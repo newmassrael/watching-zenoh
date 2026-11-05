@@ -84,6 +84,8 @@ import pathlib
 import re
 import sys
 
+import test_sources
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 # The router pin this mapping was derived at. Bound below to the one place that
@@ -312,9 +314,13 @@ def check_all(dissect_text: str, interop_text: str,
 
 
 def cmd_check() -> int:
+    # The interop test file, wherever the crate keeps it (`tests/<name>.rs`, or a merged module).
+    interop = (test_sources.locate(ROOT / pathlib.PurePosixPath(INTEROP).parent,
+                                   pathlib.PurePosixPath(INTEROP).stem)
+               or ROOT / INTEROP)
     rc, report, fail = check_all(
         (ROOT / DISSECT).read_text(encoding="utf-8"),
-        (ROOT / INTEROP).read_text(encoding="utf-8"),
+        interop.read_text(encoding="utf-8"),
         (ROOT / BUILD_ZENOHD).read_text(encoding="utf-8"),
     )
     for line in fail:

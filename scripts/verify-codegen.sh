@@ -494,12 +494,14 @@ echo
 # and byte-compares. Codecs without a paired layer3 test report
 # `layer3=skip` — see R47b carry in atomic changelog for the
 # expansion plan.
-LAYER3_TEST_DIR="$ROOT/crates/wz-integration-tests/tests"
 INPUT_STEM_FOR_LAYER3="$(extract_stem "$INPUT")"
-LAYER3_TEST_FILE="$LAYER3_TEST_DIR/layer3_${INPUT_STEM_FOR_LAYER3}.rs"
-if [[ -f "$LAYER3_TEST_FILE" ]]; then
+# `wz_test_args` sets the `cargo test` arguments of the file wherever the crate keeps it
+# (`tests/layer3_<stem>.rs`, or a module of a merged executable) and fails when there is none.
+# shellcheck source=scripts/lib/test_target.sh
+source "$ROOT/scripts/lib/test_target.sh"
+if wz_test_args wz-integration-tests "layer3_${INPUT_STEM_FOR_LAYER3}" 2>/dev/null; then
     if (cd "$ROOT/crates" && cargo test -p wz-integration-tests \
-            --test "layer3_${INPUT_STEM_FOR_LAYER3}" \
+            "${WZ_TEST_ARGS[@]}" \
             >"$WORK/layer3.log" 2>&1); then
         n_layer3_pass=$(grep -oE "[0-9]+ passed" "$WORK/layer3.log" \
             | awk '{print $1}' | head -1)

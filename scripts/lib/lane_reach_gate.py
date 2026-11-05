@@ -91,6 +91,7 @@ import re
 import sys
 import tempfile
 
+import retarget_test_refs
 import test_sources
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -184,7 +185,8 @@ def test_fns(source):
 
 def unreachable(root):
     """Fixtures no route runs, plus the population they were drawn from."""
-    runci = (root / RUNCI_REL).read_text(encoding="utf-8")
+    # A test file named by `wz_test_args <crate> <file>` is read as the `--test <file>` it stands for.
+    runci = retarget_test_refs.expand((root / RUNCI_REL).read_text(encoding="utf-8"))
     tokens = skip_tokens(runci)
     named = named_by_a_lane(runci)
 

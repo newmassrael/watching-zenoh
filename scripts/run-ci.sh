@@ -416,6 +416,11 @@ cd "$repo_root" || exit 2
 # side-effect free by that file's own contract.
 # shellcheck source=scripts/lib/sce-codegen-oracle.sh
 source scripts/lib/sce-codegen-oracle.sh
+# `wz_test_args <crate> <file> [test]` sets `WZ_TEST_ARGS`, the `cargo test` arguments that run one
+# test file of a crate wherever the crate keeps it (`tests/<file>.rs`, or a module of a merged
+# executable): a command writes `"${WZ_TEST_ARGS[@]}"` where it wrote `--test <file>`.
+# shellcheck source=scripts/lib/test_target.sh
+source scripts/lib/test_target.sh
 
 # ─── Artefact collection (R311y736, N28) ────────────────────────────
 #
@@ -1597,8 +1602,9 @@ layer_b_verify_codegen() {
     # nothing else named the file. Run here, in the job that builds the binary and
     # arms WZ_SCE_ORACLE_REQUIRE on this step, an absent or foreign oracle FAILS.
     # The count is the two tests' own listing (`-- --list --ignored`).
+    wz_test_args wz-integration-tests link_emitter_b6
     _runci_guarded_test "B link_emitter_b6" 2 \
-        cargo test -p wz-integration-tests --test link_emitter_b6 --quiet \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" --quiet \
         -- --ignored || fail=1
     return "$fail"
 }
@@ -11131,9 +11137,10 @@ layer_c1co_pico_client_dials_a_listener() {
     local listener_engine listener engine answering expect admin
     for listener_engine in tokio coop; do
         listener="$examples/hold_a_listener-${listener_engine}"
+        wz_test_args wz-integration-tests pico_dials_a_wz_listener
         _runci_guarded_test "C1co zenoh-pico dials a ${listener_engine} listener" 3 \
             env WZ_PICO_LISTENER_BIN="$listener" \
-            cargo test -p wz-integration-tests --test pico_dials_a_wz_listener \
+            cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
             -- --ignored || return 1
         for engine in engine-coop engine-tokio; do
             for answering in ",queryable" ""; do
@@ -11181,9 +11188,10 @@ layer_c1co_pico_client_dials_a_listener() {
     cp "$examples/dial_a_listener" "$examples/dial_a_listener-coop" || return 1
     local dialer_engine
     for dialer_engine in tokio coop; do
+        wz_test_args wz-integration-tests wz_pico_abi_dials_a_pico_listener
         _runci_guarded_test "C1co a ${dialer_engine} dialer reaches a zenoh-pico listener" 3 \
             env WZ_PICO_DIALER_BIN="$examples/dial_a_listener-${dialer_engine}" \
-            cargo test -p wz-integration-tests --test wz_pico_abi_dials_a_pico_listener \
+            cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
             -- --ignored || return 1
     done
     # Two nodes that are each other's dialler end with one transport on each side
@@ -15341,8 +15349,9 @@ layer_c1bn_passive_dissection_features() {
     # It rides C1bn because the SUBJECT is `wz_capture::link` and this is the
     # lane that owns wz-capture's default-feature tests. It is not `#[ignore]`d,
     # so a developer running the crate's tests gets the skip-or-check for free.
+    wz_test_args wz-integration-tests bsd_af_tcpdump_adjudicator
     out="$(cd crates && WZ_TCPDUMP_REQUIRE=1 cargo test -p wz-integration-tests \
-        --test bsd_af_tcpdump_adjudicator --quiet 2>&1)" || { echo "$out"; return 1; }
+        "${WZ_TEST_ARGS[@]}" --quiet 2>&1)" || { echo "$out"; return 1; }
     grep -qE '^test result: ok\. 1 passed' <<<"$out" || {
         echo "  C1bn FAIL: the BSD address-family adjudicator did not run"
         echo "$out"; return 1; }
@@ -15361,8 +15370,9 @@ layer_c1bn_passive_dissection_features() {
     #
     # C1bn for the same reason as the leg above: the SUBJECT is
     # `wz_capture::link` and this lane owns wz-capture's default-feature tests.
+    wz_test_args wz-integration-tests pcap_dlt_header_adjudicator
     out="$(cd crates && WZ_DLT_HEADER_REQUIRE=1 cargo test -p wz-integration-tests \
-        --test pcap_dlt_header_adjudicator --quiet 2>&1)" || { echo "$out"; return 1; }
+        "${WZ_TEST_ARGS[@]}" --quiet 2>&1)" || { echo "$out"; return 1; }
     grep -qE '^test result: ok\. 1 passed' <<<"$out" || {
         echo "  C1bn FAIL: the pcap/dlt.h ceiling adjudicator did not run"
         echo "$out"; return 1; }
@@ -15378,8 +15388,9 @@ layer_c1bn_passive_dissection_features() {
     # (netbase, on every Debian-family image) and `tcpdump`, which this job
     # already installs for the leg above; `WZ_PROTO_REGISTRY_REQUIRE=1` is what
     # stops a missing source reading as agreement.
+    wz_test_args wz-integration-tests ip_protocol_opinion_split
     out="$(cd crates && WZ_PROTO_REGISTRY_REQUIRE=1 cargo test -p wz-integration-tests \
-        --test ip_protocol_opinion_split --quiet 2>&1)" || { echo "$out"; return 1; }
+        "${WZ_TEST_ARGS[@]}" --quiet 2>&1)" || { echo "$out"; return 1; }
     grep -qE '^test result: ok\. 1 passed' <<<"$out" || {
         echo "  C1bn FAIL: the IP protocol furniture split did not run"
         echo "$out"; return 1; }
@@ -15412,8 +15423,9 @@ layer_c1bn_passive_dissection_features() {
     # adjudicator and its text-format control: eighteen. Twenty when the
     # description door's comments (`wz_dissect_proto_describe`) joined with their
     # adjudicator, which reads `protoc`'s `SourceCodeInfo`, and its control.
+    wz_test_args wz-integration-tests proto_door_protoc_oracle
     out="$(cd crates && WZ_PROTOC_REQUIRE=1 cargo test -p wz-integration-tests \
-        --test proto_door_protoc_oracle --quiet 2>&1)" || { echo "$out"; return 1; }
+        "${WZ_TEST_ARGS[@]}" --quiet 2>&1)" || { echo "$out"; return 1; }
     grep -qE '^test result: ok\. 20 passed' <<<"$out" || {
         echo "  C1bn FAIL: the .proto door oracle did not run"
         echo "$out"; return 1; }
@@ -16527,9 +16539,10 @@ layer_c1bp_plugin_dynamic_loading() {
     for leg in \
         wz_plugin_dlopened_is_read_by_a_real_pico_beside_the_static_one \
         wz_plugin_non_plugin_shared_object_is_refused_and_the_node_survives; do
+        wz_test_args wz-integration-tests wz_plugin_dynamic_loading_pico
         _runci_guarded_test "C1bp pico $leg" 1 \
             cargo test -p wz-integration-tests \
-            --test wz_plugin_dynamic_loading_pico -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
     # R2820 — the library plugin NOTIFICATION PLANE (§5.23
@@ -16541,9 +16554,10 @@ layer_c1bp_plugin_dynamic_loading() {
     # GET (storage_manager present, the library absent).
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
         --features preset-ap-full,zenoh-config --quiet) || return 1
+    wz_test_args wz-integration-tests wz_plugin_dynamic_loading_pico
     _runci_guarded_test "C1bp config write" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_plugin_dynamic_loading_pico -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico || return 1
 }
 
@@ -16714,17 +16728,20 @@ layer_epico_library_oracles() {
     # VOCABULARY oracle added the half the blind sweep cannot reach (the seven
     # extension identities the wire spec actually names); and the SCOUTING leg
     # added the second namespace, where the id `0x01` is not `T_MID_INIT`.
+    wz_test_args wz-integration-tests pico_transport_decode_differential
     _runci_guarded_test "Epico transport-decode differential" 7 \
         cargo test -p wz-integration-tests \
-        --test pico_transport_decode_differential -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
+    wz_test_args wz-integration-tests pico_pure_function_oracle
     _runci_guarded_test "Epico pure-function oracle" 8 \
         cargo test -p wz-integration-tests \
-        --test pico_pure_function_oracle -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
+    wz_test_args wz-integration-tests pico_abi_symbol_census
     _runci_guarded_test "Epico ABI symbol census" 4 \
         cargo test -p wz-integration-tests \
-        --test pico_abi_symbol_census -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Epico: wz and the real libzenohpico agree where they are pinned to"
 }
@@ -16760,9 +16777,10 @@ layer_ewire_pico_wire_dissection() {
         _pico_cli_unavailable "Layer Ewire" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests pico_wire_dissection
     _runci_guarded_test "Ewire stock-byte dissection" 1 \
         cargo test -p wz-integration-tests \
-        --test pico_wire_dissection -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewire: the analyzer parsed a real zenoh-pico session end to end"
     # R2248 (open-debt item 595) — the CENSUS half of the same capture shape.
@@ -16770,9 +16788,10 @@ layer_ewire_pico_wire_dissection() {
     # witnesses by `--test <name>`, so a proof placed anywhere else runs nowhere,
     # which is the failure the item was filed against in a different costume.
     # Same oracle guard above, because it is the same `z_put`.
+    wz_test_args wz-integration-tests pico_declared_keyexpr_census_witness
     _runci_guarded_test "Ewire declared-keyexpr census" 1 \
         cargo test -p wz-integration-tests \
-        --test pico_declared_keyexpr_census_witness \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewire: the census resolved an id to the path zenoh-pico declared"
@@ -16831,9 +16850,10 @@ layer_ewirez_zenohd_wire_dissection() {
     # `--ignored`, where this test is filtered out, so without a leg of its own
     # it would be a test no lane runs — and on a developer's box without zenohd
     # the whole lane declines, taking the one check that did not need it.
+    wz_test_args wz-integration-tests zenohd_wire_dissection the_names_this_witness_reports_are_the_declared_vocabulary
     _runci_guarded_test "Ewirez vocabulary partition" 1 \
-        cargo test -p wz-integration-tests --test zenohd_wire_dissection \
-        the_names_this_witness_reports_are_the_declared_vocabulary --quiet \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+ --quiet \
         || return 1
     if [[ ! -x "$zenohd" ]]; then
         _z_unavailable "zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)" || return 1
@@ -16855,9 +16875,10 @@ layer_ewirez_zenohd_wire_dissection() {
     # — the same idiom the QEMU runner beside it has used since R311y14. These
     # tests complete in under a second, so the ceiling is ~200x headroom and can
     # only fire on a hang.
+    wz_test_args wz-integration-tests zenohd_wire_dissection
     _runci_guarded_test "Ewirez stock-zenohd dissection" 3 \
         timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
-        --test zenohd_wire_dissection -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the analyzer parsed a real zenohd session, idle and routing"
 
@@ -16885,11 +16906,12 @@ layer_ewirez_zenohd_wire_dissection() {
 ($core_examples_dir/$missing_core_example; run: bash scripts/build-zenohd.sh)" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests zenoh_ext_body_foreign_witness
     _runci_guarded_test "Ewirez stock-zenoh ext bodies" 1 \
         timeout "$EWIREZ_WITNESS_BUDGET" \
         env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
         cargo test -p wz-integration-tests \
-        --test zenoh_ext_body_foreign_witness -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the Z64 extension-body walkers read bytes stock zenoh wrote"
 
@@ -16903,11 +16925,12 @@ layer_ewirez_zenohd_wire_dissection() {
     # holding a credentials dictionary refuses any client without the
     # extension, so folding the two would make the ext-body witness depend on
     # auth succeeding.
+    wz_test_args wz-integration-tests zenoh_auth_body_foreign_witness
     _runci_guarded_test "Ewirez stock-zenoh auth bodies" 1 \
         timeout "$EWIREZ_WITNESS_BUDGET" \
         env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
         cargo test -p wz-integration-tests \
-        --test zenoh_auth_body_foreign_witness -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the auth chain walkers read bytes a stock usrpwd handshake wrote"
 
@@ -16921,11 +16944,12 @@ layer_ewirez_zenohd_wire_dissection() {
     # `AuthPubKey::from_config` never populates its lookup set and the acceptor
     # checks membership without an is-empty guard, so a pubkey-configured
     # zenohd refuses every client. Multilink is the route that works.
+    wz_test_args wz-integration-tests zenoh_multilink_body_foreign_witness
     _runci_guarded_test "Ewirez stock-zenoh multilink bodies" 1 \
         timeout "$EWIREZ_WITNESS_BUDGET" \
         env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
         cargo test -p wz-integration-tests \
-        --test zenoh_multilink_body_foreign_witness -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the multilink walker read bytes a stock zenohd handshake wrote"
 
@@ -16941,9 +16965,10 @@ layer_ewirez_zenohd_wire_dissection() {
     # prints `1 passed` because the skip is a `return` inside the test. That is
     # stated rather than hidden — this leg is a LOCAL witness until the variant
     # is provisioned, which is open-debt item 484.
+    wz_test_args wz-integration-tests zenoh_shm_body_foreign_witness
     _runci_guarded_test "Ewirez stock-zenoh shm bodies" 1 \
         timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
-        --test zenoh_shm_body_foreign_witness -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the SHM establishment walker read bytes two stock zenohd wrote"
 
@@ -16957,9 +16982,10 @@ layer_ewirez_zenohd_wire_dissection() {
     # multicast on loopback and it binds a group port with SO_REUSEADDR, so it
     # is kept last: a machine that cannot do either fails HERE rather than
     # anywhere ambiguous.
+    wz_test_args wz-integration-tests zenoh_join_qos_foreign_witness
     _runci_guarded_test "Ewirez stock-zenoh join qos" 1 \
         timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
-        --test zenoh_join_qos_foreign_witness -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the Join qos table read bytes a stock zenohd broadcast"
 
@@ -16968,9 +16994,10 @@ layer_ewirez_zenohd_wire_dissection() {
     # what a compressing wz member beacons is listed, a member that disagrees about the wrap
     # is not, and a control that a plain member of a plain group is listed. 5 = the number
     # the command PRINTED, against the 1.10.2 oracle; it needs the same host as the leg above.
+    wz_test_args wz-integration-tests zenoh_multicast_compression_foreign_witness
     _runci_guarded_test "Ewirez stock-zenoh multicast compression" 5 \
         timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
-        --test zenoh_multicast_compression_foreign_witness -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: a stock zenohd and wz read each other's compressed group batches"
 
@@ -16984,9 +17011,10 @@ layer_ewirez_zenohd_wire_dissection() {
     # extension: zenoh reads that extension and never writes it (every
     # `ext_tstamp = Some` upstream is in a decoder), so the extension form has
     # no reachable foreign producer at all. The test asserts its ABSENCE too.
+    wz_test_args wz-integration-tests zenoh_timestamp_ext_foreign_witness
     _runci_guarded_test "Ewirez stock-zenoh timestamp" 1 \
         timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
-        --test zenoh_timestamp_ext_foreign_witness -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the timestamp walker read the stamp a stock zenohd added"
 }
@@ -17342,9 +17370,10 @@ layer_e_ap_demo_round_trip() {
         (cd crates && cargo build -p wz-capi-pico $coop_features \
             --target-dir "target/wz-capi-pico-$arm-coop" --quiet) || return 1
     done
+    wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin
     _runci_guarded_test "E pico drop-in programs on the cooperative engine" 32 \
         env WZ_PICO_ENGINE=coop \
-        cargo test -p wz-integration-tests --test pico_c_examples_on_wz_capi_dropin -- --ignored \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" -- --ignored \
         --skip zenohd --skip header_arms || return 1
 }
 
@@ -17416,14 +17445,29 @@ layer_e2_facade_subset_e2e() {
         -p wz-e2e-liveliness \
         -p wz-e2e-liveliness-token \
         -p wz-e2e-declare-observer) || return 1
-    (cd crates && cargo test -p wz-integration-tests \
-        --test wz_e2e_pubsub_to_zsub \
-        --test wz_e2e_queryable_to_zget \
-        --test wz_e2e_zget_to_zqueryable \
-        --test wz_e2e_liveliness_to_zliveliness \
-        --test wz_e2e_liveliness_token_to_zget_liveliness \
-        --test wz_e2e_declare_observer_to_zsub \
-        --quiet -- --ignored)
+    # One run for each file: the merged spelling of a test file is one `--test <target>` and one
+    # filter (`wz_test_args`), and cargo takes one filter before `--`. In turn, each stops the
+    # lane at its first failure, as the one run of the six did. Written out, one command each, and
+    # not as a loop over names, because the lints that ask which lane runs which file
+    # (`lane_reach_gate`, `lane_feature_membership_gate`) read the name from the command.
+    wz_test_args wz-integration-tests wz_e2e_pubsub_to_zsub
+    (cd crates && cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        --quiet -- --ignored) || return 1
+    wz_test_args wz-integration-tests wz_e2e_queryable_to_zget
+    (cd crates && cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        --quiet -- --ignored) || return 1
+    wz_test_args wz-integration-tests wz_e2e_zget_to_zqueryable
+    (cd crates && cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        --quiet -- --ignored) || return 1
+    wz_test_args wz-integration-tests wz_e2e_liveliness_to_zliveliness
+    (cd crates && cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        --quiet -- --ignored) || return 1
+    wz_test_args wz-integration-tests wz_e2e_liveliness_token_to_zget_liveliness
+    (cd crates && cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        --quiet -- --ignored) || return 1
+    wz_test_args wz-integration-tests wz_e2e_declare_observer_to_zsub
+    (cd crates && cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        --quiet -- --ignored) || return 1
 }
 
 # ─── Layer F — codec-footprint catalog truthfulness gate (R311n) ───
@@ -18731,7 +18775,8 @@ layer_p_throughput_differential() {
     fi
     # The test refuses a stale release cdylib, so it is built first.
     (cd crates && cargo build --release -p wz-capi-c --quiet) || return 1
-    _runci_guarded_test P 1 cargo test -p wz-integration-tests --test zenoh_c_throughput_diff --quiet -- --ignored --nocapture --test-threads=1 \
+    wz_test_args wz-integration-tests zenoh_c_throughput_diff
+    _runci_guarded_test P 1 cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" --quiet -- --ignored --nocapture --test-threads=1 \
         || return 1
 }
 
@@ -18924,9 +18969,10 @@ PY
     # Guarded through the helper rather than a bare `| grep -q` (R2074): the
     # binary is one target with one test, and a rename would otherwise select
     # nothing and exit 0.
+    wz_test_args wz-integration-tests wz_router_hat_answers_a_scout
     _runci_guarded_test "M router-hat answers a scout" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hat_answers_a_scout -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     # R2307 (open-debt item 515) — THE SAME CLAIM WITH A FOREIGN ADJUDICATOR.
     # The leg above proves the config spelling wz<->wz, and A4-3 refuses it a
     # cross-impl marker for exactly that; R2094's foreign leg proves the ARGV
@@ -18939,9 +18985,10 @@ PY
     # `zenoh-config` and stop proving `router-hat-router` minimally; standing
     # here reuses the build above, whose four features ARE the minimal set for a
     # claim about what a config document selects.
+    wz_test_args wz-integration-tests zenohd_scouts_wz_config_router_interop
     _runci_guarded_test "M zenohd->wz config-router scout" 1 \
         cargo test -p wz-integration-tests \
-        --test zenohd_scouts_wz_config_router_interop -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation \
         --test multicast_pubsub_loopback -- --ignored --quiet) || return 1
@@ -19084,9 +19131,10 @@ run: bash scripts/build-zenohd.sh)"
         # leg two atoms depend on would report success by silence. The count is
         # exact at 1 — this target holds one test and a drop to 0 is the failure
         # mode being guarded.
+        wz_test_args wz-integration-tests wz_scout_zenohd_interop
         _runci_guarded_test "M scout->zenohd" 1 \
             cargo test -p wz-integration-tests \
-            --test wz_scout_zenohd_interop -- --ignored || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
         # R311y846 — THE MIRROR: a stock zenohd, told nothing about wz,
         # DISCOVERS it and dials the locator wz's own Hello advertised. The leg
         # above proves wz can find a zenohd; this proves a zenohd can find wz,
@@ -19103,9 +19151,10 @@ run: bash scripts/build-zenohd.sh)"
         # `scouting-responder` claim must sit inside this build's closure or
         # A4-5 containment reds.
         (cd crates && cargo build -p wz-ap-demo --features scouting-responder,routing-peer --quiet) || return 1
+        wz_test_args wz-integration-tests zenohd_scouts_wz_interop
         _runci_guarded_test "M zenohd->wz scout" 1 \
             cargo test -p wz-integration-tests \
-            --test zenohd_scouts_wz_interop -- --ignored || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
         # R2094 (open-debt item 510) — THE SAME MIRROR, ON THE ROUTER ROLE. The
         # leg above builds the demo WITHOUT `router-hat-router`, so the binary it
         # drives has no `--router-hat` in it: until this round the only reader of
@@ -19124,9 +19173,10 @@ run: bash scripts/build-zenohd.sh)"
         # cross a newline, and every claim the file makes must sit inside a
         # build's closure or A4-5 containment reds.
         (cd crates && cargo build -p wz-ap-demo --features router-hat-router,scouting-responder --quiet) || return 1
+        wz_test_args wz-integration-tests zenohd_scouts_wz_router_interop
         _runci_guarded_test "M zenohd->wz router scout" 1 \
             cargo test -p wz-integration-tests \
-            --test zenohd_scouts_wz_router_interop -- --ignored || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     fi
     # R311nm — wz->pico multicast JOIN+Push interop e2e: a wz in-library
     # multicast publisher's JOIN beacon + framed Push are admitted and
@@ -19152,8 +19202,9 @@ run: bash scripts/build-zenohd.sh)"
 run: bash scripts/build-zenoh-pico-cli.sh)"
         return 0
     fi
+    wz_test_args wz-integration-tests wz_publisher_to_pico_multicast_zsub
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_publisher_to_pico_multicast_zsub -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311no — pico -> wz multicast dial-in (the reverse of the lane
     # above): an external zenoh-pico `z_pub -m peer` multicast publisher's
     # JOIN beacon + framed Push are admitted (dispatcher active_peers==1,
@@ -19162,8 +19213,9 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # possible by the SO_REUSEADDR/SO_REUSEPORT bind added to
     # `UdpDriver::bind_multicast` this round. Needs the pico `z_pub` CLI
     # (the z_sub check above covers it — the same build script emits both).
+    wz_test_args wz-integration-tests wz_subscriber_from_pico_multicast
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_subscriber_from_pico_multicast -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # A node built from its declaration that is a MEMBER of the group, against the same pico peers: the
     # file the ENTRY packages (`wz_package.py --node slot-group`, whose manifest verifies) joins
     # `udp/224.0.0.224:7490`, puts a document on one key for a pico `z_sub` (and for no `z_sub` of
@@ -19177,9 +19229,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         --node slot-group --out "$group_pkg/slot-group" || group_rc=1
     [ "$group_rc" -eq 0 ] && { [ -x "$group_pkg/slot-group/bin/declared-node" ] \
         || { echo "  Mgrp FAIL: the packaged slot-group is not executable"; group_rc=1; }; }
+    wz_test_args wz-integration-tests wz_declared_group_pico_interop
     [ "$group_rc" -eq 0 ] && { _runci_guarded_test Mgrp 5 env \
         WZ_DECLARED_NODE_GROUP="$group_pkg/slot-group/bin/declared-node" \
-        cargo test -p wz-integration-tests --test wz_declared_group_pico_interop \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || group_rc=1; }
     rm -rf "$group_pkg"
     [ "$group_rc" -eq 0 ] || return 1
@@ -19208,16 +19261,18 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     read -ra mcdecl_args <<< "$mcdecl_features"
     (cd crates && cargo build -p wz-capi-pico --quiet "${mcdecl_args[@]}" \
         --target-dir target/wz-capi-pico-mcdecl) || return 1
+    wz_test_args wz-integration-tests pico_peer_multicast_on_wz_capi
     _runci_guarded_test "M pico multicast peer test on wz" 12 \
         cargo test -p wz-integration-tests \
-        --test pico_peer_multicast_on_wz_capi -- --ignored --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     # Open-debt item 911 (found on the way) — what `z_open` returns when it cannot open, case by
     # case (a listen on a held port, a connect to a closed one, a scheme no link serves), on
     # both libraries; past the same pico guard, since it compiles a probe against the library.
     # Count-guarded at 1.
+    wz_test_args wz-integration-tests pico_open_failure_on_wz_capi
     _runci_guarded_test "M pico open failure codes on wz" 1 \
         cargo test -p wz-integration-tests \
-        --test pico_open_failure_on_wz_capi -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     # Open-debt items 911 and 913 — zenoh-pico's raw Ethernet transport: upstream's own scenario
     # (`tests/raweth.py`) across the real library and wz's drop-in both ways, and `z_info.c`
     # reporting the real publisher as a member line for line. Each program runs under
@@ -19253,9 +19308,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         read -ra reth_args <<< "$reth_features"
         (cd crates && cargo build -p wz-capi-pico --quiet "${reth_args[@]}" \
             --target-dir target/wz-capi-pico-reth) || return 1
+        wz_test_args wz-integration-tests pico_raweth_on_wz_capi
         _runci_guarded_test "M pico raweth scenario on wz" 3 \
             "${reth_wrap[@]}" cargo test -p wz-integration-tests \
-            --test pico_raweth_on_wz_capi -- --ignored --test-threads=1 || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     elif (( m_required )); then
         echo "  Layer M FAIL: no non-interactive sudo for the raweth legs, but WZ_M_REQUIRE=1" >&2
         return 1
@@ -19281,9 +19337,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         echo "Layer M SKIP zenoh-c multicast group on wz (zenoh-c oracle or zenohd absent)"
     else
         _runci_build_capi_c_for_oracle M || return 1
+        wz_test_args wz-integration-tests zenoh_c_peer_multicast_on_wz_capi
         _runci_guarded_test "M zenoh-c multicast group on wz" 4 \
             env WZ_ZENOHD_BIN="$m_zenohd" cargo test -p wz-integration-tests \
-            --test zenoh_c_peer_multicast_on_wz_capi -- --ignored --test-threads=1 || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     fi
     # R2586 — the `#join=` key with a FOREIGN sender: pico `z_pub` in its own
     # network namespace publishes to a group wz reaches only through `#join=` on
@@ -19312,9 +19369,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
              "2 under WZ_M_REQUIRE = this job was meant to provision it)" >&2
         return 1
     else
+        wz_test_args wz-integration-tests wz_multicast_extra_join_pico_netns_interop
         _runci_guarded_test "M pico->wz #join= across a namespace" 1 \
             "${netns_wrap[@]}" cargo test -p wz-integration-tests \
-            --test wz_multicast_extra_join_pico_netns_interop -- --ignored || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
         # R2612 — the scouting fan-out's DELIVERY witness, on the same substrate
         # and behind the same probe. The veth host end is a second
         # multicast-capable interface in THIS namespace and is not the default
@@ -19323,9 +19381,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         # the pre-R2611 product -- a single group socket -- and runs first.
         # Count-guarded for the reason its neighbour above is: a renamed fn would
         # select nothing and pass.
+        wz_test_args wz-integration-tests wz_scout_fanout_netns
         _runci_guarded_test "M scout fan-out reaches a second interface" 1 \
             "${netns_wrap[@]}" cargo test -p wz-integration-tests \
-            --test wz_scout_fanout_netns -- --ignored || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
         # Open-debt item 902 -- a datagram link whose interface is removed is LOST
         # at its next failed write, group link and dial link both. Behind the same
         # probe, because removing the interface is the point and needs the same
@@ -19333,9 +19392,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         # removal, so a stack whose `recvfrom` does fail cannot pass it. Count
         # guarded at 2 (the group leg and the dial leg): the legs are `#[ignore]`,
         # so a dropped attribute or a rename would select zero and pass.
+        wz_test_args wz-integration-tests wz_datagram_carrier_loss_netns
         _runci_guarded_test "M datagram link lost at a failed write" 2 \
             "${netns_wrap[@]}" cargo test -p wz-integration-tests \
-            --test wz_datagram_carrier_loss_netns -- --ignored --test-threads=1 || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     fi
     # R311y193 — router-multicast-faces S4: a wz `--router-hat` egresses a routed,
     # re-literalized Put over the data-plane multicast group to a foreign pico
@@ -19353,15 +19413,17 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # which R2587's first run measured as a reader in the namespace hearing nothing.
     # Additive for the legs above: none of them names an interface.
     (cd crates && cargo build -p wz-ap-demo --features router-multicast-faces,locator-iface --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hat_multicast_pico_interop
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_multicast_pico_interop -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311y195 — router-multicast-faces INGRESS I2 (the reverse of S4): a real pico
     # `z_pub -m peer` (LITERAL) publishes over the group; the wz `--router-hat`
     # RECEIVES it on its ingress group face and routes it to a wz unicast
     # subscriber. Reuses the demo built just above (--features
     # router-multicast-faces); reached only past the pico-CLI presence guard.
+    wz_test_args wz-integration-tests wz_router_hat_multicast_ingress_pico_interop
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_multicast_ingress_pico_interop -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311y198 — router-multicast-faces INGRESS I3c: TWO wz `--router-hat` processes
     # share the data-plane group AND mesh-peer over TCP; a foreign pico `z_pub -m peer`
     # injects a Put; an off-group `--peer` subscriber receives the DR-federated copy.
@@ -19370,8 +19432,9 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # LOOP-SAFE (EXACTLY ONE of the two routers federates the group-ingress into the
     # mesh). Reuses the demo built above (--features router-multicast-faces); reached
     # only past the pico-CLI presence guard.
+    wz_test_args wz-integration-tests wz_router_hat_multicast_ingress_federation_interop
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_multicast_ingress_federation_interop -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # Open-debt item 751 — a router's multicast group is in its south PEER region, so a
     # Put that arrives on the group is not relayed to the router's unicast peers (they
     # are one region), while a client of the router receives it. The calibration leg
@@ -19380,9 +19443,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # above. Count-guarded at 2 (the calibration and the claim): the legs are
     # `#[ignore]`, so a dropped attribute or a rename selects zero and would pass.
     if [[ -x "$m_zenohd" ]]; then
+        wz_test_args wz-integration-tests wz_router_hat_multicast_region_zenohd_interop
         _runci_guarded_test "M router group put stays out of its peer region" 2 \
             cargo test -p wz-integration-tests \
-            --test wz_router_hat_multicast_region_zenohd_interop -- --ignored --test-threads=1 || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     elif (( m_required )); then
         echo "  Layer M FAIL: zenohd absent ($m_zenohd) but WZ_M_REQUIRE=1 — the router" >&2
         echo "    group region witness adjudicates against it, so its absence is a" >&2
@@ -19398,8 +19462,9 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # publish is subscription-gated reaches the pico ONLY via that advertisement. Proves
     # cross-router reachability limit (a) against a foreign, unmodified pico subscriber.
     # Reuses the demo built above (--features router-multicast-faces); past the pico guard.
+    wz_test_args wz-integration-tests wz_router_hat_multicast_reach_pico_zsub
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_multicast_reach_pico_zsub -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
 
     # R2565 (paying R2562's lane-reach red) — the multicast DEPARTURE witnesses.
     # R2562 added this fixture and registered it with no lane, which `lane_reach_gate`
@@ -19417,8 +19482,9 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     #
     # Reuses the demo and the pico CLI provisioned above; reached only past the
     # pico-CLI presence guard, so it never runs when the lane is SKIPping.
+    wz_test_args wz-integration-tests wz_multicast_departure_witnessed_by_pico
     _runci_guarded_test M 2 cargo test -p wz-integration-tests \
-        --test wz_multicast_departure_witnessed_by_pico -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
 
     # R2588 — `--multicast-locator ...#iface=<device>;join=<extra>` installs kernel
     # memberships for the locator's group AND the extra one, in both address
@@ -19430,9 +19496,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # router's group face loses its socket and the membership at its first write),
     # and the test PANICS on a host with none. Count-guarded, because the fn name
     # is filtered by nothing but a rename would still select zero.
+    wz_test_args wz-integration-tests wz_multicast_locator_flag_installs_its_memberships
     _runci_guarded_test "M multicast locator flag installs its memberships" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_multicast_locator_flag_installs_its_memberships -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
 
     # R2587 — the multicast `ttl` key, adjudicated by zenohd ON THE WIRE. zenohd
     # and this lane's router demo each get `#iface=<veth>;ttl=5` and then no key,
@@ -19453,9 +19520,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     elif (( netns_rc != 0 )); then
         echo "Layer M SKIP multicast ttl on the wire (no network namespace on this host)"
     else
+        wz_test_args wz-integration-tests wz_multicast_ttl_on_the_wire_netns_zenohd_interop
         _runci_guarded_test "M multicast ttl on the wire vs zenohd" 2 \
             "${netns_wrap[@]}" cargo test -p wz-integration-tests \
-            --test wz_multicast_ttl_on_the_wire_netns_zenohd_interop \
+            "${WZ_TEST_ARGS[@]}" \
             -- --ignored --test-threads=1 || return 1
     fi
 
@@ -19473,9 +19541,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         fi
         echo "Layer M SKIP client + multicast peer sessions in one process (zenohd not built)"
     else
+        wz_test_args wz-integration-tests wz_client_and_multicast_peer_sessions_in_one_process_zenohd
         _runci_guarded_test "M client + multicast peer sessions in one process" 1 \
             env WZ_ZENOHD_BIN="$m_zenohd" cargo test -p wz-integration-tests \
-            --test wz_client_and_multicast_peer_sessions_in_one_process_zenohd \
+            "${WZ_TEST_ARGS[@]}" \
             -- --ignored || return 1
     fi
     # Open-debt item 900 — the same two sessions from the INPUT a lab authors:
@@ -19492,9 +19561,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         fi
         echo "Layer M SKIP sessions file: zenohd client + group peer (zenohd not built)"
     else
+        wz_test_args wz-integration-tests wz_ap_demo_sessions_client_and_group_zenohd
         _runci_guarded_test "M sessions file: zenohd client + group peer" 1 \
             env WZ_ZENOHD_BIN="$m_zenohd" cargo test -p wz-integration-tests \
-            --test wz_ap_demo_sessions_client_and_group_zenohd -- --ignored || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     fi
 
     # R2854 (`adminspace-metrics`, `transport-stats`) — a router PROCESS serves
@@ -19509,9 +19579,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         && cargo build -p wz-ap-demo --quiet --features \
             router-multicast-faces,locator-iface,adminspace-router-linkstate,adminspace-metrics,wz/transport-stats \
         && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_serves_its_multicast_group_in_its_node_registry
     _runci_guarded_test "M router multicast group in its node registry" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_router_serves_its_multicast_group_in_its_node_registry -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     # The same router PROCESS counts what its group delivers in its resource snapshot
     # (`docs/observation-plane.md` M4): a router alone in a group, then with a second member whose
     # beacons arrive on `lo`, and the count rises by what they are. It rebuilds the demo with the
@@ -19522,9 +19593,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         && cargo build -p wz-ap-demo --quiet --features \
             router-multicast-faces,locator-iface,adminspace-router-linkstate,adminspace-read,resource-snapshot \
         && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hat_counts_its_multicast_group_in_its_snapshot
     _runci_guarded_test "M router multicast group in its snapshot" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hat_counts_its_multicast_group_in_its_snapshot -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     # R2859 (`adminspace-core`) — the same router PROCESS lists a foreign pico
     # multicast member in its adminspace `sessions[]`, as a row of upstream's
     # multicast shape: the group face the router joins with is the one its
@@ -19532,9 +19604,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # superset of this leg's); needs the pico CLI, which the presence guard at
     # the head of this layer has already required. 1 = the number this command
     # PRINTED.
+    wz_test_args wz-integration-tests wz_router_lists_a_pico_multicast_member_in_its_sessions
     _runci_guarded_test "M router lists a pico multicast member" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_router_lists_a_pico_multicast_member_in_its_sessions -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
     # R3070/R3071 -- the C ABI's own sessions, over the group: a session that is told no endpoint
     # scouts and connects to what answers, a session that listens answers and is found, a client
     # does not open to a node that holds another zid or that refuses its locator, and a session
@@ -20007,9 +20080,10 @@ layer_z_zenohd_interop() {
     # Count-guarded (`1 passed`): the leg is `#[ignore]`d, so a renamed file or a
     # dropped attribute selects 0 tests and exits 0, which would report that a
     # real zenohd agrees with wz by never having asked it.
+    wz_test_args wz-integration-tests close_scope_zenohd_witness
     _runci_guarded_test "Z close scope" 1 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test close_scope_zenohd_witness -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
         _z_unavailable "zenoh-pico z_sub not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
@@ -20281,8 +20355,9 @@ layer_z_zenohd_interop() {
     # runs in isolation, the same condition as the 20/20-stable standalone) — a
     # structural fix, not a load-mitigation timeout bump. These are heavy
     # e2e tests, so serial execution costs only wall-clock, not coverage.
+    wz_test_args wz-integration-tests wz_to_zenohd_router
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_to_zenohd_router -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R3362 — three config-depth legs that need NO foreign binary and run on the build
     # above (it carries `tls`, `routing-peer`, `router-hat-router` and `zenoh-config`),
     # each a set of arms with a control that removes the key. (1) The three
@@ -20293,24 +20368,28 @@ layer_z_zenohd_interop() {
     # weight in the LinkState a router floods, with controls (key absent, a zid that is
     # no neighbour). (3) `queries_default_timeout` from a config file ends a query at
     # its deadline, and without the key no deadline fires; it needs the silent peer.
+    wz_test_args wz-integration-tests wz_tls_keys_from_a_config_file
     _runci_guarded_test "Z tls keys from a config file" 4 \
         cargo test -p wz-integration-tests \
-        --test wz_tls_keys_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
+    wz_test_args wz-integration-tests wz_router_link_weight_from_a_config_file
     _runci_guarded_test "Z router link weight from a config file" 3 \
         cargo test -p wz-integration-tests \
-        --test wz_router_link_weight_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     (cd crates && cargo build -p wz-e2e-silent-peer --quiet) || return 1
+    wz_test_args wz-integration-tests wz_ap_demo_query_timeout_from_a_config_file
     _runci_guarded_test "Z query timeout from a config file" 2 \
         cargo test -p wz-integration-tests \
-        --test wz_ap_demo_query_timeout_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R311y372 — wz LOWLATENCY transport cross-impl: wz dials zenohd with
     # `--lowlatency`, negotiates the Z_EXT_LOWLATENCY unit ext (asserted true via
     # the demo log), and its lean (4-byte-prefixed, Frame-less) Put routes through
     # a lowlatency-configured zenohd to a pico z_sub. zenoh-pico has NO lowlatency
     # transport, so zenohd is the only foreign witness. Same --test-threads=1
     # per-zenohd isolation as the client legs above.
+    wz_test_args wz-integration-tests wz_lowlatency_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_lowlatency_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y433 — wz per-batch lz4 COMPRESSION cross-impl: wz dials zenohd with
     # `--compression`, negotiates Z_EXT_COMPRESSION 0x6 (asserted true via the demo
     # log), and a COMPRESSIBLE Put — sized so `compress_batch` provably keeps the
@@ -20322,8 +20401,9 @@ layer_z_zenohd_interop() {
     # proof's `negotiated = true` as a hardcoded constant. No `--features` on this
     # invocation: the interop target drives EXTERNAL binaries, so the atom is
     # compiled into the wz-ap-demo build above, not into the test.
+    wz_test_args wz-integration-tests wz_compression_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_compression_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y505 — the SHM ESTABLISHMENT interop, and it needs its OWN oracle: zenoh's
     # `default` feature set omits `shared-memory` (zenoh/Cargo.toml:34-46) and
     # zenohd's default is `zenoh/default`, so the stock binary above has no
@@ -20359,11 +20439,13 @@ layer_z_zenohd_interop() {
     # one-shared-artifact-path treatment as the SHM lane above), and the test
     # asserts the BUILD FEATURES line rather than trusting this invocation.
     (cd crates && cargo build -p wz-ap-demo --features session-extqos --quiet) || return 1
+    wz_test_args wz-integration-tests wz_qos_link_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_qos_link_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     (cd crates && cargo build -p wz-ap-demo --features session-extshm --quiet) || return 1
+    wz_test_args wz-integration-tests wz_shm_establishment_zenohd_interop
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_shm_establishment_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R3009 -- the SHM PAYLOAD interop: what establishment agreed to carry,
     # carried, in both directions, against upstream's own `z_pub_shm` and
     # `z_sub_shm` (built beside the shared-memory zenohd by the same
@@ -20396,8 +20478,9 @@ layer_z_zenohd_interop() {
     # second: the chunk must still be delivered as shared memory, and what wz kept confirmed for
     # it must be let go of once it has acknowledged) and its control between two programs of
     # upstream's.
+    wz_test_args wz-integration-tests wz_shm_payload_zenohd_interop
     _runci_guarded_test Z 9 cargo test -p wz-integration-tests \
-        --test wz_shm_payload_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R3042 -- the QUERY plane of the same oracle: a reply through shared memory
     # (upstream's `z_queryable_shm`, asked past the size of its ten-chunk pool, which
     # a getter that never gives a chunk back cannot be answered through), the value
@@ -20413,8 +20496,9 @@ layer_z_zenohd_interop() {
     # printed) and from wz's chunks (the owner's single reference after the reply).
     # R3049 -- 4 -> 6, MEASURED: the same leg through a declared querier's `get_shm` and
     # through a querier declared on a keyexpr mapping, whose Query names its key by id.
+    wz_test_args wz-integration-tests wz_shm_query_reply_zenohd_interop
     _runci_guarded_test Z 6 cargo test -p wz-integration-tests \
-        --test wz_shm_query_reply_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R3051 -- the ROUTER HOP of the same oracle: every leg above dials the upstream
     # program directly, and these put the shared-memory `zenohd` between the two ends
     # (a wz publisher to `z_sub_shm`, `z_pub_shm` to a wz subscriber, a wz getter's
@@ -20433,8 +20517,9 @@ layer_z_zenohd_interop() {
     # two of them asked with `ALL` each are, a queryable without shared memory is handed it as
     # bytes, and a getter without shared memory is handed the reply as bytes.
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router,session-extshm --quiet) || return 1
+    wz_test_args wz-integration-tests wz_shm_router_zenohd_interop
     _runci_guarded_test Z 17 cargo test -p wz-integration-tests \
-        --test wz_shm_router_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
     # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one
     # bin to one path), and every leg after this point expects the big feature set
@@ -20493,8 +20578,9 @@ layer_z_zenohd_interop() {
     # first FOREIGN witness for the R311y434 fix — until now it had a wz<->wz byte
     # assertion only. No `--features` here: the interop target drives EXTERNAL
     # binaries, so both atoms are compiled into the wz-ap-demo build above.
+    wz_test_args wz-integration-tests wz_compose_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_compose_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y438 — wz TX FRAGMENTATION cross-impl (transport-fragmentation
     # wz->zenohd). `transport-fragmentation` had witnesses in both PICO
     # directions and none against zenohd, because wz negotiates batch_size 65535
@@ -20519,8 +20605,9 @@ layer_z_zenohd_interop() {
     # publishes under a finite fragment budget so the chain is cut part-way,
     # and asserts the `0x3 Drop` stop fragment reached a real zenohd (the
     # calibration twin's zero on the same walk is what makes that a reading).
+    wz_test_args wz-integration-tests wz_fragment_tx_zenohd_interop
     _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_fragment_tx_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R2358 — the storage-history version legs, registered in the lane that
     # PROVISIONS their oracle. They drive the zenoh CORE EXAMPLE `z_get`, which
     # only this lane builds (`build-zenohd.sh` emits the core examples beside
@@ -20532,8 +20619,9 @@ layer_z_zenohd_interop() {
     # COUNT-GUARDED at 3, which is the half that matters: the fixture is now
     # reachable from exactly one lane, so a dropped `#[ignore]` that selected
     # ZERO tests would otherwise pass green in both.
+    wz_test_args wz-integration-tests wz_storage_history_versions_to_a_zenoh_zget
     _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_storage_history_versions_to_a_zenoh_zget -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R2631 — the usrpwd RESPONDER legs, landed here for the reason the storage
     # legs above are: they drive the core example `z_get`, which only this lane
@@ -20542,8 +20630,9 @@ layer_z_zenohd_interop() {
     # name, and the same client with a wrong password is refused by name.
     # COUNT-GUARDED at 2 so an `#[ignore]` sweep that selected nothing cannot pass
     # green in both lanes.
+    wz_test_args wz-integration-tests zenoh_usrpwd_client_to_wz_responder
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test zenoh_usrpwd_client_to_wz_responder -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y439 — wz RX FRAGMENTATION cross-impl (transport-fragmentation
     # zenohd->wz), the direction R311y438 explicitly left open ("the tiny MTU
@@ -20562,8 +20651,9 @@ layer_z_zenohd_interop() {
     # reports the reassembly branch plus a chain terminator. No `--features`:
     # the test opens the session in-process, and this crate's dev-dep already
     # pins transport-fragmentation.
+    wz_test_args wz-integration-tests wz_fragment_rx_zenohd_interop
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_fragment_rx_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R2200 (open-debt item 558) — wz RX reassembly PER CONDUIT, against the
     # genuine router. The two legs above witness fragmentation and say nothing
     # about CHANNELS: `priority`, `reliability`, `conduit` and `qos` appear in
@@ -20602,10 +20692,11 @@ layer_z_zenohd_interop() {
         _z_unavailable "zenoh core publisher oracle not built \
 ($zpub_examples_dir/$missing_zpub_example; run: bash scripts/build-zenohd.sh)" || return 1
     else
+        wz_test_args wz-integration-tests wz_channel_reassembly_zenohd_interop
         _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_CORE_EXAMPLES_DIR="$zpub_examples_dir" \
             cargo test -p wz-integration-tests \
-            --test wz_channel_reassembly_zenohd_interop \
+            "${WZ_TEST_ARGS[@]}" \
             -- --ignored --quiet --test-threads=1 || return 1
         echo "  Z: genuine conduits reassemble separately while interleaved, on"
         echo "     both halves of the chain key (priority, reliability)"
@@ -20637,8 +20728,9 @@ layer_z_zenohd_interop() {
     # zenohd tells an unasking CLIENT face about a remote subscriber anyway. It
     # is kept as an end-to-end regression guard, not as a cross-impl proof, and
     # the count guard is what keeps it from being silently de-selected.
+    wz_test_args wz-integration-tests wz_matching_status_through_zenohd_router
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_matching_status_through_zenohd_router -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y775 — the QUERYABLES half, and the reason it is a SECOND file rather
     # than a second case in the one above: it swaps the foreign process (pico
@@ -20650,8 +20742,9 @@ layer_z_zenohd_interop() {
     # `build_interest_subscribers` reds THIS test at 25s and leaves the
     # subscriber-plane witness green, so a real zenohd is distinguishing the two
     # bits rather than answering any interest at all.
+    wz_test_args wz-integration-tests wz_querier_matching_through_zenohd_router
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_querier_matching_through_zenohd_router -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y842 — the stock-zenoh CONFIG SURFACE, both directions, registered
     # together because the second of these two files had never been registered
@@ -20668,8 +20761,9 @@ layer_z_zenohd_interop() {
     # shape as the C1AY guard above -- a count that does not move with the test
     # that moved it, and pre-push cannot see it because it runs the changed
     # crates' tests, not the lanes.
+    wz_test_args wz-integration-tests zenoh_config_emit_zenohd_interop
     _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test zenoh_config_emit_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R2300 (open-debt item 631) — THE SAME QUESTION ASKED OF THE C EMITTER.
     #
@@ -20803,8 +20897,9 @@ layer_z_zenohd_interop() {
     # as a whole document, read out of a file that is the node's only source of
     # the endpoint and dialled to a real zenohd. Counted on the file's `#[ignore]`
     # tests: 12 before the leg, 13 after.
+    wz_test_args wz-integration-tests wz_reads_a_stock_zenohd_config
     _runci_guarded_test Z 13 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_reads_a_stock_zenohd_config -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R2222 (open-debt items 568 + 569, and the lane hole they exposed) — the
     # two fixtures R2221 wrote and registered NOWHERE. Both name Layer Z in
@@ -20833,8 +20928,9 @@ layer_z_zenohd_interop() {
     #
     # Prereqs are the ones this lane already guards above: zenohd and the
     # zenoh-pico z_sub CLI.
+    wz_test_args wz-integration-tests wz_negotiated_axes_zenohd_interop
     _runci_guarded_test Z 7 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_negotiated_axes_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R2226 (open-debt item 575) — TWO legs: a genuine zenohd stalled past its
     # own `max_wait_before_drop_fragments` budget, and its twin stalled for less
@@ -20850,24 +20946,27 @@ layer_z_zenohd_interop() {
     #
     # Prereqs: zenohd (guarded above) and the core zenoh `z_pub` example, which
     # `zenoh_core_example_binary` panics on if absent.
+    wz_test_args wz-integration-tests wz_chain_drop_zenohd_interop
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_chain_drop_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # THREE legs: the `wz_dissect_live_*` C door driven over genuine zenohd
     # bytes and graded on offset / length / time as VALUES against the recorded
     # byte stream, plus three shifted-record controls the oracle must REJECT and
     # a single-byte damage sweep. Prereqs: zenohd and the zenoh-pico z_pub CLI,
     # both guarded above.
+    wz_test_args wz-integration-tests zenohd_binary_door_dissection
     _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test zenohd_binary_door_dissection -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R2222 — the same hole in a fixture this round did NOT write, found by the
     # same instrument: TWO legs asking a real zenohd's adminspace for its node
     # information and for its link-state graph. Both fn names carry `zenohd`
     # and no lane named the file, so it ran nowhere either. zenohd is its only
     # prereq, so it is registered here rather than behind a plugin branch.
+    wz_test_args wz-integration-tests wz_adminspace_query_zenohd_interop
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_adminspace_query_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked
     # against wz's cdylib, must report a REAL zenohd's zid under "Routers IDs".
@@ -20881,9 +20980,9 @@ layer_z_zenohd_interop() {
     # Layer E red on any machine without zenohd; naming it in the lane that DOES
     # provision one is the fix. The whatami split it pins needs both halves, and
     # its peer-side twin (LEG 10) runs in Layer E.
+    wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test pico_c_examples_on_wz_capi_dropin \
-        pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || return 1
     # LEG 9z — the same program with zenohd's zid PINNED to one whose leading
     # nibble is zero. Registered here rather than in Layer E for the identical
@@ -20894,9 +20993,9 @@ layer_z_zenohd_interop() {
     # is zero logs 31. The C side never trims. LEG 9 cannot discriminate that
     # rule — measured, by a damage probe: making `z_id_to_string` trim leaves
     # LEG 9 GREEN and reds this one with the two spellings side by side.
+    wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin pico_zinfo_source_on_wz_capi_pads_a_short_zenohd_zid_to_32
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test pico_c_examples_on_wz_capi_dropin \
-        pico_zinfo_source_on_wz_capi_pads_a_short_zenohd_zid_to_32 \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || return 1
     # R311y530 — the SCOUTING plane's witness, and the second leg of the drop-in
     # file that needs a router. Upstream's `z_scout.c` is compiled TWICE against
@@ -20907,9 +21006,9 @@ layer_z_zenohd_interop() {
     # that token ON PURPOSE so the sweep skips it rather than reding on a machine
     # with no router. It ALSO needs the CMake-built `libzenohpico.so`, which is
     # the same artifact Layer E's pico legs depend on, so no new prereq.
+    wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test pico_c_examples_on_wz_capi_dropin \
-        pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || return 1
     # The exit_on_first round — the TWO-RESPONDER twin of the leg above, and the
     # only foreign witness the SURVEY arm has. The leg above spawns one zenohd,
@@ -20921,9 +21020,9 @@ layer_z_zenohd_interop() {
     # its own count guard; the name carries `zenohd` for the same Layer E
     # `--skip zenohd` reason its sibling's does, and it needs no prereq the
     # sibling does not already have.
+    wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test pico_c_examples_on_wz_capi_dropin \
-        pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || return 1
     # Debt 873 side finding -- the two scouting legs above, re-run in a namespace with NO
     # default route (wz found nothing there while the real pico found both routers). Behind
@@ -20945,10 +21044,10 @@ layer_z_zenohd_interop() {
         echo "  Layer Z FAIL: netns-topology probe rc=$z_netns_rc (4 = the build broke)" >&2
         return 1
     else
+        wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin pico_zscout_legs_hold_in_a_namespace_with_no_default_route_against_a_zenohd
         _runci_guarded_test Z 1 "${z_netns_wrap[@]}" env WZ_ZENOHD_BIN="$zenohd" \
             cargo test -p wz-integration-tests \
-            --test pico_c_examples_on_wz_capi_dropin \
-            pico_zscout_legs_hold_in_a_namespace_with_no_default_route_against_a_zenohd \
+            "${WZ_TEST_ARGS[@]}" \
             -- --ignored --quiet --test-threads=1 || return 1
     fi
     # Open-debt item 914 -- zenoh-pico's own tests of its session-local delivery
@@ -20956,13 +21055,15 @@ layer_z_zenohd_interop() {
     # upstream's text against the local header arm, linked to wz's build of that arm
     # (built above) and run beside a zenohd they find by scouting, as the scouting legs
     # above do. Their own `assert`s over the 27 locality combinations are the oracle.
+    wz_test_args wz-integration-tests pico_local_delivery_upstream_tests_on_wz
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test pico_local_delivery_upstream_tests_on_wz -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # The other sixteen of zenoh-pico's eighteen `tests/z_api_*_test.c`, built and run as its
     # CMake and `tests/api.sh` do, under the arm its integration workflow builds them with.
+    wz_test_args wz-integration-tests pico_upstream_api_tests_on_wz
     _runci_guarded_test Z 16 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test pico_upstream_api_tests_on_wz -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y533 -- the LIVELINESS SNAPSHOT leg, moved here from Layer E because
     # its old topology was one the REFERENCE cannot serve. Measured: the real
@@ -20976,17 +21077,18 @@ layer_z_zenohd_interop() {
     # `Session::sweep_expired_liveliness_gets` (the C ABI armed a liveliness-get
     # deadline that no host ever swept, so an unanswered snapshot blocked the C
     # caller in `z_recv` forever).
+    wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin pico_zgetliveliness_source_on_wz_capi_sees_a_real_pico_token_through_zenohd
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test pico_c_examples_on_wz_capi_dropin \
-        pico_zgetliveliness_source_on_wz_capi_sees_a_real_pico_token_through_zenohd \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || return 1
     # The same five legs (the two `z_info` ones, the two `z_scout` ones and the liveliness
     # snapshot) with the library the cooperative engine builds: Layer E's cooperative leg
     # skips every name that carries `zenohd` for the reason its sweep does, so the legs that
     # need a router run here. The namespace legs have their own probe above and stay the
     # tokio engine's. The count is exact: a leg that stops being selected is a failure.
+    wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin
     _runci_guarded_test Z 5 env WZ_ZENOHD_BIN="$zenohd" WZ_PICO_ENGINE=coop \
-        cargo test -p wz-integration-tests --test pico_c_examples_on_wz_capi_dropin \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 \
         pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router \
         pico_zinfo_source_on_wz_capi_pads_a_short_zenohd_zid_to_32 \
@@ -21006,11 +21108,13 @@ layer_z_zenohd_interop() {
         pico_zsub_source_on_wz_capi_hears_a_real_pico_put_through_zenohd \
         pico_zsubtls_source_on_wz_capi_dials_a_zenohd_tls_listener_and_hears_a_real_pico_put_through_zenohd \
         pico_zsubtls_source_on_wz_capi_serves_a_zenohd_that_dials_it_over_tls_and_hears_a_real_pico_put_through_zenohd; do
+        wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin
         _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-            --test pico_c_examples_on_wz_capi_dropin \
+            "${WZ_TEST_ARGS[@]}" \
             -- --ignored --quiet --test-threads=1 "$router_pubsub_leg" || return 1
+        wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin
         _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" WZ_PICO_ENGINE=coop \
-            cargo test -p wz-integration-tests --test pico_c_examples_on_wz_capi_dropin \
+            cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
             -- --ignored --quiet --test-threads=1 "$router_pubsub_leg" || return 1
     done
     # R311y442 — wz<->zenoh-ext ADVANCED-PUBSUB cross-impl, the FIRST foreign
@@ -21111,9 +21215,10 @@ layer_z_zenohd_interop() {
         # ledger names: nothing ties a guard's number to its binary, and both
         # sides are readable without running the tests
         # (`cargo test --test X -- --list`).
+        wz_test_args wz-integration-tests wz_advanced_pubsub_zenoh_ext_interop
         _runci_guarded_test Z 13 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
-            --test wz_advanced_pubsub_zenoh_ext_interop -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             || return 1
         # R311y445 — the GROUP-MEMBERSHIP family, a separate file because it is a
         # separate atom on a separate wire (bincode under
@@ -21135,9 +21240,10 @@ layer_z_zenohd_interop() {
         # there -- wz's own view is -- so those legs read wz's log and the oracle
         # is asked for a view size it cannot reach, purely so it exits at a
         # moment the fixture picked. Same binary, so the same guard counts them.
+        wz_test_args wz-integration-tests wz_group_membership_zenoh_ext_interop
         _runci_guarded_test Zgroup 6 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
-            --test wz_group_membership_zenoh_ext_interop -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             || return 1
     fi
     # R311y374 — wz WebSocket ACCEPTOR cross-impl (transport-link-ws zenohd->wz):
@@ -21148,8 +21254,9 @@ layer_z_zenohd_interop() {
     # this is the reverse (acceptor) direction. zenoh-pico has no ws client, so
     # zenohd is the only foreign ws dialer. Same --test-threads=1 per-zenohd
     # isolation; the demo is already built with `ws` above.
+    wz_test_args wz-integration-tests wz_ws_acceptor_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_ws_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y375 — wz TLS ACCEPTOR cross-impl (transport-link-tls zenohd->wz): the tls
     # twin of the ws-acceptor leg above. A real zenohd DIALS the wz `--listen
     # tls/...` acceptor over tls (the rustls server handshake wired as the
@@ -21158,8 +21265,9 @@ layer_z_zenohd_interop() {
     # existing wz_to_zenohd_router legs prove only the wz tls DIALER (wz->zenohd);
     # this is the reverse (acceptor) direction. zenoh-pico's CLI has no tls, so
     # zenohd is the only foreign tls dialer. The demo is already built with `tls`.
+    wz_test_args wz-integration-tests wz_tls_acceptor_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_tls_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # The fixed-memory profile's secure channel against the reference router: step
     # 1b's witness (decision D9 of docs/session-lifecycle-intent.md). The kit's
     # session code as a Linux process with no allocator (`deploy/host-slot-node`
@@ -21176,10 +21284,11 @@ layer_z_zenohd_interop() {
         || return 1
     (cd deploy/host-slot-node && WZ_LIMIT_MAX_PEER_NODES=1 cargo build --release -p host-slot-node \
         --features tls,control --target-dir target/tls-control --quiet) || return 1
+    wz_test_args wz-integration-tests wz_fixed_memory_tls_zenohd_interop
     _runci_guarded_test Ztls 4 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_HOST_SLOT_NODE_TLS_CONTROL="$PWD/deploy/host-slot-node/target/tls-control/release/host-slot-node" \
         WZ_HOST_SLOT_NODE_TLS="$PWD/deploy/host-slot-node/target/release/host-slot-node" \
-        cargo test -p wz-integration-tests --test wz_fixed_memory_tls_zenohd_interop \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || return 1
     # A node built from its declaration, against the reference router: the file the ENTRY packages
     # (`wz_package.py --node slot-recorder`, whose manifest verifies) subscribes to a key, keeps
@@ -21196,40 +21305,45 @@ layer_z_zenohd_interop() {
         [ "$decl_rc" -eq 0 ] && { [ -x "$decl_pkg/$decl_node/bin/declared-node" ] \
             || { echo "  Zdecl FAIL: the packaged $decl_node is not executable"; decl_rc=1; }; }
     done
+    wz_test_args wz-integration-tests wz_declared_node_zenohd_interop
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zdecl 2 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_DECLARED_NODE_RECORDER="$decl_pkg/slot-recorder/bin/declared-node" \
-        cargo test -p wz-integration-tests --test wz_declared_node_zenohd_interop \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     # The publisher, the same way: the router's REST stream shows the declared document on the
     # declared period, the counted stream declared at a rate with a body made for each put shows
     # every sequence number in order at the rate, the replay compiled into the image shows its
     # samples in order, mutated and paced as declared, and the node puts again with the session that
     # follows a router restart.
+    wz_test_args wz-integration-tests wz_declared_publisher_zenohd_interop
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zpub 4 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_DECLARED_NODE_REPORTER="$decl_pkg/slot-reporter/bin/declared-node" \
-        cargo test -p wz-integration-tests --test wz_declared_publisher_zenohd_interop \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     # The querier, the same way, with the stock `zenoh_z_queryable` as the responder: the node keeps
     # the reply, keeps it when nothing answers and answers from it, and asks again with the session
     # that follows a router restart.
+    wz_test_args wz-integration-tests wz_declared_querier_zenohd_interop
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zask 2 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_DECLARED_NODE_ASKER="$decl_pkg/slot-asker/bin/declared-node" \
-        cargo test -p wz-integration-tests --test wz_declared_querier_zenohd_interop \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     # The liveliness tokens, the same way, with upstream's `z_sub_liveliness` as the watcher and
     # `z_get_liveliness` as the asker: the four tokens appear when the session is established and
     # drop with it, the router's table lists them, and they come back with the next session.
+    wz_test_args wz-integration-tests wz_declared_token_zenohd_interop
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Ztok 2 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_DECLARED_NODE_BEACON="$decl_pkg/slot-beacon/bin/declared-node" \
-        cargo test -p wz-integration-tests --test wz_declared_token_zenohd_interop \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     # The listener, the same way, with no router at all: the stock `z_get` and `z_pub` are CLIENTS of
     # the node. It answers each document byte for byte and nothing for a key it does not serve,
     # holds the two sessions it declared and closes a third at once, serves the next client in a row
     # a session left, and frees the rows of connections that say nothing at the handshake deadline.
+    wz_test_args wz-integration-tests wz_declared_server_zenohd_interop
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zsrv 3 env \
         WZ_DECLARED_NODE_SERVER="$decl_pkg/slot-server/bin/declared-node" \
-        cargo test -p wz-integration-tests --test wz_declared_server_zenohd_interop \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     # The verbs, the same way, with the stock `z_get` and zenohd as the askers: the node is built from
     # `slot-commander` with its commanders' zids replaced by keys the test makes (a zid is named by a
@@ -21239,8 +21353,9 @@ layer_z_zenohd_interop() {
     # the client that asked claims; and two declared nodes provisioned with identities (`[identity]`)
     # that the node's own executable made on the device (`--make-identity`, which overwrites nothing)
     # command each other by zids `wz_node.py --zid-of` printed before either ran (`slot-subject`).
+    wz_test_args wz-integration-tests wz_declared_commander_zenohd_interop
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zcmd 4 env WZ_ZENOHD_BIN="$zenohd" \
-        cargo test -p wz-integration-tests --test wz_declared_commander_zenohd_interop \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     rm -rf "$decl_pkg"
     [ "$decl_rc" -eq 0 ] || return 1
@@ -21255,8 +21370,9 @@ layer_z_zenohd_interop() {
     # dialer. The unixsock link is in STOCK zenohd (no special oracle, unlike the
     # unixpipe legs); the demo is already built with `unixsock` above. Same
     # --test-threads=1 per-zenohd isolation.
+    wz_test_args wz-integration-tests wz_unixsock_acceptor_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_unixsock_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y471 — the ADVERTISE-path sibling of the leg above, and deliberately NOT a
     # duplicate of it. That leg writes `unixsock-stream/<path>` into BOTH wz's
     # `--listen` and zenohd's `-e`, so the two sides agree by construction and wz's
@@ -21265,8 +21381,9 @@ layer_z_zenohd_interop() {
     # verbatim to zenohd, so it fails when wz advertises a scheme no foreign stack
     # can dial. Under the pre-R311y470 rendering zenohd EXITS 255 on the
     # `unixsock/<path>` endpoint (measured), which is what makes it a real gate.
+    wz_test_args wz-integration-tests wz_advertised_locator_zenohd_dial
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_advertised_locator_zenohd_dial -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y472 — wz MULTILINK AGGREGATION cross-impl (transport-multilink wz->zenohd),
     # the S4 gap the atom's own reason named: the whole C1ba behavioural lane is
     # wz<->wz, so nothing had ever put a foreign stack on the other end of the 0x4
@@ -21278,8 +21395,9 @@ layer_z_zenohd_interop() {
     # router's budget rather than restating wz's. `transport_multilink` rides zenoh's
     # DEFAULT features, so the STOCK oracle speaks it once configured -- no variant
     # build. Same --test-threads=1 per-zenohd isolation.
+    wz_test_args wz-integration-tests wz_multilink_aggregation_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_multilink_aggregation_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y473 — the READ side of the same atom: R311y472 had to ask ZENOH how many
     # links it had bound because wz's own adminspace reported none (the `sessions[]`
     # array was hard-coded empty at both admin hosts, and `to_admin_json` rendered
@@ -21291,8 +21409,9 @@ layer_z_zenohd_interop() {
     # follows a FOREIGN process's config and cannot be a wz-side constant. The
     # `sessions[]` body is parsed with the parser built for ZENOH's adminspace, so
     # reusing it is also the wire-shape fidelity assertion.
+    wz_test_args wz-integration-tests wz_own_adminspace_reports_aggregated_links
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_own_adminspace_reports_aggregated_links -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y399 — wz UDP-DEMUX ACCEPTOR cross-impl (transport-link-udp zenohd->wz):
     # the DATAGRAM sibling of the ws/tls/unixsock acceptor legs above, and the first
     # cross-impl proof of a structurally-datagram wz acceptor. A real zenohd DIALS
@@ -21304,8 +21423,9 @@ layer_z_zenohd_interop() {
     # so udp is the sole wz<->zenohd transport. udp is in STOCK zenohd + the demo
     # DEFAULT preset (no build-line change, unlike ws/tls/unixsock). Same
     # --test-threads=1 per-zenohd isolation.
+    wz_test_args wz-integration-tests wz_udp_acceptor_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_udp_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R2810 — wz RELIABLE UDP cross-impl (`udp/...?rel=1`, transport-link-udp-reliable),
     # BOTH directions: zenohd dials wz's reliable listener and a pico z_pub crosses
     # into wz; wz dials zenohd's reliable listener and its Put crosses out to a pico
@@ -21318,8 +21438,9 @@ layer_z_zenohd_interop() {
     # (leg 1), and its Put never reached z_sub (leg 2). GUARDED
     # (`_runci_guarded_test`, 2 = one leg per direction), not a `| grep -q` stage:
     # that races SIGPIPE under this script's pipefail (see the helper's header).
+    wz_test_args wz-integration-tests wz_udp_reliable_zenohd_interop
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_udp_reliable_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R311y401 — wz QUIC ACCEPTOR cross-impl (transport-link-quic zenohd->wz): the
     # cert-transport sibling of the tls acceptor leg above. A real zenohd DIALS the wz
     # `--listen quic/...` acceptor (BoundListener::Quic / bind_quic + accept_quic_on,
@@ -21336,9 +21457,10 @@ layer_z_zenohd_interop() {
     # module, unlike vsock). Same --test-threads=1 per-zenohd isolation. Count-guarded
     # (`1 passed`, the y400 vsock-leg precedent) so a dropped `#[ignore]` (0 selected
     # -> exit 0) reddens instead of silently passing.
+    wz_test_args wz-integration-tests wz_quic_acceptor_zenohd_interop
     _runci_guarded_test "Z quic acceptor" 1 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R311y454 — the `locator-iface` LISTEN-side HONOR, cross-impl (§5.2 x the quic
     # accept seam x zenohd->wz). A real zenohd dials the SAME wz quic acceptor twice,
     # differing only in the device the listen locator names: `#iface=lo` establishes,
@@ -21350,9 +21472,10 @@ layer_z_zenohd_interop() {
     # Established/not-Established pair IS the discriminator, and a routed Put would
     # add a second foreign binary without adding discrimination. The demo build above
     # gained `locator-iface`, which is also what puts the atom in the A4 closure.
+    wz_test_args wz-integration-tests wz_quic_acceptor_iface_zenohd_interop
     _runci_guarded_test "Z quic acceptor iface" 1 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_quic_acceptor_iface_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R2590 — the `bind` and `dscp` link keys on the WIRE, tcp/tls/udp/quic, with
     # zenohd as the adjudicator of every row. Both implementations dial a libc
     # observer this test owns (`IP_RECVTOS`, `IP_PKTOPTIONS`), which reads the
@@ -21362,9 +21485,10 @@ layer_z_zenohd_interop() {
     # R2591 — 1 -> 2 passed: the second leg reads the TCP socket buffer keys
     # from the accepted end's `TCP_INFO` window scale and from `ss`'s `rb`/`tb`
     # of the dialer's own socket, since neither key is in a header.
+    wz_test_args wz-integration-tests wz_link_socket_options_zenohd_interop
     _runci_guarded_test "Z link socket options" 2 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_link_socket_options_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R2594 — the QoS a queryable's REPLY carries, adjudicated by a stock zenoh
     # queryable answering the same stock `z_get` through the same zenohd. The
     # expected byte is not written in the test: each run records the stock
@@ -21382,20 +21506,22 @@ layer_z_zenohd_interop() {
         _z_unavailable "zenoh core example oracle not built \
 ($reply_qos_examples_dir/$missing_reply_qos_example; run: bash scripts/build-zenohd.sh)" || return 1
     else
+        wz_test_args wz-integration-tests reply_qos_zenohd_differential
         _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_CORE_EXAMPLES_DIR="$reply_qos_examples_dir" \
             cargo test -p wz-integration-tests \
-            --test reply_qos_zenohd_differential \
+            "${WZ_TEST_ARGS[@]}" \
             -- --ignored --quiet --test-threads=1 || return 1
         # The `reply ⊆ query` contract read by a stock zenoh `z_get`: a wz
         # queryable answering under an in-query and an out-of-query key. A default
         # get must see only the first AND leave no zenoh "didn't match query" drop
         # behind (wz's responder refused, not zenoh's requester); a `?_anyke` get
         # must see both. Same core-example oracle as the leg above.
+        wz_test_args wz-integration-tests reply_keyexpr_contract_zenoh_zget
         _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_CORE_EXAMPLES_DIR="$reply_qos_examples_dir" \
             cargo test -p wz-integration-tests \
-            --test reply_keyexpr_contract_zenoh_zget \
+            "${WZ_TEST_ARGS[@]}" \
             -- --ignored --quiet --test-threads=1 || return 1
     fi
     # R311y407 — wz MESH QUIC acceptor cross-impl (transport-link-quic x mesh accept
@@ -21424,9 +21550,10 @@ layer_z_zenohd_interop() {
     # change. Count-guarded (`5 passed`, the y401 precedent) so a dropped `#[ignore]`
     # on any leg (fewer selected -> exit 0) reddens instead of silently passing. Same
     # --test-threads=1 per-zenohd isolation.
+    wz_test_args wz-integration-tests wz_mesh_quic_acceptor_zenohd_interop
     _runci_guarded_test "Z mesh quic acceptor" 6 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_mesh_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R311y408 — wz QUIC-DATAGRAM ACCEPTOR cross-impl (transport-link-quic-datagram
     # zenohd->wz): the RFC9221 unreliable-datagram twin of the y401 one-shot quic
     # acceptor leg above. A real zenohd DIALS the wz `--listen quic-datagram/...`
@@ -21446,9 +21573,10 @@ layer_z_zenohd_interop() {
     # hosted CI (UDP loopback needs no kernel module). Same --test-threads=1 per-zenohd
     # isolation. Count-guarded (`1 passed`, the y401 precedent) so a dropped `#[ignore]`
     # (0 selected -> exit 0) reddens instead of silently passing.
+    wz_test_args wz-integration-tests wz_quic_datagram_acceptor_zenohd_interop
     _runci_guarded_test "Z quic datagram acceptor" 1 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_quic_datagram_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R311y411 — wz MESH QUIC-DATAGRAM ACCEPTOR cross-impl: the y407 mesh-quic leg's
     # UNRELIABLE twin. A real zenohd JOINS wz's MESH (`--peer` / `--router-hat
     # quic-datagram/...`, the accept LOOP -- not the y408 one-shot `--listen` above)
@@ -21473,9 +21601,10 @@ layer_z_zenohd_interop() {
     # `#[ignore]` (fewer selected) AND a FAILED result line both redden -- the
     # unanchored sibling form matches `FAILED. N passed; 1 failed`. Same
     # --test-threads=1 per-zenohd isolation.
+    wz_test_args wz-integration-tests wz_mesh_quic_datagram_acceptor_zenohd_interop
     _runci_guarded_test "Z mesh quic datagram acceptor" 7 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_mesh_quic_datagram_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R311y376 — wz ROUTER ws ACCEPTOR cross-impl (accept-symmetry Stage 3): the
     # MULTI-PEER accept loop (`--router` / peer_loop, not just one-shot `--listen`)
     # now accepts a foreign non-tcp face. A real zenohd DIALS the wz `--router
@@ -21485,8 +21614,9 @@ layer_z_zenohd_interop() {
     # loop (was TCP-only via bind_endpoint->into_tcp). zenoh-pico has no ws client,
     # so zenohd is the only foreign ws dialer. Same --test-threads=1 isolation; the
     # demo is built with `ws,routing-router` above.
+    wz_test_args wz-integration-tests wz_router_ws_acceptor_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_router_ws_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y140 — wz-ROUTER-HAT <-> zenohd ROUTER-TIER federation interop, the
     # FIRST cross-impl test on wz's `routers_net` link-state wire (every other
     # zenohd leg pairs wz as a CLIENT, never on the router tier). Leg 1 converges
@@ -21504,8 +21634,9 @@ layer_z_zenohd_interop() {
     # z_pub/z_sub/z_querier/z_queryable CLIs (checked above) + the
     # `router-hat-router` binary (built above). Same --test-threads=1 per-zenohd
     # isolation as the client legs.
+    wz_test_args wz-integration-tests wz_router_hat_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_router_hat_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # wz-PEER <-> zenohd-PEER linkstate FEDERATION interop, the peer-tier twin of
     # the router-hat leg above (the last cross-impl router gap): a wz `--peer`
     # LinkstateForwarder meshes with a real zenohd in mode=peer +
@@ -21518,16 +21649,18 @@ layer_z_zenohd_interop() {
     # edge witness is load-bearing, not an ingested-only green-but-meaningless
     # pass. Needs zenohd + the `router-hat-router` binary (built above; pulls
     # routing-peer for --peer). Same --test-threads=1 per-zenohd isolation.
+    wz_test_args wz-integration-tests wz_peer_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_peer_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R2811 — the QUERY plane across a wz `--peer-mode peer-to-peer` peer and a
     # STOCK gossip zenohd peer, both directions. Leg 1 (a client of wz queries a
     # queryable behind zenohd) got zero replies until the topology graph learned
     # to answer gossip-mode route queries itself; leg 2 (the reverse) passed
     # throughout and is the control that leg 1's failure was route selection.
     # GUARDED (`_runci_guarded_test`, 2 = one leg per direction).
+    wz_test_args wz-integration-tests wz_peer_gossip_query_zenohd_interop
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_peer_gossip_query_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # Open-debt item 751 -- the region a router puts a remote in when it PARTITIONS
     # its south (`gateway/south` as a list of subregions): wz's pure region function
     # against zenohd's own logged decisions, three partitions by four roles.
@@ -21536,15 +21669,17 @@ layer_z_zenohd_interop() {
     # control, then the bound a wz `--peer --gateway-south` announces with its
     # control, then the same peer given the partition by the `gateway/south`
     # key of a config file (the legs are `#[ignore]`d).
+    wz_test_args wz-integration-tests wz_south_partition_region_zenohd_interop
     _runci_guarded_test Z 9 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_south_partition_region_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # Open-debt item 751 -- a router placed in two routers' south subregion: each
     # Put crosses the boundary once in each direction, two zenohd gateways as the
     # calibration and two wz `--router-hat --gateway-south` gateways as the claim.
     # Needs zenohd, the pico z_pub/z_sub CLIs and the demo built above with
     # `router-hat-router,zenoh-config`. GUARDED at 2, one per leg.
+    wz_test_args wz-integration-tests wz_router_subregion_two_gateways_zenohd_interop
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_router_subregion_two_gateways_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R311y430 — `scouting-autoconnect`, the last unproven scouting atom, on a
     # THREE-node topology the peer-tier leg above cannot host: a zenohd ROUTER, a
     # THIRD-PARTY zenohd PEER listening beside it, and a wz `--peer --autoconnect`
@@ -21568,8 +21703,9 @@ layer_z_zenohd_interop() {
     # `unknown link mapping`, the two halves of R311y431's psid-introduction fix.
     # Spawns 2 zenohd per leg, hence the shared --test-threads=1. Same
     # `router-hat-router` binary (pulls routing-peer).
+    wz_test_args wz-integration-tests wz_gossip_autoconnect_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_gossip_autoconnect_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y353 — liveliness-get's cross-impl witness rides THIS lane and could not
     # ride Layer E, for a reason measured rather than assumed: zenoh-pico NEVER
     # answers an Interest on a unicast transport (interest.c:533-535, "Nothing to
@@ -21587,16 +21723,18 @@ layer_z_zenohd_interop() {
     # must NOT fire). An absence assertion that stops being selected reports
     # success by silence, which is the one failure mode a bare `--test` target
     # cannot show.
+    wz_test_args wz-integration-tests wz_liveliness_get_zenohd_pico_interop
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_liveliness_get_zenohd_pico_interop -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R311y354 — liveliness-history, same topology and same reason as the get above:
     # a history replay IS an Interest answer, and pico never answers one on unicast.
     # This file is a PAIR (history on / history off against an identical fixture) and
     # the twin is load-bearing: `LIVELINESS SAMPLE PUT` is what any token logs, so the
     # positive arm alone would not show the replay was caused by `history`. Both arms
     # must run for either to mean anything -- do not filter one out.
+    wz_test_args wz-integration-tests wz_liveliness_history_zenohd_pico_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_liveliness_history_zenohd_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y355 — session-reconnect, against a foreign router RESTARTED underneath a
     # live wz session: wz subscribes to zenohd#1, zenohd#1 is killed, a fresh
     # zenohd#2 respawns on the same port, and a pico put on a NEW keyexpr reaches wz
@@ -21606,15 +21744,17 @@ layer_z_zenohd_interop() {
     # resumes, the twin (no --reconnect) exits on link loss and never delivers the
     # post-respawn put -- both must run or neither means anything. ~28s, verified
     # stable across repeated local runs (zenohd restart on the same port).
+    wz_test_args wz-integration-tests wz_reconnect_zenohd_pico_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_reconnect_zenohd_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R3b-2 — wz<->zenohd usrpwd AUTH interop. Needs ONLY zenohd (no
     # storage-manager plugin, no pico CLI): wz authenticates to a
     # mandatory-usrpwd zenohd (correct creds -> Established) and is rejected
     # with a wrong password. --test-threads=1 for the same per-zenohd isolation
     # as the router leg.
+    wz_test_args wz-integration-tests usrpwd_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test usrpwd_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R4c — wz<->zenohd PUBKEY WIRE interop, BOTH directions (needs zenohd +
     # openssl, no plugin). Leg a (R4c): wz DIALS. Stock zenohd cannot admit a
     # pubkey client (known_keys_file is an unimplemented upstream TODO ->
@@ -21624,8 +21764,9 @@ layer_z_zenohd_interop() {
     # Some(empty) lookup that rejects every initiator EXEMPTS the empty set on the
     # responder-key side (pubkey.rs:414-418), so the success path was always on
     # this side. Leg b is also the foreign anchor for wz's own initiator gate.
+    wz_test_args wz-integration-tests pubkey_zenohd_interop
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test pubkey_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R311y392 — wz <-> zenohd UNIXPIPE cross-impl, BOTH directions (leg a: wz
     # dials zenohd's UnicastPipeListener; leg b: zenohd's UnicastPipeClient dials
     # wz's multi-client acceptor). Needs a UNIXPIPE-ENABLED zenohd — a SEPARATE
@@ -21643,9 +21784,10 @@ layer_z_zenohd_interop() {
         # two legs — making `-- --ignored` select 0 tests and exit 0 — reddens the
         # lane instead of silently passing; the helper streams the output so it
         # is visible on failure. Extends the C1al/C1bl/C1bm count-guard discipline.
+        wz_test_args wz-integration-tests wz_unixpipe_zenohd_interop
         _runci_guarded_test "Z unixpipe interop" 2 \
             env WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
-            --test wz_unixpipe_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
         # R311y393/y394 — the wz<->zenohd unixpipe DATA-PLANE cross-impl (4 legs:
         # forward wz-pub->pico-sub over the DIALED link, reverse pico-pub->wz-sub over
         # the dialed link, the ACCEPTOR-direction pico-pub->wz-sub across the link
@@ -21658,9 +21800,10 @@ layer_z_zenohd_interop() {
         # z_sub/z_pub checked at the lane top; same `--test-threads=1` isolation.
         # Count-guarded (`4 passed`) so a dropped `#[ignore]` (0 selected -> exit 0)
         # reddens instead of silently passing.
+        wz_test_args wz-integration-tests wz_unixpipe_zenohd_dataplane
         _runci_guarded_test "Z unixpipe dataplane" 4 \
             env WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
-            --test wz_unixpipe_zenohd_dataplane -- --ignored --quiet --test-threads=1 || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     elif [[ -n "${WZ_Z_REQUIRE:-}" ]]; then
         echo "  Layer Z FAIL — required (WZ_Z_REQUIRE set) but unixpipe zenohd absent" >&2
         echo "  ($zenohd_uxp; run: ZENOHD_UNIXPIPE=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" >&2
@@ -21690,9 +21833,10 @@ layer_z_zenohd_interop() {
     # from the lane early).
     local zenohd_vsock="${WZ_ZENOHD_VSOCK_BIN:-$PWD/target/zenohd-vsock/zenohd}"
     if [[ -x "$zenohd_vsock" ]]; then
+        wz_test_args wz-integration-tests wz_vsock_acceptor_zenohd_interop
         _runci_guarded_test "Z vsock acceptor" 1 \
             env WZ_ZENOHD_VSOCK_BIN="$zenohd_vsock" cargo test -p wz-integration-tests \
-            --test wz_vsock_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     else
         # R311y422 — NO LONGER WZ_Z_REQUIRE-EXEMPT. The exemption existed because the
         # hosted runner was believed to have neither the vsock_loopback module nor a
@@ -21719,10 +21863,11 @@ ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     # as every other leg in this lane.
     local rest_plugin="${WZ_REST_PLUGIN_SO:-$PWD/target/zenohd/libzenoh_plugin_rest.so}"
     if [[ -f "$rest_plugin" ]]; then
+        wz_test_args wz-integration-tests wz_rest_zenohd_interop
         _runci_guarded_test "Z rest interop" 2 \
             env WZ_ZENOHD_BIN="$zenohd" WZ_REST_PLUGIN_SO="$rest_plugin" \
             cargo test -p wz-integration-tests \
-            --test wz_rest_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
         # R311y837 (debt 161 + 162) — the Query consolidation wire byte, witnessed
         # on BOTH reference planes and then pinned against wz's own. It rides
         # INSIDE this block because one of its three legs drives zenohd's REST
@@ -21741,10 +21886,11 @@ ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
         # standing rule: a lane that skips green on a wz artifact it could
         # produce proves nothing.
         (cd crates && cargo build -p wz-ap-demo -p wz-e2e-queryable --quiet) || return 1
+        wz_test_args wz-integration-tests query_consolidation_wire_byte_divergence
         _runci_guarded_test "Z consolidation wire byte" 3 \
             env WZ_ZENOHD_BIN="$zenohd" WZ_REST_PLUGIN_SO="$rest_plugin" \
             cargo test -p wz-integration-tests \
-            --test query_consolidation_wire_byte_divergence \
+            "${WZ_TEST_ARGS[@]}" \
             -- --ignored --quiet --test-threads=1 || return 1
     else
         _z_unavailable "REST plugin not built ($rest_plugin; build it with \
@@ -21758,9 +21904,10 @@ scripts/build-zenohd.sh from a source checkout)" || return 1
         _z_unavailable "storage-manager plugin not built ($plugin)" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests wz_zenohd_storage_replication
     (cd crates && WZ_ZENOHD_BIN="$zenohd" WZ_STORAGE_MANAGER_SO="$plugin" \
         cargo test -p wz-integration-tests \
-        --test wz_zenohd_storage_replication -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R2222 — the fourth fixture the lane-reachability gate found running in no
     # lane at all: a wz `all_complete` querier against a zenohd storage declared
     # COMPLETE, with a storage declared incomplete as its control. It rides
@@ -21771,9 +21918,10 @@ scripts/build-zenohd.sh from a source checkout)" || return 1
     # AllComplete predicate under test, which the original pair structurally
     # cannot: they query a LITERAL keyexpr, and every queryable that intersects
     # a literal also includes it.
+    wz_test_args wz-integration-tests wz_querier_all_complete_vs_zenohd_storage
     _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_STORAGE_MANAGER_SO="$plugin" cargo test -p wz-integration-tests \
-        --test wz_querier_all_complete_vs_zenohd_storage \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || return 1
 }
 
@@ -21790,8 +21938,9 @@ scripts/build-zenohd.sh from a source checkout)" || return 1
 # produce.
 layer_e3_router_multi_peer() {
     (cd crates && cargo build -p wz-ap-demo --features routing-router --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_multi_peer
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_multi_peer -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311y778 — the DeclareFinal witness, built with `routing-routes` ON TOP
     # of `routing-router`. It was needed then: `routing-router` alone installed
     # `NoOpForwarder` and there was no `RouteTable` to own `record_interest`, so
@@ -21812,8 +21961,9 @@ layer_e3_router_multi_peer() {
     # takes the same fixture past its 5s bound.
     (cd crates && cargo build -p wz-ap-demo --features routing-router,routing-routes --quiet) \
         || return 1
+    wz_test_args wz-integration-tests wz_router_terminates_a_pico_liveliness_get
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_terminates_a_pico_liveliness_get -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311y803 — the LIVELINESS PLANE on the same star router, and it reuses the
     # binary built just above rather than asking for a third one: the feature set
     # is identical, only the fixture is new. The sibling above deliberately holds
@@ -21823,8 +21973,9 @@ layer_e3_router_multi_peer() {
     #
     # Serial: every arm binds an ephemeral port and drives three processes whose
     # ordering is the proof, so a parallel run would interleave their banners.
+    wz_test_args wz-integration-tests wz_router_routes_liveliness_pico_interop
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_routes_liveliness_pico_interop -- --ignored --test-threads=1 --quiet) \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 --quiet) \
         || return 1
 }
 
@@ -21839,10 +21990,12 @@ layer_e3_router_multi_peer() {
 # clobbers the others.
 layer_e4_router_reject() {
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_reject_without_feature
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_reject_without_feature -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
+    wz_test_args wz-integration-tests wz_peer_reject_without_feature
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_reject_without_feature -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
 }
 
 # ─── Layer E4i — the INERT-reporting gate for the advanced / group flags ──
@@ -21884,8 +22037,9 @@ layer_e4_router_reject() {
 # delete coverage with nothing going red.
 layer_e4i_demo_inert_flags() {
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    wz_test_args wz-integration-tests wz_ap_demo_inert_flags
     _runci_guarded_test E4i 3 cargo test -p wz-integration-tests \
-        --test wz_ap_demo_inert_flags -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
 }
 
@@ -21904,8 +22058,9 @@ layer_e4i_demo_inert_flags() {
 # it here does not invalidate E3's assertions.
 layer_e5_router_forward() {
     (cd crates && cargo build -p wz-ap-demo --features routing-routes --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_forward
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_forward -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311y373 — the CROSS-IMPL half of routing-routes forwarding: real pico
     # z_pub / z_put -> wz --router (the router hat) -> real pico z_sub, the
     # §5.15 forwarding atom's foreign<->foreign witness (incl the pico publisher's
@@ -21920,8 +22075,9 @@ layer_e5_router_forward() {
         _pico_cli_unavailable "Layer E5 (routing-routes pico interop)" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests wz_router_routes_pico_interop
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_routes_pico_interop -- --ignored --test-threads=1 --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 --quiet) || return 1
     # R2968 — the pico ABI's PEER session beside a wz ROUTER, against the real
     # libzenohpico: what a peer asks a router for and how it retracts. It lives
     # here because it needs the routing demo above (`--router`), which Layer E's
@@ -21945,9 +22101,10 @@ layer_e5_router_forward() {
         return 0
     fi
     (cd crates && cargo build -p wz-capi-pico --features transport-link-tls --quiet) || return 1
+    wz_test_args wz-integration-tests pico_keyexpr_declaration_twice_and_diff
     _runci_guarded_test "E5 pico peer beside a router" 4 \
         cargo test -p wz-integration-tests \
-        --test pico_keyexpr_declaration_twice_and_diff -- --ignored \
+        "${WZ_TEST_ARGS[@]}" -- --ignored \
         wz_router_hears_a_pico_peer --test-threads=1 --quiet || return 1
 }
 
@@ -21987,9 +22144,10 @@ layer_e5z_router_query_target() {
 ($core_examples_dir/$missing_core_example; run: bash scripts/build-zenohd.sh)" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests wz_router_query_target_zenoh_interop
     _runci_guarded_test E5z 1 env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
         cargo test -p wz-integration-tests \
-        --test wz_router_query_target_zenoh_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
 }
 
@@ -22017,9 +22175,10 @@ layer_e5u_router_unixpipe_forward() {
     fi
     (cd crates && cargo build -p wz-ap-demo \
         --features routing-routes,transport-link-unixpipe --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_unixpipe_forward
     _runci_guarded_test "E5u router unixpipe forward" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_router_unixpipe_forward -- --ignored --test-threads=1 --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E6 — peer-MESH e2e (R311qg) ─────────────────────────────
@@ -22064,38 +22223,43 @@ layer_e6_peer_mesh() {
     # of docs/session-lifecycle-intent.md), and the build is refused without one.
     (cd crates && cargo build -p wz-ap-demo \
         --features routing-peer,router-hat-router,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc,session-close-ingress,tls,zenoh-config --quiet) || return 1
+    wz_test_args wz-integration-tests wz_peer_mesh
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_mesh -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311rs — the subscription-filtered data-forward e2e (c3c-3) rides the
     # SAME routing-peer demo binary; gate it in E6 alongside the topology
     # exchange e2e. (It was added in R311ri but never wired into a CI lane —
     # Layer E `--skip wz_peer` excludes it and E6 ran only wz_peer_mesh.)
+    wz_test_args wz-integration-tests wz_peer_data_forward
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_data_forward -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311y45 (§5.23 Phase 2b) — the routing-peer adminspace config GET e2e:
     # peer A (--config-queryable) hosts its adminspace on the forwarder; client B
     # z_gets @/<A_zid>/peer/config and receives A's LIVE shared WzConfig JSON over
     # the wire. Rides the SAME routing-peer demo binary (which now pulls
     # adminspace-core), so no extra build.
+    wz_test_args wz-integration-tests wz_peer_adminspace_config
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_adminspace_config -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311y48 (§5.23 Phase 3b) — the adminspace config-WRITE e2e: peer B PUTs A's
     # @/<A_zid>/peer/config/acl-deny carrying a keyexpr; A's --config-writable
     # subscriber reconfigures A's LIVE forwarder to deny it, and the data plane
     # FLIPS admit -> drop over the wire (closing the y45 read-at-open caveat). Rides
     # the SAME routing-peer demo binary (which now pulls config-mutate-runtime so
     # the reconfigure actually drives), so no extra build.
+    wz_test_args wz-integration-tests wz_peer_adminspace_config_write
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_adminspace_config_write -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # The session lifecycle QUERIES, over the wire between real nodes: a GET closes
     # the session with a named peer and is answered with a verdict (and that peer's
     # face really goes DOWN), a second GET lists the node's verbs, and a node that
     # hosts the queries without `--session-close-permit` answers `refused` with a
     # reason. Rides the SAME E6 binary (built above with `session-close-ingress`).
     # Two tests, so the count guard reddens on a dropped `#[ignore]` (0 selected).
+    wz_test_args wz-integration-tests wz_peer_session_lifecycle_query
     _runci_guarded_test "E6 session lifecycle query" 2 \
         cargo test -p wz-integration-tests \
-        --test wz_peer_session_lifecycle_query -- --ignored --test-threads=1 --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 --quiet || return 1
     # R311y272 — the CROSS-IMPL half of the config write, on the SAME binary, and the
     # first §5.23 leg where pico is the ENCODER (y270/y271 had pico decoding wz's admin
     # replies). A pico z_put reconfigures A's live forwarder when the write permission is
@@ -22112,14 +22276,16 @@ layer_e6_peer_mesh() {
     # the lane as a test failure instead of skipping it — the same shape the
     # R311y443 review hit on Layer Z.
     if [[ -x target/zenoh-pico-cli/z_put && -x target/zenoh-pico-cli/z_pub ]]; then
+        wz_test_args wz-integration-tests wz_peer_adminspace_write_from_pico_zput
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_adminspace_write_from_pico_zput -- --ignored --quiet) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
         # R3362 — `adminspace/permissions/write` from a CONFIG FILE, on the same binary
         # (this layer's build carries `zenoh-config`): a granting document is applied,
         # and two documents that omit the key or state `false` are denied.
+        wz_test_args wz-integration-tests wz_peer_adminspace_write_from_pico_zput_from_a_config_file
         _runci_guarded_test "E6 adminspace write from a config file" 3 \
             cargo test -p wz-integration-tests \
-            --test wz_peer_adminspace_write_from_pico_zput_from_a_config_file -- --ignored --quiet || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
     else
         _pico_cli_unavailable "Layer E6 (pico adminspace config-write z_put/z_pub)" || return 1
     fi
@@ -22132,8 +22298,9 @@ layer_e6_peer_mesh() {
     # binary (routing-peer pulls access-acl). The atom binds to the AclInterceptor
     # decision (RED: always-admit -> secret leaks as a 2nd admitted push).
     if [[ -x target/zenoh-pico-cli/z_put ]]; then
+        wz_test_args wz-integration-tests wz_peer_acl_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_acl_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_acl_pico_interop" || return 1
     fi
@@ -22151,8 +22318,9 @@ layer_e6_peer_mesh() {
     # the same E6 binary (routing-peer pulls access-acl). RED: before y458 none
     # of these kinds was governed and every drop barrier times out.
     if [[ -x target/zenoh-pico-cli/z_liveliness && -x target/zenoh-pico-cli/z_get_liveliness ]]; then
+        wz_test_args wz-integration-tests wz_peer_acl_liveliness_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_acl_liveliness_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_acl_liveliness_pico_interop" || return 1
     fi
@@ -22164,8 +22332,9 @@ layer_e6_peer_mesh() {
     # --test-threads=1 because the mesh legs bind two demo listeners plus two pico
     # processes each, and the twins hold an 8s absence window.
     if [[ -x target/zenoh-pico-cli/z_liveliness && -x target/zenoh-pico-cli/z_sub_liveliness ]]; then
+        wz_test_args wz-integration-tests wz_peer_liveliness_token_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_liveliness_token_pico_interop -- --ignored --quiet --test-threads=1) \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) \
             || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_liveliness_token_pico_interop" || return 1
@@ -22182,15 +22351,17 @@ layer_e6_peer_mesh() {
     # 8s budget, so --test-threads=1 keeps the fixtures' ports and frozen
     # processes from overlapping.
     if [[ -x target/zenoh-pico-cli/z_get_liveliness ]]; then
+        wz_test_args wz-integration-tests wz_peer_interest_pending_gc_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_interest_pending_gc_pico_interop -- --ignored --quiet --test-threads=1) \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) \
             || return 1
         # R3362 — `routing/interests/timeout` from a CONFIG FILE, on the same binary: a
         # document stating 2500 ms ends the frozen-gateway get at that deadline, and a
         # document that omits the key leaves the default 10 s window pending.
+        wz_test_args wz-integration-tests wz_peer_interest_pending_gc_pico_interop_from_a_config_file
         _runci_guarded_test "E6 interest timeout from a config file" 2 \
             cargo test -p wz-integration-tests \
-            --test wz_peer_interest_pending_gc_pico_interop_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_interest_pending_gc_pico_interop" || return 1
     fi
@@ -22205,8 +22376,9 @@ layer_e6_peer_mesh() {
     # binaries, so both are guarded (RED: payload-only accounting admits the
     # attachment put as a 2nd data push and the drop barrier times out).
     if [[ -x target/zenoh-pico-cli/z_put && -x target/zenoh-pico-cli/z_pub_attachment ]]; then
+        wz_test_args wz-integration-tests wz_peer_low_pass_attachment_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_low_pass_attachment_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_low_pass_attachment_pico_interop" || return 1
     fi
@@ -22223,8 +22395,9 @@ layer_e6_peer_mesh() {
     # are admitted, 0 dropped, and the drop barrier times out while the control
     # leg still passes).
     if [[ -x target/zenoh-pico-cli/z_put && -x target/zenoh-pico-cli/z_pub ]]; then
+        wz_test_args wz-integration-tests wz_peer_downsampling_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_downsampling_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_downsampling_pico_interop" || return 1
     fi
@@ -22239,8 +22412,9 @@ layer_e6_peer_mesh() {
     # it drives (RED, measured: with both subject matchers made inert, BOTH
     # negative arms throttle and both tests fail).
     if [[ -x target/zenoh-pico-cli/z_pub ]]; then
+        wz_test_args wz-integration-tests wz_peer_subject_scoping_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_subject_scoping_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_subject_scoping_pico_interop" || return 1
     fi
@@ -22252,8 +22426,9 @@ layer_e6_peer_mesh() {
     # is the FIRST E6 leg with a pico-CLI dependency, so — like Layer E/Z — SKIP it when
     # the zenoh-pico CLI is absent (the other E6 legs are wz<->wz and need no guard).
     if [[ -x target/zenoh-pico-cli/z_pub && -x target/zenoh-pico-cli/z_sub ]]; then
+        wz_test_args wz-integration-tests wz_peer_future_push_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_future_push_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_future_push_pico_interop" || return 1
     fi
@@ -22264,8 +22439,9 @@ layer_e6_peer_mesh() {
     # returns in reverse. Same pico-CLI guard as the future-push leg (z_queryable +
     # z_querier are already in build-zenoh-pico-cli.sh TARGETS).
     if [[ -x target/zenoh-pico-cli/z_queryable && -x target/zenoh-pico-cli/z_querier ]]; then
+        wz_test_args wz-integration-tests wz_peer_qabl_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_qabl_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_qabl_pico_interop" || return 1
     fi
@@ -22274,8 +22450,9 @@ layer_e6_peer_mesh() {
     # mesh Push to a foreign pico client sub without the pico rejecting the ext_nodeid
     # and closing (the DATA twin of the R311y179 query-source fix).
     if [[ -x target/zenoh-pico-cli/z_sub ]]; then
+        wz_test_args wz-integration-tests wz_peer_transit_push_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_transit_push_pico_interop -- --ignored --quiet --test-threads=1) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_transit_push_pico_interop" || return 1
     fi
@@ -22298,8 +22475,9 @@ layer_e6_peer_mesh() {
 # double-running it on an arbitrary-feature binary.
 layer_e6b_adminspace_introspection() {
     (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-introspection-handlers --quiet) || return 1
+    wz_test_args wz-integration-tests wz_peer_adminspace_introspection
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_adminspace_introspection -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311y270 — the CROSS-IMPL half, on the SAME binary: a real zenoh-pico z_get
     # CLI reads wz's admin bodies (the adminspace-core node record + the
     # introspection subscriber leg). §5.23 was wz<->wz only until now, which is why
@@ -22315,16 +22493,18 @@ layer_e6b_adminspace_introspection() {
         _pico_cli_unavailable "Layer E6b (pico adminspace z_get)" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests wz_peer_adminspace_to_pico_zget
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_adminspace_to_pico_zget -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311y350 — locator-tcp's cross-impl witness rides THIS lane, not Layer E: it
     # needs the same routing-peer + adminspace binary built above (Layer E builds the
     # demo with default features, which reject `--peer`). The atom is the canonical
     # `tcp/...` string wz RENDERS into `@/<zid>/peer` from a BARE addr -- a foreign
     # peer reads it, which is what killed R311y348's proposal to exclude the 8
     # locator-* atoms from the A4 denominator as non-observable.
+    wz_test_args wz-integration-tests wz_peer_locator_render_to_pico_zget
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_locator_render_to_pico_zget -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
 }
 
 # ─── Layer E6c — transport-multilink: demo-binary N-link aggregation E2E ───────
@@ -22354,8 +22534,9 @@ layer_e6b_adminspace_introspection() {
 layer_e6c_peer_multilink() {
     (cd crates && cargo build -p wz-ap-demo --features transport-multilink --quiet) || return 1
     (cd crates && cargo clippy -p wz-ap-demo --features transport-multilink --quiet -- -D warnings) || return 1
+    wz_test_args wz-integration-tests wz_peer_multilink_aggregate
     _runci_guarded_test E6c 1 cargo test -p wz-integration-tests \
-        --test wz_peer_multilink_aggregate -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
     # R2457 (open-debt item 702) — the same topology, TAPPED, and read with a
     # question no other capture in this tree is asked: are the two links ONE
     # keyexpr id space? Its own `--test` target and its own count, on the
@@ -22372,8 +22553,9 @@ layer_e6c_peer_multilink() {
     # ONE flow — it asserts so itself — because `tap_proxy` accepts a single
     # connection and `z_get` dials once. `max_links:2` is a budget there, not a
     # second dial.
+    wz_test_args wz-integration-tests wz_multilink_keyexpr_session_capture
     _runci_guarded_test E6c-keyexpr 1 cargo test -p wz-integration-tests \
-        --test wz_multilink_keyexpr_session_capture -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
 }
 
 # ─── Layer E6d — qos demo reachability: prioritized publish over aggregated multilink ─
@@ -22402,8 +22584,9 @@ layer_e6c_peer_multilink() {
 layer_e6d_peer_multilink_qos() {
     (cd crates && cargo build -p wz-ap-demo --features transport-qos,transport-multilink --quiet) || return 1
     (cd crates && cargo clippy -p wz-ap-demo --features transport-qos,transport-multilink --quiet -- -D warnings) || return 1
+    wz_test_args wz-integration-tests wz_peer_multilink_qos_reach
     _runci_guarded_test E6d 1 cargo test -p wz-integration-tests \
-        --test wz_peer_multilink_qos_reach -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
 }
 
 # ─── Layer E6e — §5.23 adminspace-plugins-handlers E2E ─────────────────────────
@@ -22422,8 +22605,9 @@ layer_e6d_peer_multilink_qos() {
 # default Layer E sweep's `--skip wz_peer` from double-running it.
 layer_e6e_adminspace_plugins() {
     (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-plugins-handlers,storage-backend --quiet) || return 1
+    wz_test_args wz-integration-tests wz_peer_adminspace_plugins
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_adminspace_plugins -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311y271 — the CROSS-IMPL half, on the SAME binary this lane already builds:
     # pico's z_get reads the `plugins/**` leg and decodes wz's compiled-subsystem
     # record. PARTIAL and graded so — the atom's other two surfaces
@@ -22437,8 +22621,9 @@ layer_e6e_adminspace_plugins() {
         _pico_cli_unavailable "Layer E6e (pico adminspace plugins z_get)" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests wz_peer_adminspace_plugins_to_pico_zget
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_adminspace_plugins_to_pico_zget -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
 }
 
 # ─── Layer E6f — §5.23 adminspace-metrics E2E (vs zenoh-pico) ──────────────────
@@ -22469,16 +22654,18 @@ layer_e6e_adminspace_plugins() {
 layer_e6f_adminspace_metrics() {
     (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-metrics --quiet) || return 1
     if [[ -x target/zenoh-pico-cli/z_get ]]; then
+        wz_test_args wz-integration-tests wz_peer_adminspace_metrics_to_pico_zget
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_peer_adminspace_metrics_to_pico_zget -- --ignored --quiet) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     else
         _pico_cli_unavailable "Layer E6f (pico adminspace metrics z_get)" || return 1
     fi
     (cd crates \
         && cargo build -p wz-ap-demo --features routing-peer,adminspace-metrics,wz/transport-stats --quiet \
         && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    wz_test_args wz-integration-tests wz_peer_serves_its_node_stats_registry
     _runci_guarded_test "Layer E6f (the peer's node registry)" 1 \
-        cargo test -p wz-integration-tests --test wz_peer_serves_its_node_stats_registry \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet || return 1
     # The peer's resource snapshot (`docs/observation-plane.md` M4), at `wz/@/<zid>/snapshot`
     # beside the router's: served to a session client, denied with the read permit. Its own demo
@@ -22489,8 +22676,9 @@ layer_e6f_adminspace_metrics() {
     (cd crates \
         && cargo build -p wz-ap-demo --features routing-peer,adminspace-read,resource-snapshot --quiet \
         && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    wz_test_args wz-integration-tests wz_peer_serves_its_resource_snapshot
     _runci_guarded_test "Layer E6f (the peer's resource snapshot)" 2 \
-        cargo test -p wz-integration-tests --test wz_peer_serves_its_resource_snapshot \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --test-threads=1 --quiet || return 1
 }
 
@@ -22516,15 +22704,17 @@ layer_e6g_adminspace_read() {
         _pico_cli_unavailable "Layer E6g (pico adminspace read-deny z_get)" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests wz_peer_adminspace_read_deny_to_pico_zget
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_adminspace_read_deny_to_pico_zget -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R3362 — `adminspace/enabled` and `adminspace/permissions/read` from a CONFIG FILE:
     # the host and the read gate both come from the document, and a document naming
     # only `enabled` is the control. A build that adds `zenoh-config` to the one above.
     (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-read,zenoh-config --quiet) || return 1
+    wz_test_args wz-integration-tests wz_peer_adminspace_read_deny_to_pico_zget_from_a_config_file
     _runci_guarded_test "E6g adminspace read-deny from a config file" 2 \
         cargo test -p wz-integration-tests \
-        --test wz_peer_adminspace_read_deny_to_pico_zget_from_a_config_file -- --ignored --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet || return 1
 }
 
 # ─── Layer E6h — §5.23 adminspace-config-hotreload E2E (vs zenoh-pico) ──────────
@@ -22555,8 +22745,9 @@ layer_e6h_adminspace_config_hotreload() {
         _pico_cli_unavailable "Layer E6h (pico config-hotreload z_put/z_get)" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests wz_storage_host_config_hotreload_pico
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_storage_host_config_hotreload_pico -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # R2787 — the storage manager's DECLARATIVE document, written by a pico client
     # below `@/<zid>/peer/config/plugins/storage_manager/`. A SECOND build, and it
     # must come after the test above: the storage host applies a config-key write
@@ -22564,21 +22755,24 @@ layer_e6h_adminspace_config_hotreload() {
     # to one path, so building it first would run the test above against it.
     (cd crates && cargo build -p wz-ap-demo --features adminspace-config-hotreload,zenoh-config --quiet) || return 1
     (cd crates && cargo clippy -p wz-ap-demo --features adminspace-config-hotreload,zenoh-config -- -D warnings) || return 1
+    wz_test_args wz-integration-tests wz_storage_host_plugins_section_pico
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_storage_host_plugins_section_pico -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # A `--config` file ALONE hosts the storage it declares and binds the endpoint
     # it names (a peer-mode document that declares a storage selects the storage
     # host). Same binary as the test above, for the same reason, and its clients
     # are the demo itself, so it needs no pico CLI.
+    wz_test_args wz-integration-tests wz_storage_host_from_config_alone
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_storage_host_from_config_alone -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
     # §5.23 `adminspace-core` — the config's `metadata`, served by this same
     # build's storage host from a `--config` FILE and compared byte for byte with
     # what a stock zenohd serves for the same value. Same binary as the test
     # above (it needs `zenoh-config` to read the file), so it runs after it. The
     # zenohd is the one this job's Layer Z provisions.
+    wz_test_args wz-integration-tests wz_storage_host_metadata_matches_zenohd
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_storage_host_metadata_matches_zenohd -- --ignored --quiet --test-threads=1) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
 }
 
 # ─── Layer E6i — adminspace-read GET gate on the STORAGE-HOST tier (vs pico) ────
@@ -22614,8 +22808,9 @@ layer_e6i_storage_host_adminspace_read_deny() {
         _pico_cli_unavailable "Layer E6i (pico storage-host adminspace read-deny z_get)" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests wz_storage_host_adminspace_read_deny_to_pico_zget
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_storage_host_adminspace_read_deny_to_pico_zget -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
 }
 
 # ─── Layer E6j — the admin read permit is re-read PER GET, on ONE session ───
@@ -22650,8 +22845,9 @@ layer_e6j_admin_permit_per_get_one_session() {
     (cd crates && cargo build -p wz-ap-demo \
         --features adminspace-config-hotreload,adminspace-read,adminspace-write --quiet) || return 1
     (cd crates && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    wz_test_args wz-integration-tests wz_storage_host_admin_permit_is_read_per_get_on_one_session
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_storage_host_admin_permit_is_read_per_get_on_one_session \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet) || return 1
 }
 
@@ -22682,8 +22878,9 @@ layer_e7_router_hat() {
     # touches neither the data nor the query forwarding the mesh tests assert.
     (cd crates && cargo build -p wz-ap-demo \
         --features router-hat-router,adminspace-router-linkstate,routing-token-tables --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hat_mesh
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_mesh -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     # R311y463 — liveliness-historical-samples, the RESPONDER half of liveliness
     # history: pico A declares a token, THEN pico B subscribes with `-h`, and wz
     # replays the token B never saw declared. The pair differs in that ONE pico flag,
@@ -22691,8 +22888,9 @@ layer_e7_router_hat() {
     # src/net/liveliness.c:196-205), so the twin is what makes the sample the atom's.
     # Guarded on BOTH foreign binaries; rides the token-tables build above.
     if [[ -x target/zenoh-pico-cli/z_liveliness && -x target/zenoh-pico-cli/z_sub_liveliness ]]; then
+        wz_test_args wz-integration-tests wz_router_hat_liveliness_history_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_router_hat_liveliness_history_pico_interop \
+            "${WZ_TEST_ARGS[@]}" \
             -- --ignored --quiet --test-threads=1) || return 1
     else
         _pico_cli_unavailable "Layer E7 (pico liveliness history z_liveliness/z_sub_liveliness)" || return 1
@@ -22702,8 +22900,9 @@ layer_e7_router_hat() {
     # legs carry content once a second router exists; probed before the round). Guarded
     # on the FOREIGN binary only (R311y265); WZ_PICO_REQUIRE escalates the skip.
     if [[ -x target/zenoh-pico-cli/z_get ]]; then
+        wz_test_args wz-integration-tests wz_router_hat_adminspace_to_pico_zget
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_router_hat_adminspace_to_pico_zget -- --ignored --quiet) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     else
         _pico_cli_unavailable "Layer E7 (pico router adminspace z_get)" || return 1
     fi
@@ -22769,14 +22968,16 @@ layer_e7b_router_connect_reconcile() {
         wz_router_hat_reconcile_dials_new_endpoint \
         wz_router_hat_reconcile_dedups_already_dialed \
         wz_router_hat_reconnect_redials_dropped_peer; do
+        wz_test_args wz-integration-tests wz_router_hat_connect_reconcile
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_router_hat_connect_reconcile "$e7b_test" -- --ignored --exact --quiet) || return 1
+            "${WZ_TEST_ARGS[@]}" "$e7b_test" -- --ignored --exact --quiet) || return 1
     done
     # NEGATIVE (feature OFF): --connect-after inert on the router-hat-router-only
     # binary (rebuilt here so it never shares the reconcile build).
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hat_connect_reconcile wz_router_hat_reconcile_requires_feature
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_connect_reconcile wz_router_hat_reconcile_requires_feature \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --exact --quiet) || return 1
 }
 
@@ -22840,8 +23041,9 @@ layer_e7b2_router_connect_add_over_the_wire() {
         wz_router_hat_config_key_write_applies_a_link_weight_over_the_wire \
         wz_router_hat_config_key_write_is_denied_without_the_write_permit \
         wz_router_hat_config_key_delete_restores_the_default_over_the_wire; do
+        wz_test_args wz-integration-tests wz_router_hat_connect_reconcile
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_router_hat_connect_reconcile "$e7b2_test" \
+            "${WZ_TEST_ARGS[@]}" "$e7b2_test" \
             -- --ignored --exact --test-threads=1 --quiet) || return 1
     done
 }
@@ -22878,8 +23080,9 @@ layer_e7c_router_adminspace_linkstate() {
     # the same reason, and it costs ~1s here (measured: 1.37s for both). No
     # concurrent failure has been observed — this is a precaution taken before
     # the second test existed on a loaded runner, not a diagnosed flake.
+    wz_test_args wz-integration-tests wz_router_hat_adminspace_linkstate_interop
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_adminspace_linkstate_interop \
+        "${WZ_TEST_ARGS[@]}" \
         -- --ignored --test-threads=1 --quiet) || return 1
 }
 
@@ -22911,8 +23114,9 @@ layer_e7g_router_adminspace_read_deny() {
         --features router-hat-router,adminspace-router-linkstate,adminspace-read,resource-snapshot \
         --quiet) || return 1
     if [[ -x target/zenoh-pico-cli/z_get ]]; then
+        wz_test_args wz-integration-tests wz_router_hat_adminspace_read_deny_to_pico_zget
         (cd crates && cargo test -p wz-integration-tests \
-            --test wz_router_hat_adminspace_read_deny_to_pico_zget -- --ignored --quiet) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
     else
         _pico_cli_unavailable "Layer E7g (pico router adminspace read-deny z_get)" || return 1
     fi
@@ -22924,17 +23128,19 @@ layer_e7g_router_adminspace_read_deny() {
     # minimal subset. The count is 2 so that a dropped `#[ignore]` (selecting none) or a renamed
     # test reddens.
     (cd crates && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hat_serves_its_capacity_report
     _runci_guarded_test "E7g capacity report" 2 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hat_serves_its_capacity_report -- --ignored --test-threads=1 --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 --quiet || return 1
     # The router's resource snapshot (`docs/observation-plane.md` M4), served at
     # `wz/@/<zid>/snapshot` beside the report above, under the same root and the same permit: served
     # and the node's own, its count surviving the link that carried it, absent from upstream's
     # answers, denied with the permit. The demo is the build above, which carries
     # `resource-snapshot` for this. The count is 2 for the reason the one above is.
+    wz_test_args wz-integration-tests wz_router_hat_serves_its_resource_snapshot
     _runci_guarded_test "E7g resource snapshot" 2 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hat_serves_its_resource_snapshot -- --ignored --test-threads=1 --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E7u — router-hat (TRUE Router) forwarding OVER UNIXPIPE (R311y396) ──
@@ -22976,9 +23182,10 @@ layer_e7u_router_hat_unixpipe_forward() {
     #     distinct-zid --connect unixpipe clients through the true-Router.
     (cd crates && cargo build -p wz-ap-demo \
         --features router-hat-router,transport-link-unixpipe --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hat_unixpipe_forward
     _runci_guarded_test "E7u router hat unixpipe forward" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hat_unixpipe_forward -- --ignored --test-threads=1 --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E6u — peer (WhatAmI::Peer) forwarding OVER UNIXPIPE (R311y397) ──
@@ -23018,9 +23225,10 @@ layer_e6u_peer_unixpipe_forward() {
     #     distinct-zid --connect unixpipe clients through the peer.
     (cd crates && cargo build -p wz-ap-demo \
         --features routing-peer,transport-link-unixpipe --quiet) || return 1
+    wz_test_args wz-integration-tests wz_peer_unixpipe_forward
     _runci_guarded_test "E6u peer unixpipe forward" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_peer_unixpipe_forward -- --ignored --test-threads=1 --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E7s — router-hat data-plane cost, MEASURED (docs/router-data-plane-scaling.md) ───
@@ -23062,9 +23270,10 @@ layer_e6u_peer_unixpipe_forward() {
 # and run about three minutes, which is why they are `#[ignore]`d and their own lane.
 layer_e7s_router_hat_data_plane_scaling() {
     (cd crates && cargo build --release -p wz-ap-demo --no-default-features --features preset-ap-client,router-hat-router --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hat_data_plane_scaling
     _runci_guarded_test "E7s router data-plane scaling" 6 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hat_data_plane_scaling -- --ignored --nocapture --test-threads=1 --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E7m — the wz client of SCE Mesh's Zenoh binding, held to SCE's conformance kit ───
@@ -23100,9 +23309,10 @@ layer_e7s_router_hat_data_plane_scaling() {
 # of 1200); with it on the wait is 12.7 ms and all 1200 arrive.
 layer_e7m_wz_mesh_client_conformance() {
     (cd crates && cargo build -p wz-ap-demo --no-default-features --features preset-ap-client,router-hat-router,routing-token-tables --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hat_serves_a_wz_client_the_way_the_sce_zenoh_inbox_does
     _runci_guarded_test "E7m wz mesh client conformance" 13 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hat_serves_a_wz_client_the_way_the_sce_zenoh_inbox_does -- --ignored --nocapture --test-threads=1 --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E8 — router-hat CROSS-IMPL vs zenoh-pico (P4 §5.21) ───
@@ -23121,8 +23331,9 @@ layer_e8_router_hat_pico() {
         return 0
     fi
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hat_pico_interop
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_pico_interop -- --ignored --quiet) || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
 }
 
 # ─── Layer E8t — time-hlc FORWARD-PATH STAMP cross-impl vs zenoh-pico ───
@@ -23162,9 +23373,10 @@ layer_e8t_router_hat_hlc_stamp_pico() {
         return 0
     fi
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router,time-hlc --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hlc_stamp_to_pico_zsub
     _runci_guarded_test "E8t stamps a bare put" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact wz_router_hat_hlc_stamps_a_bare_put_for_pico_zsub_attachment || return 1
     # R2623 — the FULLY FOREIGN leg, on the SAME build as leg 1: a real pico
     # `z_put` publishes the bare Put instead of wz-ap-demo, so the only non-pico
@@ -23173,9 +23385,10 @@ layer_e8t_router_hat_hlc_stamp_pico() {
     # encoding sits on both ends of their claim; here the Put is encoded and
     # decoded by zenoh-pico. The attribution twins below cover it too, because
     # they vary the ROUTER and the router is shared.
+    wz_test_args wz-integration-tests wz_router_hlc_stamp_to_pico_zsub
     _runci_guarded_test "E8t stamps a bare pico put" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact wz_router_hat_hlc_stamps_a_bare_pico_put_for_pico_zsub_attachment || return 1
     # R2624 — the two INBOUND-timestamp arms, on leg 1's build. These need a
     # publisher that chooses its timestamp, which no upstream example is, so they
@@ -23195,9 +23408,10 @@ layer_e8t_router_hat_hlc_stamp_pico() {
         wz_router_hat_absorbs_an_upstream_timestamp_inside_the_drift_bound \
         wz_router_hat_replaces_an_upstream_timestamp_beyond_the_drift_bound \
         wz_router_hat_told_to_drop_future_timestamps_delivers_nothing; do
+        wz_test_args wz-integration-tests wz_router_hlc_stamp_to_pico_zsub
         _runci_guarded_test "E8t arm $_e8t_arm" 1 \
             cargo test -p wz-integration-tests \
-            --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             --exact "$_e8t_arm" || return 1
     done
     # R2112 (open-debt items 102 + 210) — the CONFIG twin, on the SAME build as
@@ -23206,9 +23420,10 @@ layer_e8t_router_hat_hlc_stamp_pico() {
     # is the only leg that covers the demo's own wiring from `--timestamping` to
     # the forwarder's map; the library unit tests construct the forwarder
     # directly and stay green if the runner drops the value in between.
+    wz_test_args wz-integration-tests wz_router_hlc_stamp_to_pico_zsub
     _runci_guarded_test "E8t told not to timestamp" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact wz_router_hat_told_not_to_timestamp_relays_a_bare_put_unstamped || return 1
     # R3362 — `timestamping/drop_future_timestamp` from a CONFIG FILE, on a build that
     # adds `zenoh-config` to leg 1's: the document is the only difference between the
@@ -23216,14 +23431,16 @@ layer_e8t_router_hat_hlc_stamp_pico() {
     # is typed as an argv word. Three tests, so the guard reddens on a dropped
     # `#[ignore]` (0 selected).
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router,time-hlc,zenoh-config --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hlc_stamp_to_pico_zsub_from_a_config_file
     _runci_guarded_test "E8t drop-future-timestamp from a config file" 3 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hlc_stamp_to_pico_zsub_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # The negative twin, on its OWN build (no time-hlc).
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
+    wz_test_args wz-integration-tests wz_router_hlc_stamp_to_pico_zsub
     _runci_guarded_test "E8t without time-hlc" 1 \
         cargo test -p wz-integration-tests \
-        --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact wz_router_hat_without_time_hlc_relays_a_bare_put_unstamped || return 1
 }
 
@@ -23273,9 +23490,10 @@ layer_e10_close_frame_on_teardown() {
         _pico_cli_unavailable "Layer E10" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests close_frame_on_teardown
     _runci_guarded_test "E10 close frame on teardown" 1 \
         cargo test -p wz-integration-tests \
-        --test close_frame_on_teardown -- --ignored --nocapture --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 \
         --exact who_sends_a_session_close_at_teardown || return 1
 }
 
@@ -23296,13 +23514,15 @@ layer_e9_apfull_preset_pico() {
         _pico_cli_unavailable "Layer E9" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests apfull_preset_pico_interop
     _runci_guarded_test "E9 preset acceptor round trip" 1 \
         cargo test -p wz-integration-tests \
-        --test apfull_preset_pico_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact apfull_preset_acceptor_round_trips_with_a_real_pico_z_put || return 1
+    wz_test_args wz-integration-tests apfull_preset_pico_interop
     _runci_guarded_test "E9 preset peer forwards" 1 \
         cargo test -p wz-integration-tests \
-        --test apfull_preset_pico_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact apfull_preset_peer_forwards_between_two_real_pico_clients || return 1
     # R311y481 — the QUERY PLANE legs, on the SAME preset build above. Each is the
     # first live-foreign witness for an atom whose only prior claim was
@@ -23319,17 +23539,20 @@ layer_e9_apfull_preset_pico() {
     # later `cargo build -p wz-ap-demo` had written over the same target path, and
     # the missing Err frame read exactly like a wz defect (see the test file's
     # module doc). The legs each assert a build-discriminating marker for it.
+    wz_test_args wz-integration-tests apfull_query_plane_pico_interop
     _runci_guarded_test "E9 query selector parameters" 1 \
         cargo test -p wz-integration-tests \
-        --test apfull_query_plane_pico_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact apfull_query_selector_parameters_decoded_by_a_real_pico_queryable || return 1
+    wz_test_args wz-integration-tests apfull_query_plane_pico_interop
     _runci_guarded_test "E9 query attachment" 1 \
         cargo test -p wz-integration-tests \
-        --test apfull_query_plane_pico_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact apfull_query_attachment_decoded_by_a_real_pico_queryable || return 1
+    wz_test_args wz-integration-tests apfull_query_plane_pico_interop
     _runci_guarded_test "E9 query reply err" 1 \
         cargo test -p wz-integration-tests \
-        --test apfull_query_plane_pico_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact apfull_query_reply_err_decoded_by_a_real_pico_z_get || return 1
 }
 
@@ -23361,13 +23584,15 @@ layer_e11_apfull_advanced_pubsub_pico() {
         _pico_cli_unavailable "Layer E11" || return 1
         return 0
     fi
+    wz_test_args wz-integration-tests apfull_advanced_pubsub_pico_interop
     _runci_guarded_test "E11 cache history recovered" 1 \
         cargo test -p wz-integration-tests \
-        --test apfull_advanced_pubsub_pico_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact apfull_cache_history_recovered_by_a_real_pico_advanced_subscriber || return 1
+    wz_test_args wz-integration-tests apfull_advanced_pubsub_pico_interop
     _runci_guarded_test "E11 subscriber recovers history" 1 \
         cargo test -p wz-integration-tests \
-        --test apfull_advanced_pubsub_pico_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact apfull_advanced_subscriber_recovers_history_from_a_real_pico_cache || return 1
     # R2659 — the THIRD leg, which this lane owned by its `#[ignore]` note and
     # never named. `lane_feature_membership_gate.py` found it: the note says
@@ -23375,9 +23600,10 @@ layer_e11_apfull_advanced_pubsub_pico() {
     # file's OTHER two tests, so it was selected by no lane and had never run on
     # CI since `8bffc0fc` added it. It carries `wz-proves: keyexpr-canon`, so a
     # proof claim rested on a test that never executed.
+    wz_test_args wz-integration-tests apfull_advanced_pubsub_pico_interop
     _runci_guarded_test "E11 double star keyexpr" 1 \
         cargo test -p wz-integration-tests \
-        --test apfull_advanced_pubsub_pico_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact apfull_double_star_adv_keyexpr_does_not_crash_a_real_pico_peer || return 1
 }
 
@@ -23426,9 +23652,10 @@ layer_e12_apfull_adminspace_pico() {
         apfull_adminspace_write_gate_refuses_an_unpermitted_pico_put \
         apfull_router_hat_linkstate_decoded_by_a_real_pico_z_get \
         apfull_storage_host_hotreload_state_flip_seen_by_a_real_pico; do
+        wz_test_args wz-integration-tests apfull_adminspace_pico_interop
         _runci_guarded_test "E12 adminspace $leg" 1 \
             cargo test -p wz-integration-tests \
-            --test apfull_adminspace_pico_interop -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
 }
@@ -23654,9 +23881,10 @@ layer_c1cc_api_compat_c() {
         upstream_option_defaults_on_wz_capi_c_match_real_libzenohc \
         upstream_z_put_links_against_wz_capi_c_and_a_real_wz_subscriber_receives_it \
         upstream_z_put_linked_statically_against_wz_capi_c_reaches_a_real_wz_subscriber; do
+        wz_test_args wz-integration-tests zenoh_c_examples_on_wz_capi_c_dropin
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
-            --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
     # zenoh-c's OWN tests (`tests/z_api_*.c`, `z_int_*.c`, `z_leak_*.c`), built the way its CMake
@@ -23665,17 +23893,19 @@ layer_c1cc_api_compat_c() {
     # built only where the oracle's header carries the features CMake gates them on, and
     # `z_api_alignment_test` is left out for the reason upstream's own CI states
     # (`WZ_ZENOHC_API_ORACLE=1` links the real library as the control).
+    wz_test_args wz-integration-tests zenoh_c_upstream_api_tests_on_wz
     _runci_guarded_test "C1cc upstream zenoh-c tests on wz" 24 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_upstream_api_tests_on_wz -- --ignored --quiet --test-threads=1 || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
     # R311y564 — the PURE-FUNCTION twice-and-diff, a separate binary. It reaches
     # the part of the ABI no session ever touches (the encoding constant table,
     # keyexpr canonization and the set relations), which is where a wrong answer
     # is invisible to every interop leg: `z_keyexpr_canonize` runs before a
     # session exists. It found two wire-affecting defects on its first run.
+    wz_test_args wz-integration-tests zenoh_c_pure_function_oracle
     _runci_guarded_test "C1cc upstream_pure_functions_on_wz_capi_c_match_real_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_pure_function_oracle -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact upstream_pure_functions_on_wz_capi_c_match_real_libzenohc || return 1
     # R2303 (open-debt item 636) — the CONFIG DOCUMENT, in all four directions.
     # A separate binary again, and for the same kind of reason: the pure-function
@@ -23689,19 +23919,21 @@ layer_c1cc_api_compat_c() {
     # item named: `zc_config_from_file` held a second copy of the parser and had
     # drifted from `zc_config_from_str`, which a single-door probe would have
     # left broken behind a closed item.
+    wz_test_args wz-integration-tests zenoh_c_config_document_oracle
     _runci_guarded_test \
         "C1cc a_config_document_written_by_either_implementation_is_read_by_the_other" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_config_document_oracle -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact a_config_document_written_by_either_implementation_is_read_by_the_other \
         || return 1
     # Open-debt item 854 — the same binary's locator witness: a refused document
     # must name the member it refused, so a red above reads as a key and not as
     # a bare return code.
+    wz_test_args wz-integration-tests zenoh_c_config_document_oracle
     _runci_guarded_test \
         "C1cc a_refused_config_document_names_the_member_that_was_refused" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_config_document_oracle -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact a_refused_config_document_names_the_member_that_was_refused \
         || return 1
     # R311y564 — the DROP-IN CENSUS, the question the corpus report cannot ask.
@@ -23720,9 +23952,10 @@ layer_c1cc_api_compat_c() {
         the_wz_capi_c_drop_in_surface_gap_does_not_grow \
         wz_exports_nothing_the_reference_does_not \
         the_census_reads_both_libraries_rather_than_nothing; do
+        wz_test_args wz-integration-tests zenoh_c_abi_symbol_census
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
-            --test zenoh_c_abi_symbol_census -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
     # R311y566 — the `source_info` FOREIGN ADJUDICATOR, the gap the debt ledger
@@ -23730,10 +23963,11 @@ layer_c1cc_api_compat_c() {
     # was wz-driven with damage probes, because no stock example on either side
     # sets the field. This is the y548 remedy applied: an upstream program
     # PATCHED to set it, compiled once and linked twice.
+    wz_test_args wz-integration-tests zenoh_c_source_info_twice_and_diff
     _runci_guarded_test \
         "C1cc a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_source_info_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc \
         || return 1
     # The session's own zid is the config's `id` — compiled once and linked twice,
@@ -23744,10 +23978,11 @@ layer_c1cc_api_compat_c() {
     # document with another. One probe asks the real library both questions and
     # diffs the answers; the expected bytes are ALSO derived in the test, so two
     # arms that agreed on the wrong zid could not pass.
+    wz_test_args wz-integration-tests zenoh_c_open_zid_twice_and_diff
     _runci_guarded_test \
         "C1cc an_open_stands_on_its_configured_id_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_open_zid_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact an_open_stands_on_its_configured_id_identically_on_wz_and_libzenohc \
         || return 1
     # R2579 — §5.4 `session-matching`'s SESSION-LOCAL half, by the same
@@ -23763,10 +23998,11 @@ layer_c1cc_api_compat_c() {
     # `false -> true`, with none `false -> false` against upstream's
     # `false -> true`. An interop fixture connects something by definition,
     # which is exactly why every existing one walked past this.
+    wz_test_args wz-integration-tests zenoh_c_local_queryable_matching_twice_and_diff
     _runci_guarded_test \
         "C1cc a_session_local_queryable_satisfies_its_own_querier_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_local_queryable_matching_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_session_local_queryable_satisfies_its_own_querier_on_wz_and_libzenohc \
         || return 1
@@ -23774,10 +24010,11 @@ layer_c1cc_api_compat_c() {
     # an already-cancelled token on each of the three readers (get / querier get
     # / liveliness get) and a live token cancelled while a get is outstanding.
     # Needs the unstable arm the oracle selects above, which this layer built.
+    wz_test_args wz-integration-tests zenoh_c_cancellation_token_twice_and_diff
     _runci_guarded_test \
         "C1cc a_cancellation_token_stops_a_get_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_cancellation_token_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_cancellation_token_stops_a_get_identically_on_wz_and_libzenohc \
         || return 1
@@ -23786,10 +24023,11 @@ layer_c1cc_api_compat_c() {
     # it is dropped, and the reply made through it reaches the get. Measured
     # before the repair: wz ended the get while the query was held
     # (`dropped_while_held=1`) and lost the reply (`replies=0`).
+    wz_test_args wz-integration-tests zenoh_c_local_held_query_twice_and_diff
     _runci_guarded_test \
         "C1cc a_held_local_query_keeps_its_get_open_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_local_held_query_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_held_local_query_keeps_its_get_open_identically_on_wz_and_libzenohc \
         || return 1
@@ -23797,10 +24035,11 @@ layer_c1cc_api_compat_c() {
     # same planted `/dev/shm` files: an orphaned `{id}.zenoh` goes, a held one
     # and a non-zenoh file stay. SKIPs on an oracle without the SHM+unstable
     # arm, where the function does not exist on either side.
+    wz_test_args wz-integration-tests zenoh_c_shm_orphan_cleanup_twice_and_diff
     _runci_guarded_test \
         "C1cc orphaned_shm_segments_are_cleaned_up_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_shm_orphan_cleanup_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact orphaned_shm_segments_are_cleaned_up_identically_on_wz_and_libzenohc \
         || return 1
@@ -23808,10 +24047,11 @@ layer_c1cc_api_compat_c() {
     # then blocking (READY), allocated through `loan_as`, cloned onto ONE
     # backend, and DISABLED with `transport_optimization` off, on both
     # libraries. SKIPs on an oracle without the SHM+unstable arm.
+    wz_test_args wz-integration-tests zenoh_c_session_shm_provider_twice_and_diff
     _runci_guarded_test \
         "C1cc a_sessions_own_shm_provider_is_obtained_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_session_shm_provider_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_sessions_own_shm_provider_is_obtained_identically_on_wz_and_libzenohc \
         || return 1
@@ -23822,10 +24062,11 @@ layer_c1cc_api_compat_c() {
     # aligned requests a provider built at byte alignment refuses. Before this round
     # the C ABI had an allocator of its own and differed on every one of those.
     # SKIPs on an oracle without the SHM+unstable arm.
+    wz_test_args wz-integration-tests zenoh_c_shm_provider_allocation_twice_and_diff
     _runci_guarded_test \
         "C1cc a_providers_allocation_semantics_are_identical_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_shm_provider_allocation_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_providers_allocation_semantics_are_identical_on_wz_and_libzenohc \
         || return 1
@@ -23835,10 +24076,11 @@ layer_c1cc_api_compat_c() {
     # wire see only the remote half of a publish; the local half is a different code path,
     # and before this round wz handed its own subscriber the bytes where the real library
     # hands it the buffer. SKIPs on an oracle without the SHM+unstable arm.
+    wz_test_args wz-integration-tests zenoh_c_shm_local_delivery_twice_and_diff
     _runci_guarded_test \
         "C1cc a_local_subscriber_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_shm_local_delivery_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_local_subscriber_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc \
         || return 1
@@ -23847,10 +24089,11 @@ layer_c1cc_api_compat_c() {
     # a chunk. The remote half of a get is leg 11 of the shared-memory legs above; this is the
     # local half, which is a different code path. SKIPs on an oracle without the SHM+unstable
     # arm.
+    wz_test_args wz-integration-tests zenoh_c_shm_query_local_twice_and_diff
     _runci_guarded_test \
         "C1cc a_local_queryable_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_shm_query_local_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_local_queryable_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc \
         || return 1
@@ -23858,10 +24101,11 @@ layer_c1cc_api_compat_c() {
     # getter of its own session asks of each reply's payload whether it is shared memory. The
     # remote half of a reply is legs 12 and 13 of the shared-memory legs above. SKIPs on an
     # oracle without the SHM+unstable arm.
+    wz_test_args wz-integration-tests zenoh_c_shm_reply_twice_and_diff
     _runci_guarded_test \
         "C1cc a_local_getter_is_handed_the_same_kind_of_reply_buffer_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_shm_reply_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_local_getter_is_handed_the_same_kind_of_reply_buffer_on_wz_and_libzenohc \
         || return 1
@@ -23873,10 +24117,11 @@ layer_c1cc_api_compat_c() {
     # history or periodic recovery was dead on that plane; each was measured against the real
     # library first. The remote half is leg 15 of the shared-memory legs below. SKIPs on an
     # oracle without the SHM+unstable arm.
+    wz_test_args wz-integration-tests zenoh_c_advanced_publisher_declare_twice_and_diff
     _runci_guarded_test \
         "C1cc an_advanced_publisher_declaration_is_answered_with_the_same_code_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_advanced_publisher_declare_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact an_advanced_publisher_declaration_is_answered_with_the_same_code_on_wz_and_libzenohc \
         || return 1
@@ -23884,10 +24129,11 @@ layer_c1cc_api_compat_c() {
     # be able to read: a custom provider's chunks, put, sent as a get's value and replied, to a
     # receiver whose storage holds a client for the protocol (shared memory) and to those whose
     # does not (bytes, as the real sender sends them; wz delivered nothing). Needs the SHM arm.
+    wz_test_args wz-integration-tests zenoh_c_shm_custom_protocol_twice_and_diff
     _runci_guarded_test \
         "C1cc a_chunk_of_a_custom_protocol_is_sent_as_bytes_to_a_receiver_that_cannot_read_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_shm_custom_protocol_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_chunk_of_a_custom_protocol_is_sent_as_bytes_to_a_receiver_that_cannot_read_it_on_wz_and_libzenohc \
         || return 1
@@ -23896,10 +24142,11 @@ layer_c1cc_api_compat_c() {
     # not exist) reads what the real library's sender puts it, through the storage's clients, and
     # publishes the storage's protocols so the sender chooses descriptor or bytes as it does for the
     # real receiver. Five storages by three payloads, the real library's rows as the oracle.
+    wz_test_args wz-integration-tests zenoh_c_shm_custom_protocol_twice_and_diff
     _runci_guarded_test \
         "C1cc a_receiver_over_a_client_storage_reads_what_the_real_sender_puts_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_shm_custom_protocol_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_receiver_over_a_client_storage_reads_what_the_real_sender_puts_on_wz_and_libzenohc \
         || return 1
@@ -23910,24 +24157,27 @@ layer_c1cc_api_compat_c() {
     # peers that dial each other keep one link (wz delivered every sample twice). Multicast
     # scouting is off in every row; with it on and no endpoint the real library opens and this
     # ABI refuses, which is the gap left. Needs only the oracle, not the SHM arm.
+    wz_test_args wz-integration-tests zenoh_c_open_roles_twice_and_diff
     _runci_guarded_test \
         "C1cc a_session_opens_on_the_endpoints_its_config_states_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_open_roles_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_session_opens_on_the_endpoints_its_config_states_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_open_roles_twice_and_diff
     _runci_guarded_test \
         "C1cc a_node_that_listens_and_dials_is_reached_from_both_sides_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_open_roles_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_node_that_listens_and_dials_is_reached_from_both_sides_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_open_roles_twice_and_diff
     _runci_guarded_test \
         "C1cc two_peers_that_dial_each_other_keep_one_link_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_open_roles_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact two_peers_that_dial_each_other_keep_one_link_identically_on_wz_and_libzenohc \
         || return 1
@@ -23937,10 +24187,11 @@ layer_c1cc_api_compat_c() {
     # and last event), a get with its query, reply and final, a get from inside a callback and a
     # subscriber declared from inside one. wz staged them for its drive thread and every row came
     # out after the call returned. Needs only the oracle, not the SHM arm.
+    wz_test_args wz-integration-tests zenoh_c_local_delivery_inline_twice_and_diff
     _runci_guarded_test \
         "C1cc a_delivery_a_session_makes_to_itself_runs_inside_the_call_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_local_delivery_inline_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_delivery_a_session_makes_to_itself_runs_inside_the_call_on_wz_and_libzenohc \
         || return 1
@@ -23953,31 +24204,35 @@ layer_c1cc_api_compat_c() {
     # scouts (a first draft added a scouting window beside the endpoint and took 508 ms where the
     # real library takes 10). The responder half is not built: wz finds, it is not yet found.
     # Needs only the oracle, not the SHM arm.
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_node_with_no_endpoint_finds_a_router_by_scouting_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_node_with_no_endpoint_finds_a_router_by_scouting_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_node_that_scouts_and_finds_nobody_opens_or_fails_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_node_that_scouts_and_finds_nobody_opens_or_fails_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc two_peers_that_scout_find_each_other_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact two_peers_that_scout_find_each_other_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_peer_with_a_live_endpoint_opens_at_once_though_it_scouts_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_peer_with_a_live_endpoint_opens_at_once_though_it_scouts_on_wz_and_libzenohc \
         || return 1
@@ -23988,17 +24243,19 @@ layer_c1cc_api_compat_c() {
     # and a real peer that are told nothing find a wz node that listens, connect and hear it. The
     # real peer's open against a wz peer is not timed: it waits out `scouting/delay` for a start
     # condition a wz peer does not yet satisfy, whether found or dialled at an endpoint.
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_real_node_that_scouts_finds_a_listening_node_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_real_node_that_scouts_finds_a_listening_node_identically_on_wz_and_libzenohc \
         || return 1
@@ -24022,10 +24279,11 @@ layer_c1cc_api_compat_c() {
              "2 under WZ_C1CC_REQUIRE = this job was meant to provision it)" >&2
         return 1
     else
+        wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
         _runci_guarded_test \
             "C1cc the_scouting_legs_hold_in_a_namespace_with_no_default_route" 1 \
             "${c1cc_netns_wrap[@]}" cargo test -p wz-integration-tests \
-            --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
             --test-threads=1 \
             --exact the_scouting_legs_hold_in_a_namespace_with_no_default_route \
             || return 1
@@ -24034,10 +24292,11 @@ layer_c1cc_api_compat_c() {
     # node is. The row that isolates the initial interest's Final: nothing was scouted, so what
     # ends the open is what the other end sends on connecting. 10 ms against a real peer and,
     # before the wz peer sent it, 506 against a wz one.
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_real_peer_that_dials_a_node_opens_at_once_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_real_peer_that_dials_a_node_opens_at_once_identically_on_wz_and_libzenohc \
         || return 1
@@ -24047,17 +24306,19 @@ layer_c1cc_api_compat_c() {
     # is made (two that both listen cross-dial, and the real library loses that race itself, twice
     # in twelve runs); the control has no listener on either leaf and nobody meets. Five
     # placements each: the real library everywhere, a wz hub, a wz leaf of each kind, wz everywhere.
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc two_leaves_of_a_hub_are_introduced_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact two_leaves_of_a_hub_are_introduced_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc leaves_that_cannot_be_dialled_are_not_introduced_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact leaves_that_cannot_be_dialled_are_not_introduced_identically_on_wz_and_libzenohc \
         || return 1
@@ -24067,31 +24328,35 @@ layer_c1cc_api_compat_c() {
     # node that carries the key on wz. Twelve settings in three rows (gossip off on each of the
     # three nodes; an empty autoconnect and an empty target on each; the strategy under both
     # orderings of the two ids), and the open that a target naming `client` must fail with -4.
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_node_told_not_to_gossip_introduces_no_one_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_node_told_not_to_gossip_introduces_no_one_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_nodes_autoconnect_and_target_decide_whom_it_dials_and_tells_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_nodes_autoconnect_and_target_decide_whom_it_dials_and_tells_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc the_autoconnect_strategy_decides_which_end_dials_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact the_autoconnect_strategy_decides_which_end_dials_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_gossip_target_that_names_clients_fails_the_open_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_gossip_target_that_names_clients_fails_the_open_identically_on_wz_and_libzenohc \
         || return 1
@@ -24103,24 +24368,27 @@ layer_c1cc_api_compat_c() {
     # peer that states two loopback listeners also answers a Scout with both, compared as a set
     # because the real library names them in a hash order that differs from run to run (the Hello
     # row above). Needs only the oracle, not the SHM arm.
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_peer_that_states_two_listeners_is_reached_at_both_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_peer_that_states_two_listeners_is_reached_at_both_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_listener_that_cannot_bind_fails_the_open_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_listener_that_cannot_bind_fails_the_open_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_listener_that_cannot_bind_is_skipped_when_told_to_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_listener_that_cannot_bind_is_skipped_when_told_to_identically_on_wz_and_libzenohc \
         || return 1
@@ -24130,10 +24398,11 @@ layer_c1cc_api_compat_c() {
     # 200 ms doubling schedule), failing with -4 at the budget when it stays taken, or, with
     # `exit_on_failure` false, left to the background while the open returns at once and a leaf
     # started later is accepted. Seven settings, the real library's row asserted first.
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libzenohc \
         || return 1
@@ -24142,10 +24411,11 @@ layer_c1cc_api_compat_c() {
     # alone: C reaches the hub only by the address B was told, so all three hold two peers and hear
     # every sender only if the hub gossips the listener it bound late. The real library's rows are
     # asserted first, then the same line with a wz hub.
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_listener_bound_late_is_gossiped_to_a_node_that_dials_its_neighbour_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_listener_bound_late_is_gossiped_to_a_node_that_dials_its_neighbour_on_wz_and_libzenohc \
         || return 1
@@ -24156,24 +24426,27 @@ layer_c1cc_api_compat_c() {
     # `scouting/delay` whether or not it scouts (903 ms against wz's 1); and a client that
     # scouted its node does not search again when it is lost (the row was green from the first
     # run, so that item of the atom's list was a gap that was never there).
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_peer_answers_a_scout_only_after_its_connect_walk_ends_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_peer_answers_a_scout_only_after_its_connect_walk_ends_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_router_holds_its_open_for_scouting_delay_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_router_holds_its_open_for_scouting_delay_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_client_that_scouted_its_node_does_not_search_again_when_it_is_lost_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_client_that_scouted_its_node_does_not_search_again_when_it_is_lost_on_wz_and_libzenohc \
         || return 1
@@ -24183,10 +24456,11 @@ layer_c1cc_api_compat_c() {
     # wider one but finds nobody (its default interface list holds IPv4 addresses alone). wz was
     # refused by the config parser, then opened on a link-local group because it bound the
     # wildcard; the group-address bind is `UdpDriver::bind_scouting_group`.
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_node_scouting_on_an_ipv6_group_behaves_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_node_scouting_on_an_ipv6_group_behaves_identically_on_wz_and_libzenohc \
         || return 1
@@ -24196,10 +24470,11 @@ layer_c1cc_api_compat_c() {
     # each other by a `tailscale0` address and not by the Wi-Fi one); the row takes the real
     # library's rows per address and asks wz to end each the same way. It prints how many
     # addresses it graded: a host with none (a hosted runner may be one) grades nothing.
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_node_scouting_on_an_ipv6_group_by_an_ipv6_interface_behaves_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_node_scouting_on_an_ipv6_group_by_an_ipv6_interface_behaves_identically_on_wz_and_libzenohc \
         || return 1
@@ -24211,17 +24486,19 @@ layer_c1cc_api_compat_c() {
     # text takes the real library's row and asks wz to end it the same way. Before the change wz
     # failed the open (-4) on eighteen of the twenty texts of the host this was written on. The
     # texts come from the host's own tables, so a host with no multicast interface grades none.
+    wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
         "C1cc a_node_scouting_by_an_interface_list_or_name_behaves_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_node_scouting_by_an_interface_list_or_name_behaves_identically_on_wz_and_libzenohc \
         || return 1
+    wz_test_args wz-integration-tests zenoh_c_advanced_publisher_declare_twice_and_diff
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_advanced_publisher_declare_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc \
         || return 1
@@ -24229,20 +24506,22 @@ layer_c1cc_api_compat_c() {
     # holds one unless it says not, and `false` wins over a router's default, spelled as the key
     # a C program names or as the `timestamping/enabled` document. Nine rows, five of them
     # refusals on the real library. The C ABI never read this key into a session's clock before.
+    wz_test_args wz-integration-tests zenoh_c_advanced_publisher_declare_twice_and_diff
     _runci_guarded_test \
         "C1cc a_nodes_clock_follows_its_role_and_its_config_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_advanced_publisher_declare_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_nodes_clock_follows_its_role_and_its_config_on_wz_and_libzenohc \
         || return 1
     # R3061 -- what `z_bytes_to_string` does with bytes that are not text, one C program on
     # both libraries: refused with `-1` by the real library, which wz copied until this round.
     # Needs only the oracle, not the SHM arm.
+    wz_test_args wz-integration-tests zenoh_c_bytes_to_string_twice_and_diff
     _runci_guarded_test \
         "C1cc bytes_that_are_not_utf8_are_refused_by_to_string_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_bytes_to_string_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact bytes_that_are_not_utf8_are_refused_by_to_string_on_wz_and_libzenohc \
         || return 1
@@ -24253,10 +24532,11 @@ layer_c1cc_api_compat_c() {
     # `1`). The shared-memory column was a held pin (open-debt item 823) until
     # R3059, which found it already equal to the real library's and compares it as
     # it stands. Needs the unstable arm; SKIPs without it.
+    wz_test_args wz-integration-tests zenoh_c_session_offer_twice_and_diff
     _runci_guarded_test \
         "C1cc a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_session_offer_twice_and_diff -- --ignored --quiet \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
         --exact a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc \
         || return 1
@@ -24289,9 +24569,10 @@ layer_c1cc_api_compat_c() {
         upstream_z_pub_thr_on_wz_capi_c_carries_its_publisher_qos_to_a_real_pico \
         a_wz_capi_c_queryable_reply_encoding_reaches_a_real_pico_as_it_does_on_libzenohc \
         a_wz_capi_c_get_encoding_reaches_a_real_pico_queryable_as_it_does_on_libzenohc; do
+        wz_test_args wz-integration-tests zenoh_c_capi_c_pico_interop
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
-            --test zenoh_c_capi_c_pico_interop -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
     # R3100 — a zenoh peer that dials a pico LISTENER, the listener compiled once
@@ -24304,9 +24585,10 @@ layer_c1cc_api_compat_c() {
     # failure. The pico cdylib is built here under the rule the demo is: never
     # SKIP (or crash) on a wz artifact we can just build.
     (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
+    wz_test_args wz-integration-tests pico_initial_interest_twice_and_diff
     _runci_guarded_test "C1cc a pico listener ends what it replays" 1 \
         cargo test -p wz-integration-tests \
-        --test pico_initial_interest_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact a_zenoh_peer_that_dials_a_pico_listener_is_not_left_waiting_on_wz_and_zenoh_pico \
         || return 1
     # R2281 (open-debt item 617) — the SHARED-MEMORY legs, which lived on Layer
@@ -24333,9 +24615,10 @@ layer_c1cc_api_compat_c() {
         a_chunk_put_through_an_advanced_publisher_reaches_a_real_z_sub_shm_as_shared_memory_on_wz_capi_c \
         a_cache_only_advanced_publisher_reaches_a_real_z_sub_shm_on_wz_capi_c \
         upstream_two_shared_memory_slices_reach_wz_capi_c_as_two_slices_as_on_libzenohc; do
+        wz_test_args wz-integration-tests zenoh_c_shm_and_advanced_on_wz_capi_c
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
-            --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
     # REPORTED, never enforced — see the script's own header for why a ratchet
@@ -24440,9 +24723,10 @@ layer_c1ce_api_compat_c_unstable_oracle() {
         the_wz_capi_c_drop_in_surface_gap_does_not_grow \
         wz_exports_nothing_the_reference_does_not \
         the_census_reads_both_libraries_rather_than_nothing; do
+        wz_test_args wz-integration-tests zenoh_c_abi_symbol_census
         WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce $leg" 1 \
             cargo test -p wz-integration-tests \
-            --test zenoh_c_abi_symbol_census -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || rc=1
     done
     # The OBSERVER the publishing legs adjudicate with. Built here rather than
@@ -24457,9 +24741,10 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     # asks a C compiler for `sizeof` on an installed header, the other asks
     # upstream's own build to print the sizes. Agreement between two independent
     # mechanisms is what makes the SHM arm's numbers trustworthy.
+    wz_test_args wz-integration-tests zenoh_c_examples_on_wz_capi_c_dropin
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce layout" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation || rc=1
     # R311y545 — the option-DEFAULTS differential, and this oracle is the only
     # place it can measure the unstable half. `z_publisher_options_t.reliability`
@@ -24468,9 +24753,10 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     # `Z_RELIABILITY_RELIABLE` value R311y545 corrected from 0 to 1 is invisible
     # on that lane. This is the arm nobody was measuring, which is the shape
     # R311y540 paid for.
+    wz_test_args wz-integration-tests zenoh_c_examples_on_wz_capi_c_dropin
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce option defaults" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact upstream_option_defaults_on_wz_capi_c_match_real_libzenohc || rc=1
     # R311y566 — the `source_info` FOREIGN ADJUDICATOR, and THIS is the lane
     # where it means something. The whole source-info half of that probe sits
@@ -24484,9 +24770,10 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     # witness R311y561-y563 produced for this plane was wz driving wz, because no
     # stock example sets the field. Damage-probed by dropping the put-side fold,
     # which prints five differing lines.
+    wz_test_args wz-integration-tests zenoh_c_source_info_twice_and_diff
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce source_info adjudicator" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_source_info_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc \
         || rc=1
     # R311y543 — the RUN legs for the ADVANCED plane, which is what this arm is
@@ -24509,9 +24796,10 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     for leg in \
         upstream_z_advanced_pub_on_wz_capi_c_puts_the_same_sample_and_no_adv_leak \
         upstream_z_advanced_sub_on_wz_capi_c_receives_the_same_samples_from_real_pico; do
+        wz_test_args wz-integration-tests zenoh_c_shm_and_advanced_on_wz_capi_c
         WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce $leg" 1 \
             cargo test -p wz-integration-tests \
-            --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || rc=1
     done
     # R311y573 — the zenoh-ext families (`ze_publication_cache` /
@@ -24520,9 +24808,10 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     # `Z_FEATURE_UNSTABLE_API`, so THIS oracle is the only one that can declare
     # them and this lane is the only place the leg can run. A link census says
     # the symbols exist; this says they behave as upstream's do.
+    wz_test_args wz-integration-tests zenoh_c_ext_families_twice_and_diff
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce zenoh-ext families" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact the_zenoh_ext_families_behave_identically_on_wz_and_libzenohc || rc=1
     # R3130 -- the publication cache's `_time` filter. One program fills a cache and
     # asks it under forty-odd selectors built from the cached samples' own instants,
@@ -24531,9 +24820,10 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     # a pass on both arms is a pass for a cache that FILTERS, not for two that ignore
     # the selector alike. Red-first: with the filter's `continue` removed 29 of the
     # selectors answered differently on the wz arm and the real library's did not.
+    wz_test_args wz-integration-tests zenoh_c_ext_families_twice_and_diff
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce publication cache time range" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact the_publication_cache_filters_by_the_querys_time_range_identically_on_wz_and_libzenohc || rc=1
     # R3132 -- the querying subscriber's merge. One program holds the initial query
     # open from a cloned query, publishes live samples, then answers out of order, and
@@ -24541,9 +24831,10 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     # the last query in flight ends, then delivered once per timestamp, oldest first.
     # Red-first on the library as it was: its callback saw the live samples at once and
     # in arrival order, and the real library's lines passed in the same run.
+    wz_test_args wz-integration-tests zenoh_c_ext_families_twice_and_diff
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce querying subscriber merge" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact a_querying_subscriber_merges_replies_and_live_samples_identically_on_wz_and_libzenohc || rc=1
     # R3134 -- a face session's history destination. Two sessions of one library joined by a
     # link, an advanced publisher with a cache and a subscriber with history on each side,
@@ -24552,9 +24843,10 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     # reached their own copies of the cache. Red-first: before the change the subscriber
     # beside the publisher heard each of three cached samples twice, the one across the
     # link once, and the real library's arm, checked first, heard each once on both.
+    wz_test_args wz-integration-tests zenoh_c_ext_families_twice_and_diff
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce history over a link" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact a_history_subscriber_hears_each_cached_sample_once_with_a_link_up_on_wz_and_libzenohc || rc=1
     # R3136 -- `scouting/gossip/multihop`. Five peers in a chain, only the first dialling what
     # gossip names, once with the key off and once on, linked at the real `libzenohc` and at wz's
@@ -24562,18 +24854,20 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     # nodes" when on: the real library ends with the SAME links either way (the first node
     # dials every other), because dialling converges a chain whatever the reach of the gossip.
     # So the key is not observable through a C session's links, and wz agrees on both settings.
+    wz_test_args wz-integration-tests zenoh_c_ext_families_twice_and_diff
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce gossip multihop chain" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact gossip_multihop_links_the_chain_identically_on_wz_and_libzenohc || rc=1
     # R3137 -- a queryable that answers a get of its OWN session. One session, a handler that
     # sends four replies, and a getter asking it three thousand times. The real library delivers
     # all four every time; wz's C ABI lost them from the sixtieth ask on, because the local plane
     # has two drainers and the Final of the get could run beside, and ahead of, the handler's
     # replies. Red-first: 2941 of 3000 asks incomplete before the change, none after.
+    wz_test_args wz-integration-tests zenoh_c_ext_families_twice_and_diff
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce same-session queryable" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact a_same_session_queryable_is_heard_in_full_on_every_ask_on_wz_and_libzenohc || rc=1
     # REPORTED, never enforced, exactly as C1cc's is.
     WZ_ZENOH_C_PREFIX="$shm" python3 scripts/lib/capi_c_coverage.py || rc=1
@@ -24643,9 +24937,10 @@ layer_c1cd_api_compat_c_attachment() {
     # workflow step so the lane behaves identically hosted and locally, and so a
     # clean checkout cannot reintroduce it.
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    wz_test_args wz-integration-tests zenoh_c_capi_c_pico_interop
     _runci_guarded_test "C1cd attachment through zenohd" 1 \
         cargo test -p wz-integration-tests \
-        --test zenoh_c_capi_c_pico_interop -- --ignored --quiet --test-threads=1 \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact upstream_z_sub_on_wz_capi_c_renders_a_pico_attachment_through_zenohd \
         || return 1
 }
@@ -24706,9 +25001,10 @@ layer_e14_apfull_dynamic_volume_pico() {
         apfull_dynamic_volume_survives_a_host_restart_through_the_loaded_so \
         apfull_without_the_loaded_volume_the_same_payload_mounts_nothing \
         apfull_a_non_volume_shared_object_is_refused_and_the_node_survives; do
+        wz_test_args wz-integration-tests apfull_dynamic_volume_pico_interop
         _runci_guarded_test "E14 dynamic volume $leg" 1 \
             cargo test -p wz-integration-tests \
-            --test apfull_dynamic_volume_pico_interop -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
 }
@@ -24728,9 +25024,10 @@ layer_e13_apfull_storage_plane_pico() {
         apfull_storage_plane_is_volatile_across_a_restart_without_the_durable_volume \
         apfull_storage_del_stops_serving_a_real_pico_get \
         apfull_storage_gc_sweeps_a_wildcard_update_a_real_pico_registered; do
+        wz_test_args wz-integration-tests apfull_storage_plane_pico_interop
         _runci_guarded_test "E13 storage plane $leg" 1 \
             cargo test -p wz-integration-tests \
-            --test apfull_storage_plane_pico_interop -- --ignored --quiet --test-threads=1 \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
 }
@@ -24766,9 +25063,10 @@ layer_e15_apfull_reconcile_federation_pico() {
     for leg in \
         apfull_reconcile_federation_carries_data_between_two_real_picos \
         apfull_without_the_reconcile_the_two_picos_cannot_reach_each_other; do
+        wz_test_args wz-integration-tests apfull_router_reconcile_pico_interop
         _runci_guarded_test "Layer E15 ($leg)" 1 \
             cargo test -p wz-integration-tests \
-            --test apfull_router_reconcile_pico_interop -- --ignored --quiet \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
             --test-threads=1 --exact "$leg" || return 1
     done
 }
@@ -24803,9 +25101,10 @@ layer_e16_fs_backend_shares_a_directory_with_upstream() {
         fs_shared_dir_a_prefix_conflict_laid_down_by_one_side_is_read_by_the_other \
         fs_shared_dir_a_file_nobody_put_reads_the_same_through_both \
         fs_shared_dir_a_delete_by_wz_is_seen_by_upstream; do
+        wz_test_args wz-integration-tests wz_fs_backend_shares_a_directory_with_upstream
         _runci_guarded_test "Layer E16 ($leg)" 1 \
             cargo test -p wz-integration-tests \
-            --test wz_fs_backend_shares_a_directory_with_upstream -- --ignored --quiet \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
             --test-threads=1 --exact "$leg" || return 1
     done
 }

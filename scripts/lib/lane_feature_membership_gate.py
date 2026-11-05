@@ -130,6 +130,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/lib"))
 import crossimpl_corpus  # noqa: E402
 import feature_closure  # noqa: E402
+import retarget_test_refs  # noqa: E402
 import test_sources  # noqa: E402
 
 TESTS_DIR = ROOT / "crates/wz-integration-tests/tests"
@@ -401,7 +402,11 @@ def lane_table(run_ci=RUN_CI):
 
     So each `cargo test` is paired with the build state AT ITS OWN POSITION.
     """
-    text = _strip_line_comments(Path(run_ci).read_text(), "#").replace("\\\n", " ")
+    # `wz_test_args <crate> <file>` with its `"${WZ_TEST_ARGS[@]}"` is read as the `--test <file>`
+    # it stands for, so a lane names its test files in either layout.
+    text = _strip_line_comments(
+        retarget_test_refs.expand(Path(run_ci).read_text()), "#"
+    ).replace("\\\n", " ")
     starts = [(m.start(), m.group(1)) for m in LAYER_FN.finditer(text)]
     starts.append((len(text), None))
     lanes = {}

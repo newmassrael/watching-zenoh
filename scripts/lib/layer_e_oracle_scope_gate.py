@@ -51,6 +51,7 @@ import pathlib
 import re
 import sys
 
+import retarget_test_refs
 import test_sources
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -122,7 +123,7 @@ def narrowed_to_one_target(invocation: str) -> bool:
 
 
 def sweep_tokens(root: pathlib.Path) -> list[str]:
-    text = (root / RUN_CI).read_text(errors="replace")
+    text = retarget_test_refs.expand((root / RUN_CI).read_text(errors="replace"))
     with_tokens = [
         m
         for m in SWEEP.finditer(text)

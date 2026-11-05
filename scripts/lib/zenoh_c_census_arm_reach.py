@@ -68,6 +68,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
+import retarget_test_refs  # noqa: E402
+import test_sources  # noqa: E402
 import zenoh_c_archive_arm as _archive  # noqa: E402
 import zenoh_c_oracle_arms as _arms  # noqa: E402
 
@@ -301,8 +303,12 @@ def main() -> int:
         return 1
     if args.check:
         files = _arms.scan_files()
-        census_rs = (REPO_ROOT / CENSUS_RS).read_text()
-        runci = (REPO_ROOT / RUNCI).read_text()
+        # The census file, wherever the crate keeps it (`tests/<name>.rs`, or a merged module).
+        census_path = (test_sources.locate(REPO_ROOT / Path(CENSUS_RS).parent,
+                                           Path(CENSUS_RS).stem)
+                       or REPO_ROOT / CENSUS_RS)
+        census_rs = census_path.read_text()
+        runci = retarget_test_refs.expand((REPO_ROOT / RUNCI).read_text())
         ok, lines = check(census_rs, runci, files, _archive.ARCHIVE_ARM)
         for ln in lines:
             print(ln, file=None if ok else sys.stderr)

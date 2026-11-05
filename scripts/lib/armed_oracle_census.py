@@ -89,6 +89,8 @@ import shlex
 import subprocess
 import sys
 
+import test_sources
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 RUN_CI = ROOT / "scripts" / "run-ci.sh"
 TESTS = ROOT / "crates" / "wz-integration-tests" / "tests"
@@ -166,7 +168,10 @@ KINDS = ("file", "program", "python-module")
 
 def test_path(test: str) -> pathlib.Path:
     """A row's test file: a bare name is in `wz-integration-tests/tests`."""
-    return ROOT / "crates" / test if "/" in test else TESTS / test
+    if "/" in test:
+        return ROOT / "crates" / test
+    # A bare name, wherever the crate keeps the file (`tests/<name>.rs`, or a merged module).
+    return test_sources.locate(TESTS, pathlib.PurePosixPath(test).stem) or TESTS / test
 
 
 def armings(text: str) -> set[str]:

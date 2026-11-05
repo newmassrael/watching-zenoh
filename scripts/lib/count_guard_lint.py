@@ -79,7 +79,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import retarget_test_refs  # noqa: E402
 import rust_comments  # noqa: E402  -- after the path insert that finds it
+import test_sources  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNCI = REPO_ROOT / "scripts" / "run-ci.sh"
@@ -349,7 +351,10 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
-    text = RUNCI.read_text()
+    # A test file named by `wz_test_args <crate> <file>` and `"${WZ_TEST_ARGS[@]}"` is read as the
+    # `--test <file>` it stands for (line numbers kept), so the guard is tied to the file in
+    # whichever layout it is.
+    text = retarget_test_refs.expand(RUNCI.read_text(), keep_lines=True)
     bare = guard_segments(text)
     helper = helper_segments(text)
     # ONE population, two spellings. The spelling is carried through because
@@ -427,7 +432,8 @@ def main() -> int:
             note(out_of_scope, f"{where}: {why}")
             continue
         pkg, binary = pkgm.group(1), binm.group(1)
-        path = CRATES / pkg / "tests" / f"{binary}.rs"
+        path = (test_sources.locate(CRATES / pkg / "tests", binary)
+                or CRATES / pkg / "tests" / f"{binary}.rs")
         if not path.is_file():
             failures.append(
                 f"{where}: guards `--test {binary}` in `{pkg}`, but "

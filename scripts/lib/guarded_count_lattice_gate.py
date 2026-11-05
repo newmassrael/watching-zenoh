@@ -126,6 +126,8 @@ import re
 import sys
 import typing
 
+import retarget_test_refs
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 RUN_CI = pathlib.Path("scripts/run-ci.sh")
 
@@ -258,7 +260,9 @@ def read_calls(root: pathlib.Path) -> list[Call]:
     if not path.is_file():
         raise SystemExit(f"guarded-count-lattice: FAIL -- {RUN_CI} is missing")
     calls: list[Call] = []
-    for line_no, line in join_continuations(path.read_text()):
+    # A test file named by `wz_test_args <crate> <file>` and `"${WZ_TEST_ARGS[@]}"` is read as the
+    # `--test <file>` it stands for, with the line numbers kept.
+    for line_no, line in join_continuations(retarget_test_refs.expand(path.read_text(), keep_lines=True)):
         stripped = line.lstrip()
         # The helper's own definition, and prose about it, are not call sites.
         if stripped.startswith("#") or "_runci_guarded_test()" in line:
