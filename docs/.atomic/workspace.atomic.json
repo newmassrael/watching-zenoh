@@ -312942,6 +312942,34 @@
         "The C1bnl partition is still position modulo the count. If a shard runs out again, the lasting cure is a partition by each leg's measured cost, not a fifth shard. The ADR 0084 size-fix carry of round 4290 is unchanged."
       ]
     },
+    "Round 4318": {
+      "decision_summary": "Layer C0 failed on the build fleet because the selftest of bump_sweep read a test file of wz-integration-tests by the path it had before the files were merged, and that stopped C0 before its guarded legs ran. The round-fed list of the pre-push hook runs the checks of the gates and not their selftests, which is why the hook did not see it. A run of every selftest and every plain check that run-ci invokes found one more of the same kind, the selftest of sn_resolution_words, whose check had been taught the layout and whose selftest had not.",
+      "changes_bullets": [
+        "bump_sweep reads the zenoh-c symbol census test file through test_sources.locate in both places that opened it, and refuses with a message when the file is absent. sn_resolution_words has one function that finds its interop test file in either layout, used by its check and its selftest."
+      ],
+      "verification_bullets": [
+        "All 137 selftests that run-ci invokes ran locally and all pass; 55 of the 59 plain checks pass and the other four take an argument or run longer than the limit set here, none of them reads a test path. The reproduction the peer gave, the selftest of bump_sweep, passes. The Layer C0 run on the fleet is the peer's to read."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The pre-push round-fed list runs checks only, so a gate whose selftest reads a live file can be red in Layer C0 and green at the push; adding the selftests of gates that read the tree to that list is open. Gates that open a test file by a path built from parts, not a string with the whole path, are found only by running them."
+      ],
+      "publishable_decision_summary": "Layer C0 failed on the build fleet because the selftest of bump_sweep read a test file of wz-integration-tests by the path it had before the files were merged, and that stopped C0 before its guarded legs ran. The round-fed list of the pre-push hook runs the checks of the gates and not their selftests, which is why the hook did not see it. A run of every selftest and every plain check that run-ci invokes found one more of the same kind, the selftest of sn_resolution_words, whose check had been taught the layout and whose selftest had not.",
+      "publishable_changes_bullets": [
+        "bump_sweep reads the zenoh-c symbol census test file through test_sources.locate in both places that opened it, and refuses with a message when the file is absent. sn_resolution_words has one function that finds its interop test file in either layout, used by its check and its selftest."
+      ],
+      "publishable_verification_bullets": [
+        "All 137 selftests that run-ci invokes ran locally and all pass; 55 of the 59 plain checks pass and the other four take an argument or run longer than the limit set here, none of them reads a test path. The reproduction the peer gave, the selftest of bump_sweep, passes. The Layer C0 run on the fleet is the peer's to read."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The pre-push round-fed list runs checks only, so a gate whose selftest reads a live file can be red in Layer C0 and green at the push; adding the selftests of gates that read the tree to that list is open. Gates that open a test file by a path built from parts, not a string with the whole path, are found only by running them."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
