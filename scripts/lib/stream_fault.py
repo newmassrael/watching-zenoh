@@ -33,6 +33,10 @@ when it likes) is not that: it is a second subject.
                 the other: the close is counted `swallowed` and delivered when the black hole ends.
                 Without that, the half-open case would end at the first end's own lease and a step
                 could not tell the other end's lease from the first's.
+  reject(on)    the peer that dials and is turned away: while on, a connection is taken from the
+                listener and reset at once, never reaching the upstream. Every connection taken is
+                stamped on the proxy's own clock (`stats().attempts`), joined or not, so the gaps
+                between a node's dials are read from events and not from polling its status.
   refuse(on)    the listener's absence: while on, the listening socket is closed, so a connect is
                 refused; held connections are untouched.
   segment(n)    the stream's lack of boundaries: bytes are forwarded in writes of at most n bytes.
@@ -73,6 +77,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from typing import Callable
 
@@ -91,6 +96,8 @@ class Stats:
     dropped: int = 0  # bytes read and discarded by a black hole
     held: int = 0  # bytes buffered by `hold` and not yet flushed
     swallowed: int = 0  # ends' closings a black hole kept from the other end (delivered when it ends)
+    rejected: int = 0  # connections taken from the listener and reset at once by `reject`
+    attempts: list = field(default_factory=list)  # time.monotonic() at each connection taken, joined or not
     writes: list = field(default_factory=list)  # (direction, size) of each write the proxy made
 
 
@@ -250,6 +257,7 @@ class StreamProxy:
     def __init__(self, listen: tuple[str, int], upstream: tuple[str, int]) -> None:
         self.listen_addr, self.upstream = listen, upstream
         self._blackhole = False
+        self._reject = False
         self._hold = False
         self._segment = 0
         self._stats = Stats()
@@ -309,7 +317,18 @@ class StreamProxy:
         return s
 
     def _join(self, client: socket.socket) -> None:
-        """Join an accepted connection to the upstream and forward it."""
+        """Join an accepted connection to the upstream and forward it, or, while `reject` is on, reset it
+        at once. The attempt is stamped first (rule 1), so whoever sees a connection has its time; the stamp
+        is the proxy's own clock, which is how a step reads the gaps between a node's dials without polling."""
+        self._count(attempt=time.monotonic())
+        if self._reject:
+            try:
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            except OSError:
+                pass
+            client.close()
+            self._count(rejected=1)
+            return
         try:
             upstream = socket.create_connection(self.upstream, timeout=HANG_GUARD_S)
         except OSError:
@@ -353,6 +372,12 @@ class StreamProxy:
                             listener = None
                         elif name == "open" and listener is None:
                             listener = self._bind()
+                        elif name in ("reject_on", "reject_off") and listener is not None:
+                            # What the kernel established before the control is served under the old mode.
+                            self._drain(listener)
+                            self._reject = name == "reject_on"
+                        elif name in ("reject_on", "reject_off"):
+                            self._reject = name == "reject_on"
                         done.set()
                 if listener is not None and listener in readable:
                     try:
@@ -375,6 +400,8 @@ class StreamProxy:
         dropped: int = 0,
         held: int = 0,
         swallowed: int = 0,
+        rejected: int = 0,
+        attempt: float | None = None,
         writes: list | None = None,
     ) -> None:
         with self._cv:
@@ -386,13 +413,16 @@ class StreamProxy:
             s.dropped += dropped
             s.held += held
             s.swallowed += swallowed
+            s.rejected += rejected
+            if attempt is not None:
+                s.attempts.append(attempt)
             if writes:
                 s.writes.extend(writes)
             self._cv.notify_all()
 
     def _snapshot(self) -> Stats:
         """A copy of the counters; the caller holds `_cv`."""
-        return replace(self._stats, writes=list(self._stats.writes))
+        return replace(self._stats, writes=list(self._stats.writes), attempts=list(self._stats.attempts))
 
     def stats(self) -> Stats:
         with self._cv:
@@ -403,13 +433,14 @@ class StreamProxy:
         with self._cv:
             return sum(1 for p in self._pairs if not p.ended.is_set())
 
-    def wait(self, predicate: Callable[[Stats], bool], what: str = "") -> Stats:
-        """Rule 5: wait for a state change to make `predicate(stats)` true. The deadline is a hang guard."""
+    def wait(self, predicate: Callable[[Stats], bool], what: str = "", timeout: float | None = None) -> Stats:
+        """Rule 5: wait for a state change to make `predicate(stats)` true. The deadline is a hang guard (the
+        default, or the longer one a caller who knows how long the event may take states)."""
         with self._cv:
             def ready() -> bool:
                 return predicate(self._snapshot())
 
-            if not self._cv.wait_for(ready, timeout=HANG_GUARD_S):
+            if not self._cv.wait_for(ready, timeout=HANG_GUARD_S if timeout is None else timeout):
                 raise TimeoutError(f"the proxy did not reach the state waited for ({what})")
         return self.stats()
 
@@ -447,6 +478,12 @@ class StreamProxy:
         """While on, the listening socket is closed (a connect is refused); held connections are untouched,
         and so are the ones the kernel had established and the loop had not yet taken (they are served)."""
         self._command("close" if on else "open")
+
+    def reject(self, on: bool) -> None:
+        """While on, a connection taken from the listener is reset at once and never reaches the upstream:
+        the listener is there (unlike `refuse`) and the peer's dial reaches it and fails, so every attempt
+        is stamped in `stats().attempts`. Returns when the accept thread has applied it."""
+        self._command("reject_on" if on else "reject_off")
 
     def segment(self, size: int | None) -> None:
         """Forward in writes of at most `size` bytes; None to forward as read."""
@@ -626,6 +663,31 @@ def _cases(proxy: StreamProxy, reads: list, failures: list) -> None:
     proxy.reset_all()  # the abort wakes the parked pump, and the pair ends
     proxy.wait(lambda s: s.closed >= base.closed + 5, "the parked pair was ended by an abort")
     proxy.blackhole(False)
+
+    # reject: the listener is there, the connect succeeds and the connection is reset at once, never reaching
+    # the upstream; every attempt is stamped, in order, and a joined connection is stamped too.
+    attempts_before = len(proxy.stats().attempts)
+    up_reads = len(reads)
+    proxy.reject(True)
+    for _ in range(3):
+        c = _client(port)  # the connect itself succeeds: the kernel completed the handshake
+        try:
+            got = c.recv(16)
+            check("reject: the dialled connection is reset", False, f"read {got!r}")
+        except ConnectionResetError:
+            pass
+        c.close()
+    st = proxy.wait(lambda s: s.rejected >= 3, "three connections were rejected")
+    stamps = st.attempts[attempts_before:]
+    check("reject: three attempts were stamped", len(stamps) == 3, str(stamps))
+    check("reject: the stamps are in time order", stamps == sorted(stamps), str(stamps))
+    check("reject: nothing reached the upstream", len(reads) == up_reads, f"{len(reads)} vs {up_reads}")
+    proxy.reject(False)
+    c = _client(port)
+    c.sendall(b"ok")
+    check("reject: when it is off the connection is joined", _recv_exact(c, 2) == b"ok")
+    check("reject: and the joined attempt is stamped as well", len(proxy.stats().attempts) == attempts_before + 4)
+    c.close()
 
     # refuse: a closed listener refuses a connect, held connections stay, and it comes back.
     c = _client(port)

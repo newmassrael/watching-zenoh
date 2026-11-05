@@ -94,6 +94,21 @@ class StreamSpec:
         peer here is the stock router, whose own lease is the default 10 s, the node's own figure."""
         return self.lease_ms + self.lease_ms // self.keep_alive_per_lease
 
+    #: How far a dial may precede its wait, and follow it. The node drives its dials from a housekeeping
+    #: tick of 100 ms, so it never dials before its wait is up and may dial up to a few ticks after it;
+    #: the early allowance covers the host's clock against the node's at the moment of the loss.
+    redial_early_ms: int = 100
+    redial_late_ms: int = 500
+
+    def retry_waits(self, n: int) -> list[int]:
+        """The first `n` waits of an outage: the policy's initial wait, grown by its factor, held at its
+        ceiling (upstream's 1, 2, 4, 4 seconds)."""
+        waits, w = [], float(self.retry_init_ms)
+        for _ in range(n):
+            waits.append(int(min(w, self.retry_max_ms)))
+            w *= self.retry_factor
+        return waits
+
     @property
     def return_guard_ms(self) -> int:
         """How long a peer that was released may take to be back: the guard for the peer's own redial,
@@ -115,10 +130,11 @@ SENTENCES = {
     38: "the node takes its peer back after every release and holds one session for it",
     39: "a peer that falls silent is detected by the lease and only its session ends, and it is taken back",
 }
-STEPS = (36, 37, 38, 39)
+SENTENCES[40] = "the node re-dials a lost peer on upstream's schedule of waits, and a new outage restarts it"
+STEPS = (36, 37, 38, 39, 40)
 #: What the grammar's `<...>` is for a step that was not run or could not be judged (the printed sentence
 #: is an instance of the grammar either way).
-UNRUN_TAIL = {38: ": 0 of 0 returned", 39: ": after 0 ms"}
+UNRUN_TAIL = {38: ": 0 of 0 returned", 39: ": after 0 ms", 40: ": waits 0 ms, restart 0 ms"}
 
 
 def unrun_sentence(step: int) -> str:
@@ -145,6 +161,18 @@ def judge_silence(
     )
 
 
+def judge_redial(
+    waits: list[float], restart: float | None, back: bool, spec: StreamSpec = SPEC
+) -> bool:
+    """Each gap between the node's dials (the first from the loss) is its policy's wait for that attempt,
+    from the wait to the wait and a few ticks, and a new outage starts again from the first wait."""
+    expected = spec.retry_waits(len(waits))
+    if len(waits) < 2 or restart is None or not back:
+        return False
+    inside = lambda got, want: want - spec.redial_early_ms <= got <= want + spec.redial_late_ms
+    return all(inside(g, e) for g, e in zip(waits, expected)) and inside(restart, expected[0])
+
+
 def judge_conservation(returns: list[tuple[str, bool]], final: set[str] | None) -> bool:
     """Every release was followed by the peer's return, and the node holds the two sessions, one each."""
     return bool(returns) and all(ok for _, ok in returns) and final == {A_ID, B_ID}
@@ -158,8 +186,14 @@ class StreamEnv(Protocol):
     leg, and time. The real host implements it with routers, proxies and the host's clock, and the
     reference model with a virtual one."""
 
+    #: The locator the node is told to dial for B: the proxy's on the leg to B, which is where the node's
+    #: dials are stamped.
+    b_dial: str
+
     def sessions(self, via: str) -> set[str] | None: ...
     def fault(self, leg: str, action: str) -> int: ...
+    def attempt_count(self, leg: str) -> int: ...
+    def await_attempts(self, leg: str, since: int, count: int, guard_s: float) -> list[float] | None: ...
     def sleep(self, seconds: float) -> None: ...
     def now(self) -> float: ...
 
@@ -237,6 +271,45 @@ def _silenced(
         env.fault("A", "admit")
     back, _ = _await(env, lambda: env.sessions("B") == both, spec.return_guard_ms / 1000, interval_s)
     return landed, ms, seen, back
+
+
+def _redialled(
+    env: StreamEnv, spec: StreamSpec, interval_s: float
+) -> tuple[int, list[float], float | None, bool]:
+    """Lose the node's session with B twice and read when the node dials again, from the proxy on the leg
+    to B (its own clock, one stamp for each connection taken), so no wait is read by polling the node.
+
+    First outage: the dials are rejected, so each fails and the node waits its next period; the gaps are
+    (loss to the first dial, then dial to dial), four of them. Then the dials are let through and the peer
+    is awaited. Second outage: the first gap only, which is the first wait again when the schedule restarts
+    with each outage and the ceiling when it does not. Returns (connections the first loss landed on, the
+    four gaps in ms, the second outage's first gap in ms, whether the peer was back after each)."""
+    both = {A_ID, B_ID}
+    waits = spec.retry_waits(4)
+    guard_s = 2 * (sum(waits) + 4 * spec.redial_late_ms) / 1000
+
+    def outage(count: int) -> tuple[int, list[float] | None]:
+        env.fault("B", "reject")
+        try:
+            since = env.attempt_count("B")
+            landed = env.fault("B", "reset")
+            lost = env.now()
+            if landed == 0:
+                return 0, None
+            stamps = env.await_attempts("B", since, count, guard_s)
+            if stamps is None:
+                return landed, None
+            return landed, [(b - a) * 1000.0 for a, b in zip([lost] + stamps, stamps)]
+        finally:
+            env.fault("B", "accept")
+
+    landed, gaps = outage(4)
+    back1, _ = _await(env, lambda: env.sessions("B") == both, spec.return_guard_ms / 1000, interval_s)
+    if landed == 0 or gaps is None or not back1:
+        return landed, gaps or [], None, False
+    _, again = outage(1)
+    back2, _ = _await(env, lambda: env.sessions("B") == both, spec.return_guard_ms / 1000, interval_s)
+    return landed, gaps, again[0] if again else None, back2
 
 
 def run_stream_steps(env: StreamEnv, spec: StreamSpec = SPEC, interval_s: float = 0.2) -> list[Result]:
@@ -344,6 +417,38 @@ def run_stream_steps(env: StreamEnv, spec: StreamSpec = SPEC, interval_s: float 
             else:
                 why = f"the peer was not taken back within {spec.return_guard_ms} ms of the black hole ending"
             out[39] = Result(39, False, said, f"silence FAIL: {why}")
+
+    if not conserved or env.sessions("B") != both:
+        out[40] = Result(
+            40, None, unrun_sentence(40), "not run: the node does not hold A and B after the steps before it"
+        )
+    else:
+        landed, gaps, restart, back_ok = _redialled(env, spec, interval_s)
+        listed = ", ".join(f"{g:.0f}" for g in gaps) if gaps else "0"
+        said = f"{SENTENCES[40]}: waits {listed} ms, restart {restart if restart is not None else 0:.0f} ms"
+        if landed == 0:
+            out[40] = Result(40, False, said, "the loss landed on no connection: the leg to B held none")
+        elif judge_redial(gaps, restart, back_ok, spec):
+            out[40] = Result(40, True, said)
+        else:
+            want = spec.retry_waits(4)
+            if len(gaps) < 4:
+                why = f"the node dialled {len(gaps)} time(s) of the 4 awaited: it does not keep dialling"
+            elif not back_ok:
+                why = "the peer was not back after the dials were let through"
+            else:
+                off = [
+                    f"wait {i + 1} was {g:.0f} ms, want {w} ms (-{spec.redial_early_ms} to +{spec.redial_late_ms})"
+                    for i, (g, w) in enumerate(zip(gaps, want))
+                    if not w - spec.redial_early_ms <= g <= w + spec.redial_late_ms
+                ]
+                if restart is None or not want[0] - spec.redial_early_ms <= restart <= want[0] + spec.redial_late_ms:
+                    off.append(
+                        f"the next outage's first wait was {restart if restart is not None else 'never'} ms, "
+                        f"want {want[0]} ms: the schedule is not restarted by an outage"
+                    )
+                why = "; ".join(off)
+            out[40] = Result(40, False, said, f"re-dial FAIL: {why}")
     return [out[s] for s in STEPS]
 
 
@@ -359,6 +464,10 @@ FAULTS = (
     "kills_other",  # a release of A's connection ends B's session too
     "silence_never_detected",  # a peer that goes silent is held for ever: the lease is never enforced
     "silence_premature",  # a peer that goes quiet is dropped after a second, long before its lease
+    "redial_no_wait",  # a lost peer is dialled again at once, with no wait
+    "redial_no_backoff",  # every wait is the first one: the schedule never grows
+    "redial_no_restart",  # a new outage continues the last one's schedule instead of starting again
+    "redial_never",  # a lost peer is never dialled again
 )
 
 
@@ -376,6 +485,23 @@ class StreamModel:
         self.refusing = False  # the proxy's listener is closed: A's dial is refused and retried
         self.events: list[tuple[float, str, str]] = []  # (at, kind, peer)
         self.released = 0
+        # The node's dial to B, through the proxy on that leg: each attempt is stamped there.
+        self.b_dial = "tcp/model-b:7447"
+        self.b_rejecting = False
+        self.b_attempts: list[float] = []
+        self.b_index = 0  # the position in the outage's schedule: the next wait to take
+
+    def _b_wait_s(self) -> float:
+        waits = self.spec.retry_waits(self.b_index + 1)
+        if "redial_no_wait" in self.faults:
+            return 0.001
+        if "redial_no_backoff" in self.faults:
+            return waits[0] / 1000.0
+        return waits[-1] / 1000.0
+
+    def _schedule_b_dial(self) -> None:
+        if "redial_never" not in self.faults:
+            self.events.append((self.t + self._b_wait_s(), "dial", B_ID))
 
     def _free_cell(self) -> None:
         self.cells_used = max(0, self.cells_used - 1)
@@ -393,6 +519,15 @@ class StreamModel:
                 self.sess[peer] = False
             elif kind == "free":
                 self._free_cell()
+            elif kind == "dial":
+                self.b_attempts.append(self.t)  # the proxy on the leg to B stamps every connection taken
+                if self.b_rejecting:
+                    self.b_index += 1
+                    self._schedule_b_dial()
+                else:
+                    self.sess[B_ID] = True
+                    if "redial_no_restart" not in self.faults:
+                        self.b_index = 0  # a session that is up ends the outage, and the schedule with it
             elif kind == "back":
                 stuck = "accept_stuck" in self.faults and self.released > 0
                 if self.sess.get(peer):
@@ -414,6 +549,15 @@ class StreamModel:
             return 1
         if leg == "A" and action == "speak":
             return 1  # the black hole ends; what the node does about a silent peer was decided when it began
+        if leg == "B":
+            if action in ("reject", "accept"):
+                self.b_rejecting = action == "reject"
+                return 1
+            if action == "reset" and self.sess.get(B_ID):
+                self.sess[B_ID] = False
+                self._schedule_b_dial()
+                return 1
+            return 0
         if leg != "A" or not self.sess.get(A_ID):
             return 0
         if action == "silence":
@@ -439,6 +583,17 @@ class StreamModel:
             self.events.append((self.t + detect, "free", A_ID))
         self.events.append((self.t + detect + self.A_REDIAL_S, "back", A_ID))
         return 1
+
+    def attempt_count(self, leg: str) -> int:
+        return len(self.b_attempts)
+
+    def await_attempts(self, leg: str, since: int, count: int, guard_s: float) -> list[float] | None:
+        start = self.t
+        while len(self.b_attempts) < since + count:
+            if self.t - start >= guard_s:
+                return None
+            self.advance(0.01)
+        return self.b_attempts[since : since + count]
 
     def sleep(self, seconds: float) -> None:
         self.advance(seconds)
@@ -523,8 +678,8 @@ def selftest() -> int:
     # A node that keeps its contract holds all four.
     healthy = run_stream_steps(StreamModel())
     check(
-        "healthy: HW.36 to HW.39 held",
-        _held(healthy) == {36: True, 37: True, 38: True, 39: True},
+        "healthy: HW.36 to HW.40 held",
+        _held(healthy) == {36: True, 37: True, 38: True, 39: True, 40: True},
         str([(r.step, r.held, r.fail_text) for r in healthy]),
     )
     check(
@@ -540,14 +695,18 @@ def selftest() -> int:
 
     # Each way a node breaks a property is caught by the step that holds it, and by no other.
     expect: dict[str, dict[int, bool | None]] = {
-        "leak_on_reset": {36: True, 37: True, 38: False, 39: None},
-        "leak_on_close": {36: True, 37: True, 38: False, 39: None},
-        "fin_ignored": {36: False, 37: True, 38: True, 39: True},
-        "reset_ignored": {36: True, 37: False, 38: True, 39: True},
-        "accept_stuck": {36: True, 37: None, 38: False, 39: None},
-        "kills_other": {36: False, 37: None, 38: False, 39: None},
-        "silence_never_detected": {36: True, 37: True, 38: True, 39: False},
-        "silence_premature": {36: True, 37: True, 38: True, 39: False},
+        "leak_on_reset": {36: True, 37: True, 38: False, 39: None, 40: None},
+        "leak_on_close": {36: True, 37: True, 38: False, 39: None, 40: None},
+        "fin_ignored": {36: False, 37: True, 38: True, 39: True, 40: True},
+        "reset_ignored": {36: True, 37: False, 38: True, 39: True, 40: True},
+        "accept_stuck": {36: True, 37: None, 38: False, 39: None, 40: None},
+        "kills_other": {36: False, 37: None, 38: False, 39: None, 40: None},
+        "silence_never_detected": {36: True, 37: True, 38: True, 39: False, 40: True},
+        "silence_premature": {36: True, 37: True, 38: True, 39: False, 40: True},
+        "redial_no_wait": {36: True, 37: True, 38: True, 39: True, 40: False},
+        "redial_no_backoff": {36: True, 37: True, 38: True, 39: True, 40: False},
+        "redial_no_restart": {36: True, 37: True, 38: True, 39: True, 40: False},
+        "redial_never": {36: True, 37: True, 38: True, 39: True, 40: False},
     }
     check("every fault has an expectation", set(expect) == set(FAULTS), str(set(expect) ^ set(FAULTS)))
     for fault, want in expect.items():
@@ -555,9 +714,16 @@ def selftest() -> int:
         check(f"{fault}: the steps red exactly where the property is", got == want, f"{got} want {want}")
 
     # The comparisons weakened let their fault through: the faults are red for the comparison's own sake.
-    global judge_release, judge_conservation, judge_silence
-    saved = (judge_release, judge_conservation, judge_silence)
+    global judge_release, judge_conservation, judge_silence, judge_redial
+    saved = (judge_release, judge_conservation, judge_silence, judge_redial)
     try:
+        judge_redial = lambda waits, restart, back, spec=SPEC: len(waits) >= 2 and back  # no schedule
+        got = _held(run_stream_steps(StreamModel(faults=("redial_no_backoff",))))
+        check("weakened HW.40: a schedule that never grows goes green there", got.get(40) is True, str(got))
+        judge_redial = lambda waits, restart, back, spec=SPEC: saved[3](waits, spec.retry_waits(1)[0], back, spec)  # no restart
+        got = _held(run_stream_steps(StreamModel(faults=("redial_no_restart",))))
+        check("weakened HW.40: a schedule that is not restarted goes green there", got.get(40) is True, str(got))
+        judge_redial = saved[3]
         judge_silence = lambda sessions, elapsed_ms, back, spec=SPEC: sessions == {B_ID} and back  # no lease bounds
         got = _held(run_stream_steps(StreamModel(faults=("silence_premature",))))
         check("weakened HW.39: a peer dropped long before its lease goes green there", got.get(39) is True, str(got))
@@ -570,9 +736,27 @@ def selftest() -> int:
         got = _held(run_stream_steps(StreamModel(faults=("leak_on_reset",))))
         check("weakened HW.38: a cell lost on a reset goes green there", got.get(38) is True, str(got))
     finally:
-        judge_release, judge_conservation, judge_silence = saved
+        judge_release, judge_conservation, judge_silence, judge_redial = saved
 
     # The comparisons themselves.
+    sched = SPEC.retry_waits(4)
+    check("the schedule is upstream's 1, 2, 4, 4 seconds", sched == [1000, 2000, 4000, 4000], str(sched))
+    e, l = SPEC.redial_early_ms, SPEC.redial_late_ms
+    on_time = [1050.0, 2030.0, 4100.0, 4020.0]
+    check("judge_redial: on the schedule, restarted, peer back", judge_redial(on_time, 1040.0, True))
+    check(
+        "judge_redial: each wait's two ends are inside it",
+        judge_redial([1000.0 - e, 2000.0 + l, 4000.0 - e, 4000.0 + l], 1000.0 + l, True),
+    )
+    for i, want in enumerate(sched):
+        for off, label in ((-e - 1.0, "early"), (l + 1.0, "late")):
+            moved = list(on_time)
+            moved[i] = want + off
+            check(f"judge_redial: wait {i + 1} {label} is off the schedule", not judge_redial(moved, 1040.0, True), str(moved))
+    check("judge_redial: a restart at the ceiling is not a restart", not judge_redial(on_time, 4000.0, True))
+    check("judge_redial: no second outage read is not a restart", not judge_redial(on_time, None, True))
+    check("judge_redial: a peer not back is not held", not judge_redial(on_time, 1040.0, False))
+    check("judge_redial: too few dials are not a schedule", not judge_redial([1000.0], 1000.0, True))
     lo, hi = SPEC.earliest_lease_detection_ms, SPEC.silence_bound_ms
     check("judge_silence: detected inside the lease window, the other kept, the peer back", judge_silence({B_ID}, 10000.0, True))
     check("judge_silence: the window's two ends are inside it", judge_silence({B_ID}, float(lo), True) and judge_silence({B_ID}, float(hi), True))

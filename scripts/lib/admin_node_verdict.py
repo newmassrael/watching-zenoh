@@ -786,7 +786,8 @@ def _run_stream(plan: Plan, env: "Env", out: Renderer) -> bool:
         out.note("  the stream steps need a proxy on A's leg and B's REST: this environment has none\n")
         out.not_run(stream_steps.STEPS[0], stream_steps.STEPS[-1], stream_sentences())
         return False
-    env.put("/config/connect/endpoints", f'["{plan.b_dial}"]'.encode())
+    # The node dials B through the proxy on that leg, where each of its dials is stamped.
+    env.put("/config/connect/endpoints", f'["{se.b_dial}"]'.encode())
     ok = True
     for r in stream_steps.run_stream_steps(se):
         out.step(Verdict(r.step, r.held, r.sentence, r.fail_text))
@@ -867,7 +868,9 @@ class HostEnv(Env):
         self.qemu_proc: subprocess.Popen | None = None
         self.base = ""
         self.b_base = ""
-        self.proxy: stream_fault.StreamProxy | None = None
+        self.proxy: stream_fault.StreamProxy | None = None  # on the leg A dials the node over
+        self.proxy_b: stream_fault.StreamProxy | None = None  # on the leg the node dials B over
+        self.b_dial_via = ""  # what the node is told to dial for B: the proxy's address on that leg
 
     def _spawn(self, argv: list[str], log: Path) -> subprocess.Popen:
         with log.open("wb") as fh:
@@ -890,6 +893,12 @@ class HostEnv(Env):
             host, port = plan.a_dial.split("/", 1)[1].rsplit(":", 1)
             self.proxy = stream_fault.StreamProxy(("127.0.0.1", 0), (host, int(port))).start()
             a_dial = plan.transport.locator("127.0.0.1", self.proxy.port)
+            # The node's dial to B goes through a proxy of its own, on the address B listens on: it stamps
+            # each dial the node makes, which is how the re-dial schedule is read without polling.
+            bhost, bport = plan.b_listen.split("/", 1)[1].rsplit(":", 1)
+            self.proxy_b = stream_fault.StreamProxy((bhost, 0), (bhost, int(bport))).start()
+            node_side_host = plan.b_dial.split("/", 1)[1].rsplit(":", 1)[0]
+            self.b_dial_via = plan.transport.locator(node_side_host, self.proxy_b.port)
             b_rest = _free_port()
             self.b_base = f"http://127.0.0.1:{b_rest}/@/{node_id}/peer"
         b, a = router_argv(self.zenohd, plan, self.rest_port, a_dial, b_rest)
@@ -926,8 +935,9 @@ class HostEnv(Env):
             pass
 
     def stop(self) -> None:
-        if self.proxy is not None:
-            self.proxy.stop()
+        for proxy in (self.proxy, self.proxy_b):
+            if proxy is not None:
+                proxy.stop()
         for p in self.procs:
             if p.poll() is None:
                 p.terminate()
@@ -987,10 +997,37 @@ class HostStreamEnv:
         except (ValueError, KeyError, TypeError, AttributeError):
             return None
 
-    def fault(self, leg: str, action: str) -> int:
-        if leg != "A" or self.env.proxy is None:
+    @property
+    def b_dial(self) -> str:
+        return self.env.b_dial_via
+
+    def _proxy_of(self, leg: str) -> "stream_fault.StreamProxy":
+        proxy = {"A": self.env.proxy, "B": self.env.proxy_b}.get(leg)
+        if proxy is None:
             raise ValueError(f"no proxy on leg {leg!r}")
-        proxy = self.env.proxy
+        return proxy
+
+    def attempt_count(self, leg: str) -> int:
+        return len(self._proxy_of(leg).stats().attempts)
+
+    def await_attempts(self, leg: str, since: int, count: int, guard_s: float) -> list[float] | None:
+        """The stamps of the next `count` connections the proxy takes: waits for the events (the proxy's
+        condition), to a guard against a hang."""
+        try:
+            st = self._proxy_of(leg).wait(
+                lambda s: len(s.attempts) >= since + count, f"{count} dial(s) on leg {leg}", timeout=guard_s
+            )
+        except TimeoutError:
+            return None
+        return st.attempts[since : since + count]
+
+    def fault(self, leg: str, action: str) -> int:
+        proxy = self._proxy_of(leg)
+        if leg == "B":
+            if action in ("reject", "accept"):
+                proxy.reject(action == "reject")
+                return 1
+            return {"reset": proxy.reset_all}[action]()
         if action in ("refuse", "admit"):
             proxy.refuse(action == "refuse")
             return 1
@@ -3156,14 +3193,18 @@ def selftest() -> int:
         for fault, want in {
             # A step that was not run prints as a failure too, so each fault reds what it breaks and what
             # needed it.
-            "leak_on_reset": {38, 39},
-            "leak_on_close": {38, 39},
+            "leak_on_reset": {38, 39, 40},
+            "leak_on_close": {38, 39, 40},
             "fin_ignored": {36},
             "reset_ignored": {37},
-            "accept_stuck": {37, 38, 39},
-            "kills_other": {36, 37, 38, 39},
+            "accept_stuck": {37, 38, 39, 40},
+            "kills_other": {36, 37, 38, 39, 40},
             "silence_never_detected": {39},
             "silence_premature": {39},
+            "redial_no_wait": {40},
+            "redial_no_backoff": {40},
+            "redial_no_restart": {40},
+            "redial_never": {40},
         }.items():
             rc, so, se = stream_case((fault,))
             steps = _grammar_steps(so)
@@ -3184,13 +3225,13 @@ def selftest() -> int:
         steps = _grammar_steps(so)
         check(
             "stream after a base step that failed: the stream steps are printed, not run",
-            rc == 1 and {k for k, v in steps.items() if not v} == {3, 36, 37, 38, 39} and b"HW.36 " in so,
+            rc == 1 and {k for k, v in steps.items() if not v} == {3, *stream_steps.STEPS} and b"HW.36 " in so,
             f"{steps} {so!r}",
         )
         rc, so, se = stream_case(model=False)
         check(
             "stream with no proxy: refused by name, the steps not run",
-            rc == 1 and b"need a proxy on A's leg" in se and {k for k, v in _grammar_steps(so).items() if not v} == {36, 37, 38, 39},
+            rc == 1 and b"need a proxy on A's leg" in se and {k for k, v in _grammar_steps(so).items() if not v} == set(stream_steps.STEPS),
             f"{rc} {so!r} {se!r}",
         )
 

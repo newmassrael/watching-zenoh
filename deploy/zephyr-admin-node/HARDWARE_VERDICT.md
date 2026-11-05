@@ -69,9 +69,9 @@ pool images (HW.26 to HW.35) read a packet capture frame by frame and are the da
 the program refuses them for a `tcp/` node. A stream has failure modes a datagram has not, and the
 steps that hold them are designed below and not yet in this file's grammar.
 
-### The steps for what only a stream suffers (HW.36 to HW.39 are built; the rest is design)
+### The steps for what only a stream suffers (HW.36 to HW.40 are built; the rest is design)
 
-The steps built so far are the release, conservation and silence properties, run with `--stream-steps` on a
+The steps built so far are the release, conservation, silence and re-establishment properties, run with `--stream-steps` on a
 `tcp/` node (the base HW.0 to HW.7 are unchanged without it). The leg to A runs through the program's
 proxy and B carries a REST port of its own, so a release on A's leg is read through B:
 
@@ -80,7 +80,18 @@ HW.36 an orderly release by the peer ends its session and no other, at once
 HW.37 an abortive release by the peer ends its session and no other, at once
 HW.38 the node takes its peer back after every release and holds one session for it: <N> of <N> returned
 HW.39 a peer that falls silent is detected by the lease and only its session ends, and it is taken back: after <N> ms
+HW.40 the node re-dials a lost peer on upstream's schedule of waits, and a new outage restarts it: waits <W> ms, restart <R> ms
 ```
+
+HW.40 puts a second proxy on the leg the node dials B over. The node is told to dial that proxy, which
+stamps each connection it takes on its own clock, so the gaps between the node's dials are read from events
+and not from polling the node's status. B's session is lost and every dial is turned away (reset at once),
+so each fails and the node waits its next period: the four gaps (the loss to the first dial, then dial to
+dial) are the policy's waits from the node's source, 1, 2, 4 and 4 seconds, each from the wait to the wait
+and 500 ms (the node drives its dials from a housekeeping tick of 100 ms, so it never dials before its wait
+is up, and the 100 ms allowed before it covers the host's clock against the node's at the loss). The dials
+are then let through and the peer must come back; a second loss then reads only the first gap, which is the
+first wait again when an outage restarts the schedule and the ceiling when it does not.
 
 HW.39 makes the leg to A a black hole: the connection stays open, nothing crosses it, and a close that
 either end makes (router A's own lease runs out too) is not heard by the other, so the only way the node
