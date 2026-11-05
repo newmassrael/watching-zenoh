@@ -180,8 +180,10 @@ IMAGES = (
     # first frame, with 16 calls through a register on the path not followed. It was 13,608 at the
     # tree of the same morning before the engine's lent response became a view (the connect
     # manager's first frame 544 and `start` 6,288 then), so the figure follows the code within
-    # a few frames' worth and the tolerance is the gate's. The chain is not a reading: no kit run
-    # reads this image's stack against it (see `deploy/resource_budget.json`).
+    # a few frames' worth and the tolerance is the gate's. The chain is not a bound on this image:
+    # the kit's own reading is 13,736 bytes (scripts/kit-lane.sh run zephyr-fixed, the stack line of
+    # HW.7 in 3 of 3 runs), 112 over the chain, which the 16 calls through a register not followed
+    # account for, so the resource budget's row carries `chain_misses`.
     Image(
         key="zephyr-fixed",
         elf=None,

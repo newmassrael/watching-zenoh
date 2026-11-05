@@ -159,6 +159,15 @@ image_spec() {
             KIND="admin" # quoted: a bare `admin` reads as the POSIX command to shellcheck (SC2209)
             READY_TAG="ZEPHYR-WZ-ADMIN READY"
             ;;
+        # A NODE image is the admin node on the board's own port: the node of fixed_node.rs, over lwIP on
+        # the onboard RMII MAC (no Zephyr sockets), at the address its Kconfig gives it. Its key is the
+        # stack gate's, and the host runs the steps of HARDWARE_VERDICT.md against it, HW.0 to HW.7
+        # (`scripts/lib/admin_node_verdict.py board`), which hold its stack to a quarter free themselves.
+        zephyr-fixed)
+            OVERLAYS="overlays/t2g_fixed.conf;overlays/t2g_tx_pool.conf;overlays/t2g_rx_pool.conf"
+            KIND="node"
+            READY_TAG="ZEPHYR-WZ-ADMIN READY"
+            ;;
         *) return 1 ;;
     esac
 }
@@ -169,6 +178,10 @@ MEASURE_IMAGES=(zephyr-tls-fit)
 # The admin images: the product node that listens, run against a router that dials it. Not the stack
 # gate's yet (no row until a run sets it).
 ADMIN_IMAGES=(zephyr-admin-fixed-tls)
+# The node images: the admin node on the board's own port, run against the steps of HARDWARE_VERDICT.md.
+# Their stack gate rows are in scripts/lib/stack_frame_gate.py and they hold no row of the resource
+# budget (the table declares them not measured on the kit until a run sets one).
+NODE_IMAGES=(zephyr-fixed)
 # The compare images: run only by `compare`, beside the images above.
 COMPARE_IMAGES=(zephyr-pico-queryable zephyr-pico-queryable-st)
 is_compare_image() { [[ " ${COMPARE_IMAGES[*]} " == *" $1 "* ]]; }
@@ -418,7 +431,9 @@ build() {
     if [[ -n "$confs" ]]; then
         extra+=(-DEXTRA_CONF_FILE="$confs")
     fi
-    if [[ "$APP" == zephyr-admin-node ]]; then
+    # The devicetree overlay of Zephyr's own Ethernet (`zeth`) belongs to the images that use it; a node image
+    # drives the onboard MAC itself, and its board's devicetree is the board's.
+    if [[ "$APP" == zephyr-admin-node && "$confs" == *t2g_zeth.conf* ]]; then
         extra+=(-DEXTRA_DTC_OVERLAY_FILE=overlays/t2g_zeth.overlay)
     fi
     if [[ "${#extra[@]}" -gt 0 ]]; then
@@ -592,6 +607,13 @@ run() {
     fi
     if [[ "$KIND" == admin ]]; then
         run_admin "$key"
+        stop_all
+        trap - EXIT
+        [[ "$fails" -eq "$before" ]]
+        return
+    fi
+    if [[ "$KIND" == node ]]; then
+        run_node "$key"
         stop_all
         trap - EXIT
         [[ "$fails" -eq "$before" ]]
@@ -1124,6 +1146,68 @@ EOF
     hold_the_arena "$key" "$OUT/console.run"
 }
 
+# A NODE image after its flash: the console is captured from before the reset, the kit is reset, and the
+# steps of HARDWARE_VERDICT.md (HW.0 to HW.7) are run by the program that IS them
+# (`scripts/lib/admin_node_verdict.py board`) against the node at its address on the cable, with the console
+# of the boot under test. The kit boots the image once on its own when the flash ends, so the capture the
+# program reads holds the bytes after the reset and no others (it refuses a capture with two READY lines), and
+# it is read live: HW.7 reads the last stack line, which the node prints as the steps move it. The program
+# starts its two routers on this host's address on the cable and prints one line per step on its standard
+# output and nothing else there.
+NODE_LOCATOR="udp/192.168.100.10:7447"
+run_node() {
+    local key="$1"
+    if ! sudo -n ip addr add "$KIT_HOST_IP/24" dev "$KIT_IFACE" 2>"$OUT/ip.log"; then
+        bad "$key" "the interface $KIT_IFACE did not take $KIT_HOST_IP ($OUT/ip.log)"
+        return 1
+    fi
+    ADDR_ADDED=1
+    stty -F "$KIT_CONSOLE" 115200 raw -echo -hupcl
+    setsid timeout 900 cat "$KIT_CONSOLE" >"$OUT/console.raw" 2>"$OUT/console.err" </dev/null &
+    PIDS+=("$!")
+    sleep 2
+    local mark
+    mark="$(stat -c %s "$OUT/console.raw")"
+    if timeout 60 "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" \
+        -f interface/kitprog3.cfg -f target/infineon/cyt4bf.cfg -c "init" -c "reset run" -c "shutdown" \
+        >"$OUT/reset.log" 2>&1; then
+        ok "$key" "the kit was reset ($OUT/reset.log)"
+    else
+        bad "$key" "the reset failed ($OUT/reset.log)"
+        return 1
+    fi
+    # The boot under test: the bytes after the reset, live.
+    setsid tail -c +"$((mark + 1))" -f "$OUT/console.raw" >"$OUT/console.boot" 2>/dev/null </dev/null &
+    PIDS+=("$!")
+    local waited=0
+    while [[ "$waited" -lt 90 ]] && ! grep -aq "$READY_TAG" "$OUT/console.boot" 2>/dev/null; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if ! grep -aq "$READY_TAG" "$OUT/console.boot" 2>/dev/null; then
+        bad "$key" "no READY line in 90 s after the reset: the image did not start (is the CM0+ launcher in place? preflight --deep)"
+        return 1
+    fi
+    ok "$key" "the image booted (READY line after the reset)"
+    if python3 "$ROOT/scripts/lib/admin_node_verdict.py" board --node "$NODE_LOCATOR" --host "$KIT_HOST_IP" \
+        --console "$OUT/console.boot" --zenohd "$KIT_ZENOHD" >"$OUT/verdict.txt" 2>"$OUT/verdict.err"; then
+        ok "$key" "every step HW.0 to HW.7 held ($OUT/verdict.txt)"
+    else
+        bad "$key" "the steps of HARDWARE_VERDICT.md did not all hold ($OUT/verdict.txt, $OUT/verdict.err): $(grep -a 'FAIL' "$OUT/verdict.txt" | head -n 2 | tr '\n' ' ')"
+    fi
+    if grep -aq 'wz: FAIL' "$OUT/console.boot"; then
+        bad "$key" "the console says 'wz: FAIL' ($(grep -a 'wz: FAIL' "$OUT/console.boot" | head -n 1))"
+    else
+        ok "$key" "the console has no 'wz: FAIL' line"
+    fi
+    if python3 "$ROOT/scripts/lib/resource_budget_gate.py" --measure "$key" --log "$OUT/console.boot" \
+        >"$OUT/budget.log" 2>&1; then
+        ok "$key" "the run is inside its row ($(tail -n 1 "$OUT/budget.log" | sed 's/^ *//'))"
+    else
+        bad "$key" "the run is outside its row: $(sed 's/^ *//' "$OUT/budget.log" | head -n 3 | tr '\n' ' ')"
+    fi
+}
+
 # The channel's arena over a run: the firmware's last `tls arena: peak N of M bytes` line in the console
 # file $2 leaves a quarter of M free, as the stack does. An image that builds the secure channel reports it.
 hold_the_arena() {
@@ -1347,6 +1431,43 @@ PY
             bad selftest "$key waits for '$READY_TAG', which deploy/$APP never prints with a zid and a locator"
         fi
     done
+    for key in "${NODE_IMAGES[@]}"; do
+        if ! image_spec "$key" || [[ "$KIND" != node ]]; then
+            bad selftest "$key is listed as a node image and the table does not say so"
+            continue
+        fi
+        IFS=';' read -ra files <<<"$OVERLAYS"
+        for overlay in "${files[@]}"; do
+            [[ -f "$ROOT/deploy/$APP/$overlay" ]] || bad selftest "$key names $overlay, which is not in deploy/$APP"
+        done
+        if grep -rqF "$READY_TAG {} {} {}" "$ROOT/deploy/$APP/rust/src"; then
+            ok selftest "$key is a node image of deploy/$APP that prints '$READY_TAG <id> <locator> <locator>'"
+        else
+            bad selftest "$key waits for '$READY_TAG', which deploy/$APP never prints with an id and two locators"
+        fi
+        if python3 -I - "$ROOT" "$key" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/scripts/lib")
+import stack_frame_gate as g
+sys.exit(0 if any(i.key == sys.argv[2] and i.peak is not None for i in g.IMAGES) else 1)
+PY
+        then
+            ok selftest "$key has a stack gate row with a committed worst chain"
+        else
+            bad selftest "$key has no stack gate row that commits a worst chain"
+        fi
+        if python3 -I - "$ROOT" "$key" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/scripts/lib")
+import resource_budget_gate as r
+sys.exit(0 if sys.argv[2] in r.read_table().get("images", {}) else 1)
+PY
+        then
+            ok selftest "$key has a row in the resource budget"
+        else
+            bad selftest "$key has no row in the resource budget: a run of it would be held to nothing"
+        fi
+    done
     for key in "${MEASURE_IMAGES[@]}"; do
         if ! image_spec "$key" || [[ "$KIND" != measure || -z "${DONE_TAG:-}" ]]; then
             bad selftest "$key is listed as a measure image and the table does not say how it ends"
@@ -1378,7 +1499,7 @@ case "$cmd" in
         ;;
     compare) compare "$@" ;;
     build-responder) build_responder ;;
-    list) printf '%s\n' "${IMAGES[@]}" "${ADMIN_IMAGES[@]}" "${MEASURE_IMAGES[@]}" "${COMPARE_IMAGES[@]}" ;;
+    list) printf '%s\n' "${IMAGES[@]}" "${ADMIN_IMAGES[@]}" "${NODE_IMAGES[@]}" "${MEASURE_IMAGES[@]}" "${COMPARE_IMAGES[@]}" ;;
     images) printf '%s\n' "${IMAGES[@]}" "${ADMIN_IMAGES[@]}" ;; # the images `build` holds to their rows with no kit
     --selftest) selftest ;;
     *)

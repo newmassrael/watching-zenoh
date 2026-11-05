@@ -3,10 +3,19 @@
   "not_measured_on_the_kit": {
     "frt": "the FreeRTOS demo (deploy/mcu-freertos-demo) runs in QEMU, not on the T2G kit: its worst chain is committed by the stack gate and the kit has no stack reading of it to hold beside the chain",
     "frt2": "the FreeRTOS two-session demo (deploy/mcu-freertos-demo, two_session) runs in QEMU, not on the T2G kit: its worst chain is committed by the stack gate, and its qemu run's own stack reading (8,968 of 32,768 bytes) is not a kit reading",
-    "zephyr-fixed": "the datagram node of fixed_node.rs on the fixed-memory profile is not an image of scripts/kit-lane.sh: its worst chain is committed by the stack gate, and its kit run (steps HW.26 to HW.35 of deploy/zephyr-admin-node/HARDWARE_VERDICT.md, whose HW.7 line quotes a stack peak) is a verdict of the build of its record, not a reading of the image the chain is read from, so the kit has no current stack reading to hold beside the chain",
     "zephyr-fixed-tcp": "the node over tcp/ of fixed_tcp.rs on the fixed-memory profile is BUILT and has not run on the T2G kit (its row of deploy/zephyr-boards.json grades it BUILT): its worst chain is committed by the stack gate and there is no kit stack reading of it to hold beside the chain"
   },
   "images": {
+    "zephyr-fixed": {
+      "built_as": "the fixed-memory node on the board's own port: overlays/t2g_fixed.conf with both pools (t2g_tx_pool.conf and t2g_rx_pool.conf), the node of fixed_node.rs over lwIP on the onboard RMII MAC, main stack 65536 bytes, its node wz_session_lwip::slot_node::SlotAdminNode",
+      "static_chain_bytes": 13624,
+      "peak_stack_bytes": 13736,
+      "peak_stack_tolerance_bytes": 16,
+      "latency_source": "none",
+      "chain_misses": "calls through a register (16 on the path of the chain), which the stack gate's reader does not follow; the firmware's own reading is 112 bytes over the chain",
+      "measured": "2026-11-05, the T2G kit (CYT4BF M7) on its own onboard port to two stock zenohd 1.10.2 on the bench host (scripts/kit-lane.sh run zephyr-fixed, the steps HW.0 to HW.7 of HARDWARE_VERDICT.md run by scripts/lib/admin_node_verdict.py board): the firmware's stack line reads 13,736 in 3 of 3 runs, each reset and flashed, all eight steps OK each time; the node's task cell is the compiler's figure for the session task over its types. The tree was a copy of the main line at its tip.",
+      "evidence": "deploy/zephyr-admin-node/HARDWARE_VERDICT.md, steps HW.0 to HW.7"
+    },
     "zephyr-client-fixed": {
       "built_as": "the fixed-memory client of overlays/t2g_client_fixed.conf with the idle wait and batching off (main stack 4608 bytes), its node wz_session_mcu::slot_node",
       "static_chain_bytes": 2376,
