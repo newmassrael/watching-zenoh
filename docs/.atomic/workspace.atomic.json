@@ -310938,6 +310938,46 @@
         "Stage seven continues. Still Z_EUNAVAILABLE on a node: the resource snapshot (by design until the node counts the messages it received), the advanced publisher and subscriber and their matching and liveliness, the group. The node's provider is the session's own provider only: a node does not offer shared memory to its faces from it any further than the put of a chunk already did. A remote the node dials and places in its own south has no stock witness yet. The C ABI default does not have router-node (capic-router-node is 5,729,813 bytes of text against capic-default's 9,467,100 budget), a peer that listens and keeps no south is the registry in the C ABI, and the value of a get in shared memory goes out as bytes on a node. The hosted runs of the rounds since 4242 are unread."
       ]
     },
+    "Round 4263": {
+      "decision_summary": "Server layer split, step 7a: the session engine stops building admin space rows. The three row builders the session bundle carried (the link list, the owned sessions row and the lent sessions row) become one extension trait, SessionAdminRow, in the admin space module, built only on public accessors of the session: the existing per-link enumeration and region, and three new ones (this link's two ends lent, the peer's raw zid lent, and whether SHM was negotiated, which keeps the transport-shm cfg in the crate that owns it). Hosts bring the trait into scope; every row is still read off the session in one place, so no host can report a different shm. This is the seam step 7b needs: after it the admin modules leave the core by path substitution alone.",
+      "changes_bullets": [
+        "wz-session-core: adminspace gains SessionAdminRow and its impl; session_actions loses the three builders and gains link_endpoints, with_peer_zid, shm_negotiated",
+        "Callers import the trait: wz-runtime-tokio session and router forwarder, wz-session-mcu dial and slot admin, two wz-session-lwip admin tests",
+        "reduced_docs_ledger loses the three findings the old builders' doc links made; feature axis moves adminspace-core to compound-cfg; session-close-ingress pin on session_actions re-read and re-pinned"
+      ],
+      "verification_bullets": [
+        "pc2: Layer C1am pass; lwip admin_node_slot 4 and admin_node_over_tcp 1 passed; C1bz narrowed to the core and mcu pass",
+        "pc2: clippy -D warnings clean on the core, wz-session-mcu (no-alloc slot, heap slot, all features), wz-session-lwip (all features) and wz-runtime-tokio admin features",
+        "Local: 129 round-fed gates, census, feature diagnostic, direction gate, gate 2f and guarded count gate (28 of 28) pass"
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "Step 7b: adminspace, admin_reply and admin_config_space into wz-admin with their features",
+        "Step 9: storage_config into wz-storage, delete the core storage-backend feature, direction gate strict"
+      ],
+      "publishable_decision_summary": "Server layer split, step 7a: the session engine stops building admin space rows. The three row builders the session bundle carried (the link list, the owned sessions row and the lent sessions row) become one extension trait, SessionAdminRow, in the admin space module, built only on public accessors of the session: the existing per-link enumeration and region, and three new ones (this link's two ends lent, the peer's raw zid lent, and whether SHM was negotiated, which keeps the transport-shm cfg in the crate that owns it). Hosts bring the trait into scope; every row is still read off the session in one place, so no host can report a different shm. This is the seam step 7b needs: after it the admin modules leave the core by path substitution alone.",
+      "publishable_changes_bullets": [
+        "wz-session-core: adminspace gains SessionAdminRow and its impl; session_actions loses the three builders and gains link_endpoints, with_peer_zid, shm_negotiated",
+        "Callers import the trait: wz-runtime-tokio session and router forwarder, wz-session-mcu dial and slot admin, two wz-session-lwip admin tests",
+        "reduced_docs_ledger loses the three findings the old builders' doc links made; feature axis moves adminspace-core to compound-cfg; session-close-ingress pin on session_actions re-read and re-pinned"
+      ],
+      "publishable_verification_bullets": [
+        "pc2: Layer C1am pass; lwip admin_node_slot 4 and admin_node_over_tcp 1 passed; C1bz narrowed to the core and mcu pass",
+        "pc2: clippy -D warnings clean on the core, wz-session-mcu (no-alloc slot, heap slot, all features), wz-session-lwip (all features) and wz-runtime-tokio admin features",
+        "Local: 129 round-fed gates, census, feature diagnostic, direction gate, gate 2f and guarded count gate (28 of 28) pass"
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 7b: adminspace, admin_reply and admin_config_space into wz-admin with their features",
+        "Step 9: storage_config into wz-storage, delete the core storage-backend feature, direction gate strict"
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
