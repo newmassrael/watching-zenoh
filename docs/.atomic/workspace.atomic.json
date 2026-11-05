@@ -310836,6 +310836,48 @@
         "Open from round 4234: the fuzz target's hosted time is measured on its first run; RENAMED is empty, so the first real rename is the rule's first use."
       ]
     },
+    "Round 4260": {
+      "decision_summary": "Server layer split, step 6: the admin space's MCU config-write decoder (admin_connect, the connect/endpoints write decided with no allocator) leaves the core for a new crate, wz-admin, no_std with no allocator. It is the one admin module that can leave alone: adminspace and admin_reply use each other and adminspace uses admin_config_space, so those three move together next. The module keeps its name and its feature keeps its name; the wz-admin feature turns on the core's, which keeps the config-space membership and the endpoint list the decoder reads, both now behind compound cfgs. wz-session-mcu takes wz-admin under adminspace-write and its admin_host re-exports the write body its public apply takes, so the lwip tests name it through the host they drive.",
+      "changes_bullets": [
+        "crates/wz-admin: new crate (Cargo.toml, lib.rs) and admin_connect moved from the core with its 12 tests",
+        "crates/wz-session-core: module declaration and feature comment; wz-session-mcu: optional wz-admin dependency, admin_host paths and re-export",
+        "crates/wz-session-lwip tests, workspace members and lockfiles (workspace and three deploy images that enable adminspace-write)",
+        "Gates: direction gate IN_CORE loses admin_connect; C1AM leg runs on wz-admin; feature axis registers wz-admin and defers the core feature as compound-cfg; nondefault-tests row; platform workflow paths"
+      ],
+      "verification_bullets": [
+        "pc2: wz-admin admin_connect 12 passed with no default features; lwip admin_node_slot 4 and admin_node_over_tcp 1 passed; core json5_lex 2 passed",
+        "pc2: clippy -D warnings clean on wz-admin (both feature sets), wz-session-mcu (adminspace-write and all features) and wz-session-lwip (all features); wz-admin rustdoc -D warnings clean",
+        "Local: 129 round-fed gates, direction, census, feature diagnostic, gate 2f, C0e, C0f, Layer 0, catalog audit A3 and guarded count gate (34 of 34) pass"
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "Server layer split step 7: adminspace, admin_reply and admin_config_space into wz-admin, with the session_actions admin row builders as an extension trait",
+        "Step 8 or 9: storage_config into wz-storage, delete the core storage-backend feature, direction gate strict"
+      ],
+      "publishable_decision_summary": "Server layer split, step 6: the admin space's MCU config-write decoder (admin_connect, the connect/endpoints write decided with no allocator) leaves the core for a new crate, wz-admin, no_std with no allocator. It is the one admin module that can leave alone: adminspace and admin_reply use each other and adminspace uses admin_config_space, so those three move together next. The module keeps its name and its feature keeps its name; the wz-admin feature turns on the core's, which keeps the config-space membership and the endpoint list the decoder reads, both now behind compound cfgs. wz-session-mcu takes wz-admin under adminspace-write and its admin_host re-exports the write body its public apply takes, so the lwip tests name it through the host they drive.",
+      "publishable_changes_bullets": [
+        "crates/wz-admin: new crate (Cargo.toml, lib.rs) and admin_connect moved from the core with its 12 tests",
+        "crates/wz-session-core: module declaration and feature comment; wz-session-mcu: optional wz-admin dependency, admin_host paths and re-export",
+        "crates/wz-session-lwip tests, workspace members and lockfiles (workspace and three deploy images that enable adminspace-write)",
+        "Gates: direction gate IN_CORE loses admin_connect; C1AM leg runs on wz-admin; feature axis registers wz-admin and defers the core feature as compound-cfg; nondefault-tests row; platform workflow paths"
+      ],
+      "publishable_verification_bullets": [
+        "pc2: wz-admin admin_connect 12 passed with no default features; lwip admin_node_slot 4 and admin_node_over_tcp 1 passed; core json5_lex 2 passed",
+        "pc2: clippy -D warnings clean on wz-admin (both feature sets), wz-session-mcu (adminspace-write and all features) and wz-session-lwip (all features); wz-admin rustdoc -D warnings clean",
+        "Local: 129 round-fed gates, direction, census, feature diagnostic, gate 2f, C0e, C0f, Layer 0, catalog audit A3 and guarded count gate (34 of 34) pass"
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Server layer split step 7: adminspace, admin_reply and admin_config_space into wz-admin, with the session_actions admin row builders as an extension trait",
+        "Step 8 or 9: storage_config into wz-storage, delete the core storage-backend feature, direction gate strict"
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
