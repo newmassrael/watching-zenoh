@@ -310280,6 +310280,34 @@
         "The same run settles the round 4239 repayments: the three nondefault-legs shards, the valgrind step of capi-c-arms, the capability cost budgets and the storage plane move of round 4240."
       ]
     },
+    "Round 4246": {
+      "decision_summary": "The hosted job split landed as ledger round 4245 because another session filed round 4244 between this session's fetch and its landing; the four comments that name the split's round said R4244, which points at an unrelated round, so they now say R4245.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml (two comments), scripts/lib/verdict_leg_mutation.py and scripts/lib/apt_package_census.py (one comment each): the round tag of the job split reads R4245."
+      ],
+      "verification_bullets": [
+        "The change is comment text only; the files' code is byte-identical to round 4245 outside the four tags, and the static gate array passed 130 of 130 on that code."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The carry of round 4245 stands: read the next hosted run per job for the verdict-legs shards, analyzer-crates, isolated-crates and the round 4239 repayments."
+      ],
+      "publishable_decision_summary": "The hosted job split landed as ledger round 4245 because another session filed round 4244 between this session's fetch and its landing; the four comments that name the split's round said R4244, which points at an unrelated round, so they now say R4245.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml (two comments), scripts/lib/verdict_leg_mutation.py and scripts/lib/apt_package_census.py (one comment each): the round tag of the job split reads R4245."
+      ],
+      "publishable_verification_bullets": [
+        "The change is comment text only; the files' code is byte-identical to round 4245 outside the four tags, and the static gate array passed 130 of 130 on that code."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The carry of round 4245 stands: read the next hosted run per job for the verdict-legs shards, analyzer-crates, isolated-crates and the round 4239 repayments."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
