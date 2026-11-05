@@ -312886,6 +312886,62 @@
         "Phase 6 of docs/router-table-snapshots.md, required before snapshot can be recommended: profile the starved-router admission under snapshot to find which copies a write pays (the face map's spine, the stores register reaches), make those tables persistent (a hash array mapped trie, section 2), remove the outermost read's per-message count if the profile shows it, then measure again with the instrument and all of E7s."
       ]
     },
+    "Round 4317": {
+      "decision_summary": "CI run 42011089802 (at 0c7298a48d) finished most of its jobs while it held the concurrency group in the queue, and its reds were read per job. One is repaid here at its cause. The rest are attributed: four are repaid already, one by round 4304, and one is the first run after a lockfile change.\n\nLayer C1bnl shard 0 of three ran out of its 1800 s in this run and in 41974391826, at 1813 s and 1812 s, while shards 1 and 2 read 15 and 12.5 minutes. In both runs the `wz-capture` leg alone took 11 and 14 minutes. The growth is the selector-term soundness property of round 4234, which judged every seed capture on one thread: 282 s on hkl002. Each capture is judged whole and independently, so the test now spreads the captures over the runner's cores. It joins them in the population's order, so the counts, the verdict and the examples each class keeps are what one thread reaches. On four cores of hkl002 it reads 86.6 s, 3.3 times faster. The legs also move to four shards: the partition is position modulo the count, and the heavy leg's shard otherwise carries a third of the rest, at a margin of a few percent.\n\nAttributed and not repaid here:\n- C1cn census shard 0 refused three SKIPS rows naming the `advanced_and_group` zenohd tests. That module is gated on `not(feature = \"zenoh-c-no-unstable-api\")`, so the all-features listing never holds them. 8c8a9c08b0 dropped the rows with that reason while this round was measuring it; the fleet listing (289 tests, none of the three) and a green census shard 0 with the rows gone confirm it.\n- The `large_enum_variant` red of the NEG lanes and the isolated-crate lanes is `wz-zenoh`'s `Engine`, which round 4304 boxed.\n- C1bn's bare-`.output()` census red is the file 3522f080a1 repaired.\n- C1cf's `wz-integration-tests` reduced-features red builds clean at today's tip under the gate's own command.\n- The analyzer-crate lanes ran out of time in C1bz on a cold cache: they started at 11:16 and restored the previous lockfile generation. This run's `ci` job saved the new generation only at 11:58. That is the first run after a lockfile change, and the next run reads a full match.",
+      "changes_bullets": [
+        "`crates/wz-capture/src/selector_term_tests.rs`:",
+        "New `hold_each` judges a population of captures on every available core. It joins the results in population order and asserts that every capture was judged once.",
+        "The soundness property test uses it for the seeds and for the noise.",
+        "`.github/workflows/ci.yml`: `nondefault-legs` runs four shards (`WZ_LEGS_SHARDS` 4, matrix [0, 1, 2, 3], name `/4`), with the two runs' readings that moved it."
+      ],
+      "verification_bullets": [
+        "Every red of run 42011089802 was read from its job log through the API. Attribution was done by the gate's own sentence, and by the file and line where a compiler named one.",
+        "On the fleet, `cargo test -p wz-capi-c --all-features -- --list` lists 289 tests. The three `advanced_and_group` zenohd tests are not among them; the other three zenohd tests are.",
+        "Census shard 0 of 2 (`nondefault-tests-gate.sh --census`), run on the fleet with the rows dropped, passes: wz-capi-c has 23 tests only a feature build reaches, 20 run by a leg and 3 skipped by name, and 14 crates carry 2374 such tests.",
+        "The soundness property test passes with the spread form, pinned to four cores of hkl002 (`taskset -c 0-3`), in 86.6 s. It judged 194 seed captures (582,179 sentences at the record level, 574,097 at the document level) and 1800 noise captures, the same population as before. The single-threaded form read about 282 s on the same host.",
+        "`cargo clippy -p wz-capture --features dissect --all-targets -- -D warnings` passes, and rustfmt is clean.",
+        "At today's tip, `cargo clippy -p wz-integration-tests --no-default-features --all-targets -- -D warnings`, C1cf's own command, passes.",
+        "`shard_matrix_binding.py` passes over five sharded jobs, and the pre-push hook's round-fed static gates pass, 136 of 136.",
+        "The cache attribution was read from the cache API (keys, versions, creation times) and from the prune job's log: at 11:25 the prune deleted generation `6dc91409` as superseded by `f7178cdc`."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The next hosted CI run is read per job:",
+        "C1bnl reads four shards, each under its 90 percent alarm. A shard under its 20 percent floor hands budget back.",
+        "C1cn census shard 0 is green.",
+        "The carry of rounds 4290 and 4304 stands: `validate` inside its 30 minutes, gate provenance armed, C1cs on every case, C1cn clippy with the boxed engine, C1bz and the C1bzr shards on pin d7de4b6858.",
+        "The C1bnl partition is still position modulo the count. If a shard runs out again, the lasting cure is a partition by each leg's measured cost, not a fifth shard. The ADR 0084 size-fix carry of round 4290 is unchanged."
+      ],
+      "publishable_decision_summary": "CI run 42011089802 (at 0c7298a48d) finished most of its jobs while it held the concurrency group in the queue, and its reds were read per job. One is repaid here at its cause. The rest are attributed: four are repaid already, one by round 4304, and one is the first run after a lockfile change.\n\nLayer C1bnl shard 0 of three ran out of its 1800 s in this run and in 41974391826, at 1813 s and 1812 s, while shards 1 and 2 read 15 and 12.5 minutes. In both runs the `wz-capture` leg alone took 11 and 14 minutes. The growth is the selector-term soundness property of round 4234, which judged every seed capture on one thread: 282 s on hkl002. Each capture is judged whole and independently, so the test now spreads the captures over the runner's cores. It joins them in the population's order, so the counts, the verdict and the examples each class keeps are what one thread reaches. On four cores of hkl002 it reads 86.6 s, 3.3 times faster. The legs also move to four shards: the partition is position modulo the count, and the heavy leg's shard otherwise carries a third of the rest, at a margin of a few percent.\n\nAttributed and not repaid here:\n- C1cn census shard 0 refused three SKIPS rows naming the `advanced_and_group` zenohd tests. That module is gated on `not(feature = \"zenoh-c-no-unstable-api\")`, so the all-features listing never holds them. 8c8a9c08b0 dropped the rows with that reason while this round was measuring it; the fleet listing (289 tests, none of the three) and a green census shard 0 with the rows gone confirm it.\n- The `large_enum_variant` red of the NEG lanes and the isolated-crate lanes is `wz-zenoh`'s `Engine`, which round 4304 boxed.\n- C1bn's bare-`.output()` census red is the file 3522f080a1 repaired.\n- C1cf's `wz-integration-tests` reduced-features red builds clean at today's tip under the gate's own command.\n- The analyzer-crate lanes ran out of time in C1bz on a cold cache: they started at 11:16 and restored the previous lockfile generation. This run's `ci` job saved the new generation only at 11:58. That is the first run after a lockfile change, and the next run reads a full match.",
+      "publishable_changes_bullets": [
+        "`crates/wz-capture/src/selector_term_tests.rs`:",
+        "New `hold_each` judges a population of captures on every available core. It joins the results in population order and asserts that every capture was judged once.",
+        "The soundness property test uses it for the seeds and for the noise.",
+        "`.github/workflows/ci.yml`: `nondefault-legs` runs four shards (`WZ_LEGS_SHARDS` 4, matrix [0, 1, 2, 3], name `/4`), with the two runs' readings that moved it."
+      ],
+      "publishable_verification_bullets": [
+        "Every red of run 42011089802 was read from its job log through the API. Attribution was done by the gate's own sentence, and by the file and line where a compiler named one.",
+        "On the fleet, `cargo test -p wz-capi-c --all-features -- --list` lists 289 tests. The three `advanced_and_group` zenohd tests are not among them; the other three zenohd tests are.",
+        "Census shard 0 of 2 (`nondefault-tests-gate.sh --census`), run on the fleet with the rows dropped, passes: wz-capi-c has 23 tests only a feature build reaches, 20 run by a leg and 3 skipped by name, and 14 crates carry 2374 such tests.",
+        "The soundness property test passes with the spread form, pinned to four cores of hkl002 (`taskset -c 0-3`), in 86.6 s. It judged 194 seed captures (582,179 sentences at the record level, 574,097 at the document level) and 1800 noise captures, the same population as before. The single-threaded form read about 282 s on the same host.",
+        "`cargo clippy -p wz-capture --features dissect --all-targets -- -D warnings` passes, and rustfmt is clean.",
+        "At today's tip, `cargo clippy -p wz-integration-tests --no-default-features --all-targets -- -D warnings`, C1cf's own command, passes.",
+        "`shard_matrix_binding.py` passes over five sharded jobs, and the pre-push hook's round-fed static gates pass, 136 of 136.",
+        "The cache attribution was read from the cache API (keys, versions, creation times) and from the prune job's log: at 11:25 the prune deleted generation `6dc91409` as superseded by `f7178cdc`."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The next hosted CI run is read per job:",
+        "C1bnl reads four shards, each under its 90 percent alarm. A shard under its 20 percent floor hands budget back.",
+        "C1cn census shard 0 is green.",
+        "The carry of rounds 4290 and 4304 stands: `validate` inside its 30 minutes, gate provenance armed, C1cs on every case, C1cn clippy with the boxed engine, C1bz and the C1bzr shards on pin d7de4b6858.",
+        "The C1bnl partition is still position modulo the count. If a shard runs out again, the lasting cure is a partition by each leg's measured cost, not a fifth shard. The ADR 0084 size-fix carry of round 4290 is unchanged."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
