@@ -33,7 +33,7 @@ use wz::runtime_zephyr::net::{await_board_ipv4, ZephyrNetError, ZephyrUdpSocket}
 use wz::runtime_zephyr::stream::{ZephyrTcpDial, ZephyrTcpListener, ZephyrTcpSocket};
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
 use wz_runtime_coop::ip_stack::{IpDriver, IpStack, IpTlsAcceptor};
-use wz_runtime_coop::session_drive::{LinkOpenError, SlotStack};
+use wz_runtime_coop::session_drive::{pump_task_cell_bytes, LinkOpenError, SlotStack};
 use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
 use wz_runtime_coop::{ClockSource, CoopLocalSet};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
@@ -61,7 +61,7 @@ use wz_session_mcu::app_layer::{GetRequest, NoReplies, SessionEvents, SlotDispat
 use wz_session_mcu::connect_manager::{Commanders, StaticEndpoints, StoreNode};
 use wz_session_mcu::slot_admin::AcceptingAdminNode;
 use wz_session_mcu::slot_client::{DocumentSinks, Listening};
-use wz_session_mcu::slot_dial::SessionFactory;
+use wz_session_mcu::slot_dial::{EventsOf, SessionFactory};
 use wz_session_mcu::slot_host::SessionHost;
 use wz_session_mcu::slot_node::{
     ClientNode, Declared, Entities, NoPlane, NodeApp, NodeHandle, NodeIdentity, NodeLoop, NodePort,
@@ -94,12 +94,24 @@ const SESSIONS: usize = 1;
 /// Sessions the admin node holds that a peer opened.
 const ACCEPTS: usize = 1;
 const TASKS: usize = SESSIONS + 1;
-/// The admin node's session task holds the application layer with its requesters (about 4.9 KB,
-/// twice for an `async fn`'s by-value argument), as the lwIP admin node's does.
-const SERVER_TASK_BYTES: usize = 12288;
-/// The client that only answers keeps no table of requests, but its session task also holds the
-/// secure channel's stream driver (a cell of 384 bytes refused it, measured: "too large").
-const CLIENT_TASK_BYTES: usize = 16384;
+/// The admin node's session task, as the compiler lays it out for the node's types: the pump with
+/// the secure channel's stream driver and the application layer with its requesters, and not a
+/// figure written beside it. A layer that grows grows the cell.
+const SERVER_TASK_BYTES: usize = pump_task_cell_bytes::<
+    Clock,
+    <Stack as SlotStack>::Pump,
+    Driver,
+    EventsOf<<ServerFactory as SessionFactory<Clock, Driver>>::Events>,
+>();
+/// The dialling node's session task, by its own types: its stream driver steps the admin node, and
+/// its layer asks the queries (a cell of 384 bytes refused the answering-only layer, measured: "too
+/// large").
+const CLIENT_TASK_BYTES: usize = pump_task_cell_bytes::<
+    Clock,
+    <ClientStack as SlotStack>::Pump,
+    <ClientStack as SlotStack>::Driver,
+    EventsOf<<AskLayer as SessionLayer<Clock, <ClientStack as SlotStack>::Driver>>::Events>,
+>();
 const TIMERS: usize = 4;
 const RX: usize = BATCH as usize + 64;
 const TX: usize = BATCH as usize;
