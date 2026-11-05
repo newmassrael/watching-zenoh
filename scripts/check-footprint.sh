@@ -1105,8 +1105,25 @@ declare -A BASELINE_MC_TEXT=(
     # is a build host's, not the hosted one that grades; a hosted reading that differs moves this
     # again. data is 4 and bss 270120 on both. Old:
     # 72296/72436.
-    ["thumbv7m-none-eabi"]=77848
-    ["thumbv7em-none-eabihf"]=77720
+    #
+    # 2026-11-05 -- thumbv7m 77848 -> 74160, thumbv7em-hf 77720 -> 74216 (-3688 / -3504). Hosted
+    # Layer Q read 73628 / 73760 on run 41974391826 (main's 9cd2d9499f, the tree of ledger round
+    # 4254), -4220 / -3960 over the figures above, and failed the gate on both. The figures above
+    # were a build host's reading, and that host reads this image 1364 / 1332 bytes higher than
+    # hosted at that very tree (74992 / 75092 against 73628 / 73760, the same rustc 1.97.0 and a
+    # gcc 13.2.1 of another build, so the lwIP C is what differs), which is most of the gap: on the
+    # build host the image fell 2856 / 2628 from the figures above to 9cd2d9499f, across the SCE pin
+    # moves since (the one-pass decode at 07cb8c5020 among them), and the share of each pin is not
+    # separated. Since 9cd2d9499f the build host reads +532 / +456 (74992 -> 75524
+    # and 75092 -> 75548): +232 / +228 at the SCE pin 0907db47a2 (reserved Rust destinations,
+    # `900984dbf2`) and +300 / +228 at `2274c65e57` (a record read in the lent form at the heap's
+    # capacity); the pin d7de4b6858 and the lent Response read as its view moved nothing in this
+    # image, and no C changed between the readings, so the host's offset holds. The figures here
+    # are therefore the hosted readings plus that growth (73628 + 532, 73760 + 456), a prediction
+    # of the hosted reading and not one: a hosted reading that differs moves this again. data is 4
+    # and bss 270112 hosted (270120 on the build host) on both. Old: 77848/77720.
+    ["thumbv7m-none-eabi"]=74160
+    ["thumbv7em-none-eabihf"]=74216
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
