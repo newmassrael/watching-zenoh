@@ -3585,6 +3585,11 @@ layer_c0_test_discipline() {
     # this gate's record reader. About 5 s: it starts fake routers and a fake
     # QEMU and waits the lanes' one-second stack settle.
     python3 scripts/lib/admin_node_verdict.py --selftest || return 1
+    # The instrument the stream steps of that verdict are made with (a fault-injecting TCP proxy): each
+    # control held to its effect as the ends see it, and the cases run 20 times in one process, which is
+    # how a flake is shown absent and not assumed (it waits on events, never on time).
+    python3 scripts/lib/stream_fault.py --selftest || return 1
+    python3 scripts/lib/stream_fault.py --stress 20 || return 1
     # R2162 (unregistered open-debt item 199) — the upstream zenoh CAPABILITY
     # FEATURE surface as a denominator. Item 199 recorded "18 of 19 have a wz
     # atom" as a hand measurement and nothing re-derived it afterwards, so a

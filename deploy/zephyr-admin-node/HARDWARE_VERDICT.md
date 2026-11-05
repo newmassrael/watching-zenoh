@@ -67,7 +67,53 @@ the scheme of the locators they quote (HW.0's READY line, HW.4's listener and th
 `tcp/` for a stream node, and B is a `tcp/` listener the node is told to dial). The steps for the
 pool images (HW.26 to HW.35) read a packet capture frame by frame and are the datagram transport's;
 the program refuses them for a `tcp/` node. A stream has failure modes a datagram has not, and the
-steps that hold them are not in this file yet.
+steps that hold them are designed below and not yet in this file's grammar.
+
+### The steps for what only a stream suffers (design)
+
+A datagram is delivered whole or not at all, and nothing about the link outlives a datagram. A stream
+is a byte sequence with a connection around it, and every way it can go wrong is one a datagram
+cannot: a message is cut or joined by the network, a connection ends in one of two ways, a connection
+can fall silent without ending, a listener can stop, and a peer can come back. The steps are
+organised by the PROPERTY a stream link owes, and not by incident:
+
+| property | what the node owes | the fault that holds it |
+| --- | --- | --- |
+| framing | a message is read whole whatever the segmentation; many are read apart whatever the coalescing | segment, hold and flush |
+| release | the connection a peer ends, by FIN or RST, ends that peer's session and no other, and what it held is given back | close, reset |
+| conservation | after any number of releases the node accepts as it did before: no cell, slot or task is lost | release, repeated past the pool |
+| silence | a peer that falls silent with the connection open is detected by the lease, and its session ends | black hole |
+| re-establishment | a node that dials takes its peer back on upstream's schedule, restarted per outage, and one that accepts takes its peer back at once | refuse, release |
+| admission | a peer past the node's capacity is refused promptly and the held sessions are not harmed | a second connection past the pool |
+
+Each step is a stimulus applied by the host, an observation read through the node's admin surface, and a
+comparison. Four rules make the steps trustworthy, and the program's selftest holds each:
+
+1. The fault is made by an instrument of its own (`scripts/lib/stream_fault.py`, a TCP proxy that sits on
+   one leg and does what a network does: close, reset, drop, refuse, segment, hold). A router's own
+   closing and reconnecting is a second subject and is not used as a fault.
+2. The fault and the observation are on different legs. The node holds a session with router A, through
+   the proxy, and one with router B; a fault on the leg to A is read through B's REST, and a fault on the
+   leg to B through A's. A step never asks a connection about its own death.
+3. Every bound comes from the node's contract and not from a measurement of a run. The schedule of a
+   dial's waits is upstream's (1, 2, 4, 4 seconds, restarted when a session that had been established is
+   lost), the lease is the one the node advertises (10 seconds, four keep-alives in it), and the pool is
+   the image's cells; the selftest holds the program's copy of each equal to the node's source, so a
+   constant that moves is a failure that names it. Where the node reports its own figure (the wait left
+   before a re-dial) the step judges that figure, which is in the node's clock; a bound read off the
+   host's clock is a guard against a hang, a property of NOT happening, and a run that fails it failed
+   by never, not by lateness.
+4. A step never waits on time to decide. It waits for a state (a session gone, a session back, an
+   endpoint's wait reported) and fails only when the state does not come within its guard; the proxy
+   and the program are deterministic by construction (events and acknowledgements, no timer decides
+   anything), and the proxy's selftest runs its cases in volume and beside a loaded machine to show it.
+
+The program holds each step against a reference model of the contract (a fake node that implements the
+properties above), with a fault of the model for each way a node can break one (a cell lost on a reset, a
+FIN ignored until the lease, a re-dial with no wait, a silent peer never detected, an accept queue that
+sticks), and each such node must red exactly the step that holds its property and no other, and its
+comparison weakened must go green: a step is accepted when the model that breaks it is caught, not when
+the node that has it passes.
 
 ## What the ledger entry holds
 
