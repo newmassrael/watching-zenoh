@@ -311302,6 +311302,42 @@
         "Neither node image has a kit stack reading beside its chain (the datagram node's kit verdict predates the current build, the tcp/ node has not run on the kit); a kit run of each would turn the two declarations into rows. The hosted Qzb lane has not run the new key choice. The client images' and the slot node's host tests still write their cells by hand."
       ]
     },
+    "Round 4272": {
+      "decision_summary": "Hosted run 41974391826 (head 9cd2d9499f, round 4254) has eight failed jobs, and each is attributed by the gate's own words. C1m, coop static count 16, was already repaid by round 4255. C1cg counted 22 against its guard's 21: round 4232 added `a_stopped_pool_ends_its_threads_and_runs_nothing_more` and left the guard at 21; it is repaid here. C1bz and five C1bzr shards are broken intra-doc links from round 4249, the SCE pin move to 07cb8c5020, which reached two places. In wz-runtime-tokio, one doc kept naming `encode_frame_into` after the writer moved to `encode_frame_stuffing`; that is wz text and is repaid here. In wz-codecs, the 49 links come from the SCE codec template (`codec.rs.jinja2:714`), which links the builder as `{{ struct_name }}`, a name a profile-mode module does not define. `out/**` is generated and is neither edited by hand nor budgeted, so that repayment is a template fix the SCE session has taken (an audit of every intra-doc link, plus a broken-link gate over a profile-mode golden), followed by a pin move here.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: Layer C1cg's guard goes from 21 to 22, and its comment names the test round 4232 added and the run that printed 22.",
+        "crates/wz-runtime-tokio/src/serial_pipeline.rs: the writer task's doc links `encode_frame_stuffing`, the function `SerialWriteDriver::frame_into` calls, instead of the `encode_frame_into` that left the module's imports in round 4249."
+      ],
+      "verification_bullets": [
+        "Each failed job's log was downloaded and read at its FAIL lines. C1cg printed `test result: ok. 22 passed`, and the file holds 22 `#[test]` items. C1m's guard reads 19 on origin, from round 4255.",
+        "`cargo doc -p wz-runtime-tokio --no-deps --all-features`, C1bz's own command, was run on a build machine: before the edit it reported exactly one error, `unresolved link to encode_frame_into` at serial_pipeline.rs:1357, and after the edit it exits 0. Layer C1cg was run as a fleet unit through `bx --checks ci` (`--only C1cg`) and passes. `count_guard_lint.py` and the planner's `--check` pass on the rebased tree.",
+        "The 49 wz-codecs links were read in out/wz-codecs/decl_final.rs:465 and :494; `DeclFinal` exists only as the alias `wz_codecs::lent::DeclFinal`. SCE main 2007431f32 still holds the template line."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "C1bz (wz-codecs, 49 links) and C1bzr (shards 0, 1, 2, 3 and 5) stay red until the SCE codec template fix lands on SCE main and the pin moves to it. The SCE session (bb0200) took it and will name the commit. The pin move's own round then reads C1bz and C1bzr green, or lowers no budget.",
+        "Stages 2 to 5 of docs/verdicts-in-the-fleet.md carry as filed in round 4268."
+      ],
+      "publishable_decision_summary": "Hosted run 41974391826 (head 9cd2d9499f, round 4254) has eight failed jobs, and each is attributed by the gate's own words. C1m, coop static count 16, was already repaid by round 4255. C1cg counted 22 against its guard's 21: round 4232 added `a_stopped_pool_ends_its_threads_and_runs_nothing_more` and left the guard at 21; it is repaid here. C1bz and five C1bzr shards are broken intra-doc links from round 4249, the SCE pin move to 07cb8c5020, which reached two places. In wz-runtime-tokio, one doc kept naming `encode_frame_into` after the writer moved to `encode_frame_stuffing`; that is wz text and is repaid here. In wz-codecs, the 49 links come from the SCE codec template (`codec.rs.jinja2:714`), which links the builder as `{{ struct_name }}`, a name a profile-mode module does not define. `out/**` is generated and is neither edited by hand nor budgeted, so that repayment is a template fix the SCE session has taken (an audit of every intra-doc link, plus a broken-link gate over a profile-mode golden), followed by a pin move here.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: Layer C1cg's guard goes from 21 to 22, and its comment names the test round 4232 added and the run that printed 22.",
+        "crates/wz-runtime-tokio/src/serial_pipeline.rs: the writer task's doc links `encode_frame_stuffing`, the function `SerialWriteDriver::frame_into` calls, instead of the `encode_frame_into` that left the module's imports in round 4249."
+      ],
+      "publishable_verification_bullets": [
+        "Each failed job's log was downloaded and read at its FAIL lines. C1cg printed `test result: ok. 22 passed`, and the file holds 22 `#[test]` items. C1m's guard reads 19 on origin, from round 4255.",
+        "`cargo doc -p wz-runtime-tokio --no-deps --all-features`, C1bz's own command, was run on a build machine: before the edit it reported exactly one error, `unresolved link to encode_frame_into` at serial_pipeline.rs:1357, and after the edit it exits 0. Layer C1cg was run as a fleet unit through `bx --checks ci` (`--only C1cg`) and passes. `count_guard_lint.py` and the planner's `--check` pass on the rebased tree.",
+        "The 49 wz-codecs links were read in out/wz-codecs/decl_final.rs:465 and :494; `DeclFinal` exists only as the alias `wz_codecs::lent::DeclFinal`. SCE main 2007431f32 still holds the template line."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "C1bz (wz-codecs, 49 links) and C1bzr (shards 0, 1, 2, 3 and 5) stay red until the SCE codec template fix lands on SCE main and the pin moves to it. The SCE session (bb0200) took it and will name the commit. The pin move's own round then reads C1bz and C1bzr green, or lowers no budget.",
+        "Stages 2 to 5 of docs/verdicts-in-the-fleet.md carry as filed in round 4268."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
