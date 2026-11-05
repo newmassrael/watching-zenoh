@@ -310638,6 +310638,40 @@
         "The C1cn clippy borrows and the C1bzr ledger line of that run are the peer session's repayment and are read in the same run."
       ]
     },
+    "Round 4254": {
+      "decision_summary": "Repayment round for hosted CI run 41939089182 (ledger 4243), which settled two reds. C1bzr settle: the reduced-docs ledger still carried a keyexpr_prefix finding (an unresolved link to the core storage_strip_prefix) that round 4240 removed when it moved the storage modules and wrote that link as prose; measured 0 against a ledger count of 2, so the line goes. C1cn: clippy with every feature on refused three needless borrows in the capi-c zenohd interop test from rounds 4242 and 4243; the owning session agreed to the fix. The narrow-vle rows and the coop session pump reason pin that the same preflight found were paid by round 4253 in the same way, so this round carries only these two.",
+      "changes_bullets": [
+        "scripts/lib/reduced_docs_ledger.txt: drop the stale keyexpr_prefix storage_strip_prefix line",
+        "crates/wz-capi-c/tests/router_node_zenohd_interop.rs: pass the matching closures by value to eventually and never"
+      ],
+      "verification_bullets": [
+        "C1cn builds half on pc2: Layer C1cn pass, every leg reached, lwip all-features compiles",
+        "129 round-fed static gates, upstream citation gate 2f, guarded_count_gate (no guard moved): pass",
+        "hosted settle line itself: the ledger carried 2 and measured 0 for exactly the removed finding"
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "Server layer split step 6: admin_connect into a new wz-admin crate"
+      ],
+      "publishable_decision_summary": "Repayment round for hosted CI run 41939089182 (ledger 4243), which settled two reds. C1bzr settle: the reduced-docs ledger still carried a keyexpr_prefix finding (an unresolved link to the core storage_strip_prefix) that round 4240 removed when it moved the storage modules and wrote that link as prose; measured 0 against a ledger count of 2, so the line goes. C1cn: clippy with every feature on refused three needless borrows in the capi-c zenohd interop test from rounds 4242 and 4243; the owning session agreed to the fix. The narrow-vle rows and the coop session pump reason pin that the same preflight found were paid by round 4253 in the same way, so this round carries only these two.",
+      "publishable_changes_bullets": [
+        "scripts/lib/reduced_docs_ledger.txt: drop the stale keyexpr_prefix storage_strip_prefix line",
+        "crates/wz-capi-c/tests/router_node_zenohd_interop.rs: pass the matching closures by value to eventually and never"
+      ],
+      "publishable_verification_bullets": [
+        "C1cn builds half on pc2: Layer C1cn pass, every leg reached, lwip all-features compiles",
+        "129 round-fed static gates, upstream citation gate 2f, guarded_count_gate (no guard moved): pass",
+        "hosted settle line itself: the ledger carried 2 and measured 0 for exactly the removed finding"
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Server layer split step 6: admin_connect into a new wz-admin crate"
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
