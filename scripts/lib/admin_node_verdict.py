@@ -237,6 +237,7 @@ import io
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -871,6 +872,7 @@ class HostEnv(Env):
         self.proxy: stream_fault.StreamProxy | None = None  # on the leg A dials the node over
         self.proxy_b: stream_fault.StreamProxy | None = None  # on the leg the node dials B over
         self.b_dial_via = ""  # what the node is told to dial for B: the proxy's address on that leg
+        self.flood_socks: list[socket.socket] = []  # idle connections the admission step stands at the node
 
     def _spawn(self, argv: list[str], log: Path) -> subprocess.Popen:
         with log.open("wb") as fh:
@@ -906,6 +908,48 @@ class HostEnv(Env):
         self._spawn(a, self.dir / "zenohd-a.log")
         self.base = f"http://127.0.0.1:{self.rest_port}/@/{node_id}/peer"
 
+    def open_flood(self, target: tuple[str, int], count: int) -> int:
+        """Stand `count` idle connections at `target` (the node's listener) and return how many were made.
+        A connect the node does not answer is one that was not made, and is not waited on for long: the
+        step needs the pressure, not the wait."""
+        for _ in range(count):
+            try:
+                self.flood_socks.append(socket.create_connection(target, timeout=2.0))
+            except OSError:
+                pass
+        return len(self.flood_socks)
+
+    def flood_closed(self, want: int, guard_s: float) -> int:
+        """How many of the standing connections the node has closed (EOF or reset), waiting for `want` of
+        them as events (the sockets becoming readable), to a bound: the bound is the step's, a refusal
+        inside it is a refusal, and a wait that ends at it has counted what it had."""
+        end = time.monotonic() + guard_s
+        closed: set[socket.socket] = set()
+        while len(closed) < want:
+            pending = [s for s in self.flood_socks if s not in closed]
+            left = end - time.monotonic()
+            if not pending or left <= 0:
+                break
+            ready, _, _ = select.select(pending, [], [], left)
+            for s in ready:
+                try:
+                    if s.recv(4096) == b"":
+                        closed.add(s)
+                except OSError:
+                    closed.add(s)  # a reset is a close
+        return len(closed)
+
+    def close_flood(self) -> int:
+        """Close what `open_flood` stood: each connection is closed in order (a client that goes away)."""
+        closed = len(self.flood_socks)
+        for s in self.flood_socks:
+            try:
+                s.close()
+            except OSError:
+                pass
+        self.flood_socks = []
+        return closed
+
     def _fetch(self, url: str) -> bytes:
         try:
             with urllib.request.urlopen(url, timeout=self.timing.http_timeout) as r:
@@ -935,6 +979,7 @@ class HostEnv(Env):
             pass
 
     def stop(self) -> None:
+        self.close_flood()
         for proxy in (self.proxy, self.proxy_b):
             if proxy is not None:
                 proxy.stop()
@@ -998,6 +1043,9 @@ class HostStreamEnv:
         except (ValueError, KeyError, TypeError, AttributeError):
             return None
 
+    def flood_closed(self, want: int, guard_s: float) -> int:
+        return self.env.flood_closed(want, guard_s)
+
     def small_writes(self, leg: str, size: int) -> tuple[int, int]:
         """Writes of at most `size` bytes the proxy on `leg` has made towards the node and from it: the
         proof that a cut landed, from the proxy's own log of what it wrote."""
@@ -1042,6 +1090,12 @@ class HostStreamEnv:
             size = int(action.split(":", 1)[1])
             proxy.segment(size or None)
             return proxy.live()
+        if action.startswith("flood:"):
+            # Straight at the node's listener, which is the proxy's upstream: the proxy would wait on a
+            # listener that drops what it cannot take, and stall its own accept loop.
+            return self.env.open_flood(proxy.upstream, int(action.split(":", 1)[1]))
+        if action == "unflood":
+            return self.env.close_flood()
         if action in ("refuse", "admit"):
             proxy.refuse(action == "refuse")
             return 1
@@ -3207,20 +3261,24 @@ def selftest() -> int:
         for fault, want in {
             # A step that was not run prints as a failure too, so each fault reds what it breaks and what
             # needed it.
-            "leak_on_reset": {38, 39, 40, 41},
-            "leak_on_close": {38, 39, 40, 41},
+            "leak_on_reset": {38, 39, 40, 41, 42},
+            "leak_on_close": {38, 39, 40, 41, 42},
             "fin_ignored": {36},
             "reset_ignored": {37},
-            "accept_stuck": {37, 38, 39, 40, 41},
-            "kills_other": {36, 37, 38, 39, 40, 41},
+            "accept_stuck": {37, 38, 39, 40, 41, 42},
+            "kills_other": {36, 37, 38, 39, 40, 41, 42},
             "silence_never_detected": {39},
             "silence_premature": {39},
             "redial_no_wait": {40},
             "redial_no_backoff": {40},
             "redial_no_restart": {40},
-            "redial_never": {40, 41},
-            "framing_no_reassembly": {41},
+            "redial_never": {40, 41, 42},
+            "framing_no_reassembly": {41, 42},
             "framing_cut_not_applied": {41},
+            "admission_harms_sessions": {42},
+            "admission_leaks_cells": {42},
+            "admission_not_applied": {42},
+            "admission_accepts_all": {42},
         }.items():
             rc, so, se = stream_case((fault,))
             steps = _grammar_steps(so)

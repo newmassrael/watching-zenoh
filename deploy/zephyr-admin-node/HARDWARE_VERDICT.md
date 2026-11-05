@@ -69,9 +69,9 @@ pool images (HW.26 to HW.35) read a packet capture frame by frame and are the da
 the program refuses them for a `tcp/` node. A stream has failure modes a datagram has not, and the
 steps that hold them are designed below and not yet in this file's grammar.
 
-### The steps for what only a stream suffers (HW.36 to HW.41 are built; the rest is design)
+### The steps for what only a stream suffers (HW.36 to HW.42 are built; the rest is design)
 
-The steps built so far are the release, conservation, silence, re-establishment and framing properties, run with `--stream-steps` on a
+The steps built so far are the release, conservation, silence, re-establishment, framing and admission properties, run with `--stream-steps` on a
 `tcp/` node (the base HW.0 to HW.7 are unchanged without it). The leg to A runs through the program's
 proxy and B carries a REST port of its own, so a release on A's leg is read through B:
 
@@ -82,7 +82,22 @@ HW.38 the node takes its peer back after every release and holds one session for
 HW.39 a peer that falls silent is detected by the lease and only its session ends, and it is taken back: after <N> ms
 HW.40 the node re-dials a lost peer on upstream's schedule of waits, and a new outage restarts it: waits <W> ms, restart <R> ms
 HW.41 a message is read whole whatever the segmentation: the peer is taken back and answers, a byte at a time: <N> one-byte writes towards the node and <M> from it
+HW.42 a peer past the node's capacity does not harm the sessions it holds, and the node takes its peer back once it has gone: <N> extra connections made, <M> closed by the node
 ```
+
+HW.42 stands idle connections at the node's listener, five (the cells and two) where the node can hold two
+beyond its sessions (the cell it keeps for a connection waiting to be taken and the one handshake it reads
+at once, both from its source), made by the host straight at the listener and not through the proxy (a
+proxy that waits on a listener that drops what it cannot take would stall its own accept loop). The node
+must refuse what it cannot hold, promptly: at most two of them may still stand when two seconds have
+passed (read as the sockets becoming readable at EOF or reset, not by waiting out a timer). Two seconds is
+below the three the node takes to reap a connection it holds that says nothing (measured on the first run:
+six of eight extra connections closed within half a second, the two it held closed between three and six
+seconds), so a refusal is told from a reap. While they stand, a query through router A, which is a held
+session carrying a request and its reply, must be answered with both sessions and router B must still
+report both: the held sessions are not harmed. The connections are then closed, A's connection is released
+and the node must take A back: what the extra connections held was given back. A run in which no extra
+connection was made applied no pressure and fails.
 
 HW.41 cuts every write on the leg to A to one byte (the proxy's `segment`, on the connection that exists and
 on the one the peer makes next), releases A's connection with the leg closed to new ones, opens the leg, and

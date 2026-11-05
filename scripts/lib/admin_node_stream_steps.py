@@ -104,6 +104,25 @@ class StreamSpec:
     #: asked to, and a node that read it whole proved nothing.
     framing_min_writes: int = 20
 
+    accepts: int = 1  # handshakes the node reads at once (the acceptor's ACCEPTS)
+    #: How soon a connection the node cannot hold must be closed. The node reaps one it holds and that says
+    #: nothing after about three seconds (measured on the first run: six of eight closed within half a
+    #: second, the two it held closed between three and six), so a refusal inside two is a refusal and not
+    #: a reap.
+    refuse_bound_ms: int = 2_000
+
+    @property
+    def pressure(self) -> int:
+        """Extra connections for the admission step: more than the node can hold, and a few more, so a
+        node that holds them all would show."""
+        return self.cells + 2
+
+    @property
+    def holds_extra(self) -> int:
+        """The idle connections the node can hold at once beyond its sessions: the cells it keeps for a
+        connection waiting to be taken (cells less sessions) and the handshakes it reads at once."""
+        return (self.cells - self.sessions) + self.accepts
+
     def retry_waits(self, n: int) -> list[int]:
         """The first `n` waits of an outage: the policy's initial wait, grown by its factor, held at its
         ceiling (upstream's 1, 2, 4, 4 seconds)."""
@@ -136,7 +155,10 @@ SENTENCES = {
 }
 SENTENCES[40] = "the node re-dials a lost peer on upstream's schedule of waits, and a new outage restarts it"
 SENTENCES[41] = "a message is read whole whatever the segmentation: the peer is taken back and answers, a byte at a time"
-STEPS = (36, 37, 38, 39, 40, 41)
+SENTENCES[42] = (
+    "a peer past the node's capacity does not harm the sessions it holds, and the node takes its peer back once it has gone"
+)
+STEPS = (36, 37, 38, 39, 40, 41, 42)
 #: What the grammar's `<...>` is for a step that was not run or could not be judged (the printed sentence
 #: is an instance of the grammar either way).
 UNRUN_TAIL = {
@@ -144,6 +166,7 @@ UNRUN_TAIL = {
     39: ": after 0 ms",
     40: ": waits 0 ms, restart 0 ms",
     41: ": 0 one-byte writes towards the node and 0 from it",
+    42: ": 0 extra connections made, 0 closed by the node",
 }
 
 
@@ -168,6 +191,28 @@ def judge_silence(
         sessions == {B_ID}
         and spec.earliest_lease_detection_ms <= elapsed_ms <= spec.silence_bound_ms
         and back
+    )
+
+
+def judge_admission(
+    opened: int,
+    closed: int,
+    answered: set[str] | None,
+    seen_b: set[str] | None,
+    recovered: bool,
+    spec: StreamSpec = SPEC,
+) -> bool:
+    """Extra connections were made; the node closed all it could not hold, promptly (at most what it can
+    hold stayed open); while they stood a query through A was answered with both sessions and B still
+    reported both (the held sessions were not harmed); and once they were closed the node still took its
+    peer back after a release (what they held was given back)."""
+    both = {A_ID, B_ID}
+    return (
+        opened >= 1
+        and opened - closed <= spec.holds_extra
+        and answered == both
+        and seen_b == both
+        and recovered
     )
 
 
@@ -223,6 +268,7 @@ class StreamEnv(Protocol):
     def attempt_count(self, leg: str) -> int: ...
     def await_attempts(self, leg: str, since: int, count: int, guard_s: float) -> list[float] | None: ...
     def small_writes(self, leg: str, size: int) -> tuple[int, int]: ...
+    def flood_closed(self, want: int, guard_s: float) -> int: ...
     def sleep(self, seconds: float) -> None: ...
     def now(self) -> float: ...
 
@@ -339,6 +385,34 @@ def _redialled(
     _, again = outage(1)
     back2, _ = _await(env, lambda: env.sessions("B") == both, spec.return_guard_ms / 1000, interval_s)
     return landed, gaps, again[0] if again else None, back2
+
+
+def _admitted(
+    env: StreamEnv, spec: StreamSpec, interval_s: float
+) -> tuple[int, int, set[str] | None, set[str] | None, bool]:
+    """Stand more idle connections at the node's listener than it can hold, and read what the node did
+    with them and with the sessions it holds; then close them and read whether it still takes its peer back.
+
+    The extra connections are made by the host straight at the listener (not through the proxy: a proxy
+    that waits on a listener that does not answer would stall its own accept loop). The node must close
+    what it cannot hold, promptly: the wait is for those closes as events (the sockets becoming readable
+    at EOF), to the refusal bound. While they stand, a query through A (a held session carrying a request
+    and its reply) and one through B are read, and the answer is a state, not an absence waited for.
+    Closing them is what must give their cells back: one release of A after that, and its return, show the
+    pool whole. Returns (connections made, how many the node had closed by the bound, the answer through
+    A, the answer through B, whether the node took A back)."""
+    both = {A_ID, B_ID}
+    opened = env.fault("A", f"flood:{spec.pressure}")
+    try:
+        closed = env.flood_closed(max(opened - spec.holds_extra, 0), spec.refuse_bound_ms / 1000)
+        _await(env, lambda: env.sessions("A") == both, spec.return_guard_ms / 1000, interval_s)
+        answered = env.sessions("A")
+        seen_b = env.sessions("B")
+    finally:
+        env.fault("A", "unflood")
+    landed, _, gone, _ = _released(env, "close", spec, interval_s)
+    back, _ = _await(env, lambda: env.sessions("B") == both, spec.return_guard_ms / 1000, interval_s)
+    return opened, closed, answered, seen_b, bool(landed) and gone and back
 
 
 def _segmented(
@@ -533,6 +607,33 @@ def run_stream_steps(env: StreamEnv, spec: StreamSpec = SPEC, interval_s: float 
                     f"{sorted(answered) if answered is not None else None}"
                 )
             out[41] = Result(41, False, said, f"framing FAIL: {why}")
+
+    if not conserved or env.sessions("B") != both:
+        out[42] = Result(
+            42, None, unrun_sentence(42), "not run: the node does not hold A and B after the steps before it"
+        )
+    else:
+        opened, closed, answered, seen_b, recovered = _admitted(env, spec, interval_s)
+        said = f"{SENTENCES[42]}: {opened} extra connections made, {closed} closed by the node"
+        if judge_admission(opened, closed, answered, seen_b, recovered, spec):
+            out[42] = Result(42, True, said)
+        else:
+            if opened < 1:
+                why = "no extra connection was made: the pressure did not land"
+            elif opened - closed > spec.holds_extra:
+                why = (
+                    f"the node closed {closed} of the {opened} extra connections within {spec.refuse_bound_ms} ms "
+                    f"and can hold {spec.holds_extra}: it did not refuse what it cannot hold"
+                )
+            elif answered != both or seen_b != both:
+                why = (
+                    f"a held session was harmed while {opened} extra connection(s) stood: "
+                    f"through A {sorted(answered) if answered is not None else None}, "
+                    f"through B {sorted(seen_b) if seen_b is not None else None}"
+                )
+            else:
+                why = "the node did not take its peer back after the extra connections were closed: what they held was not given back"
+            out[42] = Result(42, False, said, f"admission FAIL: {why}")
     return [out[s] for s in STEPS]
 
 
@@ -554,6 +655,10 @@ FAULTS = (
     "redial_never",  # a lost peer is never dialled again
     "framing_no_reassembly",  # a message that arrives in pieces is not read: the handshake and the replies stall
     "framing_cut_not_applied",  # the cut never lands, so the node was shown whole messages and proved nothing
+    "admission_harms_sessions",  # a connection past the capacity takes down a session the node holds
+    "admission_leaks_cells",  # a connection past the capacity keeps its cell after it has gone
+    "admission_not_applied",  # the extra connections are never made, so the node was shown no pressure
+    "admission_accepts_all",  # every extra connection is held and none refused: nothing bounds the node
 )
 
 
@@ -578,6 +683,7 @@ class StreamModel:
         self.b_index = 0  # the position in the outage's schedule: the next wait to take
         self.seg = 0  # the size the proxy on the leg to A cuts every write to (0: as read)
         self.small = [0, 0]  # one-byte writes the proxy made towards the node and from it
+        self.flooded = 0  # idle connections standing at the node's listener, past its capacity
 
     def _cut(self) -> bool:
         """The cut is in force on the leg and really made the writes small."""
@@ -649,10 +755,29 @@ class StreamModel:
     def small_writes(self, leg: str, size: int) -> tuple[int, int]:
         return self.small[0], self.small[1]
 
+    def flood_closed(self, want: int, guard_s: float) -> int:
+        """The extra connections the node has closed by the bound: all it cannot hold, unless it holds all."""
+        if "admission_accepts_all" in self.faults:
+            return 0
+        return max(self.flooded - self.spec.holds_extra, 0)
+
     def fault(self, leg: str, action: str) -> int:
         if leg == "A" and action.startswith("segment:"):
             self.seg = int(action.split(":", 1)[1])
             return 1
+        if leg == "A" and action.startswith("flood:"):
+            if "admission_not_applied" in self.faults:
+                return 0
+            n = int(action.split(":", 1)[1])
+            self.flooded = n
+            if "admission_harms_sessions" in self.faults:
+                self.sess[A_ID] = False  # the node dropped a held session to make room
+            if "admission_leaks_cells" in self.faults:
+                self.cells_used = self.spec.cells + 1  # the pool is over full and stays so: a release frees one only
+            return n
+        if leg == "A" and action == "unflood":
+            closed, self.flooded = self.flooded, 0
+            return closed
         if leg == "A" and action in ("refuse", "admit"):
             self.refusing = action == "refuse"
             return 1
@@ -750,6 +875,9 @@ def check_spec_against_source(spec: StreamSpec = SPEC, root: Path = ROOT) -> lis
         queue = re.search(r"const QUEUE: usize = (\d+);", src)
         if not sessions or int(sessions.group(1)) != spec.sessions:
             problems.append(f"{rel}: SESSIONS is {sessions.group(1) if sessions else None}, the steps hold {spec.sessions}")
+        accepts = re.search(r"const ACCEPTS: usize = (\d+);", src)
+        if not accepts or int(accepts.group(1)) != spec.accepts:
+            problems.append(f"{rel}: ACCEPTS is {accepts.group(1) if accepts else None}, the steps hold {spec.accepts}")
         if not sessions or not queue or int(sessions.group(1)) + int(queue.group(1)) != spec.cells:
             problems.append(f"{rel}: the cells are SESSIONS + QUEUE, the steps hold {spec.cells}")
     return problems
@@ -787,8 +915,8 @@ def selftest() -> int:
     # A node that keeps its contract holds all four.
     healthy = run_stream_steps(StreamModel())
     check(
-        "healthy: HW.36 to HW.41 held",
-        _held(healthy) == {36: True, 37: True, 38: True, 39: True, 40: True, 41: True},
+        "healthy: HW.36 to HW.42 held",
+        _held(healthy) == {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True},
         str([(r.step, r.held, r.fail_text) for r in healthy]),
     )
     check(
@@ -804,20 +932,25 @@ def selftest() -> int:
 
     # Each way a node breaks a property is caught by the step that holds it, and by no other.
     expect: dict[str, dict[int, bool | None]] = {
-        "leak_on_reset": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None},
-        "leak_on_close": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None},
-        "fin_ignored": {36: False, 37: True, 38: True, 39: True, 40: True, 41: True},
-        "reset_ignored": {36: True, 37: False, 38: True, 39: True, 40: True, 41: True},
-        "accept_stuck": {36: True, 37: None, 38: False, 39: None, 40: None, 41: None},
-        "kills_other": {36: False, 37: None, 38: False, 39: None, 40: None, 41: None},
-        "silence_never_detected": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True},
-        "silence_premature": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True},
-        "redial_no_wait": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True},
-        "redial_no_backoff": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True},
-        "redial_no_restart": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True},
-        "redial_never": {36: True, 37: True, 38: True, 39: True, 40: False, 41: None},
-        "framing_no_reassembly": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False},
-        "framing_cut_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False},
+        "leak_on_reset": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None, 42: None},
+        "leak_on_close": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None, 42: None},
+        "fin_ignored": {36: False, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True},
+        "reset_ignored": {36: True, 37: False, 38: True, 39: True, 40: True, 41: True, 42: True},
+        "accept_stuck": {36: True, 37: None, 38: False, 39: None, 40: None, 41: None, 42: None},
+        "kills_other": {36: False, 37: None, 38: False, 39: None, 40: None, 41: None, 42: None},
+        "silence_never_detected": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True, 42: True},
+        "silence_premature": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True, 42: True},
+        "redial_no_wait": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True},
+        "redial_no_backoff": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True},
+        "redial_no_restart": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True},
+        "redial_never": {36: True, 37: True, 38: True, 39: True, 40: False, 41: None, 42: None},
+        # A node that cannot read a message in pieces does not take A back, so the steps after it have no fixture.
+        "framing_no_reassembly": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False, 42: None},
+        "framing_cut_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False, 42: True},
+        "admission_harms_sessions": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False},
+        "admission_leaks_cells": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False},
+        "admission_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False},
+        "admission_accepts_all": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False},
     }
     check("every fault has an expectation", set(expect) == set(FAULTS), str(set(expect) ^ set(FAULTS)))
     for fault, want in expect.items():
@@ -825,9 +958,28 @@ def selftest() -> int:
         check(f"{fault}: the steps red exactly where the property is", got == want, f"{got} want {want}")
 
     # The comparisons weakened let their fault through: the faults are red for the comparison's own sake.
-    global judge_release, judge_conservation, judge_silence, judge_redial, judge_framing
-    saved = (judge_release, judge_conservation, judge_silence, judge_redial, judge_framing)
+    global judge_release, judge_conservation, judge_silence, judge_redial, judge_framing, judge_admission
+    saved = (judge_release, judge_conservation, judge_silence, judge_redial, judge_framing, judge_admission)
     try:
+        # No recovery: a pool that is not given back after the pressure goes green.
+        judge_admission = lambda opened, closed, answered, seen_b, recovered, spec=SPEC: (
+            opened >= 1 and opened - closed <= spec.holds_extra and answered == {A_ID, B_ID} and seen_b == {A_ID, B_ID}
+        )
+        got = _held(run_stream_steps(StreamModel(faults=("admission_leaks_cells",))))
+        check("weakened HW.42: a pool not given back goes green there", got.get(42) is True, str(got))
+        # No count of the pressure: a pressure that never landed goes green.
+        judge_admission = lambda opened, closed, answered, seen_b, recovered, spec=SPEC: (
+            opened - closed <= spec.holds_extra and answered == {A_ID, B_ID} and seen_b == {A_ID, B_ID} and recovered
+        )
+        got = _held(run_stream_steps(StreamModel(faults=("admission_not_applied",))))
+        check("weakened HW.42: a pressure that never landed goes green there", got.get(42) is True, str(got))
+        # No refusal count: a node that holds every connection goes green.
+        judge_admission = lambda opened, closed, answered, seen_b, recovered, spec=SPEC: (
+            opened >= 1 and answered == {A_ID, B_ID} and seen_b == {A_ID, B_ID} and recovered
+        )
+        got = _held(run_stream_steps(StreamModel(faults=("admission_accepts_all",))))
+        check("weakened HW.42: a node that holds every connection goes green there", got.get(42) is True, str(got))
+        judge_admission = saved[5]
         # No count of the cut: a cut that never landed shows the node whole messages, and goes green.
         judge_framing = lambda back, answered, up, down, spec=SPEC: back and answered == {A_ID, B_ID}
         got = _held(run_stream_steps(StreamModel(faults=("framing_cut_not_applied",))))
@@ -852,9 +1004,21 @@ def selftest() -> int:
         got = _held(run_stream_steps(StreamModel(faults=("leak_on_reset",))))
         check("weakened HW.38: a cell lost on a reset goes green there", got.get(38) is True, str(got))
     finally:
-        judge_release, judge_conservation, judge_silence, judge_redial, judge_framing = saved
+        judge_release, judge_conservation, judge_silence, judge_redial, judge_framing, judge_admission = saved
 
     # The comparisons themselves.
+    both_ids_a = {A_ID, B_ID}
+    hx = SPEC.holds_extra
+    check("holds_extra is the queue and the accepts: 2", hx == 2, str(hx))
+    check("judge_admission: pressure made, the rest closed, sessions held, pool recovered", judge_admission(5, 5 - hx, both_ids_a, both_ids_a, True))
+    check("judge_admission: closing more than needed is not a fault", judge_admission(5, 5, both_ids_a, both_ids_a, True))
+    check("judge_admission: no extra connection made is no pressure", not judge_admission(0, 0, both_ids_a, both_ids_a, True))
+    check("judge_admission: one more held than the node can hold is no refusal", not judge_admission(5, 5 - hx - 1, both_ids_a, both_ids_a, True))
+    check("judge_admission: every connection held is no refusal", not judge_admission(5, 0, both_ids_a, both_ids_a, True))
+    check("judge_admission: a session lost through A is harm", not judge_admission(5, 5 - hx, {B_ID}, both_ids_a, True))
+    check("judge_admission: an unanswered query through A is harm", not judge_admission(5, 5 - hx, None, both_ids_a, True))
+    check("judge_admission: a session lost through B is harm", not judge_admission(5, 5 - hx, both_ids_a, {A_ID}, True))
+    check("judge_admission: a pool not given back is not held", not judge_admission(5, 5 - hx, both_ids_a, both_ids_a, False))
     n = SPEC.framing_min_writes
     both_ids = {A_ID, B_ID}
     check("judge_framing: back, answered, and cut enough each way", judge_framing(True, both_ids, n, n))
