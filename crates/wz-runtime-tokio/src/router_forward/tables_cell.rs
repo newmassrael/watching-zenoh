@@ -43,6 +43,11 @@ pub(crate) struct TablesCell {
     form: Form,
 }
 
+/// The lock holds the tables in place, which makes `Locked` the larger variant by the size of the
+/// tables. A router has one cell, so the bytes the smaller variant leaves unused are counted once,
+/// while boxing the tables would add a pointer to follow on every read under `rwlock`, the
+/// upstream form every preset builds.
+#[allow(clippy::large_enum_variant)]
 enum Form {
     /// `rwlock`: the tables behind one reader-writer lock, written in place.
     Locked(PlainRwLock<Tables>),
@@ -142,7 +147,7 @@ impl TablesCell {
                 let writer = snapshot.writer.guard();
                 // The writers' lock is held, so no publish can come between the copy and the
                 // publishing of the draft.
-                let tables = Tables::clone(&snapshot.published.load());
+                let tables = Arc::new(Tables::clone(&snapshot.published.load()));
                 Write::Draft(Draft {
                     snapshot,
                     tables,
@@ -229,8 +234,8 @@ impl Snapshot {
 
     /// Make `tables` the version the readers load, and keep the one it replaces among the
     /// versions a grace period waits for. Called with the writers' lock held.
-    fn publish(&self, tables: Tables) {
-        let replaced = self.published.swap(Arc::new(tables));
+    fn publish(&self, tables: Arc<Tables>) {
+        let replaced = self.published.swap(tables);
         let mut retired = self.retired.guard();
         retired.retain(|version| version.strong_count() > 0);
         retired.push(Arc::downgrade(&replaced));
@@ -297,7 +302,9 @@ enum Write<'a> {
 /// The next version of a `snapshot` cell, while its writer writes it.
 struct Draft<'a> {
     snapshot: &'a Snapshot,
-    tables: Tables,
+    /// Allocated where it will be published, so that publishing stores it as it is. The draft is
+    /// its only holder until then, so a write through it never copies it again.
+    tables: Arc<Tables>,
     /// The writers' lock, held until the draft is published or abandoned.
     _writer: PlainGuard<'a, ()>,
 }
@@ -336,7 +343,7 @@ impl std::ops::DerefMut for TablesWrite<'_> {
     fn deref_mut(&mut self) -> &mut Tables {
         match &mut self.0 {
             Write::Locked(guard) => guard,
-            Write::Draft(draft) => &mut draft.tables,
+            Write::Draft(draft) => Arc::make_mut(&mut draft.tables),
         }
     }
 }
