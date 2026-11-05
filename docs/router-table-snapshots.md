@@ -177,7 +177,7 @@ behaviour under A.
 6. **What the measurement asks for, and only that**: persistent maps for a keyed table whose copy is
    measured to dominate a write, combining for writers if declaration bursts are measured to queue.
 
-### 6.1 The phase 0 reading (round 4282)
+### 6.1 The phase 0 reading (round 4286)
 
 `router_forward::table_sharing_tests::the_faces_and_the_writers_of_the_tables_measured_together`, release
 build with `routing-router-hat`, on the build machine of 22 cores and 30 GB with nothing else running, four
