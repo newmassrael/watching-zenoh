@@ -311776,6 +311776,66 @@
         "Phases 2 to 6 as filed in round 4281. The baseline compares against B only in phase 5; nothing here says what B costs."
       ]
     },
+    "Round 4287": {
+      "decision_summary": "Server-layer split, step 7b: the admin space leaves the session core for the admin crate above it. The read side (the local_data view and every admin leg), the buffers an answer is built in and the config-space membership move with their names, so a citation of a file still names one file and the stack contract, which names files by their base name, needed no change. The eight admin features leave the core and the admin crate keeps each name, composing the core features the core's feature composed; its default is the core's default, so a test command reads as it did. The arena proof test moves with the arena and names the core build it needs as required features, which a cfg in the test could not. The core keeps what the admin space reads, and one helper it reads becomes public. The core's direction list now holds only the storage config, step 9.",
+      "changes_bullets": [
+        "crates/wz-admin: adminspace.rs, admin_reply.rs and admin_config_space.rs moved from the core by name, their crate paths now naming wz_session_core; tests/admin_reply_fits.rs moved from the core with required-features naming the core build; features default, alloc, session-unicast, session-slot (the core's fixed backing, a selector) and the eight admin features; dependencies wz-runtime-core and log, dev-dependencies serde_json and hashbrown; doc links from items compiled without alloc to heap-only items made plain spans.",
+        "crates/wz-session-core: the eight admin features and three module declarations removed; connect_endpoints gated by connect-endpoints alone; LinkEndpoints::into_strings gated by alloc alone; encoding::packed_no_schema public; drive.rs compiles the decode and judgement of a unit (and their two imports) only where one of its callers is, alloc or the slot profile with the Frame codec.",
+        "docs/reason-review-pins.md: the session-close-ingress row of drive.rs moved; its clauses (admits_open, lifecycle_wire::tail_of) read against the file and unchanged.",
+        "crates/wz-runtime-tokio, wz-rest, wz-session-mcu, wz-session-lwip: the admin features forward to wz-admin (an optional dependency, a dev-dependency for the lwip tests); every admin path names wz_admin.",
+        "sources/features/wz-session-core.scxml regenerated from the manifest and out/wz-session-core regenerated: the feature guards of the removed features are gone.",
+        "scripts: run-ci admin lanes on wz-admin with a wz-admin clippy leg; nondefault-tests rows for wz-admin; feature_gate_diagnostic rows moved; layer_direction_gate IN_CORE down to storage_config; reduced_docs_ledger four lines fixed at their source and removed; deny_diagnostic_gate and depth_axis_census prose.",
+        "deploy/text_budget.json: the admin image's owner row moved 1,538 bytes from wz_session_core to wz_admin, measured on the built image.",
+        "Store: the reasons of the eight admin atoms re-cited to the new paths and crate.",
+        "Lockfiles of the workspace and of nine dependent trees."
+      ],
+      "verification_bullets": [
+        "pc2: every changed run-ci admin command printed its existing count (C1ak 54; C1AM adminspace 54, 51, 51, 59, 67; C1AN 46, 51; admin_connect 12; zid_hex 9; json5_lex 2; declare_adminspace 4; storage_manager_service 20; C1g admin_reply_fits 3; C1m admin_reply_fits 4, admin node slot 4).",
+        "pc2: the wz-admin wide row 118 passed and the fixed row 57; the core fixed row with the Err reply 1425; mcu 53; lwip admin_node_over_tcp 1; rest admin e2e 1.",
+        "pc2: clippy -D warnings on wz-admin (three feature sets, all targets), the core, mcu, lwip, tokio and rest; rustdoc -D warnings on wz-admin; cargo fmt clean.",
+        "Local: the six kit images built; the stack bound holds all six and the text gate five, the admin image after its owner row moved.",
+        "Local: the round-fed gates of pre-push, the feature census and diagnostic, the direction gate, the feature model, citation, reason pin, stack contract and deny-diagnostic gates, the catalog audit, the guarded-count oracle over the range, and Layers 0, C0e and C0f.",
+        "pc2: Layer C1bzr's measure of wz-admin, 10 reduced configurations, no finding the ledger does not carry; rustdoc -D warnings with every wz-admin feature; the core, the mcu fixed build and the lwip slot build clippy-clean after the drive.rs gates.",
+        "validate-workspace: no new T1 orphan after the re-citation."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "Server-layer split step 9: the storage config moves into the storage crate, the core's storage-backend feature goes, and the direction gate becomes strict.",
+        "The core's own reduced documentation configurations stop at a refused feature combination before documenting the admin space's former home; wz-admin is now measured in its own configurations, and its findings were fixed in this round."
+      ],
+      "publishable_decision_summary": "Server-layer split, step 7b: the admin space leaves the session core for the admin crate above it. The read side (the local_data view and every admin leg), the buffers an answer is built in and the config-space membership move with their names, so a citation of a file still names one file and the stack contract, which names files by their base name, needed no change. The eight admin features leave the core and the admin crate keeps each name, composing the core features the core's feature composed; its default is the core's default, so a test command reads as it did. The arena proof test moves with the arena and names the core build it needs as required features, which a cfg in the test could not. The core keeps what the admin space reads, and one helper it reads becomes public. The core's direction list now holds only the storage config, step 9.",
+      "publishable_changes_bullets": [
+        "crates/wz-admin: adminspace.rs, admin_reply.rs and admin_config_space.rs moved from the core by name, their crate paths now naming wz_session_core; tests/admin_reply_fits.rs moved from the core with required-features naming the core build; features default, alloc, session-unicast, session-slot (the core's fixed backing, a selector) and the eight admin features; dependencies wz-runtime-core and log, dev-dependencies serde_json and hashbrown; doc links from items compiled without alloc to heap-only items made plain spans.",
+        "crates/wz-session-core: the eight admin features and three module declarations removed; connect_endpoints gated by connect-endpoints alone; LinkEndpoints::into_strings gated by alloc alone; encoding::packed_no_schema public; drive.rs compiles the decode and judgement of a unit (and their two imports) only where one of its callers is, alloc or the slot profile with the Frame codec.",
+        "docs/reason-review-pins.md: the session-close-ingress row of drive.rs moved; its clauses (admits_open, lifecycle_wire::tail_of) read against the file and unchanged.",
+        "crates/wz-runtime-tokio, wz-rest, wz-session-mcu, wz-session-lwip: the admin features forward to wz-admin (an optional dependency, a dev-dependency for the lwip tests); every admin path names wz_admin.",
+        "sources/features/wz-session-core.scxml regenerated from the manifest and out/wz-session-core regenerated: the feature guards of the removed features are gone.",
+        "scripts: run-ci admin lanes on wz-admin with a wz-admin clippy leg; nondefault-tests rows for wz-admin; feature_gate_diagnostic rows moved; layer_direction_gate IN_CORE down to storage_config; reduced_docs_ledger four lines fixed at their source and removed; deny_diagnostic_gate and depth_axis_census prose.",
+        "deploy/text_budget.json: the admin image's owner row moved 1,538 bytes from wz_session_core to wz_admin, measured on the built image.",
+        "Store: the reasons of the eight admin atoms re-cited to the new paths and crate.",
+        "Lockfiles of the workspace and of nine dependent trees."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: every changed run-ci admin command printed its existing count (C1ak 54; C1AM adminspace 54, 51, 51, 59, 67; C1AN 46, 51; admin_connect 12; zid_hex 9; json5_lex 2; declare_adminspace 4; storage_manager_service 20; C1g admin_reply_fits 3; C1m admin_reply_fits 4, admin node slot 4).",
+        "pc2: the wz-admin wide row 118 passed and the fixed row 57; the core fixed row with the Err reply 1425; mcu 53; lwip admin_node_over_tcp 1; rest admin e2e 1.",
+        "pc2: clippy -D warnings on wz-admin (three feature sets, all targets), the core, mcu, lwip, tokio and rest; rustdoc -D warnings on wz-admin; cargo fmt clean.",
+        "Local: the six kit images built; the stack bound holds all six and the text gate five, the admin image after its owner row moved.",
+        "Local: the round-fed gates of pre-push, the feature census and diagnostic, the direction gate, the feature model, citation, reason pin, stack contract and deny-diagnostic gates, the catalog audit, the guarded-count oracle over the range, and Layers 0, C0e and C0f.",
+        "pc2: Layer C1bzr's measure of wz-admin, 10 reduced configurations, no finding the ledger does not carry; rustdoc -D warnings with every wz-admin feature; the core, the mcu fixed build and the lwip slot build clippy-clean after the drive.rs gates.",
+        "validate-workspace: no new T1 orphan after the re-citation."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Server-layer split step 9: the storage config moves into the storage crate, the core's storage-backend feature goes, and the direction gate becomes strict.",
+        "The core's own reduced documentation configurations stop at a refused feature combination before documenting the admin space's former home; wz-admin is now measured in its own configurations, and its findings were fixed in this round."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
