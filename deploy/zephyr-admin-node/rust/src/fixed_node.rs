@@ -36,7 +36,7 @@
 use core::cell::RefCell;
 
 use wz::link_lwip::LwipLink;
-use wz::runtime_coop::session_drive::PumpSlots;
+use wz::runtime_coop::session_drive::{pump_task_cell_bytes, PumpSlots};
 use wz::runtime_coop::session_runtime::SessionHandle;
 use wz::runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz::runtime_zephyr::glue::{log, log_args, stack_usage, yield_us};
@@ -66,6 +66,7 @@ use wz_session_core::slot_observer::{ObserverCell, Requesters};
 use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
+use wz_session_mcu::slot_dial::EventsOf;
 
 use crate::net_lwip::{LwipMacNet, MAX_PORTS, SOCKETS as SOCKET_POOL};
 use crate::{BATCH_SIZE, LISTEN_PORT, STACK_CHECK_MS, TICK_HZ};
@@ -79,11 +80,17 @@ pub const SOCKETS: usize = SESSIONS + 1;
 const LANES: usize = 1;
 /// The runtime's task table: a pump task per session, with room beside them.
 const TASKS: usize = SESSIONS + 1;
-/// Bytes of one task cell: the pump's handle and the application layer's state. The
-/// layer is about 4.9 KB (its requesters are 4.8 KB of them) and an `async fn` holds a
-/// by-value argument twice, so the cell is sized for two of them and the handle; the
-/// same number the host test of the slot node holds to the measured size.
-const TASK_BYTES: usize = 12288;
+/// Bytes of one task cell: what the task of a session is, as the compiler lays it out for this
+/// image's types (the pump's handle and the application layer's state, the layer being most of it:
+/// about 4.9 KB, its requesters 4.8 KB of them), and not a figure written beside it. A layer that
+/// grows grows the cell, and the cell is never one the spawn refuses. (The cell was 12,288 bytes
+/// while the task was an `async fn`, which holds a by-value argument twice.)
+const TASK_BYTES: usize = pump_task_cell_bytes::<
+    Clock,
+    LwipSessionLink<&'static LwipLink>,
+    LwipUdpDriver,
+    EventsOf<<Factory as SessionFactory<Clock, LwipUdpDriver>>::Events>,
+>();
 /// Timers the runtime holds: the handshake and lease deadlines of the sessions.
 const TIMERS: usize = 4;
 

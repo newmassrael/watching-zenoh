@@ -32,7 +32,7 @@ use wz::runtime_zephyr::stack::StackWatch;
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
 use wz_link_lwip::tcp::{LwipTcpListener, TcpSocketPool};
 use wz_runtime_coop::ip_stack::IpAcceptor;
-use wz_runtime_coop::session_drive::{PumpSlots, SlotStack};
+use wz_runtime_coop::session_drive::{pump_task_cell_bytes, PumpSlots, SlotStack};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::stream_link::NoStream;
 use wz_runtime_coop::udp_link::NoDatagram;
@@ -60,7 +60,7 @@ use wz_session_mcu::connect_manager::ControlledOpener;
 use wz_session_mcu::connect_manager::PeerStore;
 use wz_session_mcu::run_arena::{run_bytes_needed, RunArena};
 use wz_session_mcu::slot_admin::AcceptingAdminNode;
-use wz_session_mcu::slot_dial::SessionFactory;
+use wz_session_mcu::slot_dial::{EventsOf, SessionFactory};
 use wz_session_mcu::slot_host::SessionHost;
 
 use crate::net_lwip::{service_ports, LwipMacNet, MAX_PORTS};
@@ -79,8 +79,16 @@ pub const CELLS: usize = SESSIONS + QUEUE;
 pub const CONN_RX: usize = 3072;
 /// The runtime's task table: a pump task per session, with room beside them.
 const TASKS: usize = SESSIONS + 1;
-/// Bytes of one task cell: the pump's handle and the application layer's state (see `fixed_node`).
-const TASK_BYTES: usize = 12288;
+/// Bytes of one task cell: what the task of a session is, as the compiler lays it out for this
+/// image's types (the pump's handle and the application layer's state, the layer being most of it),
+/// and not a figure written beside it: a layer that grows grows the cell, and the cell is never one
+/// the spawn refuses.
+const TASK_BYTES: usize = pump_task_cell_bytes::<
+    Clock,
+    <Stack as SlotStack>::Pump,
+    Driver,
+    EventsOf<<Factory as SessionFactory<Clock, Driver>>::Events>,
+>();
 /// Timers the runtime holds: the handshake and lease deadlines of the sessions.
 const TIMERS: usize = 4;
 /// Extra bytes a link's receive buffer holds beyond one batch and its length.

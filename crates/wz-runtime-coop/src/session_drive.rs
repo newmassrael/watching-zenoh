@@ -1624,6 +1624,21 @@ where
     }
 }
 
+/// The bytes of a task cell that holds the task of a session ([`pump_task`]) over these types:
+/// the size an image declares for its runtime's cells, as a constant of the types it names, so
+/// that a layer that grows is a number that follows and not a spawn that is refused
+/// ([`crate::executor::SpawnRefusal::TooLarge`]).
+#[cfg(feature = "session-slot")]
+pub const fn pump_task_cell_bytes<C, L, D, F>() -> usize
+where
+    C: ClockSource,
+    L: SessionDatagramLink + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
+    F: EventSink,
+{
+    crate::executor::cell_bytes_of(pump_task::<C, L, D, F>)
+}
+
 /// Host the pump in `pump` as a task of `local` and return its join handle, or say
 /// why not. A refusal is counted (by the pump table when no cell was free, by the
 /// runtime's task table otherwise) and the pump, which this call owns, is dropped

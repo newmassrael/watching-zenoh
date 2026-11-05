@@ -433,6 +433,39 @@ fn a_task_made_in_its_cell_runs_and_a_refused_one_is_never_made() {
 }
 
 #[test]
+fn the_cell_bytes_of_a_future_are_exactly_what_a_spawn_checks_a_cell_against() {
+    // Written as a function returning a future because that is the form `cell_bytes_of` names.
+    #[allow(clippy::manual_async_fn)]
+    fn task(a: u64, b: [u8; 100]) -> impl Future<Output = u32> {
+        async move {
+            yield_now().await;
+            (a as u32) + u32::from(b[0])
+        }
+    }
+    const BYTES: usize = crate::executor::cell_bytes_of(task);
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    static FITS: RuntimeCell<Hand, 1, BYTES, 1> = RuntimeCell::new();
+    static ONE_SHORT: RuntimeCell<Hand, 1, { BYTES - 1 }, 1> = RuntimeCell::new();
+    let runtime = FITS
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
+    let local = CoopLocalSet::new(&runtime);
+    let handle = local
+        .spawn_local(task(3, [4; 100]))
+        .expect("a cell of exactly its bytes");
+    local.run_until_idle();
+    assert_eq!(local.block_on_local(handle).expect("answered"), 7);
+    let runtime = ONE_SHORT
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
+    let local = CoopLocalSet::new(&runtime);
+    assert!(matches!(
+        local.spawn_local(task(3, [4; 100])),
+        Err(refused) if refused.why == SpawnRefusal::TooLarge
+    ));
+}
+
+#[test]
 fn a_task_too_large_for_a_cell_is_refused_without_being_made() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static MADE: AtomicU32 = AtomicU32::new(0);

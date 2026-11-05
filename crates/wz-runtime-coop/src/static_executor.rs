@@ -252,6 +252,14 @@ const fn round_up(value: usize, align: usize) -> usize {
     value.div_ceil(align) * align
 }
 
+/// The bytes of a task cell that holds the future `make` returns and that future's output: what a
+/// spawn of it checks a cell against, as a constant. `make` is only the way to NAME the future,
+/// which an `async` block or an `impl Future` return has no other way to be named: pass the
+/// function that returns it, with its type arguments, and it is not called.
+pub const fn cell_bytes_of<A, B, R: Future>(_make: fn(A, B) -> R) -> usize {
+    round_up(size_of::<R>(), align_of::<R::Output>()) + size_of::<R::Output>()
+}
+
 /// Poll the future at `buf`; when it is ready, drop it in place and write its
 /// output at `out_off`.
 ///
