@@ -312020,6 +312020,54 @@
         "The UDP and TCP node images of the board table have no run on the kit (the lane does not carry them), so their two declarations in the resource budget stay declarations. A control with a cell one step too small, showing a refusal in a build with a derived cell, and the exhaustion tests of wz-session-lwip and the runtime's own tests (their cells are parameters), are not done. Hosted runs of this series are not read."
       ]
     },
+    "Round 4294": {
+      "decision_summary": "A declared node's identity can now be made on the device it runs on. The node binary takes `--make-identity <certificate> <private_key>`: it generates a P-256 key in PSA with export allowed, signs a self-signed certificate over it, and writes the key (SEC1 DER armoured as PEM, created 0600 with O_CREAT|O_EXCL|O_NOFOLLOW and fsynced) before the certificate beside it, then prints the certificate's PEM on stdout. Nothing is ever overwritten: when both files are there it reads them as the node would and prints the certificate that is there; when only one is there it makes nothing and says so, so that a key is never paired with a certificate that is not its own; a certificate that fails to write takes its key back. The key's DER and PEM are wiped once written. The vocabulary's identity entry names the command and states that it never overwrites, and the zenohd interop test now provisions both nodes with the node's own maker instead of the external tool, holding that the printed certificate equals the file, that the key is 0600, that a second run changes nothing, that half an identity is refused, and that each node proves the zid --zid-of names for its certificate.",
+      "changes_bullets": [
+        "crates/wz-tls-mbedtls/csrc/wz_tls.c, wz_tls.h, src/ffi.rs: wz_tls_identity_make_der, a key and its self-signed certificate as DER, the key zeroized on failure and destroyed in PSA after export.",
+        "crates/wz-tls-mbedtls/src/channel.rs: make_identity_der with MADE_CERT_DER_MAX and MADE_KEY_DER_MAX; pem() and PemLabel armour DER in Rust (the build has no PEM writer); certificate_pem uses it.",
+        "crates/wz-tls-mbedtls/src/tests.rs: a made identity read back from its PEM is the same certificate and proves the zid its certificate's key names; two made identities are two keys.",
+        "crates/wz-runtime-posix/src/file.rs: create_new (exclusive, 0600 for a secret, durable, removed on a failed write), exists, remove, CreateRefused; glue.rs: out_whole writes to stdout.",
+        "deploy/host-slot-node/src/tls.rs, src/bin/declared_node.rs: make_identity_files and the --make-identity argument (main is an unsafe extern \"C\" fn with its contract stated, since it reads argv); two clippy findings of this lib under declared,tls,listen-tls fixed (writeln!, PosixClock without default()).",
+        "scripts/lib/wz_node.py: the identity entry's make and makes; crates/wz-integration-tests/tests/wz_declared_commander_zenohd_interop.rs: the node makes the identities; docs/target-build-contract.md and scripts/run-ci.sh name the command."
+      ],
+      "verification_bullets": [
+        "bx on pc2 (32 cores), on the tree rebased onto origin: cargo test -p wz-tls-mbedtls --features vendored --lib, 3 passed (without vendored the crate's tests are not compiled and 0 run, so a run without it is not a pass); cargo test -p wz-runtime-posix --lib file, 3 passed; clippy -D warnings of both crates.",
+        "host-slot-node, built from deploy/nodes/generated/slot-commander.rs with declared,tls,verbs,listen,listen-tls as the interop test packages it: clippy --lib -D warnings rc 0; clippy --bin declared-node -D warnings rc 0 apart from absurd_extreme_comparisons, which fires on ten loops and asserts over the declaration's zero-valued counts that predate this round.",
+        "cargo test -p wz-integration-tests --test wz_declared_commander_zenohd_interop two_provisioned -- --ignored: 1 passed (both nodes made by the node's own --make-identity, printed certificate equals the file, key 0600, a second run changes nothing, half an identity refused, each node proves the zid --zid-of names).",
+        "python3 scripts/lib/wz_node.py --selftest rc 0; prose_named_identifier_gate --check, reason_review_pin_gate and reason_citation_gate rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Open: the identity maker's subject is fixed (CN=wz-host-slot-node); a declaration does not name a subject yet.",
+        "Open: no lane lints the declared node binary; under a declaration with zero-valued counts clippy's absurd_extreme_comparisons denies ten of its loops and asserts.",
+        "Open from round 4286: phase 1 of docs/router-table-snapshots.md (FaceRuntime) is verified apart and lands as its own round."
+      ],
+      "publishable_decision_summary": "A declared node's identity can now be made on the device it runs on. The node binary takes `--make-identity <certificate> <private_key>`: it generates a P-256 key in PSA with export allowed, signs a self-signed certificate over it, and writes the key (SEC1 DER armoured as PEM, created 0600 with O_CREAT|O_EXCL|O_NOFOLLOW and fsynced) before the certificate beside it, then prints the certificate's PEM on stdout. Nothing is ever overwritten: when both files are there it reads them as the node would and prints the certificate that is there; when only one is there it makes nothing and says so, so that a key is never paired with a certificate that is not its own; a certificate that fails to write takes its key back. The key's DER and PEM are wiped once written. The vocabulary's identity entry names the command and states that it never overwrites, and the zenohd interop test now provisions both nodes with the node's own maker instead of the external tool, holding that the printed certificate equals the file, that the key is 0600, that a second run changes nothing, that half an identity is refused, and that each node proves the zid --zid-of names for its certificate.",
+      "publishable_changes_bullets": [
+        "crates/wz-tls-mbedtls/csrc/wz_tls.c, wz_tls.h, src/ffi.rs: wz_tls_identity_make_der, a key and its self-signed certificate as DER, the key zeroized on failure and destroyed in PSA after export.",
+        "crates/wz-tls-mbedtls/src/channel.rs: make_identity_der with MADE_CERT_DER_MAX and MADE_KEY_DER_MAX; pem() and PemLabel armour DER in Rust (the build has no PEM writer); certificate_pem uses it.",
+        "crates/wz-tls-mbedtls/src/tests.rs: a made identity read back from its PEM is the same certificate and proves the zid its certificate's key names; two made identities are two keys.",
+        "crates/wz-runtime-posix/src/file.rs: create_new (exclusive, 0600 for a secret, durable, removed on a failed write), exists, remove, CreateRefused; glue.rs: out_whole writes to stdout.",
+        "deploy/host-slot-node/src/tls.rs, src/bin/declared_node.rs: make_identity_files and the --make-identity argument (main is an unsafe extern \"C\" fn with its contract stated, since it reads argv); two clippy findings of this lib under declared,tls,listen-tls fixed (writeln!, PosixClock without default()).",
+        "scripts/lib/wz_node.py: the identity entry's make and makes; crates/wz-integration-tests/tests/wz_declared_commander_zenohd_interop.rs: the node makes the identities; docs/target-build-contract.md and scripts/run-ci.sh name the command."
+      ],
+      "publishable_verification_bullets": [
+        "bx on pc2 (32 cores), on the tree rebased onto origin: cargo test -p wz-tls-mbedtls --features vendored --lib, 3 passed (without vendored the crate's tests are not compiled and 0 run, so a run without it is not a pass); cargo test -p wz-runtime-posix --lib file, 3 passed; clippy -D warnings of both crates.",
+        "host-slot-node, built from deploy/nodes/generated/slot-commander.rs with declared,tls,verbs,listen,listen-tls as the interop test packages it: clippy --lib -D warnings rc 0; clippy --bin declared-node -D warnings rc 0 apart from absurd_extreme_comparisons, which fires on ten loops and asserts over the declaration's zero-valued counts that predate this round.",
+        "cargo test -p wz-integration-tests --test wz_declared_commander_zenohd_interop two_provisioned -- --ignored: 1 passed (both nodes made by the node's own --make-identity, printed certificate equals the file, key 0600, a second run changes nothing, half an identity refused, each node proves the zid --zid-of names).",
+        "python3 scripts/lib/wz_node.py --selftest rc 0; prose_named_identifier_gate --check, reason_review_pin_gate and reason_citation_gate rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the identity maker's subject is fixed (CN=wz-host-slot-node); a declaration does not name a subject yet.",
+        "Open: no lane lints the declared node binary; under a declaration with zero-valued counts clippy's absurd_extreme_comparisons denies ten of its loops and asserts.",
+        "Open from round 4286: phase 1 of docs/router-table-snapshots.md (FaceRuntime) is verified apart and lands as its own round."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
