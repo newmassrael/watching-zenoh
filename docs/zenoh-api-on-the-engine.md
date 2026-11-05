@@ -1117,15 +1117,19 @@ Each lands whole with its surface lines, tests and faults in one round.
       faces or the node, and the open takes the node where `OpenPlan::node_for_south` says so.
       The operations of that ABI are written over the registry, and a node answers the ones it
       carries (its id, closing, put, delete, the subscriber, the publisher, get, the queryable,
-      the querier, liveliness and the matching of a publisher and a querier) and
-      `Z_EUNAVAILABLE` to the rest, which a handle that is not there (`Z_ENULL`) is not
-      mistaken for. The operations come over to the node one family at a time: put, delete,
-      the subscriber, the publisher, get, the queryable, the querier, liveliness and matching
-      are carried (a put whose payload is a chunk of shared memory goes out as the chunk,
-      its descriptor to a face that negotiated shared memory; the value of a get goes out as
-      bytes; and a get is ended by its cancellation token, which ends the one query the
-      node's face holds for it), then what is left (the shared-memory provider, the advanced
-      pair, the group). In a build with `router-node` a router opened through the C ABI is the
+      the querier, liveliness, the matching of a publisher and a querier, the stamp of a
+      timestamp and a declared key) and `Z_EUNAVAILABLE` to the rest, which a handle that is
+      not there (`Z_ENULL`) is not mistaken for. The operations come over to the node one
+      family at a time: put, delete, the subscriber, the publisher, get, the queryable, the
+      querier, liveliness and matching are carried (a put whose payload is a chunk of shared
+      memory goes out as the chunk, its descriptor to a face that negotiated shared memory;
+      the value of a get goes out as bytes; and a get is ended by its cancellation token,
+      which ends the one query the node's face holds for it), then the two that need only
+      the session's id: a timestamp is the node's id and the wall clock, and a declared key
+      is the key it names, with no alias bound (a node names every key whole on the wire, so
+      its undeclaration has none to retract), then what is left (the routers and peers of
+      a session, the transport and link events, the resource snapshot, the shared-memory
+      provider, the advanced pair, the group). In a build with `router-node` a router opened through the C ABI is the
       router data plane whatever it holds (`OpenPlan::node_role`), as the Rust API's is, and
       forwards between the clients that dial it; a peer or a client is a node there only where
       it keeps a south apart, and a build without `router-node` opens the registry of faces,

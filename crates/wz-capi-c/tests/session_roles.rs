@@ -29,6 +29,8 @@ use wz_capi_c::abi::{
     z_moved_session_t, z_owned_bytes_t, z_owned_closure_sample_t, z_owned_config_t,
     z_owned_session_t, z_owned_subscriber_t, z_view_keyexpr_t,
 };
+#[cfg(feature = "router-node")]
+use wz_capi_c::abi::{z_moved_keyexpr_t, z_owned_keyexpr_t};
 use wz_capi_c::bytes::z_bytes_copy_from_str;
 #[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
 use wz_capi_c::cancellation::{
@@ -42,7 +44,9 @@ use wz_capi_c::get::{z_closure_reply, z_get};
 #[cfg(all(feature = "router-node", not(feature = "zenoh-c-no-unstable-api")))]
 use wz_capi_c::get::{z_get_options_default, z_get_options_t};
 #[cfg(feature = "router-node")]
-use wz_capi_c::keyexpr::z_keyexpr_equals;
+use wz_capi_c::keyexpr::{
+    z_declare_keyexpr, z_keyexpr_equals, z_keyexpr_loan, z_undeclare_keyexpr,
+};
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 #[cfg(feature = "router-node")]
 use wz_capi_c::liveliness::{
@@ -85,9 +89,13 @@ use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_sess
 use wz_capi_c::sub::z_undeclare_subscriber;
 use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber};
 #[cfg(feature = "router-node")]
-use wz_capi_c::timestamp::{z_timestamp_new, z_timestamp_t};
+use wz_capi_c::timestamp::{
+    z_timestamp_id, z_timestamp_new, z_timestamp_ntp64_time, z_timestamp_t,
+};
 #[cfg(feature = "router-node")]
-use wz_capi_c::zid::z_info_zid;
+use wz_capi_c::zid::{
+    z_closure_zid, z_info_routers_zid, z_info_zid, z_moved_closure_zid_t, z_owned_closure_zid_t,
+};
 use wz_runtime_tokio_test_support::free_port;
 
 const KEYEXPR: &str = "wz/session-roles/demo";
@@ -353,12 +361,17 @@ fn a_gateway_south_of_subregions_opens_a_node_that_carries_little_yet() {
                 "the node has its own id ({mode})"
             );
             assert!(!z_session_is_closed(z_session_loan(&session)));
-            // The stamp of a session's clock is one of the operations a node does not carry yet.
-            let mut stamp: z_timestamp_t = std::mem::zeroed();
+            // The routers a session is linked to are one of the operations a node does not carry
+            // yet, and the closure given with the call is consumed all the same.
+            let mut closure: z_owned_closure_zid_t = std::mem::zeroed();
+            z_closure_zid(&mut closure, None, None, std::ptr::null_mut());
             assert_eq!(
-                z_timestamp_new(&mut stamp, z_session_loan(&session)),
+                z_info_routers_zid(
+                    z_session_loan(&session),
+                    (&mut closure as *mut z_owned_closure_zid_t).cast::<z_moved_closure_zid_t>(),
+                ),
                 Z_EUNAVAILABLE,
-                "a node does not carry a timestamp yet ({mode})"
+                "a node does not carry the routers of a session yet ({mode})"
             );
             assert_eq!(
                 z_close(z_session_loan_mut(&mut session), std::ptr::null_mut()),
@@ -435,6 +448,97 @@ fn a_node_opened_through_the_c_abi_puts_and_subscribes() {
         close_session(node);
         close_session(peer);
         drop(Box::from_raw(ctx_node));
+        drop(Box::from_raw(ctx_peer));
+    }
+}
+
+/// A node stamps a timestamp with the session's own id and the wall clock, and a key declared on
+/// it is the key it names: a put by the declared key reaches a registry peer that dials the node
+/// and subscribes to that key, and undeclaring it is no error.
+#[cfg(feature = "router-node")]
+#[test]
+fn a_node_stamps_a_timestamp_and_declares_a_key() {
+    let (port_node, port_peer) = (free_port(), free_port());
+    let mut node_entries = stated("peer", Some(port_node), None);
+    node_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+    ));
+    // SAFETY: fresh configs and sessions.
+    let (rc, node) = unsafe { open_with(&node_entries) };
+    assert_eq!(rc, Z_OK, "the node opens");
+    let (rc, peer) = unsafe { open_with(&stated("peer", Some(port_peer), Some(port_node))) };
+    assert_eq!(rc, Z_OK, "a registry peer dials the node");
+    // SAFETY: both sessions are live; the context is freed after them.
+    let (hits_peer, ctx_peer) = unsafe { count_samples(&peer) };
+    // SAFETY: the node is live, and every handle below is this test's own.
+    unsafe {
+        let mut stamp: z_timestamp_t = std::mem::zeroed();
+        assert_eq!(z_timestamp_new(&mut stamp, z_session_loan(&node)), Z_OK);
+        assert_eq!(
+            z_timestamp_id(&stamp).id,
+            z_info_zid(z_session_loan(&node)).id,
+            "the stamp names the node that minted it"
+        );
+        // The wall clock, as the registry's stamp: seconds since 1970 in the high half.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs();
+        let seconds = z_timestamp_ntp64_time(&stamp) >> 32;
+        assert!(
+            seconds.abs_diff(now) <= 5,
+            "the stamp reads the wall clock: {seconds} against {now}"
+        );
+
+        let ke = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+        let mut declared: z_owned_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_keyexpr(
+                z_session_loan(&node),
+                &mut declared,
+                z_view_keyexpr_loan(&view)
+            ),
+            Z_OK
+        );
+        assert!(
+            z_keyexpr_equals(z_keyexpr_loan(&declared), z_view_keyexpr_loan(&view)),
+            "the declared key is the key it names"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while hits_peer.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            let text = CString::new("declared").unwrap();
+            let mut payload: z_owned_bytes_t = std::mem::zeroed();
+            assert_eq!(z_bytes_copy_from_str(&mut payload, text.as_ptr()), Z_OK);
+            assert_eq!(
+                z_put(
+                    z_session_loan(&node),
+                    z_keyexpr_loan(&declared),
+                    (&mut payload as *mut z_owned_bytes_t).cast::<z_moved_bytes_t>(),
+                    std::ptr::null_mut(),
+                ),
+                Z_OK
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            hits_peer.load(Ordering::SeqCst) > 0,
+            "a put by the declared key never reached the peer"
+        );
+        assert_eq!(
+            z_undeclare_keyexpr(
+                z_session_loan(&node),
+                (&mut declared as *mut z_owned_keyexpr_t).cast::<z_moved_keyexpr_t>()
+            ),
+            Z_OK
+        );
+    }
+    // SAFETY: both sessions are live and owned here; the context is freed after them.
+    unsafe {
+        close_session(node);
+        close_session(peer);
         drop(Box::from_raw(ctx_peer));
     }
 }

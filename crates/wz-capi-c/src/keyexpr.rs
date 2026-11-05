@@ -1038,14 +1038,32 @@ pub unsafe extern "C" fn z_declare_keyexpr(
         // SAFETY: the caller's contract.
         unsafe { *declared_key_expr = z_owned_keyexpr_t::null_value() };
         // SAFETY: as above.
-        let (Some(state), Some(literal)) =
-            (unsafe { crate::session::session_state(session) }, unsafe {
+        let (Some(held), Some(literal)) =
+            (unsafe { crate::session::session_handle(session) }, unsafe {
                 keyexpr_str(key_expr)
             })
         else {
             return unsafe { crate::session::not_a_registry(session) };
         };
         let literal = literal.to_owned();
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            crate::session::SessionHandle::Registry(state) => state,
+            // A node names every key whole on the wire (a put by a declared key goes out by its
+            // text), so its declaration binds no alias: the key is the literal, the alias being
+            // a saving of bytes on a face and not a meaning.
+            #[cfg(feature = "router-node")]
+            crate::session::SessionHandle::Node(_) => {
+                let handle = Box::into_raw(Box::new(KeyexprState::new(literal))) as Handle;
+                // SAFETY: the slot was gravestoned above.
+                unsafe { *declared_key_expr = z_owned_keyexpr_t::from_handle(handle) };
+                return Z_OK;
+            }
+        };
         let Some(mapping) = state.shared.declare_keyexpr(literal.clone()) else {
             return Z_EINVAL;
         };
@@ -1089,8 +1107,19 @@ pub unsafe extern "C" fn z_undeclare_keyexpr(
             boxed.mapping
         };
         // SAFETY: the caller's contract.
-        let Some(state) = (unsafe { crate::session::session_state(session) }) else {
+        let Some(held) = (unsafe { crate::session::session_handle(session) }) else {
             return unsafe { crate::session::not_a_registry(session) };
+        };
+        // A build without `router-node` holds the registry alone, and the match has the one arm.
+        #[cfg_attr(
+            not(feature = "router-node"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match held {
+            crate::session::SessionHandle::Registry(state) => state,
+            // A node bound no alias at the declaration, so there is none to retract.
+            #[cfg(feature = "router-node")]
+            crate::session::SessionHandle::Node(_) => return Z_OK,
         };
         if let Some(mapping) = mapping {
             state.shared.undeclare_keyexpr(mapping);

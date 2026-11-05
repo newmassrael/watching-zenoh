@@ -35,7 +35,7 @@ use std::ffi::c_void;
 use crate::abi::z_loaned_session_t;
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ENULL, Z_OK};
-use crate::session::{not_a_registry, session_state};
+use crate::session::{not_a_registry, session_handle};
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
 /// zenoh-c `z_timestamp_t` (`zenoh_opaque.h:257-259`) — 24 bytes at ALIGNMENT 8.
@@ -142,7 +142,9 @@ pub unsafe extern "C" fn z_timestamp_new(
         // stamp a message with whatever was on its stack.
         unsafe { *this_ = z_timestamp_t::empty() };
         // SAFETY: the caller's contract.
-        let Some(state) = (unsafe { session_state(session) }) else {
+        // The stamp needs the session's zid and the wall clock, and both exist on a node as well
+        // as on the registry, so the handle is read, not the registry's state.
+        let Some(handle) = (unsafe { session_handle(session) }) else {
             return unsafe { not_a_registry(session) };
         };
         let mut stamped = z_timestamp_t::empty();
@@ -164,7 +166,7 @@ pub unsafe extern "C" fn z_timestamp_new(
         // stamps itself are now the same units by construction rather than by
         // coincidence.
         stamped._time = wz_runtime_tokio::timestamp_source::wall_clock_ntp64();
-        stamped._id = state.zid();
+        stamped._id = handle.zid();
         // SAFETY: checked non-null above.
         unsafe { *this_ = stamped };
         Z_OK
