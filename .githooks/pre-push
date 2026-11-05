@@ -2054,11 +2054,14 @@ fi
 # Run through the wrapper it builds on a build machine's own disk. Without `$BX`
 # it is the old behaviour (here), and the wrapper's refusal is final (no second
 # fallback; see gate 3).
-nd_run=(bash)
+# The array holds the WHOLE command, script path included, as gate 3's does:
+# `hook_gate_boundary_gate.py` reads a gate's surface off the command text it
+# runs, and an array holding only `bash` hides that this gate reads the checkout.
+nd_run=(bash scripts/lib/nondefault-tests-gate.sh)
 if [[ -n "${BX:-}" && -x "${BX}" ]]; then
-    nd_run=("${BX}" --label "pre-push-nondefault" -- bash)
+    nd_run=("${BX}" --label "pre-push-nondefault" -- bash scripts/lib/nondefault-tests-gate.sh)
 fi
-if ! "${nd_run[@]}" scripts/lib/nondefault-tests-gate.sh; then
+if ! "${nd_run[@]}"; then
     echo "" >&2
     echo "pre-push: [gate 2h] non-default-feature TESTS FAILED — a check that only a" >&2
     echo "          feature build can run is red, or a leg's filter matched no" >&2
@@ -2099,11 +2102,12 @@ fi
 # legs above have not already built -- it reads `cargo test -- --list` per crate
 # -- so it is the cheap half of what C1cn does hosted, and the half that catches
 # the population error rather than a code error.
-census_run=(bash)
+# The whole command in the array, for the reason gate 2h above gives.
+census_run=(bash scripts/lib/nondefault-tests-gate.sh --census)
 if [[ -n "${BX:-}" && -x "${BX}" ]]; then
-    census_run=("${BX}" --label "pre-push-census" -- bash)
+    census_run=("${BX}" --label "pre-push-census" -- bash scripts/lib/nondefault-tests-gate.sh --census)
 fi
-if ! "${census_run[@]}" scripts/lib/nondefault-tests-gate.sh --census; then
+if ! "${census_run[@]}"; then
     echo "" >&2
     echo "pre-push: [gate 2h2] a test only a FEATURE build reaches is claimed by" >&2
     echo "          no leg, so nothing runs it — it passes every gate by not being" >&2
