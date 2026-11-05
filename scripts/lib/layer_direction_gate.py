@@ -77,7 +77,6 @@ SERVER_STEM = re.compile(r"^(?:storage_\w+|admin\w*|extauth_\w+)$")
 IN_CORE = frozenset(
     {
         "admin_config_space",
-        "admin_connect",
         "admin_reply",
         "adminspace",
         "storage_config",

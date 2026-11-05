@@ -192,6 +192,10 @@ group = [
 ]
 adminspace-write = [
     "dial",
+    # The write is decided by wz-admin's `admin_connect` (server-layer split, step 6); the
+    # core's feature of the same name keeps the config space and the endpoint list it reads.
+    "dep:wz-admin",
+    "wz-admin/adminspace-write",
     "wz-session-core/adminspace-write",
     "pubsub-put",
     "wz-session-core/pubsub-delete",
@@ -231,6 +235,9 @@ wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, featu
 # Runtime-agnostic session SSOT: the action bundle, the engine-free FSM, the
 # admin answerers. no_std selects the heapless engine; alloc the bundle.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["session-unicast", "no_std"] }
+# R2828 — the config-write decision `admin_host` applies (`wz_admin::admin_connect`), above the
+# core since the server-layer split. Optional, pulled only by `adminspace-write`.
+wz-admin = { path = "../wz-admin", default-features = false, optional = true }
 # R2828 — `admin_host::ConnectControl` locks with the same IRQ-disabling Mutex
 # the cooperative runtime uses. No impl feature here: the firmware (or the std
 # impl in dev-dependencies, for host tests) supplies it at link time.

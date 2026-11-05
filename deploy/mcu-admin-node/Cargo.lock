@@ -1026,6 +1026,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-admin"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-codecs"
 version = "0.1.0"
 dependencies = [
@@ -1146,6 +1154,7 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "heapless",
+ "wz-admin",
  "wz-runtime-coop",
  "wz-runtime-core",
  "wz-session-core",

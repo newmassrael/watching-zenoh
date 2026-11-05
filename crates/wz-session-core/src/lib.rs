@@ -896,7 +896,8 @@ pub mod retry_period;
 
 /// R2824 (§5.23) — which sub-key a config write names in a node's config
 /// space, with no allocator: the membership gates the AP decoder
-/// (`adminspace`) and the MCU decoder (`admin_connect`) both run.
+/// (`adminspace`) and the MCU decoder (`admin_connect`, the wz-admin crate's
+/// since the server-layer split, step 6) both run.
 #[cfg(any(feature = "adminspace-fixed", feature = "adminspace-write"))]
 pub mod admin_config_space;
 
@@ -906,11 +907,10 @@ pub mod admin_config_space;
 #[cfg(any(feature = "connect-endpoints", feature = "adminspace-write"))]
 pub mod connect_endpoints;
 
-/// R2824 (§5.23 `adminspace-write`) — upstream's `connect/endpoints` config
-/// write, decided with no allocator, so an MCU can be told which peers to hold
-/// sessions with. The AP half of the write surface is `adminspace`.
-#[cfg(feature = "adminspace-write")]
-pub mod admin_connect;
+// R2824 (§5.23 `adminspace-write`) — upstream's `connect/endpoints` config write, decided with
+// no allocator, is the wz-admin crate's `admin_connect` (server-layer split, step 6). This
+// crate keeps the two things it reads, `admin_config_space` and `connect_endpoints` above,
+// under the same `adminspace-write`, and never names the crate above it.
 
 // The keys of the documents wz serves that upstream does not, under the one root outside `@/`.
 // Documented in its own `//!`; a plain comment here for the reason noted at `event_ring`.

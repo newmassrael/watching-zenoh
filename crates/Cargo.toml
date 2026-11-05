@@ -168,9 +168,11 @@ members = [
     "wz-runtime-core",
     "wz-session-core",
     # The server layer above the core, one crate per concern, each built on the core and never
-    # named by it (`scripts/lib/layer_direction_gate.py`): the auth methods and the storage plane.
+    # named by it (`scripts/lib/layer_direction_gate.py`): the auth methods, the storage plane and
+    # the admin space.
     "wz-auth",
     "wz-storage",
+    "wz-admin",
     "wz-session-core-test-support",
     "wz-statechart-bridge",
     # The watching-zenoh client of SCE Mesh's Zenoh binding: a wz session behind the `ZenohClient`

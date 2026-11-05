@@ -1134,6 +1134,10 @@ storage-mgr-garbage-collection,\
 storage-mgr-strip-prefix,\
 storage-mgr-wildcard-updates,\
 storage-replication|"
+    # The admin space's MCU config-write decoder is the wz-admin crate's (server-layer split,
+    # step 6), and its tests went with it; the core's wide leg ran them before under this same
+    # feature name. No filter, so a test added there later is claimed without touching the row.
+    "wz-admin|hook|adminspace-write|"
     # S9d, the end-to-end half: `wz-session-lwip`'s `tests/slot_control_records.rs`
     # drives a real session pair on the host lwIP loopback and counts one acceptor
     # iteration per control record. It names `codec-response-final` beside the slot

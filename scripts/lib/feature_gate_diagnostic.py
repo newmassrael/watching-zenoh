@@ -112,6 +112,11 @@ AXIS: dict[str, str] = {
     # moved it: a consumer now types `wz_storage::storage_plugin_config`, so the
     # probe is this crate's, read off its root as the core's are.
     "wz-storage": "wz_storage",
+    # The admin space, above the core since the server-layer split. Its
+    # `adminspace-write` gates `admin_connect` at the crate root, which the
+    # core's crate root gated until step 6 moved it: a consumer now types
+    # `wz_admin::admin_connect`, so the probe is this crate's.
+    "wz-admin": "wz_admin",
 }
 
 # package -> feature -> the probes that prove a consumer is told about it.
@@ -154,6 +159,7 @@ PROBES: dict[str, dict[str, list[tuple[str, str, frozenset[str]]]]] = {
     "wz-session-core": {},
     # Derived, as the core's: an empty entry says every probe is read off the root.
     "wz-storage": {},
+    "wz-admin": {},
 }
 
 # package -> feature -> why it gates no public path. A reason is what the next
@@ -435,6 +441,8 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "fields only, which the census re-derives every run"
         ),
     },
+    # Its one feature gates `admin_connect` at the crate root, probed off the root.
+    "wz-admin": {},
 }
 
 # package -> feature -> why it is not probed YET, though it does gate a public
@@ -622,6 +630,12 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "gated here' without naming a feature -- measured on 1.97.0"
             )
             for f in (
+                # Server-layer split, step 6: `pub mod admin_connect`, the one public item
+                # this feature gated alone, is the wz-admin crate's. What the core keeps
+                # under it is the config space and the endpoint list the decoder reads,
+                # `admin_config_space` behind `any(adminspace-fixed, adminspace-write)` and
+                # `connect_endpoints` behind `any(connect-endpoints, adminspace-write)`.
+                "adminspace-write",
                 "attachment-bytes",
                 # R3291 -- `bounded-heapless` LEFT this list by the R2686 route.
                 # It was here because every public item it gated sat behind
@@ -781,6 +795,7 @@ DEFERRED: dict[str, dict[str, str]] = {
             "adjudicates"
         ),
     },
+    "wz-admin": {},
 }
 
 # A crate-root item a `#[cfg(feature)]` is attached to, by the shape that names

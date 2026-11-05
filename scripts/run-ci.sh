@@ -8099,8 +8099,11 @@ layer_c1am_cargo_test_adminspace() {
     # and the default feature set does not name `adminspace-write`.
     # R2841 9 -> 12: upstream's locators-object element (a group, an empty
     # group with an unknown member, and what upstream's visitor refuses).
+    # Server-layer split, step 6: the decoder is the wz-admin crate's, which
+    # takes the core with no default features and turns on the core's
+    # `adminspace-write` through its own, so the build is the same one.
     _runci_guarded_test "C1AM admin_connect no-alloc 12" 12 \
-        cargo test -p wz-session-core --no-default-features --features adminspace-write --lib admin_connect --quiet || return 1
+        cargo test -p wz-admin --no-default-features --features adminspace-write --lib admin_connect --quiet || return 1
     _runci_guarded_test "C1AM json5_lex no-alloc 2" 2 \
         cargo test -p wz-session-core --no-default-features --features adminspace-write --lib json5_lex --quiet || return 1
     # The read-side resolver had NO guarded filter at all (only the write side did),

@@ -4,7 +4,7 @@
 //! R2828 (§5.23 `adminspace-write`) — an MCU node HOSTS upstream's
 //! `connect/endpoints` config write.
 //!
-//! `wz_session_core::admin_connect` decides a write; this module is where a
+//! `wz_admin::admin_connect` decides a write; this module is where a
 //! running node receives one. It registers, on the node's application-layer
 //! observer (`crate::app_layer`), a subscriber for the node's own config
 //! space, `@/<zid>/<whatami>/config/**` — the key upstream's admin space
@@ -35,10 +35,15 @@ use alloc::string::String;
 use core::cell::RefCell;
 
 use critical_section::Mutex;
-use wz_session_core::admin_config_space::write_config_space_pattern;
-use wz_session_core::admin_connect::{
-    parse_connect_endpoints_write, ConfigWriteBody, ConnectEndpoints, ConnectWriteOutcome,
+use wz_admin::admin_connect::{
+    parse_connect_endpoints_write, ConnectEndpoints, ConnectWriteOutcome,
 };
+use wz_session_core::admin_config_space::write_config_space_pattern;
+
+/// The write as it arrived, which [`ConnectControl::apply`] takes: named here as well as in
+/// `wz_admin::admin_connect`, so a host that drives this module names the types of its
+/// signatures through it.
+pub use wz_admin::admin_connect::ConfigWriteBody;
 use wz_session_core::locality::Locality;
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::observer::ApplicationLayerObserver;
@@ -258,7 +263,7 @@ impl crate::admin_status::ConnectStatusSource for ConnectControl {
 /// the form it was written, an empty group included.
 #[cfg(feature = "adminspace-fixed")]
 fn push_connect_endpoints(
-    list: &[wz_session_core::admin_connect::ConnectEntry],
+    list: &[wz_session_core::connect_endpoints::ConnectEntry],
     out: &mut dyn TextOut,
 ) {
     // R2843 — the entry type is named HERE, not in the module's `use` list:

@@ -178,8 +178,11 @@ adminspace-fixed = [
 connect-endpoints = []
 
 # adminspace-write (§5.23) — R2824: upstream's config-WRITE surface for
-# `connect/endpoints` WITHOUT an allocator (`admin_connect`), so an MCU can be
-# told at runtime which peers to hold sessions with. It composes the same two
+# `connect/endpoints` WITHOUT an allocator, so an MCU can be told at runtime
+# which peers to hold sessions with. The decoder (`admin_connect`) is the
+# wz-admin crate's since the server-layer split (step 6), whose feature of this
+# name turns this one on; here it keeps what the decoder reads, the config-space
+# membership and the endpoint list (`connect_endpoints`). It composes the same two
 # wildcard features as adminspace-core and for the same reason: membership in
 # the config space is decided by set semantics (`admin_config_space`), and `*`
 # / `**` are part of the space's own definition. It deliberately does NOT

@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-admin — the admin space of a node, the server layer's management surface: the wz mirror of
+# zenoh's admin space, the `@/<zid>/<whatami>/**` keys a host reads a node's state from and
+# writes its config through. The modules arrive from the core one landable step at a time
+# (server-layer split, steps 6-8); this crate holds today the config-WRITE surface an MCU can
+# carry (`admin_connect`). The read side (`adminspace`, `admin_reply`) and the config-space
+# membership both decoders share (`admin_config_space`) are still the core's, and the dependency
+# points one way: this crate is built on the core and the core never names it
+# (`scripts/lib/layer_direction_gate.py`).
+#
+# Every feature keeps the name it had in the core, so a deploy's switch reads the same; what a
+# feature needs of the core is named in its list.
+#
+# no_std with NO allocator: the write surface here exists for the targets that have none.
+[package]
+name = "wz-admin"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The admin space of a wz node: the keys a host reads a node's state from and writes its config through."
+
+[lib]
+name = "wz_admin"
+path = "src/lib.rs"
+
+[features]
+# adminspace-write (§5.23) — R2824: upstream's config-WRITE surface for `connect/endpoints`
+# WITHOUT an allocator (the `admin_connect` module), so an MCU can be told at runtime which peers
+# to hold sessions with. The same name as the core's feature, which is the one switch: the core's
+# keeps the two things this module reads, the config-space membership (`admin_config_space`) and
+# the endpoint list the write fills (`connect_endpoints`), with the wildcard matcher and the Push
+# a write arrives as. It does not compose `alloc`: the AP write surface needs a heap and lives
+# with the read side, and this one exists for the targets that have none.
+adminspace-write = ["wz-session-core/adminspace-write"]
+
+[dependencies]
+# The config-space membership, the endpoint list, the capacity constants and the JSON5 lexer the
+# write is decided with.
+wz-session-core = { path = "../wz-session-core", default-features = false }
+# The fixed-room pattern the config space is matched against, and the endpoint list the decoder
+# fills before it is handed over; the core's version, so the two name one type.
+heapless = { version = "0.8", default-features = false }
+
+[lints]
+workspace = true

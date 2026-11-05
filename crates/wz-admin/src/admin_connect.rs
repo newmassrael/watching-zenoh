@@ -57,18 +57,18 @@
 //! address can therefore reach the dial layer here; it cannot be applied as a
 //! connection, and the dial layer says so.
 
-use crate::admin_config_space::{
+use wz_session_core::admin_config_space::{
     subkey_in_config_space, write_config_space_pattern, ConfigSpaceRefusal,
 };
-use crate::caps::MAX_STATIC_CONNECT;
-use crate::json5_lex::{Json5Error, Lexer};
+use wz_session_core::caps::MAX_STATIC_CONNECT;
+use wz_session_core::json5_lex::{Json5Error, Lexer};
 
 /// The config sub-key this surface carries, as upstream spells it.
 pub const CONNECT_ENDPOINTS_SUBKEY: &str = "connect/endpoints";
 
 // The list the write fills is not the write's: it is `connect_endpoints`'s, and a node that learns its
 // endpoints some other way holds the same type. The names stay reachable from here.
-pub use crate::connect_endpoints::{
+pub use wz_session_core::connect_endpoints::{
     group_len, ConnectEndpoints, ConnectEntry, EndpointGroup, EndpointText, LocatorsStrategy,
 };
 
@@ -100,7 +100,7 @@ pub enum ConnectWriteOutcome {
     Malformed(Json5Error),
     /// More endpoints than [`MAX_STATIC_CONNECT`].
     TooMany,
-    /// One endpoint is longer than [`MAX_LOCATOR_LEN`](crate::caps::MAX_LOCATOR_LEN) bytes.
+    /// One endpoint is longer than [`MAX_LOCATOR_LEN`](wz_session_core::caps::MAX_LOCATOR_LEN) bytes.
     EndpointTooLong,
     /// An endpoint is not `<proto>/<address>`.
     NotAnEndpoint,
@@ -495,7 +495,7 @@ fn endpoint_shape_ok(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::MAX_LOCATOR_LEN;
+    use wz_session_core::caps::MAX_LOCATOR_LEN;
     // `std`, not `alloc`: this module builds without an allocator, and the
     // crate links `std` for tests only (lib.rs).
     use std::format;

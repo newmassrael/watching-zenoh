@@ -45,7 +45,6 @@ use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::PumpSlots;
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
-use wz_session_core::admin_connect::ConfigWriteBody;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -60,7 +59,7 @@ use wz_session_lwip::{LwipLinks, LwipSessionLink};
 use wz_session_mcu::admin_fixed::{
     host_admin_queryable_fixed, AdminHost, AdminSinks, FixedNodeIdentity, FixedNodeStatus,
 };
-use wz_session_mcu::admin_host::{host_connect_writes_fixed, ConnectControl};
+use wz_session_mcu::admin_host::{host_connect_writes_fixed, ConfigWriteBody, ConnectControl};
 use wz_session_mcu::app_layer::{NoReplies, SlotApp, SlotDispatch};
 use wz_session_mcu::connect_manager::{NodeRefusal, NodeState, PeerStore, SlotState};
 
