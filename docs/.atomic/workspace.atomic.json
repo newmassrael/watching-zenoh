@@ -310672,6 +310672,34 @@
         "Server layer split step 6: admin_connect into a new wz-admin crate"
       ]
     },
+    "Round 4255": {
+      "decision_summary": "Layer C1m's coop static runtime guard expected 16 and the command now prints 19, after two other sessions' commits (4f1f19988e, 6a540bdfaa) each added tests to static_tests. The guard moved to 19. The six reduced-feature lanes of round 4249 were run on a build host: C1h, C1g, C1ax, C1bnl and C1cf pass; C1m passes with this change.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: the C1m coop static runtime guard from 16 to 19."
+      ],
+      "verification_bullets": [
+        "Layer C1m on a build host: all 81 guarded legs reached, rc=0 (the lane stopped at the guard before, 66 of 81 reached). Two earlier runs on another host stopped on Text file busy (os error 26) in a build script under that host's load, in different crates, which is the host and not the tree."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the hosted run of round 4249 (CI 41960795503) was still pending when this was filed; its per-job result is to be read. Layers Qzk and Qzb were not run here. SCE main moved 65 commits past the pin (reserved Rust destinations, 0907db47a2); the pin move is the next round."
+      ],
+      "publishable_decision_summary": "Layer C1m's coop static runtime guard expected 16 and the command now prints 19, after two other sessions' commits (4f1f19988e, 6a540bdfaa) each added tests to static_tests. The guard moved to 19. The six reduced-feature lanes of round 4249 were run on a build host: C1h, C1g, C1ax, C1bnl and C1cf pass; C1m passes with this change.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: the C1m coop static runtime guard from 16 to 19."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C1m on a build host: all 81 guarded legs reached, rc=0 (the lane stopped at the guard before, 66 of 81 reached). Two earlier runs on another host stopped on Text file busy (os error 26) in a build script under that host's load, in different crates, which is the host and not the tree."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the hosted run of round 4249 (CI 41960795503) was still pending when this was filed; its per-job result is to be read. Layers Qzk and Qzb were not run here. SCE main moved 65 commits past the pin (reserved Rust destinations, 0907db47a2); the pin move is the next round."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
