@@ -184,7 +184,7 @@ config WZ_CAP_GOSSIP
 
 config WZ_CAP_ROUTER_NODE
 	bool "router-node"
-	default n
+	default y
 	select WZ_CAP_PEER
 	select WZ_CAP_MULTICAST_TRANSPORT
 	select WZ_CAP_QUERY

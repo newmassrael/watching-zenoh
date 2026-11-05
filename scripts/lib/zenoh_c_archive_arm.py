@@ -268,7 +268,7 @@ CAPABILITY_FEATURES = frozenset({
     "multicast-transport",
     # A session that forwards between its faces, opened where a config keeps its south apart
     # (`gateway/south`): the handle of a session holds it beside the registry of faces, and a
-    # type's footprint is not moved by it. Off in the default, which is zenoh-c's own.
+    # type's footprint is not moved by it. On in the default, as a router is in zenoh-c's own.
     "router-node",
     # The four instruments of the observation plane: wz's own doors, which zenoh-c has not and
     # which are off in a build made as the reference is. They add doors and no type, so none of

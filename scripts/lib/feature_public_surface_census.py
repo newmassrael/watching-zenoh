@@ -299,6 +299,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # R3418 -- the two node-config features left the row when Round 3417 made them
     # capabilities, on in this crate's default build: a default feature is not on this
     # census's axis, and a row that keeps naming one waits for nothing.
+    # 2026-11-05 -- `router-node` (and the `routing-namespace` it implies) left the `wz-capi-core`
+    # row when it became a capability on in the default build (`deploy/wz-config.toml`): the
+    # router node (`drive::RouterState`, `OpenArguments::run_router`) and the namespace of the
+    # node are what a default build holds, the top crate `zenoh` still turning both on for its
+    # own router and namespace tests.
     # R3494 -- a member of the zenoh compatibility family (`api-compat-rust`): its features are
     # the arms of upstream's own surface. Held to `FAMILY_GRADED` below.
     "zenoh-keyexpr": (
@@ -380,18 +385,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "(`wz-capi-c`'s `zenoh-c-shared-memory`). What a C program can reach is "
         "that crate's symbol set, graded against upstream's own library, and the "
         "gated methods are exercised by that arm's legs against upstream's own "
-        "subscriber; `routing-namespace` gates the `namespace` of the node (the field of "
-        "`SessionResources`, the accessor of the shared session) and is turned on by the top "
-        "crate `zenoh`, whose upstream namespace tests run against it (slice Z8a of "
-        "docs/zenoh-api-on-the-engine.md), while the plan's own test holds both its "
-        "arms, a build that carries the prefix and a build that refuses it by its key; "
-        "`router-node` gates the router node (`drive::RouterState` and "
-        "`OpenArguments::run_router`), turned on by the top crate `zenoh` alone, whose "
-        "router tests (`api::session::tests::router_session`) and upstream's scouting, "
-        "timestamp instrumentation and liveliness files run against it; `resource-snapshot` "
+        "subscriber; `resource-snapshot` "
         "gates the accessor `SharedSession::message_reading`, the node's received-message "
         "count, which the pico crate's `snapshot_doors` test reads through the doors",
-        frozenset({"resource-snapshot", "router-node", "routing-namespace", "transport-shm"}),
+        frozenset({"resource-snapshot", "transport-shm"}),
     ),
     "wz-capi-coop": (
         "the cooperative engine behind a wz C ABI: a workspace-internal rlib the C ABI crate "

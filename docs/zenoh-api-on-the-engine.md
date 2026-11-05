@@ -1112,8 +1112,8 @@ Each lands whole with its surface lines, tests and faults in one round.
       router and a peer it places in its south, and a put from the peer reaches a subscriber on
       the router through it (with the fit and the refusal both removed, the put does not cross).
       A client that is told no router scouts for one, which no node carries, and is still refused.
-      The C ABI holds a node as well, in a build with its own `router-node` feature (off by
-      default, as zenoh-c's is): the handle of a session is a `SessionHandle`, the registry of
+      The C ABI holds a node as well, in a build with its own `router-node` feature (on by
+      default, as a router is in zenoh-c's own build): the handle of a session is a `SessionHandle`, the registry of
       faces or the node, and the open takes the node where `OpenPlan::node_for_south` says so.
       The operations of that ABI are written over the registry, and a node answers the ones it
       carries (its id, closing, put, delete, the subscriber, the publisher, get, the queryable,
@@ -1158,11 +1158,15 @@ Each lands whole with its surface lines, tests and faults in one round.
       it keeps a south apart, and a build without `router-node` opens the registry of faces,
       which forwards nothing, for every role. `router-node` is a capability of
       `deploy/wz-config.toml` (the C ABI and the core export it): on in zenoh's and zenoh-c's
-      own default builds (`configs/zenoh_defconfig`, `configs/zenoh-c_defconfig`) and off in
-      the C ABI's default build, so a drop-in built by default is a router that forwards
-      nothing, which `upstream_on` set against `default = "off"` states as the gap. A profile
-      that is a client states it off (`host-client-tcp-query`), since it implies the peer role
-      and the query and liveliness planes.
+      own default builds (`configs/zenoh_defconfig`, `configs/zenoh-c_defconfig`) and on in
+      the C ABI's default build, which is the zenoh-c preset, so a drop-in built by default is
+      a router that forwards between its clients (until 2026-11-05 it was off there, and a
+      drop-in built by default was a router that forwarded nothing: `upstream_on` set against
+      `default = "off"` stated that as the gap, and the default's removal pays it). The node
+      is 1,285,904 bytes of text (13.3 percent) of the default build, read by
+      `capic-default` against `capic-default-lean`, the default without it, in the cost gate.
+      A profile that is a client states it off (`host-client-tcp-query`), since it implies the
+      peer role and the query and liveliness planes, and a build that leaves it out says so.
     - **Open:** `routing` (the two above) and `open_time` (its tests are ignored upstream).
     - **The hosted lane (Layer Z8, `z8-upstream` in `ci.yml`) and the table it holds the report
       to.** `docs/z8-expected.tsv` names, for each file of upstream's `zenoh/tests`, the outcome

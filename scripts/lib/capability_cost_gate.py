@@ -670,9 +670,18 @@ CASES: tuple[Case, ...] = (
     # capacity, another session's: its growth, by that and not by a reading at that commit, and
     # `capic-router-node` grew by the same 29,492). The budget is that reading, 3,184 and 3,500, to
     # the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_642_000,
-         forbid=(ROUTER_NODE,),
-         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
+    # 2026-11-05 -- `router-node` is on in the default (the owner's decision of that day: the
+    # default of this ABI is zenoh-c's preset, and zenoh-c opens a router in its default build), so
+    # this case holds the node and the forbid of its symbols is gone. The build without it is
+    # `capic-default-lean`, the same features but that one, whose budget is the one this case had
+    # before the node was linked in. Read on a build machine (hkl002) at `0f06557ed6` with the
+    # change: 10,921,145 text and 836 exports, against 9,635,241 and 836 for the lean case on the
+    # same tree, so the node is 1,285,904 bytes (13.3 percent) and adds no export of its own (the
+    # doors it reads through are the ABI's, in both). The budget is that reading, 3,184 for the
+    # hosted lane's difference from this machine and 3,500, to the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 10_927_900,
+         require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
+                  MULTICAST),
          exports=836,
          note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
               "rsa): 8,866,359 measured, up from about 5.1 MB without them; 9,029,823 with "
@@ -709,6 +718,22 @@ CASES: tuple[Case, ...] = (
               "to it. The growth that remains over the earlier budget is not attributed to "
               "one commit: the budget moves to the hosted reading of `d46109c70a` and 3,500, "
               "rounded up to the hundred"),
+    # The default build of the C ABI with `router-node` left out: what a build that says so
+    # (a client, a small peer, `CONFIG_WZ_CAP_ROUTER_NODE=n`) pays, kept graded so that the node
+    # being on in the default does not make the build without it free to grow. The features are
+    # the default list of `crates/wz-capi-c/Cargo.toml` less `router-node`; `wz_config` holds the
+    # manifest to the declaration, and this case to the manifest (the case's features are read as
+    # cargo resolves them, so a feature added to the default and not here shows as a difference in
+    # `require`). Its first reading is the budget `capic-default` had at 6dc6c68d9c.
+    Case("capic-default-lean", "wz-capi-c", "libwz_capi_c.so",
+         "link-udp,timestamping,peer,scout,query,queryable,liveliness,liveliness-get,advanced,"
+         "group,gossip,transport_tls,transport_quic,transport_quic_datagram,transport_ws,"
+         "transport_unixsock-stream,transport_multilink,auth_pubkey,e2e-sender,"
+         "transport_compression,auth_usrpwd,interceptors,multicast-transport",
+         9_642_000,
+         forbid=(ROUTER_NODE,),
+         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
+         note="the default of the C ABI without the router node"),
 )
 
 

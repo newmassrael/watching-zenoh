@@ -103,6 +103,9 @@ default = [
     "auth_usrpwd",
     "interceptors",
     "multicast-transport",
+    # The router data plane behind a session: zenoh-c opens a router as one by default, so the
+    # default build does (`deploy/wz-config.toml`, `router-node`).
+    "router-node",
 ]
 # The roles beyond the client: a listener, a router or a peer, and the gossip that introduces
 # the nodes of a mesh. A build without them opens a client session to the endpoints it dials.

@@ -1496,12 +1496,10 @@ a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarde
 a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
     "wz-capi-c|a_node_below_a_zenohd_learns_of_the_subscriber_and_queryable_beyond_it|\
 a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
-    "wz-capi-c|the_cache_of_a_nodes_advanced_publisher_crosses_a_zenohd_to_a_client|\
-a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
-    "wz-capi-c|a_nodes_advanced_subscriber_replays_the_history_of_a_client_beyond_a_zenohd|\
-a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
-    "wz-capi-c|a_node_and_a_client_beyond_a_zenohd_find_each_other_in_a_group|\
-a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
+    # The last three (`advanced_and_group::`) hold a row of no kind: the module is
+    # `cfg(not(feature = "zenoh-c-no-unstable-api"))`, which `--all-features` turns on, so the
+    # census never lists them and a row naming one fails as a test that no longer exists. They
+    # are run by Layer Z all the same, which is what the count of six guards.
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then
