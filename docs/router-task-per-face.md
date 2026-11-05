@@ -89,7 +89,8 @@ build:
   each enters, when it is built, as another value of a second policy, off in every upstream preset, so that a
   deployment whose fan-out is the cost (many subscribers per key, as a game world has) can choose it while a
   peer of the zenoh preset still sees upstream's behaviour. That policy is not declared yet: a value enters with
-  the code that implements it and the pair of tests that names it (`docs/build-configuration.md`, C8).
+  the code that implements it and the pair of tests that names it (`docs/build-configuration.md`, C8). B's
+  design, its correctness argument and its phases are `docs/router-table-snapshots.md`.
 
 Measuring both values of each axis with the same instrument is what gives the scaling model its parameters: the
 contention a value pays (the lock, the cross-loop message) and the coherence it pays (a snapshot republished,
