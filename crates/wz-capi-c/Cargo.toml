@@ -65,6 +65,10 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 name = "hold_a_listener"
 required-features = ["peer"]
 
+# R2103 (open-debt item 521) — build.rs gives the cdylib its SONAME. Without
+# one, a consumer that links this artifact by path records that absolute
+# build-time path in DT_NEEDED and cannot redistribute what it built, which for
+# a crate whose whole claim is "binary drop-in for zenoh-c" is the claim itself.
 [build-dependencies]
 wz-cdylib-build = { path = "../wz-cdylib-build" }
 

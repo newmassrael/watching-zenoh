@@ -182,6 +182,11 @@ def test_tables(text: str) -> list[TestTable]:
         while last > i + 1 and not lines[last - 1].strip():
             last -= 1
         end = j  # the blank lines after the table go with it
+        # ...but not the run of `#` lines right above the next table: that is the next table's
+        # comment, the same run its own `first` walks up. Taking it removes the comment of a table
+        # that stays, as wz-capi-pico's `[[example]]` right after its last test table was.
+        while end > i + 1 and lines[end - 1].lstrip().startswith("#"):
+            end -= 1
         names = re.findall(r'"([^"]+)"', keys.get("name", ""))
         feats = re.findall(r'"([^"]+)"', keys.get("required-features", ""))
         simple = bool(names) and set(keys) <= {"name", "required-features"}
@@ -672,6 +677,11 @@ def selftest() -> int:
           and '[[test]]\nname = "c"' in gone and '[features]\npeer = []\n' in gone
           and gone.startswith('[package]\nname = "c"\n\n[[test]]\nname = "c"'))
     check("removing no table changes nothing", remove_tables(manifest, {"zzz"}) == manifest)
+    example = ('[[test]]\nname = "e"\nrequired-features = ["peer"]\n\n'
+               "# The node the client dials.\n"
+               '[[example]]\nname = "x"\nrequired-features = ["peer", "query"]\n')
+    check("a removed table leaves the comment of the table after it",
+          remove_tables(example, {"e"}) == example[example.index("# The node"):])
     check("a one-feature gate", feature_gate(["peer"]) == '#![cfg(feature = "peer")]')
     check("a gate of two features", feature_gate(["a", "b"]) == '#![cfg(all(feature = "a", feature = "b"))]')
     opened = insert_gate(

@@ -359,6 +359,14 @@ required-features = ["resource-snapshot", "admin-space", "peer", "query"]
 name = "clock_source_stamps"
 required-features = ["engine-tokio", "peer", "clock-source"]
 
+# The node that `client_only_dials_a_listener` dials: a build that cannot listen needs one of
+# the full build to talk to. It asks queries and answers them, so the build has both ends of one.
+[[example]]
+name = "hold_a_listener"
+required-features = ["peer", "query", "queryable", "liveliness"]
+
+# The program that dials a node that listens, for a foreign node (upstream's CLI in `peer`
+# mode with a `listen` endpoint) to be the node. The reverse of the example above, and built for
 # each engine the same way; it needs no listener of its own, so `peer` is not required.
 [[example]]
 name = "dial_a_listener"
