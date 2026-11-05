@@ -312528,6 +312528,34 @@
         "bx on pc2 refused two runs this round with exit 125 before running anything (the run's network view could not be made). The bx session attributed it to a view setting just applied there, which failed on pc2's absolute /etc/resolv.conf link, withdrawn on every machine and fixed in its own tree; pc3 ran the same command meanwhile."
       ]
     },
+    "Round 4306": {
+      "decision_summary": "The wz-runtime-tokio integration test files are merged into one executable, as the wz-integration-tests files were in rounds 4297 and 4298. The files the platform legs and the hosted multicast probe name by target, and the files that install a global allocator, stay executables of their own, so no hosted workflow command changes and the platform surface matrix reads them where it did. The measurement decided it: the debug target of this crate falls to under half.",
+      "changes_bullets": [
+        "77 test files of wz-runtime-tokio moved to tests/it/files as modules of one executable; helper modules are pointed at by a path attribute. 27 files stay: 17 kept by name for the platform legs and the multicast probe, 10 that install a global allocator. The released port gate keys a merged file by its old tests/<name>.rs path, so its classification table is unchanged."
+      ],
+      "verification_bullets": [
+        "Measured from the same build host before and after with test_build_size: executables 105 to 29, debug target 2.03 GB to 0.87 GB, cold build 61 s to 85 s (the merged crate links one larger executable), and the list of tests is the same 934 before and after. The default run of the crate passed 949 tests with 3 ignored, the two feature rows ran 18 and 1 test and passed, and clippy over every test target and over the multilink row is clean. The full round-fed gate list of the pre-push hook ran green on the merged tree."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Merge the other crates one round each (wz-capi-pico, wz-capi-c, wz-ap-demo, wz-session-lwip, wz-session-core), measured with test_build_size. The capi crates first need the platform workflow's integration probe, which tests for a tests/*.rs glob, to read a merged target, and their re-exec test files need module_path. The cold build is 24 s slower in this crate; a crate whose merge costs more time than it saves disk should keep its files."
+      ],
+      "publishable_decision_summary": "The wz-runtime-tokio integration test files are merged into one executable, as the wz-integration-tests files were in rounds 4297 and 4298. The files the platform legs and the hosted multicast probe name by target, and the files that install a global allocator, stay executables of their own, so no hosted workflow command changes and the platform surface matrix reads them where it did. The measurement decided it: the debug target of this crate falls to under half.",
+      "publishable_changes_bullets": [
+        "77 test files of wz-runtime-tokio moved to tests/it/files as modules of one executable; helper modules are pointed at by a path attribute. 27 files stay: 17 kept by name for the platform legs and the multicast probe, 10 that install a global allocator. The released port gate keys a merged file by its old tests/<name>.rs path, so its classification table is unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "Measured from the same build host before and after with test_build_size: executables 105 to 29, debug target 2.03 GB to 0.87 GB, cold build 61 s to 85 s (the merged crate links one larger executable), and the list of tests is the same 934 before and after. The default run of the crate passed 949 tests with 3 ignored, the two feature rows ran 18 and 1 test and passed, and clippy over every test target and over the multilink row is clean. The full round-fed gate list of the pre-push hook ran green on the merged tree."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Merge the other crates one round each (wz-capi-pico, wz-capi-c, wz-ap-demo, wz-session-lwip, wz-session-core), measured with test_build_size. The capi crates first need the platform workflow's integration probe, which tests for a tests/*.rs glob, to read a merged target, and their re-exec test files need module_path. The cold build is 24 s slower in this crate; a crate whose merge costs more time than it saves disk should keep its files."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
