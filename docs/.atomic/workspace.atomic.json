@@ -310308,6 +310308,38 @@
         "The carry of round 4245 stands: read the next hosted run per job for the verdict-legs shards, analyzer-crates, isolated-crates and the round 4239 repayments."
       ]
     },
+    "Round 4247": {
+      "decision_summary": "Round 4234 left one door open: a unit a layer below framed in a stream (a WebSocket message) that no entry can stand for was kept whole without its bytes, while a datagram unit kept whole kept them. A reader that walks such a row's tree from its unit's bytes then found none, so the row's fields could not be read by a selector or shown by the field document. The rule now lives in one place: every door hands the list the unit as it was read, and a unit kept whole keeps those bytes beside its rows whichever door it came through. A unit the stream's release keeps whole is not copied; its bytes go with the retention, as a TCP row's do.",
+      "changes_bullets": [
+        "wz-session-core: push_datagram_in_stream and push_datagram_in_frames take the unit's payload; push_logged keeps the bytes of a unit it keeps whole (whole_units) for all three doors, so Messages::unit_bytes answers every unit alike.",
+        "wz-session-core: the logged, streamed and framed test pairs take the units no entry can stand for; a_unit_kept_whole_keeps_its_bytes_on_every_door holds that each row reads its unit, the kept bytes are counted, and they go with the unit's last row.",
+        "wz-capture: the WebSocket deframer hands the payload on every door."
+      ],
+      "verification_bullets": [
+        "On build machines: wz-session-core with dissect 1462 pass, a_unit_kept_whole_keeps_its_bytes_on_every_door among them, red-first (a unit kept whole with empty bytes fails it at \"datagram: row 1 reads its unit\"); wz-capture with dissect 1656 pass (the soundness oracle among them), default 1286 pass; clippy clean for wz-session-core (dissect, default) and wz-capture (dissect, default, no default features); Layer C1bz passes on pc2; the 131 round-fed static gates, dissect_name_census and the upstream citation gate pass."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "carry_forward_bullets": [
+        "Open from round 4234: the fuzz target's hosted time is measured on its first run; RENAMED is empty, so the first real rename is the rule's first use."
+      ],
+      "publishable_decision_summary": "Round 4234 left one door open: a unit a layer below framed in a stream (a WebSocket message) that no entry can stand for was kept whole without its bytes, while a datagram unit kept whole kept them. A reader that walks such a row's tree from its unit's bytes then found none, so the row's fields could not be read by a selector or shown by the field document. The rule now lives in one place: every door hands the list the unit as it was read, and a unit kept whole keeps those bytes beside its rows whichever door it came through. A unit the stream's release keeps whole is not copied; its bytes go with the retention, as a TCP row's do.",
+      "publishable_changes_bullets": [
+        "wz-session-core: push_datagram_in_stream and push_datagram_in_frames take the unit's payload; push_logged keeps the bytes of a unit it keeps whole (whole_units) for all three doors, so Messages::unit_bytes answers every unit alike.",
+        "wz-session-core: the logged, streamed and framed test pairs take the units no entry can stand for; a_unit_kept_whole_keeps_its_bytes_on_every_door holds that each row reads its unit, the kept bytes are counted, and they go with the unit's last row.",
+        "wz-capture: the WebSocket deframer hands the payload on every door."
+      ],
+      "publishable_verification_bullets": [
+        "On build machines: wz-session-core with dissect 1462 pass, a_unit_kept_whole_keeps_its_bytes_on_every_door among them, red-first (a unit kept whole with empty bytes fails it at \"datagram: row 1 reads its unit\"); wz-capture with dissect 1656 pass (the soundness oracle among them), default 1286 pass; clippy clean for wz-session-core (dissect, default) and wz-capture (dissect, default, no default features); Layer C1bz passes on pc2; the 131 round-fed static gates, dissect_name_census and the upstream citation gate pass."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open from round 4234: the fuzz target's hosted time is measured on its first run; RENAMED is empty, so the first real rename is the rule's first use."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
