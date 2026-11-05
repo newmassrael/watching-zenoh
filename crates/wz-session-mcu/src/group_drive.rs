@@ -1743,30 +1743,39 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
 /// The multicast session AS A TASK over a pump in a cell: the multicast twin of
 /// [`wz_runtime_coop::session_drive::pump_task`]. It runs [`MulticastPump::step`]
 /// once per executor pass and awaits [`yield_now`] between steps; the future is the
-/// cell's handle and the observer's and the loop's state, a few dozen bytes.
+/// cell's handle and the observer's and the loop's state.
+///
+/// A function that returns an `async` block and not an `async fn`, as the session's task is
+/// ([`wz_runtime_coop::session_drive::pump_task`], whose comment gives the reason): an `async fn`
+/// holds each by-value argument twice in its future, once as it was given and once as the local its
+/// body moves it into, and the callbacks here carry the node's state. A block uses what it captured
+/// where it was put. (Clippy's `manual_async_fn` would write it back as an `async fn`.)
 #[cfg(feature = "session-slot")]
-pub async fn multicast_pump_task<'g, C, T, F, G, H, const MAX_PEERS: usize>(
+#[allow(clippy::manual_async_fn)]
+pub fn multicast_pump_task<'g, C, T, F, G, H, const MAX_PEERS: usize>(
     mut pump: MulticastRef<C, T, MAX_PEERS>,
     mut on_event: F,
     mut next_tx: G,
     mut should_stop: H,
-) -> MulticastOutcome
+) -> impl core::future::Future<Output = MulticastOutcome> + 'g
 where
     C: ClockSource + 'static,
     T: GroupTransport + 'static,
-    F: FnMut(IterationEvent<'_, '_>),
-    G: FnMut() -> Option<MulticastTxOffer<'g>>,
-    H: FnMut() -> bool,
+    F: FnMut(IterationEvent<'_, '_>) + 'g,
+    G: FnMut() -> Option<MulticastTxOffer<'g>> + 'g,
+    H: FnMut() -> bool + 'g,
 {
-    loop {
-        let outcome = pump
-            .pump()
-            .step(&mut on_event, &mut next_tx, Some(&mut should_stop));
-        pump.publish_join_refusals();
-        if let Some(outcome) = outcome {
-            return outcome;
+    async move {
+        loop {
+            let outcome = pump
+                .pump()
+                .step(&mut on_event, &mut next_tx, Some(&mut should_stop));
+            pump.publish_join_refusals();
+            if let Some(outcome) = outcome {
+                return outcome;
+            }
+            yield_now().await;
         }
-        yield_now().await;
     }
 }
 
@@ -1788,7 +1797,8 @@ where
     G: FnMut() -> Option<MulticastTxOffer<'static>> + 'static,
     H: FnMut() -> bool + 'static,
 {
+    // Made in the cell: a future passed by value through the spawn is that size on the stack.
     local
-        .spawn_local(multicast_pump_task(pump, on_event, next_tx, should_stop))
-        .map_err(|refused| MulticastSpawnRefused::Task(refused.why))
+        .spawn_local_with(move || multicast_pump_task(pump, on_event, next_tx, should_stop))
+        .map_err(MulticastSpawnRefused::Task)
 }
