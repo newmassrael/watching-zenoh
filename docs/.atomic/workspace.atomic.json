@@ -311554,6 +311554,34 @@
         "Open from round 4234: RENAMED is empty, so the first real rename is the rule's first use."
       ]
     },
+    "Round 4280": {
+      "decision_summary": "The host's fixed-memory node (host-slot-node, the answering build and the build that can get) sizes its task cell by the task it holds, as the kit's node images do. The cell was 2,560 bytes for the answering node and 3,072 for the asking node, the next step up from sizes found on 2026-10-23 by building with each size and seeing whether the session's task was refused; it is now pump_task_cell_bytes over the build's clock, pump link, driver and the events of its application layer (Answering, or getter::Layer with the get feature). A cell is then never one the spawn refuses and a layer that grows grows the cell. The declared node's cell (TASK_BYTES_ACTIVE, which also holds the group tasks) is not changed here.",
+      "changes_bullets": [
+        "host-slot-node: main.rs declares TASK_BYTES as pump_task_cell_bytes of its types in place of the two tuning constants; lib.rs drops TASK_BYTES_ANSWERING and TASK_BYTES_ASKING with their measurements; getter.rs names its layer as the type Layer. docs/storage-policy-and-link-layer.md notes that the cells are derived since this change."
+      ],
+      "verification_bullets": [
+        "Four builds of the node were made for the host (answering, get, tls, tls with control) and run against the stock zenohd 1.10.2 of the repository's pin, so the session's task was spawned in the derived cell of each of the four: the tls interop test (the tls and the tls,control builds) (wz_fixed_memory_tls_zenohd_interop) ran 4 of 4 and passed (mutual verification both ways, a refused claim, a refused pin, close and reset by zid); the answering node established a session over udp and the router's REST plugin read its 64-byte document through it; the get node established a session and issued 20 queries, finished 20, 20 replies, no error, timeout or refusal (median 316 us). rustfmt is clean. Not run: a control with a cell one step too small, so that a refused task is seen to be refused in this build (the 2026-10-23 runs showed the refusal at the sizes then found), the node over tcp/, and the declared nodes (Zdecl lanes), whose cell is unchanged."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "The declared node's cell (TASK_BYTES_ACTIVE, 4,096) holds the session's pump task and the group tasks of a multicast node, and the group pump task (multicast_pump_task) may store a by-value argument twice, so its derivation needs the larger of the two and a look at that task first. The slot node's host tests, the session acceptor crate and the multicast end-to-end crate still write their cells by hand. The kit runs of the client images are still not done."
+      ],
+      "publishable_decision_summary": "The host's fixed-memory node (host-slot-node, the answering build and the build that can get) sizes its task cell by the task it holds, as the kit's node images do. The cell was 2,560 bytes for the answering node and 3,072 for the asking node, the next step up from sizes found on 2026-10-23 by building with each size and seeing whether the session's task was refused; it is now pump_task_cell_bytes over the build's clock, pump link, driver and the events of its application layer (Answering, or getter::Layer with the get feature). A cell is then never one the spawn refuses and a layer that grows grows the cell. The declared node's cell (TASK_BYTES_ACTIVE, which also holds the group tasks) is not changed here.",
+      "publishable_changes_bullets": [
+        "host-slot-node: main.rs declares TASK_BYTES as pump_task_cell_bytes of its types in place of the two tuning constants; lib.rs drops TASK_BYTES_ANSWERING and TASK_BYTES_ASKING with their measurements; getter.rs names its layer as the type Layer. docs/storage-policy-and-link-layer.md notes that the cells are derived since this change."
+      ],
+      "publishable_verification_bullets": [
+        "Four builds of the node were made for the host (answering, get, tls, tls with control) and run against the stock zenohd 1.10.2 of the repository's pin, so the session's task was spawned in the derived cell of each of the four: the tls interop test (the tls and the tls,control builds) (wz_fixed_memory_tls_zenohd_interop) ran 4 of 4 and passed (mutual verification both ways, a refused claim, a refused pin, close and reset by zid); the answering node established a session over udp and the router's REST plugin read its 64-byte document through it; the get node established a session and issued 20 queries, finished 20, 20 replies, no error, timeout or refusal (median 316 us). rustfmt is clean. Not run: a control with a cell one step too small, so that a refused task is seen to be refused in this build (the 2026-10-23 runs showed the refusal at the sizes then found), the node over tcp/, and the declared nodes (Zdecl lanes), whose cell is unchanged."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The declared node's cell (TASK_BYTES_ACTIVE, 4,096) holds the session's pump task and the group tasks of a multicast node, and the group pump task (multicast_pump_task) may store a by-value argument twice, so its derivation needs the larger of the two and a look at that task first. The slot node's host tests, the session acceptor crate and the multicast end-to-end crate still write their cells by hand. The kit runs of the client images are still not done."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
