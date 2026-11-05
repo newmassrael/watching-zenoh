@@ -1494,6 +1494,23 @@ fi
 # Whitespace is what lets a feature list be written one name per line.
 leg_feats() { local f="${1}"; echo "${f//[[:space:]]/}"; }
 
+# Delete the test executables a leg built, once the leg has run them.
+#
+# Every `tests/*.rs` file of a crate is its own executable that links the whole dependency tree,
+# and a leg of another feature set builds them again under another hash: the crates hold 584 such
+# files, one executable was 125 MB with the full debug information (measured 2026-11-05) and the
+# 99 legs of Layer C1bnl took 90 GB of one build machine's disk. The libraries stay (`.rlib`,
+# `.rmeta`, the build scripts' output), so a later leg builds only what its feature set changes;
+# only the executables go, which cargo links again if a later leg wants one of them. A file of
+# `deps/` with no extension is a test or example executable (a library, a dependency record and a
+# proc-macro all have one). `WZ_KEEP_TEST_EXECUTABLES=1` keeps them, for a reader who reruns a leg.
+reap_test_executables() {
+    [[ "${WZ_KEEP_TEST_EXECUTABLES:-}" == 1 ]] && return 0
+    local deps="${CARGO_TARGET_DIR:-$repo/crates/target}/debug/deps"
+    [[ -d "$deps" ]] || return 0
+    find "$deps" -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete 2>/dev/null || true
+}
+
 # Every row's scope must be one of two words. A typo would otherwise read as
 # "not hook", i.e. it would silently REMOVE a leg from the push gate -- the one
 # direction a mistake here must never take.
@@ -1944,6 +1961,7 @@ for leg in "${LEGS[@]}"; do
 
     out="$(cd "$repo/crates" && cargo "${cargo_args[@]}" 2>&1)"
     status=$?
+    reap_test_executables
     label="$pkg --features <$(awk -F, '{print NF}' <<<"$feats")> ${filter:-<whole crate>}"
     if [[ $status -ne 0 ]]; then
         echo "nondefault-tests: FAIL -- $label (exit $status)" >&2

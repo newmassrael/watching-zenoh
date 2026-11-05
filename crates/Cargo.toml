@@ -368,6 +368,19 @@ readme = "../README.md"
 [workspace.lints.rust]
 warnings = "deny"
 
+# The dev and test profile keeps the line tables and drops the rest of the debug information
+# (`debug = "line-tables-only"`): a backtrace still names the file and line of every frame, which is
+# what a failing test is read by, and a test executable is a fifth of the size. It was 125 MB each
+# with the full information (measured 2026-11-05: 16 executables in `target/debug/deps` held 2.0 GB
+# of the 3.4 GB there), and the crates hold 584 integration test files, each its own executable that
+# links the whole dependency tree, so one feature set of a gate leg was tens of gigabytes and a
+# whole lane (Layer C1bnl, 99 legs) took a build machine's disk (90 GB in one slot, 2026-11-05). The
+# build machines already built with it (bx sets it on the far side); this states it where the
+# source is, for a workstation and the hosted runners too. A debugger that needs the types and the
+# locals builds with `CARGO_PROFILE_DEV_DEBUG=2`.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
