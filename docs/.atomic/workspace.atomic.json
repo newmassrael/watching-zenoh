@@ -310878,6 +310878,36 @@
         "Step 8 or 9: storage_config into wz-storage, delete the core storage-backend feature, direction gate strict"
       ]
     },
+    "Round 4261": {
+      "decision_summary": "The SCE pin moves from 07cb8c5020 to 0907db47a2 (65 commits), the one that gives the bounded lists with_capacity and reserve (clamped to the bound, a no-op on the inline tier) and makes a generated Rust algorithm reserve its destination after clearing it, as the C++ and Go backends already did. The serial path held one stuffer destination per link since round 4249 so that a heap-tier frame did not grow a Vec for each frame; with the reserve, a fresh destination allocates once and a kept one never again, which is what that held destination relied on. The regeneration changed two files by one line each (the COBS encode and decode); no firmware image carries the serial link, so the stack, text and resource budgets do not move. The peer that owns the pin also measured the reply decode and encode of the lent codec: the decode worst-case stack is 304 bytes and the encode 232, so the two 1.4 KB frames of the asking client's bound (lend_response, encode_generic) are the values wz builds on its own stack, not the generated code; the remedy is a view for the decode and the parts form for the encode.",
+      "changes_bullets": [
+        "vendor/sce at 0907db47a2. out/wz-codecs/cobs_encode.rs and cobs_decode.rs: one line each, out.reserve(1516) and out.reserve(1507) after the clear."
+      ],
+      "verification_bullets": [
+        "Regeneration, both stages: two files changed. cargo check of the workspace with all targets: clean. Layer C1t (serial link logic and tty backend) and Layer C1bq (zero-copy arena, including the serial transmit allocation suite, zero allocations in the steady state, a burst and at the MTU): pass. No firmware image carries the serial link, so the stack and text gates read the same."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Open: the asking client's bound (4,696) still joins lend_response (1,472 bytes) and the response writer's encode_generic (1,488). SCE measured its own reply decode at 304 bytes and encode at 232, so both frames are wz's: lend_response holds a lent Response of over a kilobyte on its stack (lend_request already reads a RequestView), and the writer builds a message to encode it (the request side already encodes from its Parts). The next round moves the response to a view (its one consumer is the in-place reply dispatch) and the writer to the parts form, and measures on the kit. The hosted run of round 4249 and Layers Qzk and Qzb are still to be read."
+      ],
+      "publishable_decision_summary": "The SCE pin moves from 07cb8c5020 to 0907db47a2 (65 commits), the one that gives the bounded lists with_capacity and reserve (clamped to the bound, a no-op on the inline tier) and makes a generated Rust algorithm reserve its destination after clearing it, as the C++ and Go backends already did. The serial path held one stuffer destination per link since round 4249 so that a heap-tier frame did not grow a Vec for each frame; with the reserve, a fresh destination allocates once and a kept one never again, which is what that held destination relied on. The regeneration changed two files by one line each (the COBS encode and decode); no firmware image carries the serial link, so the stack, text and resource budgets do not move. The peer that owns the pin also measured the reply decode and encode of the lent codec: the decode worst-case stack is 304 bytes and the encode 232, so the two 1.4 KB frames of the asking client's bound (lend_response, encode_generic) are the values wz builds on its own stack, not the generated code; the remedy is a view for the decode and the parts form for the encode.",
+      "publishable_changes_bullets": [
+        "vendor/sce at 0907db47a2. out/wz-codecs/cobs_encode.rs and cobs_decode.rs: one line each, out.reserve(1516) and out.reserve(1507) after the clear."
+      ],
+      "publishable_verification_bullets": [
+        "Regeneration, both stages: two files changed. cargo check of the workspace with all targets: clean. Layer C1t (serial link logic and tty backend) and Layer C1bq (zero-copy arena, including the serial transmit allocation suite, zero allocations in the steady state, a burst and at the MTU): pass. No firmware image carries the serial link, so the stack and text gates read the same."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the asking client's bound (4,696) still joins lend_response (1,472 bytes) and the response writer's encode_generic (1,488). SCE measured its own reply decode at 304 bytes and encode at 232, so both frames are wz's: lend_response holds a lent Response of over a kilobyte on its stack (lend_request already reads a RequestView), and the writer builds a message to encode it (the request side already encodes from its Parts). The next round moves the response to a view (its one consumer is the in-place reply dispatch) and the writer to the parts form, and measures on the kit. The hosted run of round 4249 and Layers Qzk and Qzb are still to be read."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
