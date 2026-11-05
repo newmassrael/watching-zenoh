@@ -312970,6 +312970,42 @@
         "The pre-push round-fed list runs checks only, so a gate whose selftest reads a live file can be red in Layer C0 and green at the push; adding the selftests of gates that read the tree to that list is open. Gates that open a test file by a path built from parts, not a string with the whole path, are found only by running them."
       ]
     },
+    "Round 4319": {
+      "decision_summary": "Gates 2h and 2h2 of the pre-push hook were routed through the build-machine wrapper by building an array that held only the interpreter, with the script path written after the expansion. The boundary gate reads what a hook gate grades off the command text it runs, so it saw neither gate read the checkout and Layer C0 refused both. The array now holds the whole command, script path included, the form gate 3 already uses for the same wrapper; what runs is unchanged.",
+      "changes_bullets": [
+        ".githooks/pre-push: gates 2h and 2h2 build their command arrays with the script path inside (`bash scripts/lib/nondefault-tests-gate.sh`, `--census` for 2h2), with and without the wrapper; the call is the array alone."
+      ],
+      "verification_bullets": [
+        "hook_gate_boundary_gate.py --check: 50 gate sections, each owning its refusal and surface (it refused 2h and 2h2 before); --selftest passes.",
+        "shellcheck 0.11.0 and bash -n on the hook: clean; Layer 0 locally: all required layers pass.",
+        "Fleet (bx --checks ci): Layer C0 went from 81 to 138 of 255 guarded legs with this change; it stops next on config_key_fixture_gate.py reading a test file at its pre-merge path, which the test-merge session owns and was told. The fleet's Layer 0 red on hkl002 is that machine's shellcheck 0.9.0 on the fleet account's PATH (the pinned 0.11.0 passes the same tree), reported to the bx session.",
+        "Earlier this round the fleet ran the lanes rounds 4287 and 4305 touched: 0, C1, C2, C1ak, C1am, C1an, C1g, C1z, C1bv, C1m, C1bg all pass."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "Layer C0 in the fleet is still red at config_key_fixture_gate.py (a test file at its pre-merge path), owned by the test-merge session; the remaining 117 legs are unmeasured until it is paid.",
+        "Fleet units that land on hkl001 or hkl002 run shellcheck 0.9.0 and red Layer 0 with SC2317 false positives; the stage 2 image (or a 0.11.0 on the fleet account's PATH) is what makes that verdict the tree's."
+      ],
+      "publishable_decision_summary": "Gates 2h and 2h2 of the pre-push hook were routed through the build-machine wrapper by building an array that held only the interpreter, with the script path written after the expansion. The boundary gate reads what a hook gate grades off the command text it runs, so it saw neither gate read the checkout and Layer C0 refused both. The array now holds the whole command, script path included, the form gate 3 already uses for the same wrapper; what runs is unchanged.",
+      "publishable_changes_bullets": [
+        ".githooks/pre-push: gates 2h and 2h2 build their command arrays with the script path inside (`bash scripts/lib/nondefault-tests-gate.sh`, `--census` for 2h2), with and without the wrapper; the call is the array alone."
+      ],
+      "publishable_verification_bullets": [
+        "hook_gate_boundary_gate.py --check: 50 gate sections, each owning its refusal and surface (it refused 2h and 2h2 before); --selftest passes.",
+        "shellcheck 0.11.0 and bash -n on the hook: clean; Layer 0 locally: all required layers pass.",
+        "Fleet (bx --checks ci): Layer C0 went from 81 to 138 of 255 guarded legs with this change; it stops next on config_key_fixture_gate.py reading a test file at its pre-merge path, which the test-merge session owns and was told. The fleet's Layer 0 red on hkl002 is that machine's shellcheck 0.9.0 on the fleet account's PATH (the pinned 0.11.0 passes the same tree), reported to the bx session.",
+        "Earlier this round the fleet ran the lanes rounds 4287 and 4305 touched: 0, C1, C2, C1ak, C1am, C1an, C1g, C1z, C1bv, C1m, C1bg all pass."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer C0 in the fleet is still red at config_key_fixture_gate.py (a test file at its pre-merge path), owned by the test-merge session; the remaining 117 legs are unmeasured until it is paid.",
+        "Fleet units that land on hkl001 or hkl002 run shellcheck 0.9.0 and red Layer 0 with SC2317 false positives; the stage 2 image (or a 0.11.0 on the fleet account's PATH) is what makes that verdict the tree's."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
