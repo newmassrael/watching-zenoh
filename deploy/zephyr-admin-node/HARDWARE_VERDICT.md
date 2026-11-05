@@ -69,7 +69,23 @@ pool images (HW.26 to HW.35) read a packet capture frame by frame and are the da
 the program refuses them for a `tcp/` node. A stream has failure modes a datagram has not, and the
 steps that hold them are designed below and not yet in this file's grammar.
 
-### The steps for what only a stream suffers (design)
+### The steps for what only a stream suffers (HW.36 to HW.38 are built; the rest is design)
+
+The steps built so far are the release and conservation properties, run with `--stream-steps` on a
+`tcp/` node (the base HW.0 to HW.7 are unchanged without it). The leg to A runs through the program's
+proxy and B carries a REST port of its own, so a release on A's leg is read through B:
+
+```
+HW.36 an orderly release by the peer ends its session and no other, at once
+HW.37 an abortive release by the peer ends its session and no other, at once
+HW.38 the node takes its peer back after every release and holds one session for it: <N> of <N> returned
+```
+
+"At once" is below the earliest moment a lease could have expired, which is derived from the node's
+contract (the lease less one keep-alive interval, three quarters of it), so a node that waits out its
+lease fails HW.36 and HW.37. HW.38 releases the peer more times than the node has cells (cells + 2,
+alternating an orderly and an abortive release) and the node must take it back after each, with both
+sessions held at the end. A step whose fault landed on no connection fails and says so.
 
 A datagram is delivered whole or not at all, and nothing about the link outlives a datagram. A stream
 is a byte sequence with a connection around it, and every way it can go wrong is one a datagram

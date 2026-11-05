@@ -232,12 +232,14 @@ alone and beside the transmit pool's, to the record's reader.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import io
 import json
 import os
 import re
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -250,6 +252,10 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import admin_node_stream_steps as stream_steps  # noqa: E402  (a sibling: the stream steps and their model)
+import stream_fault  # noqa: E402  (a sibling: the fault-injecting proxy)
 
 ROOT = Path(__file__).resolve().parents[2]
 GRAMMAR = ROOT / "deploy" / "zephyr-admin-node" / "HARDWARE_VERDICT.md"
@@ -362,6 +368,7 @@ class Plan:
     stack_verdict: bool
     a_extra: tuple[str, ...] = ()
     transport: Transport = UDP
+    stream: bool = False  # True: HW.36 to HW.38 follow the base steps (a stream node only)
 
     def group_second(self) -> str:
         """The second locator of HW.6's group: B's host, a port nobody serves."""
@@ -751,6 +758,12 @@ def run_scenario(plan: Plan, env: "Env", timing: Timing, out: Renderer) -> int:
                     )
                     fail = True
 
+        if plan.stream:
+            if fail:
+                out.not_run(36, 38, stream_sentences())
+            else:
+                fail = not _run_stream(plan, env, out)
+
         env.stop()
         if fail:
             env.dump(out, routers=True)
@@ -758,6 +771,29 @@ def run_scenario(plan: Plan, env: "Env", timing: Timing, out: Renderer) -> int:
     finally:
         env.stop()
         env.cleanup()
+
+
+def stream_sentences() -> dict[int, str]:
+    """The sentences of HW.36 to HW.38 as the grammar prints a step that was not run."""
+    s = dict(stream_steps.SENTENCES)
+    s[38] = f"{s[38]}: 0 of 0 returned"
+    return s
+
+
+def _run_stream(plan: Plan, env: "Env", out: Renderer) -> bool:
+    """HW.36 to HW.38, after the base steps. The node is first put back to B alone (HW.6 left it a
+    refused group), so the fixture is the one the steps state: A over the proxy and B, both held."""
+    se = env.stream_env()
+    if se is None:
+        out.note("  the stream steps need a proxy on A's leg and B's REST: this environment has none\n")
+        out.not_run(36, 38, stream_sentences())
+        return False
+    env.put("/config/connect/endpoints", f'["{plan.b_dial}"]'.encode())
+    ok = True
+    for r in stream_steps.run_stream_steps(se):
+        out.step(Verdict(r.step, r.held, r.sentence, r.fail_text))
+        ok = ok and r.held is True
+    return ok
 
 
 # ------------------------------------------------------------------- env --
@@ -775,19 +811,35 @@ class Env:
     def get(self, suffix: str) -> bytes: raise NotImplementedError
     def put(self, suffix: str, body: bytes) -> None: raise NotImplementedError
     def sleep(self, seconds: float) -> None: time.sleep(seconds)
+    def stream_env(self) -> "stream_steps.StreamEnv | None": return None
     def stop(self) -> None: ...
     def dump(self, out: Renderer, routers: bool) -> None: ...
     def cleanup(self) -> None: ...
 
 
-def router_argv(zenohd: str, plan: Plan, rest_port: int) -> tuple[list[str], list[str]]:
-    """B's and A's command lines, in the order the lanes started them."""
+def router_argv(
+    zenohd: str,
+    plan: Plan,
+    rest_port: int,
+    a_dial: str | None = None,
+    b_rest_port: int | None = None,
+) -> tuple[list[str], list[str]]:
+    """B's and A's command lines, in the order the lanes started them. The stream steps put A's dial
+    through a proxy (`a_dial`) and give B a REST plugin of its own (`b_rest_port`), the leg a fault on
+    A's is observed through."""
     b = [zenohd, "--no-multicast-scouting", "-l", plan.b_listen, '--cfg=id:"bbbbbbbbbbbbbbbb"']
+    if b_rest_port is not None:
+        b += [
+            "--rest-http-port",
+            f"127.0.0.1:{b_rest_port}",
+            "--plugin-search-dir",
+            os.path.dirname(zenohd) or ".",
+        ]
     a = [
         zenohd,
         "--no-multicast-scouting",
         "-e",
-        plan.a_dial,
+        a_dial or plan.a_dial,
         "--rest-http-port",
         f"127.0.0.1:{rest_port}",
         "--plugin-search-dir",
@@ -816,6 +868,8 @@ class HostEnv(Env):
         self.procs: list[subprocess.Popen] = []
         self.qemu_proc: subprocess.Popen | None = None
         self.base = ""
+        self.b_base = ""
+        self.proxy: stream_fault.StreamProxy | None = None
 
     def _spawn(self, argv: list[str], log: Path) -> subprocess.Popen:
         with log.open("wb") as fh:
@@ -831,19 +885,37 @@ class HostEnv(Env):
         return self.qemu_proc is None or self.qemu_proc.poll() is None
 
     def start_routers(self, plan: Plan, node_id: str) -> None:
-        b, a = router_argv(self.zenohd, plan, self.rest_port)
+        a_dial, b_rest = None, None
+        if plan.stream:
+            # A dials the node through the proxy; B carries a REST plugin, so a fault on A's leg is read
+            # through B. Both ports are the kernel's to give.
+            host, port = plan.a_dial.split("/", 1)[1].rsplit(":", 1)
+            self.proxy = stream_fault.StreamProxy(("127.0.0.1", 0), (host, int(port))).start()
+            a_dial = plan.transport.locator("127.0.0.1", self.proxy.port)
+            b_rest = _free_port()
+            self.b_base = f"http://127.0.0.1:{b_rest}/@/{node_id}/peer"
+        b, a = router_argv(self.zenohd, plan, self.rest_port, a_dial, b_rest)
         self._spawn(b, self.dir / "zenohd-b.log")
         self._spawn(a, self.dir / "zenohd-a.log")
         self.base = f"http://127.0.0.1:{self.rest_port}/@/{node_id}/peer"
 
-    def get(self, suffix: str) -> bytes:
+    def _fetch(self, url: str) -> bytes:
         try:
-            with urllib.request.urlopen(self.base + suffix, timeout=self.timing.http_timeout) as r:
+            with urllib.request.urlopen(url, timeout=self.timing.http_timeout) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
             return e.read()
         except (OSError, ValueError):
             return b""
+
+    def get(self, suffix: str) -> bytes:
+        return self._fetch(self.base + suffix)
+
+    def get_via_b(self, suffix: str) -> bytes:
+        return self._fetch(self.b_base + suffix)
+
+    def stream_env(self) -> "stream_steps.StreamEnv | None":
+        return HostStreamEnv(self) if self.proxy is not None else None
 
     def put(self, suffix: str, body: bytes) -> None:
         req = urllib.request.Request(
@@ -856,6 +928,8 @@ class HostEnv(Env):
             pass
 
     def stop(self) -> None:
+        if self.proxy is not None:
+            self.proxy.stop()
         for p in self.procs:
             if p.poll() is None:
                 p.terminate()
@@ -887,6 +961,48 @@ class HostEnv(Env):
 
     def cleanup(self) -> None:
         shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def _free_port() -> int:
+    """A port the kernel gives out, for a plugin that must be told one (it is free when read, and the
+    router that takes it is started at once; a collision is a failure of that router's start, which the
+    first read through it reports)."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class HostStreamEnv:
+    """What the stream steps need of the real host: the node's sessions as router B reports them, a
+    fault on the leg to A (the proxy), and the host's clock."""
+
+    def __init__(self, env: HostEnv) -> None:
+        self.env = env
+
+    def sessions(self, via: str) -> set[str] | None:
+        if via != "B":
+            raise ValueError(f"the steps read the node through B, not {via!r}")
+        try:
+            return {
+                s["peer"] for r in _replies(self.env.get_via_b("")) for s in r["value"].get("sessions", [])
+            }
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return None
+
+    def fault(self, leg: str, action: str) -> int:
+        if leg != "A" or self.env.proxy is None:
+            raise ValueError(f"no proxy on leg {leg!r}")
+        proxy = self.env.proxy
+        if action in ("refuse", "admit"):
+            proxy.refuse(action == "refuse")
+            return 1
+        return {"close": proxy.close_all, "reset": proxy.reset_all}[action]()
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+    def now(self) -> float:
+        return time.monotonic()
 
 
 # ------------------------------------------------------ the pool images --
@@ -1839,6 +1955,7 @@ def qemu_plan(args: argparse.Namespace) -> Plan:
         node_listener=t.locator(QEMU_GUEST, NODE_PORT),
         stack_verdict=args.stack_verdict,
         transport=t,
+        stream=getattr(args, "stream_steps", False),
     )
 
 
@@ -1861,6 +1978,7 @@ def board_plan(args: argparse.Namespace) -> Plan:
         stack_verdict=True,
         a_extra=("--cfg=listen/endpoints:[]",),
         transport=t,
+        stream=getattr(args, "stream_steps", False),
     )
 
 
@@ -1950,6 +2068,12 @@ def main(argv: list[str]) -> int:
     q.add_argument("--ready", required=True, help="extended regex of the READY line, or -")
     q.add_argument("--stack-verdict", action="store_true")
     q.add_argument(
+        "--stream-steps",
+        action="store_true",
+        help="after the base steps, HW.36 to HW.38 (a tcp node only): the release and conservation "
+        "properties of a stream, with a fault on the leg to A read through B",
+    )
+    q.add_argument(
         "--transport",
         choices=tuple(TRANSPORT_NAMED),
         default=UDP.scheme,
@@ -1970,6 +2094,11 @@ def main(argv: list[str]) -> int:
     b.add_argument("--b-port", type=int, default=None, help=f"default {DEFAULT_B_PORT}")
     b.add_argument("--rest-port", type=int, default=None, help=f"default {DEFAULT_REST_PORT}")
     b.add_argument(
+        "--stream-steps",
+        action="store_true",
+        help="after HW.0 to HW.7, HW.36 to HW.38 (a tcp node only): a fault on the leg to A, read through B",
+    )
+    b.add_argument(
         "--pool-image",
         action="append",
         choices=tuple(IMAGES),
@@ -1982,6 +2111,8 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv)
 
     if args.mode == "board" and args.pool_image:
+        if args.stream_steps:
+            return _refuse("--stream-steps runs routers against a node; --pool-image reads files")
         return pool_main(args)
     if args.mode == "board":
         if args.onboard is not None or args.pcap is not None:
@@ -2018,6 +2149,10 @@ def main(argv: list[str]) -> int:
             return _refuse(f"the REST plugin is not beside zenohd ({plugin})")
         plan = board_plan(args)
         env = HostEnv(zenohd, args.rest_port, timing, capture=args.console)
+    if plan.stream and plan.transport.datagram:
+        return _refuse(
+            f"--stream-steps is for a stream node: {plan.transport.scheme} has no connection to release"
+        )
     return run_scenario(plan, env, timing, Renderer(plan, sys.stdout.buffer, sys.stderr.buffer))
 
 
@@ -2984,6 +3119,75 @@ def selftest() -> int:
             "",
         )
 
+        # 5c. The stream steps (HW.36 to HW.38) after the base eight, through the program, against the
+        #     reference model of the contract. The model's own faults are held in
+        #     `admin_node_stream_steps.py --selftest`; here the program is held to running them after the
+        #     base steps, printing them as the grammar does, and not running them on a node whose base
+        #     steps did not hold.
+        sp = dataclasses.replace(_board_plan(TCP), stream=True)
+
+        def stream_case(model_faults: tuple[str, ...] = (), faults: tuple[str, ...] = (), model: bool = True):
+            board = FakeBoard(
+                sp.node_id or "cfacc5282fa", sp.node_listener, sp.b_dial, frozenset(faults), transport=sp.transport
+            )
+            env = FakeEnv(board, case_dir())
+            if model:
+                env.stream_env = lambda: stream_steps.StreamModel(faults=model_faults)
+            so, se = io.BytesIO(), io.BytesIO()
+            return run_scenario(sp, env, FAST, Renderer(sp, so, se)), so.getvalue(), se.getvalue()
+
+        every = list(range(8)) + [36, 37, 38]
+        rc, so, se = stream_case()
+        held = _grammar_steps(so)
+        check(
+            "stream healthy: HW.0 to HW.7 and HW.36 to HW.38 held, nothing on standard error",
+            rc == 0 and sorted(held) == every and all(held.values()) and se == b"",
+            f"rc {rc} {so!r} {se!r}",
+        )
+        templates = _grammar_templates()
+        off = [
+            ln
+            for ln in so.decode().splitlines()
+            if (m := re.fullmatch(r"HW\.(\d+) (.*) - (OK|FAIL)", ln)) and not templates[int(m.group(1))].fullmatch(m.group(2))
+        ]
+        check("stream healthy: every printed sentence is an instance of the grammar", not off, str(off))
+        for fault, want in {
+            "leak_on_reset": {38},
+            "leak_on_close": {38},
+            "fin_ignored": {36},
+            "reset_ignored": {37},
+            "accept_stuck": {37, 38},
+            "kills_other": {36, 37, 38},
+        }.items():
+            rc, so, se = stream_case((fault,))
+            steps = _grammar_steps(so)
+            red = {k for k, v in steps.items() if not v}
+            check(
+                f"stream {fault}: rc 1, every step printed, red {sorted(want)}",
+                rc == 1 and sorted(steps) == every and red == want,
+                f"{red} {so!r}",
+            )
+            off = [
+                ln
+                for ln in so.decode().splitlines()
+                if (m := re.fullmatch(r"HW\.(\d+) (.*) - (OK|FAIL)", ln))
+                and not templates[int(m.group(1))].fullmatch(m.group(2))
+            ]
+            check(f"stream {fault}: every printed sentence is an instance of the grammar", not off, str(off))
+        rc, so, se = stream_case(faults=("config_forgets",))
+        steps = _grammar_steps(so)
+        check(
+            "stream after a base step that failed: the stream steps are printed, not run",
+            rc == 1 and {k for k, v in steps.items() if not v} == {3, 36, 37, 38} and b"HW.36 " in so,
+            f"{steps} {so!r}",
+        )
+        rc, so, se = stream_case(model=False)
+        check(
+            "stream with no proxy: refused by name, the steps not run",
+            rc == 1 and b"need a proxy on A's leg" in se and {k for k, v in _grammar_steps(so).items() if not v} == {36, 37, 38},
+            f"{rc} {so!r} {se!r}",
+        )
+
         # 6. End to end: the program as the lanes call it, with a fake QEMU
         #    and a fake zenohd, the REST plugin served by a fake node.
         for faults in ((), ("config_forgets",)):
@@ -3152,6 +3356,12 @@ def selftest() -> int:
         rc, _, err = _cli(["board", "--node", "tls/192.0.2.10:7447", "--host", "h", "--console", str(capture),
                            "--zenohd", str(zenohd)])
         check("a locator of no known transport is refused", rc == 2 and b"udp|tcp" in err, f"{rc} {err!r}")
+        rc, _, err = _cli(["board", "--node", "udp/192.0.2.10:7447", "--host", "h", "--console", str(capture),
+                           "--zenohd", str(zenohd), "--stream-steps"])
+        check("the stream steps are refused for a udp node, by name", rc == 2 and b"stream node" in err, f"{rc} {err!r}")
+        rc, _, err = _cli(["board", "--pool-image", "tx", "--node", "udp/192.0.2.10:7447", "--console", str(capture),
+                           "--onboard", str(capture), "--pcap", str(capture), "--stream-steps"])
+        check("the stream steps are refused beside the pool image", rc == 2 and b"--pool-image" in err, f"{rc} {err!r}")
 
         # 7. What it refuses to run on.
         rc, _, err = _cli(["qemu", "--label", "X", "--node-id", "1", "--ready", "-", "--fwd-port", "1",

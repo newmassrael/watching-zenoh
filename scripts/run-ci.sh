@@ -3590,6 +3590,10 @@ layer_c0_test_discipline() {
     # how a flake is shown absent and not assumed (it waits on events, never on time).
     python3 scripts/lib/stream_fault.py --selftest || return 1
     python3 scripts/lib/stream_fault.py --stress 20 || return 1
+    # The stream steps' reference model of the node's contract and its faults, each of which must red
+    # exactly the step that holds its property, and the drift check that holds the program's copy of the
+    # lease, the retry schedule and the cells equal to the node's source (a virtual clock: no waiting).
+    python3 scripts/lib/admin_node_stream_steps.py --selftest || return 1
     # R2162 (unregistered open-debt item 199) — the upstream zenoh CAPABILITY
     # FEATURE surface as a denominator. Item 199 recorded "18 of 19 have a wz
     # atom" as a hand measurement and nothing re-derived it afterwards, so a
@@ -25503,6 +25507,9 @@ _qa_scenario() {
     shift 3
     local stack_flag=()
     [[ -n "${_QA_STACK_VERDICT:-}" ]] && stack_flag=(--stack-verdict)
+    # HW.36 to HW.38 after the base steps, for a node over tcp/ (the release and conservation properties
+    # of a stream: a fault on the leg to A, read through B).
+    [[ -n "${_QA_STREAM_STEPS:-}" ]] && stack_flag+=(--stream-steps)
     # The transport the node is reached over: the steps judge the node and not the link, so the same
     # steps are put to a node over tcp/ (`_QA_TRANSPORT=tcp`, whose QEMU command forwards tcp).
     python3 scripts/lib/admin_node_verdict.py qemu --label "$label" --node-id "$node" \
@@ -25563,7 +25570,7 @@ layer_qa_mcu_admin_node_vs_zenohd() {
         --bin mcu-admin-node --no-default-features --features fixed-memory-tcp --quiet \
         || { echo "  Qa.tcp build mcu-admin-node FAIL" >&2; return 1; }
     echo "  Qa.tcp build mcu-admin-node $target (fixed-memory, tcp/) OK"
-    _QA_TRANSPORT=tcp _qa_scenario Qa.tcp 1000055434d7a77 - \
+    _QA_TRANSPORT=tcp _QA_STREAM_STEPS=1 _qa_scenario Qa.tcp 1000055434d7a77 - \
         qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial none \
         -semihosting-config enable=on,target=native \
         -nic "user,model=lan9118,hostfwd=tcp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
