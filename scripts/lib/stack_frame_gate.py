@@ -201,7 +201,10 @@ IMAGES = (
     # and 80), with 5 calls through a register not followed. The worst chain here is the observer's
     # install and not the dial path the datagram node's is. The row exists so that each image is
     # held to its own figure: one key for both held neither, since this chain sits 440 bytes under
-    # the datagram node's and the two move apart with each change.
+    # the datagram node's and the two move apart with each change. The kit's own reading is 13,240
+    # bytes (scripts/kit-lane.sh run zephyr-fixed-tcp, the stack line of HW.7 in 3 of 3 runs), 56
+    # over the chain, which the 5 calls through a register not followed account for, so the resource
+    # budget's row carries `chain_misses`.
     Image(
         key="zephyr-fixed-tcp",
         elf=None,

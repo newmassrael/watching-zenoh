@@ -95,6 +95,9 @@ bad() {
 image_spec() {
     APP=zephyr-admin-node
     READY_TAG="ZEPHYR-WZ-CLIENT READY"
+    # The locator a node image is reached at: the address its Kconfig gives it and the port it listens
+    # on, over the transport its image is built for (a datagram's unless the table below says another).
+    NODE_LOCATOR="udp/192.168.100.10:7447"
     case "$1" in
         # COMPARE images (docs/upstream-parity.md M1): they answer the same two GETs with the same keys,
         # bodies and encoding as zephyr-client-fixed, and are run by `compare` beside it. They have no
@@ -168,6 +171,15 @@ image_spec() {
             KIND="node"
             READY_TAG="ZEPHYR-WZ-ADMIN READY"
             ;;
+        # The same node with its links on tcp/ (CONFIG_WZ_LINK_TCP): the steps are the same, put to the
+        # node by the program in its stream transport, which takes the transport from the scheme of the
+        # locator named here.
+        zephyr-fixed-tcp)
+            OVERLAYS="overlays/t2g_fixed.conf;overlays/t2g_tcp.conf"
+            KIND="node"
+            READY_TAG="ZEPHYR-WZ-ADMIN READY"
+            NODE_LOCATOR="tcp/192.168.100.10:7447"
+            ;;
         *) return 1 ;;
     esac
 }
@@ -181,7 +193,7 @@ ADMIN_IMAGES=(zephyr-admin-fixed-tls)
 # The node images: the admin node on the board's own port, run against the steps of HARDWARE_VERDICT.md.
 # Their stack gate rows are in scripts/lib/stack_frame_gate.py and they hold no row of the resource
 # budget (the table declares them not measured on the kit until a run sets one).
-NODE_IMAGES=(zephyr-fixed)
+NODE_IMAGES=(zephyr-fixed zephyr-fixed-tcp)
 # The compare images: run only by `compare`, beside the images above.
 COMPARE_IMAGES=(zephyr-pico-queryable zephyr-pico-queryable-st)
 is_compare_image() { [[ " ${COMPARE_IMAGES[*]} " == *" $1 "* ]]; }
@@ -1153,8 +1165,8 @@ EOF
 # program reads holds the bytes after the reset and no others (it refuses a capture with two READY lines), and
 # it is read live: HW.7 reads the last stack line, which the node prints as the steps move it. The program
 # starts its two routers on this host's address on the cable and prints one line per step on its standard
-# output and nothing else there.
-NODE_LOCATOR="udp/192.168.100.10:7447"
+# output and nothing else there. The node is reached at `$NODE_LOCATOR` (`image_spec` sets it): the transport
+# the program judges it over is the scheme of that locator.
 run_node() {
     local key="$1"
     if ! sudo -n ip addr add "$KIT_HOST_IP/24" dev "$KIT_IFACE" 2>"$OUT/ip.log"; then
