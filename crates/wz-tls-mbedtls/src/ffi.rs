@@ -85,6 +85,15 @@ locked_calls! {
     fn wz_tls_arena_peak_reset();
 
     fn wz_tls_identity_generate(out: *mut *mut Identity, subject: *const c_char) -> c_int;
+    fn wz_tls_identity_make_der(
+        subject: *const c_char,
+        cert: *mut u8,
+        cert_cap: usize,
+        cert_len: *mut usize,
+        key: *mut u8,
+        key_cap: usize,
+        key_len: *mut usize,
+    ) -> c_int;
     fn wz_tls_identity_zid(id: *const Identity, zid: *mut u8);
     fn wz_tls_identity_cert(id: *const Identity, der: *mut *const u8, len: *mut usize);
     fn wz_tls_identity_from_pem(

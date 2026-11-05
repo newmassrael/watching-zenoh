@@ -22,7 +22,10 @@ use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::{PosixTcpDial, PosixTcpListener};
 use wz_runtime_posix::PosixClock;
 use wz_session_core::byte_cells::ByteSource;
-use wz_tls_mbedtls::channel::{Arena, Identity, IdentitySlot};
+use wz_tls_mbedtls::channel::{
+    make_identity_der, pem, Arena, Identity, IdentitySlot, PemLabel, MADE_CERT_DER_MAX,
+    MADE_KEY_DER_MAX,
+};
 use wz_tls_mbedtls::stream::{AcceptBudget, TlsDial, TlsListener};
 
 /// Bytes of the arena one secure session takes at its peak: the kit measured about 22 KB (Round
@@ -100,6 +103,16 @@ pub fn identity_from_files<const N: usize>(
         );
         return None;
     }
+    read_identity_files(chain, key, say)
+}
+
+/// [`identity_from_files`] on a channel already started.
+#[inline(never)]
+fn read_identity_files(
+    chain: &CStr,
+    key: &CStr,
+    say: impl FnOnce(&CStr, &'static str),
+) -> Option<&'static Identity> {
     let mut chain_text = [0u8; CHAIN_PEM_BYTES];
     let chain_pem = match file::read_into(chain, &mut chain_text) {
         Ok(text) => text,
@@ -130,6 +143,155 @@ pub fn identity_from_files<const N: usize>(
     }
 }
 
+/// Make the identity a node on this device is provisioned with, on the device itself: the
+/// command `--make-identity <certificate> <private_key>` of a node that has a secure channel.
+///
+/// The key is made here, by the library the node presents it with, and never leaves the device:
+/// the lab that registers the node receives the certificate alone, from which it computes the zid
+/// (`wz_node.py --zid-of`) and writes it into the declarations of the nodes that grant or ask this
+/// one. So this
+///
+/// - makes a P-256 key and a certificate self-signed over it ([`make_identity_der`]) when neither
+///   file is there, and writes the key to `key`, readable by its owner alone (0600) from the moment
+///   it exists, then the certificate to `chain`, each made with `O_EXCL` so nothing is replaced;
+/// - makes nothing when both files are there, so that registering a device again does not change
+///   its zid;
+/// - refuses, and writes nothing, when only one of the two is there: half an identity is a fault
+///   to look at, and making the other half would pair a key with a certificate that is not its own.
+///
+/// In every case that does not refuse, the two files are then read back exactly as a node reads
+/// them when it starts ([`identity_from_files`]: the key its owner's alone, the key the
+/// certificate's own), and the certificate the node will present is handed to `out` as PEM, a line
+/// at a time: what the lab registers. Hands back the process's exit code, 0 or 2.
+#[inline(never)]
+pub fn make_identity_files<const N: usize>(
+    arena: &'static Arena<N>,
+    chain: &CStr,
+    key: &CStr,
+    say: impl FnOnce(&CStr, &'static str),
+    out: impl FnMut(core::fmt::Arguments<'_>),
+) -> i32 {
+    if arena.start().is_err() {
+        say(
+            c"the secure channel's arena",
+            "the secure channel could not start",
+        );
+        return 2;
+    }
+    match (file::exists(chain), file::exists(key)) {
+        (true, true) => {}
+        (false, false) => {
+            if let Err((file, why)) = write_made_identity(chain, key) {
+                say(file, why);
+                return 2;
+            }
+        }
+        (true, false) => {
+            say(key, HALF_AN_IDENTITY);
+            return 2;
+        }
+        (false, true) => {
+            say(chain, HALF_AN_IDENTITY);
+            return 2;
+        }
+    }
+    match read_identity_files(chain, key, say) {
+        Some(identity) => {
+            identity.certificate_pem(out);
+            0
+        }
+        None => 2,
+    }
+}
+
+/// Why `--make-identity` makes nothing when one of the two files is there and the other is not.
+const HALF_AN_IDENTITY: &str = "it is not there while the other file of the identity is: \
+                                nothing is made, so that a key is never paired with a certificate \
+                                that is not its own";
+
+/// The subject a made identity's certificate names. The certificate is only the container of the
+/// key (decision D9): the zid is the key's, and no peer reads the name.
+const MADE_SUBJECT: &CStr = c"CN=wz-host-slot-node";
+
+/// Make an identity and write it: the key first, so that of two makers racing on one device only
+/// the one that made the key writes a certificate, and a key whose certificate could not be
+/// written is removed again. The key's DER and PEM are wiped from this frame before it returns.
+#[inline(never)]
+fn write_made_identity(chain: &CStr, key: &CStr) -> Result<(), (&'static CStr, &'static str)> {
+    let mut cert_der = [0u8; MADE_CERT_DER_MAX];
+    let mut key_der = [0u8; MADE_KEY_DER_MAX];
+    let mut key_pem = PemText::<KEY_PEM_BYTES>::new();
+    let mut cert_pem = PemText::<CHAIN_PEM_BYTES>::new();
+    let result = (|| {
+        let (cert, secret) = make_identity_der(MADE_SUBJECT, &mut cert_der, &mut key_der)
+            .map_err(|_| (c"the identity", "the secure channel could not make a key"))?;
+        pem(PemLabel::EcPrivateKey, secret, |line| key_pem.line(line));
+        pem(PemLabel::Certificate, cert, |line| cert_pem.line(line));
+        let (Some(key_text), Some(cert_text)) = (key_pem.text(), cert_pem.text()) else {
+            return Err((c"the identity", "its PEM is longer than its buffer"));
+        };
+        file::create_new(key, key_text, true).map_err(|why| (c"the private key", why.reason()))?;
+        if let Err(why) = file::create_new(chain, cert_text, false) {
+            // The key this call made just above, which no certificate holds.
+            file::remove(key);
+            return Err((c"the certificate", why.reason()));
+        }
+        Ok(())
+    })();
+    wipe(&mut key_der);
+    wipe(&mut key_pem.bytes);
+    result
+}
+
+/// Overwrite `bytes` with zeros, in a way the compiler does not elide.
+fn wipe(bytes: &mut [u8]) {
+    for byte in bytes.iter_mut() {
+        // SAFETY: a live, writable byte; volatile so the wipe is not elided.
+        unsafe { core::ptr::write_volatile(byte, 0) };
+    }
+}
+
+/// PEM text built a line at a time in a buffer of `N` bytes, with no allocation.
+struct PemText<const N: usize> {
+    bytes: [u8; N],
+    len: usize,
+    overflowed: bool,
+}
+
+impl<const N: usize> PemText<N> {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; N],
+            len: 0,
+            overflowed: false,
+        }
+    }
+
+    fn line(&mut self, line: core::fmt::Arguments<'_>) {
+        use core::fmt::Write;
+        if writeln!(self, "{line}").is_err() {
+            self.overflowed = true;
+        }
+    }
+
+    /// The text, unless a line did not fit.
+    fn text(&self) -> Option<&[u8]> {
+        (!self.overflowed).then_some(&self.bytes[..self.len])
+    }
+}
+
+impl<const N: usize> core::fmt::Write for PemText<N> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let end = self.len + s.len();
+        if end > N {
+            return Err(core::fmt::Error);
+        }
+        self.bytes[self.len..end].copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
 /// The stack of a node at `local` whose links take their buffers from `rx` and `tx`, and whose
 /// `tls/` links present `identity`.
 pub fn stack(
@@ -143,7 +305,7 @@ pub fn stack(
 
 /// Milliseconds on the host's monotonic clock: what the listener's handshake deadline reads.
 fn clock_ms() -> u64 {
-    PosixClock::default().now_us() / 1000
+    PosixClock.now_us() / 1000
 }
 
 /// The secure channel's server side over `port`: each connection it takes is a TLS 1.3 handshake

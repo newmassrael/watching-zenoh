@@ -21237,6 +21237,7 @@ layer_z_zenohd_interop() {
     # `status` reads it on a session it opened to the node's `tls` listener and is refused `close`; a
     # node granted nothing is refused; through a router, the router's key is the commander, whatever
     # the client that asked claims; and two declared nodes provisioned with identities (`[identity]`)
+    # that the node's own executable made on the device (`--make-identity`, which overwrites nothing)
     # command each other by zids `wz_node.py --zid-of` printed before either ran (`slot-subject`).
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zcmd 4 env WZ_ZENOHD_BIN="$zenohd" \
         cargo test -p wz-integration-tests --test wz_declared_commander_zenohd_interop \

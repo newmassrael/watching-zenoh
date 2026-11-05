@@ -44,6 +44,21 @@ pub fn log_whole(args: core::fmt::Arguments<'_>) {
     write_all(b"\n");
 }
 
+/// A formatted line written whole to standard OUTPUT, as it is formatted: the program's own output,
+/// which its caller reads (a command's answer), where every other line here is a diagnostic on
+/// standard error.
+pub fn out_whole(args: core::fmt::Arguments<'_>) {
+    struct Direct;
+    impl Write for Direct {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            write_all_to(1, s.as_bytes());
+            Ok(())
+        }
+    }
+    let _ = Direct.write_fmt(args);
+    write_all_to(1, b"\n");
+}
+
 /// [`log`] of a line made of [`LogPart`]s: the bytes [`log_args`] writes for the same line, cut at
 /// 256 bytes.
 pub fn log_parts(parts: &[LogPart<'_>]) {
@@ -73,10 +88,14 @@ impl Write for LineBuf {
     }
 }
 
-fn write_all(mut bytes: &[u8]) {
+fn write_all(bytes: &[u8]) {
+    write_all_to(2, bytes);
+}
+
+fn write_all_to(fd: i32, mut bytes: &[u8]) {
     while !bytes.is_empty() {
-        // SAFETY: `bytes` is live for its length; descriptor 2 is the process's.
-        let n = unsafe { libc::write(2, bytes.as_ptr().cast(), bytes.len()) };
+        // SAFETY: `bytes` is live for its length; `fd` is one of the process's standard streams.
+        let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
         if n <= 0 {
             return;
         }

@@ -12,7 +12,8 @@ use std::vec::Vec;
 use wz_session_core::credential_identity::zid_from_spki_der;
 
 use crate::channel::{
-    arena_peak, arena_peak_reset, start, Identity, Io, Role, Session, Step, Transport, Want,
+    arena_peak, arena_peak_reset, make_identity_der, pem, start, Identity, Io, PemLabel, Role,
+    Session, Step, Transport, Want, MADE_CERT_DER_MAX, MADE_KEY_DER_MAX,
 };
 
 /// The library keeps process-wide state with no lock (the profile has one thread), and the test
@@ -120,6 +121,51 @@ fn spki_of(cert: &[u8]) -> &[u8] {
     }
     let (head, len) = element(at);
     &at[..head + len]
+}
+
+/// `der` armoured as PEM ([`pem`]), NUL-terminated as [`Identity::from_pem`] reads it.
+fn pem_text(label: PemLabel, der: &[u8]) -> std::ffi::CString {
+    let mut text = std::string::String::new();
+    pem(label, der, |line| {
+        text.push_str(&std::format!("{line}\n"));
+    });
+    std::ffi::CString::new(text).expect("PEM has no NUL")
+}
+
+/// An identity made to be provisioned, written as PEM and read back the way a provisioned node
+/// reads its files, is the identity that was made: the same certificate, and the zid its key names.
+/// Two made identities are two keys.
+#[test]
+fn a_made_identity_read_back_from_its_pem_proves_the_zid_its_certificate_names() {
+    let _library = library();
+    let (mut cert, mut key) = ([0u8; MADE_CERT_DER_MAX], [0u8; MADE_KEY_DER_MAX]);
+    let (cert_der, key_der) =
+        make_identity_der(c"CN=wz-test", &mut cert, &mut key).expect("an identity is made");
+    let (cert_der, key_der) = (cert_der.to_vec(), key_der.to_vec());
+    assert_eq!(key_der[0], 0x30, "the key is a DER SEQUENCE (SEC1)");
+    let read = Identity::from_pem(
+        &pem_text(PemLabel::Certificate, &cert_der),
+        &pem_text(PemLabel::EcPrivateKey, &key_der),
+    )
+    .expect("the made identity reads back from its PEM");
+    assert_eq!(
+        read.certificate_der(),
+        cert_der.as_slice(),
+        "the same certificate"
+    );
+    assert_eq!(
+        read.zid(),
+        zid_from_spki_der(spki_of(&cert_der)),
+        "the zid the certificate's key names"
+    );
+    let (mut other_cert, mut other_key) = ([0u8; MADE_CERT_DER_MAX], [0u8; MADE_KEY_DER_MAX]);
+    let (other, _) = make_identity_der(c"CN=wz-test", &mut other_cert, &mut other_key)
+        .expect("a second identity is made");
+    assert_ne!(
+        other,
+        cert_der.as_slice(),
+        "each made identity is its own key"
+    );
 }
 
 #[test]

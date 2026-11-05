@@ -207,6 +207,64 @@ int wz_tls_identity_generate(struct wz_tls_identity **out, const char *subject)
 	return 0;
 }
 
+int wz_tls_identity_make_der(const char *subject, unsigned char *cert, size_t cert_cap,
+			     size_t *cert_len, unsigned char *key, size_t key_cap, size_t *key_len)
+{
+	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+	struct wz_tls_identity id;
+	int rc;
+
+	if (!started) {
+		return WZ_TLS_E_STATE;
+	}
+	memset(&id, 0, sizeof(id));
+	mbedtls_pk_init(&id.pk);
+	mbedtls_x509_crt_init(&id.crt);
+	id.key = MBEDTLS_SVC_KEY_ID_INIT;
+
+	/* The key a generated identity has, and exportable once: it is written to the device's own
+	 * file here and the store's copy is destroyed below, so it is in the key store only for the
+	 * length of this call. */
+	psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1));
+	psa_set_key_bits(&attr, 256);
+	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_SIGN_MESSAGE |
+					       PSA_KEY_USAGE_EXPORT);
+	psa_set_key_algorithm(&attr, PSA_ALG_ECDSA(PSA_ALG_ANY_HASH));
+	psa_status_t st = psa_generate_key(&attr, &id.key);
+	if (st != PSA_SUCCESS) {
+		return (int)st;
+	}
+	rc = mbedtls_pk_wrap_psa(&id.pk, id.key);
+	if (rc == 0) {
+		rc = write_self_signed(&id, subject);
+	}
+	if (rc == 0) {
+		if (id.crt.raw.len > cert_cap) {
+			rc = MBEDTLS_ERR_X509_BUFFER_TOO_SMALL;
+		} else {
+			memcpy(cert, id.crt.raw.p, id.crt.raw.len);
+			*cert_len = id.crt.raw.len;
+		}
+	}
+	if (rc == 0) {
+		/* SEC1, which `wz_tls_identity_from_pem` reads back. DER is written backwards, from the
+		 * end of the buffer, so it is moved to the front and what it leaves behind is wiped. */
+		int n = mbedtls_pk_write_key_der(&id.pk, key, key_cap);
+		if (n > 0) {
+			memmove(key, key + key_cap - (size_t)n, (size_t)n);
+			mbedtls_platform_zeroize(key + n, key_cap - (size_t)n);
+			*key_len = (size_t)n;
+		} else {
+			rc = n == 0 ? MBEDTLS_ERR_PK_BAD_INPUT_DATA : n;
+			mbedtls_platform_zeroize(key, key_cap);
+		}
+	}
+	mbedtls_x509_crt_free(&id.crt);
+	mbedtls_pk_free(&id.pk);
+	psa_destroy_key(id.key);
+	return rc;
+}
+
 void wz_tls_identity_zid(const struct wz_tls_identity *id, uint8_t zid[WZ_TLS_ZID_BYTES])
 {
 	memcpy(zid, id->zid, WZ_TLS_ZID_BYTES);

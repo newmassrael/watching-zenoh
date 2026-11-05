@@ -26,8 +26,11 @@
 //!   not found), so a query that came through a router is the router's, one hop, whatever the asker
 //!   claims;
 //! - two declared nodes, each PROVISIONED with an identity (`[identity]`), and neither run before
-//!   their zids are known: `wz_node.py --zid-of` prints each certificate's zid (held here to the zid
-//!   the key names), the target (`slot-commander`) grants `status` to the subject's, and the subject
+//!   their zids are known: each identity is made as a device is registered, by the node's own
+//!   executable (`--make-identity`, which keeps the key its owner's alone, prints the certificate,
+//!   makes nothing a second time and nothing when half an identity is there), `wz_node.py --zid-of`
+//!   prints each certificate's zid, the target (`slot-commander`) grants `status` to the subject's,
+//!   and the subject
 //!   (`deploy/nodes/slot-subject.toml`) holds the target by the target's and asks it over a session
 //!   it opens to the target's listener: the status is answered and the close is refused, and each
 //!   node proves the zid the tool printed.
@@ -477,18 +480,66 @@ const SUBJECT_READY: &str = "HOST-WZ-CLIENT READY ";
 /// The line the subject says each reply it keeps on.
 const REPLY: &str = "HOST-WZ-REPLY ";
 
-/// Write `party`'s identity as a device is provisioned with it: the certificate, and the key only
-/// its owner may read. Hand back the two paths.
-fn provision(dir: &Path, name: &str, party: &Party) -> (PathBuf, PathBuf) {
+/// What `--make-identity` answered: its exit status, and what it printed on standard output and on
+/// standard error.
+fn make_identity_with(node: &Path, cert: &Path, key: &Path) -> (bool, String, String) {
+    let made = Command::new(node)
+        .arg("--make-identity")
+        .arg(cert)
+        .arg(key)
+        .output_bounded()
+        .expect("run the node's --make-identity");
+    (
+        made.status.success(),
+        String::from_utf8_lossy(&made.stdout).into_owned(),
+        String::from_utf8_lossy(&made.stderr).into_owned(),
+    )
+}
+
+/// Make `name`'s identity as a device is registered: the node's own executable makes it in `dir`
+/// (`--make-identity`), and the certificate it prints is all that leaves the device. The command is
+/// held to what the vocabulary says of it: the key is its owner's alone, the printed certificate is
+/// the file's, and a second run makes nothing and prints the same certificate. Hand back the two
+/// paths.
+fn make_identity(node: &Path, dir: &Path, name: &str) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let (cert, key) = (
         dir.join(format!("{name}.crt")),
         dir.join(format!("{name}.key")),
     );
-    std::fs::write(&cert, &party.key.cert_pem).expect("write the certificate");
-    std::fs::write(&key, &party.key.key_pem).expect("write the key");
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))
-        .expect("make the key its owner's alone");
+    let (made, printed, said) = make_identity_with(node, &cert, &key);
+    assert!(made, "{name}: --make-identity failed: {said}");
+    let held = std::fs::read_to_string(&cert).expect("the certificate was written");
+    assert_eq!(
+        printed, held,
+        "{name}: what --make-identity printed is not the certificate it wrote"
+    );
+    assert!(
+        printed.starts_with("-----BEGIN CERTIFICATE-----\n")
+            && printed.ends_with("-----END CERTIFICATE-----\n"),
+        "{name}: standard output holds the certificate and nothing else: {printed:?}"
+    );
+    let mode = std::fs::metadata(&key)
+        .expect("the key was written")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "{name}: the key is its owner's alone");
+    let key_held = std::fs::read(&key).expect("read the key");
+    let (again, printed_again, said) = make_identity_with(node, &cert, &key);
+    assert!(again, "{name}: a second --make-identity failed: {said}");
+    assert_eq!(
+        printed_again, printed,
+        "{name}: registering the device again changed the certificate it prints"
+    );
+    assert_eq!(
+        (
+            std::fs::read_to_string(&cert).expect("read the certificate"),
+            std::fs::read(&key).expect("read the key")
+        ),
+        (held, key_held),
+        "{name}: a second --make-identity overwrote the identity"
+    );
     (cert, key)
 }
 
@@ -530,21 +581,34 @@ fn kept_reply(out: &str, tail: &str) -> Option<String> {
 #[ignore = "binary-dep e2e (both nodes are built from their declarations with identities made here); runs via --ignored"]
 fn two_provisioned_nodes_command_by_a_zid_known_before_either_runs_with_no_zenohd() {
     let dir = tempfile::tempdir().expect("a directory for the two nodes");
-    let (subject, target, stranger) = (Party::new(), Party::new(), Party::new());
-    let (subject_cert, subject_key) = provision(dir.path(), "subject", &subject);
-    let (target_cert, target_key) = provision(dir.path(), "target", &target);
+    let stranger = Party::new();
+    // Each device makes its identity with the node's executable, as a lab registers it: the key is
+    // made where it is used and only the certificate is taken away. Any executable of a node with a
+    // secure channel makes it, whatever its declaration, so the one the first legs built does, and
+    // the two declarations below can each name the other's zid before either is built.
+    let maker = &built().node;
+    let (subject_cert, subject_key) = make_identity(maker, dir.path(), "subject");
+    let (target_cert, target_key) = make_identity(maker, dir.path(), "target");
 
-    // The zids are known before either node runs, from the tool a consumer is given, and they are
-    // the zids the keys name (the rule `wz_session_core::credential_identity` holds).
+    // Half an identity is a fault and not an identity to complete: with the key there and its
+    // certificate gone, nothing is made.
+    let half = dir.path().join("half");
+    std::fs::create_dir(&half).expect("a directory for half an identity");
+    let (half_cert, half_key) = make_identity(maker, &half, "half");
+    std::fs::remove_file(&half_cert).expect("take the certificate away");
+    let (made, _, said) = make_identity_with(maker, &half_cert, &half_key);
+    assert!(
+        !made && said.contains("nothing is made") && !half_cert.exists(),
+        "a key with no certificate beside it was completed: {said}"
+    );
+
+    // The zids are known before either node runs, from the tool a consumer is given and from the
+    // certificate alone.
     let (subject_zid, target_zid) = (
         zid_by_the_tool(&subject_cert),
         zid_by_the_tool(&target_cert),
     );
-    assert_eq!(
-        (subject_zid.as_str(), target_zid.as_str()),
-        (subject.zid.as_str(), target.zid.as_str()),
-        "wz_node.py --zid-of is not the zid the key names"
-    );
+    assert_ne!(subject_zid, target_zid, "two devices made two identities");
 
     // The target grants `status` to the subject's zid, and `close` to a zid no node here holds.
     let root = repo_root();

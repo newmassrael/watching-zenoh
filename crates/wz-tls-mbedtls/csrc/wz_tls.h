@@ -71,6 +71,17 @@ struct wz_tls_identity;
  */
 int wz_tls_identity_generate(struct wz_tls_identity **out, const char *subject);
 
+/**
+ * An identity made to be provisioned to the device that makes it: a P-256 key and a certificate
+ * self-signed over it whose subject and issuer are `subject`, written out once, the certificate as
+ * DER into `cert` and the key as SEC1 DER into `key` (what `wz_tls_identity_from_pem` reads back
+ * once armoured as PEM). The key is generated in the PSA key store and destroyed there before this
+ * returns: the caller's buffer holds the only copy, and the caller wipes it. On a failure `key` is
+ * wiped and neither length is set.
+ */
+int wz_tls_identity_make_der(const char *subject, unsigned char *cert, size_t cert_cap,
+			     size_t *cert_len, unsigned char *key, size_t key_cap, size_t *key_len);
+
 /** The identity's zid. */
 void wz_tls_identity_zid(const struct wz_tls_identity *id, uint8_t zid[WZ_TLS_ZID_BYTES]);
 

@@ -1142,6 +1142,23 @@ each one's zid, as the tool printed it, into the other's declaration, and runs t
 (`slot-subject`) holds the target by its zid over the target's `tls` listener and is answered the
 status it is granted and refused the close it is not, and each node proves the zid the tool printed.
 
+The files are made on the device, by the node's own executable, and the key never leaves it: a lab
+that registers a device runs `<the node's executable> --make-identity <certificate> <private_key>`
+there, with the paths the declaration names, and takes away only what the command prints, the
+certificate, from which `--zid-of` computes the zid it then writes into the declarations of the
+nodes that grant or ask this one; the target's own image is built after. The key is made by the
+library the node presents it with (a P-256 key in TF-PSA-Crypto's key store, exported once into the
+file and destroyed in the store), so its kind is never a consumer's guess. The command writes the key
+readable by its owner alone from the moment it exists and the certificate beside it, each with
+`O_EXCL`, and then reads the two back exactly as the node reads them when it starts before it prints
+the certificate. Nothing is ever overwritten: with both files there it makes nothing and prints the
+certificate they hold, so registering a device again does not change its zid, and with one of the two
+there it makes nothing and fails, naming the other. Every executable of a node with a secure channel
+carries the command, whatever its declaration, so a lab does not build a second program to provision
+a device. The vocabulary states the command (`identity.make`, `identity.makes`), and the witness's
+fourth leg makes both nodes' identities with it, makes nothing a second time, and refuses half an
+identity.
+
 ## 5c. The workload: what a node or a driver sends over time (owner, 2026-10-26)
 
 **Decision (owner, 2026-10-26: cost ignored, the textbook one).** A node declaration says what is

@@ -20,6 +20,7 @@
 #![no_std]
 #![no_main]
 
+use core::ffi::CStr;
 use core::ops::ControlFlow;
 #[cfg(not(feature = "tls"))]
 use host_slot_node_glue::fresh_zid;
@@ -32,6 +33,8 @@ use host_slot_node_glue::tuning::{
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
 use wz_runtime_coop::session_drive::{pump_task_cell_bytes, SlotStack};
+#[cfg(feature = "tls")]
+use wz_runtime_posix::glue::out_whole;
 use wz_runtime_posix::glue::{log, log_args, log_whole};
 #[cfg(not(feature = "tls"))]
 use wz_runtime_posix::slot::PosixStack;
@@ -882,10 +885,59 @@ fn run() -> i32 {
     )
 }
 
+/// What the node's command line asks: run the node (no argument), or make the identity the device
+/// is provisioned with (`--make-identity <certificate> <private_key>`, a node with a secure
+/// channel). Anything else is refused by name rather than run past: a node started with an argument
+/// it ignored would run as something its caller did not ask for.
+///
+/// # Safety
+///
+/// Called by the C runtime only, as C's `main`: `argv` holds `argc` pointers to NUL-terminated
+/// strings, live for the process.
 #[no_mangle]
-pub extern "C" fn main(
-    _argc: core::ffi::c_int,
-    _argv: *const *const core::ffi::c_char,
+pub unsafe extern "C" fn main(
+    argc: core::ffi::c_int,
+    argv: *const *const core::ffi::c_char,
 ) -> core::ffi::c_int {
-    run()
+    // SAFETY: `at` is below `argc` at every call (the match below reads only the arguments its
+    // arm counted), and the caller's contract makes each of those a live NUL-terminated string.
+    let arg = |at: core::ffi::c_int| unsafe { CStr::from_ptr(*argv.offset(at as isize)) };
+    match argc {
+        0 | 1 => run(),
+        4 if arg(1) == c"--make-identity" => make_identity(arg(2), arg(3)),
+        _ => {
+            log_args(format_args!(
+                "wz: FAIL - `{}` is not a command of this node: it runs with no argument, or makes \
+                 its identity with --make-identity <certificate> <private_key>",
+                arg(1).to_str().unwrap_or("its argument")
+            ));
+            2
+        }
+    }
+}
+
+/// `--make-identity <certificate> <private_key>`: make the identity this device is provisioned
+/// with, on the device, and print its certificate (`tls::make_identity_files`).
+#[cfg(feature = "tls")]
+fn make_identity(chain: &CStr, key: &CStr) -> i32 {
+    tls::make_identity_files(
+        &TLS_ARENA,
+        chain,
+        key,
+        |file, why| {
+            log_args(format_args!(
+                "wz: FAIL - the identity was not made at {}: {}",
+                file.to_str().unwrap_or("its file"),
+                why
+            ))
+        },
+        out_whole,
+    )
+}
+
+/// A node with no secure channel has no identity to make: its zid is not a key's.
+#[cfg(not(feature = "tls"))]
+fn make_identity(_chain: &CStr, _key: &CStr) -> i32 {
+    log("wz: FAIL - this node has no secure channel, so it has no identity to make");
+    2
 }

@@ -177,13 +177,8 @@ impl Identity {
     /// The certificate as PEM, each line handed to `line`: the block a router's operator copies
     /// into its configuration (a zenoh router's `root_ca_certificate`). Written with no
     /// allocation, for an image's console.
-    pub fn certificate_pem(&self, mut line: impl FnMut(fmt::Arguments<'_>)) {
-        line(format_args!("-----BEGIN CERTIFICATE-----"));
-        // 48 bytes of DER are one 64-character line of base64, PEM's line length.
-        for chunk in self.certificate_der().chunks(48) {
-            line(format_args!("{}", Base64(chunk)));
-        }
-        line(format_args!("-----END CERTIFICATE-----"));
+    pub fn certificate_pem(&self, line: impl FnMut(fmt::Arguments<'_>)) {
+        pem(PemLabel::Certificate, self.certificate_der(), line);
     }
 
     /// The certificate, DER: what a peer that pins by certificate (a zenoh router's
@@ -197,6 +192,73 @@ impl Identity {
             core::slice::from_raw_parts(der, len)
         }
     }
+}
+
+/// The most bytes the certificate of a made identity is, DER: [`make_identity_der`]'s buffer.
+pub const MADE_CERT_DER_MAX: usize = 1024;
+
+/// The most bytes the key of a made identity is, SEC1 DER (a P-256 key is 121).
+pub const MADE_KEY_DER_MAX: usize = 256;
+
+/// An identity made to be provisioned to the device that makes it, written out once: a P-256 key
+/// and a certificate self-signed over it whose subject and issuer are `subject`, the certificate
+/// as DER into `cert` and the key as SEC1 DER into `key`, each handed back as the part of its
+/// buffer it fills. Armoured as PEM ([`pem`]), the two are what [`Identity::from_pem`] reads, so a
+/// node that is provisioned with them proves the zid their key names.
+///
+/// This is the one door through which a key leaves the library, and it leaves only into the
+/// caller's buffer: the key store's copy is destroyed before this returns, so `key` holds the only
+/// one. The caller writes it to the device's own file and wipes the buffer. On a failure `key` is
+/// wiped. Before [`start`], [`TlsError::State`].
+pub fn make_identity_der<'c, 'k>(
+    subject: &CStr,
+    cert: &'c mut [u8],
+    key: &'k mut [u8],
+) -> Result<(&'c [u8], &'k [u8]), TlsError> {
+    let (mut cert_len, mut key_len) = (0usize, 0usize);
+    // SAFETY: `subject` is NUL-terminated; both buffers are live and writable for their lengths,
+    // and the two lengths are live out-pointers.
+    check(unsafe {
+        ffi::wz_tls_identity_make_der(
+            subject.as_ptr(),
+            cert.as_mut_ptr(),
+            cert.len(),
+            &mut cert_len,
+            key.as_mut_ptr(),
+            key.len(),
+            &mut key_len,
+        )
+    })?;
+    Ok((&cert[..cert_len], &key[..key_len]))
+}
+
+/// What a PEM block holds, which names its armour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PemLabel {
+    /// An X.509 certificate.
+    Certificate,
+    /// An elliptic-curve private key, SEC1 (RFC 5915): what [`make_identity_der`] writes.
+    EcPrivateKey,
+}
+
+impl PemLabel {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Certificate => "CERTIFICATE",
+            Self::EcPrivateKey => "EC PRIVATE KEY",
+        }
+    }
+}
+
+/// `der` armoured as PEM (RFC 7468), each line handed to `line` without its newline. Written with
+/// no allocation, for an image's console or a file written a line at a time.
+pub fn pem(label: PemLabel, der: &[u8], mut line: impl FnMut(fmt::Arguments<'_>)) {
+    line(format_args!("-----BEGIN {}-----", label.name()));
+    // 48 bytes of DER are one 64-character line of base64, PEM's line length.
+    for chunk in der.chunks(48) {
+        line(format_args!("{}", Base64(chunk)));
+    }
+    line(format_args!("-----END {}-----", label.name()));
 }
 
 /// Bytes in standard base64 (RFC 4648, with padding).

@@ -40,6 +40,96 @@ impl FileRefused {
     }
 }
 
+/// Why a file was not made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateRefused {
+    /// A file (or anything else) is at the path already, and is left as it is.
+    Exists,
+    /// The file could not be made (`errno`).
+    Open(i32),
+    /// A write failed (`errno`); what was made is removed.
+    Write(i32),
+    /// What was written could not be made durable (`errno`); what was made is removed.
+    Sync(i32),
+}
+
+impl CreateRefused {
+    /// The console line's reason.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Exists => "a file is there already, and is not overwritten",
+            Self::Open(_) => "it could not be made",
+            Self::Write(_) => "it could not be written",
+            Self::Sync(_) => "what was written could not be made durable",
+        }
+    }
+}
+
+/// Whether anything is at `path` (a dangling link counts: it is not followed).
+pub fn exists(path: &CStr) -> bool {
+    // SAFETY: an all-zero `stat` is a valid value for the kernel to overwrite.
+    let mut status: libc::stat = unsafe { core::mem::zeroed() };
+    // SAFETY: `path` is NUL-terminated and `status` is live and writable.
+    unsafe { libc::lstat(path.as_ptr(), &mut status) == 0 }
+}
+
+/// Make the file at `path` with `bytes` in it, and nothing if anything is there already: the file
+/// is opened with `O_CREAT | O_EXCL`, so two makers race to one winner and a file that is there is
+/// never replaced. A secret is made readable by its owner alone (0600) from the moment it exists,
+/// the mode [`read_secret`] takes; any other file 0644, less what the process's umask removes. The
+/// bytes are on the device's storage when this returns. On a failure after the file was made, it is
+/// removed again, so a file is there whole or not at all.
+pub fn create_new(path: &CStr, bytes: &[u8], secret: bool) -> Result<(), CreateRefused> {
+    let mode: libc::c_uint = if secret { 0o600 } else { 0o644 };
+    // SAFETY: `path` is NUL-terminated; the descriptor is this call's own, closed below.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            mode,
+        )
+    };
+    if fd < 0 {
+        return Err(match errno() {
+            libc::EEXIST => CreateRefused::Exists,
+            e => CreateRefused::Open(e),
+        });
+    }
+    let result = write_open(fd, bytes);
+    // SAFETY: `fd` is open and this call's own, closed exactly once.
+    unsafe { libc::close(fd) };
+    if result.is_err() {
+        // The file this call made, which holds less than it was given.
+        remove(path);
+    }
+    result
+}
+
+/// Remove the file at `path`, if it is there: what a caller made with [`create_new`] and must
+/// take back.
+pub fn remove(path: &CStr) {
+    // SAFETY: `path` is NUL-terminated.
+    unsafe { libc::unlink(path.as_ptr()) };
+}
+
+/// Write `bytes` to the open file `fd` and make them durable.
+fn write_open(fd: i32, mut bytes: &[u8]) -> Result<(), CreateRefused> {
+    while !bytes.is_empty() {
+        // SAFETY: `bytes` is live for its length; `fd` is open.
+        let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+        match n {
+            n if n > 0 => bytes = &bytes[n as usize..],
+            _ if errno() == libc::EINTR => {}
+            _ => return Err(CreateRefused::Write(errno())),
+        }
+    }
+    // SAFETY: `fd` is open.
+    if unsafe { libc::fsync(fd) } != 0 {
+        return Err(CreateRefused::Sync(errno()));
+    }
+    Ok(())
+}
+
 /// Read the file at `path` into `buf`, followed by a NUL, and hand back the text as a C string.
 pub fn read_into<'b>(path: &CStr, buf: &'b mut [u8]) -> Result<&'b CStr, FileRefused> {
     read(path, buf, false)
@@ -151,5 +241,32 @@ mod tests {
             read_secret(&c, &mut buf),
             Err(FileRefused::Open(_))
         ));
+    }
+
+    /// A new secret is made its owner's alone and read back as one; a file that is there already
+    /// is never replaced, and is left with what it held.
+    #[test]
+    fn a_new_file_is_made_whole_and_one_that_is_there_is_never_replaced() {
+        let path = std::env::temp_dir().join(format!("wz-file-{}-made", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let c = CString::new(path.to_str().unwrap()).unwrap();
+        assert!(!exists(&c));
+        create_new(&c, b"first", true).expect("made");
+        assert!(exists(&c));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a secret is its owner's alone from the start");
+        let mut buf = [0u8; 16];
+        assert_eq!(read_secret(&c, &mut buf).unwrap().to_bytes(), b"first");
+        assert_eq!(
+            create_new(&c, b"second", true),
+            Err(CreateRefused::Exists),
+            "a file that is there is not made again"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"first",
+            "and keeps what it held"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }

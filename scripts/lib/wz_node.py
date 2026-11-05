@@ -17,7 +17,10 @@ it runs on, held to what the target profile can build.
                                         each word's keys and bounds, the budgets and the policies
     wz_node.py --zid-of PEM             print the zid the key of a certificate (the first of a chain)
                                         or a public key names, as zenoh spells it: the zid a node
-                                        provisioned with that identity proves (`[identity]`)
+                                        provisioned with that identity proves (`[identity]`); the
+                                        files are made on the device by the node's executable,
+                                        `--make-identity <certificate> <private_key>`, which prints
+                                        the certificate and never overwrites either file
     wz_node.py --selftest
 
 A node is a declaration and not an argument vector. This module is the first half of turning one
@@ -370,6 +373,19 @@ IDENTITY_ZID = ("the first 16 bytes of SHA-256 over the certificate's SubjectPub
                 "spelled as zenoh spells a zid: lowercase hex of those bytes read as a little-endian "
                 "integer")
 IDENTITY_ZID_TOOL = "python3 scripts/lib/wz_node.py --zid-of <certificate or public key, PEM>"
+# How the files are made: on the device, by the node's own executable, so that the key is made by
+# the library that presents it (a P-256 key, which the node's TF-PSA-Crypto takes) and never leaves
+# the device; the lab is handed the certificate alone and computes the zid from it.
+IDENTITY_MAKE = "<the node's executable> --make-identity <certificate> <private_key>"
+IDENTITY_MAKES = ("run on the device the node runs on, with the two paths its `[identity]` names: "
+                  "makes a P-256 key and a certificate self-signed over it, writes the key readable "
+                  "by its owner alone (0600) and the certificate beside it, and prints the "
+                  "certificate (PEM) on standard output, the one thing the lab takes away. When both "
+                  "files are there already it makes nothing and prints the certificate they hold, so "
+                  "registering a device again does not change its zid; when only one is there it "
+                  "makes nothing and fails, naming the other; nothing is ever overwritten. Every "
+                  "executable of a node with a secure channel carries the command, whatever its "
+                  "declaration")
 IDENTITY_REFUSED_INSECURE = ("identity: a node's identity is the key its secure channel presents, "
                              "and the node declares no `tls` router, peer or listener")
 
@@ -1572,7 +1588,8 @@ def vocabulary(target_id: str, decl: dict) -> dict:
         "identity": {"is": "the table `[identity]`: the files the device was provisioned with, read "
                            "when the node starts; without it the node makes its own key then",
                      "keys": dict(IDENTITY_KEYS), "requires": "a `tls` router, peer or listener",
-                     "zid": IDENTITY_ZID, "zid_tool": IDENTITY_ZID_TOOL},
+                     "zid": IDENTITY_ZID, "zid_tool": IDENTITY_ZID_TOOL,
+                     "make": IDENTITY_MAKE, "makes": IDENTITY_MAKES},
     }
 
 
@@ -2482,6 +2499,11 @@ document_bytes = 8
     expect("the vocabulary states the rule of the zid and the tool that computes it",
            vocab["identity"]["zid"] == IDENTITY_ZID and "--zid-of" in vocab["identity"]["zid_tool"]
            and sorted(vocab["identity"]["keys"]) == ["certificate", "private_key"])
+    expect("the vocabulary states the command that makes an identity on the device, and that it "
+           "overwrites nothing",
+           "--make-identity <certificate> <private_key>" in vocab["identity"]["make"]
+           and "nothing is ever overwritten" in vocab["identity"]["makes"]
+           and "does not change its zid" in vocab["identity"]["makes"])
     provisioned_text = (head + tls_listen + toml_item("endpoint", least_commander)
                         + '\n[identity]\ncertificate = "/etc/wz/n.crt"\nprivate_key = "/etc/wz/n.key"\n')
     provisioned = wz_config.read_decl_toml(provisioned_text)
