@@ -311160,6 +311160,90 @@
         "The hosted CI run that carries rounds 4253 and 4254 (41974391826) is still to be read per job: the twelve `ci` cache readers, the jobs cut at 30 minutes, and C1cn and the C1bzr settle."
       ]
     },
+    "Round 4269": {
+      "decision_summary": "ze_declare_publication_cache refuses a session that holds no clock, as\nzenoh-c does. Upstream's PublicationCache bails when the session has\nno HLC, at\n`zenoh-ext/src/publication_cache.rs` @ `if conf.session.hlc().is_none() {`\nand zenoh-c reports that failure as Z_EGENERIC, -128. wz accepted such a session, declared the cache and\nreturned 0, which round 4232 had found and carried. The declare now\nasks the session's node clock whether it stamps and answers -128\nbefore it declares anything, leaving the caller the gravestone it was\nalready left with on every other refusal.\n\nThe differential probe that holds the zenoh-ext families to the real\nlibrary gains the clockless case: an endpointless peer with\ntimestamping left at its shipped value declares a cache, and both arms\nmust print noclock.cache.rc=-128 and an empty handle. The anchors make\nan arm that never reached the case fail rather than print nothing.",
+      "changes_bullets": [
+        "crates/wz-capi-c/src/zenoh_ext.rs: ze_declare_publication_cache",
+        "looks the session up and answers Z_EGENERIC when its node clock does",
+        "not stamp, before the cache's subscriber and queryable are declared;",
+        "a handle that is not a registry answers as the sibling declares do.",
+        "crates/wz-integration-tests/tests/zenoh_c_ext_families_twice_and_diff.rs:",
+        "the first probe opens a second, clockless peer after its own",
+        "checks and declares a cache on it; three anchors name the open, the",
+        "-128 and the empty handle, so both arms are held to them."
+      ],
+      "verification_bullets": [
+        "Bench host pc2, oracle arm `unstable` at the pin 1.10.2, wz-capi-c",
+        "built with the features the arm's own header selects: the six",
+        "zenoh-ext differential tests pass, 6 of 6, with the three new",
+        "anchors satisfied by the real library and by wz.",
+        "Bench host pc3, final tree: wz-capi-c unit tests 235 passed; clippy",
+        "-D warnings clean on the default and the shared-memory feature sets;",
+        "zenoh-c's own 24 programs on wz pass, 24 of 24, the two leak programs",
+        "skipping there for want of valgrind.",
+        "Not run: a wz-red control (the new anchors against the tree before",
+        "the change). The reference arm satisfying them is the control that",
+        "the probe measures what it says; before the change wz answered 0.",
+        "A first run on pc2 crashed in three tests with stack smashing; the",
+        "cause was a harness fault, a cdylib built with shared memory against",
+        "an oracle header without it (opaque types differ by 16 bytes), and",
+        "not wz; the lane's own helper picks the features from the header."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The oracle is at the pin 1.10.2 on this machine, pc2 and pc3; this",
+        "machine needed ZENOHD_ALLOW_CLONE=1 because a cargo git checkout",
+        "carries no tags and cannot name the pin. The census upstream arm now",
+        "passes here without an override.",
+        "The cargo form of the zenoh-c lane passed 24 of 24 on pc2 against",
+        "the real library and on wz, with valgrind present.",
+        "Not done: a hosted Layer C1ce run has not been read for this tree."
+      ],
+      "publishable_decision_summary": "ze_declare_publication_cache refuses a session that holds no clock, as\nzenoh-c does. Upstream's PublicationCache bails when the session has\nno HLC, at\n`zenoh-ext/src/publication_cache.rs` @ `if conf.session.hlc().is_none() {`\nand zenoh-c reports that failure as Z_EGENERIC, -128. wz accepted such a session, declared the cache and\nreturned 0, which round 4232 had found and carried. The declare now\nasks the session's node clock whether it stamps and answers -128\nbefore it declares anything, leaving the caller the gravestone it was\nalready left with on every other refusal.\n\nThe differential probe that holds the zenoh-ext families to the real\nlibrary gains the clockless case: an endpointless peer with\ntimestamping left at its shipped value declares a cache, and both arms\nmust print noclock.cache.rc=-128 and an empty handle. The anchors make\nan arm that never reached the case fail rather than print nothing.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/src/zenoh_ext.rs: ze_declare_publication_cache",
+        "looks the session up and answers Z_EGENERIC when its node clock does",
+        "not stamp, before the cache's subscriber and queryable are declared;",
+        "a handle that is not a registry answers as the sibling declares do.",
+        "crates/wz-integration-tests/tests/zenoh_c_ext_families_twice_and_diff.rs:",
+        "the first probe opens a second, clockless peer after its own",
+        "checks and declares a cache on it; three anchors name the open, the",
+        "-128 and the empty handle, so both arms are held to them."
+      ],
+      "publishable_verification_bullets": [
+        "Bench host pc2, oracle arm `unstable` at the pin 1.10.2, wz-capi-c",
+        "built with the features the arm's own header selects: the six",
+        "zenoh-ext differential tests pass, 6 of 6, with the three new",
+        "anchors satisfied by the real library and by wz.",
+        "Bench host pc3, final tree: wz-capi-c unit tests 235 passed; clippy",
+        "-D warnings clean on the default and the shared-memory feature sets;",
+        "zenoh-c's own 24 programs on wz pass, 24 of 24, the two leak programs",
+        "skipping there for want of valgrind.",
+        "Not run: a wz-red control (the new anchors against the tree before",
+        "the change). The reference arm satisfying them is the control that",
+        "the probe measures what it says; before the change wz answered 0.",
+        "A first run on pc2 crashed in three tests with stack smashing; the",
+        "cause was a harness fault, a cdylib built with shared memory against",
+        "an oracle header without it (opaque types differ by 16 bytes), and",
+        "not wz; the lane's own helper picks the features from the header."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The oracle is at the pin 1.10.2 on this machine, pc2 and pc3; this",
+        "machine needed ZENOHD_ALLOW_CLONE=1 because a cargo git checkout",
+        "carries no tags and cannot name the pin. The census upstream arm now",
+        "passes here without an override.",
+        "The cargo form of the zenoh-c lane passed 24 of 24 on pc2 against",
+        "the real library and on wz, with valgrind present.",
+        "Not done: a hosted Layer C1ce run has not been read for this tree."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
