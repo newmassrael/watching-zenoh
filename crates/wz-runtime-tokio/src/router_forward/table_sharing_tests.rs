@@ -189,3 +189,131 @@ fn the_faces_and_the_writers_of_the_tables_measured_together() {
     println!("table-sharing: declarations {}", declarations.line());
     println!("table-sharing: face transitions {}", transitions.line());
 }
+
+/// How many client faces the admission instrument brings up, as many as the starved router of
+/// the data-plane scaling tests admits.
+const ADMITTED: u64 = 2048;
+
+/// The admission instrument reports its writes in bands of this many faces.
+const BAND: u64 = 256;
+
+/// What a copy of `value` costs and what letting the copy go costs, the least of a few tries.
+fn copy_cost<T: Clone>(value: &T) -> (Duration, Duration) {
+    let (mut copy, mut drop_) = (Duration::MAX, Duration::MAX);
+    for _ in 0..5 {
+        let began = Instant::now();
+        let copied = std::hint::black_box(value.clone());
+        copy = copy.min(began.elapsed());
+        let began = Instant::now();
+        drop(copied);
+        drop_ = drop_.min(began.elapsed());
+    }
+    (copy, drop_)
+}
+
+fn cost_line(name: &str, (copy, drop_): (Duration, Duration)) {
+    println!(
+        "table-sharing: copy of {name} {}us, its release {}us",
+        copy.as_micros(),
+        drop_.as_micros()
+    );
+}
+
+/// The faces of a starved router's admission, one after another with nothing else running: each
+/// comes up, declares a subscriber of a key of its own and asks for the subscribers of the next
+/// face's key, as each session of `wz_router_hat_data_plane_scaling` does. Prints each kind of
+/// write's time against how many faces were already up, then what a copy of the whole tables and
+/// of each component a write reaches costs with every face up: the profile phase 6 of
+/// `docs/router-table-snapshots.md` reads to choose which tables become persistent.
+#[test]
+#[ignore = "a measurement of what a write of the router's tables copies (docs/router-table-snapshots.md, \
+            phase 6); run with --release --ignored --nocapture on a build host"]
+fn the_writes_of_an_admission_measured_against_the_faces_already_up() {
+    let fwd = RouterForwarder::new(zid(0x01));
+    let mut held = Vec::new();
+    let (mut registers, mut subscribes, mut interests) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..ADMITTED {
+        if i % BAND == 0 {
+            registers.push(Waits::default());
+            subscribes.push(Waits::default());
+            interests.push(Waits::default());
+        }
+        let band = (i / BAND) as usize;
+        let peer = Zid::from_slice(&(0x0010_0000 + i as u32).to_be_bytes());
+        let (actions, sink) = client(peer);
+        let face = FaceId(i);
+        registers[band].time(|| fwd.register(face, &actions));
+        let own = format!("mesh/dev_{i}");
+        subscribes[band].time(|| bring(&fwd, face, declare_sub(&own)));
+        let next = format!("mesh/dev_{}", (i + 1) % ADMITTED);
+        let interest = wz_session_core::interest_build::build_interest_subscribers(
+            1,
+            true,
+            true,
+            0,
+            Some(&next),
+        )
+        .expect("build interest");
+        interests[band].time(|| bring(&fwd, face, NetworkMessage::Interest(interest)));
+        held.push((actions, sink));
+    }
+
+    let (_, receiver) = &held[1];
+    receiver.reset();
+    let put =
+        wz_session_core::push_build::build_push_literal("mesh/dev_1", b"x").expect("build push");
+    bring(&fwd, FaceId(0), NetworkMessage::Push(Box::new(put)));
+    assert_eq!(
+        receiver.frame_count(),
+        1,
+        "a Put of the last face's key reached the face that subscribed it"
+    );
+
+    let structure = fwd.table_sharing().id();
+    for (band, ((registers, subscribes), interests)) in registers
+        .iter_mut()
+        .zip(subscribes.iter_mut())
+        .zip(interests.iter_mut())
+        .enumerate()
+    {
+        let from = band as u64 * BAND;
+        println!(
+            "table-sharing: structure={structure} faces_up={from}..{} register {}",
+            from + BAND,
+            registers.line()
+        );
+        println!(
+            "table-sharing: structure={structure} faces_up={from}..{} subscribe {}",
+            from + BAND,
+            subscribes.line()
+        );
+        println!(
+            "table-sharing: structure={structure} faces_up={from}..{} interest {}",
+            from + BAND,
+            interests.line()
+        );
+    }
+
+    let tables = fwd.tables.read();
+    cost_line("the tables (every map's spine)", copy_cost(&*tables));
+    cost_line("faces (the map)", copy_cost(&tables.faces));
+    cost_line("future_subs", copy_cost(&*tables.future_subs));
+    cost_line("future_qabls", copy_cost(&*tables.future_qabls));
+    #[cfg(feature = "routing-token-tables")]
+    cost_line("future_tokens", copy_cost(&*tables.future_tokens));
+    cost_line("mesh_ids", copy_cost(&*tables.mesh_ids));
+    for hat in tables.hats.values() {
+        match hat {
+            Hat::Broker(hat) => {
+                cost_line("a broker hat's subs", copy_cost(&*hat.subs));
+                cost_line("a broker hat's qabls", copy_cost(&*hat.qabls));
+                #[cfg(feature = "routing-token-tables")]
+                cost_line("a broker hat's tokens", copy_cost(&*hat.tokens));
+            }
+            Hat::Mesh(hat) => {
+                cost_line("a mesh hat's net", copy_cost(&*hat.net));
+                cost_line("a mesh hat's subs", copy_cost(&*hat.subs));
+            }
+        }
+    }
+}
