@@ -596,7 +596,22 @@ CASES: tuple[Case, ...] = (
     # feature implies, and their doors. The budget is that reading and 3,500, rounded up to the
     # hundred. The first build of this case did not compile: the node used the interceptors'
     # `install_on` and the gossip policy's autoconnect fields without their features.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 5_739_400,
+    # 2026-11-05 -- 5,795,873 text and 743 exports on a build machine (hkl002) at `0c7298a48d`,
+    # 56,473 over the budget and 59,987 over its first reading (5,735,886, 2026-11-04). The growth
+    # was NOT split: the build at the one commit between the two SCE pin moves of the day and the
+    # node's engine (`900984dbf2`) does not compile (`session_state` is unused in this feature
+    # set there; `b67b3440cf` made it conditional), so no reading stands between them, and
+    # `capic-default`'s note shows what the pin moves alone put into a build that links the
+    # generated codec. What the node added since the first reading: the engine port
+    # (`SessionEngine` for the node, `PeriodicJob`), the face source of the listings and listeners,
+    # the shared-memory provider and the clock a node holds, and the doors read through the
+    # session handle. Chosen growth, so the budget is that reading and 3,500, to the hundred.
+    # The same day, 29,492 more on the same machine from `0c7298a48d` to `6dc6c68d9c` (5,825,365),
+    # which `capic-default` grew by the same amount (29,412) over the same commits: the only commit
+    # of them that changes code is `2274c65e57` (a record read in the lent form at the heap's
+    # capacity, another session's), so the growth is its, by that and not by a reading at that
+    # commit. The budget is the reading of `6dc6c68d9c` and 3,500, to the hundred.
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 5_828_900,
          # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
          # role and the scouting and UDP link under it, and the multicast transport.
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
@@ -614,7 +629,31 @@ CASES: tuple[Case, ...] = (
     # pool's shutdown; the open handoff that replaced an mpsc channel takes some of it back
     # (`Sender::send` -3,239, `open_blocking` -1,546). Chosen growth, so the budget is the hosted
     # reading and 3,500, to the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_500_800,
+    # 2026-11-05 -- 9,605,829 on a build machine (hkl002) at `0c7298a48d`, 111,772 over its
+    # reading at `c179611fc9` (9,494,057, the commit the budget above was set at, on the same
+    # machine). SPLIT by building the same case at the commits between, each on hkl002:
+    #   `814859ddf2`  9,544,741  (+50,684, before any commit of the node's operations: the SCE pin
+    #                 moved to `07cb8c5020`, the one-pass lent decode, with the census fixes)
+    #   `f532f5051f`  9,544,741  (+0, the node's timestamp and declared key)
+    #   `081395adab`  9,544,901  (+160, the node's peers, transports, links and listeners)
+    #   `685e6b1f89`  9,544,901  (+0)
+    #   `900984dbf2`  9,600,117  (+55,216, the SCE pin moved to `0907db47a2`, reserved Rust
+    #                 destinations: generated code, no commit of the node's)
+    #   `8ef208ab60`  9,600,117  (+0, the node's shared-memory provider)
+    #   `0c7298a48d`  9,605,829  (+5,712, from the node's advanced publisher and subscriber and its
+    #                 group, with the session refactors of the same hours, not split further)
+    # So 105,900 of the 111,772 are the two moves of the SCE pin, which the generated codec of every
+    # build that links it carries, and at most 5,872 are the node's operations, which live behind
+    # `router-node` and reach this build only through the session handle's second arm and the
+    # shared group rules. Chosen growth. The budget is the reading, 3,184 for the hosted run's
+    # difference from this machine at the previous budget (9,497,241 against 9,494,057), and
+    # 3,500, to the hundred.
+    # Then 29,412 more, 9,635,241 at `6dc6c68d9c` (the commits `0c7298a48d` to there are docs, tests
+    # and a build profile but for `2274c65e57`, a record read in the lent form at the heap's
+    # capacity, another session's: its growth, by that and not by a reading at that commit, and
+    # `capic-router-node` grew by the same 29,492). The budget is that reading, 3,184 and 3,500, to
+    # the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_642_000,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          exports=836,
