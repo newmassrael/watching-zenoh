@@ -25468,7 +25468,10 @@ _qa_scenario() {
     shift 3
     local stack_flag=()
     [[ -n "${_QA_STACK_VERDICT:-}" ]] && stack_flag=(--stack-verdict)
+    # The transport the node is reached over: the steps judge the node and not the link, so the same
+    # steps are put to a node over tcp/ (`_QA_TRANSPORT=tcp`, whose QEMU command forwards tcp).
     python3 scripts/lib/admin_node_verdict.py qemu --label "$label" --node-id "$node" \
+        --transport "${_QA_TRANSPORT:-udp}" \
         --ready "$ready" ${stack_flag[@]+"${stack_flag[@]}"} \
         --zenohd "${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}" \
         --fwd-port "$_QA_FWD_PORT" --b-port "$_QA_B_PORT" --rest-port "$_QA_REST_PORT" \
@@ -25512,6 +25515,23 @@ layer_qa_mcu_admin_node_vs_zenohd() {
         qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial none \
         -semihosting-config enable=on,target=native \
         -nic "user,model=lan9118,hostfwd=udp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
+        -kernel "$fw" || return 1
+
+    # The same scenario against the node over tcp/ (`fixed-memory-tcp`, `src/fixed_tcp.rs`): the core
+    # of the fixed-memory node over lwIP's streams, with the lwIP port that turns TCP on and sizes it
+    # (`cross-test-tcp`), and a QEMU that forwards the host's tcp port to the node's listener. It is
+    # the first run of that node on any machine, and what a stock zenohd is shown of it is what it is
+    # shown of the datagram node: the same zid, the same legs, the same write, the links named tcp/.
+    # It is built over the same binary's path, after the datagram scenario has run.
+    WZ_LWIP_PORT="$(realpath crates/lwip-sys/port/cross-test-tcp)" cargo build --release \
+        --manifest-path deploy/mcu-admin-node/Cargo.toml --target "$target" \
+        --bin mcu-admin-node --no-default-features --features fixed-memory-tcp --quiet \
+        || { echo "  Qa.tcp build mcu-admin-node FAIL" >&2; return 1; }
+    echo "  Qa.tcp build mcu-admin-node $target (fixed-memory, tcp/) OK"
+    _QA_TRANSPORT=tcp _qa_scenario Qa.tcp 1000055434d7a77 - \
+        qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial none \
+        -semihosting-config enable=on,target=native \
+        -nic "user,model=lan9118,hostfwd=tcp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
         -kernel "$fw"
 }
 

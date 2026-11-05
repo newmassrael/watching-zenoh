@@ -70,6 +70,12 @@ wz-session-core = { path = "../../crates/wz-session-core", default-features = fa
 wz-session-lwip = { path = "../../crates/wz-session-lwip", optional = true, default-features = false }
 wz-link-lwip = { path = "../../crates/wz-link-lwip", optional = true, default-features = false }
 wz-runtime-coop = { path = "../../crates/wz-runtime-coop", optional = true, default-features = false }
+# The node's shared mechanism (`slot_admin`, `slot_host`, `run_arena`), named directly by the node over
+# `tcp/` (`fixed-memory-tcp`): the datagram node reaches it through `wz-session-lwip`'s re-exports, and
+# the stream node assembles the same core over lwIP's streams.
+wz-session-mcu = { path = "../../crates/wz-session-mcu", optional = true, default-features = false, features = [
+    "transport-keepalive",
+] }
 
 [features]
 default = ["heap"]
@@ -94,6 +100,17 @@ fixed-memory = [
     "wz-session-lwip/session-unicast-accept",
     "wz-runtime-coop/session-slot",
     "wz-session-core/session-slot",
+]
+# The same fixed-memory node with its links on `tcp/`: `wz_session_mcu::slot_admin::AcceptingAdminNode`
+# over lwIP's streams (`src/fixed_tcp.rs`), as the Zephyr image's `fixed-tcp` is over the kit's MAC. lwIP is
+# built with its TCP sources (`wz-session-lwip/tcp`, through `wz-link-lwip/tcp` and `lwip-sys/tcp`) and
+# the port that turns TCP on and sizes it is `crates/lwip-sys/port/cross-test-tcp`. It replaces the
+# datagram node of `src/fixed.rs` in the image.
+fixed-memory-tcp = [
+    "fixed-memory",
+    "dep:wz-session-mcu",
+    "wz-session-lwip/tcp",
+    "wz-link-lwip/tcp",
 ]
 # The measurement of one typed session slot (`scripts/lib/session_slot_bytes.py`): with
 # it the fixed-memory image declares `WZ_SESSION_SLOT_BYTES`, a symbol whose SIZE is the

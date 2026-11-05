@@ -445,6 +445,7 @@ dependencies = [
  "wz-runtime-coop",
  "wz-session-core",
  "wz-session-lwip",
+ "wz-session-mcu",
 ]
 
 [[package]]

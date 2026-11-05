@@ -73,8 +73,11 @@ use wz_session_core::zid_hex::zid_to_zenoh_hex;
 #[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::WhatAmI;
 
-#[cfg(feature = "fixed-memory")]
+#[cfg(all(feature = "fixed-memory", not(feature = "fixed-memory-tcp")))]
 mod fixed;
+// The node over `tcp/` replaces the datagram node in the image (`fixed-memory-tcp`).
+#[cfg(feature = "fixed-memory-tcp")]
+mod fixed_tcp;
 
 #[cfg(feature = "heap")]
 const HEAP_SIZE: usize = 1024 * 256;
@@ -188,8 +191,10 @@ fn main() -> ! {
     // The census build has both features: the allocator is there, the node is not.
     #[cfg(feature = "heap")]
     init_heap();
-    #[cfg(feature = "fixed-memory")]
+    #[cfg(all(feature = "fixed-memory", not(feature = "fixed-memory-tcp")))]
     fixed::run();
+    #[cfg(feature = "fixed-memory-tcp")]
+    fixed_tcp::run();
     #[cfg(not(feature = "fixed-memory"))]
     run_heap()
 }

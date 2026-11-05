@@ -349,6 +349,24 @@ IMAGES: dict[str, Image] = {
             ),
         ),
     ),
+    # The same node with its links on `tcp/` (`fixed-memory-tcp`, `fixed_tcp.rs`): the core of
+    # `slot_admin` over lwIP's streams, no allocator and no `extern crate alloc` in the bin. It is
+    # built with the cross port that turns lwIP's TCP on and sizes it (`cross-test-tcp`).
+    "mcu-admin-node-fixed-tcp": Image(
+        "deploy/mcu-admin-node/Cargo.toml",
+        "bin",
+        "mcu-admin-node",
+        "gated",
+        (
+            Build(
+                V7M,
+                "cross-test-tcp",
+                ("fixed-memory-tcp",),
+                label="mps2-fixed-tcp",
+                no_default_features=True,
+            ),
+        ),
+    ),
     # The same profile with an allocator, for the census alone (see the acceptor's).
     "mcu-admin-node-fixed-census": Image(
         "deploy/mcu-admin-node/Cargo.toml",
