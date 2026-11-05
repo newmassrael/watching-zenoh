@@ -310700,6 +310700,34 @@
         "Open: the hosted run of round 4249 (CI 41960795503) was still pending when this was filed; its per-job result is to be read. Layers Qzk and Qzb were not run here. SCE main moved 65 commits past the pin (reserved Rust destinations, 0907db47a2); the pin move is the next round."
       ]
     },
+    "Round 4256": {
+      "decision_summary": "The task cell of the bare-metal lwIP node image (mcu-admin-node, fixed-memory profile) is sized by the task it holds, as the udp and tcp Zephyr images are since Round 4251. The cell was 12,288 bytes written beside the image; it is now pump_task_cell_bytes over the image's clock, pump link, driver and the events of its factory. wz-session-lwip slot_node re-exports EventsOf so an image names the events type without a direct dependency on the session crate under it. The thumbv7m build's .data falls from 210,516 to 187,492 bytes (23,024) with the same three cells.",
+      "changes_bullets": [
+        "mcu-admin-node: fixed.rs declares TASK_BYTES as pump_task_cell_bytes of its own types. wz-session-lwip: slot_node.rs re-exports EventsOf beside SessionFactory."
+      ],
+      "verification_bullets": [
+        "On a build host through bx (pc2): the fixed-memory image builds for thumbv7m-none-eabi with the derived cell; .data 187,492 bytes against 210,516 with the figure written by hand (the same command, one constant differing). On this host: the same image boots on qemu mps2-an385 and passes the six legs of the stock-zenohd scenario (admin_node_verdict.py qemu, label Qa.fixed: a GET before the write, a PUT of connect/endpoints that the node dials, config read-back, link src/dst of every session, status/connect, and the refusal of a group of two); the zenohd is the stock build in the main checkout's target/zenohd, which was built on 2026-10-25 and not checked against the pinned version. Not run: the lane Qa as run-ci.sh runs it, and the heap image."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Images that still write the figure by hand: fixed_admin (2,048 bytes, the TLS node), the client images, zephyr-admin-loopback (a 12,288-byte server cell and a 16,384-byte client cell, which sit behind the node storage of wz-session-mcu and need an events type named from its layer) and the host tests of the slot node. The spare cell of TASKS = SESSIONS + 1 is still unchecked."
+      ],
+      "publishable_decision_summary": "The task cell of the bare-metal lwIP node image (mcu-admin-node, fixed-memory profile) is sized by the task it holds, as the udp and tcp Zephyr images are since Round 4251. The cell was 12,288 bytes written beside the image; it is now pump_task_cell_bytes over the image's clock, pump link, driver and the events of its factory. wz-session-lwip slot_node re-exports EventsOf so an image names the events type without a direct dependency on the session crate under it. The thumbv7m build's .data falls from 210,516 to 187,492 bytes (23,024) with the same three cells.",
+      "publishable_changes_bullets": [
+        "mcu-admin-node: fixed.rs declares TASK_BYTES as pump_task_cell_bytes of its own types. wz-session-lwip: slot_node.rs re-exports EventsOf beside SessionFactory."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host through bx (pc2): the fixed-memory image builds for thumbv7m-none-eabi with the derived cell; .data 187,492 bytes against 210,516 with the figure written by hand (the same command, one constant differing). On this host: the same image boots on qemu mps2-an385 and passes the six legs of the stock-zenohd scenario (admin_node_verdict.py qemu, label Qa.fixed: a GET before the write, a PUT of connect/endpoints that the node dials, config read-back, link src/dst of every session, status/connect, and the refusal of a group of two); the zenohd is the stock build in the main checkout's target/zenohd, which was built on 2026-10-25 and not checked against the pinned version. Not run: the lane Qa as run-ci.sh runs it, and the heap image."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Images that still write the figure by hand: fixed_admin (2,048 bytes, the TLS node), the client images, zephyr-admin-loopback (a 12,288-byte server cell and a 16,384-byte client cell, which sit behind the node storage of wz-session-mcu and need an events type named from its layer) and the host tests of the slot node. The spare cell of TASKS = SESSIONS + 1 is still unchecked."
+      ]
+    },
     "Round 43": {
       "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
       "changes_bullets": [
