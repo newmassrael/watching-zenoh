@@ -420,6 +420,8 @@ use crate::linkstate_forward::{
     QueryRoutes,
 };
 use crate::persistent_map::PersistentMap;
+#[cfg(feature = "routing-token-tables")]
+use crate::persistent_map::PersistentSet;
 #[cfg(feature = "router-multicast-faces")]
 use crate::routing_region::is_primary_gateway;
 use crate::routing_region::{
@@ -1401,18 +1403,21 @@ impl DeclPlane for TokenPlane {
         keyexpr: &str,
         value: Option<()>,
     ) {
-        let all = Arc::make_mut(&mut fwd.tables.advertised_tokens);
+        // Read before writing: a write to a persistent map copies its path even when it changes
+        // nothing, and most declarations leave the record as it was.
+        let region = target.to_string();
+        let all = &mut fwd.tables.advertised_tokens;
+        let recorded = all.get(&region).is_some_and(|keys| keys.contains(keyexpr));
         match value {
-            Some(()) => {
-                all.entry(target.to_string())
-                    .or_default()
-                    .insert(keyexpr.to_owned());
+            Some(()) if !recorded => {
+                all.get_mut_or_default(region).insert(keyexpr.to_owned());
             }
-            None => {
-                if let Some(keys) = all.get_mut(&target.to_string()) {
+            None if recorded => {
+                if let Some(keys) = all.get_mut(&region) {
                     keys.remove(keyexpr);
                 }
             }
+            _ => {}
         }
     }
 }
@@ -2426,8 +2431,12 @@ pub(crate) struct Tables {
     /// copy alive in every node it told. Upstream keeps what it propagated (`local_tokens`) and
     /// withdraws that; this is the same, by region. Only a writer of the tables records what it
     /// advertised, so the map needs no lock of its own.
+    ///
+    /// It grows by one key per token a client holds, and every token declaration records into it,
+    /// so it is persistent as the client stores are: a write under the snapshot value copies one
+    /// path of it and not every key advertised before (`docs/router-table-snapshots.md` § 6.5).
     #[cfg(feature = "routing-token-tables")]
-    advertised_tokens: Arc<HashMap<String, HashSet<String>>>,
+    advertised_tokens: PersistentMap<String, PersistentSet<String>>,
     /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
     /// declared a FUTURE (`f()`) subscriber `Interest`, and which
     /// `DeclareSubscriber`s wz has pushed back to them (zenoh's per-`FaceState`
@@ -4449,7 +4458,7 @@ impl RouterForwarder {
                     local_subscribers: Arc::new(Vec::new()),
                     next_hosted_id: 1,
                     #[cfg(feature = "routing-token-tables")]
-                    advertised_tokens: Arc::new(HashMap::new()),
+                    advertised_tokens: PersistentMap::new(),
                     future_subs: Arc::new(FutureSubStore::new()),
                     own_interests: Arc::new(Vec::new()),
                     future_qabls: Arc::new(FutureQablStore::new()),
@@ -9314,17 +9323,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .derived_cross_tier_tokens_into(target)
                 .into_iter()
                 .collect();
-            let sent: HashSet<String> = self
+            // A copy of a persistent set is one pointer, and it keeps what was sent while the
+            // loops below record what is sent now.
+            let sent: PersistentSet<String> = self
                 .tables
                 .advertised_tokens
                 .get(&target.to_string())
                 .cloned()
                 .unwrap_or_default();
-            for keyexpr in desired.difference(&sent) {
+            for keyexpr in desired.iter().filter(|keyexpr| !sent.contains(*keyexpr)) {
                 TokenPlane::remember(self, target, keyexpr, Some(()));
                 self.flood_self_sourced(target, keyexpr, |ke| TokenPlane::declare(ke, ()));
             }
-            for keyexpr in sent.difference(&desired) {
+            for keyexpr in sent.iter().filter(|keyexpr| !desired.contains(*keyexpr)) {
                 TokenPlane::remember(self, target, keyexpr, None);
                 self.flood_self_sourced(target, keyexpr, TokenPlane::undeclare);
             }
