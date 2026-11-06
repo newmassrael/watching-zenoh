@@ -239,6 +239,9 @@ def expand(text: str, keep_lines: bool = False) -> str:
                     line = line.replace(token, stands_for, 1)
                     pending = None
                     break
+        # `--exact "${WZ_TEST_PREFIX}<test>"` names the test inside its file's module in a merged
+        # executable; read back as the `--exact <test>` it was before the merge.
+        line = line.replace("${WZ_TEST_PREFIX}", "")
         out.append(line)
     return "".join(out)
 

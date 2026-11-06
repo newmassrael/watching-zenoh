@@ -31,6 +31,12 @@ _wz_tt_root="${repo_root:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 WZ_TEST_ARGS=()
 WZ_TEST_TARGET=()
+# `WZ_TEST_PREFIX` is what a libtest `--exact` name needs in front of a test's own name: the module
+# path of the file in a merged target (`files::<name>::`), nothing in a file of its own. `--exact`
+# compares the WHOLE name, so `--exact <test>` alone selects no test of a merged executable (`running
+# 0 tests`, 2026-11-06, C1cc, C1cd, E5); a leg that names its test writes
+# `--exact "${WZ_TEST_PREFIX}<test>"` after `--`.
+WZ_TEST_PREFIX=""
 
 # `WZ_TEST_TARGET` is `--test <target>` alone: what a command that BUILDS a test target and runs
 # none (`cargo clippy`, `check`, `build`, `doc`) writes, since a filter is `cargo test`'s alone. A
@@ -39,6 +45,7 @@ wz_test_args() {
     local crate="$1" name="$2" within="${3:-}"
     local dir="$_wz_tt_root/crates/$crate/tests"
     local file target
+    WZ_TEST_PREFIX=""
     if [[ -f "$dir/$name.rs" ]]; then
         WZ_TEST_TARGET=(--test "$name")
         WZ_TEST_ARGS=("${WZ_TEST_TARGET[@]}")
@@ -50,6 +57,7 @@ wz_test_args() {
         target="$(basename "$(dirname "$(dirname "$file")")")"
         WZ_TEST_TARGET=(--test "$target")
         WZ_TEST_ARGS=(--test "$target" "files::${name}::${within}")
+        WZ_TEST_PREFIX="files::${name}::"
         return 0
     done
     # A name that is not a file must not widen the command to the whole crate (the argument would

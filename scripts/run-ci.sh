@@ -16649,7 +16649,7 @@ layer_c1bp_plugin_dynamic_loading() {
         _runci_guarded_test "C1bp pico $leg" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" || return 1
+            --exact "${WZ_TEST_PREFIX}$leg" || return 1
     done
     # R2820 — the library plugin NOTIFICATION PLANE (§5.23
     # `adminspace-config-hotreload`). The binary above cannot drive it: the
@@ -16664,7 +16664,7 @@ layer_c1bp_plugin_dynamic_loading() {
     _runci_guarded_test "C1bp config write" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico || return 1
+        --exact "${WZ_TEST_PREFIX}wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico" || return 1
 }
 
 # ─── Layer L — every committed Cargo.lock agrees with its manifests ────
@@ -23096,7 +23096,8 @@ layer_e7b_router_connect_reconcile() {
         wz_router_hat_reconnect_redials_dropped_peer; do
         wz_test_args wz-integration-tests wz_router_hat_connect_reconcile
         (cd crates && cargo test -p wz-integration-tests \
-            "${WZ_TEST_ARGS[@]}" "$e7b_test" -- --ignored --exact --quiet) || return 1
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+            --exact "${WZ_TEST_PREFIX}$e7b_test") || return 1
     done
     # NEGATIVE (feature OFF): --connect-after inert on the router-hat-router-only
     # binary (rebuilt here so it never shares the reconcile build).
@@ -23169,8 +23170,9 @@ layer_e7b2_router_connect_add_over_the_wire() {
         wz_router_hat_config_key_delete_restores_the_default_over_the_wire; do
         wz_test_args wz-integration-tests wz_router_hat_connect_reconcile
         (cd crates && cargo test -p wz-integration-tests \
-            "${WZ_TEST_ARGS[@]}" "$e7b2_test" \
-            -- --ignored --exact --test-threads=1 --quiet) || return 1
+            "${WZ_TEST_ARGS[@]}" \
+            -- --ignored --test-threads=1 --quiet \
+            --exact "${WZ_TEST_PREFIX}$e7b2_test") || return 1
     done
 }
 
@@ -23503,7 +23505,7 @@ layer_e8t_router_hat_hlc_stamp_pico() {
     _runci_guarded_test "E8t stamps a bare put" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact wz_router_hat_hlc_stamps_a_bare_put_for_pico_zsub_attachment || return 1
+        --exact "${WZ_TEST_PREFIX}wz_router_hat_hlc_stamps_a_bare_put_for_pico_zsub_attachment" || return 1
     # R2623 — the FULLY FOREIGN leg, on the SAME build as leg 1: a real pico
     # `z_put` publishes the bare Put instead of wz-ap-demo, so the only non-pico
     # hop in the path is the router doing the stamping. Legs 1-3 all put wz on
@@ -23515,7 +23517,7 @@ layer_e8t_router_hat_hlc_stamp_pico() {
     _runci_guarded_test "E8t stamps a bare pico put" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact wz_router_hat_hlc_stamps_a_bare_pico_put_for_pico_zsub_attachment || return 1
+        --exact "${WZ_TEST_PREFIX}wz_router_hat_hlc_stamps_a_bare_pico_put_for_pico_zsub_attachment" || return 1
     # R2624 — the two INBOUND-timestamp arms, on leg 1's build. These need a
     # publisher that chooses its timestamp, which no upstream example is, so they
     # run against `oracles/future-stamp` — a wz-AUTHORED oracle linked to the
@@ -23538,7 +23540,7 @@ layer_e8t_router_hat_hlc_stamp_pico() {
         _runci_guarded_test "E8t arm $_e8t_arm" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-            --exact "$_e8t_arm" || return 1
+            --exact "${WZ_TEST_PREFIX}$_e8t_arm" || return 1
     done
     # R2112 (open-debt items 102 + 210) — the CONFIG twin, on the SAME build as
     # leg 1 and deliberately so: it varies an ARGV WORD, not a cargo feature, so
@@ -23550,7 +23552,7 @@ layer_e8t_router_hat_hlc_stamp_pico() {
     _runci_guarded_test "E8t told not to timestamp" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact wz_router_hat_told_not_to_timestamp_relays_a_bare_put_unstamped || return 1
+        --exact "${WZ_TEST_PREFIX}wz_router_hat_told_not_to_timestamp_relays_a_bare_put_unstamped" || return 1
     # R3362 — `timestamping/drop_future_timestamp` from a CONFIG FILE, on a build that
     # adds `zenoh-config` to leg 1's: the document is the only difference between the
     # drop arm and its two controls (key absent, key `false`), and the drop arm above
@@ -23567,7 +23569,7 @@ layer_e8t_router_hat_hlc_stamp_pico() {
     _runci_guarded_test "E8t without time-hlc" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact wz_router_hat_without_time_hlc_relays_a_bare_put_unstamped || return 1
+        --exact "${WZ_TEST_PREFIX}wz_router_hat_without_time_hlc_relays_a_bare_put_unstamped" || return 1
 }
 
 # ─── Layer E9 — the preset-ap-full COMPOSITION, driven against pico ──
@@ -23620,7 +23622,7 @@ layer_e10_close_frame_on_teardown() {
     _runci_guarded_test "E10 close frame on teardown" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 \
-        --exact who_sends_a_session_close_at_teardown || return 1
+        --exact "${WZ_TEST_PREFIX}who_sends_a_session_close_at_teardown" || return 1
 }
 
 layer_e9_apfull_preset_pico() {
@@ -23644,12 +23646,12 @@ layer_e9_apfull_preset_pico() {
     _runci_guarded_test "E9 preset acceptor round trip" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact apfull_preset_acceptor_round_trips_with_a_real_pico_z_put || return 1
+        --exact "${WZ_TEST_PREFIX}apfull_preset_acceptor_round_trips_with_a_real_pico_z_put" || return 1
     wz_test_args wz-integration-tests apfull_preset_pico_interop
     _runci_guarded_test "E9 preset peer forwards" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact apfull_preset_peer_forwards_between_two_real_pico_clients || return 1
+        --exact "${WZ_TEST_PREFIX}apfull_preset_peer_forwards_between_two_real_pico_clients" || return 1
     # R311y481 — the QUERY PLANE legs, on the SAME preset build above. Each is the
     # first live-foreign witness for an atom whose only prior claim was
     # `codec-parity` (query-selector-parameters / query-attachment /
@@ -23669,17 +23671,17 @@ layer_e9_apfull_preset_pico() {
     _runci_guarded_test "E9 query selector parameters" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact apfull_query_selector_parameters_decoded_by_a_real_pico_queryable || return 1
+        --exact "${WZ_TEST_PREFIX}apfull_query_selector_parameters_decoded_by_a_real_pico_queryable" || return 1
     wz_test_args wz-integration-tests apfull_query_plane_pico_interop
     _runci_guarded_test "E9 query attachment" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact apfull_query_attachment_decoded_by_a_real_pico_queryable || return 1
+        --exact "${WZ_TEST_PREFIX}apfull_query_attachment_decoded_by_a_real_pico_queryable" || return 1
     wz_test_args wz-integration-tests apfull_query_plane_pico_interop
     _runci_guarded_test "E9 query reply err" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact apfull_query_reply_err_decoded_by_a_real_pico_z_get || return 1
+        --exact "${WZ_TEST_PREFIX}apfull_query_reply_err_decoded_by_a_real_pico_z_get" || return 1
 }
 
 # ─── Layer E11 — AP-full ADVANCED-PUBSUB against a real zenoh-pico ─────
@@ -23714,12 +23716,12 @@ layer_e11_apfull_advanced_pubsub_pico() {
     _runci_guarded_test "E11 cache history recovered" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact apfull_cache_history_recovered_by_a_real_pico_advanced_subscriber || return 1
+        --exact "${WZ_TEST_PREFIX}apfull_cache_history_recovered_by_a_real_pico_advanced_subscriber" || return 1
     wz_test_args wz-integration-tests apfull_advanced_pubsub_pico_interop
     _runci_guarded_test "E11 subscriber recovers history" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact apfull_advanced_subscriber_recovers_history_from_a_real_pico_cache || return 1
+        --exact "${WZ_TEST_PREFIX}apfull_advanced_subscriber_recovers_history_from_a_real_pico_cache" || return 1
     # R2659 — the THIRD leg, which this lane owned by its `#[ignore]` note and
     # never named. `lane_feature_membership_gate.py` found it: the note says
     # "Layer E11 runs via --ignored" and the two invocations above name the
@@ -23730,7 +23732,7 @@ layer_e11_apfull_advanced_pubsub_pico() {
     _runci_guarded_test "E11 double star keyexpr" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact apfull_double_star_adv_keyexpr_does_not_crash_a_real_pico_peer || return 1
+        --exact "${WZ_TEST_PREFIX}apfull_double_star_adv_keyexpr_does_not_crash_a_real_pico_peer" || return 1
 }
 
 # ─── Layer E12 — AP-full ADMINSPACE plane against a real zenoh-pico ────
@@ -23782,7 +23784,7 @@ layer_e12_apfull_adminspace_pico() {
         _runci_guarded_test "E12 adminspace $leg" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" || return 1
+            --exact "${WZ_TEST_PREFIX}$leg" || return 1
     done
 }
 
@@ -24011,7 +24013,7 @@ layer_c1cc_api_compat_c() {
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" || return 1
+            --exact "${WZ_TEST_PREFIX}$leg" || return 1
     done
     # zenoh-c's OWN tests (`tests/z_api_*.c`, `z_int_*.c`, `z_leak_*.c`), built the way its CMake
     # builds them and linked to wz's library. Twenty-four programs: the two leak ones run under
@@ -24032,7 +24034,7 @@ layer_c1cc_api_compat_c() {
     _runci_guarded_test "C1cc upstream_pure_functions_on_wz_capi_c_match_real_libzenohc" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact upstream_pure_functions_on_wz_capi_c_match_real_libzenohc || return 1
+        --exact "${WZ_TEST_PREFIX}upstream_pure_functions_on_wz_capi_c_match_real_libzenohc" || return 1
     # R2303 (open-debt item 636) — the CONFIG DOCUMENT, in all four directions.
     # A separate binary again, and for the same kind of reason: the pure-function
     # oracle diffs two stdouts produced INDEPENDENTLY, so it can never see a
@@ -24050,7 +24052,7 @@ layer_c1cc_api_compat_c() {
         "C1cc a_config_document_written_by_either_implementation_is_read_by_the_other" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact a_config_document_written_by_either_implementation_is_read_by_the_other \
+        --exact "${WZ_TEST_PREFIX}a_config_document_written_by_either_implementation_is_read_by_the_other" \
         || return 1
     # Open-debt item 854 — the same binary's locator witness: a refused document
     # must name the member it refused, so a red above reads as a key and not as
@@ -24060,7 +24062,7 @@ layer_c1cc_api_compat_c() {
         "C1cc a_refused_config_document_names_the_member_that_was_refused" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact a_refused_config_document_names_the_member_that_was_refused \
+        --exact "${WZ_TEST_PREFIX}a_refused_config_document_names_the_member_that_was_refused" \
         || return 1
     # R311y564 — the DROP-IN CENSUS, the question the corpus report cannot ask.
     # `capi_c_coverage.py` above counts upstream EXAMPLES that link (29 of 29);
@@ -24082,7 +24084,7 @@ layer_c1cc_api_compat_c() {
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" || return 1
+            --exact "${WZ_TEST_PREFIX}$leg" || return 1
     done
     # R311y566 — the `source_info` FOREIGN ADJUDICATOR, the gap the debt ledger
     # named as the largest on this axis. Everything y561-y563 built on this plane
@@ -24094,7 +24096,7 @@ layer_c1cc_api_compat_c() {
         "C1cc a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc" \
         || return 1
     # The session's own zid is the config's `id` — compiled once and linked twice,
     # like the leg above, because no shipped example sets `id` and reads
@@ -24109,7 +24111,7 @@ layer_c1cc_api_compat_c() {
         "C1cc an_open_stands_on_its_configured_id_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact an_open_stands_on_its_configured_id_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}an_open_stands_on_its_configured_id_identically_on_wz_and_libzenohc" \
         || return 1
     # R2579 — §5.4 `session-matching`'s SESSION-LOCAL half, by the same
     # compile-once-link-twice route and for the same reason: no shipped example
@@ -24130,7 +24132,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_session_local_queryable_satisfies_its_own_querier_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_session_local_queryable_satisfies_its_own_querier_on_wz_and_libzenohc" \
         || return 1
     # R2949 — the cancellation token plane: one program on wz and on libzenohc,
     # an already-cancelled token on each of the three readers (get / querier get
@@ -24142,7 +24144,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_cancellation_token_stops_a_get_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_cancellation_token_stops_a_get_identically_on_wz_and_libzenohc" \
         || return 1
     # R2953 (open-debt item 836) — a query ONE session asks of itself, kept by
     # the queryable that received it (`z_query_clone`), holds the get open until
@@ -24155,7 +24157,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_held_local_query_keeps_its_get_open_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_held_local_query_keeps_its_get_open_identically_on_wz_and_libzenohc" \
         || return 1
     # R2954 — `zc_cleanup_orphaned_shm_segments` on both libraries over the
     # same planted `/dev/shm` files: an orphaned `{id}.zenoh` goes, a held one
@@ -24167,7 +24169,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact orphaned_shm_segments_are_cleaned_up_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}orphaned_shm_segments_are_cleaned_up_identically_on_wz_and_libzenohc" \
         || return 1
     # R2957 — the session's OWN provider: obtained non-blocking (INITIALIZING)
     # then blocking (READY), allocated through `loan_as`, cloned onto ONE
@@ -24179,7 +24181,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_sessions_own_shm_provider_is_obtained_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_sessions_own_shm_provider_is_obtained_identically_on_wz_and_libzenohc" \
         || return 1
     # R3058 — a provider's ALLOCATION, one C program on both libraries: which pools
     # are made and refused (0 and 1000 bytes are refused, 4096 and 5000 made), how
@@ -24194,7 +24196,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_providers_allocation_semantics_are_identical_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_providers_allocation_semantics_are_identical_on_wz_and_libzenohc" \
         || return 1
     # R3059 -- a SUBSCRIBER OF THE PUBLISHING SESSION, one C program on both libraries: a
     # chunk put on a literal key and on a declared key is handed to a local subscriber as a
@@ -24208,7 +24210,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_local_subscriber_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_local_subscriber_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc" \
         || return 1
     # R3061 -- the same, for a QUERYABLE of the asking session: a `z_get` with a chunk, a
     # `z_get` with plain bytes (the control, `-1` on both) and a declared querier's get with
@@ -24221,7 +24223,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_local_queryable_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_local_queryable_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc" \
         || return 1
     # R3062 -- the same, for a REPLY: a queryable answers with a chunk and with bytes, and a
     # getter of its own session asks of each reply's payload whether it is shared memory. The
@@ -24233,7 +24235,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_local_getter_is_handed_the_same_kind_of_reply_buffer_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_local_getter_is_handed_the_same_kind_of_reply_buffer_on_wz_and_libzenohc" \
         || return 1
     # R3064 -- what `ze_declare_advanced_publisher` answers for fourteen configurations (seven
     # option shapes, with and without the timestamp key), and whether a subscriber of the
@@ -24249,7 +24251,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact an_advanced_publisher_declaration_is_answered_with_the_same_code_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}an_advanced_publisher_declaration_is_answered_with_the_same_code_on_wz_and_libzenohc" \
         || return 1
     # R3065 -- what a SENDER does with a chunk of a shared-memory protocol its receiver may not
     # be able to read: a custom provider's chunks, put, sent as a get's value and replied, to a
@@ -24261,7 +24263,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_chunk_of_a_custom_protocol_is_sent_as_bytes_to_a_receiver_that_cannot_read_it_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_chunk_of_a_custom_protocol_is_sent_as_bytes_to_a_receiver_that_cannot_read_it_on_wz_and_libzenohc" \
         || return 1
     # R3066 -- the other half, with wz as the RECEIVER: a session opened over a client storage
     # (`z_open_with_custom_shm_clients`, `z_ref_shm_client_storage_global`, the two symbols that did
@@ -24274,7 +24276,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_receiver_over_a_client_storage_reads_what_the_real_sender_puts_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_receiver_over_a_client_storage_reads_what_the_real_sender_puts_on_wz_and_libzenohc" \
         || return 1
     # R3067 -- the ROLES of a session: what `z_open` makes of the endpoints a config states. A
     # peer or router with none opens alone (wz answered -1), a client with none, or with only a
@@ -24289,7 +24291,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_session_opens_on_the_endpoints_its_config_states_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_session_opens_on_the_endpoints_its_config_states_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_open_roles_twice_and_diff
     _runci_guarded_test \
@@ -24297,7 +24299,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_node_that_listens_and_dials_is_reached_from_both_sides_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_node_that_listens_and_dials_is_reached_from_both_sides_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_open_roles_twice_and_diff
     _runci_guarded_test \
@@ -24305,7 +24307,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact two_peers_that_dial_each_other_keep_one_link_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}two_peers_that_dial_each_other_keep_one_link_identically_on_wz_and_libzenohc" \
         || return 1
     # R3069 -- WHERE a delivery a session makes to itself runs: inside the call that causes it, on
     # the calling thread, in the real library's order. A put's subscriber, a publisher's put, a
@@ -24319,7 +24321,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_delivery_a_session_makes_to_itself_runs_inside_the_call_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_delivery_a_session_makes_to_itself_runs_inside_the_call_on_wz_and_libzenohc" \
         || return 1
     # R3070 -- a session that SCOUTS: `z_open` of a config that states no endpoint and leaves
     # multicast scouting on, which every shipped example does without `-e` and which wz refused.
@@ -24336,7 +24338,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_node_with_no_endpoint_finds_a_router_by_scouting_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_node_with_no_endpoint_finds_a_router_by_scouting_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24344,7 +24346,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_node_that_scouts_and_finds_nobody_opens_or_fails_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_node_that_scouts_and_finds_nobody_opens_or_fails_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24352,7 +24354,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact two_peers_that_scout_find_each_other_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}two_peers_that_scout_find_each_other_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24360,7 +24362,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_peer_with_a_live_endpoint_opens_at_once_though_it_scouts_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_peer_with_a_live_endpoint_opens_at_once_though_it_scouts_on_wz_and_libzenohc" \
         || return 1
     # R3071 -- the other direction: a node that is FOUND. What a wz node says when a Scout asks for
     # its role is read by the real library's own `z_scout` and compared with what a real node says
@@ -24375,7 +24377,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24383,7 +24385,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_real_node_that_scouts_finds_a_listening_node_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_real_node_that_scouts_finds_a_listening_node_identically_on_wz_and_libzenohc" \
         || return 1
     # Debt 873 side finding -- the scouting legs (a node that scouts, a node that is found)
     # re-run in a namespace with NO default route, where wz's group join was refused and the
@@ -24411,7 +24413,7 @@ layer_c1cc_api_compat_c() {
             "${c1cc_netns_wrap[@]}" cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
             --test-threads=1 \
-            --exact the_scouting_legs_hold_in_a_namespace_with_no_default_route \
+            --exact "${WZ_TEST_PREFIX}the_scouting_legs_hold_in_a_namespace_with_no_default_route" \
             || return 1
     fi
     # R3073 -- a real peer that DIALS a node at an endpoint opens at once, whichever library the
@@ -24424,7 +24426,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_real_peer_that_dials_a_node_opens_at_once_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_real_peer_that_dials_a_node_opens_at_once_identically_on_wz_and_libzenohc" \
         || return 1
     # R3074 -- gossip: two peers that each connected to a third come to dial each other. A hub and
     # two leaves with multicast scouting OFF, so the only thing that can introduce the leaves is
@@ -24438,7 +24440,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact two_leaves_of_a_hub_are_introduced_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}two_leaves_of_a_hub_are_introduced_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24446,7 +24448,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact leaves_that_cannot_be_dialled_are_not_introduced_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}leaves_that_cannot_be_dialled_are_not_introduced_identically_on_wz_and_libzenohc" \
         || return 1
     # R3075 -- the gossip keys a C session reads: `scouting/gossip/enabled`, `target`,
     # `autoconnect` and `autoconnect_strategy`, each set on ONE node of the same hub-and-two-leaves
@@ -24460,7 +24462,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_node_told_not_to_gossip_introduces_no_one_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_node_told_not_to_gossip_introduces_no_one_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24468,7 +24470,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_nodes_autoconnect_and_target_decide_whom_it_dials_and_tells_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_nodes_autoconnect_and_target_decide_whom_it_dials_and_tells_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24476,7 +24478,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact the_autoconnect_strategy_decides_which_end_dials_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}the_autoconnect_strategy_decides_which_end_dials_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24484,7 +24486,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_gossip_target_that_names_clients_fails_the_open_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_gossip_target_that_names_clients_fails_the_open_identically_on_wz_and_libzenohc" \
         || return 1
     # R3076 -- `listen/endpoints` is a SET. A peer that states two endpoints is reached at both
     # (a leaf of each, scouting off, so a leaf has no way to the hub but the endpoint it was
@@ -24500,7 +24502,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_peer_that_states_two_listeners_is_reached_at_both_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_peer_that_states_two_listeners_is_reached_at_both_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24508,7 +24510,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_listener_that_cannot_bind_fails_the_open_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_listener_that_cannot_bind_fails_the_open_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24516,7 +24518,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_listener_that_cannot_bind_is_skipped_when_told_to_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_listener_that_cannot_bind_is_skipped_when_told_to_identically_on_wz_and_libzenohc" \
         || return 1
     # R3089 -- the bind phase's budget and retry. With a `listen/timeout_ms` that is not zero an
     # endpoint that cannot be bound is tried again on the `listen/retry` schedule: held up inside
@@ -24530,7 +24532,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libzenohc" \
         || return 1
     # R3096 -- the gossip half of a listener bound late. A hub whose only listener binds in the
     # background, a node B that dials it after the bind and also listens, and a node C that dials B
@@ -24543,7 +24545,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_listener_bound_late_is_gossiped_to_a_node_that_dials_its_neighbour_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_listener_bound_late_is_gossiped_to_a_node_that_dials_its_neighbour_on_wz_and_libzenohc" \
         || return 1
     # R3125 -- the order a session starts its halves in, each row measured on the real library
     # before anything was repaired. A peer whose connect walk is one attempt the open waits for,
@@ -24558,7 +24560,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_peer_answers_a_scout_only_after_its_connect_walk_ends_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_peer_answers_a_scout_only_after_its_connect_walk_ends_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24566,7 +24568,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_router_holds_its_open_for_scouting_delay_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_router_holds_its_open_for_scouting_delay_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_scouting_twice_and_diff
     _runci_guarded_test \
@@ -24574,7 +24576,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_client_that_scouted_its_node_does_not_search_again_when_it_is_lost_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_client_that_scouted_its_node_does_not_search_again_when_it_is_lost_on_wz_and_libzenohc" \
         || return 1
     # R3126 -- an IPv6 scouting group, on the four scopes one can have. The real library fails the
     # open on a link-local group (the kernel refuses to bind a link-local multicast address that
@@ -24588,7 +24590,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_node_scouting_on_an_ipv6_group_behaves_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_node_scouting_on_an_ipv6_group_behaves_identically_on_wz_and_libzenohc" \
         || return 1
     # R3127 -- the same group with an IPv6 interface named for it, on every address of the host
     # that can carry one. The real library takes the address literal as the interface and joins
@@ -24602,7 +24604,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_node_scouting_on_an_ipv6_group_by_an_ipv6_interface_behaves_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_node_scouting_on_an_ipv6_group_by_an_ipv6_interface_behaves_identically_on_wz_and_libzenohc" \
         || return 1
     # R3138 -- the interface key as TEXT: a name, a padded name, a comma list, a name nothing
     # holds, an interface that is down, one that holds no IPv4 address. The real library splits on
@@ -24618,7 +24620,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_node_scouting_by_an_interface_list_or_name_behaves_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_node_scouting_by_an_interface_list_or_name_behaves_identically_on_wz_and_libzenohc" \
         || return 1
     wz_test_args wz-integration-tests zenoh_c_advanced_publisher_declare_twice_and_diff
     _runci_guarded_test \
@@ -24626,7 +24628,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" \
         || return 1
     # R3064 -- which nodes hold a clock: a peer holds none unless the config says so, a router
     # holds one unless it says not, and `false` wins over a router's default, spelled as the key
@@ -24638,7 +24640,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_nodes_clock_follows_its_role_and_its_config_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_nodes_clock_follows_its_role_and_its_config_on_wz_and_libzenohc" \
         || return 1
     # R3061 -- what `z_bytes_to_string` does with bytes that are not text, one C program on
     # both libraries: refused with `-1` by the real library, which wz copied until this round.
@@ -24649,7 +24651,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact bytes_that_are_not_utf8_are_refused_by_to_string_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}bytes_that_are_not_utf8_are_refused_by_to_string_on_wz_and_libzenohc" \
         || return 1
     # R2970 — what a session's links OFFER, read from its config: QoS by
     # default, lowlatency and compression when asked, qos+lowlatency refused at
@@ -24664,7 +24666,7 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
         --test-threads=1 \
-        --exact a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc" \
         || return 1
     # R311y500 — the CROSS-IMPL half, and it is a different question from the
     # three legs above. Those establish that upstream's program LINKS wz and that
@@ -24699,7 +24701,7 @@ layer_c1cc_api_compat_c() {
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" || return 1
+            --exact "${WZ_TEST_PREFIX}$leg" || return 1
     done
     # R3100 — a zenoh peer that dials a pico LISTENER, the listener compiled once
     # against the real zenoh-pico and once against `wz-capi-pico`. It stood in
@@ -24715,7 +24717,7 @@ layer_c1cc_api_compat_c() {
     _runci_guarded_test "C1cc a pico listener ends what it replays" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact a_zenoh_peer_that_dials_a_pico_listener_is_not_left_waiting_on_wz_and_zenoh_pico \
+        --exact "${WZ_TEST_PREFIX}a_zenoh_peer_that_dials_a_pico_listener_is_not_left_waiting_on_wz_and_zenoh_pico" \
         || return 1
     # R2281 (open-debt item 617) — the SHARED-MEMORY legs, which lived on Layer
     # C1ce while that lane was believed to hold the only SHM header. It does not
@@ -24745,7 +24747,7 @@ layer_c1cc_api_compat_c() {
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" || return 1
+            --exact "${WZ_TEST_PREFIX}$leg" || return 1
     done
     # REPORTED, never enforced — see the script's own header for why a ratchet
     # needs a committed baseline and is a separate decision.
@@ -24853,7 +24855,7 @@ layer_c1ce_api_compat_c_unstable_oracle() {
         WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce $leg" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" || rc=1
+            --exact "${WZ_TEST_PREFIX}$leg" || rc=1
     done
     # The OBSERVER the publishing legs adjudicate with. Built here rather than
     # inherited from Layer C1cc, because `--layer C1ce` on its own is a supported
@@ -24871,7 +24873,7 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce layout" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation || rc=1
+        --exact "${WZ_TEST_PREFIX}the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation" || rc=1
     # R311y545 — the option-DEFAULTS differential, and this oracle is the only
     # place it can measure the unstable half. `z_publisher_options_t.reliability`
     # and `z_put_options_t.source_info` exist ONLY under Z_FEATURE_UNSTABLE_API,
@@ -24883,7 +24885,7 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce option defaults" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact upstream_option_defaults_on_wz_capi_c_match_real_libzenohc || rc=1
+        --exact "${WZ_TEST_PREFIX}upstream_option_defaults_on_wz_capi_c_match_real_libzenohc" || rc=1
     # R311y566 — the `source_info` FOREIGN ADJUDICATOR, and THIS is the lane
     # where it means something. The whole source-info half of that probe sits
     # behind the header's own `#if defined(Z_FEATURE_UNSTABLE_API)`, so on the
@@ -24900,7 +24902,7 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce source_info adjudicator" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc \
+        --exact "${WZ_TEST_PREFIX}a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc" \
         || rc=1
     # R311y543 — the RUN legs for the ADVANCED plane, which is what this arm is
     # what makes reachable. Named --exact one per invocation, as C1cc does: a
@@ -24926,7 +24928,7 @@ layer_c1ce_api_compat_c_unstable_oracle() {
         WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce $leg" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" || rc=1
+            --exact "${WZ_TEST_PREFIX}$leg" || rc=1
     done
     # R311y573 — the zenoh-ext families (`ze_publication_cache` /
     # `ze_querying_subscriber`), the 18 symbols that were the smaller of the two
@@ -24938,7 +24940,7 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce zenoh-ext families" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact the_zenoh_ext_families_behave_identically_on_wz_and_libzenohc || rc=1
+        --exact "${WZ_TEST_PREFIX}the_zenoh_ext_families_behave_identically_on_wz_and_libzenohc" || rc=1
     # R3130 -- the publication cache's `_time` filter. One program fills a cache and
     # asks it under forty-odd selectors built from the cached samples' own instants,
     # linked once at the real `libzenohc` and once at wz's C ABI. The real library's
@@ -24950,7 +24952,7 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce publication cache time range" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact the_publication_cache_filters_by_the_querys_time_range_identically_on_wz_and_libzenohc || rc=1
+        --exact "${WZ_TEST_PREFIX}the_publication_cache_filters_by_the_querys_time_range_identically_on_wz_and_libzenohc" || rc=1
     # R3132 -- the querying subscriber's merge. One program holds the initial query
     # open from a cloned query, publishes live samples, then answers out of order, and
     # prints what the callback saw and when. Replies and live samples are parked until
@@ -24961,7 +24963,7 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce querying subscriber merge" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact a_querying_subscriber_merges_replies_and_live_samples_identically_on_wz_and_libzenohc || rc=1
+        --exact "${WZ_TEST_PREFIX}a_querying_subscriber_merges_replies_and_live_samples_identically_on_wz_and_libzenohc" || rc=1
     # R3134 -- a face session's history destination. Two sessions of one library joined by a
     # link, an advanced publisher with a cache and a subscriber with history on each side,
     # and a count of how often each callback ran. A C session here is a plane plus one wz
@@ -24973,7 +24975,7 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce history over a link" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact a_history_subscriber_hears_each_cached_sample_once_with_a_link_up_on_wz_and_libzenohc || rc=1
+        --exact "${WZ_TEST_PREFIX}a_history_subscriber_hears_each_cached_sample_once_with_a_link_up_on_wz_and_libzenohc" || rc=1
     # R3136 -- `scouting/gossip/multihop`. Five peers in a chain, only the first dialling what
     # gossip names, once with the key off and once on, linked at the real `libzenohc` and at wz's
     # C ABI. MEASURED, against the default config's sentence that it spreads gossip "to all
@@ -24984,7 +24986,7 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce gossip multihop chain" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact gossip_multihop_links_the_chain_identically_on_wz_and_libzenohc || rc=1
+        --exact "${WZ_TEST_PREFIX}gossip_multihop_links_the_chain_identically_on_wz_and_libzenohc" || rc=1
     # R3137 -- a queryable that answers a get of its OWN session. One session, a handler that
     # sends four replies, and a getter asking it three thousand times. The real library delivers
     # all four every time; wz's C ABI lost them from the sixtieth ask on, because the local plane
@@ -24994,7 +24996,7 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce same-session queryable" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact a_same_session_queryable_is_heard_in_full_on_every_ask_on_wz_and_libzenohc || rc=1
+        --exact "${WZ_TEST_PREFIX}a_same_session_queryable_is_heard_in_full_on_every_ask_on_wz_and_libzenohc" || rc=1
     # REPORTED, never enforced, exactly as C1cc's is.
     WZ_ZENOH_C_PREFIX="$shm" python3 scripts/lib/capi_c_coverage.py || rc=1
 
@@ -25067,7 +25069,7 @@ layer_c1cd_api_compat_c_attachment() {
     _runci_guarded_test "C1cd attachment through zenohd" 1 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        --exact upstream_z_sub_on_wz_capi_c_renders_a_pico_attachment_through_zenohd \
+        --exact "${WZ_TEST_PREFIX}upstream_z_sub_on_wz_capi_c_renders_a_pico_attachment_through_zenohd" \
         || return 1
 }
 
@@ -25131,7 +25133,7 @@ layer_e14_apfull_dynamic_volume_pico() {
         _runci_guarded_test "E14 dynamic volume $leg" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" || return 1
+            --exact "${WZ_TEST_PREFIX}$leg" || return 1
     done
 }
 
@@ -25154,7 +25156,7 @@ layer_e13_apfull_storage_plane_pico() {
         _runci_guarded_test "E13 storage plane $leg" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" || return 1
+            --exact "${WZ_TEST_PREFIX}$leg" || return 1
     done
 }
 
@@ -25193,7 +25195,7 @@ layer_e15_apfull_reconcile_federation_pico() {
         _runci_guarded_test "Layer E15 ($leg)" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
-            --test-threads=1 --exact "$leg" || return 1
+            --test-threads=1 --exact "${WZ_TEST_PREFIX}$leg" || return 1
     done
 }
 
@@ -25231,7 +25233,7 @@ layer_e16_fs_backend_shares_a_directory_with_upstream() {
         _runci_guarded_test "Layer E16 ($leg)" 1 \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
-            --test-threads=1 --exact "$leg" || return 1
+            --test-threads=1 --exact "${WZ_TEST_PREFIX}$leg" || return 1
     done
 }
 
