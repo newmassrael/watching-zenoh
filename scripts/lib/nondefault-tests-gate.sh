@@ -1472,8 +1472,9 @@ the pinned OpenMetrics text describes a build without transport-stats' four coun
     # open-debt item 544, and this row is what must be deleted when 544 closes.
     "wz-runtime-tokio|unixpipe_pipeline::tests::two_dialers_get_distinct_dedicated_pairs|\
 an intermittent HANG in the two-dialer FIFO rendezvous (measured 1-in-3 alone, 719s in-suite); open-debt item 544"
-    # The `tls/` link of the COOPERATIVE engine through the pico ABI (`tests/tls_coop_roundtrip.rs`,
-    # `tls-mbedtls`). They are about the engine the build selects, and a build that has the tokio
+    # The `tls/` link of the COOPERATIVE engine through the pico ABI
+    # (`tests/it/files/tls_coop_roundtrip.rs`, `tls-mbedtls`; a module of the merged target `it`,
+    # so a row names its test by the path `-- --list` reports there). They are about the engine the build selects, and a build that has the tokio
     # engine on selects that one, which is every build this table can spell (it has no
     # `--no-default-features`). The cooperative engine runs them in `run-ci.sh`, the lane
     # `C1co tls engine-coop`, with 2 passed guarded.
@@ -1488,8 +1489,9 @@ the cooperative engine's test, run by lane C1co tls engine-coop; this table's bu
 the cooperative engine's test, run by lane C1co tls handshake drop event; this table's builds keep the tokio engine on"
     "wz-capi-pico|a_client_that_never_speaks_is_dropped_as_a_stall_and_the_event_log_is_told|\
 the cooperative engine's test, run by lane C1co tls handshake drop event; this table's builds keep the tokio engine on"
-    # The C ABI's node beside a REAL zenohd (`tests/router_node_zenohd_interop.rs`, needs
-    # `router-node`; the last three also need `advanced` and `group`): `#[ignore]` because it
+    # The C ABI's node beside a REAL zenohd (`tests/it/files/router_node_zenohd_interop.rs`, a
+    # module of the merged target `it`, named by its path there; needs `router-node`; the last
+    # three also need `advanced` and `group`): `#[ignore]` because it
     # spawns `target/zenohd/zenohd`, which only Layer Z provisions, so a leg of this table, which
     # never passes `--ignored`, would run none of them. Layer Z runs the six with `--ignored`,
     # 6 passed guarded.

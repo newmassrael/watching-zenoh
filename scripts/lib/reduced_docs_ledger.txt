@@ -415,7 +415,6 @@ wz-session-core	wz-session-core/src/lib.rs	1	refused: wz-session-core: `session-
 wz-session-core	wz-session-core/src/lifecycle_wire.rs	1	error: unresolved link to `crate::peer_connection::PeerConnectionState::in_intent`: no item named `peer_connection` in module `wz_session_core`
 wz-session-core	wz-session-core/src/lifecycle_wire.rs	1	error: unresolved link to `crate::peer_table::StateWords`: no item named `peer_table` in module `wz_session_core`
 wz-session-core	wz-session-core/src/link.rs	1	error: unresolved link to `Self::ActionsHandle`: the trait `SessionRuntime` has no associated item named `ActionsHandle`
-wz-session-core	wz-session-core/src/link.rs	1	error: unresolved link to `crate::adminspace::AdminLink`: no item named `adminspace` in module `wz_session_core`
 wz-session-core	wz-session-core/src/link.rs	1	error: unresolved link to `crate::session_actions::LinkState`: no item named `session_actions` in module `wz_session_core`
 wz-session-core	wz-session-core/src/link.rs	1	error: unresolved link to `crate::session_actions::SessionCore`: no item named `session_actions` in module `wz_session_core`
 wz-session-core	wz-session-core/src/link.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::batch_envelope_bytes`: no item named `session_actions` in module `wz_session_core`
