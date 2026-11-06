@@ -313990,6 +313990,44 @@
         "A querier of a lifecycle verb is still declared by its whole key, with the target's zid and the peer's written in it after both identities exist; a declared form naming the verb, the target endpoint and the peer (self or a zid), with the key made by the generator, is the next step of this claim."
       ]
     },
+    "Round 4348": {
+      "decision_summary": "A querier of a lifecycle verb is declared by its words, not its key: verb, of (the zid of one of the node's peer endpoints), about (a zid or self), whatami (client unless stated), generation for reset, mode for open; one of key and verb. The generator makes the key as lifecycle_wire::VerbKey reads it, so no declaration and no consumer spells the key grammar, and raises the node's key budget to the longest key such a querier can ask. about = self is the node's own zid, a fact of the node when it runs (its [identity] or a key it makes at start), so the key is generated up to its last chunk and the node ends it at start through slot_querier::LaunchedKeys (written once before the node exists, read as the 'static key a Query asks). The node says each querier's key at start, HOST-WZ-QUERIER <n> <key>, so a consumer joins the ASKED, REPLY and VERDICT lines to the querier by its place in the declaration.",
+      "changes_bullets": [
+        "scripts/lib/wz_node.py: the querier's verb keys (value kinds peer-zid and about), verb_key, entity_key, verb_querier_problems (of must be a peer endpoint's zid; about a zid or self; self refused under a closed key set), the key budget from the longest verb key, QUERIED_ABOUT_SELF, the vocabulary's verdicts.key; selftest cases for every form and refusal.",
+        "crates/wz-session-mcu/src/slot_querier.rs: LaunchedKeys and LaunchedKeysRefused, with a test.",
+        "deploy/host-slot-node/src/bin/declared_node.rs: the queriers' keys set at start from QUERIED and QUERIED_ABOUT_SELF; HOST-WZ-QUERIER lines; ASKED lines carry the key asked.",
+        "deploy/nodes/slot-subject.toml and generated: the witness declares its three queriers by their words, one about itself.",
+        "crates/wz-integration-tests/tests/it/files/wz_declared_commander_zenohd_interop.rs: the provisioned leg asserts the QUERIER lines and the verdict of the querier about itself.",
+        "docs/target-build-contract.md: the querier's verb form."
+      ],
+      "verification_bullets": [
+        "wz_node.py --selftest and --check: OK. hkl002: clippy -D warnings wz-session-mcu (session-slot, client-core, query-get) all-targets clean; slot_querier tests 10 passed; slot-asker packaged as a declared node (no tls). Layer Zcmd provisioned leg: 1 passed, with HOST-WZ-QUERIER 0..2 and the status verdict of the querier about itself (key ended with the subject's zid). reason_review_pin_gate, prose_named_identifier_gate --check, upstream_citation_anchor_gate, barrier_needle_gate --check: OK."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "A verb querier's whatami defaults to client, which is how a declared node answers its verbs; a target of another role is named by the declaration (whatami), since the generator cannot read the role of a node it does not declare."
+      ],
+      "publishable_decision_summary": "A querier of a lifecycle verb is declared by its words, not its key: verb, of (the zid of one of the node's peer endpoints), about (a zid or self), whatami (client unless stated), generation for reset, mode for open; one of key and verb. The generator makes the key as lifecycle_wire::VerbKey reads it, so no declaration and no consumer spells the key grammar, and raises the node's key budget to the longest key such a querier can ask. about = self is the node's own zid, a fact of the node when it runs (its [identity] or a key it makes at start), so the key is generated up to its last chunk and the node ends it at start through slot_querier::LaunchedKeys (written once before the node exists, read as the 'static key a Query asks). The node says each querier's key at start, HOST-WZ-QUERIER <n> <key>, so a consumer joins the ASKED, REPLY and VERDICT lines to the querier by its place in the declaration.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_node.py: the querier's verb keys (value kinds peer-zid and about), verb_key, entity_key, verb_querier_problems (of must be a peer endpoint's zid; about a zid or self; self refused under a closed key set), the key budget from the longest verb key, QUERIED_ABOUT_SELF, the vocabulary's verdicts.key; selftest cases for every form and refusal.",
+        "crates/wz-session-mcu/src/slot_querier.rs: LaunchedKeys and LaunchedKeysRefused, with a test.",
+        "deploy/host-slot-node/src/bin/declared_node.rs: the queriers' keys set at start from QUERIED and QUERIED_ABOUT_SELF; HOST-WZ-QUERIER lines; ASKED lines carry the key asked.",
+        "deploy/nodes/slot-subject.toml and generated: the witness declares its three queriers by their words, one about itself.",
+        "crates/wz-integration-tests/tests/it/files/wz_declared_commander_zenohd_interop.rs: the provisioned leg asserts the QUERIER lines and the verdict of the querier about itself.",
+        "docs/target-build-contract.md: the querier's verb form."
+      ],
+      "publishable_verification_bullets": [
+        "wz_node.py --selftest and --check: OK. hkl002: clippy -D warnings wz-session-mcu (session-slot, client-core, query-get) all-targets clean; slot_querier tests 10 passed; slot-asker packaged as a declared node (no tls). Layer Zcmd provisioned leg: 1 passed, with HOST-WZ-QUERIER 0..2 and the status verdict of the querier about itself (key ended with the subject's zid). reason_review_pin_gate, prose_named_identifier_gate --check, upstream_citation_anchor_gate, barrier_needle_gate --check: OK."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A verb querier's whatami defaults to client, which is how a declared node answers its verbs; a target of another role is named by the declaration (whatami), since the generator cannot read the role of a node it does not declare."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
