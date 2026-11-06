@@ -2229,8 +2229,8 @@ def main(argv: list[str]) -> int:
     q.add_argument(
         "--stream-steps",
         action="store_true",
-        help="after the base steps, HW.36 to HW.38 (a tcp node only): the release and conservation "
-        "properties of a stream, with a fault on the leg to A read through B",
+        help="after the base steps, HW.36 to HW.44 (a tcp node only): the release, conservation, "
+        "admission, redial and coalescing properties of a stream, with a fault on the leg to A read through B",
     )
     q.add_argument(
         "--transport",
@@ -2255,7 +2255,7 @@ def main(argv: list[str]) -> int:
     b.add_argument(
         "--stream-steps",
         action="store_true",
-        help="after HW.0 to HW.7, HW.36 to HW.38 (a tcp node only): a fault on the leg to A, read through B",
+        help="after HW.0 to HW.7, HW.36 to HW.44 (a tcp node only): a fault on the leg to A, read through B",
     )
     b.add_argument(
         "--pool-image",

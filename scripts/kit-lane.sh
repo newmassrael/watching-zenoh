@@ -1201,9 +1201,18 @@ run_node() {
         return 1
     fi
     ok "$key" "the image booted (READY line after the reset)"
+    # A node reached over a stream (tcp/) is also put to the stream steps, HW.36 to HW.44: a connection can
+    # be released, refused, held and cut, which a datagram node has no counterpart of. The program refuses
+    # the switch on a datagram node, so the lane names it by the locator's scheme and not by the image.
+    local steps="HW.0 to HW.7" stream_args=()
+    if [[ "$NODE_LOCATOR" == tcp/* ]]; then
+        steps="HW.0 to HW.7 and HW.36 to HW.44"
+        stream_args=(--stream-steps)
+    fi
     if python3 "$ROOT/scripts/lib/admin_node_verdict.py" board --node "$NODE_LOCATOR" --host "$KIT_HOST_IP" \
-        --console "$OUT/console.boot" --zenohd "$KIT_ZENOHD" >"$OUT/verdict.txt" 2>"$OUT/verdict.err"; then
-        ok "$key" "every step HW.0 to HW.7 held ($OUT/verdict.txt)"
+        --console "$OUT/console.boot" --zenohd "$KIT_ZENOHD" "${stream_args[@]}" \
+        >"$OUT/verdict.txt" 2>"$OUT/verdict.err"; then
+        ok "$key" "every step $steps held ($OUT/verdict.txt)"
     else
         bad "$key" "the steps of HARDWARE_VERDICT.md did not all hold ($OUT/verdict.txt, $OUT/verdict.err): $(grep -a 'FAIL' "$OUT/verdict.txt" | head -n 2 | tr '\n' ' ')"
     fi

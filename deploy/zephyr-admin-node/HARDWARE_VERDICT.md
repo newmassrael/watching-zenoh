@@ -101,6 +101,17 @@ out of what it is handed: all eight answered with both sessions, exactly one wri
 in the buffer, and router B still reporting both sessions afterwards. A run in which a request did not reach the
 buffer, or the buffer went as several writes, shows the node nothing and fails.
 
+The steps run on the board as they run under QEMU: `scripts/kit-lane.sh run zephyr-fixed-tcp` puts a node
+reached over a `tcp/` locator to `--stream-steps` as well as to HW.0 to HW.7 (the lane names the switch by
+the locator's scheme, because the program refuses it on a datagram node). The proxy on A's leg is on the
+host's loopback and the one on B's leg is on the host's address on the cable, the address the node is told
+to dial. What the board changes is the stack under the node: lwIP's own accept, close and reset, and a
+100 Mbit link in place of QEMU's, so the timings the steps print are the board's and the bounds are held
+unchanged. Three kit runs, each reset and flashed, held all seventeen steps (read in the first and the last:
+HW.42, five extra connections made and three closed by the node, where QEMU closed six of eight; HW.43,
+2,000 of 2,000 in 85,565 and 85,293 ms, against about six seconds under QEMU, which the step does not bound;
+HW.44, eight requests held, eight answered, in one write).
+
 HW.43 asks through router A, one query after another, 2,000 times: a request to the node and its reply
 across the leg to A, each answered with the sessions the node holds, which must be both. The count is
 derived and not round: five hundred for each entry of the largest fixed table the node holds (its four
