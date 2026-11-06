@@ -6056,6 +6056,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // A declaration for a face that keeps declarations by id is numbered first: the gate then
         // reads the message that goes out.
         let msg = self.number_declaration(state, msg);
+        if matches!(msg, NetworkMessage::Declare(_)) {
+            route_event!(
+                "node {} sends to face {:?}: {}",
+                self.own_zid,
+                id,
+                declaration_ids::declare_digest(&msg)
+            );
+        }
         let verdict = self.admit_outbound(id, state, &msg, known);
         if let Some(kind) = verdict.dropped_by() {
             self.interceptor_dropped.bump();
@@ -7613,6 +7621,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // An unrestricted interest cannot aggregate: the aggregate reply is keyed on the
         // interest's own keyexpr, which it does not carry.
         let aggregate = aggregate && target.is_some();
+        route_event!(
+            "node {} answers interest {} of face {:?} (target {:?}, future {}) with subscribers {:?}",
+            self_zid,
+            interest_id,
+            inbound,
+            target,
+            future,
+            per_ke.keys().collect::<Vec<_>>()
+        );
         // The replies are built first, interning their ids in the store as they go, and sent after:
         // the store is written while they are built, and nothing may read the tables from the
         // sink at the same time.

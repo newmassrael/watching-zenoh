@@ -159,6 +159,30 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 }
 
+/// What a `Declare` says, in one short line for the routing event: the kind, the id it carries,
+/// the interest it answers and the key it names (`?` for a key that is an alias). The whole
+/// record is a kilobyte of extensions, and the event is written for every declaration a router
+/// sends.
+pub(super) fn declare_digest(msg: &NetworkMessage) -> String {
+    let NetworkMessage::Declare(declare) = msg else {
+        return String::new();
+    };
+    let (kind, id) = match &declare.body {
+        DeclareOwnedVariant::CodecZenohDeclSubscriber(s) => ("declare-subscriber", s.id),
+        DeclareOwnedVariant::CodecZenohDeclQueryable(q) => ("declare-queryable", q.id),
+        DeclareOwnedVariant::CodecZenohDeclToken(t) => ("declare-token", t.id),
+        DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => ("undeclare-subscriber", u.id),
+        DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => ("undeclare-queryable", u.id),
+        DeclareOwnedVariant::CodecZenohUndeclToken(u) => ("undeclare-token", u.id),
+        _ => ("declare-other", 0),
+    };
+    let key = resolve_governed_keyexpr(msg, &Default::default()).unwrap_or_else(|| "?".to_owned());
+    format!(
+        "{kind} id={id} interest={:?} key={key}",
+        declare.interest_id
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

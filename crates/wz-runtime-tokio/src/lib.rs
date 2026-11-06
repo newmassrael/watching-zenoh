@@ -85,6 +85,27 @@ const _: () = assert!(
 // multicast transport drive loop (`multicast_glue`) is independent of this
 // module (it dispatches into the shared `ApplicationLayerObserver` directly,
 // not through the unicast `SessionLinkActions`).
+/// One observation of what a router tells its faces about declarations, target `wz::routing`: a
+/// tracing event where `tracing-spans` is built, a `log` record elsewhere. The tracing event is a
+/// ROOT event (`parent: None`): upstream's test of its regions counts every event that has its
+/// `register_subscriber` span as an ancestor, and a declaration is sent to a face from inside
+/// that span, so an event that took the current span as its parent would be counted as one more
+/// registration. The message names the node, as the root event carries no `demux{zid}` scope.
+#[allow(unused_macros)] // a build without a router feature has no call
+macro_rules! route_event {
+    ($fmt:literal $(, $arg:expr)* $(,)?) => {{
+        #[cfg(feature = "tracing-spans")]
+        tracing::debug!(
+            target: "wz::routing",
+            parent: Option::<tracing::Id>::None,
+            $fmt
+            $(, $arg)*
+        );
+        #[cfg(not(feature = "tracing-spans"))]
+        log::debug!(target: "wz::routing", $fmt $(, $arg)*);
+    }};
+}
+
 /// R311y453 — live NIC-name resolution for the §5.16 `interfaces` subject axis.
 /// Gated on `link-interfaces`, which owns the `libc` dependency the `getifaddrs`
 /// call needs; all three `access-*` knobs pull it.
