@@ -313604,6 +313604,34 @@
         "A subscription costs O(faces) under both values, since every face's interests are matched against it (935 us at 2048 faces); an index of the interests by what they match would serve both values."
       ]
     },
+    "Round 4337": {
+      "decision_summary": "The hosted Z8 regions run that failed once (scenario 7, a peer saw three registrations of the key where upstream counts four) left no trace of what each router had told each face, because the capture holds only upstream's own spans. The router now writes one event for every declaration it sends to a face and one for every interest it answers, under the target wz::routing, so the next failure carries the sender side of the missing declaration. An earlier reading of the failure as a late member of a multicast group was wrong: the test's multicast setting is a scouting group and the nodes link over unicast, which five runs with events on the multicast session path showed by printing none.",
+      "changes_bullets": [
+        "A route_event macro in the crate root writes a tracing event with no parent where tracing-spans is built and a log record elsewhere; the router calls it in egress_to_face for each Declare and in dump_interest_subs for each interest answer, and declaration_ids gains declare_digest, a one-line summary of kind, id, interest and key. The event has no parent so that upstream's count of events under register_subscriber does not see it. No routing behaviour changed."
+      ],
+      "verification_bullets": [
+        "All 126 tests of the regions suite pass on pc3 with the events built in, so no span count moved, and five repeats of the scenario 7 order1_pubsub test pass and print about 500 events a run, each one line. Clippy of wz-runtime-tokio with all features and all targets is clean, formatting is clean, and the reason pin gate is OK. The failure itself was not reproduced: it appeared once in about 1300 runs."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The failure is still unattributed. The next hosted Z8 run that shows it carries the events in its regions run log; read the lines of wz::routing for the key of the missing registration, node by node, and see whether the router that should have told the peer sent it. Without a failing run there is nothing more to measure here at about 0.08 percent."
+      ],
+      "publishable_decision_summary": "The hosted Z8 regions run that failed once (scenario 7, a peer saw three registrations of the key where upstream counts four) left no trace of what each router had told each face, because the capture holds only upstream's own spans. The router now writes one event for every declaration it sends to a face and one for every interest it answers, under the target wz::routing, so the next failure carries the sender side of the missing declaration. An earlier reading of the failure as a late member of a multicast group was wrong: the test's multicast setting is a scouting group and the nodes link over unicast, which five runs with events on the multicast session path showed by printing none.",
+      "publishable_changes_bullets": [
+        "A route_event macro in the crate root writes a tracing event with no parent where tracing-spans is built and a log record elsewhere; the router calls it in egress_to_face for each Declare and in dump_interest_subs for each interest answer, and declaration_ids gains declare_digest, a one-line summary of kind, id, interest and key. The event has no parent so that upstream's count of events under register_subscriber does not see it. No routing behaviour changed."
+      ],
+      "publishable_verification_bullets": [
+        "All 126 tests of the regions suite pass on pc3 with the events built in, so no span count moved, and five repeats of the scenario 7 order1_pubsub test pass and print about 500 events a run, each one line. Clippy of wz-runtime-tokio with all features and all targets is clean, formatting is clean, and the reason pin gate is OK. The failure itself was not reproduced: it appeared once in about 1300 runs."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The failure is still unattributed. The next hosted Z8 run that shows it carries the events in its regions run log; read the lines of wz::routing for the key of the missing registration, node by node, and see whether the router that should have told the peer sent it. Without a failing run there is nothing more to measure here at about 0.08 percent."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
