@@ -346,10 +346,97 @@ def _bare_parser_selftest() -> None:
     )
 
 
+WZ_TEST_ARRAY = '"${WZ_TEST_ARGS[@]}"'
+WZ_TEST_PREFIX_WORD = "${WZ_TEST_PREFIX}"
+
+
+def filters_beside_the_array(text: str) -> list[str]:
+    """The commands of `text` (run-ci.sh as written, NOT expanded) that expand `WZ_TEST_ARGS` and
+    write a test filter of their own after it in a form that does not select that test.
+
+    `wz_test_args C N` spells a merged file as `--test <target> files::N::`, which is a filter.
+    libtest runs a test that matches ANY of its filters, so a name written after the array (on
+    either side of `--`) does not narrow the file to that test: without `--exact` it widens the
+    run to the whole file, and under `--exact` a bare name matches nothing, since the test's full
+    name is `files::N::<test>`. The count of such a leg is then wrong or zero, and only the lane
+    that runs it says so. MEASURED: hosted run 42061671165 redded Layers E5 (13 run where 4 were
+    guarded) and C1cd (none selected), and 87 legs had the shape. `--exact NAME` read through
+    `expand` still checks out against the file's declarations, which is why the guard check below
+    cannot see it.
+
+    Two forms select one test: the helper's third word (`wz_test_args C N <test>`), or
+    `--exact "${WZ_TEST_PREFIX}<test>"`, where `--exact` makes the array's `files::N::` match
+    nothing and the prefix makes the name whole. A filter beside the array passes only in the
+    second form; a shell variable is a filter too.
+    """
+    found: list[str] = []
+    for lineno, logical in logical_lines(text):
+        if logical.lstrip().startswith("#") or WZ_TEST_ARRAY not in logical:
+            continue
+        for seg in logical.split("&&"):
+            if WZ_TEST_ARRAY not in seg:
+                continue
+            toks = command_tokens(seg)
+            if WZ_TEST_ARRAY not in toks:
+                continue
+            # A redirection or the `)` that closes a `$(...)` capture ends the command too
+            # (`out="$(... --quiet 2>&1)"`): neither is a word libtest sees.
+            for k, t in enumerate(toks):
+                if ">" in t or t.startswith(")") or t.endswith(')"') or t.endswith(")"):
+                    toks = toks[:k]
+                    break
+            if WZ_TEST_ARRAY not in toks:
+                continue
+            exact, filters, _ = libtest_selection(toks, toks.index(WZ_TEST_ARRAY) + 1)
+            wrong = [
+                f
+                for f in filters
+                if not (exact and f.strip('"').startswith(WZ_TEST_PREFIX_WORD))
+            ]
+            if wrong:
+                found.append(
+                    f"run-ci.sh:{lineno}: {' '.join(wrong)} written after "
+                    f"`{WZ_TEST_ARRAY}`. After a merge the array ends in the filter "
+                    f"`files::<file>::`, and libtest ORs its filters, so this runs the "
+                    f"whole file (or, under `--exact`, nothing). Name the test as "
+                    f"wz_test_args' third word, or as "
+                    f'`--exact "{WZ_TEST_PREFIX_WORD}<test>"`.'
+                )
+    return found
+
+
+def _filter_beside_array_selftest() -> None:
+    """The check above must see a bare filter after `--`, a variable one, and a prefixed one
+    without `--exact`, and pass both forms that select one test."""
+    wrong = (
+        "    wz_test_args C f\n"
+        "    _runci_guarded_test L 1 cargo test -p C \\\n"
+        f"        {WZ_TEST_ARRAY} -- --ignored --test-threads=1 \\\n"
+        "        --exact name || return 1\n"
+        f"    cargo test -p C {WZ_TEST_ARRAY} -- --exact \"$leg\" || return 1\n"
+        f'    cargo test -p C {WZ_TEST_ARRAY} -- --ignored "{WZ_TEST_PREFIX_WORD}name" || return 1\n'
+    )
+    right = (
+        "    wz_test_args C f name\n"
+        "    _runci_guarded_test L 1 cargo test -p C \\\n"
+        f"        {WZ_TEST_ARRAY} -- --ignored --test-threads=1 --skip other \\\n"
+        "        --exact || return 1\n"
+        f'    cargo test -p C {WZ_TEST_ARRAY} -- --ignored --quiet \\\n'
+        f'        --exact "{WZ_TEST_PREFIX_WORD}$leg" || return 1\n'
+    )
+    assert len(filters_beside_the_array(wrong)) == 3 and not filters_beside_the_array(right), (
+        "count-guard lint: the filter-beside-the-array check no longer reads its own fixture: "
+        f"{filters_beside_the_array(wrong)} / {filters_beside_the_array(right)}"
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+
+    _filter_beside_array_selftest()
+    beside = filters_beside_the_array(RUNCI.read_text())
 
     # A test file named by `wz_test_args <crate> <file>` and `"${WZ_TEST_ARGS[@]}"` is read as the
     # `--test <file>` it stands for (line numbers kept), so the guard is tied to the file in
@@ -577,6 +664,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    failures += beside
     if failures:
         print("count-guard lint FAIL:", file=sys.stderr)
         for f in failures:
