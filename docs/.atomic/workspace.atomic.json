@@ -314422,6 +314422,56 @@
         "No C1cs case builds a zenoh-c layout arm on (shared memory, no unstable API); the arm's reading is held by the unit tests and by the capi-c test of whatever build C1cn runs it in."
       ]
     },
+    "Round 4361": {
+      "decision_summary": "The broker hat's queryables and tokens are held in the store the subscriptions use: ClientStore, one generic store by face and by key with the KeyexprIndex of round 4346, a version and the change log, its per-key value merged by a Held trait (nothing for a subscription or a token, the QueryableInfo for a queryable), so the exact-key and intersecting questions (merged_qabl_info_in, any_qabl_matches_in, token_contributions, dump_interest_qabls) read the key index instead of trying every face. The phase 6 instrument, extended to time a queryable, an interest in queryables and a token per admitted client, found two more costs that grew with the faces up: every registration reconciled every token against each mesh link, a client's too although it moves no graph (94 to 99 ms per registration at 2,048 faces), and the forwarder's record of what it told each region of tokens was a hash map of hash sets that a token declaration under snapshot copied whole. The linkstate tables' register and deregister now say whether the face moved a graph and only such a face reconciles, and the record is a persistent map of persistent sets, read before it is written. Under snapshot the last per-face cost of a declaration is the face map's spine, carried.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/client_store.rs: new ClientStore<V> and the Held trait, replacing client_sub_store.rs; the subscriptions, queryables and tokens are its three instances, with model tests of the index against the scan, the merge and the change log.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: the queryable and token questions read the store by key; OnTables register and deregister return whether the face moved a graph, and only then does the forwarder reconcile tokens; advertised_tokens is a PersistentMap of PersistentSet, read before written.",
+        "crates/wz-runtime-tokio/src/linkstate_forward.rs: ClientQablStore is the store's queryable instance; the client queryable routes are retired by the store's change log and the candidates read from its key index.",
+        "crates/wz-runtime-tokio/src/persistent_map.rs: get_key_value restored for the client stores, gated with the router hat, and read by the map's model test.",
+        "crates/wz-runtime-tokio/src/router_forward/table_sharing_tests.rs: the admission instrument times a queryable, an interest in queryables and a token per client.",
+        "docs/router-table-snapshots.md: section 6.5 (the reading and the two findings), section 7 (the face map's spine is the last per-face copy).",
+        "scripts/lib/capability_cost_gate.py: capic-router-node and capic-default budgets moved by the reading on the landed tree, split from the peer commits by readings at four commits on pc3."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio lib tests with routing-router-hat and routing-token-tables: 1165 passed, 0 failed, 2 ignored (pc2); clippy -D warnings all-targets with those features and lib with routing-router-hat alone: clean; the peer-mesh-only dead-code check (C1y) passes with get_key_value read by the map's model test.",
+        "pc2 phase 6 admission instrument, p50 at 1,792 to 2,048 faces up, round 4350 against the final tree: rwlock register 93,888-99,076 to 0 us, queryable 428-437 to 5-9 us, token 190-203 to 10-19 us; snapshot register 81,278-83,509 to 15 us, queryable 652-654 to 24 us, token 627-638 to 30-31 us (three interleaved runs of the gated tree and the final tree; snapshot token 125-150 to 30-31 us from the persistent tokens map alone).",
+        "Layer Z8 on the tree of both fixes: pass.",
+        "capability_cost_gate --measure on pc3 at a7331c59ea, 5de08a3373, 9fc9f7106e, 9bf10ad6e8 and the rebased a250c2ff26: capic-router-node 5,961,373 / 5,961,373 / 5,988,113 / 5,961,544 / 5,988,284, capic-default 11,048,057 / 11,048,057 / 11,074,849 / 11,048,144 / 11,074,936, lean 9,543,776 inside; capability_cost_gate --selftest 20/20.",
+        "reason_review_pin_gate, prose_named_identifier_gate --check and upstream_citation_anchor_gate: OK."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Under snapshot every write still copies the face map's spine, 7 to 15 us more per declaration at 2,048 faces than at 256; a persistent face map would make the write logarithmic and every message's lookup a trie walk, and choosing needs both measured against the message rate (docs/router-table-snapshots.md section 7).",
+        "Under snapshot, at 0 to 256 faces, a client registration read 6 to 7 us after the persistent tokens map against 3 to 4 us before it in every interleaved run, and not at 2,048 faces; no registration write reaches that map, and the difference is not attributed."
+      ],
+      "publishable_decision_summary": "The broker hat's queryables and tokens are held in the store the subscriptions use: ClientStore, one generic store by face and by key with the KeyexprIndex of round 4346, a version and the change log, its per-key value merged by a Held trait (nothing for a subscription or a token, the QueryableInfo for a queryable), so the exact-key and intersecting questions (merged_qabl_info_in, any_qabl_matches_in, token_contributions, dump_interest_qabls) read the key index instead of trying every face. The phase 6 instrument, extended to time a queryable, an interest in queryables and a token per admitted client, found two more costs that grew with the faces up: every registration reconciled every token against each mesh link, a client's too although it moves no graph (94 to 99 ms per registration at 2,048 faces), and the forwarder's record of what it told each region of tokens was a hash map of hash sets that a token declaration under snapshot copied whole. The linkstate tables' register and deregister now say whether the face moved a graph and only such a face reconciles, and the record is a persistent map of persistent sets, read before it is written. Under snapshot the last per-face cost of a declaration is the face map's spine, carried.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/client_store.rs: new ClientStore<V> and the Held trait, replacing client_sub_store.rs; the subscriptions, queryables and tokens are its three instances, with model tests of the index against the scan, the merge and the change log.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: the queryable and token questions read the store by key; OnTables register and deregister return whether the face moved a graph, and only then does the forwarder reconcile tokens; advertised_tokens is a PersistentMap of PersistentSet, read before written.",
+        "crates/wz-runtime-tokio/src/linkstate_forward.rs: ClientQablStore is the store's queryable instance; the client queryable routes are retired by the store's change log and the candidates read from its key index.",
+        "crates/wz-runtime-tokio/src/persistent_map.rs: get_key_value restored for the client stores, gated with the router hat, and read by the map's model test.",
+        "crates/wz-runtime-tokio/src/router_forward/table_sharing_tests.rs: the admission instrument times a queryable, an interest in queryables and a token per client.",
+        "docs/router-table-snapshots.md: section 6.5 (the reading and the two findings), section 7 (the face map's spine is the last per-face copy).",
+        "scripts/lib/capability_cost_gate.py: capic-router-node and capic-default budgets moved by the reading on the landed tree, split from the peer commits by readings at four commits on pc3."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio lib tests with routing-router-hat and routing-token-tables: 1165 passed, 0 failed, 2 ignored (pc2); clippy -D warnings all-targets with those features and lib with routing-router-hat alone: clean; the peer-mesh-only dead-code check (C1y) passes with get_key_value read by the map's model test.",
+        "pc2 phase 6 admission instrument, p50 at 1,792 to 2,048 faces up, round 4350 against the final tree: rwlock register 93,888-99,076 to 0 us, queryable 428-437 to 5-9 us, token 190-203 to 10-19 us; snapshot register 81,278-83,509 to 15 us, queryable 652-654 to 24 us, token 627-638 to 30-31 us (three interleaved runs of the gated tree and the final tree; snapshot token 125-150 to 30-31 us from the persistent tokens map alone).",
+        "Layer Z8 on the tree of both fixes: pass.",
+        "capability_cost_gate --measure on pc3 at a7331c59ea, 5de08a3373, 9fc9f7106e, 9bf10ad6e8 and the rebased a250c2ff26: capic-router-node 5,961,373 / 5,961,373 / 5,988,113 / 5,961,544 / 5,988,284, capic-default 11,048,057 / 11,048,057 / 11,074,849 / 11,048,144 / 11,074,936, lean 9,543,776 inside; capability_cost_gate --selftest 20/20.",
+        "reason_review_pin_gate, prose_named_identifier_gate --check and upstream_citation_anchor_gate: OK."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Under snapshot every write still copies the face map's spine, 7 to 15 us more per declaration at 2,048 faces than at 256; a persistent face map would make the write logarithmic and every message's lookup a trie walk, and choosing needs both measured against the message rate (docs/router-table-snapshots.md section 7).",
+        "Under snapshot, at 0 to 256 faces, a client registration read 6 to 7 us after the persistent tokens map against 3 to 4 us before it in every interleaved run, and not at 2,048 faces; no registration write reaches that map, and the difference is not attributed."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
