@@ -18,10 +18,7 @@
 // One sample across each forwarded link; each file is also `cfg`'d on its link feature.
 #![cfg(feature = "peer")]
 
-#[path = "../../link_roundtrip/mod.rs"]
-mod link_roundtrip;
-
-use link_roundtrip::{payloads_across, PAYLOAD};
+use crate::link_roundtrip::{payloads_across, PAYLOAD};
 use wz_runtime_tokio_test_support::free_port;
 
 #[test]

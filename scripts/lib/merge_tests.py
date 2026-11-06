@@ -336,6 +336,21 @@ def shared_helpers(texts: list[str], helpers: dict[str, str]) -> set[str]:
     return {name for name, n in count.items() if n > 1}
 
 
+# A module a file names by `#[path = "..."]`, however the path is spelled.
+PATH_MOD = re.compile(r'#\[path\s*=\s*"(?P<path>[^"]+)"\]\s*(?:#\[[^\]]*\]\s*)*(?:pub\s+)?mod\s+\w+\s*;')
+
+
+def duplicate_path_modules(texts: dict[str, str]) -> dict[str, list[str]]:
+    """{path: [files]} for each `#[path]` that two or more of `texts` (name -> source) name. One
+    executable that loads a file twice as a module is refused by rustc ("file is loaded as a
+    module multiple times"): the files used to be one executable each and loaded it once each."""
+    seen: dict[str, list[str]] = {}
+    for name, text in texts.items():
+        for path in {m.group("path") for m in PATH_MOD.finditer(text)}:
+            seen.setdefault(path.removeprefix("./"), []).append(name)
+    return {p: sorted(n) for p, n in seen.items() if len(n) > 1}
+
+
 def point_helper_modules(text: str, helpers: dict[str, str],
                          shared: frozenset[str] | set[str] = frozenset()) -> tuple[str, int]:
     """`text` with each `mod <helper>;` given a `#[path]` to the helper, from `tests/<t>/files/`,
@@ -438,6 +453,15 @@ def apply(crate: Path, keep: set[str], exclusive: list[str]) -> int:
                   f"by hand. Nothing done", file=sys.stderr)
             return 1
         shared_by[target] = shared
+        twice = duplicate_path_modules(
+            {n: (crate / "tests" / f"{n}.rs").read_text() for n in names})
+        if twice:
+            for path, files in sorted(twice.items()):
+                print(f"tests/{target}: {', '.join(files)} each load {path} by #[path]; one "
+                      f"executable cannot load a file twice as a module. Declare it once in the "
+                      f"target's main.rs and `use crate::<module>` in the files, or --keep all "
+                      f"but one. Nothing done", file=sys.stderr)
+            return 1
     manifest_path = crate / "Cargo.toml"
     manifest = manifest_path.read_text() if manifest_path.exists() else ""
     dissolved = {t.name: t for t in test_tables(manifest) if t.simple}
@@ -609,6 +633,12 @@ def selftest() -> int:
               shared_helpers(["mod harness;\n", "mod harness;\nmod other;\n", "mod other;\n"],
                              helpers) == {"harness"}
               and shared_helpers(["mod harness;\n"], helpers) == set())
+        twice = duplicate_path_modules({
+            "a": '#[path = "../x/mod.rs"]\nmod x;\n',
+            "b": '#![cfg(feature = "f")]\n#[path = "../x/mod.rs"]\n#[allow(dead_code)]\nmod y;\n',
+            "c": '#[path = "../z/mod.rs"]\nmod z;\n'})
+        check("a module two files load by #[path] is found, one loaded once is not",
+              twice == {"../x/mod.rs": ["a", "b"]})
         text, n = point_helper_modules("    mod harness;\n", helpers, {"harness"})
         check("a shared helper is used from the root, not declared again",
               n == 1 and text == "    use crate::harness;\n")

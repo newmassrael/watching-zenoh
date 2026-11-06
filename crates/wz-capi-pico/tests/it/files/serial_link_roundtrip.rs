@@ -27,9 +27,6 @@
 
 #![cfg(feature = "peer")]
 
-#[path = "../../link_roundtrip/mod.rs"]
-mod link_roundtrip;
-
 use std::ffi::CStr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,7 +34,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use link_roundtrip::{payloads_across, PAYLOAD};
+use crate::link_roundtrip::{payloads_across, PAYLOAD};
 
 /// The panic message of a failed libc call: what was called and the OS's reason.
 fn os_error(call: &str) -> String {

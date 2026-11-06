@@ -26,6 +26,9 @@
 # `scripts/lib/retarget_test_refs.py --verify` reads this spelling back (the call and the array are
 # `--test <name> [<test>]`) for the lints that parse `run-ci.sh`.
 
+# The arrays and the prefix below are read by the scripts that source this file.
+# shellcheck disable=SC2034
+
 # The repository root: where `crates/` is, from the caller's `repo_root` or from this file.
 _wz_tt_root="${repo_root:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 

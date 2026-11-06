@@ -9273,8 +9273,9 @@ layer_c1bm_cargo_test_pico_failfast() {
             unixpipe) suite=unixpipe_listen_multiclient ;;
             quic) suite=quic_listen_cert ;;
         esac
+        wz_test_args wz-capi-pico "$suite"
         out="$(cd crates && cargo test -p wz-capi-pico \
-            --features "transport-link-$link" --test "$suite" --quiet 2>&1)" || {
+            --features "transport-link-$link" "${WZ_TEST_ARGS[@]}" --quiet 2>&1)" || {
             echo "  C1bm FAIL: $suite did not pass under transport-link-$link" >&2
             echo "$out" >&2
             return 1
@@ -21220,13 +21221,13 @@ layer_z_zenohd_interop() {
     # tokio engine's. The count is exact: a leg that stops being selected is a failure.
     wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin
     _runci_guarded_test Z 5 env WZ_ZENOHD_BIN="$zenohd" WZ_PICO_ENGINE=coop \
-        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        cargo test -p wz-integration-tests "${WZ_TEST_TARGET[@]}" \
         -- --ignored --quiet --test-threads=1 \
-        pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router \
-        pico_zinfo_source_on_wz_capi_pads_a_short_zenohd_zid_to_32 \
-        pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd \
-        pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group \
-        pico_zgetliveliness_source_on_wz_capi_sees_a_real_pico_token_through_zenohd \
+        "${WZ_TEST_PREFIX}pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router" \
+        "${WZ_TEST_PREFIX}pico_zinfo_source_on_wz_capi_pads_a_short_zenohd_zid_to_32" \
+        "${WZ_TEST_PREFIX}pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd" \
+        "${WZ_TEST_PREFIX}pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group" \
+        "${WZ_TEST_PREFIX}pico_zgetliveliness_source_on_wz_capi_sees_a_real_pico_token_through_zenohd" \
         || return 1
     # A sample through a real router to a subscriber on wz, and the secure channel to that router
     # in both roles (step T5 of L6, `docs/capi-pico-on-coop-engine.md`): a real pico `z_pub` puts
@@ -21240,14 +21241,14 @@ layer_z_zenohd_interop() {
         pico_zsub_source_on_wz_capi_hears_a_real_pico_put_through_zenohd \
         pico_zsubtls_source_on_wz_capi_dials_a_zenohd_tls_listener_and_hears_a_real_pico_put_through_zenohd \
         pico_zsubtls_source_on_wz_capi_serves_a_zenohd_that_dials_it_over_tls_and_hears_a_real_pico_put_through_zenohd; do
-        wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin
+        wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin "$router_pubsub_leg"
         _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" \
-            -- --ignored --quiet --test-threads=1 "$router_pubsub_leg" || return 1
-        wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin
+            -- --ignored --quiet --test-threads=1 || return 1
+        wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin "$router_pubsub_leg"
         _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" WZ_PICO_ENGINE=coop \
             cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
-            -- --ignored --quiet --test-threads=1 "$router_pubsub_leg" || return 1
+            -- --ignored --quiet --test-threads=1 || return 1
     done
     # R311y442 — wz<->zenoh-ext ADVANCED-PUBSUB cross-impl, the FIRST foreign
     # witness the `@adv` plane has ever had. Every advanced-pubsub test before
@@ -22233,11 +22234,11 @@ layer_e5_router_forward() {
         return 0
     fi
     (cd crates && cargo build -p wz-capi-pico --features transport-link-tls --quiet) || return 1
-    wz_test_args wz-integration-tests pico_keyexpr_declaration_twice_and_diff
+    wz_test_args wz-integration-tests pico_keyexpr_declaration_twice_and_diff wz_router_hears_a_pico_peer
     _runci_guarded_test "E5 pico peer beside a router" 4 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored \
-        wz_router_hears_a_pico_peer --test-threads=1 --quiet || return 1
+        --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E5z — router QUERY-TARGET e2e vs real zenoh (R311y841) ────

@@ -59,12 +59,39 @@ ARRAY = '"${WZ_TEST_ARGS[@]}"'
 TARGET_ARRAY = '"${WZ_TEST_TARGET[@]}"'
 BUILD_ONLY = {"clippy", "check", "build", "doc", "fix", "bench"}
 CARGO_SUB = re.compile(r"\bcargo\s+(?:\+\S+\s+)?([a-z][a-z-]*)")
-CALL = re.compile(r"(?m)^[ \t]*wz_test_args[ \t]+[A-Za-z0-9_-]+[ \t]+([A-Za-z0-9_]+)(?:[ \t]+([A-Za-z0-9_:]+))?[ \t]*\n")
+# The helper's third word is a test name, or a quoted variable that holds one (a loop over names).
+THIRD = r'([A-Za-z0-9_:]+|"\$[A-Za-z_]\w*")'
+CALL = re.compile(r"(?m)^[ \t]*wz_test_args[ \t]+[A-Za-z0-9_-]+[ \t]+([A-Za-z0-9_]+)(?:[ \t]+" + THIRD + r")?[ \t]*\n")
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_:]*")
 CHAIN_CALL = re.compile(
-    r"^[ \t]*&&[ \t]+wz_test_args[ \t]+[A-Za-z0-9_-]+[ \t]+([A-Za-z0-9_]+)(?:[ \t]+([A-Za-z0-9_:]+))?[ \t]*\\\n")
+    r"^[ \t]*&&[ \t]+wz_test_args[ \t]+[A-Za-z0-9_-]+[ \t]+([A-Za-z0-9_]+)(?:[ \t]+" + THIRD + r")?[ \t]*\\\n")
 INLINE_CALL = re.compile(
-    r"wz_test_args[ \t]+[A-Za-z0-9_-]+[ \t]+([A-Za-z0-9_]+)(?:[ \t]+([A-Za-z0-9_:]+))?[ \t]*&&[ \t]*")
+    r"wz_test_args[ \t]+[A-Za-z0-9_-]+[ \t]+([A-Za-z0-9_]+)(?:[ \t]+" + THIRD + r")?[ \t]*&&[ \t]*")
+
+
+# `--exact NAME` after `--`: a test named whole. In a merged executable the whole name is
+# `files::<file>::NAME`, so the name carries the prefix `wz_test_args` set (`WZ_TEST_PREFIX`).
+EXACT_NAME = re.compile(r'--exact[ \t]+("\$[A-Za-z_]\w*"|\$[A-Za-z_]\w*|[A-Za-z_]\w*)(?=[ \t]*(?:\\?\n|\|\||&&|;|\)|[ \t]))')
+PREFIXED = re.compile(r'"\$\{WZ_TEST_PREFIX\}([^"]*)"')
+
+
+def prefix_exact_names(text: str) -> tuple[str, int]:
+    """`text` with the name of each `--exact NAME` of a command that takes its target from
+    `wz_test_args` written `"${WZ_TEST_PREFIX}NAME"`. A command that does not use the helper's
+    array keeps its name (its target is a file of its own, which has no `files::` in the name)."""
+    lines = text.splitlines(keepends=True)
+    done = 0
+    for first, last in logical_commands(lines):
+        command = "".join(lines[first:last + 1])
+        if ARRAY not in command and TARGET_ARRAY not in command:
+            continue
+        for i in range(first, last + 1):
+            def swap(m: re.Match[str]) -> str:
+                nonlocal done
+                done += 1
+                return f'--exact "${{WZ_TEST_PREFIX}}{m.group(1).strip(chr(34))}"'
+            lines[i] = EXACT_NAME.sub(swap, lines[i])
+    return "".join(lines), done
 
 
 def logical_commands(lines: list[str]) -> list[tuple[int, int]]:
@@ -240,7 +267,9 @@ def expand(text: str, keep_lines: bool = False) -> str:
                     pending = None
                     break
         # `--exact "${WZ_TEST_PREFIX}<test>"` names the test inside its file's module in a merged
-        # executable; read back as the `--exact <test>` it was before the merge.
+        # executable; read back as the `--exact <test>` it was before the merge (a variable's
+        # name stays quoted).
+        line = PREFIXED.sub(lambda m: f'"{m.group(1)}"' if m.group(1).startswith("$") else m.group(1), line)
         line = line.replace("${WZ_TEST_PREFIX}", "")
         out.append(line)
     return "".join(out)
@@ -319,6 +348,28 @@ def selftest() -> int:
         ok2, _ = verify(out2, spread)
         check("a filter on its own line verifies too", ok2)
         check("a changed file does not verify", not verify(out + "echo x\n", text)[0])
+        # `--exact NAME` names the whole test: a merged file's tests are `files::<file>::NAME`.
+        exact = (
+            "    wz_test_args wz-c alpha\n"
+            "    cargo test -p wz-c " + ARRAY + " -- --ignored --exact one_test || rc=1\n"
+            '    wz_test_args wz-c beta\n'
+            "    cargo test -p wz-c " + ARRAY + " \\\n"
+            '        -- --quiet --exact "$leg" \\\n'
+            "        || return 1\n"
+            "    cargo test -p wz-c --test gamma -- --exact kept_name\n"
+            "    cargo test -p wz-c " + ARRAY + " -- --exact --quiet\n"
+        )
+        prefixed, n_exact = prefix_exact_names(exact)
+        check("two exact names are prefixed", n_exact == 2)
+        check("a bare name carries the prefix",
+              '--exact "${WZ_TEST_PREFIX}one_test" || rc=1' in prefixed)
+        check("a variable carries it and stays one word",
+              '--exact "${WZ_TEST_PREFIX}$leg" \\\n' in prefixed)
+        check("a command with no helper array keeps its name", "--exact kept_name" in prefixed)
+        check("--exact with no name is left alone", "-- --exact --quiet\n" in prefixed)
+        check("a second run changes nothing", prefix_exact_names(prefixed) == (prefixed, 0))
+        check("expanded, the prefix reads as the name it began from",
+              tokens(expand(prefixed)) == tokens(expand(exact)))
     if failures == 0:
         print("retarget_test_refs: selftest OK")
     return 1 if failures else 0
@@ -329,6 +380,9 @@ def main() -> int:
     ap.add_argument("--crate")
     ap.add_argument("--file", default="scripts/run-ci.sh")
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--exact-names", action="store_true",
+                    help="write each `--exact NAME` of a command that uses the helper's array as "
+                         '`--exact "${WZ_TEST_PREFIX}NAME"` (no --crate)')
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--verify", metavar="BEFORE",
                     help="the file as it read before the rewrite: read the result back against it")
@@ -339,6 +393,14 @@ def main() -> int:
         ok, why = verify((ROOT / args.file).read_text(), Path(args.verify).read_text())
         print(f"{args.file}: {'VERIFIED' if ok else 'DIFFERENT'} -- {why}")
         return 0 if ok else 1
+    if args.exact_names:
+        path = ROOT / args.file
+        text = path.read_text()
+        new, done = prefix_exact_names(text)
+        print(f"{args.file}: {done} `--exact` name(s) {'prefixed' if args.apply else 'to prefix'}")
+        if args.apply and new != text:
+            path.write_text(new)
+        return 0
     if not args.crate:
         ap.error("--crate is required")
     path = ROOT / args.file
