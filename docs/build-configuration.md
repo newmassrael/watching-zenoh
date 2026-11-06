@@ -341,6 +341,38 @@ defconfig fragment that CI builds and tests; its name describes its axes (for
 example `mcu-zephyr-static`). User presets live outside the repository and merge
 after it.
 
+**C15. A build states what it is, from the configuration it was built with.** Whoever
+tests a build must know which capabilities it has and which numbers and policies it
+runs, and must read that from the build, not from a hand-kept list that can disagree
+with it. That is an implementation conformance statement (ISO/IEC 9646-7): the
+implementation's answers to the questions a test suite selects its tests by. The
+declaration already holds every question, so the statement is one more derivation,
+in the declaration's vocabulary, by the same routes that give a build's cargo
+arguments: `--resolve-conformance-statement ABI PRESET...` for a build given by
+presets, `--original-conformance-statement ORIGINAL` for an upstream original's own
+build, and `--conformance-statement pico [--engine coop] CONFIG` for the pico
+drop-in a zenoh-pico `config.h` gives.
+
+- It lists every capability the ABI exports with whether the build has it, every
+  limit with its value and the catalogue's default, and every policy with its value
+  and upstream's. A statement that left out what is off could not be told from one
+  that never asked.
+- A capability is supported when it is in the build's final feature list, so the
+  cooperative engine's build states what it has (its list leaves out what selects
+  the tokio engine), not what its header asked for.
+- `digest` is SHA-256 over the canonical JSON of the ABI, the catalogue version and
+  every value, and of nothing else. Two routes to the same build give the same
+  digest, a build that differs in one value gives another, and where the inputs were
+  read from is beside it in `derived_from` (file names only, never a path of the
+  machine that made it).
+
+It is JSON, format `wz-conformance-statement` version 1; a field's meaning changes
+only with the version. Rejected: a statement written by hand per image (it drifts
+from the build the first time a preset moves); one per Cargo feature set (a feature
+list says nothing of the limits and policies, which change what is on the wire); and
+a digest over the statement's whole text (it would differ for one build read two
+ways).
+
 ## 5. Switches
 
 The catalogue is the declaration itself (C1); this note does not keep a second list.
@@ -464,8 +496,13 @@ Each step lands with its own done-when; sizes are not estimated here.
     each a committed figure that a change moves visibly.
 14. **SCE as a configuration axis**: the state machine's feature gates
     (`feature_inventory.md` §8) driven by the same declaration, checked by `--check`.
+15. **The conformance statement** (C15). (a) The statement from presets, from an
+    original, and from a pico header (done). (b) The same digest built into each
+    image and readable through the C ABI, so a tester can check that the build it
+    talks to is the one the statement describes. (c) The zenoh-c drop-in's statement
+    from an installed `zenoh_configure.h`.
 
-Order: 1 first. 2, 3, 4, 6, 7, 8, 11, 12, 13 and 14 depend on 1; 5 on 1 and 2; 9 on 4
+Order: 1 first. 2, 3, 4, 6, 7, 8, 11, 12, 13, 14 and 15 depend on 1; 5 on 1 and 2; 9 on 4
 and 7; 10 on 5.
 
 ## 8. Open

@@ -50,6 +50,13 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   arguments of the ABI that original is built through
     --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
                                   sets off its default
+    --conformance-statement pico [--engine coop] CONFIG
+    --resolve-conformance-statement ABI PRESET...
+    --original-conformance-statement ORIGINAL
+                                  print, as JSON, the conformance statement of the build the
+                                  matching cargo-argument modes describe: every capability the ABI
+                                  exports with whether the build has it, every limit and policy
+                                  with its value, and a digest of those values (decision C15)
     --check-presets               every registered profile (configs/profiles) resolves strictly,
                                   and each upstream defconfig resolves to its original's values
     --check-equivalence           the pinned kconfiglib and the copy Zephyr runs give the same
@@ -115,6 +122,9 @@ Usage:
                          | kconfig-policies | rust-policies | rust-feature-bits
     wz_config.py --resolve-features pico|c|core PRESET...
     wz_config.py --resolve-env PRESET...
+    wz_config.py --conformance-statement pico [--engine coop] CONFIG
+    wz_config.py --resolve-conformance-statement pico|c|core PRESET...
+    wz_config.py --original-conformance-statement zenoh-pico|zenoh-c|zenoh
     wz_config.py --features pico|c|core CONFIG
         CONFIG is a Kconfig `.config` (CONFIG_WZ_CAP_X=y) or a pico header of
         `#define Z_FEATURE_X 0|1` lines; a capability the file does not mention is OFF.
@@ -123,6 +133,7 @@ Usage:
 from __future__ import annotations
 
 import functools
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -1084,17 +1095,17 @@ def limit_rows(decl: dict) -> list[tuple[str, str]]:
             and str(s.get("anchor", "")).startswith(LIMIT_ANCHOR)]
 
 
-def pico_value_env(decl: dict, text: str, macros: dict[str, str]) -> tuple[list[str], list[str]]:
-    """The `WZ_LIMIT_<ID>=<n>` lines a zenoh-pico `config.h` states for the limits its value
-    switches map to, each where the header's number differs from the limit's default, and the
-    problems. A macro the header does not define leaves its limit at the default, which is pico's
-    own; one it defines to something that is not a number is a problem, never a default."""
-    defaults = {lim["id"]: lim["default"] for lim in decl["limits"]}
+def pico_limit_values(decl: dict, text: str,
+                      macros: dict[str, str]) -> tuple[dict[str, int], list[str]]:
+    """The value of every declared limit in the build a zenoh-pico `config.h` states, and the
+    problems. A limit one of the header's value switches maps to takes the header's number; every
+    other limit, and one whose macro the header does not define, keeps its default, which is
+    pico's own. A macro defined to something that is not a number is a problem, never a default."""
+    values = {lim["id"]: lim["default"] for lim in decl["limits"]}
     stated: dict[str, str] = {}
     for line in text.splitlines():
         if m := VALUE_DEFINE_RE.match(line):
             stated[m.group(1)] = m.group(2)
-    lines: list[str] = []
     problems: list[str] = []
     defined = {d.group(1) for line in text.splitlines()
                if (d := re.match(r"^\s*#\s*define\s+([A-Z][A-Z0-9_]*)\b", line))}
@@ -1108,9 +1119,18 @@ def pico_value_env(decl: dict, text: str, macros: dict[str, str]) -> tuple[list[
             if macro in defined:
                 problems.append(f"{macro} is defined to something that is not a number")
             continue
-        value = int(stated[macro], 0)
-        if value != defaults[lid]:
-            lines.append(f"WZ_LIMIT_{lid}={value}")
+        values[lid] = int(stated[macro], 0)
+    return values, problems
+
+
+def pico_value_env(decl: dict, text: str, macros: dict[str, str]) -> tuple[list[str], list[str]]:
+    """The `WZ_LIMIT_<ID>=<n>` lines a zenoh-pico `config.h` states for the limits its value
+    switches map to, each where the header's number differs from the limit's default, and the
+    problems (`pico_limit_values`)."""
+    defaults = {lim["id"]: lim["default"] for lim in decl["limits"]}
+    values, problems = pico_limit_values(decl, text, macros)
+    lines = [f"WZ_LIMIT_{lid}={values[lid]}" for _, lid in limit_rows(decl)
+             if values[lid] != defaults[lid]]
     return lines, problems
 
 
@@ -2239,6 +2259,104 @@ def resolved_policy_env(decl: dict, kconf) -> list[str]:
     return out
 
 
+# The conformance statement of one build (docs/build-configuration.md, decision C15), in the
+# sense of an implementation conformance statement (ISO/IEC 9646-7): what the build exports and
+# the value of every limit and policy it was built with, in the declaration's vocabulary, so
+# that whoever tests the build reads what it is from the build's own configuration instead of
+# from a hand-kept copy that can disagree with it.
+STATEMENT_FORMAT = "wz-conformance-statement"
+STATEMENT_FORMAT_VERSION = 1
+
+
+def conformance_statement(decl: dict, abi: str, features: list[str], limits: dict[str, int],
+                          policies: dict[str, str], derived_from: dict) -> dict:
+    """The conformance statement of a build of `abi` whose cargo features are `features`.
+
+    A capability is supported when its feature is in the list, so a list that a later step has
+    changed (the cooperative engine's, which leaves out what selects the tokio engine) states
+    what that build has, not what its configuration asked for. Every capability the ABI exports
+    is listed, supported or not, every limit with its value and every policy with its value: a
+    statement that left out what is off could not be told from one that never asked.
+
+    `digest` identifies the build by what it states: the ABI, the catalogue and every value, and
+    nothing of where they were read from, so two routes to the same build give the same digest
+    and a build that differs in one value gives another.
+    """
+    have = set(features)
+    body = {
+        "format": STATEMENT_FORMAT,
+        "format_version": STATEMENT_FORMAT_VERSION,
+        "catalog_version": decl["catalog_version"],
+        "abi": abi,
+        "capabilities": [{"id": cid, "supported": cid in have} for cid in decl["order"]
+                         if abi in decl["caps"][cid]["abis"]],
+        "limits": [{"id": lim["id"], "value": limits[lim["id"]], "default": lim["default"]}
+                   for lim in decl["limits"]],
+        "policies": [{"id": pol["id"], "value": policies[pol["id"]], "upstream": pol["default"]}
+                     for pol in decl["policies"]],
+    }
+    return {**body, "derived_from": derived_from, "digest": statement_digest(body)}
+
+
+def statement_digest(body: dict) -> str:
+    """SHA-256 over the canonical JSON of what a statement says the build is: its format, ABI,
+    catalogue, and each capability's support and each limit's and policy's value. The defaults
+    beside the values are the catalogue's, which `catalog_version` already names."""
+    identity = {
+        "format": body["format"],
+        "format_version": body["format_version"],
+        "catalog_version": body["catalog_version"],
+        "abi": body["abi"],
+        "capabilities": [[c["id"], c["supported"]] for c in body["capabilities"]],
+        "limits": [[x["id"], x["value"]] for x in body["limits"]],
+        "policies": [[p["id"], p["value"]] for p in body["policies"]],
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return "sha256:" + hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
+def resolved_statement(decl: dict, abi: str, kconf, derived_from: dict) -> dict:
+    """The conformance statement of the `abi` build a resolved configuration gives."""
+    return conformance_statement(
+        decl, abi, features_for(decl, abi, resolved_caps(decl, kconf)),
+        {lim["id"]: int(kconf.syms[lim["kconfig"]].str_value) for lim in decl["limits"]},
+        {pol["id"]: resolved_policy(kconf, pol) for pol in decl["policies"]},
+        derived_from)
+
+
+def pico_header_statement(decl: dict, text: str, macros: dict[str, str], name: str,
+                          engine_features: dict | None = None) -> tuple[dict | None, list[str]]:
+    """The conformance statement of the pico drop-in a zenoh-pico `config.h` gives (the build the
+    `--features pico` and `--env pico` modes describe together), and the problems.
+
+    The header states no policy, so every policy is upstream's, which is what that build runs.
+    `engine_features`, the pico crate's feature table, makes it the cooperative engine's build.
+    A Kconfig result is refused: this reads the header's own switches, and a `.config` states
+    its numbers through symbols this mode does not read."""
+    if any(CONFIG_RE.match(line) or re.match(r"^\s*#\s*CONFIG_WZ_", line)
+           for line in text.splitlines()):
+        return None, [f"{name} is a Kconfig result; the statement of a build given by presets is "
+                      "--resolve-conformance-statement's"]
+    problems = pico_header_conflicts(decl, "pico", text)
+    limits, value_problems = pico_limit_values(decl, text, macros)
+    problems += value_problems
+    if problems:
+        return None, problems
+    features = features_for(decl, "pico", read_config(decl, text))
+    engine = "tokio"
+    if engine_features is not None:
+        features = coop_features(features, engine_features)
+        engine = "coop"
+    derived = {"kind": "pico-header", "inputs": [name], "engine": engine}
+    return conformance_statement(decl, "pico", features, limits,
+                                 {pol["id"]: pol["default"] for pol in decl["policies"]},
+                                 derived), []
+
+
+def print_statement(doc: dict) -> None:
+    sys.stdout.write(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+
+
 def cmd_check_presets() -> int:
     """Every registered profile resolves, strictly, on the pinned interpreter.
 
@@ -2781,6 +2899,60 @@ def cmd_selftest() -> int:
     tokio_selecting["query"] = list(good["query"]) + ["engine-tokio"]
     expect("a capability that later selects the tokio engine leaves the list by itself",
            "query" not in coop_features(arm, tokio_selecting))
+    # The conformance statement (decision C15) states the build the feature list makes, every
+    # capability of the ABI on or off, every limit and policy, and a digest of only those values.
+    defaults = {lim["id"]: lim["default"] for lim in decl["limits"]}
+    upstream = {pol["id"]: pol["default"] for pol in decl["policies"]}
+    stated = conformance_statement(decl, "pico", arm, defaults, upstream, {"kind": "test"})
+    pico_caps = [cid for cid in decl["order"] if "pico" in caps[cid]["abis"]]
+    expect("a statement lists every capability of its ABI, the off ones too, in declared order",
+           [c["id"] for c in stated["capabilities"]] == pico_caps
+           and {c["id"] for c in stated["capabilities"] if c["supported"]} == set(arm) & set(pico_caps)
+           and any(not c["supported"] for c in stated["capabilities"]))
+    expect("a statement lists every limit and every policy with its value",
+           [x["id"] for x in stated["limits"]] == [lim["id"] for lim in decl["limits"]]
+           and [p["id"] for p in stated["policies"]] == [pol["id"] for pol in decl["policies"]])
+    expect("a statement of the cooperative build states what that build has, not what was asked",
+           {c["id"]: c["supported"] for c in conformance_statement(
+               decl, "pico", coop, defaults, upstream, {"kind": "test"})["capabilities"]}
+           ["multicast-transport"] is False
+           and {c["id"]: c["supported"] for c in stated["capabilities"]}["multicast-transport"])
+    expect("the digest does not depend on where the values were read from",
+           conformance_statement(decl, "pico", arm, defaults, upstream, {"kind": "other"})["digest"]
+           == stated["digest"] and stated["digest"].startswith("sha256:"))
+    one_off = dict(defaults)
+    one_off[decl["limits"][0]["id"]] += 1
+    flipped = dict(upstream)
+    if decl["policies"]:
+        pol0 = decl["policies"][0]
+        flipped[pol0["id"]] = next(v for v in pol0.get("choices", ["on", "off"]) if v != pol0["default"])
+    expect("a build that differs in one limit, one policy or one capability has another digest",
+           conformance_statement(decl, "pico", arm, one_off, upstream, {})["digest"] != stated["digest"]
+           and (not decl["policies"] or conformance_statement(
+               decl, "pico", arm, defaults, flipped, {})["digest"] != stated["digest"])
+           and conformance_statement(decl, "pico", arm[:-1], defaults, upstream, {})["digest"]
+           != stated["digest"])
+    expect("a statement's digest does not count the catalogue's defaults beside the values",
+           statement_digest({**stated, "limits": [{**x, "default": 0} for x in stated["limits"]]})
+           == stated["digest"])
+    rows = limit_rows(decl)
+    identity_macros = {switch: switch for switch, _ in rows}
+    if rows:
+        switch0, lid0 = rows[0]
+        from_header, problems = pico_header_statement(
+            decl, f"#define {switch0} {defaults[lid0] + 1}\n#define Z_FEATURE_QUERY 1\n",
+            identity_macros, "config.h")
+        expect("a pico header's statement takes the header's numbers and switches, and upstream's "
+               "policies",
+               problems == [] and from_header is not None
+               and {x["id"]: x["value"] for x in from_header["limits"]}[lid0] == defaults[lid0] + 1
+               and {c["id"]: c["supported"] for c in from_header["capabilities"]}["query"]
+               and all(p["value"] == p["upstream"] for p in from_header["policies"])
+               and from_header["derived_from"] == {"kind": "pico-header", "inputs": ["config.h"],
+                                                   "engine": "tokio"})
+    expect("a Kconfig result is not read as a pico header",
+           pico_header_statement(decl, "CONFIG_WZ_CAP_QUERY=y\n", identity_macros, ".config")[0]
+           is None)
     lost = dict(good)
     lost["peer"] = [x for x in good["peer"] if x != "scout"]
     expect("a manifest that forgets peer -> scout is a finding",
@@ -3428,6 +3600,18 @@ def cmd_selftest() -> int:
                    resolved_limit_env(decl, resolve([first])) == ["WZ_LIMIT_MAX_TASKS=4"])
             expect("a later preset overrides an earlier one",
                    resolved_limit_env(decl, resolve([first, later])) == ["WZ_LIMIT_MAX_TASKS=6"])
+            resolved_doc = resolved_statement(decl, "c", resolve([first]),
+                                              {"kind": "presets", "inputs": ["first.conf"]})
+            expect("a preset's statement states the value its preset gives and the features "
+                   "--resolve-features gives",
+                   {x["id"]: x["value"] for x in resolved_doc["limits"]}["MAX_TASKS"] == 4
+                   and {c["id"] for c in resolved_doc["capabilities"] if c["supported"]}
+                   == set(features_for(decl, "c", resolved_caps(decl, resolve([first]))))
+                   & {cid for cid in decl["order"] if "c" in caps[cid]["abis"]})
+            for original, abi in BASE_ABI.items():
+                expect(f"{original}'s own build states every policy at upstream's",
+                       all(p["value"] == p["upstream"] for p in resolved_statement(
+                           decl, abi, resolve([], original=original), {})["policies"]))
             expect("a preset that changes nothing resolves to its original's own default build",
                    original_differences(decl, "zenoh-c", resolve([preset(d, "empty.conf", "")])) == []
                    and resolved_limit_env(decl, resolve([preset(d, "empty2.conf", "")])) == [])
@@ -3575,6 +3759,47 @@ def main(argv: list[str]) -> int:
             return 1
         for line in resolved_limit_env(decl, kconf) + resolved_policy_env(decl, kconf):
             print(line)
+        return 0
+    if len(argv) >= 4 and argv[1] == "--resolve-conformance-statement" and argv[2] in ABIS:
+        # The conformance statement of the build --resolve-features and --resolve-env describe
+        # for the same presets. The inputs are named by file name only: a statement travels
+        # with the build, and a path of this machine means nothing where it is read.
+        decl = load_decl()
+        paths = [pathlib.Path(p) for p in argv[3:]]
+        try:
+            kconf = resolve(paths)
+        except PresetError as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        print_statement(resolved_statement(
+            decl, argv[2], kconf, {"kind": "presets", "inputs": [p.name for p in paths]}))
+        return 0
+    if len(argv) == 3 and argv[1] == "--original-conformance-statement" and argv[2] in BASE_ABI:
+        # An upstream original's own default build, stated through the ABI it is built through.
+        decl = load_decl()
+        try:
+            kconf = resolve([], original=argv[2])
+        except PresetError as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        print_statement(resolved_statement(
+            decl, BASE_ABI[argv[2]], kconf, {"kind": "original", "inputs": [argv[2]]}))
+        return 0
+    coop = len(argv) == 6 and argv[1:5] == ["--conformance-statement", "pico", "--engine", "coop"]
+    if coop or (len(argv) == 4 and argv[1:3] == ["--conformance-statement", "pico"]):
+        # The pico drop-in a zenoh-pico config.h gives: the build of --features pico (with
+        # --engine coop, of the cooperative engine) and --env pico for the same header.
+        decl = load_decl()
+        header = pathlib.Path(argv[-1])
+        macros = pico_value_macros(PICO_CONFIG_IN.read_text(encoding="utf-8"))
+        doc, problems = pico_header_statement(
+            decl, header.read_text(encoding="utf-8"), macros, header.name,
+            manifest_features(MANIFESTS["pico"]) if coop else None)
+        for problem in problems:
+            print(f"  wz-config FAIL: {header}: {problem}", file=sys.stderr)
+        if doc is None:
+            return 1
+        print_statement(doc)
         return 0
     print(__doc__, file=sys.stderr)
     return 2
