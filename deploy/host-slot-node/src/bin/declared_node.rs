@@ -44,6 +44,7 @@ use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::stream::PosixTcpListener;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps::{MAX_QUERYABLES, MAX_REPLY_PAYLOAD_BYTES, MAX_SUBSCRIPTIONS};
+use wz_session_core::lifecycle_wire::{ReplyRead, VerbKey};
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::text_out::LogPart::Str;
 use wz_session_mcu::connect_manager::{DeclaredPeer, StaticEndpoints};
@@ -649,7 +650,8 @@ impl NodeApp for Report {
         });
         self.watch
             .poll_range(&LATEST, SUBSCRIBERS, CELLS, |_, sample| {
-                say_cell("HOST-WZ-REPLY", &sample)
+                say_cell("HOST-WZ-REPLY", &sample);
+                say_verdict(&sample);
             });
         ControlFlow::Continue(())
     }
@@ -676,6 +678,58 @@ fn say_cell(tag: &str, sample: &Latest<'_>) {
             "{} {} del seq={}",
             tag, sample.key, sample.sequence
         )),
+    }
+}
+
+/// What a reply a querier kept says, when the querier's key is a lifecycle verb's
+/// (`lifecycle_wire::VerbKey`): `HOST-WZ-VERDICT <key> verdict=<word>`, the members that word
+/// carries, and last the refusal's sentence, which has spaces (the line is the vocabulary's
+/// `verdicts`, `scripts/lib/wz_node.py`). The reply is read by the module that writes it
+/// (`lifecycle_wire::ReplyRead`), so a lab reads the verdict from the node and not from the reply's
+/// bytes. A reply that is no verdict document, or was cut before what its word carries, is said as
+/// `unreadable` with its length and what was kept. A querier of any other key says nothing more.
+fn say_verdict(sample: &Latest<'_>) {
+    if sample.kind != SampleKind::Put || VerbKey::parse(sample.key).is_none() {
+        return;
+    }
+    match ReplyRead::parse(sample.payload) {
+        Some(read) => log_whole(format_args!(
+            "HOST-WZ-VERDICT {} verdict={}{}",
+            sample.key,
+            read.verdict,
+            Members(&read)
+        )),
+        None => log_args(format_args!(
+            "HOST-WZ-VERDICT {} unreadable len={} kept={}",
+            sample.key,
+            sample.received_len,
+            sample.payload.len()
+        )),
+    }
+}
+
+/// The members a verdict carries beside its word, each ` <name>=<value>`, the reason last.
+struct Members<'a>(&'a ReplyRead);
+
+impl core::fmt::Display for Members<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let read = self.0;
+        if let Some(links) = read.links {
+            write!(f, " links={links}")?;
+        }
+        if let Some(generation) = read.generation {
+            write!(f, " generation={generation}")?;
+        }
+        if let Some(held) = read.held {
+            write!(f, " open={} closing={}", held.open, held.closing)?;
+        }
+        if let Some(intent) = read.intent {
+            write!(f, " intent={intent}")?;
+        }
+        if let Some(reason) = read.reason {
+            write!(f, " reason={}", reason.words())?;
+        }
+        Ok(())
     }
 }
 

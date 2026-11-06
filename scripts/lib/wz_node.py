@@ -167,7 +167,9 @@ DECLARATION_SCHEMA = 1
 #   3: the value `verbs` became `words` (`choices`, each with its line in `means`), and an endpoint
 #      role states the `conditions` the validator holds it to, each naming the text of its refusal.
 #      Added beside it since (the number stays): the `identity` section (its keys, what it requires,
-#      the rule of its zid and the tool that computes it).
+#      the rule of its zid and the tool that computes it), and the `verdicts` section (the line a
+#      querier of a lifecycle verb says of each reply, the words of each verb, what each means and
+#      the sentences of a refusal).
 VOCABULARY_SCHEMA = 3
 
 # The shape of each word of the vocabulary: the keys it takes and the value of each. An integer's
@@ -269,6 +271,53 @@ COMMANDER_CONDITIONS = (
      "refusal": "a commander has no locator: it is a zid the node takes orders from, not a place it "
                 "reaches"},
 )
+
+
+# The `verdict` words a reply to each lifecycle verb carries, as `wz_session_core::lifecycle_wire`
+# writes them (each verdict's `WORDS`; a test there holds these lines to them).
+VERDICT_WORDS_OF = {
+    "close": ("closing", "already_closed", "not_found", "refused"),
+    "reset": ("resetting", "already_closed", "not_found", "duplicate", "refused"),
+    "status": ("status", "refused"),
+    "open": ("opening", "refused"),
+}
+
+# What each `verdict` word says of the node that answered, and the member the line carries beside it.
+VERDICT_MEANS = {
+    "opening": "the node was asked to hold the peer; the dial is asynchronous, and a status reads "
+               "how it ended",
+    "closing": "the node ordered closed `links` links to the peer",
+    "resetting": "the node ordered closed `links` links to the peer, and a machine that holds the "
+                 "peer in the node's intent connects it again",
+    "already_closed": "every session with the peer had already been ordered closed",
+    "not_found": "the node holds no session with the peer",
+    "duplicate": "a reset of this generation or a later one was already taken; `generation` is "
+                 "the latest, and nothing was closed",
+    "status": "the node's sessions with the peer, `open` and `closing` links, and whether a machine "
+              "holds the peer in its `intent`",
+    "refused": "the verb was not carried out, for the `reason` the line ends with",
+}
+
+# The sentences a refusal carries as its `reason`, a closed set, written as they stand.
+REFUSAL_REASONS = (
+    "this node does not permit closing the session with that peer",
+    "the last chunk of the key is not a zid",
+    "this node does not permit resetting the session with that peer",
+    "the generation chunk of the key is not a number",
+    "this node does not permit reading the status of the session with that peer",
+    "this node does not permit opening a session with that peer",
+    "the loop that would hold that peer is gone",
+    "this node holds as many peers by their zid as it was built for",
+    "this node cannot tell which node answers a dial, so it holds no peer by its zid",
+)
+
+# The line a querier whose key is a lifecycle verb's says for each reply it keeps, after its
+# `HOST-WZ-REPLY` line: the members after `verdict=` are those its word carries, and `reason`, whose
+# sentence has spaces, is last and runs to the end of the line. A reply that is no verdict document,
+# or was cut before the members its word carries, is said as `unreadable`.
+VERDICT_LINE = ("HOST-WZ-VERDICT <key> verdict=<word> [links=<n>] [generation=<n>] "
+                "[open=<n> closing=<n> intent=<true|false>] [reason=<sentence>]")
+VERDICT_UNREADABLE = "HOST-WZ-VERDICT <key> unreadable len=<n> kept=<n>"
 
 
 # The roles whose `tls/` locator is a secure channel the node holds: a router it dials, a peer it
@@ -1041,10 +1090,11 @@ def pending_need(entities: list) -> int:
     return total
 
 
-# The longest key a lifecycle verb is asked under, `@/<zid>/client/session/reset/<peer>/<generation>`
-# with a zid of sixteen bytes and the largest generation: what a node that names a commander must
-# hold as one key (`MAX_KEYEXPR_BYTES`), since the query and its reply are under that key.
-VERB_KEY_BYTES = len("@/" + "f" * 32 + "/client/session/reset/" + "f" * 32 + "/" + str(2**64 - 1))
+# The longest key a lifecycle verb is asked under, `@/<zid>/client/session/reset/<generation>/<peer>`
+# (the generation is the chunk before the peer, as `lifecycle_wire::VerbKey` reads it) with a zid of
+# sixteen bytes and the largest generation: what a node that names a commander must hold as one key
+# (`MAX_KEYEXPR_BYTES`), since the query and its reply are under that key.
+VERB_KEY_BYTES = len("@/" + "f" * 32 + "/client/session/reset/" + str(2**64 - 1) + "/" + "f" * 32)
 
 
 def verb_queryables(data: dict) -> int:
@@ -1590,6 +1640,13 @@ def vocabulary(target_id: str, decl: dict) -> dict:
                      "keys": dict(IDENTITY_KEYS), "requires": "a `tls` router, peer or listener",
                      "zid": IDENTITY_ZID, "zid_tool": IDENTITY_ZID_TOOL,
                      "make": IDENTITY_MAKE, "makes": IDENTITY_MAKES},
+        "verdicts": {"is": "what the node says of each reply a querier keeps when the querier's "
+                           "key is a lifecycle verb's, `@/<zid>/<whatami>/session/<verb>/<peer>` "
+                           "(`reset/<generation>/<peer>`, `open/passive/<peer>`): the reply's "
+                           "verdict, read by the node, so the reply's bytes need no second reader",
+                     "line": VERDICT_LINE, "unreadable": VERDICT_UNREADABLE,
+                     "words": {verb: list(words) for verb, words in VERDICT_WORDS_OF.items()},
+                     "means": dict(VERDICT_MEANS), "reasons": list(REFUSAL_REASONS)},
     }
 
 

@@ -602,6 +602,119 @@ impl<'a> VerbKey<'a> {
     }
 }
 
+/// Every `verdict` word a reply of any verb carries, each once, in the order the verbs' own lists
+/// give them ([`verdict_words_of`]).
+pub const VERDICT_WORDS: [&str; 8] = [
+    "opening",
+    "closing",
+    "resetting",
+    "already_closed",
+    "not_found",
+    "duplicate",
+    "status",
+    "refused",
+];
+
+/// The `verdict` words a reply to `verb` can carry, or `None` for a word that is no verb.
+pub fn verdict_words_of(verb: &str) -> Option<&'static [&'static str]> {
+    match verb {
+        OPEN_VERB => Some(&OpenVerdict::WORDS),
+        CLOSE_VERB => Some(&CloseVerdict::WORDS),
+        RESET_VERB => Some(&ResetVerdict::WORDS),
+        STATUS_VERB => Some(&StatusVerdict::WORDS),
+        _ => None,
+    }
+}
+
+/// A reply of a lifecycle verb read back: the `verdict` word and the members the verdict's writer
+/// puts beside it.
+///
+/// The reader of the documents this module writes, in this module, so a node that asked a verb says
+/// what the answer was without a second decoder of the reply's spelling. It borrows nothing and needs
+/// no allocator. A status reply is read up to its `intent`: the machines after it are a list as long
+/// as the node holds them, and a querier may keep fewer bytes than that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplyRead {
+    /// The `verdict` word: one of [`VERDICT_WORDS`].
+    pub verdict: &'static str,
+    /// The links the call ordered closed, on `closing` and `resetting`.
+    pub links: Option<u32>,
+    /// The latest generation taken for the peer, on `duplicate`.
+    pub generation: Option<u64>,
+    /// The links of the node's sessions with the peer, on `status`.
+    pub held: Option<SessionLinks>,
+    /// Whether a machine holds the peer in the node's intent, on `status`.
+    pub intent: Option<bool>,
+    /// Why the verb was refused, on `refused`.
+    pub reason: Option<RefusedReason>,
+}
+
+impl ReplyRead {
+    /// The reply `document` is, or `None` when it is no document a verdict here writes: another
+    /// spelling, an unknown word or reason, or cut before the members its verdict carries.
+    pub fn parse(document: &[u8]) -> Option<Self> {
+        let text = core::str::from_utf8(document).ok()?;
+        let (word, rest) = text.strip_prefix("{\"verdict\":\"")?.split_once('"')?;
+        let verdict = *VERDICT_WORDS.iter().find(|known| **known == word)?;
+        let mut read = Self {
+            verdict,
+            links: None,
+            generation: None,
+            held: None,
+            intent: None,
+            reason: None,
+        };
+        match verdict {
+            "opening" | "already_closed" | "not_found" => (rest == "}").then_some(read),
+            "closing" | "resetting" => {
+                let links = rest.strip_prefix(",\"links\":")?.strip_suffix('}')?;
+                read.links = Some(decimal(links)?);
+                Some(read)
+            }
+            "duplicate" => {
+                let last = rest.strip_prefix(",\"generation\":")?.strip_suffix('}')?;
+                read.generation = Some(decimal(last)?);
+                Some(read)
+            }
+            "refused" => {
+                let words = rest.strip_prefix(",\"reason\":\"")?.strip_suffix("\"}")?;
+                read.reason = Some(
+                    *RefusedReason::ALL
+                        .iter()
+                        .find(|reason| reason.words() == words)?,
+                );
+                Some(read)
+            }
+            "status" => {
+                let (open, rest) = rest
+                    .strip_prefix(",\"links\":{\"open\":")?
+                    .split_once(",\"closing\":")?;
+                let (closing, rest) = rest.split_once("},\"intent\":")?;
+                let (intent, _machines) = rest.split_once(",\"machines\":[")?;
+                read.held = Some(SessionLinks {
+                    open: decimal(open)?,
+                    closing: decimal(closing)?,
+                });
+                read.intent = Some(match intent {
+                    "true" => true,
+                    "false" => false,
+                    _ => return None,
+                });
+                Some(read)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A number as the writers here spell it: decimal digits and nothing else.
+fn decimal<N: core::str::FromStr>(text: &str) -> Option<N> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 /// Write the capability document `{"verbs":[...]}` for exactly the verbs `verbs` names, in
 /// that order. A node says what it has bound (`lifecycle_query` writes the heap profile's four,
 /// and the fixed profile its one).
@@ -800,6 +913,207 @@ mod tests {
             text.finish().expect("fits"),
             "{\"verdict\":\"refused\",\"reason\":\"the last chunk of the key is not a zid\"}"
         );
+    }
+
+    /// What every writer here writes, the reader reads back as written.
+    fn read_back(write: impl FnOnce(&mut FixedText<192>)) -> Option<ReplyRead> {
+        let mut text: FixedText<192> = FixedText::new();
+        write(&mut text);
+        ReplyRead::parse(text.finish().expect("fits").as_bytes())
+    }
+
+    #[test]
+    fn the_reader_reads_back_every_verdict_the_writers_write() {
+        let refused = |reason| ReplyRead {
+            verdict: "refused",
+            links: None,
+            generation: None,
+            held: None,
+            intent: None,
+            reason: Some(reason),
+        };
+        let plain = |verdict| ReplyRead {
+            verdict,
+            links: None,
+            generation: None,
+            held: None,
+            intent: None,
+            reason: None,
+        };
+        assert_eq!(
+            read_back(|t| OpenVerdict::Opening.write_json(t)),
+            Some(plain("opening"))
+        );
+        assert_eq!(
+            read_back(|t| CloseVerdict::Closing { links: 3 }.write_json(t)),
+            Some(ReplyRead {
+                links: Some(3),
+                ..plain("closing")
+            })
+        );
+        assert_eq!(
+            read_back(|t| CloseVerdict::AlreadyClosed.write_json(t)),
+            Some(plain("already_closed"))
+        );
+        assert_eq!(
+            read_back(|t| CloseVerdict::NotFound.write_json(t)),
+            Some(plain("not_found"))
+        );
+        assert_eq!(
+            read_back(|t| ResetVerdict::Resetting { links: 1 }.write_json(t)),
+            Some(ReplyRead {
+                links: Some(1),
+                ..plain("resetting")
+            })
+        );
+        assert_eq!(
+            read_back(|t| ResetVerdict::Duplicate { last: u64::MAX }.write_json(t)),
+            Some(ReplyRead {
+                generation: Some(u64::MAX),
+                ..plain("duplicate")
+            })
+        );
+        for reason in RefusedReason::ALL {
+            assert_eq!(
+                read_back(|t| CloseVerdict::Refused(reason).write_json(t)),
+                Some(refused(reason)),
+                "{reason:?}"
+            );
+        }
+        let status =
+            "{\"verdict\":\"status\",\"links\":{\"open\":2,\"closing\":1},\"intent\":true,\
+                      \"machines\":[{\"state\":\"established\"}]}";
+        let want = ReplyRead {
+            held: Some(SessionLinks {
+                open: 2,
+                closing: 1,
+            }),
+            intent: Some(true),
+            ..plain("status")
+        };
+        assert_eq!(ReplyRead::parse(status.as_bytes()), Some(want));
+        // A querier that kept fewer bytes than the machines take still reads what comes before them.
+        let cut = status.find("machines\":[").expect("the list") + "machines\":[".len();
+        assert_eq!(ReplyRead::parse(&status.as_bytes()[..cut]), Some(want));
+    }
+
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn the_reader_reads_back_the_status_the_writer_writes() {
+        let machines = [MachineReport {
+            endpoint: None,
+            state: "established",
+            cause: None,
+            in_intent: false,
+        }];
+        let links = SessionLinks {
+            open: 0,
+            closing: 4,
+        };
+        let read = read_back(|t| StatusVerdict::of(links, &machines).write_json(t, &machines))
+            .expect("a status");
+        assert_eq!(
+            (read.verdict, read.held, read.intent),
+            ("status", Some(links), Some(false))
+        );
+    }
+
+    #[test]
+    fn the_reader_refuses_what_no_writer_here_writes() {
+        for refused in [
+            "",
+            "{}",
+            "{\"verdict\":\"opening\"",
+            "{\"verdict\":\"opening\"} ",
+            "{\"verdict\":\"held\"}",
+            "{\"verdict\":\"closing\"}",
+            "{\"verdict\":\"closing\",\"links\":}",
+            "{\"verdict\":\"closing\",\"links\":-1}",
+            "{\"verdict\":\"closing\",\"links\":+1}",
+            "{\"verdict\":\"closing\",\"links\":99999999999}",
+            "{\"verdict\":\"duplicate\",\"links\":1}",
+            "{\"verdict\":\"refused\"}",
+            "{\"verdict\":\"refused\",\"reason\":\"because\"}",
+            "{\"verdict\":\"not_found\",\"links\":1}",
+            "{\"verdict\":\"status\",\"links\":{\"open\":2,\"closing\":1},\"intent\":true",
+            "{\"verdict\":\"status\",\"links\":{\"open\":2,\"closing\":1},\"intent\":yes,\"machines\":[",
+            " {\"verdict\":\"opening\"}",
+        ] {
+            assert_eq!(ReplyRead::parse(refused.as_bytes()), None, "{refused}");
+        }
+        assert_eq!(ReplyRead::parse(&[0xff, 0xfe]), None, "not text");
+    }
+
+    #[test]
+    fn every_verbs_words_are_among_the_verdict_words_and_cover_them() {
+        let mut seen: [bool; VERDICT_WORDS.len()] = [false; VERDICT_WORDS.len()];
+        for verb in VERBS {
+            for word in verdict_words_of(verb).expect("a verb has words") {
+                let at = VERDICT_WORDS
+                    .iter()
+                    .position(|known| known == word)
+                    .expect("a verb's word is a verdict word");
+                seen[at] = true;
+            }
+        }
+        assert!(seen.iter().all(|s| *s), "a verdict word no verb gives");
+        assert_eq!(verdict_words_of("hold"), None);
+    }
+
+    /// The vocabulary a consumer reads (`scripts/lib/wz_node.py --vocabulary`, `verdicts`) states the
+    /// words each verb's reply carries and the sentences of a refusal; it is held here to the sets
+    /// the writers and the reader use, so the two cannot drift.
+    #[test]
+    fn the_vocabulary_states_the_words_and_the_reasons_this_module_writes() {
+        let vocabulary = include_str!("../../../scripts/lib/wz_node.py");
+        for verb in VERBS {
+            let mut line: FixedText<192> = FixedText::new();
+            line.push_str("    \"");
+            line.push_str(verb);
+            line.push_str("\": (");
+            for (at, word) in verdict_words_of(verb)
+                .expect("a verb has words")
+                .iter()
+                .enumerate()
+            {
+                line.push_str(if at == 0 { "\"" } else { ", \"" });
+                line.push_str(word);
+                line.push_str("\"");
+            }
+            line.push_str("),\n");
+            let line = line.finish().expect("fits");
+            assert!(
+                vocabulary.contains(line),
+                "wz_node.py does not state {line:?}"
+            );
+        }
+        let means_from = vocabulary
+            .find("\nVERDICT_MEANS = {\n")
+            .expect("wz_node.py states VERDICT_MEANS");
+        let means_block = &vocabulary[means_from..];
+        let means_block = &means_block[..means_block.find("\n}\n").expect("its end")];
+        for word in VERDICT_WORDS {
+            let mut means: FixedText<64> = FixedText::new();
+            for part in ["\n    \"", word, "\": \""] {
+                means.push_str(part);
+            }
+            let means = means.finish().expect("fits");
+            assert!(
+                means_block.contains(means),
+                "wz_node.py says nothing of what {word} means"
+            );
+        }
+        for reason in RefusedReason::ALL {
+            let mut line: FixedText<192> = FixedText::new();
+            for part in ["\n    \"", reason.words(), "\",\n"] {
+                line.push_str(part);
+            }
+            let line = line.finish().expect("fits");
+            assert!(
+                vocabulary.contains(line),
+                "wz_node.py does not state the refusal {line:?}"
+            );
+        }
     }
 
     #[test]

@@ -935,7 +935,14 @@ declaration decides which. The budgets the querier decides follow from it: the p
 queries can fill (the periods that fit in its timeout, and one more) when the image's table is
 smaller, and a declaration that states fewer is refused. The node says what it asked
 (`HOST-WZ-ASKED <key> asked= replies= errors= finals= timeouts= refused=`) and what it kept
-(`HOST-WZ-REPLY <key> put len= kept= seq= hex=`). A node holds at most four queriers. The
+(`HOST-WZ-REPLY <key> put len= kept= seq= hex=`). A querier whose key is a lifecycle verb's
+(`@/<zid>/<whatami>/session/<verb>/<peer>`, read by `lifecycle_wire::VerbKey`) also says the verdict
+of each reply it keeps, read by the module that writes the reply (`lifecycle_wire::ReplyRead`):
+`HOST-WZ-VERDICT <key> verdict=<word>`, the members that word carries (`links`, `generation`, or a
+status's `open`, `closing` and `intent`), and a refusal's `reason` last, as its sentence runs to the
+end of the line; a reply that is no verdict document is said as `unreadable len= kept=`. The words
+of each verb and the sentences of a refusal are the vocabulary's `verdicts`, held to the module by
+its test. A node holds at most four queriers. The
 witness is the stock `zenoh_z_queryable` as the responder and the reference router's REST plugin
 as the asker of the node's own queryable: the reply is kept, it is kept after the responder is
 stopped and answered from, another responder's value replaces it, and the node asks again with
@@ -1114,7 +1121,7 @@ names a commander is now built with the image's `verbs` feature (its `const` ass
 together), which registers one queryable more, `@/<zid>/client/session/**`, answered by
 `wz_session_mcu::admin_fixed::VerbLegs` from the store the node's connect manager holds its nodes
 in, through the same `lifecycle_verdict` the admin node uses. The verbs take that queryable and keys
-of up to 109 bytes (`@/<zid>/client/session/reset/<peer>/<generation>`), which the generator gives
+of up to 109 bytes (`@/<zid>/client/session/reset/<generation>/<peer>`), which the generator gives
 the build (`MAX_QUERYABLES`, `MAX_KEYEXPR_BYTES`) when the declaration states neither, and refuses a
 declaration that states less. The vocabulary says a role is built only when the target's image
 declares the feature that does what the role grants (`role_features`, read from the image's manifest

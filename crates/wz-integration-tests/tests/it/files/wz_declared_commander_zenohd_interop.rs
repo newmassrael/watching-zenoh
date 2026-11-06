@@ -671,4 +671,24 @@ fn two_provisioned_nodes_command_by_a_zid_known_before_either_runs_with_no_zenoh
         close.contains(CLOSE_REFUSED),
         "the subject's zid is not granted `close` and was not refused by name: {close}"
     );
+
+    // The subject says each verdict itself, read from the reply by the module that writes it, so a
+    // lab needs no reader of the reply's bytes: the status of a peer neither node holds, and the
+    // refusal with its sentence.
+    let said = subject_run.console();
+    for want in [
+        format!(
+            "HOST-WZ-VERDICT @/{target_zid}/client/session/status/d4 verdict=status open=0 \
+             closing=0 intent=false"
+        ),
+        format!(
+            "HOST-WZ-VERDICT @/{target_zid}/client/session/close/d4 verdict=refused \
+             reason={CLOSE_REFUSED}"
+        ),
+    ] {
+        assert!(
+            said.lines().any(|line| line == want),
+            "the subject did not say {want:?}\n--- subject ---\n{said}"
+        );
+    }
 }
