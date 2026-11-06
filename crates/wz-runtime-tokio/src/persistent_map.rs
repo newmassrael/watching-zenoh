@@ -272,6 +272,10 @@ impl<K: Hash + Eq, V, S: BuildHasher> PersistentMap<K, V, S> {
     }
 
     /// The key the map holds equal to `key`, and its value.
+    ///
+    /// Read by the tests and by the forwarder's client stores (`routing-router-hat`); gated as
+    /// [`len`](Self::len) is, for the dead-code lint of a build of the peer mesh alone.
+    #[cfg(any(test, feature = "routing-router-hat"))]
     pub(crate) fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
     where
         K: Borrow<Q>,
@@ -755,6 +759,11 @@ mod tests {
                 map.get(&key),
                 model.get(&key),
                 "the value of {key} at step {step}"
+            );
+            assert_eq!(
+                map.get_key_value(&key),
+                model.get_key_value(&key),
+                "the entry of {key} at step {step}"
             );
             assert_eq!(
                 check_shape(&map.root, true),

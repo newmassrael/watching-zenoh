@@ -12553,7 +12553,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
-    fn register(&mut self, id: FaceId, actions: &Arc<SessionLinkActions>)
+    /// Hold the face `id` and answer whether its link moved a mesh's graph, the one input of the
+    /// inter-region filter a face's coming can move
+    /// ([`reconcile_token_advertisements`](Self::reconcile_token_advertisements)). A client's
+    /// face, or any face without a routing identity, adds no link.
+    fn register(&mut self, id: FaceId, actions: &Arc<SessionLinkActions>) -> bool
     where
         T: std::ops::DerefMut,
     {
@@ -12672,9 +12676,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 id.0
             );
         }
+        added.is_some()
     }
 
-    fn deregister(&mut self, id: FaceId)
+    /// Let the face `id` go and answer whether its link left a mesh's graph, as
+    /// [`register`](Self::register) answers of its coming.
+    fn deregister(&mut self, id: FaceId) -> bool
     where
         T: std::ops::DerefMut,
     {
@@ -12857,7 +12864,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             self.undeclare_push_token(&keyexpr);
         }
         let Some(state) = self.tables.faces.remove(&id) else {
-            return;
+            return false;
         };
         // What its receive path counted stays in the router's total, in the same step that
         // removes it, so a reader sees the face's count in one place and never in two or none.
@@ -12870,10 +12877,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(link) = state.link else {
             // A held-without-identity face (Client, or no routing zid) changed
             // no link-state; nothing to disconnect or re-flood.
-            return;
+            return false;
         };
         if self.plane(tier).is_none() {
-            return;
+            return false;
         }
         // Drop the dead edge from the tier's graph; GC-prune detaches it
         // returns, and purge each pruned node's interest from THAT tier's
@@ -12886,6 +12893,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // tick.
         let _ = self.flood_self_links_changed_tier(tier);
         self.tables.mesh_mut(tier).trees_dirty = true;
+        true
     }
 
     fn tick(&mut self)
@@ -13353,10 +13361,18 @@ impl RouterForwarder {
 impl FaceForwarder for RouterForwarder {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
         let mut on = self.on_tables_mut();
-        on.register(id, actions);
-        // A face that joined may be a gateway of a region, which moves what is advertised.
+        let moved_graph = on.register(id, actions);
+        // A face that joined may be a gateway of a region, which moves what is advertised. It can
+        // be one only through the link it adds to a mesh's graph, the filter's one input a face
+        // moves (`GatewayView` reads the graphs, and every holder's change of what it holds is
+        // propagated where it is made): a face that added none, a client's, is not reconciled
+        // for, so its coming costs no walk of every token held.
         #[cfg(feature = "routing-token-tables")]
-        on.reconcile_token_advertisements();
+        if moved_graph {
+            on.reconcile_token_advertisements();
+        }
+        #[cfg(not(feature = "routing-token-tables"))]
+        let _ = moved_graph;
     }
 
     /// The face leaves, and nothing is sent to it once this has returned
@@ -13368,9 +13384,14 @@ impl FaceForwarder for RouterForwarder {
     fn deregister(&self, id: FaceId) {
         {
             let mut on = self.on_tables_mut();
-            on.deregister(id);
+            // Reconciled only for a face whose link left a mesh's graph, as on its coming.
+            let moved_graph = on.deregister(id);
             #[cfg(feature = "routing-token-tables")]
-            on.reconcile_token_advertisements();
+            if moved_graph {
+                on.reconcile_token_advertisements();
+            }
+            #[cfg(not(feature = "routing-token-tables"))]
+            let _ = moved_graph;
         }
         self.tables.synchronize();
     }
