@@ -53,12 +53,16 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
                                   sets off its default
     --conformance-statement pico [--engine coop] CONFIG
+    --conformance-statement c HEADER
     --resolve-conformance-statement ABI PRESET...
     --original-conformance-statement ORIGINAL
                                   print, as JSON, the conformance statement of the build the
                                   matching cargo-argument modes describe: every capability the ABI
-                                  exports with whether the build has it, every limit and policy
-                                  with its value, and a digest of those values (decision C15)
+                                  exports with whether the build has it, every layout switch of the
+                                  ABI that is not a capability (`arm`), every limit and policy
+                                  with its value, and a digest of those values (decision C15). The
+                                  `c` form reads an installed zenoh-c's zenoh_configure.h, as
+                                  --drop-in-features c does
     --check-presets               every registered profile (configs/profiles) resolves strictly,
                                   and each upstream defconfig resolves to its original's values
     --check-equivalence           the pinned kconfiglib and the copy Zephyr runs give the same
@@ -125,6 +129,7 @@ Usage:
     wz_config.py --resolve-features pico|c|core PRESET...
     wz_config.py --resolve-env PRESET...
     wz_config.py --conformance-statement pico [--engine coop] CONFIG
+    wz_config.py --conformance-statement c HEADER
     wz_config.py --resolve-conformance-statement pico|c|core PRESET...
     wz_config.py --original-conformance-statement zenoh-pico|zenoh-c|zenoh
     wz_config.py --features pico|c|core CONFIG
@@ -1684,6 +1689,18 @@ def emit_rust_conformance_items(decl: dict) -> str:
     ]
     out += rust_tuple_rows([[rust_word(cid), rust_word_list(list(decl["caps"][cid]["abis"]))]
                             for cid in decl["order"]])
+    arm: dict[str, list[str]] = {}
+    for abi in ABIS:
+        for switch in arm_switches(decl, abi):
+            arm.setdefault(switch, []).append(abi)
+    out += [
+        "];",
+        "",
+        "/// Each layout switch that is not a capability (`wz_config.arm_switches`) and the ABIs whose",
+        "/// crate has it as a feature: it selects the arm of the C types a program allocates.",
+        "pub const ARM: &[(&str, &[&str])] = &[",
+    ]
+    out += rust_tuple_rows([[rust_word(switch), rust_word_list(abis)] for switch, abis in arm.items()])
     out += [
         "];",
         "",
@@ -2353,7 +2370,21 @@ def resolved_policy_env(decl: dict, kconf) -> list[str]:
 # that whoever tests the build reads what it is from the build's own configuration instead of
 # from a hand-kept copy that can disagree with it.
 STATEMENT_FORMAT = "wz-conformance-statement"
-STATEMENT_FORMAT_VERSION = 1
+# 2 (2026-11-07): `arm`, the layout switches that are not capabilities, joined the identity; a
+# version-1 digest could not tell two zenoh-c drop-ins of different type layouts apart.
+STATEMENT_FORMAT_VERSION = 2
+
+
+def arm_switches(decl: dict, abi: str) -> list[str]:
+    """The features of `abi`'s crate that select which arm of its C type layouts the library is,
+    and are not capabilities: the zenoh-c rows that a header macro selects (`drop_in_arm`). They
+    change the size of the types a program allocates, so a build is not stated without them.
+    Every layout switch of the pico ABI is a capability (`multi-thread`, `unstable-api`, the
+    local planes), so its list is empty, and so is the core's."""
+    if abi != "c":
+        return []
+    return [row["anchor"].removeprefix(ZENOH_C_DROP_IN) for row in decl["switches"]
+            if row.get("original") == "zenoh-c" and "macro" in row]
 
 
 def conformance_statement(decl: dict, abi: str, features: list[str], limits: dict[str, int],
@@ -2363,8 +2394,9 @@ def conformance_statement(decl: dict, abi: str, features: list[str], limits: dic
     A capability is supported when its feature is in the list, so a list that a later step has
     changed (the cooperative engine's, which leaves out what selects the tokio engine) states
     what that build has, not what its configuration asked for. Every capability the ABI exports
-    is listed, supported or not, every limit with its value and every policy with its value: a
-    statement that left out what is off could not be told from one that never asked.
+    is listed, supported or not, every layout switch of the ABI (`arm_switches`) on or off,
+    every limit with its value and every policy with its value: a statement that left out what
+    is off could not be told from one that never asked.
 
     `digest` identifies the build by what it states: the ABI, the catalogue and every value, and
     nothing of where they were read from, so two routes to the same build give the same digest
@@ -2376,6 +2408,7 @@ def conformance_statement(decl: dict, abi: str, features: list[str], limits: dic
         "format_version": STATEMENT_FORMAT_VERSION,
         "catalog_version": decl["catalog_version"],
         "abi": abi,
+        "arm": [{"id": switch, "on": switch in have} for switch in arm_switches(decl, abi)],
         "capabilities": [{"id": cid, "supported": cid in have} for cid in decl["order"]
                          if abi in decl["caps"][cid]["abis"]],
         "limits": [{"id": lim["id"], "value": limits[lim["id"]], "default": lim["default"]}
@@ -2388,13 +2421,15 @@ def conformance_statement(decl: dict, abi: str, features: list[str], limits: dic
 
 def statement_digest(body: dict) -> str:
     """SHA-256 over the canonical JSON of what a statement says the build is: its format, ABI,
-    catalogue, and each capability's support and each limit's and policy's value. The defaults
-    beside the values are the catalogue's, which `catalog_version` already names."""
+    catalogue, each layout switch's state, and each capability's support and each limit's and
+    policy's value. The defaults beside the values are the catalogue's, which `catalog_version`
+    already names."""
     identity = {
         "format": body["format"],
         "format_version": body["format_version"],
         "catalog_version": body["catalog_version"],
         "abi": body["abi"],
+        "arm": [[a["id"], a["on"]] for a in body["arm"]],
         "capabilities": [[c["id"], c["supported"]] for c in body["capabilities"]],
         "limits": [[x["id"], x["value"]] for x in body["limits"]],
         "policies": [[p["id"], p["value"]] for p in body["policies"]],
@@ -2410,6 +2445,21 @@ def resolved_statement(decl: dict, abi: str, kconf, derived_from: dict) -> dict:
         {lim["id"]: int(kconf.syms[lim["kconfig"]].str_value) for lim in decl["limits"]},
         {pol["id"]: resolved_policy(kconf, pol) for pol in decl["policies"]},
         derived_from)
+
+
+def zenoh_c_header_statement(decl: dict, text: str, name: str) -> dict:
+    """The conformance statement of the zenoh-c drop-in a program compiled against an installed
+    zenoh-c's `zenoh_configure.h` links: `wz-capi-c`'s default build with the arm the header
+    selects added (`drop_in_arm`, the build `--drop-in-features c` describes). A link or a
+    handshake zenoh-c was built without moves no type, so the drop-in keeps its own defaults for
+    them and the statement says so; the header states no limit and no policy, so each is the
+    catalogue's default and upstream's."""
+    default = {cid for cid, cap in decl["caps"].items() if default_on(cap)}
+    return conformance_statement(
+        decl, "c", features_for(decl, "c", default) + drop_in_arm(decl, text),
+        {lim["id"]: lim["default"] for lim in decl["limits"]},
+        {pol["id"]: pol["default"] for pol in decl["policies"]},
+        {"kind": "zenoh-c-header", "inputs": [name]})
 
 
 def pico_header_statement(decl: dict, text: str, macros: dict[str, str], name: str,
@@ -3024,12 +3074,35 @@ def cmd_selftest() -> int:
     # and_digest_wz_config_gives_it`) asserts this same value of this same fixture: the two
     # writers of the canonical form cannot drift apart unseen.
     fixture = {"format": STATEMENT_FORMAT, "format_version": 1, "catalog_version": 7, "abi": "pico",
+               "arm": [{"id": "x-arm", "on": True}],
                "capabilities": [{"id": "a-cap", "supported": True}, {"id": "b-cap", "supported": False}],
                "limits": [{"id": "L_ONE", "value": 256}, {"id": "L_TWO", "value": 0}],
                "policies": [{"id": "p-one", "value": "on"}, {"id": "p-two", "value": "os-default"}]}
     expect("the build script's digest form gives the fixture the digest this one does",
            statement_digest(fixture)
-           == "sha256:81393c276e5371c04b9ca2d2c27d4008355c700c7a0f557f9b22e4d94ae0f2e0")
+           == "sha256:f503a3f077f1fd6a8b6fd97ae6281ba9bb81e628f2680ce70ab248a31fd51387")
+    # The zenoh-c drop-in (decision C15, step 15c): the arm its header selects is in the statement
+    # and in the digest, and nothing else of the header is read.
+    c_arm = arm_switches(decl, "c")
+    shm_row = next(r for r in decl["switches"] if r.get("original") == "zenoh-c"
+                   and r.get("macro") == "Z_FEATURE_SHARED_MEMORY")
+    plain = zenoh_c_header_statement(decl, "", "zenoh_configure.h")
+    shm = zenoh_c_header_statement(decl, "#define Z_FEATURE_SHARED_MEMORY\n", "zenoh_configure.h")
+    expect("the zenoh-c ABI states its layout arm and the pico ABI has none",
+           c_arm and arm_switches(decl, "pico") == [] and arm_switches(decl, "core") == []
+           and [a["id"] for a in plain["arm"]] == c_arm and stated["arm"] == [])
+    expect("a zenoh_configure.h that defines shared memory states that arm and another digest",
+           {a["id"]: a["on"] for a in shm["arm"]}[shm_row["anchor"].removeprefix(ZENOH_C_DROP_IN)]
+           and not {a["id"]: a["on"] for a in plain["arm"]}[
+               shm_row["anchor"].removeprefix(ZENOH_C_DROP_IN)]
+           and shm["digest"] != plain["digest"]
+           and shm["capabilities"] == plain["capabilities"])
+    expect("the zenoh-c header's statement is the default build's, its arm added",
+           {c["id"] for c in plain["capabilities"] if c["supported"]}
+           == set(features_for(decl, "c", {cid for cid, cap in caps.items() if default_on(cap)}))
+           & {cid for cid in decl["order"] if "c" in caps[cid]["abis"]}
+           and all(x["value"] == x["default"] for x in plain["limits"])
+           and plain["derived_from"] == {"kind": "zenoh-c-header", "inputs": ["zenoh_configure.h"]})
     items = emit_rust_conformance_items(decl)
     expect("the build script's questions are every capability, limit and policy of the declaration",
            all(f'("{cid}", ' in items or f'        "{cid}",' in items for cid in decl["order"])
@@ -3889,6 +3962,14 @@ def main(argv: list[str]) -> int:
             return 1
         print_statement(resolved_statement(
             decl, BASE_ABI[argv[2]], kconf, {"kind": "original", "inputs": [argv[2]]}))
+        return 0
+    if len(argv) == 4 and argv[1:3] == ["--conformance-statement", "c"]:
+        # The zenoh-c drop-in an installed zenoh_configure.h links: the build of
+        # --drop-in-features c for the same header.
+        decl = load_decl()
+        header = pathlib.Path(argv[3])
+        print_statement(zenoh_c_header_statement(decl, header.read_text(encoding="utf-8"),
+                                                 header.name))
         return 0
     coop = len(argv) == 6 and argv[1:5] == ["--conformance-statement", "pico", "--engine", "coop"]
     if coop or (len(argv) == 4 and argv[1:3] == ["--conformance-statement", "pico"]):

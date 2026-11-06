@@ -36,8 +36,8 @@ mod tests {
 
     #[test]
     fn the_build_script_read_the_features_this_crate_was_compiled_with() {
-        assert_eq!(STATED_CAPABILITIES, COMPILED_CAPABILITIES);
-        assert!(!STATED_CAPABILITIES.is_empty());
+        assert_eq!(STATED_FEATURES, COMPILED_FEATURES);
+        assert!(!STATED_FEATURES.is_empty());
     }
 
     #[test]

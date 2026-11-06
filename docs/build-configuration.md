@@ -350,13 +350,21 @@ declaration already holds every question, so the statement is one more derivatio
 in the declaration's vocabulary, by the same routes that give a build's cargo
 arguments: `--resolve-conformance-statement ABI PRESET...` for a build given by
 presets, `--original-conformance-statement ORIGINAL` for an upstream original's own
-build, and `--conformance-statement pico [--engine coop] CONFIG` for the pico
-drop-in a zenoh-pico `config.h` gives.
+build, `--conformance-statement pico [--engine coop] CONFIG` for the pico drop-in a
+zenoh-pico `config.h` gives, and `--conformance-statement c HEADER` for the zenoh-c
+drop-in an installed zenoh-c's `zenoh_configure.h` links (the default build with the
+arm `--drop-in-features c` adds).
 
 - It lists every capability the ABI exports with whether the build has it, every
   limit with its value and the catalogue's default, and every policy with its value
   and upstream's. A statement that left out what is off could not be told from one
   that never asked.
+- It lists every layout switch of the ABI that is not a capability, on or off
+  (`arm`): the zenoh-c rows a header macro selects (`zenoh-c-shared-memory`,
+  `zenoh-c-no-unstable-api`), which change the size of the types a program
+  allocates. The pico ABI's layout switches are capabilities, so its `arm` is empty.
+  Version 1 had no `arm`, and its digest could not tell two zenoh-c drop-ins of
+  different layouts apart; version 2 adds it.
 - A capability is supported when it is in the build's final feature list, so the
   cooperative engine's build states what it has (its list leaves out what selects
   the tokio engine), not what its header asked for.
@@ -366,7 +374,7 @@ drop-in a zenoh-pico `config.h` gives.
   read from is beside it in `derived_from` (file names only, never a path of the
   machine that made it).
 
-It is JSON, format `wz-conformance-statement` version 1; a field's meaning changes
+It is JSON, format `wz-conformance-statement` version 2; a field's meaning changes
 only with the version.
 
 The C ABI libraries carry the same digest and hand it out:
@@ -515,8 +523,12 @@ Each step lands with its own done-when; sizes are not estimated here.
     C ABI library and readable through the C ABI, so a tester can check that the
     build it talks to is the one the statement describes (done for `wz-capi-pico`
     and `wz-capi-c`). (c) The zenoh-c drop-in's statement from an installed
-    `zenoh_configure.h`. (d) A lane that builds a library from a statement's
-    configuration and requires its digest to equal the statement's, end to end.
+    `zenoh_configure.h`, with the layout arm in the statement and its digest
+    (format version 2; done). (d) The end-to-end check (done): Layer C1cs
+    (`capability_cost_gate.py`) builds each of its cases with exactly its features,
+    reads the digest out of the library's bytes and requires it to equal the digest of
+    the case's statement. Its cases set no `WZ_LIMIT_*` or `WZ_POLICY_*`; how those
+    reach the digest is held by `wz-conformance-build`'s own tests.
 
 Order: 1 first. 2, 3, 4, 6, 7, 8, 11, 12, 13, 14 and 15 depend on 1; 5 on 1 and 2; 9 on 4
 and 7; 10 on 5.

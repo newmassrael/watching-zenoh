@@ -10,7 +10,7 @@
 /// `format` of the statement.
 pub const FORMAT: &str = "wz-conformance-statement";
 /// `format_version` of the statement.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 /// The declaration's `catalog_version`.
 pub const CATALOG_VERSION: u32 = 2;
 
@@ -55,6 +55,13 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("transport_compression", &["core", "c"]),
     ("auth_usrpwd", &["core", "c"]),
     ("interceptors", &["core", "c"]),
+];
+
+/// Each layout switch that is not a capability (`wz_config.arm_switches`) and the ABIs whose
+/// crate has it as a feature: it selects the arm of the C types a program allocates.
+pub const ARM: &[(&str, &[&str])] = &[
+    ("zenoh-c-shared-memory", &["c"]),
+    ("zenoh-c-no-unstable-api", &["c"]),
 ];
 
 /// Each limit, the environment name a build states it by, and its default.

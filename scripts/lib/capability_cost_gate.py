@@ -19,7 +19,13 @@ feature set and checks four facts about it:
   1. SIZE        the text segment (`size`) is within the case's budget;
   2. ABSENCE     no defined symbol matches a FORBIDDEN pattern: the plane the case left out;
   3. PRESENCE    a symbol matches every REQUIRED pattern: the plane the case put in;
-  4. EXPORTS     the library exports the pinned number of C symbols, where one is pinned.
+  4. EXPORTS     the library exports the pinned number of C symbols, where one is pinned;
+  5. STATEMENT   the conformance digest the library carries (the NUL-terminated
+                 `sha256:<64 hex>` its build script wrote, read out of the binary's bytes) is
+                 the digest `wz_config.conformance_statement` gives the case's feature set
+                 (docs/build-configuration.md, decision C15, step 15d). Every case is a build
+                 whose configuration is known, so each is also the end-to-end witness that a
+                 library states the build it is.
 
 PRESENCE is what makes ABSENCE mean something. A forbidden pattern that no build can match is a
 check that cannot fail (`--selftest` pins the matcher, and the full builds here are the live
@@ -324,8 +330,10 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
-         exports=441,
-         note="the single-threaded client of pico-client-udp on the cooperative engine: "
+         exports=442,
+         note="442 exports with the conformance digest's door (`wz_ext_conformance_digest`, "
+              "decision C15, in every build), 441 before. "
+              "The single-threaded client of pico-client-udp on the cooperative engine: "
               "888,223 measured, 2.20 times the same pico, against pico-client-udp's 4.63. It "
               "grew from 867,811 by what pico's client has by default and it lacked: the "
               "KeepAlive and Close codecs, a lost link dialled again with the session's "
@@ -551,9 +559,10 @@ CASES: tuple[Case, ...] = (
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
-         exports=803,
+         exports=804,
          note="every capability on: the symbol count is the drop-in's. 809 -> 802 when the "
-              "seven single-threaded entry points left the multi-threaded arm; 803 with the "
+              "seven single-threaded entry points left the multi-threaded arm; 804 with the "
+              "conformance digest's door (`wz_ext_conformance_digest`, decision C15); 803 with the "
               "door that answers what a configuration asks of the operating system "
               "(`wz_ext_config_device_requires`). 4,216,542 "
               "measured with the multicast transport pico's default has (open-debt item 913), "
@@ -711,8 +720,10 @@ CASES: tuple[Case, ...] = (
     Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_055_200,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST),
-         exports=836,
-         note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
+         exports=837,
+         note="837 exports with the conformance digest's door (`wz_capi_c_conformance_digest`, "
+              "decision C15), 836 before. "
+              "zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
               "rsa): 8,866,359 measured, up from about 5.1 MB without them; 9,029,823 with "
               "the multicast transport (open-debt item 913). 9,214,622 and 836 exports on "
               "hosted CI on 2026-10-27 (head `e6d953fc2`), 4,622 over the earlier budget with "
@@ -771,11 +782,46 @@ class Measured:
     text: int
     symbols: list[str]  # demangled names of the defined symbols
     exports: int
+    # Every distinct NUL-terminated `sha256:<64 hex>` string in the binary: the conformance
+    # digest is one, and a binary that holds none or two cannot say which build it is.
+    digests: tuple[str, ...] = ()
 
 
-def grade(case: Case, got: Measured) -> list[str]:
-    """The findings for one case; empty when it passes. Pure, so the selftest can drive it."""
+# The conformance digest as the library stores it: a C string, so the NUL is part of the match and
+# a longer hex run or an unterminated one is not taken for it.
+DIGEST_IN_BINARY = re.compile(rb"sha256:[0-9a-f]{64}\x00")
+
+
+def digests_in(data: bytes) -> tuple[str, ...]:
+    return tuple(sorted({m.group(0)[:-1].decode("ascii") for m in DIGEST_IN_BINARY.finditer(data)}))
+
+
+def case_abi(case: Case) -> str:
+    return {"wz-capi-pico": "pico", "wz-capi-c": "c"}[case.package]
+
+
+def stated_digest(case: Case, features: set[str]) -> str:
+    """The digest the conformance statement gives the case's build: its ABI and features, every
+    limit at its default and every policy at upstream's (a case sets no environment)."""
+    decl = wz_config.load_decl()
+    return wz_config.conformance_statement(
+        decl, case_abi(case), sorted(features),
+        {lim["id"]: lim["default"] for lim in decl["limits"]},
+        {pol["id"]: pol["default"] for pol in decl["policies"]}, {})["digest"]
+
+
+def grade(case: Case, got: Measured, stated: str | None = None) -> list[str]:
+    """The findings for one case; empty when it passes. Pure, so the selftest can drive it.
+    `stated` is the digest the case's conformance statement gives; None skips that fact (the
+    selftest's synthetic cases have no statement)."""
     findings: list[str] = []
+    if stated is not None and got.digests != (stated,):
+        findings.append(
+            f"{case.id}: the library carries the conformance digest(s) {list(got.digests) or 'none'}, "
+            f"and the statement of its feature set is {stated}. The build script "
+            f"(wz-conformance-build) read another build than the one this case made, or the two "
+            f"writers of the canonical form disagree (their fixture tests say which)."
+        )
     if got.text > case.max_text:
         findings.append(
             f"{case.id}: text is {got.text} bytes, over its budget of {case.max_text} "
@@ -824,7 +870,7 @@ def build(case: Case) -> Measured:
         ["nm", "-D", "--defined-only", str(lib)], capture_output=True, text=True, check=True
     ).stdout.splitlines()
     exports = sum(1 for line in dynamic if len(line.split()) == 3 and line.split()[1] == "T")
-    return Measured(text=text, symbols=symbols, exports=exports)
+    return Measured(text=text, symbols=symbols, exports=exports, digests=digests_in(lib.read_bytes()))
 
 
 @dataclass(frozen=True)
@@ -919,17 +965,19 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
         if only and case.id not in only:
             continue
         got = build(case)
+        stated = stated_digest(case, case_features(case))
         print(f"  capability-cost: {case.id}: text {got.text} of {case.max_text} "
-              f"({100 * got.text // case.max_text}%), {got.exports} exports")
+              f"({100 * got.text // case.max_text}%), {got.exports} exports, conformance digest "
+              f"{', '.join(got.digests) or 'none'} (statement {stated})")
         report_reference(case, got)
         if measure_only:
             continue
-        for finding in grade(case, got):
+        for finding in grade(case, got, stated):
             print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
             rc = 1
     if rc == 0 and not measure_only:
         print(f"  capability-cost: {len(only) or len(CASES)} case(s) within budget, absent where absent, "
-              f"present where present")
+              f"present where present, each carrying its statement's digest")
     return rc
 
 
@@ -999,6 +1047,25 @@ def cmd_selftest() -> int:
            all(case_features(by_id[small]) == case_features(by_id[base])
                for small, base in (("pico-client-small", "pico-client"),
                                    ("capic-client-small", "capic-client"))))
+    # STATEMENT: the digest is read from the binary's bytes as the C string the library stores, and
+    # graded against the statement's; none, two, or another one are each a finding.
+    a, b = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    expect("the digest is the NUL-terminated sha256 string, and only that",
+           digests_in(b"\x00" + a.encode() + b"\x00junk" + a.encode() + b"\x00") == (a,)
+           and digests_in(a.encode() + b"0\x00") == ()
+           and digests_in(a.encode()) == ()
+           and digests_in(b"sha256:" + b"A" * 64 + b"\x00") == ())
+    with_digest = Measured(900, clean.symbols, 3, (a,))
+    expect("a library carrying its statement's digest passes", grade(case, with_digest, a) == [])
+    expect("a library carrying another digest, none, or two is a finding",
+           len(grade(case, with_digest, b)) == 1 and len(grade(case, clean, a)) == 1
+           and len(grade(case, Measured(900, clean.symbols, 3, (a, b)), a)) == 1)
+    expect("a case's statement follows its features and its ABI",
+           stated_digest(by_id["pico-client"], case_features(by_id["pico-client"]))
+           == stated_digest(by_id["pico-client-small"], case_features(by_id["pico-client-small"]))
+           != stated_digest(by_id["pico-default"], case_features(by_id["pico-default"]))
+           and stated_digest(by_id["capic-client"], case_features(by_id["capic-client"]))
+           != stated_digest(by_id["pico-client"], case_features(by_id["pico-client"])))
     expect("every case's profile is one crates/Cargo.toml defines",
            {c.profile for c in CASES} <= {"release"} | set(
                re.findall(r"^\[profile\.([\w-]+)\]", (CRATES / "Cargo.toml").read_text(), re.M)))

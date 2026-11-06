@@ -32,8 +32,10 @@
 //!
 //! # The digest
 //!
-//! SHA-256 over the canonical JSON `wz_config.py` hashes: the object with the keys `abi`,
-//! `capabilities` (`[id, supported]` pairs), `catalog_version`, `format`, `format_version`,
+//! SHA-256 over the canonical JSON `wz_config.py` hashes: the object with the keys `abi`, `arm`
+//! (`[switch, on]` pairs: the layout switches that are not capabilities, which select the arm
+//! of the C types a program allocates), `capabilities` (`[id, supported]` pairs),
+//! `catalog_version`, `format`, `format_version`,
 //! `limits` (`[id, value]`) and `policies` (`[id, value]`), keys sorted, no whitespace. Every word
 //! in it is a declaration word (`wz_config.rust_word`), so no escaping arises; one that would
 //! need it is refused rather than escaped differently from the other side. The fixture test below
@@ -61,6 +63,8 @@ pub struct Statement<'a> {
     pub catalog_version: u32,
     /// The ABI the build is of: `core`, `pico` or `c`.
     pub abi: &'a str,
+    /// Every layout switch of the ABI that is not a capability, in declared order, on or off.
+    pub arm: Vec<(&'a str, bool)>,
     /// Every capability the ABI exports, in declared order, with whether the build has it.
     pub capabilities: Vec<(&'a str, bool)>,
     /// Every limit, in declared order, with its value.
@@ -75,16 +79,11 @@ impl Statement<'_> {
         let mut out = String::new();
         out.push_str("{\"abi\":");
         push_word(&mut out, self.abi);
-        out.push_str(",\"capabilities\":[");
-        for (i, (id, supported)) in self.capabilities.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            out.push('[');
-            push_word(&mut out, id);
-            out.push_str(if *supported { ",true]" } else { ",false]" });
-        }
-        let _ = write!(out, "],\"catalog_version\":{}", self.catalog_version);
+        out.push_str(",\"arm\":");
+        push_flags(&mut out, &self.arm);
+        out.push_str(",\"capabilities\":");
+        push_flags(&mut out, &self.capabilities);
+        let _ = write!(out, ",\"catalog_version\":{}", self.catalog_version);
         out.push_str(",\"format\":");
         push_word(&mut out, self.format);
         let _ = write!(out, ",\"format_version\":{}", self.format_version);
@@ -121,6 +120,20 @@ impl Statement<'_> {
         }
         out
     }
+}
+
+/// A JSON array of `[word, bool]` pairs.
+fn push_flags(out: &mut String, flags: &[(&str, bool)]) {
+    out.push('[');
+    for (i, (id, on)) in flags.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        push_word(out, id);
+        out.push_str(if *on { ",true]" } else { ",false]" });
+    }
+    out.push(']');
 }
 
 /// A JSON string of a declaration word. A word outside the declaration's alphabet is refused:
@@ -171,7 +184,8 @@ fn policy_value(env_name: &str, stated: Option<&str>, values: &[&str], upstream:
 }
 
 /// The statement of a build of `abi`: `has_feature` says whether the package's cargo feature of
-/// a capability id is on, and `stated` gives the build environment's value of a name, if any.
+/// a capability id or layout switch is on, and `stated` gives the build environment's value of a
+/// name, if any.
 ///
 /// # Panics
 ///
@@ -193,6 +207,11 @@ pub fn of_build(
         format_version: items::FORMAT_VERSION,
         catalog_version: items::CATALOG_VERSION,
         abi,
+        arm: items::ARM
+            .iter()
+            .filter(|(_, abis)| abis.contains(&abi))
+            .map(|(id, _)| (*id, has_feature(id)))
+            .collect(),
         capabilities: items::CAPABILITIES
             .iter()
             .filter(|(_, abis)| abis.contains(&abi))
@@ -231,9 +250,9 @@ fn feature_env(id: &str) -> String {
 /// for the crate to `include!`, and tell cargo to run again when a limit or policy changes.
 ///
 /// The file holds `CONFORMANCE_DIGEST`, the digest as a C string, and two lists for the crate's
-/// own tests: the capabilities this script read as on (`STATED_CAPABILITIES`) and the same ids
-/// with `cfg!(feature = ...)` as the crate was compiled (`COMPILED_CAPABILITIES`). A test that
-/// compares them shows the script read the build the crate is.
+/// own tests: the features this script read as on, capabilities and layout switches
+/// (`STATED_FEATURES`), and the same names with `cfg!(feature = ...)` as the crate was compiled
+/// (`COMPILED_FEATURES`). A test that compares them shows the script read the build the crate is.
 ///
 /// # Panics
 ///
@@ -267,14 +286,18 @@ pub fn emit(abi: &'static str) {
         "pub const CONFORMANCE_DIGEST: &core::ffi::CStr = c\"{}\";",
         statement.digest()
     );
-    text.push_str("\n#[cfg(test)]\npub(crate) const STATED_CAPABILITIES: &[(&str, bool)] = &[\n");
-    for (id, on) in &statement.capabilities {
+    let features: Vec<(&str, bool)> = statement
+        .arm
+        .iter()
+        .chain(&statement.capabilities)
+        .copied()
+        .collect();
+    text.push_str("\n#[cfg(test)]\npub(crate) const STATED_FEATURES: &[(&str, bool)] = &[\n");
+    for (id, on) in &features {
         let _ = writeln!(text, "    (\"{id}\", {on}),");
     }
-    text.push_str(
-        "];\n\n#[cfg(test)]\npub(crate) const COMPILED_CAPABILITIES: &[(&str, bool)] = &[\n",
-    );
-    for (id, _) in &statement.capabilities {
+    text.push_str("];\n\n#[cfg(test)]\npub(crate) const COMPILED_FEATURES: &[(&str, bool)] = &[\n");
+    for (id, _) in &features {
         let _ = writeln!(text, "    (\"{id}\", cfg!(feature = \"{id}\")),");
     }
     text.push_str("];\n");
@@ -296,6 +319,7 @@ mod tests {
             format_version: 1,
             catalog_version: 7,
             abi: "pico",
+            arm: vec![("x-arm", true)],
             capabilities: vec![("a-cap", true), ("b-cap", false)],
             limits: vec![("L_ONE", 256), ("L_TWO", 0)],
             policies: vec![("p-one", "on".into()), ("p-two", "os-default".into())],
@@ -306,15 +330,27 @@ mod tests {
     fn the_fixture_has_the_canonical_form_and_digest_wz_config_gives_it() {
         assert_eq!(
             fixture().canonical_json(),
-            "{\"abi\":\"pico\",\"capabilities\":[[\"a-cap\",true],[\"b-cap\",false]],\
+            "{\"abi\":\"pico\",\"arm\":[[\"x-arm\",true]],\
+             \"capabilities\":[[\"a-cap\",true],[\"b-cap\",false]],\
              \"catalog_version\":7,\"format\":\"wz-conformance-statement\",\"format_version\":1,\
              \"limits\":[[\"L_ONE\",256],[\"L_TWO\",0]],\
              \"policies\":[[\"p-one\",\"on\"],[\"p-two\",\"os-default\"]]}"
         );
         assert_eq!(
             fixture().digest(),
-            "sha256:81393c276e5371c04b9ca2d2c27d4008355c700c7a0f557f9b22e4d94ae0f2e0"
+            "sha256:f503a3f077f1fd6a8b6fd97ae6281ba9bb81e628f2680ce70ab248a31fd51387"
         );
+    }
+
+    #[test]
+    fn the_zenoh_c_abi_states_its_layout_arm_and_the_pico_abi_has_none() {
+        let c = of_build("c", |_| false, |_| None);
+        assert!(!c.arm.is_empty());
+        assert_eq!(c.arm.len(), items::ARM.len());
+        let arm_on = of_build("c", |id| c.arm.iter().any(|(a, _)| *a == id), |_| None);
+        assert!(arm_on.arm.iter().all(|(_, on)| *on));
+        assert_ne!(arm_on.digest(), c.digest());
+        assert!(of_build("pico", |_| true, |_| None).arm.is_empty());
     }
 
     #[test]
@@ -331,6 +367,7 @@ mod tests {
             .zip(items::POLICIES)
             .all(|((_, v), (_, _, _, upstream))| v == upstream));
         assert!(s.capabilities.iter().all(|(_, on)| !on));
+        assert!(s.arm.iter().all(|(_, on)| !on));
     }
 
     #[test]

@@ -3,9 +3,12 @@
 
 //! The conformance digest of this build (docs/build-configuration.md, decision C15).
 //!
-//! `wz_config.py --resolve-conformance-statement c PRESET...` (and the original route) prints what
-//! a build of this library is: every capability the zenoh-c ABI exports with whether the build has
-//! it, every limit and policy with its value, and the digest of those values. The build script
+//! `wz_config.py --conformance-statement c HEADER` (the drop-in an installed zenoh-c's
+//! `zenoh_configure.h` links), `--resolve-conformance-statement c PRESET...` and the original route
+//! print what a build of this library is: every capability the zenoh-c ABI exports with whether
+//! the build has it, which arm of the type layouts it is (`zenoh-c-shared-memory`,
+//! `zenoh-c-no-unstable-api`), every limit and policy with its value, and the digest of those
+//! values. The build script
 //! (`wz-conformance-build`) reads the same answers from what this crate is compiled with and puts
 //! the digest here, so a tester holding a statement asks the library which build it is and
 //! compares the two. Equal digests are the same build; a different one names a library that is not
@@ -36,8 +39,8 @@ mod tests {
 
     #[test]
     fn the_build_script_read_the_features_this_crate_was_compiled_with() {
-        assert_eq!(STATED_CAPABILITIES, COMPILED_CAPABILITIES);
-        assert!(!STATED_CAPABILITIES.is_empty());
+        assert_eq!(STATED_FEATURES, COMPILED_FEATURES);
+        assert!(!STATED_FEATURES.is_empty());
     }
 
     #[test]
