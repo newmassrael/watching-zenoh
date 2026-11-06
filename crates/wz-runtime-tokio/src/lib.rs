@@ -2444,11 +2444,12 @@ pub mod interceptor;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_interest;
 
-/// The client faces' subscriptions, indexed by key and changed only through methods that record the
-/// key they moved, so [`route_cache::RouteCache::refresh`] can retire a route and not the whole cache.
+/// The client faces' declarations on one plane (subscribers, queryables, liveliness tokens), indexed
+/// by key and changed only through methods that record the key they moved, so
+/// [`route_cache::RouteCache::refresh`] can retire a route and not the whole cache.
 /// Gated on `routing-router-hat`, with the forwarder that holds it.
 #[cfg(feature = "routing-router-hat")]
-pub(crate) mod client_sub_store;
+pub(crate) mod client_store;
 /// A persistent index of members by keyexpr (a trie of chunks), so that a declaration finds the
 /// interests it meets without trying every face's (`docs/router-table-snapshots.md`, section 7).
 /// Gated on `routing-peer`, with the stores that hold it.

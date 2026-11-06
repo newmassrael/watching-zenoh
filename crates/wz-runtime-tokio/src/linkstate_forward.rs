@@ -28,7 +28,7 @@
 //! says (item 751 step 7c-2 left the name for that reason).
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -46,7 +46,7 @@ use wz_session_core::transport_profile::owned::DeclareOwned;
 use wz_session_core::wire::PushOwned;
 use wz_session_core::wireexpr_resolve::wireexpr_names_a_declaration;
 
-use wz_routing_graph::{LinkId, LinkstateNetwork, Versioned};
+use wz_routing_graph::{LinkId, LinkstateNetwork};
 
 use crate::accept_loop::FaceId;
 use crate::interceptor::InterceptorKind;
@@ -543,8 +543,8 @@ fn data_route(
 /// id: the leaf-face store every broker hat keeps. Versioned for the reason the
 /// mesh tables are, the client leg of a data route is cached against it, and
 /// indexed and change-logged so that a change retires only the routes its key
-/// reaches (see [`crate::client_sub_store`]).
-pub(crate) use crate::client_sub_store::ClientSubStore;
+/// reaches (see [`crate::client_store`]).
+pub(crate) use crate::client_store::ClientSubStore;
 
 /// R2909 — the client-leg route cache of one [`ClientSubStore`]: per keyexpr,
 /// the client faces subscribing to it. Keyed by `()` rather than a source,
@@ -598,8 +598,8 @@ pub(crate) fn client_route(
 
 /// R2911 — the CLIENT faces a node holds, each with its queryables by decl id
 /// and the `QueryableInfo` each declared: the query twin of [`ClientSubStore`],
-/// kept by every broker hat and [`Versioned`] for the same reason.
-pub(crate) type ClientQablStore = Versioned<HashMap<FaceId, HashMap<u64, (String, QueryableInfo)>>>;
+/// the same store with the info held beside each id (see [`crate::client_store`]).
+pub(crate) use crate::client_store::ClientQablStore;
 
 /// R2911 — one client face that can answer a query: the leaf twin of
 /// [`QueryCandidate`]. A client is directly attached, so there is no hop and
@@ -637,26 +637,36 @@ pub(crate) fn client_query_route(
         net: 0,
         table: store.version(),
     };
+    // A change of the store retires the routes of the keys it intersects, as the data leg's does
+    // ([`client_route`]): a queryable's key can make a client a candidate, or complete, only for a
+    // query whose keyexpr it intersects.
+    cached.routes.refresh(
+        inputs,
+        |since, visit| store.changed_since(since, visit),
+        |changed, cached_key| {
+            let target: Vec<&str> = cached_key.split('/').collect();
+            keyexpr_intersects_target(changed, &target)
+        },
+    );
     let resource = || wire || (cached.names_a_resource)(keyexpr);
     cached
         .routes
         .get_or_compute(inputs, &(), keyexpr, resource, || {
+            // The keys the query meets, from the store's index; a face is complete for the query
+            // when one of its complete queryables is on a key that includes the whole of it.
             let query_chunks: Vec<&str> = keyexpr.split('/').collect();
-            let mut out: Vec<ClientQueryable> = store
-                .iter()
-                .filter(|(_, ids)| {
-                    ids.values()
-                        .any(|(decl, _)| keyexpr_intersects_target(decl, &query_chunks))
-                })
-                .map(|(face, ids)| ClientQueryable {
-                    face: *face,
-                    complete: ids.values().any(|(decl, info)| {
-                        info.complete && keyexpr_includes_target(decl, &query_chunks)
-                    }),
-                })
-                .collect();
-            out.sort_unstable_by_key(|c| c.face);
-            out.into()
+            let mut faces: BTreeMap<FaceId, bool> = BTreeMap::new();
+            for (key, holders) in store.keys_intersecting(keyexpr) {
+                let includes = keyexpr_includes_target(key, &query_chunks);
+                for (face, ids) in holders {
+                    let complete = includes && ids.values().any(|info| info.complete);
+                    *faces.entry(*face).or_default() |= complete;
+                }
+            }
+            faces
+                .into_iter()
+                .map(|(face, complete)| ClientQueryable { face, complete })
+                .collect()
         })
 }
 

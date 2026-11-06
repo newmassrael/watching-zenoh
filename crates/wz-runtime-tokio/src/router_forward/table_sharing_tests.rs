@@ -244,9 +244,22 @@ fn cost_line(name: &str, (copy, drop_): (Duration, Duration)) {
     );
 }
 
+/// The kinds of write a face of the admission makes, in the order it makes them. A build without
+/// the token tables makes no token write and prints no token line.
+const ADMISSION_WRITES: [&str; 6] = [
+    "register",
+    "subscribe",
+    "interest",
+    "queryable",
+    "queryable_interest",
+    "token",
+];
+
 /// The faces of a starved router's admission, one after another with nothing else running: each
 /// comes up, declares a subscriber of a key of its own and asks for the subscribers of the next
-/// face's key, as each session of `wz_router_hat_data_plane_scaling` does. Prints each kind of
+/// face's key, as each session of `wz_router_hat_data_plane_scaling` does, then declares a
+/// queryable of its key, asks for the queryables of the next face's key and declares a liveliness
+/// token of its key, the client store of each plane growing with the faces. Prints each kind of
 /// write's time against how many faces were already up, then what a copy of the whole tables and
 /// of each component a write reaches costs with every face up: the profile phase 6 of
 /// `docs/router-table-snapshots.md` reads to choose which tables become persistent.
@@ -256,20 +269,18 @@ fn cost_line(name: &str, (copy, drop_): (Duration, Duration)) {
 fn the_writes_of_an_admission_measured_against_the_faces_already_up() {
     let fwd = RouterForwarder::new(zid(0x01));
     let mut held = Vec::new();
-    let (mut registers, mut subscribes, mut interests) = (Vec::new(), Vec::new(), Vec::new());
+    let mut bands: Vec<[Waits; ADMISSION_WRITES.len()]> = Vec::new();
     for i in 0..ADMITTED {
         if i % BAND == 0 {
-            registers.push(Waits::default());
-            subscribes.push(Waits::default());
-            interests.push(Waits::default());
+            bands.push(Default::default());
         }
-        let band = (i / BAND) as usize;
+        let waits = bands.last_mut().expect("a band is open");
         let peer = Zid::from_slice(&(0x0010_0000 + i as u32).to_be_bytes());
         let (actions, sink) = client(peer);
         let face = FaceId(i);
-        registers[band].time(|| fwd.register(face, &actions));
+        waits[0].time(|| fwd.register(face, &actions));
         let own = format!("mesh/dev_{i}");
-        subscribes[band].time(|| bring(&fwd, face, declare_sub(&own)));
+        waits[1].time(|| bring(&fwd, face, declare_sub(&own)));
         let next = format!("mesh/dev_{}", (i + 1) % ADMITTED);
         let interest = wz_session_core::interest_build::build_interest_subscribers(
             1,
@@ -279,9 +290,31 @@ fn the_writes_of_an_admission_measured_against_the_faces_already_up() {
             Some(&next),
         )
         .expect("build interest");
-        interests[band].time(|| bring(&fwd, face, NetworkMessage::Interest(interest)));
+        waits[2].time(|| bring(&fwd, face, NetworkMessage::Interest(interest)));
+        let queryable = build_declare_queryable_with_info(&own, QueryableInfo::local(true))
+            .expect("build queryable");
+        waits[3].time(|| bring(&fwd, face, NetworkMessage::Declare(Box::new(queryable))));
+        let interest = wz_session_core::interest_build::build_interest_queryables(
+            2,
+            true,
+            true,
+            0,
+            Some(&next),
+        )
+        .expect("build interest");
+        waits[4].time(|| bring(&fwd, face, NetworkMessage::Interest(interest)));
+        #[cfg(feature = "routing-token-tables")]
+        {
+            let token = build_declare_token(1, 0, Some(&own)).expect("build token");
+            waits[5].time(|| bring(&fwd, face, NetworkMessage::Declare(Box::new(token))));
+        }
         held.push((actions, sink));
     }
+    assert_eq!(
+        fwd.client_queryables_seen(),
+        ADMITTED as usize,
+        "every face's queryable is held"
+    );
 
     let (_, receiver) = &held[1];
     receiver.reset();
@@ -295,28 +328,18 @@ fn the_writes_of_an_admission_measured_against_the_faces_already_up() {
     );
 
     let structure = fwd.table_sharing().id();
-    for (band, ((registers, subscribes), interests)) in registers
-        .iter_mut()
-        .zip(subscribes.iter_mut())
-        .zip(interests.iter_mut())
-        .enumerate()
-    {
+    for (band, waits) in bands.iter_mut().enumerate() {
         let from = band as u64 * BAND;
-        println!(
-            "table-sharing: structure={structure} faces_up={from}..{} register {}",
-            from + BAND,
-            registers.line()
-        );
-        println!(
-            "table-sharing: structure={structure} faces_up={from}..{} subscribe {}",
-            from + BAND,
-            subscribes.line()
-        );
-        println!(
-            "table-sharing: structure={structure} faces_up={from}..{} interest {}",
-            from + BAND,
-            interests.line()
-        );
+        for (kind, waits) in ADMISSION_WRITES.iter().zip(waits.iter_mut()) {
+            if waits.0.is_empty() {
+                continue;
+            }
+            println!(
+                "table-sharing: structure={structure} faces_up={from}..{} {kind} {}",
+                from + BAND,
+                waits.line()
+            );
+        }
     }
 
     let tables = fwd.tables.read();

@@ -356,8 +356,7 @@ use std::time::{Duration, Instant};
 use sce_forge_runtime::codec::CodecError;
 
 use wz_routing_graph::{
-    AutoConnect, Changes, LinkEdgeWeight, LinkId, LinkInfo, LinkstateNetwork, Versioned, WhatAmI,
-    Zid,
+    AutoConnect, Changes, LinkEdgeWeight, LinkId, LinkInfo, LinkstateNetwork, WhatAmI, Zid,
 };
 use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable_reply,
@@ -400,6 +399,9 @@ use wz_session_core::wireexpr_resolve::{
 use crate::accept_loop::{
     DialIntent, DialIntentOrigin, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId,
 };
+use crate::client_store;
+#[cfg(feature = "routing-token-tables")]
+use crate::client_store::ClientTokenStore;
 use crate::future_interest::{FutureQablStore, FutureSubStore, InterestOrigin};
 #[cfg(feature = "routing-interceptor-hotreload")]
 use crate::interceptor::InterceptorKeyexprCache;
@@ -708,36 +710,25 @@ impl MeshHat {
 /// (`vendor/zenoh-pico/src/net/primitives.c`), so a keyexpr-keyed store had no
 /// way to resolve it and a pico subscriber that undeclared kept being routed to.
 ///
-/// R2909 — the shared [`ClientSubStore`], [`Versioned`] because the client leg
+/// R2909 — the shared [`ClientSubStore`], versioned because the client leg
 /// of the data route is cached against it.
 type ClientSubs = ClientSubStore;
 /// A client face's queryables, decl id -> (keyexpr, declared `QueryableInfo`),
 /// id-keyed for the same reason as [`ClientSubs`] (pico's
 /// `_z_make_undecl_queryable(qle->_entity_id, NULL)`).
 ///
-/// R2911 — the shared [`ClientQablStore`], [`Versioned`] because the client
-/// leg of the query route is cached against it.
-type ClientQabls = ClientQablStore;
-
-/// The one `QueryableInfo` a client face holds for `keyexpr`: the merge of
-/// every id on the face naming it, `None` when none does. This is what the
-/// pin recomputes when an id leaves
+/// R2911 — the shared [`ClientQablStore`], versioned because the client
+/// leg of the query route is cached against it. The one `QueryableInfo` a
+/// face holds for a keyexpr is the merge of every id on the face naming it
+/// ([`ClientStore::face_value`](crate::client_store::ClientStore::face_value)).
+/// This is what the pin recomputes when an id leaves
 /// (`zenoh/src/net/routing/hat/broker/queries.rs` @ `.reduce(merge_qabl_infos);`).
 /// ⚠ One stated divergence: on REGISTER the pin overwrites the face's info
 /// with the newest declaration (`get_mut_unchecked(ctx).qabl = Some(*info);`)
 /// rather than merging, so a face holding two DIFFERENT infos for one keyexpr
 /// reads as the newest there and as the merge here. Deriving it the same way
 /// in both directions keeps the answer independent of declaration order.
-fn face_qabl_info(
-    by_id: &HashMap<u64, (String, QueryableInfo)>,
-    keyexpr: &str,
-) -> Option<QueryableInfo> {
-    by_id
-        .values()
-        .filter(|(k, _)| k == keyexpr)
-        .map(|(_, info)| *info)
-        .reduce(QueryableInfo::merge)
-}
+type ClientQabls = ClientQablStore;
 
 /// The MERGED [`QueryableInfo`] the querier on `exclude_face` interested in `ke`
 /// would see — the OR of `complete` (min of `distance`) over EVERY queryable wz
@@ -795,16 +786,12 @@ fn merged_qabl_info_in(
             }
         }
     }
-    let ke_chunks: Vec<&str> = ke.split('/').collect();
+    // The client keys that back `ke`, read from each store's index by key; the destination
+    // querier's own queryables are not folded.
     for hat in hats.values().filter_map(Hat::broker) {
-        for (face, m) in hat.qabls.iter() {
-            if *face == exclude_face {
-                continue; // don't fold the destination querier's own queryable
-            }
-            for (k, info) in m.values() {
-                if keyexpr_intersects_target(k, &ke_chunks) && admitted(k) {
-                    fold(*info);
-                }
+        for (_, holders) in hat.qabls.keys_backing(ke, aggregate) {
+            if let Some(info) = client_store::key_value(holders, Some(exclude_face)) {
+                fold(info);
             }
         }
     }
@@ -831,18 +818,9 @@ fn any_sub_matches_in(hats: &RegionMap<Hat>, ke: &str, aggregate: bool) -> bool 
     }) {
         return true;
     }
-    let chunks: Vec<&str> = ke.split('/').collect();
-    hats.values().filter_map(Hat::broker).any(|hat| {
-        hat.subs.values().any(|by_id| {
-            by_id.values().any(|k| {
-                if aggregate {
-                    keyexpr_intersects_target(k, &chunks)
-                } else {
-                    k == ke
-                }
-            })
-        })
-    })
+    hats.values()
+        .filter_map(Hat::broker)
+        .any(|hat| hat.subs.backs(ke, aggregate))
 }
 
 /// The liveliness-token twin of [`any_sub_matches_in`] (see `OnTables::any_token_matches`): the
@@ -857,18 +835,9 @@ fn any_token_matches_in(hats: &RegionMap<Hat>, ke: &str, aggregate: bool) -> boo
     }) {
         return true;
     }
-    let chunks: Vec<&str> = ke.split('/').collect();
-    hats.values().filter_map(Hat::broker).any(|hat| {
-        hat.tokens.values().any(|ids| {
-            ids.values().any(|k| {
-                if aggregate {
-                    keyexpr_intersects_target(k, &chunks)
-                } else {
-                    k == ke
-                }
-            })
-        })
-    })
+    hats.values()
+        .filter_map(Hat::broker)
+        .any(|hat| hat.tokens.backs(ke, aggregate))
 }
 
 /// The queryable twin of [`any_sub_matches_in`]. An EXISTENCE check, NOT
@@ -883,43 +852,23 @@ fn any_qabl_matches_in(hats: &RegionMap<Hat>, ke: &str, aggregate: bool) -> bool
     }) {
         return true;
     }
-    let chunks: Vec<&str> = ke.split('/').collect();
-    hats.values().filter_map(Hat::broker).any(|hat| {
-        hat.qabls.values().any(|by_id| {
-            by_id.values().any(|(k, _)| {
-                if aggregate {
-                    keyexpr_intersects_target(k, &chunks)
-                } else {
-                    k == ke
-                }
-            })
-        })
-    })
+    hats.values()
+        .filter_map(Hat::broker)
+        .any(|hat| hat.qabls.backs(ke, aggregate))
 }
 
-/// R2906 — what a reader of one client face's SUBSCRIBERS sees: each keyexpr
-/// once, however many ids name it. Every reader goes through this rather than
-/// the id map, so a face with two subscribers on one key is never delivered
-/// to, advertised or counted twice.
-fn face_sub_keyexprs(by_id: &PersistentMap<u64, String>) -> HashSet<&str> {
+/// R2906 — what a reader of one client face's declarations on a plane sees:
+/// each keyexpr once, however many ids name it. Every reader goes through this
+/// rather than the id map, so a face with two subscribers on one key is never
+/// delivered to, advertised or counted twice.
+fn face_keyexprs(by_id: &PersistentMap<u64, String>) -> HashSet<&str> {
     by_id.values().map(String::as_str).collect()
 }
 
-/// R2906 — what a reader of one client face's QUERYABLES sees: each keyexpr
-/// once, with the merged info of every id naming it ([`face_qabl_info`]).
-fn face_qabls(by_id: &HashMap<u64, (String, QueryableInfo)>) -> HashMap<&str, QueryableInfo> {
-    let mut out: HashMap<&str, QueryableInfo> = HashMap::new();
-    for (keyexpr, info) in by_id.values() {
-        out.entry(keyexpr.as_str())
-            .and_modify(|merged| *merged = merged.merge(*info))
-            .or_insert(*info);
-    }
-    out
-}
 /// A client face's liveliness tokens, decl id -> keyexpr (an `UndeclareToken`
 /// carries no keyexpr on the wire, so only an id map resolves a retraction).
 #[cfg(feature = "routing-token-tables")]
-type ClientTokens = HashMap<FaceId, HashMap<u64, String>>;
+type ClientTokens = ClientTokenStore;
 
 /// R2873 (open-debt item 751, step 3d) — the state one LEAF region's hat owns:
 /// the declarations of the faces it holds, per face, as the pin's broker hat
@@ -947,14 +896,8 @@ struct BrokerHat {
     /// toward this router. The cross-tier DATA delivery to these clients is C3a
     /// (`deliver_to_client_subscribers`).
     ///
-    /// CARRIED FOLLOW-UP (id-map): still KEYEXPR-keyed, so a client's ID-ONLY
-    /// graceful `UndeclareSubscriber` (no `ext_keyexpr`) no-ops in
-    /// `undeclare_subscriber` -> stale until face-down. The wz-PEER
-    /// client planes were converted to id-keyed at R311y178 (and `tokens` below
-    /// at slice-3); `subs` and `qabls` are the remaining keyexpr-keyed holdouts.
-    ///
-    /// R2909 — [`Versioned`], so the client leg cached in `client_routes` is
-    /// stale once it changes.
+    /// R2909 — versioned and change-logged, so the client leg cached in
+    /// `client_routes` retires the routes a change reaches.
     subs: Arc<ClientSubs>,
     /// R2909 — the client leg of the data route over `subs`, per keyexpr.
     client_routes: Arc<ClientRoutes>,
@@ -969,8 +912,8 @@ struct BrokerHat {
     /// BestMatching at distance 1. A3 advertises them into both meshes
     /// ([`repropagate`](RouterForwarder::repropagate))
     /// and the store contributes to the merged
-    /// `derived_cross_tier_qabl_info`.
-    /// Same keyexpr-keyed follow-up as `subs` (`undeclare_queryable`).
+    /// `derived_cross_tier_qabl_info`. The same store as `subs`, with the info
+    /// held beside each id, so each of those reads asks the index by key.
     qabls: Arc<ClientQabls>,
     /// R2911 — the client leg of the query route over `qabls`, per keyexpr.
     client_query_routes: Arc<ClientQueryRoutes>,
@@ -995,10 +938,10 @@ impl BrokerHat {
         Self {
             subs: Arc::new(ClientSubStore::new()),
             client_routes: Arc::new(ClientRoutes::new()),
-            qabls: Arc::new(Versioned::new(HashMap::new())),
+            qabls: Arc::new(ClientQablStore::new()),
             client_query_routes: Arc::new(ClientQueryRoutes::new()),
             #[cfg(feature = "routing-token-tables")]
-            tokens: Arc::new(HashMap::new()),
+            tokens: Arc::new(ClientTokenStore::new()),
         }
     }
 
@@ -1036,9 +979,7 @@ fn mesh_tokens_name(_hat: &MeshHat, _keyexpr: &str) -> bool {
 /// R2910 — the broker-hat twin of [`mesh_tokens_name`].
 #[cfg(feature = "routing-token-tables")]
 fn client_tokens_name(hat: &BrokerHat, keyexpr: &str) -> bool {
-    hat.tokens
-        .values()
-        .any(|ids| ids.values().any(|k| k == keyexpr))
+    hat.tokens.names_key(keyexpr)
 }
 
 #[cfg(not(feature = "routing-token-tables"))]
@@ -1172,16 +1113,23 @@ enum DeclKind {
 /// it, `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `ext_wire_expr: WireExprType::null(),`) is
 /// resolved by, upstream's hat keeping `remote_subs`, `remote_qabls` and `remote_tokens` for every
 /// face. A linkstate flood names its key and does not read this.
+///
+/// Held in [`PersistentMap`]s for the reason the client stores are: a version of the tables
+/// shares it, and a declaration writes it, so a `HashMap` was copied whole by the first
+/// declaration of each version (`docs/router-table-snapshots.md`, phase 6).
 #[derive(Clone, Default)]
 struct MeshDeclaredIds {
-    subscribers: HashMap<FaceId, HashMap<u64, String>>,
-    queryables: HashMap<FaceId, HashMap<u64, String>>,
+    subscribers: DeclaredIdsOf,
+    queryables: DeclaredIdsOf,
     #[cfg(feature = "routing-token-tables")]
-    tokens: HashMap<FaceId, HashMap<u64, String>>,
+    tokens: DeclaredIdsOf,
 }
 
+/// One plane's declarations of [`MeshDeclaredIds`]: per face, the key of each id.
+type DeclaredIdsOf = PersistentMap<FaceId, PersistentMap<u64, String>>;
+
 impl MeshDeclaredIds {
-    fn of(&self, plane: DeclKind) -> &HashMap<FaceId, HashMap<u64, String>> {
+    fn of(&self, plane: DeclKind) -> &DeclaredIdsOf {
         match plane {
             DeclKind::Subscriber => &self.subscribers,
             DeclKind::Queryable => &self.queryables,
@@ -1190,7 +1138,7 @@ impl MeshDeclaredIds {
         }
     }
 
-    fn of_mut(&mut self, plane: DeclKind) -> &mut HashMap<FaceId, HashMap<u64, String>> {
+    fn of_mut(&mut self, plane: DeclKind) -> &mut DeclaredIdsOf {
         match plane {
             DeclKind::Subscriber => &mut self.subscribers,
             DeclKind::Queryable => &mut self.queryables,
@@ -1201,8 +1149,7 @@ impl MeshDeclaredIds {
 
     fn remember(&mut self, plane: DeclKind, face: FaceId, id: u64, keyexpr: &str) {
         self.of_mut(plane)
-            .entry(face)
-            .or_default()
+            .get_mut_or_default(face)
             .insert(id, keyexpr.to_owned());
     }
 
@@ -1210,7 +1157,16 @@ impl MeshDeclaredIds {
         self.of(plane).get(&face)?.get(&id).cloned()
     }
 
+    /// Forget `id` of `face`. Looked up before it is written, so that an id the face does not
+    /// hold (every client's, whose ids its broker hat keeps) copies nothing.
     fn forget(&mut self, plane: DeclKind, face: FaceId, id: u64) {
+        if !self
+            .of(plane)
+            .get(&face)
+            .is_some_and(|ids| ids.contains_key(&id))
+        {
+            return;
+        }
         let by_face = self.of_mut(plane);
         if let Some(ids) = by_face.get_mut(&face) {
             ids.remove(&id);
@@ -1221,10 +1177,16 @@ impl MeshDeclaredIds {
     }
 
     fn forget_face(&mut self, face: FaceId) {
-        self.subscribers.remove(&face);
-        self.queryables.remove(&face);
-        #[cfg(feature = "routing-token-tables")]
-        self.tokens.remove(&face);
+        for plane in [
+            DeclKind::Subscriber,
+            DeclKind::Queryable,
+            #[cfg(feature = "routing-token-tables")]
+            DeclKind::Token,
+        ] {
+            if self.of(plane).contains_key(&face) {
+                self.of_mut(plane).remove(&face);
+            }
+        }
     }
 }
 
@@ -1472,97 +1434,23 @@ struct Snapshot<P: DeclPlane> {
     before: Vec<(Region, Option<P::Value>)>,
 }
 
-/// Remove one entry from `face`'s store in a broker hat, by `remove`, and
-/// prune the face once its store is empty — so a client that withdraws
-/// everything does not linger in the derive and late-joiner folds, nor defeat
-/// the `is_empty()` delivery fast-path (the discipline
-/// [`LinkstatepeerInterest::withdraw`] applies to an emptied key).
-fn remove_from_face<M: FaceStore, R>(
-    store: &mut HashMap<FaceId, M>,
-    face: FaceId,
-    remove: impl FnOnce(&mut M) -> Option<R>,
-) -> Option<R> {
-    let entries = store.get_mut(&face)?;
-    let removed = remove(entries);
-    if entries.is_empty() {
-        store.remove(&face);
-    }
-    removed
-}
-
-/// R2909 — a broker-hat store read face by face, whether it is kept plain, [`Versioned`] (a
-/// route is cached against it) or persistent (the subscriber store, which a version of the
-/// tables shares, `docs/router-table-snapshots.md` phase 6). The views fold every store through
-/// this one read, so it is gated as they are.
-#[cfg(feature = "adminspace-introspection-handlers")]
-trait FaceMap {
-    type Entry;
-    fn each_face(&self, visit: &mut dyn FnMut(FaceId, &Self::Entry));
-}
-
-#[cfg(feature = "adminspace-introspection-handlers")]
-impl<T> FaceMap for HashMap<FaceId, T> {
-    type Entry = T;
-    fn each_face(&self, visit: &mut dyn FnMut(FaceId, &T)) {
-        for (face, entry) in self {
-            visit(*face, entry);
-        }
-    }
-}
-
-#[cfg(feature = "adminspace-introspection-handlers")]
-impl<T> FaceMap for Versioned<HashMap<FaceId, T>> {
-    type Entry = T;
-    fn each_face(&self, visit: &mut dyn FnMut(FaceId, &T)) {
-        (**self).each_face(visit);
-    }
-}
-
-#[cfg(feature = "adminspace-introspection-handlers")]
-impl FaceMap for ClientSubStore {
-    type Entry = PersistentMap<u64, String>;
-    fn each_face(&self, visit: &mut dyn FnMut(FaceId, &PersistentMap<u64, String>)) {
-        for (face, entry) in self.iter() {
-            visit(*face, entry);
-        }
-    }
-}
-
-/// A client face's entries in one broker-hat store.
-trait FaceStore {
-    fn is_empty(&self) -> bool;
-}
-
-impl<T> FaceStore for HashSet<T> {
-    fn is_empty(&self) -> bool {
-        HashSet::is_empty(self)
-    }
-}
-
-impl<K, V> FaceStore for HashMap<K, V> {
-    fn is_empty(&self) -> bool {
-        HashMap::is_empty(self)
-    }
-}
-
 /// The set of keyexprs one face holds on a plane, per face — the shape the
-/// adminspace view buckets by, whatever the store keys its entries by.
+/// adminspace view buckets by.
 #[cfg(feature = "adminspace-introspection-handlers")]
 type FaceKeyexprs = HashMap<FaceId, HashSet<String>>;
 
-/// The keyexprs every broker hat's per-face store holds, merged into one
-/// face-keyed map. A face is owned by exactly one hat, so no two regions
-/// contribute the same face.
+/// The keyexprs every broker hat's store of one plane holds, merged into one
+/// face-keyed map, each keyexpr once however many ids name it. A face is owned
+/// by exactly one hat, so no two regions contribute the same face.
 #[cfg(feature = "adminspace-introspection-handlers")]
-fn client_keyexprs<'a, S: FaceMap + 'a>(
-    stores: impl Iterator<Item = &'a S>,
-    keys: impl Fn(&S::Entry) -> HashSet<String>,
+fn client_keyexprs<'a, V: client_store::Held + 'a>(
+    stores: impl Iterator<Item = &'a client_store::ClientStore<V>>,
 ) -> FaceKeyexprs {
     let mut out = FaceKeyexprs::new();
     for store in stores {
-        store.each_face(&mut |face, entry| {
-            out.insert(face, keys(entry));
-        });
+        for (face, by_id) in store.iter() {
+            out.insert(*face, by_id.values().cloned().collect());
+        }
     }
     out
 }
@@ -2152,9 +2040,7 @@ impl RouterDeclarationsView {
     /// answers these legs with its own admin queryable and nothing else.
     pub fn subscribers(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         let tables = self.tables.read();
-        let clients = client_keyexprs(tables.broker_hats().map(|hat| &*hat.subs), |by_id| {
-            by_id.values().cloned().collect()
-        });
+        let clients = client_keyexprs(tables.broker_hats().map(|hat| &*hat.subs));
         Self::bucket_by_tier(
             &tables,
             &tables
@@ -2175,9 +2061,7 @@ impl RouterDeclarationsView {
     /// reduced to its keyexpr set here.
     pub fn queryables(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         let tables = self.tables.read();
-        let clients = client_keyexprs(tables.broker_hats().map(|hat| &*hat.qabls), |by_id| {
-            by_id.values().map(|(keyexpr, _)| keyexpr.clone()).collect()
-        });
+        let clients = client_keyexprs(tables.broker_hats().map(|hat| &*hat.qabls));
         Self::bucket_by_tier(
             &tables,
             &tables
@@ -2203,13 +2087,11 @@ impl RouterDeclarationsView {
     /// `fn sourced_tokens` folds `router_tokens`
     /// (`zenoh/src/net/routing/hat/router/token.rs` @ `fn sourced_tokens`).
     ///
-    /// ⚠ The client store is keyed the OTHER WAY ROUND from the queryable one
-    /// and the reduction differs accordingly: `client_qabls` is
-    /// `keyexpr -> QueryableInfo` so its KEYS are the keyexprs, while
-    /// `client_tokens` is `decl id -> keyexpr` so its VALUES are. Taking `keys()`
-    /// here would fold a set of decl ids rendered as keyexprs. The id keying is
-    /// not incidental — the field doc explains that an `UndeclareToken` carries
-    /// no keyexpr on the wire, so only an id map can resolve a retraction.
+    /// The client store is the subscribers' and queryables' shape, decl id ->
+    /// keyexpr per face, so it is reduced to its keyexpr set the same way. The
+    /// id keying is not incidental — the field doc explains that an
+    /// `UndeclareToken` carries no keyexpr on the wire, so only an id map can
+    /// resolve a retraction.
     ///
     /// ⚠ NO self-exclusion predicate, unlike the peer forwarder's token fold.
     /// This host never writes a self row for a client's token: a client-held
@@ -2220,9 +2102,7 @@ impl RouterDeclarationsView {
     #[cfg(feature = "routing-token-tables")]
     pub fn tokens(&self) -> Vec<(String, wz_admin::adminspace::AdminSources)> {
         let tables = self.tables.read();
-        let clients = client_keyexprs(tables.broker_hats().map(|hat| &*hat.tokens), |by_id| {
-            by_id.values().cloned().collect()
-        });
+        let clients = client_keyexprs(tables.broker_hats().map(|hat| &*hat.tokens));
         Self::bucket_by_tier(
             &tables,
             &tables
@@ -5724,10 +5604,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         });
         let in_clients = self.broker_hats().any(|hat| {
             hat.subs.names_key(keyexpr)
-                || hat
-                    .qabls
-                    .values()
-                    .any(|ids| ids.values().any(|(k, _)| k == keyexpr))
+                || hat.qabls.names_key(keyexpr)
                 || client_tokens_name(hat, keyexpr)
         });
         // The node's own declarations are the `Local` hat's, and `in_clients` folds it.
@@ -6769,7 +6646,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Declared::Face(keyexpr) => {
                 let store = self.tables.owner_broker_mut(region).subs_mut();
                 let already = store.face_names(inbound, keyexpr);
-                store.insert(inbound, decl_id, keyexpr.clone());
+                store.insert(inbound, decl_id, keyexpr.clone(), ());
                 !already
             }
         };
@@ -6901,7 +6778,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// `region`, whether it changed anything (a new holder or a changed info).
     /// A broker hat keys it by the client's `decl_id`; what a reader sees for
     /// the face is the merge of every id naming the keyexpr
-    /// ([`face_qabl_info`]), so the change is judged on that merge.
+    /// ([`ClientStore::face_value`](client_store::ClientStore::face_value)), so the
+    /// change is judged on that merge.
     fn register_queryable(
         &mut self,
         inbound: FaceId,
@@ -6928,10 +6806,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             ),
             Declared::Face(keyexpr) => {
                 let store = self.tables.owner_broker_mut(region).qabls_mut();
-                let by_id = store.entry(inbound).or_default();
-                let before = face_qabl_info(by_id, keyexpr);
-                by_id.insert(decl_id, (keyexpr.clone(), info));
-                face_qabl_info(by_id, keyexpr) != before
+                let before = store.face_value(inbound, keyexpr);
+                store.insert(inbound, decl_id, keyexpr.clone(), info);
+                store.face_value(inbound, keyexpr) != before
             }
         };
         span.returned(registered);
@@ -6969,7 +6846,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 hat.qabls
                     .get(&inbound)
                     .and_then(|by_id| by_id.get(&decl_id))
-                    .map(|(keyexpr, _)| keyexpr.clone())
+                    .cloned()
             },
         ) else {
             return;
@@ -7006,16 +6883,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 MeshHat::qabls_mut,
                 build_undeclare_queryable_with_keyexpr,
             ),
-            Declared::Face(keyexpr) => remove_from_face(
-                self.tables.owner_broker_mut(region).qabls_mut(),
-                inbound,
-                |by_id| {
-                    let before = face_qabl_info(by_id, keyexpr);
-                    by_id.remove(&decl_id)?;
-                    (face_qabl_info(by_id, keyexpr) != before).then_some(())
-                },
-            )
-            .is_some(),
+            Declared::Face(keyexpr) => {
+                let store = self.tables.owner_broker_mut(region).qabls_mut();
+                let before = store.face_value(inbound, keyexpr);
+                store.remove_id(inbound, decl_id).is_some()
+                    && store.face_value(inbound, keyexpr) != before
+            }
         }
     }
 
@@ -7111,14 +6984,25 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 |ke| build_declare_token(0, 0, Some(ke)),
             ),
             Declared::Face(keyexpr) => {
-                let previous = self
+                // A same-id/same-ke re-declare changes nothing, so it is answered before the
+                // store is written and moves no version.
+                let held = self
                     .tables
-                    .owner_broker_mut(region)
-                    .tokens_mut()
-                    .entry(inbound)
-                    .or_default()
-                    .insert(decl_id, keyexpr.clone());
-                previous.as_deref() != Some(keyexpr.as_str())
+                    .owner_broker(region)
+                    .tokens
+                    .get(&inbound)
+                    .and_then(|ids| ids.get(&decl_id))
+                    .is_some_and(|held| held == keyexpr);
+                if held {
+                    return false;
+                }
+                self.tables.owner_broker_mut(region).tokens_mut().insert(
+                    inbound,
+                    decl_id,
+                    keyexpr.clone(),
+                    (),
+                );
+                true
             }
         }
     }
@@ -7201,12 +7085,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 MeshHat::tokens_mut,
                 build_undeclare_token_with_keyexpr,
             ),
-            Declared::Face(_) => remove_from_face(
-                self.tables.owner_broker_mut(region).tokens_mut(),
-                inbound,
-                |ids| ids.remove(&decl_id),
-            )
-            .is_some(),
+            Declared::Face(_) => self
+                .tables
+                .owner_broker_mut(region)
+                .tokens_mut()
+                .remove_id(inbound, decl_id)
+                .is_some(),
         }
     }
 
@@ -7682,7 +7566,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // `target: None` is an UNRESTRICTED interest (see `dump_interest_tokens`): upstream's
         // matcher admits every queryable for an absent resource
         // (`zenoh/src/net/routing/hat/peer/queries.rs` @ `res.is_none_or`).
-        let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let mut per_ke: HashMap<String, QueryableInfo> = HashMap::new();
         for table in self.mesh_hats_answering(inbound).map(|hat| &hat.qabls) {
             let hits = match target {
@@ -7696,22 +7579,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .or_insert(*info);
             }
         }
+        // The client queryables are read from the store's index by key, as the subscribers are
+        // (`dump_interest_subs`); a face is never told of its own.
         for hat in self.broker_hats() {
-            for (face, by_id) in hat.qabls.iter() {
-                if *face == inbound {
-                    continue;
-                }
-                for (k, info) in face_qabls(by_id) {
-                    let matched = match target_chunks.as_deref() {
-                        None => true,
-                        Some(chunks) => keyexpr_intersects_target(k, chunks),
-                    };
-                    if matched {
-                        per_ke
-                            .entry(k.to_string())
-                            .and_modify(|e| *e = e.merge(info))
-                            .or_insert(info);
-                    }
+            let keys = match target {
+                Some(target) => hat.qabls.keys_intersecting(target),
+                None => hat.qabls.every_key(),
+            };
+            for (k, holders) in keys {
+                if let Some(info) = client_store::key_value(holders, Some(inbound)) {
+                    per_ke
+                        .entry(k.to_string())
+                        .and_modify(|e| *e = e.merge(info))
+                        .or_insert(info);
                 }
             }
         }
@@ -7830,7 +7710,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         target: Option<&str>,
         self_zid: &Zid,
     ) -> HashMap<String, ()> {
-        let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let inbound_zid = self.tables.faces.get(&inbound).and_then(|s| s.peer_zid);
         let mut per_ke: HashMap<String, ()> = HashMap::new();
         for table in self.mesh_hats_answering(inbound).map(|hat| &hat.tokens) {
@@ -7847,19 +7726,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 per_ke.insert(ke.to_string(), ());
             }
         }
+        // The client tokens are read from the store's index by key, as the subscribers are.
         for hat in self.broker_hats() {
-            for (face, ids) in hat.tokens.iter() {
-                if *face == inbound {
-                    continue; // never replay a face its own token
-                }
-                for k in ids.values() {
-                    let matched = match target_chunks.as_deref() {
-                        None => true,
-                        Some(chunks) => keyexpr_intersects_target(k, chunks),
-                    };
-                    if matched {
-                        per_ke.insert(k.clone(), ());
-                    }
+            let keys = match target {
+                Some(target) => hat.tokens.keys_intersecting(target),
+                None => hat.tokens.every_key(),
+            };
+            for (k, holders) in keys {
+                // Never replay a face its own token.
+                if holders.keys().any(|face| *face != inbound) {
+                    per_ke.insert(k.to_string(), ());
                 }
             }
         }
@@ -9633,8 +9509,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .collect(),
                 Some(Hat::Broker(hat)) => hat
                     .tokens
-                    .values()
-                    .flat_map(|ids| ids.values().cloned())
+                    .every_key()
+                    .into_iter()
+                    .map(|(keyexpr, _)| keyexpr.to_string())
                     .collect(),
                 None => Vec::new(),
             },
@@ -9655,11 +9532,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         match holder {
             Holder::Hat(region) => match self.tables.hats.get(&region) {
                 Some(Hat::Mesh(hat)) => hat.tokens.source_count(keyexpr),
-                Some(Hat::Broker(hat)) => hat
-                    .tokens
-                    .values()
-                    .map(|ids| ids.values().filter(|k| *k == keyexpr).count())
-                    .sum(),
+                Some(Hat::Broker(hat)) => hat.tokens.ids_naming(keyexpr),
                 None => 0,
             },
             Holder::Group => 0,
@@ -9774,11 +9647,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .values_for(keyexpr)
                     .into_iter()
                     .reduce(QueryableInfo::merge),
-                Hat::Broker(hat) => hat
-                    .qabls
-                    .values()
-                    .filter_map(|by_id| face_qabl_info(by_id, keyexpr))
-                    .reduce(QueryableInfo::merge),
+                Hat::Broker(hat) => hat.qabls.key_value(keyexpr),
             },
             Holder::Group => None,
         }
@@ -9797,8 +9666,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .collect(),
                 Some(Hat::Broker(hat)) => hat
                     .qabls
-                    .values()
-                    .flat_map(|by_id| face_qabls(by_id).into_keys().map(str::to_string))
+                    .every_key()
+                    .into_iter()
+                    .map(|(keyexpr, _)| keyexpr.to_string())
                     .collect(),
                 None => Vec::new(),
             },
@@ -9998,9 +9868,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables
             .owner_broker_mut(Region::Local)
             .qabls_mut()
-            .entry(LOCAL_FACE)
-            .or_default()
-            .insert(id, (keyexpr.to_string(), QueryableInfo::local(complete)));
+            .insert(
+                LOCAL_FACE,
+                id,
+                keyexpr.to_string(),
+                QueryableInfo::local(complete),
+            );
         self.tables.local_queryables_mut().push(HostedQueryable {
             id,
             keyexpr: keyexpr.to_string(),
@@ -10167,7 +10040,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables
             .owner_broker_mut(Region::Local)
             .subs_mut()
-            .insert(LOCAL_FACE, id, keyexpr.to_string());
+            .insert(LOCAL_FACE, id, keyexpr.to_string(), ());
         self.tables.local_subscribers_mut().push(HostedSubscriber {
             id,
             keyexpr: keyexpr.to_string(),
@@ -10227,13 +10100,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let keyexpr = self.tables.local_queryables[position].keyexpr.clone();
         let snapshot = self.snapshot::<QablPlane>(&keyexpr);
         self.tables.local_queryables_mut().remove(position);
-        let store = self.tables.owner_broker_mut(Region::Local).qabls_mut();
-        if let Some(by_id) = store.get_mut(&LOCAL_FACE) {
-            by_id.remove(&id);
-            if by_id.is_empty() {
-                store.remove(&LOCAL_FACE);
-            }
-        }
+        self.tables
+            .owner_broker_mut(Region::Local)
+            .qabls_mut()
+            .remove_id(LOCAL_FACE, id);
         self.repropagate(snapshot);
         // And the faces that were told of it are told it is gone, unless another holds the key.
         self.undeclare_push_qabls(&keyexpr);
@@ -10287,13 +10157,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             false
         });
         let store = self.tables.owner_broker_mut(Region::Local).qabls_mut();
-        if let Some(by_id) = store.get_mut(&LOCAL_FACE) {
-            for id in &withdrawn {
-                by_id.remove(id);
-            }
-            if by_id.is_empty() {
-                store.remove(&LOCAL_FACE);
-            }
+        for id in &withdrawn {
+            store.remove_id(LOCAL_FACE, *id);
         }
         self.repropagate(snapshot);
         self.undeclare_push_qabls(keyexpr);
@@ -10375,9 +10240,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables
             .owner_broker_mut(Region::Local)
             .tokens_mut()
-            .entry(LOCAL_FACE)
-            .or_default()
-            .insert(id, keyexpr.to_owned());
+            .insert(LOCAL_FACE, id, keyexpr.to_owned(), ());
         self.repropagate(snapshot);
         self.push_future_token(keyexpr, LOCAL_FACE);
         id
@@ -10400,13 +10263,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return false;
         };
         let snapshot = self.snapshot::<TokenPlane>(&keyexpr);
-        let store = self.tables.owner_broker_mut(Region::Local).tokens_mut();
-        if let Some(ids) = store.get_mut(&LOCAL_FACE) {
-            ids.remove(&id);
-            if ids.is_empty() {
-                store.remove(&LOCAL_FACE);
-            }
-        }
+        self.tables
+            .owner_broker_mut(Region::Local)
+            .tokens_mut()
+            .remove_id(LOCAL_FACE, id);
         self.repropagate(snapshot);
         self.undeclare_push_token(&keyexpr);
         true
@@ -11259,17 +11119,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                             },
                         )
                     }
-                    (Hat::Broker(hat), MatchPlane::Subscribers) => hat.subs.values().any(|by_id| {
-                        by_id
-                            .values()
-                            .any(|declared| keyexpr_intersects_target(declared, &chunks))
-                    }),
+                    (Hat::Broker(hat), MatchPlane::Subscribers) => hat.subs.backs(keyexpr, true),
+                    // A key that includes the querier's intersects it, so the keys the index
+                    // finds intersecting are every key either rule can count.
                     (Hat::Broker(hat), MatchPlane::Queryables { complete_required }) => {
-                        hat.qabls.values().any(|by_id| {
-                            by_id.values().any(|(declared, info)| {
-                                meets(region, declared, info.complete, complete_required)
-                            })
-                        })
+                        hat.qabls.keys_intersecting(keyexpr).into_iter().any(
+                            |(declared, holders)| {
+                                holders.values().flat_map(|ids| ids.values()).any(|info| {
+                                    meets(region, declared, info.complete, complete_required)
+                                })
+                            },
+                        )
                     }
                 }
         })
@@ -12897,8 +12757,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .qabls
                     .get(&id)
                     .map(|by_id| {
-                        face_qabls(by_id)
-                            .into_keys()
+                        face_keyexprs(by_id)
+                            .into_iter()
                             .map(str::to_string)
                             .collect::<Vec<_>>()
                     })
@@ -12908,7 +12768,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .map(|keyexpr| self.snapshot(keyexpr))
             .collect();
         if let Some(region) = owner_region {
-            self.tables.owner_broker_mut(region).qabls_mut().remove(&id);
+            self.tables
+                .owner_broker_mut(region)
+                .qabls_mut()
+                .remove_face(id);
         }
         for snapshot in qabl_snapshots {
             self.repropagate(snapshot);
@@ -12916,7 +12779,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let sub_snapshots: Vec<Snapshot<SubPlane>> = owner_region
             .and_then(|region| {
                 self.tables.owner_broker(region).subs.get(&id).map(|by_id| {
-                    face_sub_keyexprs(by_id)
+                    face_keyexprs(by_id)
                         .into_iter()
                         .map(str::to_string)
                         .collect::<Vec<_>>()
@@ -12964,7 +12827,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 self.tables
                     .owner_broker_mut(region)
                     .tokens_mut()
-                    .remove(&id);
+                    .remove_face(id);
             }
             for snapshot in snapshots {
                 self.repropagate(snapshot);
@@ -25465,11 +25328,12 @@ mod tests {
         );
         let on = fwd.on_tables();
         let store = &on.owner_broker(CLIENTS_REGION).qabls;
-        let hosted = store
-            .get(&FaceId(0))
-            .expect("the client's queryable is stored");
+        assert!(
+            store.contains_key(&FaceId(0)),
+            "the client's queryable is stored"
+        );
         assert_eq!(
-            face_qabl_info(hosted, "demo/q"),
+            store.face_value(FaceId(0), "demo/q"),
             Some(QueryableInfo {
                 complete: true,
                 distance: 0,

@@ -271,6 +271,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> PersistentMap<K, V, S> {
         self.find(key).map(|entry| &entry.value)
     }
 
+    /// The key the map holds equal to `key`, and its value.
+    pub(crate) fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.find(key).map(|entry| (&entry.key, &entry.value))
+    }
+
     /// Whether the map holds `key`.
     pub(crate) fn contains_key<Q>(&self, key: &Q) -> bool
     where
