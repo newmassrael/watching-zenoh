@@ -314028,6 +314028,34 @@
         "A verb querier's whatami defaults to client, which is how a declared node answers its verbs; a target of another role is named by the declaration (whatami), since the generator cannot read the role of a node it does not declare."
       ]
     },
+    "Round 4349": {
+      "decision_summary": "Reds of hosted run 42161910521 (b65f96aff6) that no session had taken, paid under the owner's standing instruction (every red is fixed, whoever made it). Three causes. C1bzr, all six shards: the doc of future_interest named the private PersistentMap as a link. C1ak, C1k, C1y and C1ao (a routing-peer-only library build): PersistentMap::len is read by the tests and by the forwarder and by nothing in the peer mesh, so the dead-code lint refused it; it is now compiled where it is read. C1cs: capic-router-node and capic-default read 86,681 and 86,141 over on that run while capic-default-lean, which has no node, stayed inside, so the growth is the node's: the persistent stores of the router tables and the declaration log. That growth is chosen (the tables' sharing is the owner's decision of 2026-11-05), so the two budgets move to the reading at a7331c59ea on pc3 with the hosted lane's 3,600 and the 3,500 margin. Already paid by other sessions after that run and not touched here: the namespace re-run name (Layer Z, C1cc scouting, c73b871e37), the stale link.rs row of C1bzr (f2bd1cafa2). The merged-executable selection of the legs paid in round 4338 is read: C1cc legs now select and pass.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/future_interest.rs: PersistentMap named as code, not as a link. crates/wz-runtime-tokio/src/persistent_map.rs: len is compiled under test or routing-router-hat. scripts/lib/capability_cost_gate.py: capic-router-node 5,808,100 to 5,968,500 and capic-default 10,896,600 to 11,055,200, with the reading and its attribution written above each case."
+      ],
+      "verification_bullets": [
+        "On a build machine (pc3) through bx: cargo clippy -p wz-runtime-tokio --lib --no-default-features --features routing-peer -- -D warnings exit 0 (it failed on the dead len before the change) and the same with routing-router-hat exit 0; capability_cost_gate.py --measure at a7331c59ea read capic-router-node 5,961,373, capic-default 11,048,057, capic-default-lean 9,543,617 and pico-default 4,404,550, the last two inside their budgets; capability_cost_gate.py --selftest 16/16. Not run: the rustdoc of the C1bzr lane (the change is one link made a code span; the next hosted run reads it), the other three lanes that failed on the dead len (they run the same clippy build)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The hosted reads still due: the next run reads C1bzr, C1ak, C1k, C1y, C1ao and C1cs on these budgets (the hosted lane may read above pc3 by more than the 3,600 allowed), C1cc and C1cd legs past their selection, E5, C1bm unixpipe_listen_multiclient, and the pico C ABI under engine-coop and all features. Own carries of the router node: the resource snapshot answers Z_EUNAVAILABLE on a node and needs a receive counter on the forwarder face."
+      ],
+      "publishable_decision_summary": "Reds of hosted run 42161910521 (b65f96aff6) that no session had taken, paid under the owner's standing instruction (every red is fixed, whoever made it). Three causes. C1bzr, all six shards: the doc of future_interest named the private PersistentMap as a link. C1ak, C1k, C1y and C1ao (a routing-peer-only library build): PersistentMap::len is read by the tests and by the forwarder and by nothing in the peer mesh, so the dead-code lint refused it; it is now compiled where it is read. C1cs: capic-router-node and capic-default read 86,681 and 86,141 over on that run while capic-default-lean, which has no node, stayed inside, so the growth is the node's: the persistent stores of the router tables and the declaration log. That growth is chosen (the tables' sharing is the owner's decision of 2026-11-05), so the two budgets move to the reading at a7331c59ea on pc3 with the hosted lane's 3,600 and the 3,500 margin. Already paid by other sessions after that run and not touched here: the namespace re-run name (Layer Z, C1cc scouting, c73b871e37), the stale link.rs row of C1bzr (f2bd1cafa2). The merged-executable selection of the legs paid in round 4338 is read: C1cc legs now select and pass.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/future_interest.rs: PersistentMap named as code, not as a link. crates/wz-runtime-tokio/src/persistent_map.rs: len is compiled under test or routing-router-hat. scripts/lib/capability_cost_gate.py: capic-router-node 5,808,100 to 5,968,500 and capic-default 10,896,600 to 11,055,200, with the reading and its attribution written above each case."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine (pc3) through bx: cargo clippy -p wz-runtime-tokio --lib --no-default-features --features routing-peer -- -D warnings exit 0 (it failed on the dead len before the change) and the same with routing-router-hat exit 0; capability_cost_gate.py --measure at a7331c59ea read capic-router-node 5,961,373, capic-default 11,048,057, capic-default-lean 9,543,617 and pico-default 4,404,550, the last two inside their budgets; capability_cost_gate.py --selftest 16/16. Not run: the rustdoc of the C1bzr lane (the change is one link made a code span; the next hosted run reads it), the other three lanes that failed on the dead len (they run the same clippy build)."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The hosted reads still due: the next run reads C1bzr, C1ak, C1k, C1y, C1ao and C1cs on these budgets (the hosted lane may read above pc3 by more than the 3,600 allowed), C1cc and C1cd legs past their selection, E5, C1bm unixpipe_listen_multiclient, and the pico C ABI under engine-coop and all features. Own carries of the router node: the resource snapshot answers Z_EUNAVAILABLE on a node and needs a receive counter on the forwarder face."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
