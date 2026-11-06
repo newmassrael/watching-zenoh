@@ -94,6 +94,19 @@ impl ClientSubStore {
         self.by_key.contains_key(keyexpr)
     }
 
+    /// How many faces subscribe to exactly `keyexpr`, however many ids each holds on it: one lookup,
+    /// where counting the faces whose ids name it is a scan of every face.
+    pub(crate) fn faces_naming(&self, keyexpr: &str) -> usize {
+        self.by_key.get(keyexpr).map_or(0, PersistentMap::len)
+    }
+
+    /// Whether `face` subscribes to exactly `keyexpr` under any id.
+    pub(crate) fn face_names(&self, face: FaceId, keyexpr: &str) -> bool {
+        self.by_key
+            .get(keyexpr)
+            .is_some_and(|holders| holders.contains_key(&face))
+    }
+
     /// Subscribe `id` of `face` to `keyexpr`, returning the key `id` named before, if it named one.
     pub(crate) fn insert(&mut self, face: FaceId, id: u64, keyexpr: String) -> Option<String> {
         self.record(&keyexpr);
@@ -134,10 +147,7 @@ impl ClientSubStore {
         let Some(removed) = self.remove_id(face, id) else {
             return false;
         };
-        !self
-            .by_face
-            .get(&face)
-            .is_some_and(|by_id| by_id.values().any(|k| *k == removed))
+        !self.face_names(face, &removed)
     }
 
     /// Withdraw every subscription of `face`, returning what it held by id.
@@ -318,6 +328,28 @@ mod tests {
         keys
     }
 
+    /// The exact-key answers against a scan of every face's ids: how many faces name `keyexpr`, and
+    /// which.
+    fn assert_exact_answers(store: &ClientSubStore, keyexpr: &str) {
+        let naming: Vec<FaceId> = store
+            .iter()
+            .filter(|(_, ids)| ids.values().any(|sub| sub == keyexpr))
+            .map(|(f, _)| *f)
+            .collect();
+        assert_eq!(
+            store.faces_naming(keyexpr),
+            naming.len(),
+            "count, {keyexpr}"
+        );
+        for n in 0..10 {
+            assert_eq!(
+                store.face_names(face(n), keyexpr),
+                naming.contains(&face(n)),
+                "face {n}, {keyexpr}"
+            );
+        }
+    }
+
     const PROBES: &[&str] = &[
         "demo/a",
         "demo/b",
@@ -356,6 +388,7 @@ mod tests {
                 scanned_keys(&store, probe),
                 "keys, probe {probe}"
             );
+            assert_exact_answers(&store, probe);
         }
         // Withdraw some, displace one, drop a face: the index follows each.
         store.remove_id(face(5), 2);
@@ -373,6 +406,7 @@ mod tests {
                 scanned_keys(&store, probe),
                 "after changes, keys, probe {probe}"
             );
+            assert_exact_answers(&store, probe);
         }
     }
 

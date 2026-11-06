@@ -6768,9 +6768,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             ),
             Declared::Face(keyexpr) => {
                 let store = self.tables.owner_broker_mut(region).subs_mut();
-                let already = store
-                    .get(&inbound)
-                    .is_some_and(|by_id| by_id.values().any(|k| k == keyexpr));
+                let already = store.face_names(inbound, keyexpr);
                 store.insert(inbound, decl_id, keyexpr.clone());
                 !already
             }
@@ -9142,11 +9140,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         match holder {
             Holder::Hat(region) => match self.tables.hats.get(&region) {
                 Some(Hat::Mesh(hat)) => hat.subs.source_count(keyexpr),
-                Some(Hat::Broker(hat)) => hat
-                    .subs
-                    .values()
-                    .filter(|by_id| face_sub_keyexprs(by_id).contains(keyexpr))
-                    .count(),
+                Some(Hat::Broker(hat)) => hat.subs.faces_naming(keyexpr),
                 None => 0,
             },
             Holder::Group => usize::from(self.group_subscribes(keyexpr)),
@@ -9517,8 +9511,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .collect(),
                 Some(Hat::Broker(hat)) => hat
                     .subs
-                    .values()
-                    .flat_map(|by_id| face_sub_keyexprs(by_id).into_iter().map(str::to_string))
+                    .every_key()
+                    .into_iter()
+                    .map(|(keyexpr, _)| keyexpr.to_string())
                     .collect(),
                 None => Vec::new(),
             },
