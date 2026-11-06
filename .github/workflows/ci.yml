@@ -1210,18 +1210,32 @@ jobs:
   # asks the legs and predicate thresholds whose position is congruent to it
   # (`verdict_leg_mutation.py`, `WZ_MUTANTS_SHARD`); the population checks run in both.
   #
+  # R4354 -- FOUR SHARDS, and 60 minutes. Two shards were cancelled at 30 minutes in every
+  # run read since (hosted run 42182407682: shard 0 one mutant short of its 42, shard 1 at 17
+  # of about 39). The cost is not spread by the legs: a leg that a `wz-replay` test kills is
+  # a mutant that runs that crate's whole suite, 189 s on one runner and 393 s on a slower
+  # one (PacketsSkipped, SnMissing and GapsForced, three operators each), against 8 to 12 s
+  # for the rest, and a baseline of 3.6 to 7.4 minutes besides. The legs are taken in
+  # sorted order and shard k asks those whose position is congruent to k, so at four the
+  # three heavy ones known (13 GapsForced, 14 PacketsSkipped, 20 SnMissing) fall in shards
+  # 1, 2 and 0, where at two they were 1, 0 and 0. The timeout follows the slow runner: a
+  # shard that holds one heavy leg and a quarter of the rest reads about 7 + 20 + 5
+  # minutes there, and a shard that happens to hold two reads about 50, so 60; a cancel
+  # grades nothing, which is why the number is not tight. The next run that ends reads each
+  # shard's length.
+  #
   # DROP-PROOF INVARIANT: `shard` MUST list exactly [0 .. WZ_MUTANTS_SHARDS-1];
   # `scripts/lib/shard_matrix_binding.py` holds the list to the count.
   verdict-legs:
-    name: verdict-leg mutation gate (Layer C0mut, shard ${{ matrix.shard }}/2)
+    name: verdict-leg mutation gate (Layer C0mut, shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1]
+        shard: [0, 1, 2, 3]
     env:
-      WZ_MUTANTS_SHARDS: "2"
+      WZ_MUTANTS_SHARDS: "4"
       WZ_MUTANTS_SHARD: ${{ matrix.shard }}
     steps:
       - name: Checkout (with submodules)
