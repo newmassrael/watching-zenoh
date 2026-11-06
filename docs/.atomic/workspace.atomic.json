@@ -313950,6 +313950,46 @@
         "The broker hat's queryable and token client stores are still per-face hash maps: their exact-key and intersecting questions (merged_qabl_info_in, any_qabl_matches_in, token_contributions, dump_interest_qabls) try every face, and under snapshot a declaration copies the store; next is ClientSubStore's form with a value beside each id. Under snapshot every write still copies the face map's spine (15 us at 2,048 faces)."
       ]
     },
+    "Round 4347": {
+      "decision_summary": "A declared node says the verdict of each reply its querier keeps when the querier's key is a lifecycle verb's (read by lifecycle_wire::VerbKey, so the key's shape is what selects it and no new entity kind is needed): HOST-WZ-VERDICT <key> verdict=<word>, the members that word carries, and a refusal's sentence last. The reply is read by lifecycle_wire::ReplyRead, beside the writers of the same documents, so a consumer reads the verdict from the node and needs no second decoder of the reply. The vocabulary states the words of each verb, what each means and the closed set of refusal sentences, held to the module by a test that reads wz_node.py.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/lifecycle_wire.rs: VERDICT_WORDS, verdict_words_of, ReplyRead::parse (no allocator; status read up to its intent so a cut machine list still reads); tests read back every writer, refuse what no writer writes, and hold wz_node.py's lists to the sets.",
+        "deploy/host-slot-node/src/bin/declared_node.rs: say_verdict after each HOST-WZ-REPLY of a verb-key querier; unreadable len= kept= for a reply that is no verdict document.",
+        "scripts/lib/wz_node.py: VERDICT_WORDS_OF, VERDICT_MEANS, REFUSAL_REASONS, VERDICT_LINE and the vocabulary's verdicts section (vocabulary_schema stays 3, a section added beside); the reset key is reset/<generation>/<peer> in the VERB_KEY_BYTES comment and expression.",
+        "docs/target-build-contract.md: the verdict line beside HOST-WZ-REPLY; the reset key order.",
+        "crates/wz-integration-tests/tests/it/files/wz_declared_commander_zenohd_interop.rs: the provisioned leg asserts the status and the refusal lines."
+      ],
+      "verification_bullets": [
+        "hkl001: clippy -D warnings wz-session-core all-targets, default and storage-profile: clean; lifecycle_wire tests 11 passed under each.",
+        "Layer Zcmd provisioned leg (two_provisioned_nodes_command_by_a_zid_known_before_either_runs_with_no_zenohd): 1 passed, the subject said verdict=status open=0 closing=0 intent=false and verdict=refused with the close sentence.",
+        "wz_node.py --selftest and --check: OK; reason_review_pin_gate, prose_named_identifier_gate --check, upstream_citation_anchor_gate, barrier_needle_gate --check: OK."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "A querier of a lifecycle verb is still declared by its whole key, with the target's zid and the peer's written in it after both identities exist; a declared form naming the verb, the target endpoint and the peer (self or a zid), with the key made by the generator, is the next step of this claim."
+      ],
+      "publishable_decision_summary": "A declared node says the verdict of each reply its querier keeps when the querier's key is a lifecycle verb's (read by lifecycle_wire::VerbKey, so the key's shape is what selects it and no new entity kind is needed): HOST-WZ-VERDICT <key> verdict=<word>, the members that word carries, and a refusal's sentence last. The reply is read by lifecycle_wire::ReplyRead, beside the writers of the same documents, so a consumer reads the verdict from the node and needs no second decoder of the reply. The vocabulary states the words of each verb, what each means and the closed set of refusal sentences, held to the module by a test that reads wz_node.py.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/lifecycle_wire.rs: VERDICT_WORDS, verdict_words_of, ReplyRead::parse (no allocator; status read up to its intent so a cut machine list still reads); tests read back every writer, refuse what no writer writes, and hold wz_node.py's lists to the sets.",
+        "deploy/host-slot-node/src/bin/declared_node.rs: say_verdict after each HOST-WZ-REPLY of a verb-key querier; unreadable len= kept= for a reply that is no verdict document.",
+        "scripts/lib/wz_node.py: VERDICT_WORDS_OF, VERDICT_MEANS, REFUSAL_REASONS, VERDICT_LINE and the vocabulary's verdicts section (vocabulary_schema stays 3, a section added beside); the reset key is reset/<generation>/<peer> in the VERB_KEY_BYTES comment and expression.",
+        "docs/target-build-contract.md: the verdict line beside HOST-WZ-REPLY; the reset key order.",
+        "crates/wz-integration-tests/tests/it/files/wz_declared_commander_zenohd_interop.rs: the provisioned leg asserts the status and the refusal lines."
+      ],
+      "publishable_verification_bullets": [
+        "hkl001: clippy -D warnings wz-session-core all-targets, default and storage-profile: clean; lifecycle_wire tests 11 passed under each.",
+        "Layer Zcmd provisioned leg (two_provisioned_nodes_command_by_a_zid_known_before_either_runs_with_no_zenohd): 1 passed, the subject said verdict=status open=0 closing=0 intent=false and verdict=refused with the close sentence.",
+        "wz_node.py --selftest and --check: OK; reason_review_pin_gate, prose_named_identifier_gate --check, upstream_citation_anchor_gate, barrier_needle_gate --check: OK."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A querier of a lifecycle verb is still declared by its whole key, with the target's zid and the peer's written in it after both identities exist; a declared form naming the verb, the target endpoint and the peer (self or a zid), with the key made by the generator, is the next step of this claim."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
