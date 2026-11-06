@@ -86,6 +86,8 @@ mod advanced_forms;
 #[cfg(feature = "advanced")]
 mod advanced_plane;
 pub mod bytes;
+// The conformance digest of this build (decision C15), handed out by `wz_ext_conformance_digest`.
+pub mod conformance;
 pub mod revision;
 // pico implements the token only with both the unstable API and the query plane: its
 // `vendor/zenoh-pico/src/api/api.c` @ `_Z_OWNED_FUNCTIONS_RC_IMPL(cancellation_token)` sits

@@ -1129,6 +1129,7 @@ dependencies = [
  "wz-capi-core",
  "wz-capture",
  "wz-cdylib-build",
+ "wz-conformance-build",
  "wz-runtime-tokio",
 ]
 
@@ -1189,6 +1190,13 @@ version = "0.1.0"
 dependencies = [
  "sce-forge-runtime",
  "sce-portable-bytes",
+]
+
+[[package]]
+name = "wz-conformance-build"
+version = "0.1.0"
+dependencies = [
+ "sha2",
 ]
 
 [[package]]

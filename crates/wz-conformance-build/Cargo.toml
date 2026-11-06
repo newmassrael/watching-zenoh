@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-conformance-build — the conformance digest a C ABI library is built with.
+#
+# docs/build-configuration.md, decision C15: a build states what it is from the configuration
+# it was built with. `wz_config.py` prints that statement; this crate puts the same statement's
+# digest into the library, read by the library's own build script from the same three sources
+# the code is compiled from (its cargo features, `WZ_LIMIT_*`, `WZ_POLICY_*`), so a tester can
+# ask a running library which build it is and compare it with the statement it was handed. One
+# crate for the two ABI crates, on the `wz-cdylib-build` precedent: two copies of a digest
+# would be two places for it to disagree with the statement.
+
+[package]
+name = "wz-conformance-build"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Shared build-script helper: the conformance digest of the build, from the configuration it is compiled with."
+
+[lib]
+name = "wz_conformance_build"
+path = "src/lib.rs"
+
+[dependencies]
+sha2 = "0.10"
+
+[lints]
+workspace = true

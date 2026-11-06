@@ -23,6 +23,8 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   has a policy)
     --emit rust-policies          print crates/wz-session-core/src/policy_generated.rs
     --emit rust-feature-bits      print crates/wz-session-core/src/feature_bits_generated.rs
+    --emit rust-conformance-items print crates/wz-conformance-build/src/items_generated.rs, the
+                                  questions a build script answers for its conformance digest
     --emit defconfig:ORIGINAL     print configs/<ORIGINAL>_defconfig, an upstream original's own
                                   default build in wz's switches (zenoh, zenoh-c, zenoh-pico)
     --emit image-kconfig:IMAGE    print the axes of a declared image as Kconfig choices
@@ -163,6 +165,9 @@ RUST_LIMITS = ROOT / "crates" / "wz-session-core" / "src" / "caps_generated.rs"
 KCONFIG_POLICIES = ROOT / "deploy" / "Kconfig.policies"
 RUST_POLICIES = ROOT / "crates" / "wz-session-core" / "src" / "policy_generated.rs"
 RUST_FEATURE_BITS = ROOT / "crates" / "wz-session-core" / "src" / "feature_bits_generated.rs"
+# What a build script reads to state its build (decision C15): the questions of a conformance
+# statement and where each answer is found, for `wz-conformance-build`.
+RUST_CONFORMANCE_ITEMS = ROOT / "crates" / "wz-conformance-build" / "src" / "items_generated.rs"
 CAPS_RS =ROOT / "crates" / "wz-session-core" / "src" / "caps.rs"
 # The configuration-aware derivation's own spelling of the vocabulary and of `[os] always`
 # (docs/target-build-contract.md T9), held to this declaration by `--check`.
@@ -1621,6 +1626,88 @@ def emit_rust_limits(decl: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def rust_word(text: str) -> str:
+    """A string literal of a word the declaration names: an id, an ABI, an environment name or a
+    policy value. Such a word needs no escaping, and one that would is refused here rather than
+    escaped differently from the JSON the statement digests."""
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", text):
+        raise ValueError(f"{text!r} is not a declaration word")
+    return f'"{text}"'
+
+
+def _refuses_word(text: str) -> bool:
+    """Whether `rust_word` refuses `text` (the selftest's probe of the refusal)."""
+    try:
+        rust_word(text)
+    except ValueError:
+        return True
+    return False
+
+
+def rust_tuple_rows(rows: list[list[str]]) -> list[str]:
+    """Array rows of tuples, each laid out as rustfmt lays it out: on one line when its elements
+    fit the call width, else one element a line."""
+    out: list[str] = []
+    for parts in rows:
+        inner = ", ".join(parts)
+        if len(inner) <= RUST_FN_CALL_WIDTH and len(f"    ({inner}),") <= RUST_MAX_WIDTH:
+            out.append(f"    ({inner}),")
+        else:
+            out += ["    ("] + [f"        {p}," for p in parts] + ["    ),"]
+    return out
+
+
+def rust_word_list(words: list[str]) -> str:
+    return "&[" + ", ".join(rust_word(w) for w in words) + "]"
+
+
+def emit_rust_conformance_items(decl: dict) -> str:
+    """The questions a conformance statement answers (decision C15), for a build script: each
+    capability with the ABIs that export it, each limit with the environment name its value is
+    stated by and its default, and each policy with its environment name, the values it may take
+    and upstream's. `wz-conformance-build` reads the answers of the build it runs in and digests
+    them as `statement_digest` does."""
+    out = generated_header("//", "rust-conformance-items") + [
+        "",
+        "//! The questions a conformance statement answers (docs/build-configuration.md, decision C15),",
+        "//! in the declaration's order, and where a build script finds each answer.",
+        "",
+        "/// `format` of the statement.",
+        f"pub const FORMAT: &str = {rust_word(STATEMENT_FORMAT)};",
+        "/// `format_version` of the statement.",
+        f"pub const FORMAT_VERSION: u32 = {STATEMENT_FORMAT_VERSION};",
+        "/// The declaration's `catalog_version`.",
+        f"pub const CATALOG_VERSION: u32 = {decl['catalog_version']};",
+        "",
+        "/// Each capability and the ABIs that export it: its cargo feature in those crates has its id.",
+        "pub const CAPABILITIES: &[(&str, &[&str])] = &[",
+    ]
+    out += rust_tuple_rows([[rust_word(cid), rust_word_list(list(decl["caps"][cid]["abis"]))]
+                            for cid in decl["order"]])
+    out += [
+        "];",
+        "",
+        "/// Each limit, the environment name a build states it by, and its default.",
+        "pub const LIMITS: &[(&str, &str, u64)] = &[",
+    ]
+    out += rust_tuple_rows([[rust_word(lim["id"]), rust_word(lim["kconfig"]), str(lim["default"])]
+                            for lim in decl["limits"]])
+    out += [
+        "];",
+        "",
+        "/// Each policy, the environment name a build states it by, the values it may take (`off`",
+        "/// and `on` for a bool), and upstream's value, which a build that states none runs.",
+        "pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[",
+    ]
+    out += rust_tuple_rows([
+        [rust_word(pol["id"]), rust_word(pol["kconfig"]),
+         rust_word_list(list(pol["choices"]) if pol["kind"] == "choice" else ["off", "on"]),
+         rust_word(pol["default"])]
+        for pol in decl["policies"]])
+    out += ["];"]
+    return "\n".join(out) + "\n"
+
+
 def emit_rust_feature_bits(decl: dict) -> str:
     """The `features` word of a resource snapshot: one bit for each capability that declares an
     `observation_bit`, in bit order. The names the code uses are bound to these in
@@ -1904,6 +1991,7 @@ GENERATED = {
     "rust-limits": (RUST_LIMITS, emit_rust_limits),
     "rust-policies": (RUST_POLICIES, emit_rust_policies),
     "rust-feature-bits": (RUST_FEATURE_BITS, emit_rust_feature_bits),
+    "rust-conformance-items": (RUST_CONFORMANCE_ITEMS, emit_rust_conformance_items),
 }
 
 
@@ -2932,6 +3020,23 @@ def cmd_selftest() -> int:
                decl, "pico", arm, defaults, flipped, {})["digest"] != stated["digest"])
            and conformance_statement(decl, "pico", arm[:-1], defaults, upstream, {})["digest"]
            != stated["digest"])
+    # The build script's digest form (wz-conformance-build, `the_fixture_has_the_canonical_form_
+    # and_digest_wz_config_gives_it`) asserts this same value of this same fixture: the two
+    # writers of the canonical form cannot drift apart unseen.
+    fixture = {"format": STATEMENT_FORMAT, "format_version": 1, "catalog_version": 7, "abi": "pico",
+               "capabilities": [{"id": "a-cap", "supported": True}, {"id": "b-cap", "supported": False}],
+               "limits": [{"id": "L_ONE", "value": 256}, {"id": "L_TWO", "value": 0}],
+               "policies": [{"id": "p-one", "value": "on"}, {"id": "p-two", "value": "os-default"}]}
+    expect("the build script's digest form gives the fixture the digest this one does",
+           statement_digest(fixture)
+           == "sha256:81393c276e5371c04b9ca2d2c27d4008355c700c7a0f557f9b22e4d94ae0f2e0")
+    items = emit_rust_conformance_items(decl)
+    expect("the build script's questions are every capability, limit and policy of the declaration",
+           all(f'("{cid}", ' in items or f'        "{cid}",' in items for cid in decl["order"])
+           and all(f'"{lim["kconfig"]}"' in items for lim in decl["limits"])
+           and all(f'"{pol["kconfig"]}"' in items for pol in decl["policies"]))
+    expect("a word that would need escaping is refused, never escaped",
+           not _refuses_word("a-cap") and _refuses_word('a"cap') and _refuses_word("a cap"))
     expect("a statement's digest does not count the catalogue's defaults beside the values",
            statement_digest({**stated, "limits": [{**x, "default": 0} for x in stated["limits"]]})
            == stated["digest"])

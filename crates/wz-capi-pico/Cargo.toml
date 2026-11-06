@@ -48,6 +48,7 @@ crate-type = ["cdylib", "rlib"]
 # build-time path in DT_NEEDED and cannot redistribute what it built.
 [build-dependencies]
 wz-cdylib-build = { path = "../wz-cdylib-build" }
+wz-conformance-build = { path = "../wz-conformance-build" }
 
 [features]
 # The serial drive runs the session runtime on its own thread alone (round trip

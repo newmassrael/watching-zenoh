@@ -367,7 +367,21 @@ drop-in a zenoh-pico `config.h` gives.
   machine that made it).
 
 It is JSON, format `wz-conformance-statement` version 1; a field's meaning changes
-only with the version. Rejected: a statement written by hand per image (it drifts
+only with the version.
+
+The C ABI libraries carry the same digest and hand it out:
+`wz_ext_conformance_digest()` (`wz_ext.h`, the pico ABI) and
+`wz_capi_c_conformance_digest()` (`wz_capi_c.h`). Each library's build script computes
+it with `wz-conformance-build` from the three sources the code is compiled from: the
+package's cargo features (`CARGO_FEATURE_*`), `WZ_LIMIT_*` and `WZ_POLICY_*`. It reads
+them by the rules `wz-session-core` reads them with, and refuses what they refuse.
+The questions, their order and their defaults are generated into the helper by
+`--emit rust-conformance-items`, held by `--check`. A tester holding a statement asks
+the library it talks to for its digest: equal digests are the same build. The two
+writers of the canonical JSON, Python and the build script, assert the same digest of
+one fixture, each in its own test, so neither can change the form alone. The crate's
+own tests compare the capabilities its build script read with `cfg!(feature)` as
+compiled. Rejected: a statement written by hand per image (it drifts
 from the build the first time a preset moves); one per Cargo feature set (a feature
 list says nothing of the limits and policies, which change what is on the wire); and
 a digest over the statement's whole text (it would differ for one build read two
@@ -498,9 +512,11 @@ Each step lands with its own done-when; sizes are not estimated here.
     (`feature_inventory.md` §8) driven by the same declaration, checked by `--check`.
 15. **The conformance statement** (C15). (a) The statement from presets, from an
     original, and from a pico header (done). (b) The same digest built into each
-    image and readable through the C ABI, so a tester can check that the build it
-    talks to is the one the statement describes. (c) The zenoh-c drop-in's statement
-    from an installed `zenoh_configure.h`.
+    C ABI library and readable through the C ABI, so a tester can check that the
+    build it talks to is the one the statement describes (done for `wz-capi-pico`
+    and `wz-capi-c`). (c) The zenoh-c drop-in's statement from an installed
+    `zenoh_configure.h`. (d) A lane that builds a library from a statement's
+    configuration and requires its digest to equal the statement's, end to end.
 
 Order: 1 first. 2, 3, 4, 6, 7, 8, 11, 12, 13, 14 and 15 depend on 1; 5 on 1 and 2; 9 on 4
 and 7; 10 on 5.

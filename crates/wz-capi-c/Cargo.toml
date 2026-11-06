@@ -71,6 +71,7 @@ required-features = ["peer"]
 # a crate whose whole claim is "binary drop-in for zenoh-c" is the claim itself.
 [build-dependencies]
 wz-cdylib-build = { path = "../wz-cdylib-build" }
+wz-conformance-build = { path = "../wz-conformance-build" }
 
 [features]
 # The capabilities, each one feature of this crate and of the model under it: on in a default

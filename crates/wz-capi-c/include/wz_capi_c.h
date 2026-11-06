@@ -1007,6 +1007,15 @@ size_t wz_capi_c_snapshot_size(void);
  * NULL `out` or `length`. */
 z_result_t wz_capi_c_snapshot_read(uint8_t *out, size_t capacity, size_t *length);
 
+/* The conformance digest of this build (docs/build-configuration.md,
+ * decision C15): "sha256:" and 64 lowercase hex digits, NUL-terminated and
+ * static. It is the digest wz_config.py prints in the conformance statement
+ * of the configuration the library was built with (every capability of the
+ * ABI and whether the build has it, every limit and policy value), so a
+ * tester holding a statement can tell whether this library is that build.
+ * Present in every build. */
+const char *wz_capi_c_conformance_digest(void);
+
 #ifdef __cplusplus
 }
 #endif

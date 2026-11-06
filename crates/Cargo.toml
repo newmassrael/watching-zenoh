@@ -165,6 +165,10 @@ members = [
     # so a tool describing an artifact for a device it cannot run on reads the number from the
     # bytes. One macro for the three families, on the `wz-cdylib-build` precedent above.
     "wz-abi-stamp",
+    # The conformance digest a C ABI library is built with (docs/build-configuration.md, decision
+    # C15): its build script reads the build's features, limits and policies and the library hands
+    # the digest out, so a tester checks the build it talks to against the statement it was given.
+    "wz-conformance-build",
     "wz-runtime-core",
     "wz-session-core",
     # The server layer above the core, one crate per concern, each built on the core and never

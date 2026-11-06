@@ -64,6 +64,9 @@ pub mod abi;
 // different rates: `abi` is the layout, this is its provenance, and only the
 // latter is checked against upstream's own declaration of the correspondence.
 pub mod abi_origin;
+// The conformance digest of this build (decision C15), handed out by
+// `wz_capi_c_conformance_digest`.
+pub mod conformance;
 // The `ze_advanced_*` plane is `#if defined(Z_FEATURE_UNSTABLE_API)` in
 // upstream's header, so it exists on the unstable arms and nowhere else. The
 // `cfg` mirrors upstream's `#if` rather than exporting symbols a program
