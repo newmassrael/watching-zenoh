@@ -20222,6 +20222,12 @@ layer_z_zenohd_interop() {
     fi
     rustup toolchain install "$rdj_toolchain" --profile minimal --no-self-update || return 1
     python3 scripts/lib/rust_api_surface.py --upstream || return 1
+    # The legs from the close scope witness down to the feature build of the demo below read
+    # `target/debug/wz-ap-demo` at its default features, and nothing in this lane built it: in
+    # the hosted job the E lanes before this step left one there, so the lane run alone (a
+    # fleet unit, a developer's `--layer Z`) failed at that witness with "binary not found".
+    # Built here, per this file's standing rule that a lane builds the wz artifacts it reads.
+    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
     # R311y839 — the CLOSE SCOPE witness, run HERE: above every pico-CLI check
     # below, because it needs zenohd and nothing else, and a SKIP on an absent
     # z_sub would take a zenohd-only measurement down with it.
