@@ -80,6 +80,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field, replace
 from typing import Callable
 
@@ -221,11 +222,23 @@ class _Pair:
         same step, under the direction's lock, so nothing read afterwards can be sent before it. Returns
         the writes it made, (direction, size): the proxy's own account of what this call sent, which no
         write made by a later read can be mistaken for."""
-        made = [
-            ("up", self._flush_direction(True, self.upstream, end_hold)),
-            ("down", self._flush_direction(False, self.client, end_hold)),
-        ]
-        return [(d, n) for d, n in made if n]
+        # Both directions in ONE step, under both locks (always taken up first; a pump takes one only). One
+        # direction at a time let the reply to what the first sent land in the second while it was still
+        # held, and be sent by this call as if it were the buffer's (measured: 2 of 400 runs under load).
+        # The locks are held across the writes so a read after the step goes after the buffer; the buffer is
+        # what a step chose to hold, which is far below a socket's buffer, so the writes do not wait on the
+        # pumps the locks hold back.
+        made: list[tuple[str, int]] = []
+        with self._dlock[True], self._dlock[False]:
+            for up, dst in ((True, self.upstream), (False, self.client)):
+                if end_hold:
+                    self.holding[up] = False
+                data, self._held[up] = self._held[up], b""
+                if data:
+                    self.proxy._count(held=-len(data))
+                    self._write(dst, data, up)
+                    made.append(("up" if up else "down", len(data)))
+        return made
 
     def _finish(self, reset: bool = False) -> None:
         """The one place the sockets are closed, once: a zero linger first when the end is a RST."""
@@ -732,7 +745,14 @@ def _cases(proxy: StreamProxy, reads: list, failures: list) -> None:
     up_reads = len(reads)
     proxy.reject(True)
     for _ in range(3):
-        c = _client(port)  # the connect itself succeeds: the kernel completed the handshake
+        # The kernel completes the handshake before the proxy takes the connection, so the reset follows the
+        # connect. A client that is not scheduled again until the reset has arrived hears it from its own
+        # connect instead of its first read (measured: 20 of the first 140 runs on a loaded 8-core machine). Both are
+        # the reset this control makes, and the proxy stamps and counts the attempt either way.
+        try:
+            c = _client(port)
+        except ConnectionResetError:
+            continue
         try:
             got = c.recv(16)
             check("reject: the dialled connection is reset", False, f"read {got!r}")
@@ -816,7 +836,10 @@ def _run_once() -> list[str]:
     try:
         _cases(proxy, reads, failures)
     except (OSError, TimeoutError) as e:
-        failures.append(f"an unexpected error ended the cases early: {e!r}")
+        # Where in the cases it was raised: the error alone does not say which control's effect broke.
+        frames = [f for f in traceback.extract_tb(e.__traceback__) if f.name == "_cases"]
+        at = f" at line {frames[-1].lineno}: {frames[-1].line}" if frames else ""
+        failures.append(f"an unexpected error ended the cases early: {e!r}{at}")
     finally:
         proxy.stop()
         try:
