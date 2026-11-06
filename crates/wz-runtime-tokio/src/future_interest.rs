@@ -86,7 +86,7 @@
 //! ## Indexed by keyexpr
 //!
 //! A walker does not try every face. Every interest is indexed under its target and every
-//! pushed reply under its keyexpr ([`KeyexprIndex`], a persistent trie of chunks), and a
+//! pushed reply under its keyexpr (`KeyexprIndex`, a persistent trie of chunks), and a
 //! declaration or a withdrawal reads from the index the faces whose interests or replies may
 //! meet its keyexpr, then refines each with the exact matcher the full scan used. Trying every
 //! face made each declaration cost as many tries as faces were up: an interest took 152 us at

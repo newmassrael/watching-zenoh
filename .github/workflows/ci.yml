@@ -6709,10 +6709,20 @@ jobs:
   # 60% of the slow run is not reachable here without putting the warm runs
   # under the floor, and the floor is the y794 rule: a budget this job cannot
   # approach is a gate that cannot fire.
+  #
+  # BUDGET, again (2026-11-06, run 42182407682 and the run before it). The legs of E3
+  # and E5 name their test with `--exact`, which selected no test of a merged
+  # executable (`running 0 tests`) until `WZ_TEST_PREFIX` named it by its path, so the
+  # lanes were fast for the wrong reason. With the tests running the job read 626s of
+  # 660s (94%, the alarm) and the run before it was cancelled at the 660s ceiling:
+  # setup 121s, E3 168s, E4 55s, E4i 22s, E5 128s, E5u 40s, E7u 54s, E6u 33s. The
+  # alarm at 90% needs a budget no smaller than 696s (626 / 0.90) and the cancelled
+  # run's 666s needs 740s to stay silent; 15 minutes (900s) puts the slow run at 74%
+  # and the 626s one at 70%, well over the 30% floor.
   e2e-demo:
     name: demo-spawning router e2e lanes (Layers E3..E6u)
     runs-on: ubuntu-22.04
-    timeout-minutes: 11
+    timeout-minutes: 15
     steps:
       - name: Budget stamp — start this job's own clock
         # Same reason the `ci` job stamps: `timeout-minutes` measures from when
@@ -6849,14 +6859,14 @@ jobs:
 
       - name: Budget margin — this job may not approach its timeout in silence
         # Instrumented from birth rather than after its first cancel, which is
-        # the whole lesson of the two rounds that produced this job. 660s to
-        # match `timeout-minutes: 11`; the two numbers are one fact, so move that
+        # the whole lesson of the two rounds that produced this job. 900s to
+        # match `timeout-minutes: 15`; the two numbers are one fact, so move that
         # and move this. The floor is 30%: a job that peels down below its own
         # budget should be told to give the budget back (R311y794) — which is
         # exactly what it did at R311y892, and the numbers above record what it
         # was measured to cost after item 898 took Layer E out.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 660 90 30 '${{ job.status }}'
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 900 90 30 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
   # OPEN-DEBT ITEM 898 — Layer E, taken out of `e2e-demo` so that job's budget
