@@ -314596,6 +314596,54 @@
         "bx main has the capability `userns-netns` (a namespace with NET_ADMIN, SYS_ADMIN and NET_RAW, plus a veth pair, tested as netns-topology.sh uses it) and unit `authorities`. Both are merged and not installed. When the fleet's owner installs them, the lanes that build a namespace topology (C1bs, C1cc, M, Z) ask `userns-netns` instead of `userns-net-raw`; until then the installed bx refuses the name. Stage 3 still waits on valgrind beyond one machine for C1cc. The first scheduled upstream-watch run is to be read like any hosted run; its red is the snapshot's, repaid by `--fetch` and the rows Layer U then names. C1's get-timeout stays unattributed. Read the next hosted run per job."
       ]
     },
+    "Round 4365": {
+      "decision_summary": "Two fleet faults closed. The sandbox lanes C1bs, C1cc, M and Z ask bx for `userns-netns`, tested as the sandbox is used (three capabilities, a named namespace, a veth pair), not `userns-net-raw`, which tests CAP_NET_RAW alone. Layer M's pico multicast legs pinned pico to the default route's device, claiming wz's INADDR_ANY egress uses it; that holds only when no route covers the group. A build machine routing 224.0.0.0/4 to its wired device, with a wireless default route, sent wz's JOIN out of the wired one while pico listened on the wireless one, and M failed there twice; the fleet's retry elsewhere had shown it as memory pressure. `group_route_iface(group)` reads `ip route get <group>`, the same device wherever no route covers the group, so hosted runners see no change.",
+      "changes_bullets": [
+        "`scripts/lib/runci_plan.py`: `SANDBOX_CAPABILITY` is `userns-netns` (was `userns-net-raw`); the docstring bullet and the constant's comment state the three capabilities, the namespace and the veth pair, and why the old name placed units that failed.",
+        "`scripts/run-ci.sh`: the C1bs comment names the bx facility `userns-netns`.",
+        "`crates/wz-integration-tests/src/lib.rs`: `default_route_iface()` is replaced by `group_route_iface(group)`, which reads `ip route get <group>`; its doc states the machine where the old reading failed.",
+        "Ten Layer M interop test files under `crates/wz-integration-tests/tests/it/files/` call it with their own group (224.0.0.224, .225 or .231); `wz_router_lists_a_pico_multicast_member_in_its_sessions.rs` declares its group as an `Ipv4Addr`; four doc comments that repeated the default-route claim now state the routed interface."
+      ],
+      "verification_bullets": [
+        "`runci_plan.py --selftest`: 10 cases pass; the plan emits `capabilities: [\"userns-netns\"]` on exactly C1bs, C1cc, M and Z. The installed `bx-fleet decl capabilities userns-netns` answers with the bwrap, `ip netns add` and veth probe.",
+        "Fleet, `bx --checks ci -- python3 scripts/lib/runci_plan.py --only C1bs,C1cc,M,Z`: 4 pass, 0 fail, exit 0, 6860 s (C1bs and M on hkl002, C1cc on pc2 with valgrind, Z on pc3). M had first exited 1 on hkl001 and been retried.",
+        "C1bs again on hkl002 with its log: `Layer C1bs pass`, the live tap read 800 packets on lo inside the sandbox under WZ_LIVECAP_REQUIRE.",
+        "M on hkl001 before the fix: FAIL, `wz_publisher_reaches_pico_multicast_zsub` \"z_sub did not receive wz's multicast Push ... #iface=wlp0s20f3\", reached 26 of 62 guarded legs; the host routes 224.0.0.0/4 via eno1 and its default via wlp0s20f3. After the fix: `Layer M pass` on hkl001 (1003 s) and on hkl002 (921 s), no unreached line.",
+        "`cargo fmt -p wz-integration-tests` clean; 138 pre-push static gates including the upstream citation gate pass."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "A fleet unit's output is not kept, so a failure bx retries elsewhere shows only as \"exit 1 while memory was short\"; asked bx-63 whether a retried unit can keep its tail. Until then rerun such a unit with `bx --host` and read its own log.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: all four requirement-bearing lanes now pass in the fleet; rerun the full `bx --checks ci` set to read the 180.",
+        "Read hosted run 42281344423 (still pending with no job at this round's start) and the first scheduled upstream-watch run.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ],
+      "publishable_decision_summary": "Two fleet faults closed. The sandbox lanes C1bs, C1cc, M and Z ask bx for `userns-netns`, tested as the sandbox is used (three capabilities, a named namespace, a veth pair), not `userns-net-raw`, which tests CAP_NET_RAW alone. Layer M's pico multicast legs pinned pico to the default route's device, claiming wz's INADDR_ANY egress uses it; that holds only when no route covers the group. A build machine routing 224.0.0.0/4 to its wired device, with a wireless default route, sent wz's JOIN out of the wired one while pico listened on the wireless one, and M failed there twice; the fleet's retry elsewhere had shown it as memory pressure. `group_route_iface(group)` reads `ip route get <group>`, the same device wherever no route covers the group, so hosted runners see no change.",
+      "publishable_changes_bullets": [
+        "`scripts/lib/runci_plan.py`: `SANDBOX_CAPABILITY` is `userns-netns` (was `userns-net-raw`); the docstring bullet and the constant's comment state the three capabilities, the namespace and the veth pair, and why the old name placed units that failed.",
+        "`scripts/run-ci.sh`: the C1bs comment names the bx facility `userns-netns`.",
+        "`crates/wz-integration-tests/src/lib.rs`: `default_route_iface()` is replaced by `group_route_iface(group)`, which reads `ip route get <group>`; its doc states the machine where the old reading failed.",
+        "Ten Layer M interop test files under `crates/wz-integration-tests/tests/it/files/` call it with their own group (224.0.0.224, .225 or .231); `wz_router_lists_a_pico_multicast_member_in_its_sessions.rs` declares its group as an `Ipv4Addr`; four doc comments that repeated the default-route claim now state the routed interface."
+      ],
+      "publishable_verification_bullets": [
+        "`runci_plan.py --selftest`: 10 cases pass; the plan emits `capabilities: [\"userns-netns\"]` on exactly C1bs, C1cc, M and Z. The installed `bx-fleet decl capabilities userns-netns` answers with the bwrap, `ip netns add` and veth probe.",
+        "Fleet, `bx --checks ci -- python3 scripts/lib/runci_plan.py --only C1bs,C1cc,M,Z`: 4 pass, 0 fail, exit 0, 6860 s (C1bs and M on hkl002, C1cc on pc2 with valgrind, Z on pc3). M had first exited 1 on hkl001 and been retried.",
+        "C1bs again on hkl002 with its log: `Layer C1bs pass`, the live tap read 800 packets on lo inside the sandbox under WZ_LIVECAP_REQUIRE.",
+        "M on hkl001 before the fix: FAIL, `wz_publisher_reaches_pico_multicast_zsub` \"z_sub did not receive wz's multicast Push ... #iface=wlp0s20f3\", reached 26 of 62 guarded legs; the host routes 224.0.0.0/4 via eno1 and its default via wlp0s20f3. After the fix: `Layer M pass` on hkl001 (1003 s) and on hkl002 (921 s), no unreached line.",
+        "`cargo fmt -p wz-integration-tests` clean; 138 pre-push static gates including the upstream citation gate pass."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A fleet unit's output is not kept, so a failure bx retries elsewhere shows only as \"exit 1 while memory was short\"; asked bx-63 whether a retried unit can keep its tail. Until then rerun such a unit with `bx --host` and read its own log.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: all four requirement-bearing lanes now pass in the fleet; rerun the full `bx --checks ci` set to read the 180.",
+        "Read hosted run 42281344423 (still pending with no job at this round's start) and the first scheduled upstream-watch run.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
