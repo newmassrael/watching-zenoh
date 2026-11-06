@@ -96,8 +96,8 @@ impl Waits {
 
 /// The faces' threads route Puts to `FAN_OUT` subscribers without pause while one writer
 /// declares and undeclares subscriptions of keys nobody puts to, and every `TRANSITION_EVERY`
-/// declarations brings a face up and takes it down. Prints the Puts routed per second and the
-/// writer's waits, by kind of write.
+/// declarations brings a face up and takes it down. Prints the Puts routed per second, with the
+/// writer and in a window before it with none, and the writer's waits, by kind of write.
 #[test]
 #[ignore = "a measurement of how the router's tables are shared (docs/router-table-snapshots.md, \
             phase 0); run with --release --ignored --nocapture on a build host"]
@@ -120,15 +120,57 @@ fn the_faces_and_the_writers_of_the_tables_measured_together() {
     let writer_face = FaceId(200);
     let (writer_actions, _writer_sink) = client(zid(0xE0));
     fwd.register(writer_face, &writer_actions);
-    for sink in &subscribers {
+
+    // The faces alone first: what a read costs under each value with no write to retire a route,
+    // which the window with the writer cannot separate from what the writes cost the readers.
+    let alone = routed_while(&fwd, &publishers, &subscribers, || {
+        std::thread::sleep(Duration::from_millis(1))
+    });
+
+    let (mut declarations, mut transitions) = (Waits::default(), Waits::default());
+    let mut round = 0u64;
+    let together = routed_while(&fwd, &publishers, &subscribers, || {
+        let key = format!("demo/churn/{}", round % 64);
+        declarations.time(|| bring(&fwd, writer_face, declare_sub(&key)));
+        declarations.time(|| bring(&fwd, writer_face, undeclare_sub(&key)));
+        if round % TRANSITION_EVERY == 0 {
+            let id = FaceId(1_000 + round);
+            let (actions, _sink) = client(zid(0xF0));
+            transitions.time(|| fwd.register(id, &actions));
+            transitions.time(|| fwd.deregister(id));
+        }
+        round += 1;
+    });
+
+    // The structure is the build's value of the `routing-table-sharing` policy, so that one
+    // instrument measures both values, each in a build that states it.
+    println!(
+        "table-sharing: structure={} publishers={PUBLISHERS} fan_out={FAN_OUT} \
+         window={WINDOW:?} puts_routed_per_s={together:.0} with no writer {alone:.0}",
+        fwd.table_sharing().id(),
+    );
+    println!("table-sharing: declarations {}", declarations.line());
+    println!("table-sharing: face transitions {}", transitions.line());
+}
+
+/// The Puts a second the `publishers` route to the `subscribers` for [`WINDOW`], each from a
+/// thread of its own without pause, while this thread calls `meanwhile` again and again. Asserts
+/// the population: every Put routed once and given to every subscriber.
+fn routed_while(
+    fwd: &Arc<RouterForwarder>,
+    publishers: &[FaceId],
+    subscribers: &[Arc<RecordingLinkDriver>],
+    mut meanwhile: impl FnMut(),
+) -> f64 {
+    for sink in subscribers {
         sink.reset();
     }
-
+    let seen_before = fwd.data_seen();
     let routing = Arc::new(AtomicBool::new(true));
     let (done, finished) = std::sync::mpsc::channel();
     let mut threads = Vec::new();
-    for id in publishers {
-        let (fwd, routing, done) = (Arc::clone(&fwd), Arc::clone(&routing), done.clone());
+    for &id in publishers {
+        let (fwd, routing, done) = (Arc::clone(fwd), Arc::clone(&routing), done.clone());
         threads.push(std::thread::spawn(move || {
             let mut sent = 0usize;
             while routing.load(Ordering::Acquire) {
@@ -143,25 +185,14 @@ fn the_faces_and_the_writers_of_the_tables_measured_together() {
     drop(done);
 
     let began = Instant::now();
-    let (mut declarations, mut transitions) = (Waits::default(), Waits::default());
-    let mut round = 0u64;
     while began.elapsed() < WINDOW {
-        let key = format!("demo/churn/{}", round % 64);
-        declarations.time(|| bring(&fwd, writer_face, declare_sub(&key)));
-        declarations.time(|| bring(&fwd, writer_face, undeclare_sub(&key)));
-        if round % TRANSITION_EVERY == 0 {
-            let id = FaceId(1_000 + round);
-            let (actions, _sink) = client(zid(0xF0));
-            transitions.time(|| fwd.register(id, &actions));
-            transitions.time(|| fwd.deregister(id));
-        }
-        round += 1;
+        meanwhile();
     }
     routing.store(false, Ordering::Release);
     let window = began.elapsed();
 
     let mut total = 0usize;
-    for _ in 0..PUBLISHERS {
+    for _ in publishers {
         total += finished
             .recv_timeout(Duration::from_secs(60))
             .expect("every publisher finishes: one that does not is waiting for the tables");
@@ -169,7 +200,11 @@ fn the_faces_and_the_writers_of_the_tables_measured_together() {
     for thread in threads {
         thread.join().expect("a publisher of the router finishes");
     }
-    assert_eq!(fwd.data_seen(), total, "every Put was routed once");
+    assert_eq!(
+        fwd.data_seen() - seen_before,
+        total,
+        "every Put was routed once"
+    );
     for (s, sink) in subscribers.iter().enumerate() {
         assert_eq!(
             sink.frame_count(),
@@ -177,17 +212,7 @@ fn the_faces_and_the_writers_of_the_tables_measured_together() {
             "subscriber {s} was given every Put"
         );
     }
-    // The structure is the build's value of the `routing-table-sharing` policy, so that one
-    // instrument measures both values, each in a build that states it.
-    println!(
-        "table-sharing: structure={} publishers={PUBLISHERS} fan_out={FAN_OUT} \
-         window={:.2}s puts_routed_per_s={:.0}",
-        fwd.table_sharing().id(),
-        window.as_secs_f64(),
-        total as f64 / window.as_secs_f64()
-    );
-    println!("table-sharing: declarations {}", declarations.line());
-    println!("table-sharing: face transitions {}", transitions.line());
+    total as f64 / window.as_secs_f64()
 }
 
 /// How many client faces the admission instrument brings up, as many as the starved router of
