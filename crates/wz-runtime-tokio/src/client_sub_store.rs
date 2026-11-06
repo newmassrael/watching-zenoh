@@ -8,9 +8,11 @@
 //! ([`client_route`](crate::linkstate_forward)). Three things come with it that a plain
 //! `Versioned<HashMap<..>>` did not give:
 //!
-//! - AN INDEX BY KEY. A route for a literal key is found by one lookup of that key, plus a scan of the
-//!   subscriptions that have a wildcard in them, instead of a scan of every subscription. Whether a key
-//!   is declared by any client at all (the question every route cache asks on a miss) is one lookup too.
+//! - AN INDEX BY KEY. Every key some client subscribes to is held in a trie of its chunks
+//!   ([`KeyexprIndex`]), so the keys a route or an interest's answer needs are found by walking the
+//!   branches the asked keyexpr can meet, wildcards on either side included, instead of a scan of
+//!   every subscription. Whether a key is declared by any client at all (the question every route
+//!   cache asks on a miss) is one lookup.
 //! - A CHANGE LOG. Every change records the key it declared or withdrew under the version it produced,
 //!   so a cache that was fresh at an earlier version can ask which keys moved since and retire only the
 //!   routes those keys intersect ([`changed_since`](ClientSubStore::changed_since)).
@@ -34,7 +36,8 @@ use std::ops::Deref;
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 
 use crate::accept_loop::FaceId;
-use crate::persistent_map::{PersistentMap, PersistentSet};
+use crate::keyexpr_index::KeyexprIndex;
+use crate::persistent_map::PersistentMap;
 
 /// How many changed keys the log keeps. A cache consulted by every message is never this far behind;
 /// one that is drops its routes instead.
@@ -47,9 +50,9 @@ pub(crate) struct ClientSubStore {
     by_face: PersistentMap<FaceId, PersistentMap<u64, String>>,
     /// Per key some client subscribes to, the faces subscribing it and how many ids each holds on it.
     by_key: PersistentMap<String, PersistentMap<FaceId, usize>>,
-    /// The keys in `by_key` that contain a wildcard: the only ones a literal key can intersect without
-    /// being equal to.
-    wild: PersistentSet<String>,
+    /// The keys in `by_key`, each held under itself: the keys an asked keyexpr may intersect, found
+    /// without trying every key.
+    keys: KeyexprIndex<String>,
     /// How many changes the store has seen; wraps.
     version: u64,
     /// The keys changed, each under the version its change produced, by the order they were logged
@@ -71,12 +74,6 @@ impl Deref for ClientSubStore {
     fn deref(&self) -> &Self::Target {
         &self.by_face
     }
-}
-
-/// Whether `keyexpr` has a wildcard chunk. A zenoh key expression spells its wildcards `*`, `**` and
-/// `$*`, and every one contains a `*`.
-fn has_wildcard(keyexpr: &str) -> bool {
-    keyexpr.contains('*')
 }
 
 impl ClientSubStore {
@@ -160,36 +157,48 @@ impl ClientSubStore {
     }
 
     /// The faces with a subscription that intersects `keyexpr`, in face order.
-    ///
-    /// A literal `keyexpr` finds its literal subscribers by one lookup and the wildcard subscriptions by
-    /// a scan of only those; a `keyexpr` with a wildcard of its own is matched against every key, as
-    /// there is nothing to look up. The intersection test is the one the scan always used, so the
-    /// answer is the same set.
     pub(crate) fn faces_intersecting(&self, keyexpr: &str) -> Vec<FaceId> {
-        let target: Vec<&str> = keyexpr.split('/').collect();
-        let mut faces: Vec<FaceId> = Vec::new();
-        let mut take = |key: &str, holders: &PersistentMap<FaceId, usize>| {
-            if keyexpr_intersects_target(key, &target) {
-                faces.extend(holders.keys().copied());
-            }
-        };
-        if has_wildcard(keyexpr) {
-            for (key, holders) in &self.by_key {
-                take(key, holders);
-            }
-        } else {
-            if let Some((key, holders)) = self.by_key.get_key_value(keyexpr) {
-                take(key, holders);
-            }
-            for key in self.wild.iter() {
-                if let Some(holders) = self.by_key.get(key) {
-                    take(key, holders);
-                }
-            }
-        }
+        let mut faces: Vec<FaceId> = self
+            .keys_intersecting(keyexpr)
+            .into_iter()
+            .flat_map(|(_, holders)| holders.keys().copied())
+            .collect();
         faces.sort_unstable();
         faces.dedup();
         faces
+    }
+
+    /// Every key some client subscribes to that intersects `keyexpr`, with the faces subscribing it
+    /// and how many ids each holds on it.
+    ///
+    /// The index finds the keys that may intersect and the intersection test the scan always used
+    /// decides each, so the answer is the set a scan of every key gives.
+    pub(crate) fn keys_intersecting(
+        &self,
+        keyexpr: &str,
+    ) -> Vec<(&str, &PersistentMap<FaceId, usize>)> {
+        let target: Vec<&str> = keyexpr.split('/').collect();
+        self.keys
+            .intersecting(keyexpr)
+            .into_iter()
+            .filter(|key| keyexpr_intersects_target(key, &target))
+            .map(|key| {
+                let holders = self
+                    .by_key
+                    .get(key.as_str())
+                    .expect("an indexed key has holders");
+                (key.as_str(), holders)
+            })
+            .collect()
+    }
+
+    /// Every key some client subscribes to, with the faces subscribing it: the answer to an
+    /// unrestricted interest.
+    pub(crate) fn every_key(&self) -> Vec<(&str, &PersistentMap<FaceId, usize>)> {
+        self.by_key
+            .iter()
+            .map(|(key, holders)| (key.as_str(), holders))
+            .collect()
     }
 
     /// Feed `visit` every key changed after `version`, and say whether that was all of them. `false`
@@ -236,8 +245,8 @@ impl ClientSubStore {
     }
 
     fn index_add(&mut self, face: FaceId, keyexpr: &str) {
-        if !self.by_key.contains_key(keyexpr) && has_wildcard(keyexpr) {
-            self.wild.insert(keyexpr.to_owned());
+        if !self.by_key.contains_key(keyexpr) {
+            self.keys.insert(keyexpr, keyexpr.to_owned());
         }
         *self
             .by_key
@@ -257,7 +266,7 @@ impl ClientSubStore {
         }
         if holders.is_empty() {
             self.by_key.remove(keyexpr);
-            self.wild.remove(keyexpr);
+            self.keys.remove(keyexpr, &keyexpr.to_owned());
         }
     }
 }
@@ -283,6 +292,30 @@ mod tests {
             .collect();
         faces.sort_unstable();
         faces
+    }
+
+    /// The keys a scan of every subscription finds intersecting `keyexpr`, in order.
+    fn scanned_keys(store: &ClientSubStore, keyexpr: &str) -> Vec<String> {
+        let target: Vec<&str> = keyexpr.split('/').collect();
+        let mut keys: Vec<String> = store
+            .values()
+            .flat_map(|ids| ids.values())
+            .filter(|sub| keyexpr_intersects_target(sub, &target))
+            .cloned()
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
+    fn indexed_keys(store: &ClientSubStore, keyexpr: &str) -> Vec<String> {
+        let mut keys: Vec<String> = store
+            .keys_intersecting(keyexpr)
+            .into_iter()
+            .map(|(key, _)| key.to_owned())
+            .collect();
+        keys.sort_unstable();
+        keys
     }
 
     const PROBES: &[&str] = &[
@@ -318,6 +351,11 @@ mod tests {
                 scanned(&store, probe),
                 "probe {probe}"
             );
+            assert_eq!(
+                indexed_keys(&store, probe),
+                scanned_keys(&store, probe),
+                "keys, probe {probe}"
+            );
         }
         // Withdraw some, displace one, drop a face: the index follows each.
         store.remove_id(face(5), 2);
@@ -329,6 +367,11 @@ mod tests {
                 store.faces_intersecting(probe),
                 scanned(&store, probe),
                 "after changes, probe {probe}"
+            );
+            assert_eq!(
+                indexed_keys(&store, probe),
+                scanned_keys(&store, probe),
+                "after changes, keys, probe {probe}"
             );
         }
     }

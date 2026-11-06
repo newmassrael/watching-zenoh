@@ -2449,6 +2449,11 @@ pub mod linkstate_interest;
 /// Gated on `routing-router-hat`, with the forwarder that holds it.
 #[cfg(feature = "routing-router-hat")]
 pub(crate) mod client_sub_store;
+/// A persistent index of members by keyexpr (a trie of chunks), so that a declaration finds the
+/// interests it meets without trying every face's (`docs/router-table-snapshots.md`, section 7).
+/// Gated on `routing-peer`, with the stores that hold it.
+#[cfg(feature = "routing-peer")]
+pub(crate) mod keyexpr_index;
 /// A persistent hash map (a hash array mapped trie with path copying), so that a copy of the
 /// router's tables shares its stores and a write copies only the path it changes
 /// (`docs/router-table-snapshots.md`, phase 6). Gated on `routing-peer`, with the stores that hold

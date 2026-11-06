@@ -7588,19 +7588,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 per_ke.insert(ke.to_string(), ());
             }
         }
+        // The client subscriptions are read from the store's index by key, which finds the keys the
+        // target can meet without trying every face's (`ClientSubStore::keys_intersecting`).
         for hat in self.broker_hats() {
-            for (face, by_id) in hat.subs.iter() {
-                if *face == inbound {
-                    continue; // never advertise a face its own subscription
-                }
-                for k in face_sub_keyexprs(by_id) {
-                    let matched = match target_chunks.as_deref() {
-                        None => true,
-                        Some(chunks) => keyexpr_intersects_target(k, chunks),
-                    };
-                    if matched {
-                        per_ke.insert(k.to_string(), ());
-                    }
+            let keys = match target {
+                Some(target) => hat.subs.keys_intersecting(target),
+                None => hat.subs.every_key(),
+            };
+            for (k, holders) in keys {
+                // Never advertise a face its own subscription.
+                if holders.keys().any(|face| *face != inbound) {
+                    per_ke.insert(k.to_string(), ());
                 }
             }
         }
