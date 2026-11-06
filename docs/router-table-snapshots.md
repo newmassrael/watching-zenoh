@@ -254,7 +254,7 @@ E7s and costs no more per message.
 Section 6.3 corrects the attribution above: the copies were real and are gone, but the starved router's
 bring-up failed under A as well once A was run more than once, and the cause was the test's harness.
 
-### 6.3 The phase 6 reading (this round)
+### 6.3 The phase 6 reading (round 4336)
 
 **The profile.** A second instrument, `the_writes_of_an_admission_measured_against_the_faces_already_up`,
 brings 2,048 client faces up one at a time as the starved router's population does (register, a
@@ -284,7 +284,7 @@ hash map: it is read on every message, and its copy is the 10 us measured. On pc
 
 and every store's copy is 0 us but the face map's. Under both values a subscription still costs O(faces),
 since every face's interests are matched against it; that is the router's and not the sharing's, and an
-index of the interests by what they match would serve both values.
+index of the interests by what they match would serve both values. Section 6.4 builds it.
 
 **The starved router.** The phase 5 failure did not move: 1,697 and 1,734 of 2,048 sessions came up. The
 harness was given a timeline of the bring-up (every 10 s, the sessions up, the messages forwarded, the
@@ -344,6 +344,65 @@ asked before B could be recommended. A stays the default, as C2 of `docs/build-c
 of every policy, and the help text of `routing-table-sharing` now says that `snapshot` is the value to
 choose for a router whose sessions come and go while it routes.
 
+### 6.4 The index by keyexpr (this round)
+
+Section 6.3 left a subscription and an interest each costing as much as the faces up, under both
+values. Two walks made it so, and neither was the sharing's:
+
+- **The future interests.** A subscription tried every face's interests for one that meets its key,
+  and an interest every face's subscriptions. Every interest is now held under its target, every
+  pushed reply under its keyexpr and every key a client subscribes to under itself in
+  `KeyexprIndex` (`crates/wz-runtime-tokio/src/keyexpr_index.rs`), a persistent trie of the chunks
+  of a keyexpr, path-copied like the maps of section 6.3. A question walks only the branches its
+  keyexpr can meet, with `*`, `**` and `$*` on either side, and each candidate is then decided by
+  the exact matcher the scan used: filter and refine (Orenstein 1986), so the answer is the scan's.
+  Model tests hold it to the scan over every chunk form, and the interest store's walkers to the
+  walkers that try every face.
+- **The broker hat's exact-key questions.** Whether self advertises a subscription into a mesh
+  counted the client faces whose ids name the key by trying every face, before and after each
+  declaration (`sub_contributions`), and the re-advertisement listed every face's keys. The store
+  already held its subscriptions by key; both now read that.
+
+The tree of round 4337 against this one, on pc2 (32 cores, 125 GB, shared with other work at host
+loads of 14 to 48), the phase 6 instrument, p50 by band of faces already up. Four runs of each value
+before, two after the index alone, two after both:
+
+| Faces already up | Value | Tree | Register | Subscribe | Interest |
+|---|---|---|---|---|---|
+| 0 to 256 | rwlock | before | 0 us | 33 to 36 us | 7 to 8 us |
+| 1,792 to 2,048 | rwlock | before | 0 us | 601 to 713 us | 148 to 171 us |
+| 1,792 to 2,048 | rwlock | the index alone | 0 to 1 us | 473 to 753 us | 3 to 4 us |
+| 0 to 256 | rwlock | after | 0 us | 4 to 7 us | 2 us |
+| 1,792 to 2,048 | rwlock | after | 0 us | 4 to 9 us | 1 to 3 us |
+| 0 to 256 | snapshot | before | 2 to 3 us | 37 to 69 us | 9 to 17 us |
+| 1,792 to 2,048 | snapshot | before | 15 us | 694 to 758 us | 178 to 195 us |
+| 1,792 to 2,048 | snapshot | the index alone | 15 to 16 us | 497 to 510 us | 20 to 21 us |
+| 0 to 256 | snapshot | after | 2 to 3 us | 7 to 14 us | 4 to 7 us |
+| 1,792 to 2,048 | snapshot | after | 15 to 16 us | 23 to 26 us | 18 to 20 us |
+
+Under A a subscription and an interest no longer grow with the faces up. Under B what still grows is
+the copy of the face map's spine, which every write pays (section 7): 2 to 3 us of a registration at
+256 faces and 15 us at 2,048, and the same part of a subscription and an interest.
+
+Layer E7s on the tree after both, one run of each value, at host loads of 21 (rwlock) and 42
+(snapshot); every test passed under both values, as it did after the index alone:
+
+| | rwlock | snapshot |
+|---|---|---|
+| us per message, 256 / 1,024 / 2,048 subscribers, no churn | 26.5 / 27.1 / 28.8 | 28.9 / 31.3 / 30.1 |
+| us per message, 256 / 1,024 subscribers, churn | 29.9 / 30.3 | 29.5 / 30.3 |
+| starved router, churn: admitted of 320 in the window | 308 | 312 |
+| starved router: messages forwarded a second, faces down | 6,342, 0 | 8,551, 0 |
+| told 1.32 % of a core, 32 hogs: forwarded, faces down, table waits of 250 ms or more | 466, 94, 7 | 606, 45, 0 |
+| told 1.32 % of a core, 64 hogs: forwarded, faces down, table waits | 242, 51, 4 | 365, 12, 0 |
+
+The starved router admitted 308 and 312 of the 320 sessions that knocked in its window, where section
+6.3 read 148 to 196 on pc3 and the index alone 244 and 269 here: each admission is a subscription and
+an interest, and on one shared core at nice 10 their cost is the admission rate. The per-message
+cost and the rows told 1.32 % of a core moved with the host's load as they did in section 6.3 and say
+nothing of the index; the faces down under 32 hogs (94 and 45, against 14 and 19 after the index
+alone at lower load) are that load's.
+
 ## 7. What is not decided, and what could make this wrong
 
 - **The graph's copy.** `LinkstateNetwork` holds one shortest-path tree per node, O(N squared) for N nodes
@@ -352,9 +411,12 @@ choose for a router whose sessions come and go while it routes.
 - **The face map's copy.** Every write under B copies the face map's spine (one pointer per face): 10 us
   at 2,048 faces, measured in phase 6. It stays a hash map because every message reads it; a router of
   many more faces is where a persistent face map would be measured against that read.
-- **A subscription costs O(faces) under both values.** Every face's interests are matched against it
-  (section 6.3, 935 us at 2,048 faces under A). An index of the interests by what they match is the
-  router's to build, and serves A and B alike.
+- **The queryables' and the tokens' client stores.** Section 6.4 indexed the interests and the
+  subscriptions. The broker hat's queryables and tokens are still held per face in hash maps, so a
+  queryable's or a token's declaration under B copies its store, and the questions about one key
+  (`merged_qabl_info_in`, `any_qabl_matches_in`, `token_contributions`, `dump_interest_qabls`)
+  try every face, under both values. They are the same seam as the subscriptions', and the store
+  that answers them is `ClientSubStore`'s form with a value beside each id.
 - **The tick.** Under B the tick that finds nothing dirty need not publish; whether to split it into a read
   that decides and a write that acts is decided in phase 4 by what it writes (queries and interests timed
   out, egress swept: the last is per-face runtime and needs no version).

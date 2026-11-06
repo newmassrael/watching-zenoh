@@ -89,9 +89,9 @@
 //! pushed reply under its keyexpr ([`KeyexprIndex`], a persistent trie of chunks), and a
 //! declaration or a withdrawal reads from the index the faces whose interests or replies may
 //! meet its keyexpr, then refines each with the exact matcher the full scan used. Trying every
-//! face made each declaration cost as many tries as faces were up: 935 us at 2,048 faces
-//! (`docs/router-table-snapshots.md`, section 6.3). The faces a walker yields come in face
-//! order.
+//! face made each declaration cost as many tries as faces were up: an interest took 152 us at
+//! 2,048 faces and takes 1 to 3 us with the index (`docs/router-table-snapshots.md`, section
+//! 6.4). The faces a walker yields come in face order.
 
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::queryable_info::QueryableInfo;
