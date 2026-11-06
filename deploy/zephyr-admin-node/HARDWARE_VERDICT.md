@@ -69,6 +69,14 @@ pool images (HW.26 to HW.35) read a packet capture frame by frame and are the da
 the program refuses them for a `tcp/` node. A stream has failure modes a datagram has not, and the
 steps that hold them are designed below and not yet in this file's grammar.
 
+The pool steps run on the board in the kit lane: `scripts/kit-lane.sh run zephyr-fixed` starts a capture of
+the node's frames at the host's wire before the reset, and the program judges HW.26 to HW.35 from the
+console of the boot, its own output (HW.0 to HW.7, which the pool steps are held to) and that capture. The
+boot under test is cut from the console at the first Zephyr banner after the reset, and a run removes the
+console, capture and verdict files of the run before it first, because the kit boots the image once on
+its own when the flash ends and the directory of a built image is the same for every run of it. Three kit
+runs, each reset and flashed, held all eighteen steps, with the stack line at 13,736 bytes in each.
+
 ### The steps for what only a stream suffers (HW.36 to HW.44 are built; the rest is design)
 
 The steps built so far are the release, conservation, silence, re-establishment, framing, admission, sustained-run and coalescing properties, run with `--stream-steps` on a
