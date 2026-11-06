@@ -344,7 +344,7 @@ asked before B could be recommended. A stays the default, as C2 of `docs/build-c
 of every policy, and the help text of `routing-table-sharing` now says that `snapshot` is the value to
 choose for a router whose sessions come and go while it routes.
 
-### 6.4 The index by keyexpr (this round)
+### 6.4 The index by keyexpr (round 4346)
 
 Section 6.3 left a subscription and an interest each costing as much as the faces up, under both
 values. Two walks made it so, and neither was the sharing's:
@@ -403,20 +403,69 @@ cost and the rows told 1.32 % of a core moved with the host's load as they did i
 nothing of the index; the faces down under 32 hogs (94 and 45, against 14 and 19 after the index
 alone at lower load) are that load's.
 
+### 6.5 The queryables' and the tokens' stores (this round)
+
+Section 6.4 left the broker hat's queryables and tokens held per face in hash maps. The phase 6
+instrument now also times a queryable, an interest in queryables and a token for each admitted
+client, and its first reading found two more costs that grow with the faces up, neither the
+sharing's:
+
+- **The client stores.** The subscriptions', the queryables' and the tokens' client stores are one
+  generic store, `ClientStore` (by face, by key, the `KeyexprIndex` of section 6.4, a version and
+  the change log), its value merged per key by a `Held` trait: a subscription holds nothing beside
+  its id, a queryable its info, a token nothing. The questions about one key
+  (`merged_qabl_info_in`, `any_qabl_matches_in`, `token_contributions`, `dump_interest_qabls`)
+  read the store's key index and no longer try every face.
+- **The token reconciliation on every registration.** Admitting a face reconciled every token it
+  should be told against what each mesh link had been told, a walk of the tokens times the faces,
+  for a client face too, whose admission moves no graph. `register` and `deregister` of the
+  linkstate tables now say whether the face moved a graph, and only such a face reconciles. What
+  the forwarder told each region of tokens (`advertised_tokens`) was a hash map of hash sets, so a
+  token's declaration under B copied it whole; it is now a persistent map of persistent sets,
+  read before it is written, since a write copies its path even when it changes nothing.
+
+On pc2, p50 by band of faces already up. Before is the tree of round 4350 with the instrument, two
+runs of each value; the store alone is that tree with the store, two runs of each; the other rows are three runs interleaved on one tree
+(the reconciliation gated, then the persistent tokens map), built side by side and run in turn:
+
+| Faces up | Value | Tree | Register | Queryable | Queryable interest | Token |
+|---|---|---|---|---|---|---|
+| 0 to 256 | rwlock | before | 165 to 316 us | 9 to 12 us | 7 to 12 us | 4 to 6 us |
+| 1,792 to 2,048 | rwlock | before | 93,888 to 99,076 us | 428 to 437 us | 172 to 173 us | 190 to 203 us |
+| 1,792 to 2,048 | rwlock | the store alone | 853 to 892 us | 4 to 6 us | 1 to 2 us | 9 to 13 us |
+| 1,792 to 2,048 | rwlock | gated | 0 to 1 us | 4 to 11 us | 1 to 3 us | 9 to 20 us |
+| 1,792 to 2,048 | rwlock | after | 0 us | 5 to 9 us | 1 to 3 us | 10 to 19 us |
+| 0 to 256 | snapshot | before | 157 to 158 us | 19 to 20 us | 10 to 11 us | 23 to 24 us |
+| 1,792 to 2,048 | snapshot | before | 81,278 to 83,509 us | 652 to 654 us | 201 to 205 us | 627 to 638 us |
+| 1,792 to 2,048 | snapshot | the store alone | 893 to 898 us | 25 to 26 us | 18 us | 119 us |
+| 0 to 256 | snapshot | gated | 3 to 4 us | 15 to 17 us | 7 to 8 us | 27 to 31 us |
+| 1,792 to 2,048 | snapshot | gated | 15 to 18 us | 25 to 29 us | 18 to 22 us | 125 to 150 us |
+| 0 to 256 | snapshot | after | 6 to 7 us | 17 to 20 us | 7 to 8 us | 15 to 18 us |
+| 1,792 to 2,048 | snapshot | after | 15 us | 24 us | 18 us | 30 to 31 us |
+
+The first of the three runs of the tree after, under snapshot, read 42 to 70 us in every column at
+2,048 faces, the registration's included, which neither change touches; the two runs after it agree
+with each other, and the row gives those. The registration of a client is now 0 us under A and the
+face map's spine under B (section 7); a queryable and an interest in queryables no longer grow with
+the faces under either value; a token under B costs that spine and the path of one region's set.
+Under B, at 0 to 256 faces, a registration read 6 to 7 us after against 3 to 4 us gated in every
+run, and not at 2,048 faces; no write of a registration reaches the tokens map, and the difference
+is not attributed.
+
+Layer Z8 passes on the tree after both, and the store's model tests
+(`crates/wz-runtime-tokio/src/client_store.rs`) hold its index to a scan of every face.
+
 ## 7. What is not decided, and what could make this wrong
 
 - **The graph's copy.** `LinkstateNetwork` holds one shortest-path tree per node, O(N squared) for N nodes
   of a mesh. A write that changes the topology copies it under B; a declaration does not. Whether topology
   writes are frequent enough on a large mesh for this to matter is a phase 5 reading.
 - **The face map's copy.** Every write under B copies the face map's spine (one pointer per face): 10 us
-  at 2,048 faces, measured in phase 6. It stays a hash map because every message reads it; a router of
-  many more faces is where a persistent face map would be measured against that read.
-- **The queryables' and the tokens' client stores.** Section 6.4 indexed the interests and the
-  subscriptions. The broker hat's queryables and tokens are still held per face in hash maps, so a
-  queryable's or a token's declaration under B copies its store, and the questions about one key
-  (`merged_qabl_info_in`, `any_qabl_matches_in`, `token_contributions`, `dump_interest_qabls`)
-  try every face, under both values. They are the same seam as the subscriptions', and the store
-  that answers them is `ClientSubStore`'s form with a value beside each id.
+  at 2,048 faces, measured in phase 6. After section 6.5 it is the last cost of a declaration that
+  grows with the faces: a registration, a subscription, an interest, a queryable and a token under B
+  each cost 7 to 15 us more at 2,048 faces than at 256. It stays a hash map because every message
+  reads it; a persistent face map would make the write logarithmic and every message's lookup a trie
+  walk, and which a router should pay is a measurement of both against the message rate, not yet made.
 - **The tick.** Under B the tick that finds nothing dirty need not publish; whether to split it into a read
   that decides and a write that acts is decided in phase 4 by what it writes (queries and interests timed
   out, egress swept: the last is per-face runtime and needs no version).
