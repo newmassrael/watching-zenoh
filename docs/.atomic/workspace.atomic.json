@@ -313532,6 +313532,34 @@
         "Stage 3 of docs/verdicts-in-the-fleet.md (all lanes green in the fleet) is held until that landing."
       ]
     },
+    "Round 4335": {
+      "decision_summary": "Item 751 step (b), the C ABI node: the hosted census (Layer C1cn, shards 0 and 1) was red on the runs after the default-on change, and the cause is the merge of the wz-capi-c and wz-capi-pico test files into one executable each (ee04534e95, another session's), not the default: libtest lists a test of a merged file as files::<file>::<name>, and five SKIPS rows named the bare name, so the census refused each as a test that no longer exists and the unexcused tests as claimed by nothing. The three rows of wz-capi-c's zenohd interop (mine) and the two of wz-capi-pico's tls coop file are renamed to their path. Owner's standing instruction (every red is fixed, whoever made it) is why the pico rows are in the same change. The other reds of the same hosted runs are not this item's and are not touched here: pico-default 46 bytes over its budget in the cost gate, wz-capi-pico not clean under all features and under engine-coop, a broken doc link in wz-session-mcu, the stack chain figure of the FreeRTOS image, and the lanes that select a merged file by a filter that no longer matches (C1cc, C1cd, E5, which run the file as `--test it files::<file>::` plus `--exact <name>`).",
+      "changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: the SKIPS rows of wz-capi-c's router_node_zenohd_interop (three) and wz-capi-pico's tls_coop_roundtrip (two) name files::<file>::<name>."
+      ],
+      "verification_bullets": [
+        "On a build machine (hkl002) through bx, `nondefault-tests-gate.sh --census` at the head rebased on origin/main (round 4330): exit 0, no FAIL line, wz-capi-c 11 only-with-features all run by a leg, wz-capi-pico 32 (28 by a leg, 4 skipped by name). Before the rename the same command failed on exactly those two crates' rows (the first run, which also showed the vendor/sce pin refusal, was a pin the rebase had moved). The hosted reading is the runs' own: C1cn shards 0 and 1 of run 42087308054 named the same rows. Not run: the other lanes of that run listed in the decision (pico budget, pico clippy, doc link, stack chain, the filter of C1cc, C1cd and E5), which belong to the sessions that moved those files and figures."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The hosted runs after the default-on change show reds that are not this item's, each named in the decision: pico-default over its budget by 46 bytes, wz-capi-pico not clean under all features and under engine-coop, one broken doc link in wz-session-mcu, the FreeRTOS stack chain figure, and the legs of C1cc, C1cd and E5, which ran a merged test executable and selected no test (the logs show `running 0 tests` and the command `--test it files::<file>:: ... --exact <name>`; that the module filter beside --exact is the cause is inferred, not tried). The drop-in lane of the C ABI with the node on is still not read as a pass, because C1cc did not reach it: the first leg failed on the filter. The resource snapshot still answers Z_EUNAVAILABLE on a node."
+      ],
+      "publishable_decision_summary": "Item 751 step (b), the C ABI node: the hosted census (Layer C1cn, shards 0 and 1) was red on the runs after the default-on change, and the cause is the merge of the wz-capi-c and wz-capi-pico test files into one executable each (ee04534e95, another session's), not the default: libtest lists a test of a merged file as files::<file>::<name>, and five SKIPS rows named the bare name, so the census refused each as a test that no longer exists and the unexcused tests as claimed by nothing. The three rows of wz-capi-c's zenohd interop (mine) and the two of wz-capi-pico's tls coop file are renamed to their path. Owner's standing instruction (every red is fixed, whoever made it) is why the pico rows are in the same change. The other reds of the same hosted runs are not this item's and are not touched here: pico-default 46 bytes over its budget in the cost gate, wz-capi-pico not clean under all features and under engine-coop, a broken doc link in wz-session-mcu, the stack chain figure of the FreeRTOS image, and the lanes that select a merged file by a filter that no longer matches (C1cc, C1cd, E5, which run the file as `--test it files::<file>::` plus `--exact <name>`).",
+      "publishable_changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: the SKIPS rows of wz-capi-c's router_node_zenohd_interop (three) and wz-capi-pico's tls_coop_roundtrip (two) name files::<file>::<name>."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine (hkl002) through bx, `nondefault-tests-gate.sh --census` at the head rebased on origin/main (round 4330): exit 0, no FAIL line, wz-capi-c 11 only-with-features all run by a leg, wz-capi-pico 32 (28 by a leg, 4 skipped by name). Before the rename the same command failed on exactly those two crates' rows (the first run, which also showed the vendor/sce pin refusal, was a pin the rebase had moved). The hosted reading is the runs' own: C1cn shards 0 and 1 of run 42087308054 named the same rows. Not run: the other lanes of that run listed in the decision (pico budget, pico clippy, doc link, stack chain, the filter of C1cc, C1cd and E5), which belong to the sessions that moved those files and figures."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The hosted runs after the default-on change show reds that are not this item's, each named in the decision: pico-default over its budget by 46 bytes, wz-capi-pico not clean under all features and under engine-coop, one broken doc link in wz-session-mcu, the FreeRTOS stack chain figure, and the legs of C1cc, C1cd and E5, which ran a merged test executable and selected no test (the logs show `running 0 tests` and the command `--test it files::<file>:: ... --exact <name>`; that the module filter beside --exact is the cause is inferred, not tried). The drop-in lane of the C ABI with the node on is still not read as a pass, because C1cc did not reach it: the first leg failed on the filter. The resource snapshot still answers Z_EUNAVAILABLE on a node."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
