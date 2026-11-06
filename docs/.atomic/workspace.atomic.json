@@ -314158,6 +314158,34 @@
         "Step 15c: the zenoh-c drop-in's statement from an installed zenoh_configure.h (the --drop-in-features c route)."
       ]
     },
+    "Round 4353": {
+      "decision_summary": "The cross-impl job (interop) of hosted run 42182407682 was cancelled at its 120 minute timeout with the tests running for the first time. In the three runs before it the job failed at 225 to 271 s, so its length with the legs selecting their tests had never been read; the selection (round 4338) and the netns re-run name (c73b871e37) are what let it get that far. The layers before Layer Z took 84 minutes, Layer Z was 36 minutes into its sweep (16 tests running, no output since) and the steps after it (E5z, Ewirez and the rest) were not reached. The ceiling moves to 240 minutes as a measurement and not as a budget: the next run that ends reads the real length, and the job is cut at the layer boundary the reading names if it is past two hours, as the file's own doctrine says (split, not raise), because a cut duplicates the cold builds and a cut on a guess would be a second measurement of nothing. The job has no margin gate, so none is rebound. Read in the same pass and not touched, since they are not from this work and need a design choice: the verdict-leg mutation job (C0mut, two shards) is cancelled at 30 minutes in every run since R4245 (shard 0 one mutant short of its 42, shard 1 at 17 of about 39, each mutant that binds wz-replay re-running a suite of 190 to 393 s), and the analyzer-crate job reads 1593 to 1781 s of 1800 s, 1380 s of it C1bz.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: the interop job's timeout-minutes 120 to 240, with the measurement written above it."
+      ],
+      "verification_bullets": [
+        "Read from the job log of run 42182407682 (layer start and end lines, the cancel at 12:08:32 and the last libtest line at 11:59:05) and from the job lists of runs 42087308054, 42121505586 and 42144563863 (interop 225 to 271 s). job_budget_binding.py reads 18 of 35 jobs bound and the interop job is not one of them; workflow_cache_budget_gate.py and workflow_cache_save_gate.py pass. Not run: the job itself on the new ceiling, which is the point of the change."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The next hosted run that ends reads the length of interop and decides whether to cut it (Layer Z and what follows it into a job of their own). Open and unowned: the C0mut job (two shards, cancelled at 30 minutes in every run since R4245; a mutant that binds wz-replay re-runs the whole suite, so the cost is in what each mutant runs, with more shards the other way out) and the analyzer-crate job (C1bz alone 1380 s of 1800 s). The C1cs budgets of round 4349 and the demo budget of round 4351 are still unread by a hosted run."
+      ],
+      "publishable_decision_summary": "The cross-impl job (interop) of hosted run 42182407682 was cancelled at its 120 minute timeout with the tests running for the first time. In the three runs before it the job failed at 225 to 271 s, so its length with the legs selecting their tests had never been read; the selection (round 4338) and the netns re-run name (c73b871e37) are what let it get that far. The layers before Layer Z took 84 minutes, Layer Z was 36 minutes into its sweep (16 tests running, no output since) and the steps after it (E5z, Ewirez and the rest) were not reached. The ceiling moves to 240 minutes as a measurement and not as a budget: the next run that ends reads the real length, and the job is cut at the layer boundary the reading names if it is past two hours, as the file's own doctrine says (split, not raise), because a cut duplicates the cold builds and a cut on a guess would be a second measurement of nothing. The job has no margin gate, so none is rebound. Read in the same pass and not touched, since they are not from this work and need a design choice: the verdict-leg mutation job (C0mut, two shards) is cancelled at 30 minutes in every run since R4245 (shard 0 one mutant short of its 42, shard 1 at 17 of about 39, each mutant that binds wz-replay re-running a suite of 190 to 393 s), and the analyzer-crate job reads 1593 to 1781 s of 1800 s, 1380 s of it C1bz.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml: the interop job's timeout-minutes 120 to 240, with the measurement written above it."
+      ],
+      "publishable_verification_bullets": [
+        "Read from the job log of run 42182407682 (layer start and end lines, the cancel at 12:08:32 and the last libtest line at 11:59:05) and from the job lists of runs 42087308054, 42121505586 and 42144563863 (interop 225 to 271 s). job_budget_binding.py reads 18 of 35 jobs bound and the interop job is not one of them; workflow_cache_budget_gate.py and workflow_cache_save_gate.py pass. Not run: the job itself on the new ceiling, which is the point of the change."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The next hosted run that ends reads the length of interop and decides whether to cut it (Layer Z and what follows it into a job of their own). Open and unowned: the C0mut job (two shards, cancelled at 30 minutes in every run since R4245; a mutant that binds wz-replay re-runs the whole suite, so the cost is in what each mutant runs, with more shards the other way out) and the analyzer-crate job (C1bz alone 1380 s of 1800 s). The C1cs budgets of round 4349 and the demo budget of round 4351 are still unread by a hosted run."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
