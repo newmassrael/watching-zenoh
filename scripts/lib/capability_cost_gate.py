@@ -663,7 +663,15 @@ CASES: tuple[Case, ...] = (
     # 9,543,617, unchanged). Chosen growth, the tables' sharing is the owner's decision of
     # 2026-11-05; the budget is that reading, 3,600 for the hosted lane and 3,500, to the
     # hundred.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 5_968_500,
+    # 2026-11-07 -- 5,988,284 on pc3 at `a250c2ff26`, 26,911 over the reading above. SPLIT by
+    # reading on pc3 at the commits between: `5de08a3373` (where the next commits branched)
+    # 5,961,373, +0; the client store of the broker hat's subscriptions, queryables and tokens,
+    # the gated token reconciliation and the persistent map of the advertised tokens on it
+    # (`9fc9f7106e`) 5,988,113, +26,740; the peers' commits to `9bf10ad6e8` alone 5,961,544,
+    # +171 and one export (the conformance digest). The two add up to the reading after the
+    # rebase. Chosen growth (`docs/router-table-snapshots.md` section 6.5); the budget is that
+    # reading, 3,600 and 3,500, to the hundred.
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 5_995_400,
          # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
          # role and the scouting and UDP link under it, and the multicast transport.
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
@@ -717,7 +725,11 @@ CASES: tuple[Case, ...] = (
     # 2026-11-06, later -- the node's growth `capic-router-node`'s note gives (86,141 over on
     # hosted run 42161910521): 11,048,057 on pc3 at `a7331c59ea`, and the budget is that reading,
     # 3,600 and 3,500, to the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_055_200,
+    # 2026-11-07 -- the router tables' growth `capic-router-node`'s note of this day splits:
+    # 11,074,936 on pc3 at `a250c2ff26`, of which 26,792 the client store and the tokens' changes
+    # and 87 the peers' commits (the lean case 9,543,776, inside); the budget is that reading,
+    # 3,600 and 3,500, to the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_082_100,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST),
          exports=837,
