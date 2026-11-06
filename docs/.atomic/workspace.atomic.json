@@ -313492,6 +313492,46 @@
         "Next: a fresh 20-run volume job on a build host for HW.36 to HW.44 (HW.43 and HW.44 have each held in one real run only); the kit run of the stream steps; and a board table row for the stream steps after an evidence round. What HW.44 shows is that eight requests written as one segment are each read out and answered; it does not show the node's read count (the proxy's write is the instrument's account, and a kernel may still hand a segment over in pieces), and the node is shown eight requests, not a full batch."
       ]
     },
+    "Round 4334": {
+      "decision_summary": "Hosted run 42121505586 (`aefdd5ca0e`) was the first run in a day to judge every job. It read Layer C1cs red: `pico-default` text 4,408,146 against its budget of 4,408,100. No crate changed between the tree round 4322 read on a build host and that run. The budgets of round 4322 were a build host's reading plus 3,500, and the hosted lane reads these images up to about 3,600 above that host (`pico-peer` was left 11 bytes under). The nine budgets round 4322 moved now come from that hosted run's reading plus 3,500, to the hundred, which is the form the older budget notes use.\n\nThe run's other reds were the test-merge leftovers, C1bz/C1bzr, the C1bzr ledger row for `wz-session-core` and C1bf. The session that owns them has the fixes committed and is landing them after a fleet verdict, so this round leaves them alone. C1bnl shard 1 passed with the raised memlock limit, which confirms round 4323's repair, and Layer Z8 passed.",
+      "changes_bullets": [
+        "`scripts/lib/capability_cost_gate.py`: the budgets of `pico-client`, `pico-client-small`, `pico-client-udp`, `pico-peer`, `pico-default`, `capic-client-small`, `capic-router-node`, `capic-default` and `capic-default-lean` are now hosted run 42121505586's reading plus 3,500, to the hundred. A dated note gives the reason."
+      ],
+      "verification_bullets": [
+        "Hosted run 42121505586, job 127583440299 (Layer C1cs): `pico-default` 4,408,146 of 4,408,100. The new budgets were computed from this job's readings: 1,852,320, 1,512,465, 1,913,480, 2,974,789, 4,408,146, 1,963,743, 5,804,537, 10,893,065 and 9,544,705.",
+        "`git diff --stat 215e687827 348ff830fe` on the crates shows only a test and the SCE pin the reading already had, and nothing changed in the crates from 348ff830fe to `aefdd5ca0e`.",
+        "`python3 scripts/lib/capability_cost_gate.py --selftest` passed 16/16 arms.",
+        "In the same run, C1bnl shard 1 (job 127583440546) passed with the raised memlock limit, and Layer Z8 passed."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "At the next round:",
+        "Read the next hosted run's C1cs job to confirm the nine budgets.",
+        "Read the landing of the server-split session: test-merge leftovers, C1bz/C1bzr, C1bf, the C1cc/C1cd/E5 filters.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md (all lanes green in the fleet) is held until that landing."
+      ],
+      "publishable_decision_summary": "Hosted run 42121505586 (`aefdd5ca0e`) was the first run in a day to judge every job. It read Layer C1cs red: `pico-default` text 4,408,146 against its budget of 4,408,100. No crate changed between the tree round 4322 read on a build host and that run. The budgets of round 4322 were a build host's reading plus 3,500, and the hosted lane reads these images up to about 3,600 above that host (`pico-peer` was left 11 bytes under). The nine budgets round 4322 moved now come from that hosted run's reading plus 3,500, to the hundred, which is the form the older budget notes use.\n\nThe run's other reds were the test-merge leftovers, C1bz/C1bzr, the C1bzr ledger row for `wz-session-core` and C1bf. The session that owns them has the fixes committed and is landing them after a fleet verdict, so this round leaves them alone. C1bnl shard 1 passed with the raised memlock limit, which confirms round 4323's repair, and Layer Z8 passed.",
+      "publishable_changes_bullets": [
+        "`scripts/lib/capability_cost_gate.py`: the budgets of `pico-client`, `pico-client-small`, `pico-client-udp`, `pico-peer`, `pico-default`, `capic-client-small`, `capic-router-node`, `capic-default` and `capic-default-lean` are now hosted run 42121505586's reading plus 3,500, to the hundred. A dated note gives the reason."
+      ],
+      "publishable_verification_bullets": [
+        "Hosted run 42121505586, job 127583440299 (Layer C1cs): `pico-default` 4,408,146 of 4,408,100. The new budgets were computed from this job's readings: 1,852,320, 1,512,465, 1,913,480, 2,974,789, 4,408,146, 1,963,743, 5,804,537, 10,893,065 and 9,544,705.",
+        "`git diff --stat 215e687827 348ff830fe` on the crates shows only a test and the SCE pin the reading already had, and nothing changed in the crates from 348ff830fe to `aefdd5ca0e`.",
+        "`python3 scripts/lib/capability_cost_gate.py --selftest` passed 16/16 arms.",
+        "In the same run, C1bnl shard 1 (job 127583440546) passed with the raised memlock limit, and Layer Z8 passed."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "At the next round:",
+        "Read the next hosted run's C1cs job to confirm the nine budgets.",
+        "Read the landing of the server-split session: test-merge leftovers, C1bz/C1bzr, C1bf, the C1cc/C1cd/E5 filters.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md (all lanes green in the fleet) is held until that landing."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
