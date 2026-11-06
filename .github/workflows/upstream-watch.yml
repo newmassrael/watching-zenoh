@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# Whether upstream has published since the releases snapshot the tree carries
+# (scripts/lib/upstream_releases.json). Layer U of the `ci` workflow judges the
+# pins against that snapshot and needs no network; this is the half that does.
+#
+# A red run here is not a red of any commit: it says the snapshot is behind
+# what upstream publishes. The repair is
+# `python3 scripts/lib/upstream_release_distance.py --fetch` where gh is
+# authenticated, a commit of the snapshot, and whatever PINNED rows Layer U then
+# names. A `minor` or greater step opens a bump round (item 711).
+#
+# Item 578's condition 3 holds here: an unreachable API is a failure, not a
+# skip. The token is given because the unauthenticated releases API allows 60
+# requests an hour per address, which a shared runner exhausts.
+
+name: Upstream watch
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    name: upstream releases against the snapshot
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (with submodules)
+        # Submodule pins are read with `git describe --tags`, which needs the
+        # submodule checkouts with their history and tags; the `validate` job
+        # of ci.yml, where Layer U runs, checks out the same way.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Compare the live releases API with the snapshot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/lib/upstream_release_distance.py --watch

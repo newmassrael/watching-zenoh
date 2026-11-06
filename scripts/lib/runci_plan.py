@@ -159,9 +159,9 @@ SANDBOX_CAPABILITY = "userns-net-raw"
 
 # Programs a lane fails without because its HOSTED JOB arms it, so no arming in run-ci.sh says so
 # and the census cannot (see the docstring). Each entry quotes the lane's failure sentence.
-#   U:    "gh is not on PATH, so the releases API cannot be read" (Layer U has no skip).
 #   C1cc: "valgrind is absent ... WZ_C1CC_REQUIRE is set, so this is a failure" (the job's env).
-JOB_ARMED_COMMANDS: dict[str, list[str]] = {"U": ["gh"], "C1cc": ["valgrind"]}
+# Layer U asked for `gh` until 2026-11-07; it now reads the releases snapshot the tree carries.
+JOB_ARMED_COMMANDS: dict[str, list[str]] = {"C1cc": ["valgrind"]}
 
 # The workflow keys that tune the hosted runner's cargo and not a lane (see the docstring).
 BUILD_TUNING_PREFIX = "CARGO_"

@@ -267,10 +267,11 @@ DEFERRED: dict[str, str] = {
         "does not."
     ),
     "upstream_release_distance.py": (
-        "queries the GitHub releases API (8.31s, network-bound). A gate that "
-        "needs the network cannot be a verdict on a developer's machine -- "
-        "offline it would red a push for a reason the push did not cause. "
-        "Hosted Layer U owns it."
+        "reads the releases snapshot the tree carries, not the network (1.7s, "
+        "2026-11-07, mostly `git describe` on each submodule). It refuses only "
+        "a pin moved without refreshing the snapshot, which seldom happens. "
+        "Hosted Layer U owns it; the network half (`--watch`) runs on a "
+        "schedule and grades no push."
     ),
     "cdylib_soname_gate.py": (
         "R2653 -- it BUILDS its subject. The gate asks cargo which targets are "

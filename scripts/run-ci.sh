@@ -4049,24 +4049,17 @@ layer_c0mut_verdict_legs() {
 # pin names. R2226/R2227 read upstream at 1.5.0 while upstream was at 1.10.0,
 # and the only reason that surfaced was a person asking.
 #
-# ⛔ THE ONLY LANE IN THIS TREE THAT NEEDS THE NETWORK, and the only one with
-# no SKIP. Item 578's condition ③ is explicit -- a gate that cannot measure
-# must not report green -- so an absent `gh`, an unauthenticated one, or an
-# unreachable API all FAIL here. The cost is real and stated: a GitHub outage
-# reds this lane. The alternative is the failure mode the whole item is about,
-# one level up.
-#
-# ⚠ DELIBERATELY NOT IN `pre-push`. A developer without a network must still be
-# able to push; what they must not be able to do is run this lane and be told
-# everything is fine. Those are different guarantees, and separating them is
-# what lets condition ③ hold without an arming flag.
+# 2026-11-07 — NO NETWORK, NO `gh`. This lane used to call the releases API
+# itself, which made its verdict depend on the day it ran and on a token. The
+# API's answer is now an input the tree carries
+# (`scripts/lib/upstream_releases.json`, written by `--fetch` and pinned by the
+# sha256 of its body), and this lane judges the pins against it. Item 578's
+# condition ③ still holds here: an absent, damaged or stale snapshot FAILS,
+# with no SKIP. Whether upstream has published SINCE is a fact about the world,
+# not about a commit; `--watch` judges it on a schedule in
+# `.github/workflows/upstream-watch.yml` and fails there.
 layer_u_upstream_release_distance() {
     python3 scripts/lib/upstream_release_distance.py --selftest || return 1
-    if ! command -v gh >/dev/null 2>&1; then
-        echo "  Layer U FAIL: gh is not on PATH, so the releases API cannot be" \
-            "read and the distance cannot be measured (item 578 condition 3)" >&2
-        return 1
-    fi
     python3 scripts/lib/upstream_release_distance.py || return 1
     return 0
 }

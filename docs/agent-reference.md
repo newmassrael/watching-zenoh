@@ -76,8 +76,8 @@ git config core.hooksPath .githooks
   push proceeds (hosted CI judges it); an oracle that cannot run or read
   refuses, since that says nothing about any count. `scripts/lib/hook_default_region_gate.py`
   holds the list of checks above the boundary, with each check's measured
-  seconds, and the checks that stay hosted on purpose (Layer U, which needs the
-  network, and the count-guard builds, whose cold measurement was 473s for one
+  seconds, and the checks that stay hosted on purpose (Layer U, which seldom
+  refuses, and the count-guard builds, whose cold measurement was 473s for one
   guard). The default hook exits after these checks.
 
   The remaining static gates, feature tests/census, Layer 0, changed-crate

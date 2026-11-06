@@ -185,11 +185,11 @@ DEFERRED: tuple[Deferred, ...] = (
     ),
     Deferred(
         "scripts/run-ci.sh --layer U",
-        "needs the network and a GitHub token (9.4s when reachable) and goes "
-        "red whenever upstream publishes a release, which is a fact about the "
-        "world and not about this push; a push blocked on it would be refused "
-        "for a reason it did not cause. Its own lane header says it is "
-        "deliberately not in the hook",
+        "reads the releases snapshot the tree carries, not the network (1.7s, "
+        "2026-11-07), and refuses only a pin moved without refreshing that "
+        "snapshot, which seldom happens; hosted CI runs it on every push. "
+        "Whether upstream has published since is a fact about the world, "
+        "judged by `--watch` on a schedule (upstream-watch.yml) and by no push",
     ),
 )
 

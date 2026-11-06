@@ -1031,19 +1031,16 @@ jobs:
         # does" from a checkout pinned five minors back, and the only thing
         # that surfaced it was a person asking. This lane asks instead.
         #
-        # ⛔ THE ONLY STEP IN THIS WORKFLOW THAT NEEDS THE NETWORK, and it is
-        # given a token deliberately: unauthenticated the releases API is 60
-        # requests an hour per IP, which a shared runner exhausts, and item
-        # 578's condition ③ makes "could not measure" a FAILURE rather than a
-        # skip. So an outage reds this lane. That is the stated cost of not
-        # having a green that means nothing.
+        # 2026-11-07 — no network and no token: the lane judges the pins
+        # against the releases snapshot the tree carries
+        # (scripts/lib/upstream_releases.json), so its verdict is a function
+        # of the commit. Whether upstream has published since is judged by
+        # `upstream_release_distance.py --watch` in upstream-watch.yml, on a
+        # schedule, and grades no push.
         #
         # R2526 — LAST in this job on purpose; see the note at its old position
-        # for the seven steps its red was masking and why an expected,
-        # time-dependent red must not sit in front of gates that are neither.
-        # Nothing follows it here, so its refusal now costs only itself.
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # for the seven steps its red was masking. Its red is no longer
+        # time-dependent, but the position costs nothing and is kept.
         run: bash scripts/run-ci.sh --layer U
 
   # ─────────────────────────────────────────────────────────────────

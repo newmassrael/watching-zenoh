@@ -40,17 +40,21 @@ be the copy item 567 refused:
     3. `git clone` followed by `checkout "$VAR"` in a workflow whose `env:`
        block writes `VAR: VALUE`.
 * the UPSTREAM SIDE — the GitHub releases API. Not a table of known versions;
-  the repository's own answer.
+  the repository's own answer, recorded in the tree by `--fetch`
+  (`upstream_releases.json`) and read from there by the verdict. Until
+  2026-11-07 the verdict called the API itself; why it stopped is under "The
+  upstream answer is an input" below.
 
 ## ⛔ A GATE THAT CANNOT MEASURE MUST NOT REPORT GREEN
 
-Item 578's condition ③, and it is the reason this is NOT wired into `pre-push`.
-An unreachable API, a missing `gh`, an empty response: each FAILS. The cost is
-stated rather than hidden — this lane depends on the network, which no other
-lane in this tree does, so a GitHub outage reds a run. That is the trade item
-578 asked for in as many words ("못 재는 게이트는 초록을 보고하면 안 된다"),
-and the alternative — a SKIP that goes green — is the exact failure this gate
-exists to prevent, one layer up.
+Item 578's condition ③. A snapshot that is absent, edited after its fetch, or
+silent about a repository or pin the tree now names: each FAILS the verdict.
+An unreachable API, a missing `gh`, an empty response: each FAILS `--fetch`
+(which then writes nothing) and `--watch`. That is the trade item 578 asked
+for in as many words ("못 재는 게이트는 초록을 보고하면 안 된다"), and the
+alternative — a SKIP that goes green — is the exact failure this gate exists to
+prevent, one layer up. Only the watch depends on the network, and it grades no
+commit.
 
 ⚠ `NO_RELEASES` is NOT that escape. It is an OBSERVATION: the API answered, and
 its answer was an empty list. The two are told apart by whether the call
@@ -78,6 +82,8 @@ repository joining it is a RED that asks why a tagged pin was abandoned.
 from __future__ import annotations
 
 import argparse
+import datetime
+import hashlib
 import json
 import os
 import pathlib
@@ -629,14 +635,14 @@ def script_pins(paths: list[str]) -> dict[str, str]:
     return pins
 
 
-def releases(repo: str, fetch=None) -> list[str]:
-    """Tag names newest-first, from the repository's own releases API.
+def live_releases(repo: str) -> list[list[str]]:
+    """`[tag, published_at]` rows newest-first, from the repository's own
+    releases API. Only `--fetch` and `--watch` call this; the verdict reads the
+    snapshot (see "The upstream answer is an input" below).
 
     Raises [`Unmeasurable`] when the call fails. An EMPTY list is a result, not
     a failure, and the difference is the whole of item 578's condition ③.
     """
-    if fetch is not None:
-        return fetch(repo)
     got = subprocess.run(
         ["gh", "api", f"repos/{repo}/releases?per_page=100", "--jq",
          ".[] | [.tag_name, .published_at] | @tsv"],
@@ -648,8 +654,15 @@ def releases(repo: str, fetch=None) -> list[str]:
     rows = [line.split("\t") for line in got.stdout.strip().splitlines() if line.strip()]
     if any(len(r) != 2 for r in rows):
         raise Unmeasurable(f"{repo}: releases API returned a row this gate cannot read")
-    rows.sort(key=lambda r: r[1], reverse=True)
-    return [r[0] for r in rows]
+    rows.sort(key=lambda r: (r[1], r[0]), reverse=True)
+    return rows
+
+
+def releases(repo: str, fetch=None) -> list[str]:
+    """Tag names newest-first: from `fetch` when given, else the live API."""
+    if fetch is not None:
+        return fetch(repo)
+    return [tag for tag, _ in live_releases(repo)]
 
 
 def judge(pin: str | None, tags: list[str]) -> tuple[str, int]:
@@ -689,13 +702,25 @@ def release_toolchain(repo: str, ref: str, fetch=None) -> str | None:
     """The channel `ref` of `repo` pins, read from its own `rust-toolchain.toml`."""
     if fetch is not None:
         return fetch(repo, ref)
+    return live_toolchain(repo, ref)
+
+
+def live_toolchain(repo: str, ref: str) -> str | None:
+    """The live read behind [`release_toolchain`]: `None` when `ref` of `repo`
+    has no `rust-toolchain.toml` (the API answers 404, the normal case for a C
+    repository) or the file names no channel; [`Unmeasurable`] for any other
+    failure, so a snapshot never records an outage as "no toolchain".
+    """
     got = subprocess.run(
         ["gh", "api", f"repos/{repo}/contents/rust-toolchain.toml?ref={ref}", "--jq", ".content"],
         capture_output=True,
         text=True,
     )
     if got.returncode != 0:
-        raise Unmeasurable(f"{repo}@{ref}: cannot read rust-toolchain.toml")
+        if "HTTP 404" in got.stderr:
+            return None
+        raise Unmeasurable(f"{repo}@{ref}: cannot read rust-toolchain.toml: "
+                           f"{got.stderr.strip()[:200]}")
     import base64
 
     try:
@@ -725,12 +750,205 @@ def pin_consistency(workflow: str, pins: dict[str, str], toolchains: set[str]) -
     return sorted(bad)
 
 
-def run(fetch=None, tc_fetch=None) -> int:
+# ── 2026-11-07: the upstream answer is an INPUT, read from the tree ─────────
+#
+# Until this date the verdict called the releases API itself, so it was a
+# function of the tree AND of the moment it ran: one commit could be green on
+# Monday and red on Tuesday, a machine without `gh` and a token could not judge
+# it, and no verdict could be kept against the tree's content. Two different
+# questions were sharing one command:
+#
+#   * "does this tree agree with what upstream had published when its pins were
+#     last read?" -- the rows of `PINNED`, the bump grade, the workflow's cache
+#     keys and toolchain. That is a verdict on the tree.
+#   * "has upstream published since?" -- a fact about the world. It is not a
+#     verdict on any commit, and running it on every push is what made the lane
+#     need the network.
+#
+# So the API's answer is recorded in the tree (`SNAPSHOT`), with the sha256 of
+# its body written beside it, and the verdict reads only that. `--fetch` writes
+# it, where `gh` is authenticated; `--watch` compares it with the live API and
+# FAILS when upstream has moved, and runs on a schedule in its own workflow, out
+# of the check set. Item 578's condition ③ holds on both sides: the verdict
+# fails when the snapshot is absent, damaged or does not cover the tree's
+# population, and the watch fails when it cannot reach the API.
+#
+# ⚠ A pin bump now refreshes the snapshot in the same commit: the verdict refuses
+# a pinned ref the snapshot holds no toolchain answer for, and a repository the
+# snapshot holds no releases for. That is the coupling the old live read gave
+# for free, made explicit.
+SNAPSHOT = ROOT / "scripts" / "lib" / "upstream_releases.json"
+SNAPSHOT_SCHEMA = 1
+
+
+class SnapshotStale(Unmeasurable):
+    """The snapshot does not answer for the tree's current population."""
+
+
+def body_digest(body: dict) -> str:
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
+def render_snapshot(body: dict, fetched_at: str) -> str:
+    doc = {
+        "schema": SNAPSHOT_SCHEMA,
+        "fetched_at": fetched_at,
+        "written_by": "python3 scripts/lib/upstream_release_distance.py --fetch",
+        "sha256": body_digest(body),
+        "body": body,
+    }
+    return json.dumps(doc, indent=1, sort_keys=True) + "\n"
+
+
+def parse_snapshot(text: str) -> dict:
+    """The snapshot's body, or [`Unmeasurable`] naming why it cannot be read.
+
+    The digest covers the body only, so a refresh that changes nothing upstream
+    changes `fetched_at` and nothing the verdict reads. A body that disagrees
+    with its digest was not written by `--fetch` (a hand edit, or a merge that
+    mixed two fetches), and it is refused rather than judged.
+    """
+    try:
+        doc = json.loads(text)
+    except ValueError as exc:
+        raise Unmeasurable(f"the snapshot is not JSON: {exc}") from None
+    if not isinstance(doc, dict) or doc.get("schema") != SNAPSHOT_SCHEMA:
+        raise Unmeasurable(f"the snapshot is not schema {SNAPSHOT_SCHEMA}")
+    body = doc.get("body")
+    if (
+        not isinstance(body, dict)
+        or not isinstance(body.get("releases"), dict)
+        or not isinstance(body.get("toolchains"), dict)
+    ):
+        raise Unmeasurable("the snapshot has no `releases` and `toolchains` body")
+    if doc.get("sha256") != body_digest(body):
+        raise Unmeasurable(
+            "the snapshot's body does not match its sha256, so --fetch did not "
+            "write it; fetch again rather than editing it"
+        )
+    return body
+
+
+def load_snapshot(path: pathlib.Path = SNAPSHOT) -> dict:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise Unmeasurable(f"cannot read the snapshot {path.relative_to(ROOT)}: {exc}") from None
+    return parse_snapshot(text)
+
+
+def population() -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """`(repos, pins, stray)`: what this tree fetches, what it pins, and the
+    URLs no releases API can be asked about."""
     paths = tracked_paths()
     urls = grc.upstream_urls(paths)
-    stray = unroutable_urls(urls)
-    repos = github_repos(urls)
     pins = {**submodule_pins(), **script_pins(paths)}
+    return github_repos(urls), pins, unroutable_urls(urls)
+
+
+def toolchain_key(repo: str, ref: str) -> str:
+    return f"{repo}@{ref}"
+
+
+def fetch_body(repos: dict[str, str], pins: dict[str, str],
+               rel=live_releases, tc=live_toolchain) -> dict:
+    """Everything the verdict reads from upstream, for this population.
+
+    Any [`Unmeasurable`] propagates: a body with a hole in it is never written.
+    """
+    body: dict = {"releases": {}, "toolchains": {}}
+    for repo, url in sorted(repos.items()):
+        body["releases"][repo] = rel(repo)
+        ref = pins.get(url)
+        if ref is not None:
+            body["toolchains"][toolchain_key(repo, ref)] = tc(repo, ref)
+    return body
+
+
+def snapshot_fetchers(body: dict, repos: dict[str, str], pins: dict[str, str]):
+    """`(fetch, tc_fetch, stale)` serving [`run`] from a snapshot body.
+
+    `stale` names entries the tree no longer asks about; the fetchers raise
+    [`SnapshotStale`] for anything it asks about and the snapshot lacks. Both
+    mean "fetch again", and both fail the verdict.
+    """
+    wanted_tc = {
+        toolchain_key(repo, pins[url]) for repo, url in repos.items() if url in pins
+    }
+    stale = [f"the snapshot holds releases for {repo}, which this tree no longer fetches"
+             for repo in sorted(set(body["releases"]) - set(repos))]
+    stale += [f"the snapshot holds a toolchain answer for {key}, which no pin names now"
+              for key in sorted(set(body["toolchains"]) - wanted_tc)]
+
+    def fetch(repo: str) -> list[str]:
+        if repo not in body["releases"]:
+            raise SnapshotStale(f"{repo}: the snapshot holds no releases for it")
+        return [row[0] for row in body["releases"][repo]]
+
+    def tc_fetch(repo: str, ref: str) -> str | None:
+        key = toolchain_key(repo, ref)
+        if key not in body["toolchains"]:
+            raise SnapshotStale(f"{key}: the snapshot holds no toolchain answer for this pin")
+        return body["toolchains"][key]
+
+    return fetch, tc_fetch, stale
+
+
+def body_changes(old: dict, new: dict) -> list[str]:
+    """What differs between two bodies, one line per repository or pin."""
+    lines: list[str] = []
+    for repo in sorted(set(old["releases"]) | set(new["releases"])):
+        if repo not in old["releases"]:
+            lines.append(f"{repo}: not in the snapshot")
+            continue
+        if repo not in new["releases"]:
+            lines.append(f"{repo}: in the snapshot, no longer fetched")
+            continue
+        was = {row[0] for row in old["releases"][repo]}
+        now = {row[0] for row in new["releases"][repo]}
+        if now - was:
+            lines.append(f"{repo}: published {', '.join(sorted(now - was))}")
+        if was - now:
+            lines.append(f"{repo}: withdrew {', '.join(sorted(was - now))}")
+        if (now == was) and old["releases"][repo] != new["releases"][repo]:
+            lines.append(f"{repo}: the same tags with other publication times")
+    for key in sorted(set(old["toolchains"]) | set(new["toolchains"])):
+        a, b = old["toolchains"].get(key, "<absent>"), new["toolchains"].get(key, "<absent>")
+        if key not in old["toolchains"] or key not in new["toolchains"] or a != b:
+            lines.append(f"{key}: toolchain {a} -> {b}")
+    return lines
+
+
+def declared_toolchains(repos: dict[str, str], pins: dict[str, str],
+                        tc_fetch=None) -> tuple[set[str], list[str]]:
+    """The channels the pinned releases declare, plus failures.
+
+    A snapshot without an answer for a pin is a failure. A live read that fails
+    is recorded and passed over, as it always was: a repository without a
+    `rust-toolchain.toml` matters only if the workflow installs a channel, and
+    [`pin_consistency`] decides that.
+    """
+    toolchains: set[str] = set()
+    failures: list[str] = []
+    for repo, url in sorted(repos.items()):
+        ref = pins.get(url)
+        if ref is None:
+            continue
+        try:
+            channel = release_toolchain(repo, ref, fetch=tc_fetch)
+        except SnapshotStale as exc:
+            failures.append(str(exc))
+            continue
+        except Unmeasurable:
+            continue
+        if channel:
+            toolchains.add(channel)
+    return toolchains, failures
+
+
+def run(fetch=None, tc_fetch=None, stale: list[str] | None = None) -> int:
+    repos, pins, stray = population()
 
     observed: dict[str, tuple[str, int]] = {}
     # R2537 (item 716) — the TAGS are kept, not discarded. `judge` reduces them
@@ -751,23 +969,9 @@ def run(fetch=None, tc_fetch=None) -> int:
     # The workflow's own version literals, checked against the pins above. A
     # `rustup toolchain install` is only meaningful next to the release that
     # declares that channel, so the declared set is derived per pinned repo.
-    toolchains: set[str] = set()
-    for repo, url in sorted(repos.items()):
-        ref = pins.get(url)
-        if ref is None:
-            continue
-        try:
-            channel = release_toolchain(repo, ref, fetch=tc_fetch)
-        except Unmeasurable as exc:
-            # A repository with no `rust-toolchain.toml` is the normal case, and
-            # `gh` reports that as a failed call. Only a repo the workflow
-            # actually installs a channel for can make this matter, and that is
-            # what the comparison below decides -- so this is recorded, not
-            # fatal.
-            del exc
-            continue
-        if channel:
-            toolchains.add(channel)
+    toolchains, tc_failures = declared_toolchains(repos, pins, tc_fetch)
+    failures.extend(tc_failures)
+    failures.extend(stale or [])
     workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
     drift: list[str] = []
     try:
@@ -806,6 +1010,10 @@ def run(fetch=None, tc_fetch=None) -> int:
         for line in failures:
             print(f"    {line}")
         print("    A gate that cannot measure must not report green (item 578 ③).")
+        if stale is not None:
+            print("    The verdict reads the snapshot only. Where `gh` is authenticated,")
+            print("    run `python3 scripts/lib/upstream_release_distance.py --fetch`")
+            print("    and commit scripts/lib/upstream_releases.json with this change.")
     for repo in sorted(set(observed) | set(PINNED)):
         want, got = PINNED.get(repo), observed.get(repo)
         if repo not in observed and repo not in failures:
@@ -1165,6 +1373,96 @@ def selftest() -> int:
             bad += 1
             print(f"  selftest FAIL: {label} gave {len(got)} complaint(s), want {want_complaints}")
 
+    # ── 2026-11-07: the snapshot, which is all the verdict reads ──────────
+    #
+    # Each case is a way the input could stop being what `--fetch` wrote, or
+    # stop answering for the tree, and each must be refused rather than judged.
+    snap_cases = 0
+    fx_body = {
+        "releases": {"a/one": [["v3", "2026-03-01T00:00:00Z"], ["v1", "2026-01-01T00:00:00Z"]],
+                     "a/two": []},
+        "toolchains": {"a/one@v1": "1.97.1"},
+    }
+    text = render_snapshot(fx_body, "2026-11-07T00:00:00Z")
+    snap_cases += 1
+    if parse_snapshot(text) != fx_body:
+        bad += 1
+        print("  selftest FAIL: a snapshot did not read back as the body it was written from")
+    damaged = text.replace('"v3"', '"v4"')
+    for label, bad_text, needle in (
+        ("a body edited after the fetch", damaged, "sha256"),
+        ("another schema", text.replace('"schema": 1', '"schema": 2'), "schema"),
+        ("not JSON", text[:-3], "not JSON"),
+    ):
+        snap_cases += 1
+        try:
+            parse_snapshot(bad_text)
+            bad += 1
+            print(f"  selftest FAIL: {label} was read as a snapshot")
+        except Unmeasurable as exc:
+            if needle not in str(exc):
+                bad += 1
+                print(f"  selftest FAIL: {label} was refused for another reason: {exc}")
+    # The digest covers the body only: a refetch of the same answer is the same input.
+    snap_cases += 1
+    if body_digest(parse_snapshot(render_snapshot(fx_body, "2027-01-01T00:00:00Z"))) != \
+            body_digest(fx_body):
+        bad += 1
+        print("  selftest FAIL: fetched_at moved the body's digest")
+
+    fx_repos = {"a/one": "u1", "a/two": "u2"}
+    fx_pins2 = {"u1": "v1"}
+    fetch, tc_fetch, stale = snapshot_fetchers(fx_body, fx_repos, fx_pins2)
+    snap_cases += 1
+    if fetch("a/one") != ["v3", "v1"] or fetch("a/two") != [] or stale:
+        bad += 1
+        print(f"  selftest FAIL: a covering snapshot was not served whole (stale={stale})")
+    snap_cases += 1
+    if declared_toolchains(fx_repos, fx_pins2, tc_fetch) != ({"1.97.1"}, []):
+        bad += 1
+        print("  selftest FAIL: the snapshot's toolchain answer was not declared")
+    # A tree that fetches a third repository, and one whose pin moved: both
+    # are unanswered, and an unanswered pin must FAIL, not drop out of the
+    # workflow-consistency arm the way a live 404 does.
+    grown = {**fx_repos, "a/three": "u3"}
+    fetch, tc_fetch, stale = snapshot_fetchers(fx_body, grown, {"u1": "v3"})
+    snap_cases += 1
+    try:
+        fetch("a/three")
+        bad += 1
+        print("  selftest FAIL: a repository the snapshot lacks was served")
+    except SnapshotStale:
+        pass
+    snap_cases += 1
+    got_tc = declared_toolchains(grown, {"u1": "v3"}, tc_fetch)
+    if got_tc[0] or len(got_tc[1]) != 1 or "a/one@v3" not in got_tc[1][0]:
+        bad += 1
+        print(f"  selftest FAIL: a moved pin the snapshot lacks gave {got_tc}")
+    snap_cases += 1
+    if stale != ["the snapshot holds a toolchain answer for a/one@v1, which no pin names now"]:
+        bad += 1
+        print(f"  selftest FAIL: the moved pin's old answer was not named stale: {stale}")
+    _f, _t, stale = snapshot_fetchers(fx_body, {"a/one": "u1"}, fx_pins2)
+    snap_cases += 1
+    if stale != ["the snapshot holds releases for a/two, which this tree no longer fetches"]:
+        bad += 1
+        print(f"  selftest FAIL: a repository the tree dropped was not named stale: {stale}")
+    # A live read that fails leaves nothing to write: no half body.
+    snap_cases += 1
+    try:
+        fetch_body(fx_repos, fx_pins2, rel=explode, tc=lambda r, f: None)
+        bad += 1
+        print("  selftest FAIL: fetch_body returned a body past a failed read")
+    except Unmeasurable:
+        pass
+    # The watch: the same answer is quiet, a new release is named.
+    snap_cases += 1
+    moved = json.loads(json.dumps(fx_body))
+    moved["releases"]["a/one"].insert(0, ["v4", "2026-11-01T00:00:00Z"])
+    if body_changes(fx_body, fx_body) or body_changes(fx_body, moved) != ["a/one: published v4"]:
+        bad += 1
+        print(f"  selftest FAIL: body_changes gave {body_changes(fx_body, moved)}")
+
     if bad:
         print(f"upstream-release-distance selftest: FAIL ({bad})")
         return 1
@@ -1176,19 +1474,100 @@ def selftest() -> int:
         f"upstream-release-distance selftest: OK ({len(cases)} classifier case(s), "
         f"{len(threshold_cases)} threshold case(s), {len(grade_cases)} grade "
         f"case(s) plus the boundary from both sides, the measure/observe split, "
-        f"the two zero-population arms, and the workflow-consistency arm with "
-        f"its control)"
+        f"the two zero-population arms, the workflow-consistency arm with "
+        f"its control, and {snap_cases} snapshot case(s))"
     )
+    return 0
+
+
+def verdict() -> int:
+    """Layer U: judge the tree against the snapshot. No network, no `gh`."""
+    try:
+        body = load_snapshot()
+    except Unmeasurable as exc:
+        print(f"upstream-release-distance: FAIL — {exc}")
+        print("    A gate that cannot measure must not report green (item 578 ③).")
+        return 1
+    repos, pins, _ = population()
+    fetch, tc_fetch, stale = snapshot_fetchers(body, repos, pins)
+    return run(fetch=fetch, tc_fetch=tc_fetch, stale=stale)
+
+
+def fetch_snapshot() -> int:
+    """Write the snapshot from the live API. Writes nothing if any read fails."""
+    repos, pins, _ = population()
+    try:
+        body = fetch_body(repos, pins)
+    except Unmeasurable as exc:
+        print(f"upstream-release-distance --fetch: FAIL — {exc}; nothing written")
+        return 1
+    try:
+        old = load_snapshot()
+    except Unmeasurable:
+        old = {"releases": {}, "toolchains": {}}
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    SNAPSHOT.write_text(render_snapshot(body, stamp), encoding="utf-8")
+    changes = body_changes(old, body)
+    print(f"upstream-release-distance --fetch: wrote {SNAPSHOT.relative_to(ROOT)} "
+          f"({len(body['releases'])} repositories, {len(body['toolchains'])} pinned refs, "
+          f"sha256 {body_digest(body)[:16]})")
+    for line in changes:
+        print(f"    {line}")
+    if not changes:
+        print("    the body is unchanged; only fetched_at moved")
+    print("    Run without flags (Layer U) to see which rows of PINNED move.")
+    return 0
+
+
+def watch() -> int:
+    """Out of the check set: FAIL when upstream has moved past the snapshot.
+
+    Run on a schedule where the API is reachable (`upstream-watch.yml`). Its
+    red is not a red of any commit: it says the snapshot is behind the world,
+    and the repair is `--fetch` plus whatever rows Layer U then names.
+    """
+    repos, pins, _ = population()
+    try:
+        live = fetch_body(repos, pins)
+    except Unmeasurable as exc:
+        print(f"upstream-release-watch: FAIL — could not measure: {exc}")
+        print("    A watch that cannot measure must not report green (item 578 ③).")
+        return 1
+    try:
+        snap = load_snapshot()
+    except Unmeasurable as exc:
+        print(f"upstream-release-watch: FAIL — {exc}")
+        return 1
+    changes = body_changes(snap, live)
+    print(f"upstream-release-watch: {len(live['releases'])} repositories read live")
+    if changes:
+        print("upstream-release-watch: FAIL — upstream differs from the snapshot:")
+        for line in changes:
+            print(f"    {line}")
+        print("    Run `--fetch` where gh is authenticated and commit the snapshot;")
+        print("    Layer U then names the PINNED rows that move, and a `minor` or")
+        print("    greater step opens a bump round (item 711).")
+        return 1
+    print("upstream-release-watch: OK — the snapshot is what upstream publishes")
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--selftest", action="store_true", help="drive the classifier on fixtures")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--selftest", action="store_true", help="drive the classifier on fixtures")
+    mode.add_argument("--fetch", action="store_true",
+                      help="write the snapshot from the live releases API (needs gh)")
+    mode.add_argument("--watch", action="store_true",
+                      help="fail when upstream differs from the snapshot (needs gh)")
     args = ap.parse_args()
     if args.selftest:
         return selftest()
-    return run()
+    if args.fetch:
+        return fetch_snapshot()
+    if args.watch:
+        return watch()
+    return verdict()
 
 
 if __name__ == "__main__":

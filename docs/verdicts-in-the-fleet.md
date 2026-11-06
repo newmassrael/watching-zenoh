@@ -86,8 +86,14 @@ Each stage is its own round and lands on its own.
      `capabilities`, read from the armed-oracle census and the lane's use of
      the namespace sandbox), and bx places it only where that is present.
      C1bn and C1bs (the latter through the sandbox) pass there.
-   - Left, all fleet provisioning: U needs `gh` and a token in the run
-     account, and C1cc needs valgrind beyond the one machine that has it.
+   - U no longer reads the network. The releases API's answer is an input the
+     tree carries (`scripts/lib/upstream_releases.json`, written by
+     `upstream_release_distance.py --fetch`, with the sha256 of its body), and
+     the lane judges the pins against it on any machine. Whether upstream has
+     published since is not a verdict on a commit: `--watch` judges it on a
+     schedule in `upstream-watch.yml`, outside the check set.
+   - Left, fleet provisioning: C1cc needs valgrind beyond the one machine that
+     has it.
 4. **Judged before landing.** `scripts/land.sh` already holds the clone's push
    lock, so it is already a serial integrator for this machine. It runs
    `bx --checks ci` on the rebased candidate and pushes only a pass, which is

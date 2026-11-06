@@ -73,8 +73,8 @@ keeps paying for.
 Offline and seconds, on purpose, so it can run in Layer C0 and by hand mid-bump.
 That buys two absences:
 
-  * anything needing the network. `upstream_release_distance`'s own table is
-    graded by Layer U, which reads the releases API;
+  * the release table. `upstream_release_distance`'s own table is graded by
+    Layer U, against the releases snapshot the tree carries;
   * anything needing a built oracle or a cargo build. The zenoh-c symbol census
     is one of those — but its VERSION COLUMN is readable statically, and that is
     the half this catches: R2535 paid a hosted red whose whole content was a
