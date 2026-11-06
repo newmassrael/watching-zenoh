@@ -313780,6 +313780,34 @@
         "The row of the board table for the image over tcp/ (rmii-dp83825i-fixed-tcp) cites this entry in the next round, with HW.0 to HW.7 and HW.36 to HW.44 as its verdict_steps, the image hash above, and its note and budget row brought up to the stream steps. The pool steps HW.26 to HW.35 are still not in the kit lane."
       ]
     },
+    "Round 4342": {
+      "decision_summary": "The hosted run 42121505586 was red on a dozen lanes after the integration-test merge, and the part of it the prefix for --exact did not reach was a lane that names its tests after the double dash. In a merged executable libtest takes the file's module as one filter and a bare test name as another, and filters add up, so a leg that wanted five tests of one file ran the whole file and E5 ran every test in the crate whose name held a substring. Those legs now name each test whole or scope the name to its file through the helper, C1bm names its moved file through the helper, the two pico files that loaded one helper by #[path] into one executable load it once from the target root, and the merge tool refuses a target whose files would load one module twice.",
+      "changes_bullets": [
+        "In run-ci.sh the five pico legs of the cooperative engine name each test with WZ_TEST_PREFIX under the target alone, the router pubsub loop and E5 pass their test as the helper's third word, and C1bm takes its target from wz_test_args. retarget_test_refs.py reads the prefix back as the bare name, accepts a quoted variable as the helper's third word and gains --exact-names, which writes the prefix into the --exact names of a command that uses the helper's array. The wz-capi-pico it target declares link_roundtrip once and the serial and ws files use it. merge_tests.py refuses a target whose files each load one path by #[path]. test_target.sh declares its variables read by its callers."
+      ],
+      "verification_bullets": [
+        "On pc3 C1bm's unixpipe and quic suites and the ws link test pass by their merged names, wz-capi-pico builds its it target with the serial and ws links together, and the prefixed name of the C1cd test selects one test where the bare name selects none. The selftests of retarget_test_refs and merge_tests pass, the rewrite of --exact names reads back word for word against the file before it, shellcheck is clean on run-ci.sh and the helper, and the count-guard lint, lane reach, feature membership, config key, oracle scope and corpus gates pass. The oracle lanes need zenohd and the pico tools and were not run."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Not touched and not mine: the hosted reds of the same run in C1bf (a cfg-gated pub struct field), C1bz and C1bzr (a private doc link in wz-session-mcu), and hold_a_listener's feature table, which a peer restored on its own branch. The next hosted run reads whether the oracle lanes now select their tests."
+      ],
+      "publishable_decision_summary": "The hosted run 42121505586 was red on a dozen lanes after the integration-test merge, and the part of it the prefix for --exact did not reach was a lane that names its tests after the double dash. In a merged executable libtest takes the file's module as one filter and a bare test name as another, and filters add up, so a leg that wanted five tests of one file ran the whole file and E5 ran every test in the crate whose name held a substring. Those legs now name each test whole or scope the name to its file through the helper, C1bm names its moved file through the helper, the two pico files that loaded one helper by #[path] into one executable load it once from the target root, and the merge tool refuses a target whose files would load one module twice.",
+      "publishable_changes_bullets": [
+        "In run-ci.sh the five pico legs of the cooperative engine name each test with WZ_TEST_PREFIX under the target alone, the router pubsub loop and E5 pass their test as the helper's third word, and C1bm takes its target from wz_test_args. retarget_test_refs.py reads the prefix back as the bare name, accepts a quoted variable as the helper's third word and gains --exact-names, which writes the prefix into the --exact names of a command that uses the helper's array. The wz-capi-pico it target declares link_roundtrip once and the serial and ws files use it. merge_tests.py refuses a target whose files each load one path by #[path]. test_target.sh declares its variables read by its callers."
+      ],
+      "publishable_verification_bullets": [
+        "On pc3 C1bm's unixpipe and quic suites and the ws link test pass by their merged names, wz-capi-pico builds its it target with the serial and ws links together, and the prefixed name of the C1cd test selects one test where the bare name selects none. The selftests of retarget_test_refs and merge_tests pass, the rewrite of --exact names reads back word for word against the file before it, shellcheck is clean on run-ci.sh and the helper, and the count-guard lint, lane reach, feature membership, config key, oracle scope and corpus gates pass. The oracle lanes need zenohd and the pico tools and were not run."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Not touched and not mine: the hosted reds of the same run in C1bf (a cfg-gated pub struct field), C1bz and C1bzr (a private doc link in wz-session-mcu), and hold_a_listener's feature table, which a peer restored on its own branch. The next hosted run reads whether the oracle lanes now select their tests."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
