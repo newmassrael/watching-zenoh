@@ -98,6 +98,10 @@ image_spec() {
     # The locator a node image is reached at: the address its Kconfig gives it and the port it listens
     # on, over the transport its image is built for (a datagram's unless the table below says another).
     NODE_LOCATOR="udp/192.168.100.10:7447"
+    # The pools a node image is built with, as `--pool-image` names them (tx, rx): a node image with a pool
+    # is also put to that pool's steps (HW.26 to HW.30 for tx, HW.31 to HW.35 for rx), which the program
+    # judges from the console, its own output and a capture of the node's frames at this host's wire.
+    POOLS=""
     case "$1" in
         # COMPARE images (docs/upstream-parity.md M1): they answer the same two GETs with the same keys,
         # bodies and encoding as zephyr-client-fixed, and are run by `compare` beside it. They have no
@@ -170,6 +174,7 @@ image_spec() {
             OVERLAYS="overlays/t2g_fixed.conf;overlays/t2g_tx_pool.conf;overlays/t2g_rx_pool.conf"
             KIND="node"
             READY_TAG="ZEPHYR-WZ-ADMIN READY"
+            POOLS="tx rx"
             ;;
         # The same node with its links on tcp/ (CONFIG_WZ_LINK_TCP): the steps are the same, put to the
         # node by the program in its stream transport, which takes the transport from the scheme of the
@@ -552,6 +557,9 @@ flash_region() {
 
 stop_all() {
     local pid
+    # A capture runs as root, so the kill below cannot end it; stop_capture can. It is ended here so that
+    # every way out of a run ends it, because one left running refuses the next flash.
+    stop_capture
     for pid in "${PIDS[@]:-}"; do
         [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
     done
@@ -581,6 +589,24 @@ take_kit() {
     printf 'pid=%s home=%s step=%s since=%s\n' "$$" "$LANE_HOME" "$1" "$(date -u +%FT%TZ)" >"$KIT_LOCK.owner"
 }
 
+# What a run writes into its directory and reads back to decide that something has started or ended: its
+# console, its captures, its reset and its verdicts. The directory belongs to a built image and is the same
+# for every run of it, so the files of the run before are there when this run begins, and a wait that reads
+# one (a READY line, a line of a capture) before the process that writes it has truncated it is answered by
+# the run before. They are removed before the run does anything, so a file that is there was written by it.
+RUN_PRODUCTS=(
+    console.raw console.boot console.run console.err
+    cap.err cap.out cap.txt node.pcap
+    reset.log ip.log probe.log
+    verdict.txt verdict.err pool-verdict.txt pool-verdict.err
+)
+clear_run_products() {
+    local name
+    for name in "${RUN_PRODUCTS[@]}"; do
+        rm -f -- "$OUT/$name"
+    done
+}
+
 run() {
     local key="$1" before="$fails"
     image_spec "$key" || { bad "$key" "not an image of this lane (scripts/kit-lane.sh list)"; return 1; }
@@ -605,6 +631,7 @@ run() {
         echo "tree:   $(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo 'not a git checkout (a copy of a tree)')"
         echo "date:   $(date '+%F %T %Z')"
     } >"$OUT/record.txt"
+    clear_run_products
     flash_region "$OUT/m7.bin" "$(cat "$OUT/m7.sha256")" "$key" || return 1
 
     PIDS=()
@@ -1158,6 +1185,77 @@ EOF
     hold_the_arena "$key" "$OUT/console.run"
 }
 
+# Where, in the console file, the boot that began after the byte $1 starts, printed as a byte offset: the
+# first Zephyr banner at or after $1, taken back to the cache line of the same boot (the one early line the
+# firmware prints before the banner), when that line is also at or after $1. The console is the only thing
+# that tells a boot's bytes from the previous boot's: a boot begins with its banner, and the banner of the
+# boot the reset began can only come after the reset, which is after the size $1 was read. Waits for the
+# banner for 30 s and fails if none comes.
+boot_start_after() {
+    local mark="$1" waited=0 banner="" caches=""
+    while [[ "$waited" -lt 30 ]]; do
+        banner="$(grep -abo '\*\*\* Booting Zephyr' "$OUT/console.raw" | cut -d: -f1 | awk -v m="$mark" '$1 >= m { print $1; exit }')"
+        [[ -n "$banner" ]] && break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    [[ -n "$banner" ]] || return 1
+    caches="$(grep -abo 'wz: caches' "$OUT/console.raw" | cut -d: -f1 | awk -v m="$mark" -v b="$banner" '$1 >= m && $1 < b { print $1; exit }')"
+    echo "${caches:-$banner}"
+}
+
+# The capture of a node's frames for the pool steps: a pcap of the Ethernet frames to and from the node's
+# address (the file the program reads for the transmit pool's HW.30), made at this host's wire from before
+# the reset. It runs as root and is written as this user; stop_all ends it on every way out of a run.
+start_node_capture() {
+    local key="$1" address waited=0
+    address="${NODE_LOCATOR#*/}"
+    address="${address%%:*}"
+    if ! command -v tcpdump >/dev/null 2>&1; then
+        bad "$key" "tcpdump is not installed: the pool steps read a capture of the node's frames"
+        return 1
+    fi
+    # shellcheck disable=SC2024  # the capture's own output is written as this user, into the run's directory
+    sudo -n tcpdump -i "$KIT_IFACE" -n -U -Z "$(id -un)" -w "$OUT/node.pcap" "host $address" \
+        >"$OUT/cap.out" 2>"$OUT/cap.err" </dev/null &
+    CAPTURE_PID=$!
+    while [[ "$waited" -lt 10 ]] && ! grep -aq 'listening on' "$OUT/cap.err" 2>/dev/null; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if ! grep -aq 'listening on' "$OUT/cap.err" 2>/dev/null; then
+        bad "$key" "the capture did not start in 10 s ($OUT/cap.err)"
+        return 1
+    fi
+    ok "$key" "the node's frames are captured at the host's wire ($OUT/node.pcap)"
+}
+
+# The pool steps of a node image, judged from the files its run left: the console of the boot, the
+# program's own output of the run (HW.0 to HW.7, which the pool steps hold to the same console) and the
+# capture. The firmware prints a pool's counts every 10 s when they moved, so the last line is waited for
+# before the capture ends and the files are read.
+judge_pools() {
+    local key="$1" pool steps="" args=()
+    for pool in $POOLS; do
+        args+=(--pool-image "$pool")
+        [[ "$pool" == tx ]] && args+=(--pcap "$OUT/node.pcap")
+    done
+    case "$POOLS" in
+        tx) steps="HW.26 to HW.30" ;;
+        rx) steps="HW.31 to HW.35" ;;
+        *) steps="HW.26 to HW.35" ;;
+    esac
+    sleep 12
+    stop_capture
+    if python3 "$ROOT/scripts/lib/admin_node_verdict.py" board --node "$NODE_LOCATOR" \
+        --console "$OUT/console.boot" --onboard "$OUT/verdict.txt" "${args[@]}" \
+        >"$OUT/pool-verdict.txt" 2>"$OUT/pool-verdict.err"; then
+        ok "$key" "every step $steps held ($OUT/pool-verdict.txt)"
+    else
+        bad "$key" "the pool steps did not all hold ($OUT/pool-verdict.txt, $OUT/pool-verdict.err): $(grep -a 'FAIL' "$OUT/pool-verdict.txt" | head -n 2 | tr '\n' ' ')"
+    fi
+}
+
 # A NODE image after its flash: the console is captured from before the reset, the kit is reset, and the
 # steps of HARDWARE_VERDICT.md (HW.0 to HW.7) are run by the program that IS them
 # (`scripts/lib/admin_node_verdict.py board`) against the node at its address on the cable, with the console
@@ -1178,6 +1276,13 @@ run_node() {
     setsid timeout 900 cat "$KIT_CONSOLE" >"$OUT/console.raw" 2>"$OUT/console.err" </dev/null &
     PIDS+=("$!")
     sleep 2
+    # The capture of the node's frames is running before the reset, so it holds the boot and every frame
+    # the node sends after it.
+    if [[ -n "$POOLS" ]] && ! start_node_capture "$key"; then
+        return 1
+    fi
+    # The console's size just before the reset: every byte of the boot under test is at or after it, and
+    # the boot the flash started is not (it began seconds before the capture of the console did).
     local mark
     mark="$(stat -c %s "$OUT/console.raw")"
     if timeout 60 "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" \
@@ -1188,8 +1293,16 @@ run_node() {
         bad "$key" "the reset failed ($OUT/reset.log)"
         return 1
     fi
-    # The boot under test: the bytes after the reset, live.
-    setsid tail -c +"$((mark + 1))" -f "$OUT/console.raw" >"$OUT/console.boot" 2>/dev/null </dev/null &
+    # The boot under test: the bytes of the boot the reset began, live. Where it begins is told by the
+    # console and not by a clock (boot_start_after): the boot the flash started may still be printing when
+    # the reset comes, and its READY line, taken for this boot's, names an id the node under test does not
+    # have.
+    local boot_start
+    if ! boot_start="$(boot_start_after "$mark")"; then
+        bad "$key" "no boot began after the reset in 30 s: the console shows no Zephyr banner past byte $mark"
+        return 1
+    fi
+    setsid tail -c +"$((boot_start + 1))" -f "$OUT/console.raw" >"$OUT/console.boot" 2>/dev/null </dev/null &
     PIDS+=("$!")
     local waited=0
     while [[ "$waited" -lt 90 ]] && ! grep -aq "$READY_TAG" "$OUT/console.boot" 2>/dev/null; do
@@ -1216,6 +1329,7 @@ run_node() {
     else
         bad "$key" "the steps of HARDWARE_VERDICT.md did not all hold ($OUT/verdict.txt, $OUT/verdict.err): $(grep -a 'FAIL' "$OUT/verdict.txt" | head -n 2 | tr '\n' ' ')"
     fi
+    [[ -n "$POOLS" ]] && judge_pools "$key"
     if grep -aq 'wz: FAIL' "$OUT/console.boot"; then
         bad "$key" "the console says 'wz: FAIL' ($(grep -a 'wz: FAIL' "$OUT/console.boot" | head -n 1))"
     else
@@ -1319,9 +1433,23 @@ compare() {
 # sent to tcpdump, which then writes out what it holds. A capture left running would refuse the next
 # flash (flash_region), so every way out of a boot ends it.
 CAPTURE_PID=""
+# The signal is sent until the capture has gone, because sudo hands a signal to its command only once the
+# command runs: one sent in the first moments after the start is taken by sudo and lost, and a wait on a
+# capture that never got it does not end. The bound is a limit for a capture that cannot be ended, which is
+# said and not waited for.
 stop_capture() {
+    local tries=0
     if [[ -n "$CAPTURE_PID" ]]; then
-        sudo -n kill -INT "$CAPTURE_PID" 2>/dev/null
+        while kill -0 "$CAPTURE_PID" 2>/dev/null; do
+            if [[ "$tries" -ge 75 ]]; then
+                bad "capture" "the capture (pid $CAPTURE_PID) did not end in 15 s of signals: it is still running and refuses the next flash"
+                CAPTURE_PID=""
+                return 1
+            fi
+            sudo -n kill -INT "$CAPTURE_PID" 2>/dev/null
+            sleep 0.2
+            tries=$((tries + 1))
+        done
         wait "$CAPTURE_PID" 2>/dev/null
         CAPTURE_PID=""
     fi
@@ -1488,6 +1616,29 @@ PY
         else
             bad selftest "$key has no row in the resource budget: a run of it would be held to nothing"
         fi
+        # A pool in the image's overlays is a pool the run must judge, and a pool the table names is one the
+        # program has steps for and the image is built with: neither may be said without the other.
+        local pool
+        for pool in tx rx; do
+            if [[ "$OVERLAYS" == *"t2g_${pool}_pool.conf"* && " $POOLS " != *" $pool "* ]]; then
+                bad selftest "$key is built with the $pool pool and its table entry does not put it to the pool's steps (POOLS)"
+            fi
+        done
+        for pool in $POOLS; do
+            if [[ "$OVERLAYS" != *"t2g_${pool}_pool.conf"* ]]; then
+                bad selftest "$key names the pool '$pool' in POOLS and its overlays do not build it"
+            elif python3 -I - "$ROOT" "$pool" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/scripts/lib")
+import admin_node_verdict as v
+sys.exit(0 if sys.argv[2] in v.IMAGES else 1)
+PY
+            then
+                ok selftest "$key is put to the steps of the $pool pool, which the program judges"
+            else
+                bad selftest "$key names the pool '$pool', which the verdict program has no steps for"
+            fi
+        done
     done
     for key in "${MEASURE_IMAGES[@]}"; do
         if ! image_spec "$key" || [[ "$KIND" != measure || -z "${DONE_TAG:-}" ]]; then
@@ -1500,6 +1651,25 @@ PY
             ok selftest "$key is a measure image of deploy/$APP that ends on '$DONE_TAG done'"
         fi
     done
+    # A console, a capture, a reset or a verdict file the script writes into the run's directory is one of
+    # the files a run removes before it starts (RUN_PRODUCTS): a file left by the run before is read as this
+    # run's by a wait that comes before its writer does.
+    local named name product listed missing=""
+    # shellcheck disable=SC2016  # the pattern is the text of this script, where $OUT is written
+    named="$(grep -o '\$OUT/\(console\.[a-z]*\|cap\.[a-z]*\|node\.pcap\|reset\.log\|ip\.log\|probe\.log\|verdict\.[a-z]*\|pool-verdict\.[a-z]*\)' "${BASH_SOURCE[0]}" | sort -u)"
+    for name in $named; do
+        name="${name#\$OUT/}"
+        listed=""
+        for product in "${RUN_PRODUCTS[@]}"; do
+            [[ "$product" == "$name" ]] && listed=1
+        done
+        [[ -n "$listed" ]] || missing="$missing $name"
+    done
+    if [[ -z "$missing" ]]; then
+        ok selftest "every console, capture, reset and verdict file a run writes is cleared before the run"
+    else
+        bad selftest "RUN_PRODUCTS does not list:$missing"
+    fi
     [[ "$fails" -eq 0 ]]
 }
 
