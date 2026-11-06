@@ -313688,6 +313688,34 @@
         "Next: the board table row for the stream steps (verdict_steps and the note of the tcp node's row in deploy/zephyr-boards.json, and the measurement line of its budget row), citing this round. Not shown: HW.42's refusal bound is read on one stack of lwIP's options (it closed three of five here and six of eight under QEMU, both inside the bound, by different counts); HW.43 is sequential, so it does not show queries arriving together; the kit runs were three, not a volume; and the pool steps HW.26 to HW.35 are still not in the kit lane."
       ]
     },
+    "Round 4340": {
+      "decision_summary": "Two reds of the hosted run on e0459e59fc that no session had taken, paid under the owner's standing instruction (every red is fixed, whoever made it). C1bf: the drift audit found wz-admin, which carries cfg(feature)-gated pub fields since the admin space left the core, and it was not in the C1bf COVERED list, so no lane composed its features; it is added, with its reason, after clippy with all features and all targets was read clean on a build machine. C1bz: wz-session-mcu's doc comment on group_task_cell_bytes linked to the private fn group_task (public documentation to a private item), one over the ledger's 0; the link is now plain code. Not touched here: pico-default's budget (read after 7f907e51ef), wz-capi-pico's clean builds under all features and engine-coop, C1bm unixpipe_listen_multiclient.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: wz-admin in the C1bf covered list. crates/wz-session-mcu/src/slot_group.rs: the doc of group_task_cell_bytes names group_task as code, not as a link."
+      ],
+      "verification_bullets": [
+        "On a build machine (pc3) through bx: cargo clippy -p wz-admin --all-targets --all-features -- -D warnings exit 0 (the C1bf lane's own command for the crate), and RUSTDOCFLAGS=-D warnings cargo doc -p wz-session-mcu --no-deps --all-features exit 0. Not run: the whole C1bf lane (its other twelve crates are unchanged by this) and the C1bz ledger count over all crates; the next hosted run reads both."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The hosted reds that remain from that run belong to open work: pico-default over budget by 46 bytes (may be paid by 7f907e51ef, unread), wz-capi-pico clean under all features and under engine-coop, C1bm unixpipe_listen_multiclient, and the C1cc, C1cd and E5 legs whose selection is paid by the previous round and not yet read."
+      ],
+      "publishable_decision_summary": "Two reds of the hosted run on e0459e59fc that no session had taken, paid under the owner's standing instruction (every red is fixed, whoever made it). C1bf: the drift audit found wz-admin, which carries cfg(feature)-gated pub fields since the admin space left the core, and it was not in the C1bf COVERED list, so no lane composed its features; it is added, with its reason, after clippy with all features and all targets was read clean on a build machine. C1bz: wz-session-mcu's doc comment on group_task_cell_bytes linked to the private fn group_task (public documentation to a private item), one over the ledger's 0; the link is now plain code. Not touched here: pico-default's budget (read after 7f907e51ef), wz-capi-pico's clean builds under all features and engine-coop, C1bm unixpipe_listen_multiclient.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: wz-admin in the C1bf covered list. crates/wz-session-mcu/src/slot_group.rs: the doc of group_task_cell_bytes names group_task as code, not as a link."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine (pc3) through bx: cargo clippy -p wz-admin --all-targets --all-features -- -D warnings exit 0 (the C1bf lane's own command for the crate), and RUSTDOCFLAGS=-D warnings cargo doc -p wz-session-mcu --no-deps --all-features exit 0. Not run: the whole C1bf lane (its other twelve crates are unchanged by this) and the C1bz ledger count over all crates; the next hosted run reads both."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The hosted reds that remain from that run belong to open work: pico-default over budget by 46 bytes (may be paid by 7f907e51ef, unread), wz-capi-pico clean under all features and under engine-coop, C1bm unixpipe_listen_multiclient, and the C1cc, C1cd and E5 legs whose selection is paid by the previous round and not yet read."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
