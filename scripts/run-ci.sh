@@ -14516,7 +14516,7 @@ layer_c1bs_live_capture() {
     # has it, non-interactive sudo (a hosted runner), or the namespace sandbox of
     # `netns-topology.sh`. The sandbox is a user and network namespace of its
     # own with CAP_NET_RAW over it, which is what a build machine with neither
-    # gives (bx names that facility `userns-net-raw`). Its `lo` is its own and
+    # gives (bx names that facility `userns-netns`). Its `lo` is its own and
     # bwrap brings it up, so every read below, the tests' probe packets and the
     # live arm's feeder, has to run inside the same wrapper.
     local runner=() sandbox_rc=0

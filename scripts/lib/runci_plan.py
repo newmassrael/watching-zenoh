@@ -91,10 +91,12 @@ states the lane's dependence on it.
     `armed_oracle_census.py` declares for that flag, a program as `needs` and
     a file or Python module as the Debian package that provides it
     (`packages`).
-  * `capabilities: ["userns-net-raw"]`: a lane whose function wraps a witness
+  * `capabilities: ["userns-netns"]`: a lane whose function wraps a witness
     in `scripts/lib/netns-sandbox.sh`, the user and network namespace with
-    CAP_NET_RAW over it that a lane falls back to where there is no sudo. A
-    hosted runner has sudo; a build machine has the sandbox or nothing.
+    CAP_NET_ADMIN, CAP_SYS_ADMIN and CAP_NET_RAW over it, in which it makes
+    named namespaces and veth pairs, that a lane falls back to where there is
+    no sudo. A hosted runner has sudo; a build machine has the sandbox or
+    nothing.
   * `needs` from `JOB_ARMED_COMMANDS`: a program a lane fails without because
     its hosted job arms it (a `WZ_*_REQUIRE` in the job's env, or a lane that
     has no skip), which the runner image or an apt step of that job provides.
@@ -148,14 +150,14 @@ PREP = re.compile(r"^bash (scripts/(?:build|install|provision)-[\w.-]+\.sh)((?: 
 # A lane line of a hosted step, the only form `ci.yml` writes.
 LANE = re.compile(r"^bash scripts/run-ci\.sh --layer ([A-Za-z0-9]+)$")
 
-# The namespace sandbox a lane wraps a witness in when the machine gives it no sudo, and the
-# closest name bx has for what it needs. `userns-net-raw` is tested by bx as CAP_NET_RAW alone in
-# an unprivileged user and network namespace; the sandbox also adds CAP_NET_ADMIN and
-# CAP_SYS_ADMIN there and builds a veth pair (`netns_sandbox_exec`). A host that passes the name
-# and fails the rest takes the unit and the lane reports the broken sandbox as its failure. A
-# capability tested as the sandbox is used was put to the fleet's owner on 2026-11-07.
+# The namespace sandbox a lane wraps a witness in when the machine gives it no sudo, and the bx
+# capability that is tested the way the sandbox is used: bwrap with the same three capabilities
+# in an unprivileged user and network namespace, `ip netns add` and a veth pair moved into it
+# (`netns_sandbox_exec`). Until 2026-11-07 the name was `userns-net-raw`, which bx tests as
+# CAP_NET_RAW alone, so a host that passed it and refused a namespace or veth took the unit and
+# failed it.
 SANDBOX = "scripts/lib/netns-sandbox.sh"
-SANDBOX_CAPABILITY = "userns-net-raw"
+SANDBOX_CAPABILITY = "userns-netns"
 
 # Programs a lane fails without because its HOSTED JOB arms it, so no arming in run-ci.sh says so
 # and the census cannot (see the docstring). Each entry quotes the lane's failure sentence.
