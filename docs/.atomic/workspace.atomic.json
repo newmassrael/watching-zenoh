@@ -313906,6 +313906,50 @@
         "The rest of the hosted run the earlier rounds answered is held by another session: Layer Q's frt chain, C1bnl's shared-memory provider, Z8 regions and the macOS leg."
       ]
     },
+    "Round 4346": {
+      "decision_summary": "The router's interests and the broker hat's subscriptions are indexed by keyexpr: KeyexprIndex, a persistent trie of keyexpr chunks (path-copied like the phase 6 maps), finds the members whose keyexpr may meet a question, wildcards on either side, and the exact matcher the scan used decides each candidate (filter and refine), so every answer is the scan's. The broker hat's exact-key questions (sub_contributions, sub_keys, the re-declare check) read the store's index by key instead of trying every face. This closes the carried item of docs/router-table-snapshots.md section 7: a subscription and an interest no longer cost as many tries as faces are up, under both values of routing-table-sharing.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/keyexpr_index.rs: new KeyexprIndex (insert, remove with pruning, contains, intersecting), held by a model test against the full scan over every chunk form and by tests of the states a walk visits.",
+        "crates/wz-runtime-tokio/src/future_interest.rs: by_target and by_reply indexes; every walker (pushes, forgets, withdrawals, re-pushes, purge) reads the faces from them; a model test holds every walker to the scan over three roles.",
+        "crates/wz-runtime-tokio/src/client_sub_store.rs: keys index replaces the wildcard set; keys_intersecting, every_key, faces_naming, face_names.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: dump_interest_subs reads keys_intersecting; sub_contributions, sub_keys and register_subscriber read the store by key.",
+        "crates/wz-runtime-tokio/src/persistent_map.rs: PersistentSet is_empty and contains; the unused get_key_value removed.",
+        "docs/router-table-snapshots.md: section 6.4 (the reading), section 7 (queryable and token stores carried)."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio lib tests with routing-router-hat and routing-token-tables: 1162 passed (pc2); clippy -D warnings all-targets with those features and lib with routing-router-hat alone: clean.",
+        "pc2 A/B against round 4337, phase 6 admission instrument, p50 at 1,792 to 2,048 faces up: rwlock subscribe 601-713 to 4-9 us, interest 148-171 to 1-3 us; snapshot subscribe 694-758 to 23-26 us, interest 178-195 to 18-20 us.",
+        "Layer E7s on the final tree: 6 of 6 under each value; the starved router admitted 308 and 312 of 320 in its window (section 6.3 on pc3: 148 to 196).",
+        "reason_review_pin_gate, prose_named_identifier_gate --check and upstream_citation_anchor_gate (after the KeTree citation was given its root): OK."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "The broker hat's queryable and token client stores are still per-face hash maps: their exact-key and intersecting questions (merged_qabl_info_in, any_qabl_matches_in, token_contributions, dump_interest_qabls) try every face, and under snapshot a declaration copies the store; next is ClientSubStore's form with a value beside each id. Under snapshot every write still copies the face map's spine (15 us at 2,048 faces)."
+      ],
+      "publishable_decision_summary": "The router's interests and the broker hat's subscriptions are indexed by keyexpr: KeyexprIndex, a persistent trie of keyexpr chunks (path-copied like the phase 6 maps), finds the members whose keyexpr may meet a question, wildcards on either side, and the exact matcher the scan used decides each candidate (filter and refine), so every answer is the scan's. The broker hat's exact-key questions (sub_contributions, sub_keys, the re-declare check) read the store's index by key instead of trying every face. This closes the carried item of docs/router-table-snapshots.md section 7: a subscription and an interest no longer cost as many tries as faces are up, under both values of routing-table-sharing.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/keyexpr_index.rs: new KeyexprIndex (insert, remove with pruning, contains, intersecting), held by a model test against the full scan over every chunk form and by tests of the states a walk visits.",
+        "crates/wz-runtime-tokio/src/future_interest.rs: by_target and by_reply indexes; every walker (pushes, forgets, withdrawals, re-pushes, purge) reads the faces from them; a model test holds every walker to the scan over three roles.",
+        "crates/wz-runtime-tokio/src/client_sub_store.rs: keys index replaces the wildcard set; keys_intersecting, every_key, faces_naming, face_names.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: dump_interest_subs reads keys_intersecting; sub_contributions, sub_keys and register_subscriber read the store by key.",
+        "crates/wz-runtime-tokio/src/persistent_map.rs: PersistentSet is_empty and contains; the unused get_key_value removed.",
+        "docs/router-table-snapshots.md: section 6.4 (the reading), section 7 (queryable and token stores carried)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio lib tests with routing-router-hat and routing-token-tables: 1162 passed (pc2); clippy -D warnings all-targets with those features and lib with routing-router-hat alone: clean.",
+        "pc2 A/B against round 4337, phase 6 admission instrument, p50 at 1,792 to 2,048 faces up: rwlock subscribe 601-713 to 4-9 us, interest 148-171 to 1-3 us; snapshot subscribe 694-758 to 23-26 us, interest 178-195 to 18-20 us.",
+        "Layer E7s on the final tree: 6 of 6 under each value; the starved router admitted 308 and 312 of 320 in its window (section 6.3 on pc3: 148 to 196).",
+        "reason_review_pin_gate, prose_named_identifier_gate --check and upstream_citation_anchor_gate (after the KeTree citation was given its root): OK."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The broker hat's queryable and token client stores are still per-face hash maps: their exact-key and intersecting questions (merged_qabl_info_in, any_qabl_matches_in, token_contributions, dump_interest_qabls) try every face, and under snapshot a declaration copies the store; next is ClientSubStore's form with a value beside each id. Under snapshot every write still copies the face map's spine (15 us at 2,048 faces)."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
