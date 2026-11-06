@@ -314540,6 +314540,34 @@
         "The row of the board table for the fixed-memory node on the datagram transport (rmii-dp83825i-fixed) cites this entry in the next round, with HW.0 to HW.7 and HW.26 to HW.35 as its verdict_steps, the image hash above, and its note and budget row brought up to the lane's runs. Open: HW.42's refusal bound on a second stack of lwIP's options; HW.43's queries arriving together; a volume of kit runs beyond three; the load run of round 3315 in no lane; the hosted runs of this series are not read."
       ]
     },
+    "Round 4363": {
+      "decision_summary": "The row of the board table for the fixed-memory node on the datagram transport (rmii-dp83825i-fixed) now names the steps the kit lane has run on the board. Its record is Round 4362, which names the image that ran (the padded region file, sha256 f07590b3...), the launcher it ran with, and all eighteen steps OK; the row's verdict_steps is HW.0 to HW.7 and HW.26 to HW.35, and its verdict text opens with the same words. The first record of the image (HW.26 to HW.35, Round 3315, a run by hand) stays what it was and is named in the row's note as the earlier one; the image hash moves to the one of this record because the table names the image its record ran. The budget row says the pool steps ran inside it, and the hardware verdict document says how the lane runs them.",
+      "changes_bullets": [
+        "deploy/zephyr-boards.json: the row rmii-dp83825i-fixed cites Round 4362 with its image hash, verdict text and date, verdict_steps HW.0 to HW.7 and HW.26 to HW.35, and a note that says what the lane's runs hold and do not settle. deploy/resource_budget.json: the zephyr-fixed row's measured text and evidence name the pool steps and the three kit runs of 2026-11-07. deploy/zephyr-admin-node/HARDWARE_VERDICT.md: a paragraph on how the lane runs the pool steps on the board."
+      ],
+      "verification_bullets": [
+        "The board table gate passes on the table as it stands (10 rows: 0 DECLARED, 3 BUILT, 2 QEMU, 5 HARDWARE), which reads the row against Round 4362 (the image hash is in its text, the launcher's hash is in its text, and each of the eighteen steps of the scope is named OK there), its selftest passes, and the resource budget gate passes (zephyr-fixed: chain 13624, measured peak 13736 of 65536, 8 images held). Both JSON files parse. The evidence is Round 4362's and is not repeated here: three kit runs, each flashed and reset again, and the stack line at 13,736 in all three."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Open: HW.42's refusal bound on a second stack of lwIP's options; HW.43's queries arriving together instead of one after another; a volume of kit runs beyond three; the load run of round 3315 in no lane; the hosted runs of this series are not read; the pc2 working copies of the lane's tree that are not this session's are not touched."
+      ],
+      "publishable_decision_summary": "The row of the board table for the fixed-memory node on the datagram transport (rmii-dp83825i-fixed) now names the steps the kit lane has run on the board. Its record is Round 4362, which names the image that ran (the padded region file, sha256 f07590b3...), the launcher it ran with, and all eighteen steps OK; the row's verdict_steps is HW.0 to HW.7 and HW.26 to HW.35, and its verdict text opens with the same words. The first record of the image (HW.26 to HW.35, Round 3315, a run by hand) stays what it was and is named in the row's note as the earlier one; the image hash moves to the one of this record because the table names the image its record ran. The budget row says the pool steps ran inside it, and the hardware verdict document says how the lane runs them.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-boards.json: the row rmii-dp83825i-fixed cites Round 4362 with its image hash, verdict text and date, verdict_steps HW.0 to HW.7 and HW.26 to HW.35, and a note that says what the lane's runs hold and do not settle. deploy/resource_budget.json: the zephyr-fixed row's measured text and evidence name the pool steps and the three kit runs of 2026-11-07. deploy/zephyr-admin-node/HARDWARE_VERDICT.md: a paragraph on how the lane runs the pool steps on the board."
+      ],
+      "publishable_verification_bullets": [
+        "The board table gate passes on the table as it stands (10 rows: 0 DECLARED, 3 BUILT, 2 QEMU, 5 HARDWARE), which reads the row against Round 4362 (the image hash is in its text, the launcher's hash is in its text, and each of the eighteen steps of the scope is named OK there), its selftest passes, and the resource budget gate passes (zephyr-fixed: chain 13624, measured peak 13736 of 65536, 8 images held). Both JSON files parse. The evidence is Round 4362's and is not repeated here: three kit runs, each flashed and reset again, and the stack line at 13,736 in all three."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: HW.42's refusal bound on a second stack of lwIP's options; HW.43's queries arriving together instead of one after another; a volume of kit runs beyond three; the load run of round 3315 in no lane; the hosted runs of this series are not read; the pc2 working copies of the lane's tree that are not this session's are not touched."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
