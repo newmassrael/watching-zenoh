@@ -77,6 +77,14 @@ Each stage is its own round and lands on its own.
    - This waits on RFCs 0032 and 0033, which are not built.
 3. **The whole set, green, in the fleet.** `bx --checks ci` passes all lanes.
    Wall clock and machine time are measured against the hosted run.
+   - First run (2026-11-06): 180 units, 160 pass. The tree reds were repaid
+     on their own. Six other failures came from a unit that ran the lane bare,
+     without the provisioning lines its hosted job runs first. A unit is now
+     `runci_plan.py --layer <id>`, which runs those lines and the lane under
+     the job's env; the six pass.
+   - Left: U (`gh`), C1bs (CAP_NET_RAW) and C1cc (valgrind) need what a
+     machine has, and wait for bx's per-unit requirements (`needs`,
+     `capabilities`, `packages` on a plan line).
 4. **Judged before landing.** `scripts/land.sh` already holds the clone's push
    lock, so it is already a serial integrator for this machine. It runs
    `bx --checks ci` on the rebased candidate and pushes only a pass, which is

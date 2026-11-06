@@ -142,11 +142,11 @@ needed_by = ["Qz"]
 # `run-ci.sh` with no `--layer` runs Layer 0 too and is not matched, the caveat the Zephyr tools
 # above state.
 #
-# ⚠ NOT YET for a `bx --checks ci` unit (measured 2026-11-06, the bx session confirmed it): the
-# fan-out places units by capacity alone and matches `needed_by` against each machine's batch command
-# line rather than a unit's own argv, so a Layer 0 unit is still sent to a machine without this tool.
-# That is bx's to fix (a unit carries the tools its argv needs); this declaration is what the fix
-# will read, and a plain `bx -- bash scripts/run-ci.sh --layer 0` is steered by it now.
+# A `bx --checks ci` unit is steered by it too: since bx's fix of 2026-11-06 the fan-out matches
+# `needed_by` against the unit's own argv (`python3 scripts/lib/runci_plan.py --layer 0`), and a
+# machine whose store lacks the tool does not receive the unit (`bx --explain-candidates -- true`
+# prints each machine's `lacks_tools=`). `needed_by` is a substring: a lane id that begins another
+# (`E` of `E6i`) asks the same tool of both.
 [tools.shellcheck]
 version_file = ".github/workflows/ci.yml"
 version_pattern = 'SHELLCHECK_VERSION: *"?([0-9.]+)"?'
