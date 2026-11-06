@@ -73,7 +73,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
 use wz_integration_tests::common::{
-    default_route_iface, read_captured, wait_for_substring, zenoh_pico_cli_binary, ChildGuard,
+    group_route_iface, read_captured, wait_for_substring, zenoh_pico_cli_binary, ChildGuard,
     PICO_BATCH_MULTICAST_SIZE, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP, Z_SUB_INIT_TIMEOUT,
 };
 use wz_runtime_tokio::multicast_glue::{
@@ -197,7 +197,7 @@ fn has_multicast_event_for(captured: &str, kind: &str, zid: &str) -> bool {
 #[ignore = "binary-dep multicast e2e (zenoh-pico CLI z_info); Layer M runs via --ignored"]
 async fn pico_witnesses_a_wz_multicast_departure() {
     let z_info = zenoh_pico_cli_binary("z_info");
-    let iface = default_route_iface();
+    let iface = group_route_iface(GROUP);
     let locator = format!("udp/{GROUP}:{PORT}#iface={iface}");
 
     // ── pico z_info (multicast peer + transport-events listener) ─────
@@ -389,7 +389,7 @@ async fn pico_witnesses_a_wz_multicast_departure() {
 #[ignore = "binary-dep multicast e2e (zenoh-pico CLI z_info); Layer M runs via --ignored"]
 async fn pico_infers_a_wz_multicast_departure_from_silence() {
     let z_info = zenoh_pico_cli_binary("z_info");
-    let iface = default_route_iface();
+    let iface = group_route_iface(GROUP);
     let locator = format!("udp/{GROUP}:{LEASE_PORT}#iface={iface}");
 
     let capture = tempfile::tempfile().expect("tempfile for z_info capture");

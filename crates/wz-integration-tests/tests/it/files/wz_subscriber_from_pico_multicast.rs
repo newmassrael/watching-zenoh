@@ -54,8 +54,8 @@
 //! Multicast routing is environment-dependent (a container without a
 //! multicast route drops the IGMP join), so this is opt-in like the
 //! wz<->wz `multicast_pubsub_loopback` lane and the R311nm wz->pico lane.
-//! pico's multicast peer needs an explicit `#iface=<dev>`; the test
-//! discovers the default-route interface at runtime, which is the
+//! pico's multicast peer needs an explicit `#iface=<dev>`; the test asks
+//! the kernel which interface it routes the group through, which is the
 //! interface wz's `INADDR_ANY` multicast join selects, so both peers meet
 //! on the same link.
 
@@ -66,8 +66,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    default_route_iface, read_captured, zenoh_pico_cli_binary, ChildGuard,
-    PICO_BATCH_MULTICAST_SIZE, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP,
+    group_route_iface, read_captured, zenoh_pico_cli_binary, ChildGuard, PICO_BATCH_MULTICAST_SIZE,
+    PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP,
 };
 use wz_runtime_tokio::multicast_glue::{
     drive_multicast_session, open_multicast_session, MulticastDriveConfig, MulticastLink,
@@ -122,7 +122,7 @@ fn wz_mc_params() -> MulticastParams {
 #[ignore = "binary-dep multicast e2e (zenoh-pico CLI z_pub); Layer M runs via --ignored"]
 async fn wz_subscriber_admits_pico_multicast_push() {
     let z_pub = zenoh_pico_cli_binary("z_pub");
-    let iface = default_route_iface();
+    let iface = group_route_iface(GROUP);
     let locator = format!("udp/{GROUP}:{PORT}#iface={iface}");
 
     // ── wz multicast subscriber (in-library) ─────────────────────────

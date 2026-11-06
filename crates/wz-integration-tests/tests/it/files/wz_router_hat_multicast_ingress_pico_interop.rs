@@ -64,9 +64,9 @@
 //! Multicast routing is environment-dependent (a routeless container drops the IGMP
 //! join), so this is opt-in like the sibling multicast interop lanes (Layer M,
 //! `WZ_RUN_LAYER_M=1` / `--layer M`), never a required gate. pico's multicast peer
-//! needs an explicit `#iface=<dev>`; the test discovers the default-route interface
-//! at runtime, which is the interface the router's group join selects, so both meet
-//! on the same link. z_pub's stdout is line-buffered via `stdbuf -oL`.
+//! needs an explicit `#iface=<dev>`; the test asks the kernel which interface it routes
+//! the group through, which is the interface the router's group join selects, so both
+//! meet on the same link. z_pub's stdout is line-buffered via `stdbuf -oL`.
 //!
 //! Requires: wz-ap-demo built with `--features router-multicast-faces` (the ingress
 //! join is `#[cfg]`'d on it, `runner.rs`) AND the zenoh-pico CLI (`z_pub`). run-ci's
@@ -79,7 +79,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    default_route_iface, graceful_terminate, read_captured, spawn_on_ephemeral_port,
+    graceful_terminate, group_route_iface, read_captured, spawn_on_ephemeral_port,
     wait_for_substring, wait_for_tcp_accept, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 
@@ -115,7 +115,7 @@ const VALUE: &str = "WZ-MCAST-INGRESS-INTEROP-I2";
 fn wz_router_hat_multicast_ingress_from_pico_zpub() {
     let demo = wz_ap_demo_binary();
     let z_pub = zenoh_pico_cli_binary("z_pub");
-    let iface = default_route_iface();
+    let iface = group_route_iface(GROUP);
     let locator = format!("udp/{GROUP}:{PORT}#iface={iface}");
 
     // ── wz router-hat: joins the multicast group (ingress) + binds a TCP port ──

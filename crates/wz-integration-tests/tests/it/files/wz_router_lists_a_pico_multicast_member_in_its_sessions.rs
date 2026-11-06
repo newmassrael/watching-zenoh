@@ -33,13 +33,14 @@
 //!
 //! Needs wz-ap-demo built with `router-multicast-faces` and
 //! `adminspace-router-linkstate`, the admin probe, and the pico CLI; the group
-//! rides the default-route interface, as the ingress leg's does.
+//! rides the interface the kernel routes it through, as the ingress leg's does.
 
+use std::net::Ipv4Addr;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    assert_demo_binary_newer_than_sources, default_route_iface, read_captured, wait_for_substring,
+    assert_demo_binary_newer_than_sources, group_route_iface, read_captured, wait_for_substring,
     wz_ap_demo_binary, wz_e2e_admin_probe_binary, zenoh_pico_cli_binary, ChildGuard,
     PortReservation,
 };
@@ -49,7 +50,7 @@ use wz_integration_tests::common::{
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The group, and a port no other multicast leg binds.
-const GROUP: &str = "224.0.0.224";
+const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
 const GROUP_PORT: u16 = 7476;
 
 /// One root GET of the router's adminspace, returning the `local_data` body.
@@ -124,7 +125,7 @@ fn wz_router_lists_a_pico_multicast_member_in_its_sessions() {
     assert_demo_binary_newer_than_sources(&demo);
     let probe = wz_e2e_admin_probe_binary();
     let z_pub = zenoh_pico_cli_binary("z_pub");
-    let iface = default_route_iface();
+    let iface = group_route_iface(GROUP);
     let locator = format!("udp/{GROUP}:{GROUP_PORT}#iface={iface}");
     let port_res = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port_res.port());

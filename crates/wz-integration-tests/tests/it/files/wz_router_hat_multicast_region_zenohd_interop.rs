@@ -64,7 +64,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    assert_demo_binary_newer_than_sources, default_route_iface, graceful_terminate, read_captured,
+    assert_demo_binary_newer_than_sources, graceful_terminate, group_route_iface, read_captured,
     spawn_on_ephemeral_port, spawn_publishing_zpub, spawn_subscribed_zsub, wait_for_substring,
     wait_for_tcp_accept_alive, wait_for_zenohd_handshake_ready, wz_ap_demo_binary,
     zenoh_pico_cli_binary, zenohd_binary, ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
@@ -119,7 +119,7 @@ fn last_push_count(captured: &str) -> usize {
 fn run_topology(router: Router, port: u16) -> Outcome {
     let z_sub = zenoh_pico_cli_binary("z_sub");
     let z_pub = zenoh_pico_cli_binary("z_pub");
-    let iface = default_route_iface();
+    let iface = group_route_iface(GROUP);
     let locator = format!("udp/{GROUP}:{port}#iface={iface}");
 
     // ── ROUTER, with the group attached. ──

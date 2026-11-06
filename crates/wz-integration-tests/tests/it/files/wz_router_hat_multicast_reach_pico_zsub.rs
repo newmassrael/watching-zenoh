@@ -57,7 +57,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    default_route_iface, read_captured, spawn_on_ephemeral_port, wait_for_substring,
+    group_route_iface, read_captured, spawn_on_ephemeral_port, wait_for_substring,
     wait_for_tcp_accept, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 
@@ -127,7 +127,7 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, std::fs::File, u16) {
 #[ignore = "binary-dep multicast e2e (wz-ap-demo --features router-multicast-faces + zenoh-pico z_sub); Layer M runs via --ignored"]
 fn wz_router_hat_advertises_group_sub_reaches_pico_zsub() {
     let z_sub = zenoh_pico_cli_binary("z_sub");
-    let iface = default_route_iface();
+    let iface = group_route_iface(GROUP);
     let locator = format!("udp/{GROUP}:{PORT}#iface={iface}");
     // R2859 — the router's ONE group face (R2850) logs `multicast group ..
     // joined`; the `ingress` word left with the separate ingress face.

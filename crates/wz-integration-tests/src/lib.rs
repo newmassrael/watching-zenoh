@@ -7341,31 +7341,41 @@ pub mod common {
         out
     }
 
-    /// The default-route interface name, e.g. `wlp0s20f3`. This is the
-    /// interface wz's `INADDR_ANY` multicast egress/join selects (no
-    /// explicit `224.0.0.0/4` route → kernel uses the default route), so
-    /// pinning pico's `#iface=` to it makes both peers share the link.
-    /// Panics if there is no default route (the env-dependent multicast
-    /// Layer M lanes require one).
-    pub fn default_route_iface() -> String {
+    /// The interface the kernel routes `group` through, e.g. `eno1`, as
+    /// `ip route get <group>` answers it. That is the interface a socket
+    /// that sends to the group or joins it with `INADDR_ANY` uses, which is
+    /// what wz does, so pinning pico's `#iface=` to it puts both peers on
+    /// the same link.
+    ///
+    /// Until 2026-11-07 this read the default route, on the claim that the
+    /// kernel uses it for multicast. It does only when no route covers the
+    /// group. A build machine whose default route is `wlp0s20f3` and that
+    /// has `224.0.0.0/4 dev eno1` sent wz's datagrams out of `eno1` while
+    /// pico listened on `wlp0s20f3`. pico never saw the JOIN, and Layer M
+    /// failed there twice.
+    ///
+    /// Panics if the kernel has no route for the group (the multicast
+    /// interop lanes of Layer M need one).
+    pub fn group_route_iface(group: std::net::Ipv4Addr) -> String {
+        let group = group.to_string();
         let out = std::process::Command::new("ip")
-            .args(["route", "show", "default"])
+            .args(["route", "get", &group])
             .output_bounded()
-            .expect("run `ip route show default`");
+            .expect("run `ip route get <group>`");
         let text = String::from_utf8_lossy(&out.stdout);
-        for line in text.lines() {
-            let mut toks = line.split_whitespace();
-            while let Some(tok) = toks.next() {
-                if tok == "dev" {
-                    if let Some(dev) = toks.next() {
-                        return dev.to_string();
-                    }
+        let mut toks = text.split_whitespace();
+        while let Some(tok) = toks.next() {
+            if tok == "dev" {
+                if let Some(dev) = toks.next() {
+                    return dev.to_string();
                 }
             }
         }
         panic!(
-            "no default-route interface from `ip route show default`; the \
-             environment-dependent multicast interop lanes need one (Layer M)"
+            "no route for multicast group {group} from `ip route get {group}` \
+             (stdout {text:?}, stderr {:?}); the multicast interop lanes of \
+             Layer M need one",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 

@@ -86,8 +86,8 @@
 //! never receiving, never as a bind error. Thus this is opt-in like the sibling
 //! multicast interop lanes (Layer M, `WZ_RUN_LAYER_M=1` / `--layer M`), never a
 //! required gate. pico's multicast peer needs an explicit `#iface=<dev>`; the
-//! test discovers the default-route interface at runtime, which is the interface
-//! wz's `INADDR_ANY` multicast egress selects, so both peers meet on the same
+//! test asks the kernel which interface it routes the group through, which is the
+//! interface wz's `INADDR_ANY` multicast egress selects, so both peers meet on the same
 //! link. z_sub's stdout is line-buffered via `stdbuf -oL` (glibc block-buffers a
 //! piped fd, hiding the Received line until exit otherwise).
 //!
@@ -105,7 +105,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    default_route_iface, graceful_terminate, read_captured, spawn_on_ephemeral_port,
+    graceful_terminate, group_route_iface, read_captured, spawn_on_ephemeral_port,
     wait_for_substring, wait_for_tcp_accept, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
     Z_SUB_INIT_TIMEOUT,
 };
@@ -151,7 +151,7 @@ const PAYLOAD: &str = "WZ-ROUTER-MCAST-EGRESS-INTEROP-S4";
 fn wz_router_hat_multicast_egress_reaches_pico_zsub() {
     let demo = wz_ap_demo_binary();
     let z_sub = zenoh_pico_cli_binary("z_sub");
-    let iface = default_route_iface();
+    let iface = group_route_iface(GROUP);
     let locator = format!("udp/{GROUP}:{PORT}#iface={iface}");
 
     // ── wz router-hat: binds a TCP port + attaches the multicast egress group ──

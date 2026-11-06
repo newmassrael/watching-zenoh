@@ -56,10 +56,10 @@
 //! Multicast routing is environment-dependent (a container without a
 //! multicast route drops the IGMP join), so this is opt-in like the
 //! wz<->wz `multicast_pubsub_loopback` lane. pico's multicast peer needs an
-//! explicit `#iface=<dev>`; the test discovers the default-route interface
-//! at runtime (`ip route show default`), which is exactly the interface
-//! wz's `INADDR_ANY` multicast egress selects, so both peers meet on the
-//! same link. z_sub's stdout is line-buffered via `stdbuf -oL` (glibc block-
+//! explicit `#iface=<dev>`; the test asks the kernel which interface it
+//! routes the group through (`ip route get <group>`), which is exactly the
+//! interface wz's `INADDR_ANY` multicast egress selects, so both peers meet
+//! on the same link. z_sub's stdout is line-buffered via `stdbuf -oL` (glibc block-
 //! buffers a piped fd, which would otherwise hide the Received line until
 //! exit).
 
@@ -70,7 +70,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 
 use wz_integration_tests::common::{
-    default_route_iface, read_captured, wait_for_substring, zenoh_pico_cli_binary, ChildGuard,
+    group_route_iface, read_captured, wait_for_substring, zenoh_pico_cli_binary, ChildGuard,
     PICO_BATCH_MULTICAST_SIZE, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP, Z_SUB_INIT_TIMEOUT,
 };
 use wz_runtime_tokio::multicast_glue::{
@@ -126,7 +126,7 @@ fn wz_mc_params() -> MulticastParams {
 #[ignore = "binary-dep multicast e2e (zenoh-pico CLI z_sub); Layer M runs via --ignored"]
 async fn wz_publisher_reaches_pico_multicast_zsub() {
     let z_sub = zenoh_pico_cli_binary("z_sub");
-    let iface = default_route_iface();
+    let iface = group_route_iface(GROUP);
     let locator = format!("udp/{GROUP}:{PORT}#iface={iface}");
 
     // ── pico z_sub (multicast peer + subscriber) ─────────────────────

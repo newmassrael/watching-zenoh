@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 
 use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
-    default_route_iface, graceful_terminate, read_captured, wait_for_substring,
+    graceful_terminate, group_route_iface, read_captured, wait_for_substring,
     zenoh_pico_cli_binary, ChildGuard, ZENOH_MULTICAST_GROUP,
 };
 
@@ -74,11 +74,11 @@ fn node_binary() -> PathBuf {
     path
 }
 
-/// The locator pico peers join, on the default route's interface.
+/// The locator pico peers join, on the interface the kernel routes the group through.
 fn locator() -> String {
     format!(
         "udp/{ZENOH_MULTICAST_GROUP}:{PORT}#iface={}",
-        default_route_iface()
+        group_route_iface(ZENOH_MULTICAST_GROUP)
     )
 }
 
