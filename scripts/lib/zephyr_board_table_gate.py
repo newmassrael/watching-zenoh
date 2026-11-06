@@ -58,13 +58,15 @@ than off the row's own say-so.
      FAIL in a step cannot be outvoted by an OK later in the entry. An app with
      a HARDWARE row and no grammar file is refused: there is nothing the record
      could have satisfied. A row names ALL the grammar's steps unless it carries
-     `verdict_steps` (`"HW.a to HW.b"` or `"HW.a"`), which narrows it to the
-     steps its record was made against: a grammar grows steps for links a row's
-     image does not carry, and a record made before a step existed cannot name
-     it. The narrowing is held to three things so that it cannot become a way
-     round the grammar: every step it names is published by the grammar, the
-     witness's `verdict` text opens with the same step expression, and every
-     step inside it is read exactly as above.
+     `verdict_steps` (`"HW.a to HW.b"` or `"HW.a"`, or several of those joined
+     by ` and ` in ascending order without overlap, as `"HW.0 to HW.7 and
+     HW.36 to HW.44"`), which narrows it to the steps its record was made
+     against: a grammar grows steps for links a row's image does not carry, and
+     a record made before a step existed cannot name it. The narrowing is held
+     to three things so that it cannot become a way round the grammar: every
+     step it names is published by the grammar, the witness's `verdict` text
+     opens with the same step expression, and every step inside it is read
+     exactly as above.
   7. Per-board settings (`deploy/<app>/boards/*.conf`) and the table agree both
      ways: every conf belongs to a row of that app (a board configured but not
      declared is a support claim nobody graded), a row that selects a network
@@ -159,9 +161,14 @@ DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 STEP_LINE = re.compile(r"^HW\.(\d+) ", re.M)
 STEP_SPLIT = re.compile(r"(?=HW\.\d+ )")
 STEP_MARK = re.compile(r" - OK|FAIL")
-# A row's `verdict_steps`: one step, or an inclusive range, spelt as the grammar
-# and the witness's verdict text spell them.
-STEP_SCOPE = re.compile(r"HW\.(\d+)(?: to HW\.(\d+))?")
+# A row's `verdict_steps`: one step or an inclusive range, or several of those
+# joined by ` and ` in ascending order, spelt as the grammar and the witness's
+# verdict text spell them. A node's steps are not always one run of numbers: the
+# stream node's are HW.0 to HW.7 and HW.36 to HW.44, because the steps between
+# them are the second interface's and the datagram pools'.
+STEP_ITEM = r"HW\.(\d+)(?: to HW\.(\d+))?"
+STEP_ITEM_RE = re.compile(STEP_ITEM)
+STEP_SCOPE = re.compile(rf"{STEP_ITEM}(?: and {STEP_ITEM})*")
 # An overlay that exists so a build can be made, and describes no board.
 BUILD_ONLY_MARKER = "WZ-BUILD-VALUES-ONLY"
 BUILD_ONLY_NAMES = ("build_values", "build-values")
@@ -313,13 +320,23 @@ def scoped_steps(
     shape = STEP_SCOPE.fullmatch(scope) if isinstance(scope, str) else None
     if shape is None:
         return published, [
-            f"{label}: verdict_steps {scope!r} is not of the form 'HW.<a> to HW.<b>' or 'HW.<a>'"
+            f"{label}: verdict_steps {scope!r} is not of the form 'HW.<a> to HW.<b>' or 'HW.<a>', "
+            f"alone or several joined by ' and '"
         ]
-    first = int(shape.group(1))
-    last = int(shape.group(2)) if shape.group(2) is not None else first
-    if last < first:
-        return published, [f"{label}: verdict_steps {scope!r} ends before it starts"]
-    wanted = [str(n) for n in range(first, last + 1)]
+    wanted: list[str] = []
+    previous_end = -1
+    for item in STEP_ITEM_RE.finditer(scope):
+        first = int(item.group(1))
+        last = int(item.group(2)) if item.group(2) is not None else first
+        if last < first:
+            return published, [f"{label}: verdict_steps {scope!r} ends before it starts"]
+        if first <= previous_end:
+            return published, [
+                f"{label}: verdict_steps {scope!r} is not in ascending order without overlap "
+                f"(HW.{first} does not come after HW.{previous_end}), so it has more than one spelling"
+            ]
+        wanted += [str(n) for n in range(first, last + 1)]
+        previous_end = last
     out = [
         f"{label}: verdict_steps names step HW.{n}, which {GRAMMAR_FILE} does not publish"
         for n in wanted
@@ -1061,8 +1078,29 @@ def selftest() -> int:
            "which HARDWARE_VERDICT.md does not publish", grammar_grows, entries=whole)
     expect("a scope that is not a step expression", scoped("steps 0 to 2", "HW.0 to HW.2 OK"),
            "is not of the form", grammar_grows, entries=whole)
-    expect("a scope with more in it than one expression", scoped("HW.0 to HW.2 and HW.3"),
-           "is not of the form", grammar_grows, entries=whole)
+    two_runs = {"Round 9": entry("HW.0 a - OK. HW.1 b - OK. HW.2 c - OK. HW.3 d - OK.")}
+    expect("a scope of two ranges, each step of both named OK",
+           scoped("HW.0 to HW.1 and HW.3"), None, grammar_grows, entries=two_runs)
+    expect("a scope of two ranges whose record lacks a step of the second",
+           scoped("HW.0 to HW.1 and HW.3"), "never names step HW.3", grammar_grows,
+           entries={"Round 9": entry("HW.0 a - OK. HW.1 b - OK. HW.2 c - OK.")})
+    expect("a scope of two ranges whose record says a step of the second failed",
+           scoped("HW.0 to HW.1 and HW.3"), "does not say HW.3 held", grammar_grows,
+           entries={"Round 9": entry("HW.0 a - OK. HW.1 b - OK. HW.3 d FAIL.")})
+    expect("a scope whose second range is one the grammar does not publish",
+           scoped("HW.0 to HW.1 and HW.3 to HW.4"), "which HARDWARE_VERDICT.md does not publish",
+           grammar_grows, entries=two_runs)
+    expect("a scope of two ranges the verdict text spells in the same words",
+           scoped("HW.0 and HW.2 to HW.3"), None, grammar_grows, entries=two_runs)
+    expect("a scope of two ranges the verdict text opens with only the first of",
+           scoped("HW.0 to HW.1 and HW.3", "HW.0 to HW.1 OK"), "opens with", grammar_grows,
+           entries=two_runs)
+    expect("a scope whose ranges are out of order", scoped("HW.2 and HW.0 to HW.1"),
+           "ascending order", grammar_grows, entries=two_runs)
+    expect("a scope whose ranges overlap", scoped("HW.0 to HW.2 and HW.2 to HW.3"),
+           "ascending order", grammar_grows, entries=two_runs)
+    expect("a scope that ends in a joiner", scoped("HW.0 to HW.2 and"), "is not of the form",
+           grammar_grows, entries=whole)
     expect("a scope that ends before it starts", scoped("HW.2 to HW.0"), "ends before it starts",
            grammar_grows, entries=whole)
     expect("a scope the record's verdict text does not open with",
