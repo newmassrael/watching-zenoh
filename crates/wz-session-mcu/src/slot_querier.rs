@@ -63,6 +63,80 @@ impl Periodic for Query {
     }
 }
 
+/// Why the keys of a node's queriers were not set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchedKeysRefused {
+    /// A key with what it ends with is longer than a key the node holds.
+    TooLong,
+    /// The keys were set before.
+    Twice,
+}
+
+impl LaunchedKeysRefused {
+    /// The console line.
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::TooLong => "wz: FAIL - a querier's key is longer than a key the node holds",
+            Self::Twice => "wz: FAIL - the queriers' keys were set twice",
+        }
+    }
+}
+
+/// The keys of a node's `N` queriers when some end with what the node learns only when it runs (its
+/// own zid, for a querier of a lifecycle verb about the node itself): written once, before the node
+/// exists, each a declared key or a declared prefix with its end, and read as the `'static` key a
+/// [`Query`] asks. A key known whole when the image is built needs none of this. `B` is the bytes of
+/// the longest key the node holds.
+pub struct LaunchedKeys<const N: usize, const B: usize> {
+    keys: core::cell::OnceCell<[wz_session_core::text_out::FixedText<B>; N]>,
+}
+
+// SAFETY: the profile's rule, as for `slot_node::SingleEndpoint`: one thread runs the program, and
+// the cell is written once, before the node that reads it exists.
+unsafe impl<const N: usize, const B: usize> Sync for LaunchedKeys<N, B> {}
+
+impl<const N: usize, const B: usize> LaunchedKeys<N, B> {
+    /// No keys yet.
+    pub const fn new() -> Self {
+        Self {
+            keys: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// Set each key `at` to `declared(at)`, followed by `end` when `ends(at)`.
+    pub fn set(
+        &self,
+        declared: impl Fn(usize) -> &'static str,
+        ends: impl Fn(usize) -> bool,
+        end: &str,
+    ) -> Result<(), LaunchedKeysRefused> {
+        use wz_session_core::text_out::{FixedText, TextOut};
+        let keys: [FixedText<B>; N] = core::array::from_fn(|at| {
+            let mut key = FixedText::new();
+            key.push_str(declared(at));
+            if ends(at) {
+                key.push_str(end);
+            }
+            key
+        });
+        if keys.iter().any(|key| key.finish().is_err()) {
+            return Err(LaunchedKeysRefused::TooLong);
+        }
+        self.keys.set(keys).map_err(|_| LaunchedKeysRefused::Twice)
+    }
+
+    /// The key `at` that was set, or `None` before the keys are set.
+    pub fn key(&'static self, at: usize) -> Option<&'static str> {
+        self.keys.get()?.get(at)?.finish().ok()
+    }
+}
+
+impl<const N: usize, const B: usize> Default for LaunchedKeys<N, B> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// What came of the queries of one querier, as the loop reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Tally {
@@ -287,6 +361,30 @@ mod tests {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
     use wz_session_core::reply_sink::BorrowedReply;
+
+    /// A key that ends with what the node learns when it runs is the declared prefix and that end;
+    /// a key known whole is the declared key; the keys are set once, and one too long is refused.
+    #[test]
+    fn launched_keys_end_the_keys_that_end_with_what_the_node_learns() {
+        static KEYS: LaunchedKeys<2, 32> = LaunchedKeys::new();
+        assert_eq!(KEYS.key(0), None, "no key before they are set");
+        let declared = ["@/c3/client/session/close/", "lab/ask/val"];
+        KEYS.set(|at| declared[at], |at| at == 0, "a1b2")
+            .expect("the keys fit");
+        assert_eq!(KEYS.key(0), Some("@/c3/client/session/close/a1b2"));
+        assert_eq!(KEYS.key(1), Some("lab/ask/val"));
+        assert_eq!(KEYS.key(2), None);
+        assert_eq!(
+            KEYS.set(|at| declared[at], |_| false, ""),
+            Err(LaunchedKeysRefused::Twice)
+        );
+        static SHORT: LaunchedKeys<1, 8> = LaunchedKeys::new();
+        assert_eq!(
+            SHORT.set(|_| "@/c3/client/", |_| true, "a1b2"),
+            Err(LaunchedKeysRefused::TooLong)
+        );
+        assert_eq!(SHORT.key(0), None, "a refused set leaves no key");
+    }
 
     fn query(reply_bytes: usize) -> Query {
         Query {

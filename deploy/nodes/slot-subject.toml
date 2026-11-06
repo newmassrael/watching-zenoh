@@ -26,10 +26,15 @@ role = "peer"
 zid = "c3"
 locator = "tls/127.0.0.1:17477"
 
+# Each querier names the verb, the node asked (`of`, the peer above) and the node the verb is about;
+# the generator makes the key, and `about = "self"` is ended with this node's zid when it runs.
+
 # The status of a peer (`d4`, which neither node holds): granted to this node's zid.
 [[entity]]
 kind = "querier"
-key = "@/c3/client/session/status/d4"
+verb = "status"
+of = "c3"
+about = "d4"
 period_ms = 500
 timeout_ms = 2000
 reply_bytes = 256
@@ -37,7 +42,19 @@ reply_bytes = 256
 # A close of the same peer: not granted, so it is refused by name.
 [[entity]]
 kind = "querier"
-key = "@/c3/client/session/close/d4"
+verb = "close"
+of = "c3"
+about = "d4"
+period_ms = 500
+timeout_ms = 2000
+reply_bytes = 256
+
+# The status of this node itself: the session it opened to the commanding node's listener.
+[[entity]]
+kind = "querier"
+verb = "status"
+of = "c3"
+about = "self"
 period_ms = 500
 timeout_ms = 2000
 reply_bytes = 256

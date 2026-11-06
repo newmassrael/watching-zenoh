@@ -169,7 +169,9 @@ DECLARATION_SCHEMA = 1
 #      Added beside it since (the number stays): the `identity` section (its keys, what it requires,
 #      the rule of its zid and the tool that computes it), and the `verdicts` section (the line a
 #      querier of a lifecycle verb says of each reply, the words of each verb, what each means and
-#      the sentences of a refusal).
+#      the sentences of a refusal), and a querier's form of a lifecycle verb (`verb`, `of`, `about`,
+#      `whatami`, `generation`, `mode`, one of `key` and `verb`) with the key the generator makes
+#      (`verdicts.key`).
 VOCABULARY_SCHEMA = 3
 
 # The shape of each word of the vocabulary: the keys it takes and the value of each. An integer's
@@ -179,7 +181,9 @@ VOCABULARY_SCHEMA = 3
 # consumer is told a target builds and what the target accepts are one statement.
 #   value: `locator` (<scheme>/<a.b.c.d>:<port>), `zid` (lowercase hex), `key-expression` (a key or a
 #   pattern, held to MAX_KEYEXPR_BYTES), `key` (a literal key: no `*`, no `$`), `cell-key` (the key
-#   of a subscriber or a querier of the same node), `integer` (from `min` to `max`), `word` (one of
+#   of a subscriber or a querier of the same node), `peer-zid` (the zid of one of the node's `peer`
+#   endpoints), `about` (a zid, or `self` for the node's own, which the node puts in the key when it
+#   runs), `integer` (from `min` to `max`), `word` (one of
 #   `choices`), `words` (a comma-separated list of `choices`, at least one, each with its line in
 #   `means`; no word stands for all of them), `rate` (a positive decimal of puts a second written as a string, whose gap is from
 #   `min_gap_ns` to `max_gap_ns`).
@@ -320,6 +324,74 @@ VERDICT_LINE = ("HOST-WZ-VERDICT <key> verdict=<word> [links=<n>] [generation=<n
 VERDICT_UNREADABLE = "HOST-WZ-VERDICT <key> unreadable len=<n> kept=<n>"
 
 
+# What a querier of a lifecycle verb states instead of a key (`querier` in ENTITY_SHAPES): the verb,
+# the node asked (`of`, the zid of one of the node's `peer` endpoints), the node the verb is about
+# (`about`, a zid or `self`), the role the asked node answers its verbs under (`whatami`; a declared
+# node's verbs answer as `client`), a reset's `generation` and an open's `mode`. The generator makes
+# the key from them, `@/<of>/<whatami>/session/<verb>/[<generation>/|passive/]<about>`, as
+# `wz_session_core::lifecycle_wire::VerbKey` reads it; `about = "self"` is the node's own zid, which
+# the node knows only when it runs (a key it makes at start, or the one its `[identity]` names), so
+# the node puts it at the end of the key then.
+VERBS_ASKED = tuple(VERDICT_WORDS_OF)
+WHATAMI_ASKED = ("client", "peer", "router")
+OPEN_MODES = ("dial", "passive")
+ABOUT_SELF = "self"
+# What the vocabulary says of the key of such a querier, so a consumer joins a line to the querier
+# that asked without spelling the key itself.
+VERB_QUERIER_KEY = ("a querier stated with `verb` asks the key the generator makes from its words, "
+                    "`@/<of>/<whatami>/session/<verb>/<about>`, with `<generation>/` before `<about>` "
+                    "for `reset` and `passive/` for an `open` whose `mode` is `passive`; `about = "
+                    "\"self\"` is the node's own zid, which it puts there when it runs. When it "
+                    "starts, the node says each querier's key once, `HOST-WZ-QUERIER <n> <key>`, "
+                    "`<n>` the querier's place among the declaration's queriers from 0; its "
+                    "HOST-WZ-ASKED, HOST-WZ-REPLY and HOST-WZ-VERDICT lines carry that key, so a "
+                    "line is joined to the querier that asked by the key its HOST-WZ-QUERIER line "
+                    "names")
+# The widest zid, for the longest key a querier about `self` can ask.
+WIDEST_ZID = "f" * 32
+
+
+def verb_key(ent: dict, about: str) -> str:
+    """The key a querier of a lifecycle verb asks (valid input), about `about`: its own `about`, or
+    the empty text for the prefix a node about `self` puts its zid after."""
+    verb = ent["verb"]
+    argument = (f"{ent['generation']}/" if verb == "reset"
+                else "passive/" if verb == "open" and ent.get("mode", "dial") == "passive" else "")
+    return f"@/{ent['of']}/{ent.get('whatami', 'client')}/session/{verb}/{argument}{about}"
+
+
+def entity_key(ent: dict) -> object:
+    """The key an entity is on, as the checks and the cells name it: the one it states, or the one
+    the generator makes for a querier of a verb, with `self` spelled as the word, or `None` for a
+    querier of a verb whose words make no key (any input)."""
+    if ent.get("kind") == "querier" and "verb" in ent and "key" not in ent:
+        verb, generation = ent.get("verb"), ent.get("generation")
+        words = (verb in VERBS_ASKED and isinstance(ent.get("of"), str) and isinstance(ent.get("about"), str)
+                 and (verb != "reset" or (isinstance(generation, int) and not isinstance(generation, bool))))
+        return verb_key(ent, ent["about"]) if words else None
+    return ent.get("key")
+
+
+def verb_querier_problems(who: str, ent: dict, data: dict) -> list[str]:
+    """Why a querier of a verb names no node it can ask (any input): `of` must be the zid of one of
+    the node's `peer` endpoints, since a verb is asked of a node the node holds, and `about` a zid or
+    `self`. The words and the integers are `value_problems`'."""
+    out = []
+    of, about = ent.get("of"), ent.get("about")
+    if not isinstance(of, str) or ZID_RE.fullmatch(of) is None:
+        out.append(f"{who}: of is {of!r}, not a zid")
+    elif of not in peer_zids_of(data):
+        out.append(f"{who}: of is {of!r}, which no `peer` endpoint of this node names: a verb is "
+                   "asked of a node the node holds by its zid")
+    if not isinstance(about, str) or (about != ABOUT_SELF and ZID_RE.fullmatch(about) is None):
+        out.append(f"{who}: about is {about!r}, neither a zid nor `{ABOUT_SELF}`")
+    elif about == ABOUT_SELF and states_closed_key_set(data):
+        out.append(f"{who}: a querier about `{ABOUT_SELF}` asks a key the node ends with its zid when "
+                   "it runs, and a closed key set lists the keys when the node is built: name the "
+                   "zid, or leave the key set open")
+    return out
+
+
 # The roles whose `tls/` locator is a secure channel the node holds: a router it dials, a peer it
 # holds by its zid and the port it listens on. A group is UDP, and a commander is no place at all.
 SECURE_ROLES = ("dial", "peer", "listen")
@@ -368,9 +440,21 @@ ENTITY_SHAPES = {
                   "keys": {"key": _key("key-expression"), "document_bytes": _int(0, "document_max", required=False),
                            "from": _key("cell-key", required=False)},
                   "one_of": [["document_bytes", "from"]]},
+    # A querier asks a key it states, or a lifecycle verb of a node it holds as a `peer` endpoint,
+    # whose key the generator makes (`verb_key`), so a declaration never spells the key's grammar.
     "querier": {"is": "asks and keeps what comes back", "count": {"max": "max_queriers"},
-                "keys": {"key": _key("key-expression"), "period_ms": _int(1, "period_max"),
-                         "timeout_ms": _int(1, "timeout_max"), "reply_bytes": _int(1, "sample_max")}},
+                "keys": {"key": _key("key-expression", required=False),
+                         "verb": {"value": "word", "required": False, "choices": list(VERBS_ASKED)},
+                         "of": _when(_key("peer-zid"), "verb"),
+                         "about": _when(_key("about"), "verb"),
+                         "whatami": _when(_word(WHATAMI_ASKED, "client"), "verb"),
+                         # A TOML integer is signed 64-bit, so a declaration states up to its
+                         # largest; a node takes generations up to 2^64 - 1 on the wire.
+                         "generation": _when(_int(0, 2**63 - 1), "verb", "reset"),
+                         "mode": _when(_word(OPEN_MODES, "dial"), "verb", "open"),
+                         "period_ms": _int(1, "period_max"),
+                         "timeout_ms": _int(1, "timeout_max"), "reply_bytes": _int(1, "sample_max")},
+                "one_of": [["key", "verb"]]},
     "liveliness-token": {"is": "is only its key", "count": {"max": "max_tokens"}, "keys": {"key": _key("key")}},
     "replay": {"is": "puts a recorded sequence of samples on each session", "count": {"max": "max_replays"},
                "keys": {"key": _key("key"), "timing": _word(TIMINGS, "declared"),
@@ -937,8 +1021,21 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                 if refused in ent:
                     out.append(f"{who}: a {kind}'s `{refused}` is not carried by the group this node is "
                                f"a member of: {why_not}")
-        key = ent.get("key")
-        why = key_problem(key, values["MAX_KEYEXPR_BYTES"]) if isinstance(key, str) else "is missing"
+        if kind == "querier" and "verb" in ent and "key" not in ent:
+            # The key is the generator's, and the longest one it can be is what the node must hold:
+            # the declaration's limit when it states one, and otherwise what the key needs.
+            unasked = verb_querier_problems(who, ent, data)
+            out += unasked
+            key = entity_key(ent)
+            if unasked or key is None or value_problems(who, ent, shape["keys"], target):
+                continue
+            widest = verb_key(ent, WIDEST_ZID if ent["about"] == ABOUT_SELF else ent["about"])
+            room = (values["MAX_KEYEXPR_BYTES"] if "MAX_KEYEXPR_BYTES" in data.get("limits", {})
+                    else max(values["MAX_KEYEXPR_BYTES"], len(widest)))
+            why = key_problem(widest, room)
+        else:
+            key = ent.get("key")
+            why = key_problem(key, values["MAX_KEYEXPR_BYTES"]) if isinstance(key, str) else "is missing"
         # A subscription and a querier each keep their latest in a cell named by the key.
         cell_twin = {"subscriber": "querier", "querier": "subscriber"}.get(kind)
         if why:
@@ -1119,7 +1216,9 @@ def budgets(data: dict, decl: dict) -> dict[str, int]:
         "MAX_SUBSCRIPTIONS": sum(1 for e in entities if e["kind"] == "subscriber"),
         "MAX_PENDING_QUERIES": pending_need(entities),
         "MAX_PEER_NODES": sum(1 for ep in data["endpoint"] if ep["role"] == "peer"),
-        "MAX_KEYEXPR_BYTES": VERB_KEY_BYTES if verbs else 0,
+        "MAX_KEYEXPR_BYTES": max([VERB_KEY_BYTES if verbs else 0]
+                                 + [len(verb_key(e, WIDEST_ZID if e["about"] == ABOUT_SELF else e["about"]))
+                                    for e in entities if e["kind"] == "querier" and "verb" in e]),
     }
     for name, need in needs.items():
         if name not in stated and need > values[name]:
@@ -1150,7 +1249,7 @@ def key_set_entities(data: dict) -> list[dict]:
     key set sees of it is the keys its samples put on, each a publisher's (once, and not again where
     a publisher of the node already puts on it)."""
     entities = [e for e in data.get("entity", []) if isinstance(e, dict)]
-    rows = [{"kind": e.get("kind"), "key": e.get("key")} for e in entities if e.get("kind") != "replay"]
+    rows = [{"kind": e.get("kind"), "key": entity_key(e)} for e in entities if e.get("kind") != "replay"]
     put = {row["key"] for row in rows if row["kind"] == "publisher"}
     for sample in data.get("sample", []):
         if not isinstance(sample, dict):
@@ -1308,11 +1407,15 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     docs = ", ".join(f"({rust_string(k)}, {b})" for k, b in entities)
     subscribed = [(e["key"], e["sample_bytes"]) for e in every if e["kind"] == "subscriber"]
     cells = ", ".join(f"({rust_string(k)}, {b})" for k, b in subscribed)
-    queried = [(e["key"], e["period_ms"], e["timeout_ms"], e["reply_bytes"]) for e in every
-               if e["kind"] == "querier"]
+    queriers = [e for e in every if e["kind"] == "querier"]
+    # A querier about `self` is generated as the key up to its last chunk, which the node ends with
+    # its own zid when it runs (`QUERIED_ABOUT_SELF`).
+    about_self = [e.get("about") == ABOUT_SELF and "verb" in e for e in queriers]
+    queried = [(verb_key(e, "") if itself else entity_key(e), e["period_ms"], e["timeout_ms"],
+                e["reply_bytes"]) for e, itself in zip(queriers, about_self)]
     asks = ", ".join(f"({rust_string(k)}, {p}, {t}, {b})" for k, p, t, b in queried)
     # The cells are the subscriptions' and then the queriers', in the order the declaration has them.
-    place = {k: at for at, k in enumerate([k for k, _ in subscribed] + [k for k, _, _, _ in queried])}
+    place = {k: at for at, k in enumerate([k for k, _ in subscribed] + [entity_key(e) for e in queriers])}
     mirrored = [(e["key"], place[e["from"]]) for e in every if e["kind"] == "queryable" and "from" in e]
     mirrors = ", ".join(f"({rust_string(k)}, {at})" for k, at in mirrored)
     published = [e for e in every if e["kind"] == "publisher"]
@@ -1357,6 +1460,10 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
         "/// The queriers: (key, the period and the timeout in milliseconds, the bytes of a reply each",
         "/// keeps).",
         f"pub const QUERIED: [(&str, u32, u32, usize); {len(queried)}] = [{asks}];",
+        "/// Which queriers ask a lifecycle verb about the node itself: each such key is generated up",
+        "/// to its last chunk, which the node ends with its own zid when it runs.",
+        f"pub const QUERIED_ABOUT_SELF: [bool; {len(queried)}] = "
+        f"[{', '.join('true' if s else 'false' for s in about_self)}];",
     ] if queried else []
     return "\n".join(
         [
@@ -1644,6 +1751,7 @@ def vocabulary(target_id: str, decl: dict) -> dict:
                            "key is a lifecycle verb's, `@/<zid>/<whatami>/session/<verb>/<peer>` "
                            "(`reset/<generation>/<peer>`, `open/passive/<peer>`): the reply's "
                            "verdict, read by the node, so the reply's bytes need no second reader",
+                     "key": VERB_QUERIER_KEY,
                      "line": VERDICT_LINE, "unreadable": VERDICT_UNREADABLE,
                      "words": {verb: list(words) for verb, words in VERDICT_WORDS_OF.items()},
                      "means": dict(VERDICT_MEANS), "reasons": list(REFUSAL_REASONS)},
@@ -2209,6 +2317,62 @@ document_bytes = 8
             "not a comma-separated list")
     refuses("a commander of no verb", secured + commander.replace('verbs = "open, status"\n', ""),
             "not a comma-separated list")
+    # A querier of a lifecycle verb states the verb, the node asked and the node it is about, and the
+    # generator makes the key; `self` is ended with the node's zid when it runs.
+    verb_ask = ('\n[[entity]]\nkind = "querier"\nverb = "close"\nof = "a1b2c3"\nabout = "d4"\n'
+                "period_ms = 500\ntimeout_ms = 1000\nreply_bytes = 64\n")
+    asking = SAMPLE + peer + verb_ask
+    expect("a querier of a verb is a valid entity", problems(asking) == [])
+    made = emit("n", wz_config.read_decl_toml(asking), sha)
+    expect("its key is made from its words, as a node reads a verb's key",
+           '[("@/a1b2c3/client/session/close/d4", 500, 1000, 64)]' in made
+           and "pub const QUERIED_ABOUT_SELF: [bool; 1] = [false];" in made)
+    itself = asking.replace('about = "d4"', 'about = "self"')
+    made = emit("n", wz_config.read_decl_toml(itself), sha)
+    expect("a querier about self is generated up to its last chunk, which the node ends",
+           '[("@/a1b2c3/client/session/close/", 500, 1000, 64)]' in made
+           and "pub const QUERIED_ABOUT_SELF: [bool; 1] = [true];" in made)
+    image_key_bytes = limit_values(decl, {}, image_limits(TARGETS["slot"]))[0]["MAX_KEYEXPR_BYTES"]
+    expect("the node holds the longest key a querier about self can ask",
+           budgets(wz_config.read_decl_toml(itself), decl).get("MAX_KEYEXPR_BYTES", image_key_bytes)
+           >= len("@/a1b2c3/client/session/close/") + 32)
+    long_of = "f" * 32
+    far = itself.replace("a1b2c3", long_of).replace('verb = "close"', 'verb = "reset"\ngeneration = '
+                                                     f"{2**63 - 1}")
+    far_key = len(f"@/{long_of}/client/session/reset/{2**63 - 1}/") + 32
+    expect("a key longer than the image holds raises the node's key budget when none is stated",
+           far_key <= image_key_bytes
+           or budgets(wz_config.read_decl_toml(far), decl)["MAX_KEYEXPR_BYTES"] == far_key)
+    refuses("a key longer than the declaration's own key budget",
+            far.replace("MAX_QUERYABLES = 2", "MAX_QUERYABLES = 2\nMAX_KEYEXPR_BYTES = 64"),
+            "is longer than MAX_KEYEXPR_BYTES (64)")
+    reset = asking.replace('verb = "close"', 'verb = "reset"\ngeneration = 7')
+    expect("a reset carries its generation before the node it is about",
+           '"@/a1b2c3/client/session/reset/7/d4"' in emit("n", wz_config.read_decl_toml(reset), sha))
+    passive = asking.replace('verb = "close"', 'verb = "open"\nmode = "passive"')
+    expect("a passive open carries the word before the node it is about",
+           '"@/a1b2c3/client/session/open/passive/d4"' in emit("n", wz_config.read_decl_toml(passive), sha))
+    router = asking.replace('verb = "close"', 'verb = "status"\nwhatami = "router"')
+    expect("the role the asked node answers under is the declaration's to name",
+           '"@/a1b2c3/router/session/status/d4"' in emit("n", wz_config.read_decl_toml(router), sha))
+    expect("the vocabulary states the querier's verb form and the key it makes",
+           vocabulary("slot", decl)["entities"]["querier"]["one_of"] == [["key", "verb"]]
+           and "HOST-WZ-QUERIER" in vocabulary("slot", decl)["verdicts"]["key"])
+    refuses("a verb asked of a node the node does not hold", asking.replace('of = "a1b2c3"', 'of = "e5"'),
+            "which no `peer` endpoint")
+    refuses("a verb about something that is no node", asking.replace('about = "d4"', 'about = "everyone"'),
+            "neither a zid nor `self`")
+    refuses("a verb there is not", asking.replace('verb = "close"', 'verb = "hold"'), "not one of")
+    refuses("a reset with no generation", asking.replace('verb = "close"', 'verb = "reset"'),
+            "generation is None")
+    refuses("a generation on a close", asking.replace('verb = "close"', 'verb = "close"\ngeneration = 7'),
+            "`generation` is read only when `verb` is 'reset'")
+    refuses("a mode on a status", asking.replace('verb = "close"', 'verb = "status"\nmode = "passive"'),
+            "`mode` is read only when `verb` is 'open'")
+    refuses("a querier with both a key and a verb", asking.replace('verb = "close"', 'key = "lab/x"\nverb = "close"'),
+            "state exactly one of `key`, `verb`, not both")
+    refuses("a node about itself in a closed key set",
+            itself.replace("[node]", '[policy]\nkey-set = "closed"\n\n[node]'), "a closed key set lists")
     refuses("a commander named by a zid with a leading zero", secured + commander.replace('"1f"', '"01f"'),
             "lowercase hex")
     refuses("a commander named twice for a verb", secured + commander + commander.replace("open, status", "open"),
@@ -2378,8 +2542,8 @@ document_bytes = 8
 
     def at_least(spec: dict, kind: str) -> object:
         return {"integer": spec.get("min"), "key": f"lab/v/{kind}", "key-expression": f"lab/v/{kind}",
-                "word": spec.get("default"), "rate": "1", "decimal": "1", "text": "t", "hex": "00",
-                "replay-key": "lab/v/replay"}[spec["value"]]
+                "word": spec.get("default", (spec.get("choices") or [None])[0]), "rate": "1", "decimal": "1", "text": "t", "hex": "00",
+                "replay-key": "lab/v/replay", "peer-zid": "a1", "about": ABOUT_SELF}[spec["value"]]
 
     def stating(entry: dict, item: dict, key: str, value: object) -> dict:
         """`item` with `key` stated as `value`: the other keys of its `one_of` group left out, and

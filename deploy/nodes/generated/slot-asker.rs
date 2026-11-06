@@ -47,6 +47,9 @@ pub const QUERIERS: usize = 1;
 /// The queriers: (key, the period and the timeout in milliseconds, the bytes of a reply each
 /// keeps).
 pub const QUERIED: [(&str, u32, u32, usize); 1] = [("lab/ask/val", 500, 1000, 32)];
+/// Which queriers ask a lifecycle verb about the node itself: each such key is generated up
+/// to its last chunk, which the node ends with its own zid when it runs.
+pub const QUERIED_ABOUT_SELF: [bool; 1] = [false];
 /// The cells that keep a latest value: the subscriptions' and then the queriers'.
 pub const CELLS: usize = 1;
 /// The most bytes any cell keeps: the size of every cell the node holds.

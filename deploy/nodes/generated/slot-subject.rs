@@ -6,7 +6,7 @@
 
 pub const NODE_ID: &str = "slot-subject";
 /// The digest of the declaration file this was generated from; the node's facts note carries it.
-pub const DECLARATION_SHA256: &str = "0632f2b97e01bc44842e72f5ae5cb2e7dd8479beb47970860343838c6f3e8c74";
+pub const DECLARATION_SHA256: &str = "c2e99938b7d72e845778969c27ccfa5b2d5d426781baf9b22efba13eb88c773e";
 /// The routers the node dials, as locators.
 pub const DIALS: usize = 0;
 pub const DIALED: [&str; 0] = [];
@@ -49,12 +49,15 @@ pub const SUBSCRIPTIONS: [(&str, usize); 0] = [];
 pub const TOKENS: usize = 0;
 pub const TOKEN_KEYS: [&str; 0] = [];
 /// The queriers the node runs.
-pub const QUERIERS: usize = 2;
+pub const QUERIERS: usize = 3;
 /// The queriers: (key, the period and the timeout in milliseconds, the bytes of a reply each
 /// keeps).
-pub const QUERIED: [(&str, u32, u32, usize); 2] = [("@/c3/client/session/status/d4", 500, 2000, 256), ("@/c3/client/session/close/d4", 500, 2000, 256)];
+pub const QUERIED: [(&str, u32, u32, usize); 3] = [("@/c3/client/session/status/d4", 500, 2000, 256), ("@/c3/client/session/close/d4", 500, 2000, 256), ("@/c3/client/session/status/", 500, 2000, 256)];
+/// Which queriers ask a lifecycle verb about the node itself: each such key is generated up
+/// to its last chunk, which the node ends with its own zid when it runs.
+pub const QUERIED_ABOUT_SELF: [bool; 3] = [false, false, true];
 /// The cells that keep a latest value: the subscriptions' and then the queriers'.
-pub const CELLS: usize = 2;
+pub const CELLS: usize = 3;
 /// The most bytes any cell keeps: the size of every cell the node holds.
 pub const SAMPLE_MAX: usize = 256;
 /// The queryables that answer from a cell: (key, index into the cells).

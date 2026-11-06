@@ -942,7 +942,19 @@ of each reply it keeps, read by the module that writes the reply (`lifecycle_wir
 status's `open`, `closing` and `intent`), and a refusal's `reason` last, as its sentence runs to the
 end of the line; a reply that is no verdict document is said as `unreadable len= kept=`. The words
 of each verb and the sentences of a refusal are the vocabulary's `verdicts`, held to the module by
-its test. A node holds at most four queriers. The
+its test. Such a querier is declared by its words instead of its key: `verb` (`close`, `reset`,
+`status`, `open`), `of` (the zid of one of the node's `peer` endpoints: a verb is asked of a node
+the node holds), `about` (the zid of the node the verb acts on, or `self`), `whatami` (the role the
+asked node answers its verbs under, `client` unless stated, which is how a declared node answers),
+`generation` for `reset` and `mode` (`dial` or `passive`) for `open`. The generator makes the key
+`@/<of>/<whatami>/session/<verb>/[<generation>/|passive/]<about>`, so no declaration spells the
+grammar, and holds the node's key budget to the longest it can be. `self` is the node's own zid,
+known only when it runs (from `[identity]`, or a key it makes at start), so the key is generated up to
+its last chunk and the node ends it with its zid at start (`slot_querier::LaunchedKeys`); a closed
+key set, which lists its keys when the node is built, refuses it. When it starts the node says each
+querier's key, `HOST-WZ-QUERIER <n> <key>` with `n` its place among the declaration's queriers, so a
+lab joins the ASKED, REPLY and VERDICT lines to the querier that asked without making the key. A
+node holds at most four queriers. The
 witness is the stock `zenoh_z_queryable` as the responder and the reference router's REST plugin
 as the asker of the node's own queryable: the reply is kept, it is kept after the responder is
 stopped and answered from, another responder's value replaces it, and the node asks again with

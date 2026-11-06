@@ -66,7 +66,9 @@ use wz_session_mcu::slot_publisher::{
     Body, MadeBuffer, Process, Publication, PublishCounts, PublishWatch,
 };
 #[cfg(feature = "get")]
-use wz_session_mcu::slot_querier::{Query, QueryState, QueryWatch};
+use wz_session_mcu::slot_querier::{
+    LaunchedKeys, LaunchedKeysRefused, Query, QueryState, QueryWatch,
+};
 use wz_session_mcu::slot_replay::{Decimal, Replay, ReplayCounts, ReplayWatch, Sample, Schedule};
 
 wz_runtime_posix::posix_image_no_heap!();
@@ -77,8 +79,6 @@ mod declared {
     include!(env!("WZ_DECLARED_RS"));
 }
 
-#[cfg(feature = "get")]
-use declared::QUERIED;
 use declared::{
     ACCEPTS, CELLS, DECLARATION_SHA256, DIALED, DOCS, DOCUMENTS, GROUPS, LISTEN, LISTENS,
     LISTEN_TLS, MIRRORED, MIRRORS, NODE_ID, PEERS, PEER_NODES, PUBLISHED, PUBLISHERS, QUERIERS,
@@ -93,6 +93,8 @@ use declared::{GROUP, GROUP_ADDR, GROUP_PORT, GROUP_TTL, MEMBERS};
 use declared::{IDENTITY, SECURE_SESSIONS};
 #[cfg(feature = "listen")]
 use declared::{LISTEN_ADDR, LISTEN_PORT};
+#[cfg(feature = "get")]
+use declared::{QUERIED, QUERIED_ABOUT_SELF};
 #[cfg(feature = "verbs")]
 use wz_session_mcu::admin_fixed::VerbLegs;
 #[cfg(feature = "verbs")]
@@ -194,6 +196,19 @@ const fn cell_bytes(at: usize) -> usize {
     } else {
         queried_bytes(at - SUBSCRIBERS)
     }
+}
+
+/// The keys the queriers ask, set once the node knows its zid: a querier of a lifecycle verb about
+/// the node itself is generated up to its last chunk (`QUERIED_ABOUT_SELF`), and the node ends it
+/// with its own zid; every other key is the declared one.
+#[cfg(feature = "get")]
+static ASKED: LaunchedKeys<QUERIERS, { wz_session_core::caps::MAX_KEYEXPR_BYTES }> =
+    LaunchedKeys::new();
+
+/// The key querier `at` asks: the one set at start, which every querier has before the node exists.
+#[cfg(feature = "get")]
+fn asked_key(at: usize) -> &'static str {
+    ASKED.key(at).unwrap_or(QUERIED[at].0)
 }
 
 /// The bytes the replies of querier `at` are kept to.
@@ -517,7 +532,7 @@ fn mirrors() -> [Mirror; MIRRORS] {
 #[cfg(feature = "get")]
 fn queries() -> [Query; QUERIERS] {
     core::array::from_fn(|at| Query {
-        key: QUERIED[at].0,
+        key: asked_key(at),
         period_ms: QUERIED[at].1,
         timeout_ms: QUERIED[at].2,
         reply_bytes: QUERIED[at].3,
@@ -635,7 +650,7 @@ impl NodeApp for Report {
         self.queried.poll(&QUERY_STATE, |at, tally| {
             log_args(format_args!(
                 "HOST-WZ-ASKED {} asked={} replies={} errors={} finals={} timeouts={} refused={}",
-                QUERIED[at].0,
+                asked_key(at),
                 tally.asked,
                 tally.replied,
                 tally.errors,
@@ -791,6 +806,24 @@ fn run() -> i32 {
         log("wz: FAIL - the zenoh id does not fit");
         return 2;
     };
+    // The queriers about the node itself end their keys with its zid, known from here on.
+    #[cfg(feature = "get")]
+    {
+        let zid = identity.zid_hex();
+        let set = match zid.finish() {
+            Ok(zid) => ASKED.set(|at| QUERIED[at].0, |at| QUERIED_ABOUT_SELF[at], zid),
+            Err(_) => Err(LaunchedKeysRefused::TooLong),
+        };
+        if let Err(why) = set {
+            log(why.message());
+            return 3;
+        }
+        // Each querier's key, once, by its place among the declaration's queriers: what a lab
+        // joins the querier's lines to, without making the key itself.
+        for at in 0..QUERIERS {
+            log_args(format_args!("HOST-WZ-QUERIER {at} {}", asked_key(at)));
+        }
+    }
     // What `whoami` answers on the control channel.
     #[cfg(feature = "control")]
     let own_zid = identity.zid_hex();

@@ -623,10 +623,15 @@ fn two_provisioned_nodes_command_by_a_zid_known_before_either_runs_with_no_zenoh
     // The subject holds the target by the zid the tool printed, and asks it.
     let asker = std::fs::read_to_string(root.join(SUBJECT_DECLARATION))
         .expect("read the subject's declaration");
-    assert_eq!(asker.matches(&format!("\"{TARGET_ZID}\"")).count(), 1);
+    // The zid is named by the peer endpoint and by each querier's `of`, never inside a key: the
+    // generator makes the keys.
+    assert_eq!(asker.matches(&format!("\"{TARGET_ZID}\"")).count(), 4);
+    assert!(
+        !asker.lines().any(|line| line.starts_with("key = ")),
+        "the subject's queriers name verbs, not keys"
+    );
     let asker = asker
         .replace(&format!("\"{TARGET_ZID}\""), &format!("\"{target_zid}\""))
-        .replace(&format!("@/{TARGET_ZID}/"), &format!("@/{target_zid}/"))
         .replace(SUBJECT_CERT, &subject_cert.display().to_string())
         .replace(SUBJECT_KEY, &subject_key.display().to_string());
     let target_node = package(dir.path(), "slot-commander", &commander);
@@ -690,5 +695,37 @@ fn two_provisioned_nodes_command_by_a_zid_known_before_either_runs_with_no_zenoh
             said.lines().any(|line| line == want),
             "the subject did not say {want:?}\n--- subject ---\n{said}"
         );
+    }
+    // The querier about `self` asks under a key the subject ended with its own zid when it ran, and
+    // the target answers the status of the session the subject holds with it.
+    // It said each querier's key when it started, by the querier's place in its declaration.
+    let said = subject_run.console();
+    let itself = format!("status/{subject_zid}");
+    for (at, about) in [
+        ("0", "status/d4"),
+        ("1", "close/d4"),
+        ("2", itself.as_str()),
+    ] {
+        let want = format!("HOST-WZ-QUERIER {at} @/{target_zid}/client/session/{about}");
+        assert!(
+            said.lines().any(|line| line == want),
+            "the subject did not say {want:?}\n--- subject ---\n{said}"
+        );
+    }
+    let about_self = format!(
+        "HOST-WZ-VERDICT @/{target_zid}/client/session/status/{subject_zid} verdict=status "
+    );
+    let deadline = std::time::Instant::now() + BUDGET;
+    loop {
+        let said = subject_run.console();
+        if said.lines().any(|line| line.starts_with(&about_self)) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the subject's querier about itself was not answered within {BUDGET:?}: want \
+             {about_self:?}\n--- subject ---\n{said}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
