@@ -118,20 +118,57 @@ struct Router {
 /// Run `demo` with `args` under a shell that raises the soft open-files limit to the hard one first
 /// and then `exec`s it, so the process this returns is the demo itself (its `/proc` entry is read).
 /// A router holding two thousand sessions needs more descriptors than a default login shell allows.
-/// With `pin`, the demo runs on that one core at a lower priority (`taskset` and `nice`, which also
-/// `exec`): the scheduler shares a core between THREADS, and the demo has several busy ones, so
-/// without the lower priority three hogs would still leave it most of the core.
-fn command_with_raised_limit(demo: &Path, args: &[&str], pin: Option<usize>) -> Command {
+fn command_with_raised_limit(demo: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("sh");
-    let script = match pin {
-        Some(core) => format!(
-            "ulimit -n \"$(ulimit -Hn)\" 2>/dev/null; \
-             exec nice -n {ROUTER_NICE} taskset -c {core} \"$0\" \"$@\""
-        ),
-        None => "ulimit -n \"$(ulimit -Hn)\" 2>/dev/null; exec \"$0\" \"$@\"".to_string(),
-    };
-    command.arg("-c").arg(script).arg(demo).args(args);
     command
+        .arg("-c")
+        .arg("ulimit -n \"$(ulimit -Hn)\" 2>/dev/null; exec \"$0\" \"$@\"")
+        .arg(demo)
+        .args(args);
+    command
+}
+
+/// Take the router's CPU away: every thread of `pid` onto `core`, at [`ROUTER_NICE`]. The scheduler
+/// shares a core between THREADS, and the router has several busy ones, so without the lower
+/// priority three hogs would still leave it most of the core.
+///
+/// Done to the running router once its sessions are in, and not by starting it under `taskset` and
+/// `nice`: a router started on one core at a lower priority brings its sessions up on a core it
+/// shares with whatever else the host runs, at a tenth of that core's weight, and every handshake
+/// not done within the accept timeout is dropped. Measured (`docs/router-table-snapshots.md`,
+/// section 6.3): pinned from its start, the same router brought up 2048, 1451 and 1350 of 2048
+/// sessions as the host's load went from 2 to 9, every one of them within the first ten seconds.
+/// The router's own thread layout does not depend on where it starts, as its runtime names its
+/// worker count. A thread it starts later inherits the core and the priority of the thread that
+/// starts it; the threads are walked twice so that one started during the first walk is caught.
+fn starve_router(pid: u32, core: usize) {
+    for _ in 0..2 {
+        let tasks = fs::read_dir(format!("/proc/{pid}/task")).expect("the router's threads");
+        for task in tasks.flatten() {
+            let Some(tid) = task
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<libc::pid_t>().ok())
+            else {
+                continue;
+            };
+            // SAFETY: `set` is a plain bit set the calls below only read or write through the
+            // pointer and size given, and `tid` is a number; a thread that has exited since the
+            // walk answers ESRCH, which leaves nothing to move.
+            let moved = unsafe {
+                let mut set: libc::cpu_set_t = std::mem::zeroed();
+                libc::CPU_SET(core, &mut set);
+                libc::sched_setaffinity(tid, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
+                    && libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, ROUTER_NICE) == 0
+            };
+            let errno = std::io::Error::last_os_error().raw_os_error();
+            assert!(
+                moved || errno == Some(libc::ESRCH),
+                "thread {tid} of the router could not be moved to core {core} at nice \
+                 {ROUTER_NICE} (errno {errno:?})"
+            );
+        }
+    }
 }
 
 /// The highest core this process may run on, from the kernel's own list (`0-31`, `0,2-5`, ...).
@@ -211,7 +248,7 @@ fn sessions_shed(line: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
-fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Router {
+fn spawn_router(demo: &Path, cpu_share: Option<&str>) -> Router {
     let max_sessions = ROUTER_MAX_SESSIONS.to_string();
     // The client processes start their sessions together, so the router sees every handshake at
     // once. Upstream's router closes the links past `accept_pending` (a hundred) at once; this test
@@ -229,7 +266,7 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
     if let Some(share) = cpu_share {
         args.extend(["--cpu-share", share]);
     }
-    let mut child = command_with_raised_limit(demo, &args, pin)
+    let mut child = command_with_raised_limit(demo, &args)
         .env("RUST_LOG", "info")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -384,7 +421,6 @@ fn spawn_sessions(
     let mut command = command_with_raised_limit(
         demo,
         &["--sessions", document.to_str().expect("a UTF-8 path")],
-        None,
     );
     command.stdout(Stdio::null());
     command.stderr(if ended.is_some() {
@@ -448,6 +484,92 @@ fn cpu_seconds(pid: u32) -> f64 {
     (utime + stime) / USER_HZ
 }
 
+/// The router's CPU time per thread name, in seconds, the threads of one name summed: which of its
+/// runtimes spent the CPU, when a share of one core is all it has.
+fn cpu_seconds_by_thread(pid: u32) -> Vec<(String, f64)> {
+    let mut by_name: Vec<(String, f64)> = Vec::new();
+    let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
+        return by_name;
+    };
+    for task in tasks.flatten() {
+        let Ok(stat) = fs::read_to_string(task.path().join("stat")) else {
+            continue;
+        };
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+            continue;
+        };
+        let name = stat[open + 1..close].to_owned();
+        let fields: Vec<&str> = stat[close + 2..].split_whitespace().collect();
+        let (Some(utime), Some(stime)) = (
+            fields.get(11).and_then(|f| f.parse::<f64>().ok()),
+            fields.get(12).and_then(|f| f.parse::<f64>().ok()),
+        ) else {
+            continue;
+        };
+        let seconds = (utime + stime) / USER_HZ;
+        match by_name.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, sum)) => *sum += seconds,
+            None => by_name.push((name, seconds)),
+        }
+    }
+    by_name.sort_by(|a, b| b.1.total_cmp(&a.1));
+    by_name
+}
+
+/// The interval of [`BringUp`]'s samples.
+const BRING_UP_SAMPLE: Duration = Duration::from_secs(10);
+
+/// How the sessions came up: every [`BRING_UP_SAMPLE`], how many were up, how many messages the
+/// router had forwarded and the CPU it had used. A count at the deadline cannot tell a router slow
+/// at every admission from one that admits fast until forwarding the load its sessions offer takes
+/// its core; the samples can.
+struct BringUp {
+    started: Instant,
+    samples: Vec<(u64, usize, u64, f64)>,
+}
+
+impl BringUp {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            samples: Vec::new(),
+        }
+    }
+
+    /// Take a sample if one is due.
+    fn sample(&mut self, router: &Router, pid: u32) {
+        let due = (self.samples.len() as u64 + 1) * BRING_UP_SAMPLE.as_secs();
+        let elapsed = self.started.elapsed().as_secs();
+        if elapsed >= due {
+            self.samples.push((
+                elapsed,
+                router.up.load(Ordering::Relaxed),
+                router.pushes.load(Ordering::Relaxed),
+                cpu_seconds(pid),
+            ));
+        }
+    }
+
+    /// The samples and the CPU of the router's threads, for a printed line.
+    fn text(&self, router: &Router, pid: u32) -> String {
+        let mut text = format!(
+            "bring-up {:.1}s, {} up, {} forwarded, router CPU {:.1}s;",
+            self.started.elapsed().as_secs_f64(),
+            router.up.load(Ordering::Relaxed),
+            router.pushes.load(Ordering::Relaxed),
+            cpu_seconds(pid),
+        );
+        for (at, up, pushes, cpu) in &self.samples {
+            text.push_str(&format!(" t={at}s up={up} fwd={pushes} cpu={cpu:.1}s;"));
+        }
+        text.push_str(" threads:");
+        for (name, seconds) in cpu_seconds_by_thread(pid) {
+            text.push_str(&format!(" {name}={seconds:.1}s"));
+        }
+        text
+    }
+}
+
 /// What a run holds fixed.
 #[derive(Clone, Copy)]
 struct Scenario {
@@ -456,8 +578,8 @@ struct Scenario {
     churn: bool,
     /// Messages per second all the publishers offer together.
     offered: u64,
-    /// The router runs on one core, at a lower priority, shared with this many CPU hogs that start
-    /// once every session is in. `None` leaves it the host.
+    /// Once every session is in, the router is moved onto one core at a lower priority
+    /// ([`starve_router`]) and shares it with this many CPU hogs. `None` leaves it the host.
     starved_by: Option<usize>,
     /// The CPU, in percent of one core, the router is told it may count on (`--cpu-share`). With it
     /// the router admits only the sessions it can keep the leases of, and refuses the rest; without
@@ -536,7 +658,7 @@ fn measure(scenario: Scenario) -> Window {
     let demo = release_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);
     let core = starved_by.map(|_| last_allowed_core());
-    let mut router = spawn_router(&demo, core, cpu_share);
+    let mut router = spawn_router(&demo, cpu_share);
     let router_pid = router.guard.child_mut().id();
     let dir = tempfile::tempdir().expect("a directory for the sessions documents");
 
@@ -572,6 +694,7 @@ fn measure(scenario: Scenario) -> Window {
     }
 
     let up_deadline = Instant::now() + Duration::from_secs(60 + subscribers as u64 / 20);
+    let mut bring_up = BringUp::new();
     // Every session, or as many as the declared share lets the router admit and a refusal for each of
     // the rest: the router that says no to the session that does not fit is the behaviour measured.
     // A router told its share measures its own host and may admit fewer than the recorded costs
@@ -582,14 +705,16 @@ fn measure(scenario: Scenario) -> Window {
         router.up.load(Ordering::Relaxed) < expected_up
             || router.refused.load(Ordering::Relaxed) < subscribers - expected_up
     } {
+        bring_up.sample(&router, router_pid);
         assert!(
             Instant::now() < up_deadline,
             "only {} of {expected_up} sessions came up and {} of {} were refused (went DOWN {}); \
-             the router said:{}",
+             {}; the router said:{}",
             router.up.load(Ordering::Relaxed),
             router.refused.load(Ordering::Relaxed),
             subscribers - expected_up,
             router.down.load(Ordering::Relaxed),
+            bring_up.text(&router, router_pid),
             router
                 .capacity_line
                 .lock()
@@ -598,11 +723,15 @@ fn measure(scenario: Scenario) -> Window {
         );
         thread::sleep(Duration::from_millis(200));
     }
+    eprintln!("{}", bring_up.text(&router, router_pid));
     thread::sleep(settle);
 
     // A starved router takes its CPU away only now, after every session is in and the load is
     // flowing, so what the window measures is the links under overload and not whether a router that
     // is short of CPU can still admit sessions (which is its own question).
+    if let Some(core) = core {
+        starve_router(router_pid, core);
+    }
     let hogs: Vec<ChildGuard> = core
         .into_iter()
         .flat_map(|core| (0..starved_by.unwrap_or(0)).map(move |_| spawn_cpu_hog(core)))
