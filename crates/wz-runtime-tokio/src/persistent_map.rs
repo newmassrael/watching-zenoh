@@ -188,6 +188,10 @@ impl<K, V, S> PersistentMap<K, V, S> {
     }
 
     /// How many keys the map holds.
+    ///
+    /// Read by the tests and by the forwarder (`routing-router-hat`); a build of the peer mesh
+    /// alone reads it nowhere, and the dead-code lint of that build is why it is gated.
+    #[cfg(any(test, feature = "routing-router-hat"))]
     pub(crate) fn len(&self) -> usize {
         self.len
     }

@@ -644,7 +644,17 @@ CASES: tuple[Case, ...] = (
     # of them that changes code is `2274c65e57` (a record read in the lent form at the heap's
     # capacity, another session's), so the growth is its, by that and not by a reading at that
     # commit. The budget is the reading of `6dc6c68d9c` and 3,500, to the hundred.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 5_808_100,
+    # 2026-11-06, later -- hosted run 42161910521 (`b65f96aff6`) read 5,894,781, 86,681 over, and
+    # `capic-default` 86,141 over, while `capic-default-lean`, which has no node, stayed inside:
+    # the growth is the node's. The commits between the last budget and that run that change
+    # this crate's dependencies are the router session's, the persistent hash map the tables'
+    # stores are held in (`446ee33ef7`, `2788076e9a`) and the declaration log (`fe6f3ac205`);
+    # the keyexpr index of the faces' subscriptions (`51279e5529`) came after it. At
+    # `a7331c59ea` on pc3: 5,961,373 here and 11,048,057 for `capic-default` (the lean case
+    # 9,543,617, unchanged). Chosen growth, the tables' sharing is the owner's decision of
+    # 2026-11-05; the budget is that reading, 3,600 for the hosted lane and 3,500, to the
+    # hundred.
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 5_968_500,
          # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
          # role and the scouting and UDP link under it, and the multicast transport.
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
@@ -695,7 +705,10 @@ CASES: tuple[Case, ...] = (
     # same tree, so the node is 1,285,904 bytes (13.3 percent) and adds no export of its own (the
     # doors it reads through are the ABI's, in both). The budget is that reading, 3,184 for the
     # hosted lane's difference from this machine and 3,500, to the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 10_896_600,
+    # 2026-11-06, later -- the node's growth `capic-router-node`'s note gives (86,141 over on
+    # hosted run 42161910521): 11,048,057 on pc3 at `a7331c59ea`, and the budget is that reading,
+    # 3,600 and 3,500, to the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_055_200,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST),
          exports=836,

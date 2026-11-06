@@ -78,7 +78,7 @@
 //! The store is part of the router's tables, which the `snapshot` value of the
 //! `routing-table-sharing` policy copies as a version and writes as the next one
 //! (`docs/router-table-snapshots.md`, phase 6). Every map in it is a
-//! [`PersistentMap`], so a copy shares the store and a write copies the path to what it
+//! `PersistentMap`, so a copy shares the store and a write copies the path to what it
 //! changes. The walkers that answer a declaration or a withdrawal therefore read first and
 //! then write only the faces they push to or forget on: writing through every face, as a
 //! mutable walk does, would copy every face of a shared version.
