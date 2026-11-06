@@ -2539,7 +2539,9 @@ a change copies only the part of the tables it touches, and a link that leaves
 is sent nothing after its leaving has returned. What `snapshot` does not keep
 of `rwlock`: a message being routed by the version before a change may reach a
 link after a declaration that change sends to the same link, an order no rule
-of the protocol sets.
+of the protocol sets. `snapshot` is the value to choose for a router whose
+sessions come and go while it routes: a change waits for no message being
+routed, and a message costs what it costs under `rwlock`.
 '''
 
 # The role of a node in a zenoh network: upstream's `mode`. A global axis (it names no image),

@@ -298,7 +298,9 @@ choice WZ_POLICY_ROUTING_TABLE_SHARING
 	  is sent nothing after its leaving has returned. What `snapshot` does not keep
 	  of `rwlock`: a message being routed by the version before a change may reach a
 	  link after a declaration that change sends to the same link, an order no rule
-	  of the protocol sets.
+	  of the protocol sets. `snapshot` is the value to choose for a router whose
+	  sessions come and go while it routes: a change waits for no message being
+	  routed, and a message costs what it costs under `rwlock`.
 	  Upstream: Keeps a router's routing tables behind one reader-writer lock
 	  (`RwLock<Tables>` in its `TablesLock`), so a declaration, a face coming up or
 	  one leaving waits for the messages being routed, and they wait for it.

@@ -113,8 +113,10 @@ impl TablesCell {
     /// Under `rwlock` the recursive read of [`PlainRwLock::read`]: a thread that holds a read may
     /// take another. Under `snapshot` the version this thread already reads the cell by, or, for
     /// its outermost read, the version published last. Loading it costs one increment of the
-    /// version's count, and the pin of the outermost read one more; reading through the load's
-    /// guard without a count is a measurement of phase 6 of the design, not a guess made here.
+    /// version's count, and the pin of the outermost read one more. Measured in phase 6 of the
+    /// design (`docs/router-table-snapshots.md`, section 6.3): with no writer the readers route
+    /// within 2.6 % of what they route under `rwlock`, inside the spread of either, so the counts
+    /// stay rather than a nested read borrowing a guard of the load that its thread must keep.
     pub(crate) fn read(&self) -> TablesRead<'_> {
         TablesRead(match &self.form {
             Form::Locked(lock) => Read::Locked(lock.read()),

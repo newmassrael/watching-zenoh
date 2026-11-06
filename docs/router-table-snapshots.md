@@ -2,8 +2,8 @@
 
 Structure B of `docs/router-task-per-face.md` section 4, the second value of the table-sharing axis that
 section names and leaves undeclared. This is the design and its correctness argument, written before the
-first line of the change, so that each phase is judged against it. Nothing here is measured yet: where this
-note says B costs less or more than A, it says what will be measured and how, not what the result is.
+first line of the change, so that each phase is judged against it. Sections 1 to 5 were written before any
+measurement; what was measured, and what it decided, is in sections 6.1 to 6.3.
 
 ## 1. Why
 
@@ -251,13 +251,110 @@ tables persistent (section 2, path copying inside a keyed map), and it removes t
 outermost read if the profile shows it. The default stays `rwlock` until a reading of B holds every test of
 E7s and costs no more per message.
 
+Section 6.3 corrects the attribution above: the copies were real and are gone, but the starved router's
+bring-up failed under A as well once A was run more than once, and the cause was the test's harness.
+
+### 6.3 The phase 6 reading (this round)
+
+**The profile.** A second instrument, `the_writes_of_an_admission_measured_against_the_faces_already_up`,
+brings 2,048 client faces up one at a time as the starved router's population does (register, a
+subscriber, an interest), times each write by band of 256 faces already up, and times the copy and the
+release of each store of the tables. On the tree of phase 5 (hkl001, the same build of each value):
+
+| Faces already up | Value | Register p50 | Subscribe p50 | Interest p50 |
+|---|---|---|---|---|
+| 0 to 256 | rwlock | 0 us | 54 us | 12 us |
+| 0 to 256 | snapshot | 2 us | 88 us | 36 us |
+| 1,792 to 2,048 | rwlock | 0 us | 521 us | 130 us |
+| 1,792 to 2,048 | snapshot | 19 us | 1,313 us | 602 us |
+
+At 2,048 faces a copy of the future subscriptions' store took 202 to 398 us and of the broker hat's client
+subscriptions 191 to 214 us, each released in 117 to 177 us by whichever reader let the last version go;
+the face map's spine took 9 us. Those two stores were hash maps of hash maps of strings, copied whole by
+every write under B. They are now persistent maps, a hash array mapped trie written for the router
+(`crates/wz-runtime-tokio/src/persistent_map.rs`, Bagwell 2001, held by model tests against `HashMap` under
+three degenerate hashers and by a test that a write to a copy of 100,000 keys owns at most eight nodes),
+and the writers that walk them read first and write only the entries that change. The face map stays a
+hash map: it is read on every message, and its copy is the 10 us measured. On pc3 after the change:
+
+| Faces already up | Value | Register p50 | Subscribe p50 | Interest p50 |
+|---|---|---|---|---|
+| 1,792 to 2,048 | rwlock | 0 us | 935 us | 227 us |
+| 1,792 to 2,048 | snapshot | 20 us | 968 us | 256 us |
+
+and every store's copy is 0 us but the face map's. Under both values a subscription still costs O(faces),
+since every face's interests are matched against it; that is the router's and not the sharing's, and an
+index of the interests by what they match would serve both values.
+
+**The starved router.** The phase 5 failure did not move: 1,697 and 1,734 of 2,048 sessions came up. The
+harness was given a timeline of the bring-up (every 10 s, the sessions up, the messages forwarded, the
+router's CPU, and its CPU by thread), and three runs of each value, alternating, on pc3:
+
+| Run | Host load | rwlock: up | snapshot: up |
+|---|---|---|---|
+| 1 | 1.9, 3.9 | 2,048 | 1,773 |
+| 2 | 8.3, 4.6 | 1,451 | 1,056 |
+| 3 | 9.0, 6.5 | 1,350 | 1,324 |
+
+In every failed run every session that came up had come up within the first 10 s, and none came up in the
+150 s after, including the last 60 s, when the publishers had finished and the router was idle. 10 s is
+the accept timeout: a handshake not done by then is dropped, and the clients do not try again. The router
+was started under `taskset` and `nice 10`, so it brought its 2,048 sessions up on one core it shared with
+whatever else the host ran, at a tenth of that core's weight, while its own comment said its CPU was taken
+away only once every session was in. The bring-up therefore measured the host's load, under both values.
+
+The harness now does what its comment says (`starve_router` in
+`crates/wz-integration-tests/tests/it/files/wz_router_hat_data_plane_scaling.rs`): the router starts on
+the host, and once its sessions are in, every thread of it is moved onto the one core at nice 10, and the
+hogs start. Its thread layout does not depend on where it starts, since its runtime names its worker count.
+
+**Layer E7s, the corrected harness**, two runs of each value alternating, on pc3 at host loads of 3 to 30:
+every test passed in every run, under both values, and 2,048 sessions came up in 1.6 to 1.8 s.
+
+| | rwlock, runs 1 and 2 | snapshot, runs 1 and 2 |
+|---|---|---|
+| us per message, 256 / 1,024 / 2,048 subscribers, no churn | 17.9 / 26.8 / 27.0; 19.7 / 24.7 / 27.2 | 18.6 / 24.4 / 27.4; 19.8 / 25.9 / 27.8 |
+| us per message, 256 / 1,024 subscribers, churn | 19.3 / 27.2; 21.3 / 29.3 | 21.2 / 28.2; 20.7 / 30.3 |
+| starved router, churn: admitted of 320 in the window | 196; 168 | 188; 148 |
+| starved router: messages forwarded a second, faces down | 4,707, 0; 3,366, 0 | 4,863, 0; 4,588, 0 |
+| told 1.32 % of a core, 32 hogs: forwarded, faces down, table waits of 250 ms or more | 481, 1, 8; 356, 14, 5 | 548, 7, 0; 436, 11, 1 |
+| told 1.32 % of a core, 64 hogs: forwarded, faces down, table waits | 261, 2, 3; 285, 2, 4 | 319, 4, 1; 349, 0, 0 |
+
+Per message the two values differ by less than either differs from itself between two runs (rwlock at
+1,024 subscribers read 26.8 and 24.7), and the sign of the difference changes from row to row.
+
+**The outermost read's count.** The phase 0 instrument now first routes for one window with no writer,
+which separates what a read costs from what the writes cost the readers. Four runs of each, alternating,
+on pc3:
+
+| | rwlock | snapshot |
+|---|---|---|
+| Puts routed a second, no writer | 1,255,886; 1,133,461; 1,098,874; 1,071,651 | 1,204,801; 1,048,329; 1,105,701; 1,083,184 |
+| Puts routed a second, with the writer | 1,191,451; 1,214,003; 1,145,651; 1,192,479 | 983,024; 982,978; 1,044,669; 1,083,831 |
+| Declarations in the window | 294 to 322 | 173,246 to 210,182 |
+
+With no writer the means are 1,139,968 and 1,110,504, 2.6 % apart, within the spread of either value. With
+the writer B's readers route 14 % fewer Puts while B's writer completes about 600 times A's writes, each of
+which retires the routes it touches. The count of the outermost read is not what the readers pay, so it
+stays: a read through the load's guard without a count would make a nested read's version a borrow of a
+guard the thread must keep, which is not worth 2.6 % that the spread already covers.
+
+**The verdict.** B holds every test of E7s and costs no more per message than A, which is what section 6.2
+asked before B could be recommended. A stays the default, as C2 of `docs/build-configuration.md` requires
+of every policy, and the help text of `routing-table-sharing` now says that `snapshot` is the value to
+choose for a router whose sessions come and go while it routes.
+
 ## 7. What is not decided, and what could make this wrong
 
 - **The graph's copy.** `LinkstateNetwork` holds one shortest-path tree per node, O(N squared) for N nodes
   of a mesh. A write that changes the topology copies it under B; a declaration does not. Whether topology
   writes are frequent enough on a large mesh for this to matter is a phase 5 reading.
-- **The face map's copy.** A face transition copies the face map's spine (one pointer per face) until phase
-  6 makes it persistent; at 2,048 faces that is 16 KiB per transition.
+- **The face map's copy.** Every write under B copies the face map's spine (one pointer per face): 10 us
+  at 2,048 faces, measured in phase 6. It stays a hash map because every message reads it; a router of
+  many more faces is where a persistent face map would be measured against that read.
+- **A subscription costs O(faces) under both values.** Every face's interests are matched against it
+  (section 6.3, 935 us at 2,048 faces under A). An index of the interests by what they match is the
+  router's to build, and serves A and B alike.
 - **The tick.** Under B the tick that finds nothing dirty need not publish; whether to split it into a read
   that decides and a write that acts is decided in phase 4 by what it writes (queries and interests timed
   out, egress swept: the last is per-face runtime and needs no version).
@@ -267,5 +364,6 @@ E7s and costs no more per message.
   done until a measurement asks for it.
 - **The gain is a prediction until phase 5 runs.** If B costs more per message than A, B stays a value for
   the deployments whose writers are what they pay for, and the reading is recorded here as such. Phase 5
-  ran (section 6.2): B's writers no longer wait, and B as built fails the starved router's admission, so
-  phase 6 comes before any recommendation of B.
+  ran (section 6.2): B's writers no longer wait. Phase 6 ran (section 6.3): B holds every test of E7s and
+  costs no more per message, and is the recommended value for a router whose sessions come and go; the
+  default stays A (C2).
