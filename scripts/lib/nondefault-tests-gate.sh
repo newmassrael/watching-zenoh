@@ -1477,9 +1477,9 @@ an intermittent HANG in the two-dialer FIFO rendezvous (measured 1-in-3 alone, 7
     # engine on selects that one, which is every build this table can spell (it has no
     # `--no-default-features`). The cooperative engine runs them in `run-ci.sh`, the lane
     # `C1co tls engine-coop`, with 2 passed guarded.
-    "wz-capi-pico|a_dial_that_trusts_the_listeners_certificate_opens_a_session_that_carries_a_put_each_way|\
+    "wz-capi-pico|files::tls_coop_roundtrip::a_dial_that_trusts_the_listeners_certificate_opens_a_session_that_carries_a_put_each_way|\
 the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine on"
-    "wz-capi-pico|a_dial_that_trusts_another_certificate_does_not_open|\
+    "wz-capi-pico|files::tls_coop_roundtrip::a_dial_that_trusts_another_certificate_does_not_open|\
 the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine on"
     # The listener's event for a dropped handshake (`tests/tls_handshake_drop_event.rs`, needs
     # `tls-mbedtls` and `event-ring`): the same cooperative engine, run by lane C1co tls handshake
@@ -1493,11 +1493,11 @@ the cooperative engine's test, run by lane C1co tls handshake drop event; this t
     # spawns `target/zenohd/zenohd`, which only Layer Z provisions, so a leg of this table, which
     # never passes `--ignored`, would run none of them. Layer Z runs the six with `--ignored`,
     # 6 passed guarded.
-    "wz-capi-c|a_router_node_and_a_zenohd_forward_between_the_clients_of_each|\
+    "wz-capi-c|files::router_node_zenohd_interop::a_router_node_and_a_zenohd_forward_between_the_clients_of_each|\
 a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
-    "wz-capi-c|a_peer_node_that_keeps_a_south_relays_between_its_client_and_zenohd|\
+    "wz-capi-c|files::router_node_zenohd_interop::a_peer_node_that_keeps_a_south_relays_between_its_client_and_zenohd|\
 a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
-    "wz-capi-c|a_node_below_a_zenohd_learns_of_the_subscriber_and_queryable_beyond_it|\
+    "wz-capi-c|files::router_node_zenohd_interop::a_node_below_a_zenohd_learns_of_the_subscriber_and_queryable_beyond_it|\
 a test that spawns a real zenohd, run by Layer Z with --ignored (6 passed guarded); this table never passes --ignored"
     # The last three (`advanced_and_group::`) hold a row of no kind: the module is
     # `cfg(not(feature = "zenoh-c-no-unstable-api"))`, which `--all-features` turns on, so the
