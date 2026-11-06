@@ -39,7 +39,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/lib/vendored-oracle.sh"
 
 VENDOR_DIR="$ROOT/vendor/zenoh-pico"
-EXAMPLES_DIR="$VENDOR_DIR/examples"
+# The copy of the submodule this script patches and builds from, so the submodule itself is
+# only read (see `stage_pico_source` below for why).
+SRC_DIR="$ROOT/target/zenoh-pico-src"
+EXAMPLES_DIR="$SRC_DIR/examples"
 BUILD_DIR="$ROOT/target/zenoh-pico-build"
 INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
 # The arm built with Z_FEATURE_MULTICAST_DECLARATIONS (below). Variables of their own, because
@@ -127,7 +130,7 @@ if ! command -v cmake >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "build-zenoh-pico-cli: building from vendor/zenoh-pico/examples" >&2
+echo "build-zenoh-pico-cli: building from a copy of vendor/zenoh-pico at target/zenoh-pico-src" >&2
 echo "build-zenoh-pico-cli: pin = $(git -C "$VENDOR_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)" >&2
 
 # R216 — wz-side build-time patch on vendor/zenoh-pico/examples/
@@ -145,48 +148,72 @@ echo "build-zenoh-pico-cli: pin = $(git -C "$VENDOR_DIR" rev-parse --short HEAD 
 # use try_lock — contended with the keep_alive worker's blocking
 # lock — and drops the message on contention.
 #
-# Patch lifecycle: applied IN-PLACE (vendor/zenoh-pico/examples is
-# inside a submodule but the staged-tree alternative collides with
-# zenoh-pico's CMakeLists.txt which references `../cmake/helpers.
-# cmake` and `configure_include_project ".." ...` — both relative
-# to the in-tree examples path). A `trap` revert restores the file
-# to its committed state on exit (success, error, or signal). The
-# revert uses `git checkout` rather than a backup-file mv so an
-# interrupted earlier run that left a partial patch behind is
-# still cleaned up. THIRD_PARTY.md vendor/zenoh-pico section
-# documents this divergence.
+# Patch lifecycle: applied to a COPY of the submodule, never to the submodule. The copy is the
+# whole pico tree and not the examples directory alone, because pico's examples CMakeLists.txt
+# reaches its parent (`include(../cmake/helpers.cmake)`, `configure_include_project ".." ...`),
+# so an examples directory staged anywhere else would not configure. THIRD_PARTY.md's
+# vendor/zenoh-pico section documents the divergence.
 #
-# R311y240 / R311y244 / R311y245 — SECOND + THIRD + FOURTH in-place
-# example patches land below (z_sub_attachment.c qos+source_info print;
-# z_queryable.c query source_info print; z_get.c reply source_info
-# print). Bash keeps ONE `trap ... EXIT` handler, so a separate
-# `trap ... EXIT` per file would SILENTLY REPLACE this one and disable
-# the earlier reverts. All git-checkouts therefore live in ONE handler,
-# wired once — which also makes the up-front restore-first cover every
-# patched file.
-restore_pico_example_patches() {
-    if [[ -e "$VENDOR_DIR/.git" ]]; then
-        git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_put.c 2>/dev/null || true
-        git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_sub_attachment.c 2>/dev/null || true
-        git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_queryable.c 2>/dev/null || true
-        git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_get.c 2>/dev/null || true
-        git -C "$VENDOR_DIR" checkout -- src/transport/raweth/read.c 2>/dev/null || true
-        git -C "$VENDOR_DIR" checkout -- src/api/api.c 2>/dev/null || true
+# Until 2026-11-06 the patches were written into vendor/zenoh-pico itself and an `EXIT` trap
+# reverted them with `git checkout`. A trap does not run when the process is killed, and a
+# build that outgrows its memory ceiling is killed: a fleet run of the gate (`bx --checks ci`)
+# ended four units at their reservation while this script was building, and bx reported that a
+# check had changed the machine's `vendor/zenoh-pico`. The copy removes the window rather than
+# narrowing it. A killed build leaves only `target/` behind, the next run makes the copy anew,
+# and units that share a checkout no longer see each other's half-patched files.
+#
+# The submodule must therefore be at its committed shape for the files the patches touch. One
+# left patched by an earlier version of this script (a kill inside the old window) is refused by
+# name rather than reverted here: this script now only reads the submodule, and an uncommitted
+# change there may be someone's work.
+PATCHED_PICO_FILES=(
+    examples/unix/c11/z_put.c
+    examples/unix/c11/z_sub_attachment.c
+    examples/unix/c11/z_queryable.c
+    examples/unix/c11/z_get.c
+    src/transport/raweth/read.c
+    src/api/api.c
+)
+if [[ -e "$VENDOR_DIR/.git" ]]; then
+    _wzpico_dirty="$(git -C "$VENDOR_DIR" status --porcelain -- "${PATCHED_PICO_FILES[@]}")"
+    if [[ -n "$_wzpico_dirty" ]]; then
+        echo "build-zenoh-pico-cli: vendor/zenoh-pico has uncommitted changes in files this script" >&2
+        echo "  patches in its own copy; an earlier version patched them in place and was killed" >&2
+        echo "  before it could revert them. If they are such leftovers, revert them with:" >&2
+        echo "  git -C \"$VENDOR_DIR\" checkout -- ${PATCHED_PICO_FILES[*]}" >&2
+        echo "$_wzpico_dirty" >&2
+        exit 2
     fi
-}
-trap restore_pico_example_patches EXIT
+fi
 
-# Restore first so the patch anchor greps below match the committed
-# shape even if a previous run aborted mid-build (leftover patches).
-restore_pico_example_patches
+# A fresh copy on every run, made by tar so modification times are kept: an object built from an
+# unchanged file stays newer than its source and is not rebuilt. The submodule's `.git` (a
+# pointer file relative to the submodule's own path) is left out. A build directory configured
+# from another source directory (the submodule, before this copy existed) is removed first,
+# because CMake refuses to reuse a cache whose source directory differs.
+stage_pico_source() {
+    rm -rf "$SRC_DIR"
+    mkdir -p "$SRC_DIR"
+    tar -C "$VENDOR_DIR" --exclude=./.git -cf - . | tar -C "$SRC_DIR" -xf -
+    local dir home
+    for dir in "$BUILD_DIR" "${BUILD_DIR}-st" "${BUILD_DIR}-default" "${BUILD_DIR}-local" \
+        "$BUILD_DIR_MCDECL" "$BUILD_DIR_RETH" "$BUILD_DIR_INTEG"; do
+        [[ -f "$dir/CMakeCache.txt" ]] || continue
+        home="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$dir/CMakeCache.txt")"
+        if [[ "$home" != "$EXAMPLES_DIR" ]]; then
+            rm -rf "$dir"
+        fi
+    done
+}
+stage_pico_source
 
 # R2326 — the provenance token, taken HERE and not beside the write.
 #
-# The checkout is at its COMMITTED shape at exactly this point: the restore
-# above has just undone any leftover patch, and the patches this script applies
-# start on the next line. Taking the token after the build instead folds those
-# patches into its dirty digest, the `EXIT` trap then reverts them, and the
-# stamp can never match again — MEASURED on this file's first real run, which
+# The token reads the submodule, which this script no longer writes, so it is the
+# committed shape wherever it is taken. It stays here, before the patches, from
+# the time they were written into the submodule: a token taken after the build
+# then folded them into its dirty digest, the `EXIT` trap reverted them, and the
+# stamp could never match again — MEASURED on this file's first real run, which
 # left a correct, fresh oracle reading STALE.
 #
 # The recipe is folded in for the other half of the same fact: the patches ARE
@@ -235,24 +262,22 @@ fi
 # tests/wz_priority_to_pico_zsub.rs, R311y240; congestion + express:
 # tests/wz_qos_congestion_express_to_pico_zsub.rs, R311y242) and
 # source_info (tests/wz_source_info_to_pico_zsub.rs, R311y243). Same
-# lifecycle as the z_put patch above: applied in-place, reverted by the
-# shared trap.
+# lifecycle as the z_put patch above: applied to the staged copy.
 #
 # Idempotency hazard (WHY the explicit marker check below): the z_put
 # patch is self-guarding — its anchor `z_put(.., NULL)` is CONSUMED by
-# the patch (rewritten to `&opts`), so a leftover-patched file fails the
+# the patch (rewritten to `&opts`), so an already-patched file fails the
 # anchor grep and the else-branch exit 2 fires. This patch's anchor is a
-# COMMENT (`// Check timestamp`) that SURVIVES the insert, so a restore
-# miss (e.g. SIGKILL before the trap) would let a stale marker slip the
-# anchor grep and DOUBLE-insert the printf. Hard-reject when the marker
-# is already present so a dirty submodule tree errors loudly instead.
+# COMMENT (`// Check timestamp`) that SURVIVES the insert, so a source that
+# already carried the marker would slip the anchor grep and DOUBLE-insert
+# the printf. The copy is made fresh and the submodule's patched files are
+# checked clean above, so the marker can only come from a pin whose example
+# prints it natively; hard-reject so that errors loudly instead.
 # THIRD_PARTY.md vendor/zenoh-pico section documents this divergence.
 z_sub_att_src="$EXAMPLES_DIR/unix/c11/z_sub_attachment.c"
 if grep -q "with priority:" "$z_sub_att_src"; then
-    echo "build-zenoh-pico-cli: z_sub_attachment.c already prints 'with priority:'" >&2
-    echo "  — either a prior patch was not reverted (dirty submodule tree; revert with" >&2
-    echo "  'git -C \"$VENDOR_DIR\" checkout -- examples/unix/c11/z_sub_attachment.c')" >&2
-    echo "  or a vendor-pin bump added a native priority print (re-verify the patch)." >&2
+    echo "build-zenoh-pico-cli: z_sub_attachment.c already prints 'with priority:' at the pin;" >&2
+    echo "  a vendor-pin bump added a native priority print, so re-verify the patch." >&2
     exit 2
 fi
 if grep -q "// Check timestamp" "$z_sub_att_src"; then
@@ -300,8 +325,8 @@ else
     exit 2
 fi
 
-# R311y244 — THIRD in-place example patch on
-# vendor/zenoh-pico/examples/unix/c11/z_queryable.c. The stock query
+# R311y244 — THIRD example patch, on examples/unix/c11/z_queryable.c of
+# the staged copy. The stock query
 # handler prints the received query's keyexpr / parameters / value but
 # NOT its source_info. This patch adds `with query source_info eid: ..
 # sn: ..` (z_query_source_info + z_source_info_id / z_source_info_sn).
@@ -325,12 +350,11 @@ fi
 # Anchor
 # is the `// Process value` comment (survives the insert), so — like the
 # z_sub_attachment patch — hard-reject when the marker is already present
-# rather than double-insert. Reverted by the shared trap.
+# rather than double-insert.
 z_qabl_src="$EXAMPLES_DIR/unix/c11/z_queryable.c"
 if grep -q "with query source_info" "$z_qabl_src" || grep -q "with query encoding" "$z_qabl_src"; then
-    echo "build-zenoh-pico-cli: z_queryable.c already carries a wz print patch" >&2
-    echo "  — revert with 'git -C \"$VENDOR_DIR\" checkout -- examples/unix/c11/z_queryable.c'" >&2
-    echo "  or re-verify the patch against the current vendor pin." >&2
+    echo "build-zenoh-pico-cli: z_queryable.c already prints what the wz patch adds at the pin;" >&2
+    echo "  re-verify the patch against the current vendor pin." >&2
     exit 2
 fi
 if grep -q "// Process value" "$z_qabl_src"; then
@@ -362,8 +386,8 @@ else
     exit 2
 fi
 
-# R311y245 — FOURTH in-place example patch on
-# vendor/zenoh-pico/examples/unix/c11/z_get.c. The stock reply handler
+# R311y245 — FOURTH example patch, on examples/unix/c11/z_get.c of the
+# staged copy. The stock reply handler
 # prints the reply sample's keyexpr / payload but NOT its source_info.
 # This patch adds `with reply source_info eid: .. sn: ..`
 # (z_sample_source_info on the reply sample — a Reply body IS a Put
@@ -376,12 +400,11 @@ fi
 # `z_drop(z_move(replystr));` line (the reply-ok branch's cleanup, unique;
 # the err branch drops `errstr`), which survives the insert — so, like the
 # other example patches, hard-reject when the marker is already present
-# rather than double-insert. Reverted by the shared trap.
+# rather than double-insert.
 z_get_src="$EXAMPLES_DIR/unix/c11/z_get.c"
 if grep -q "with reply source_info" "$z_get_src"; then
-    echo "build-zenoh-pico-cli: z_get.c already prints 'with reply source_info'" >&2
-    echo "  — revert with 'git -C \"$VENDOR_DIR\" checkout -- examples/unix/c11/z_get.c'" >&2
-    echo "  or re-verify the patch against the current vendor pin." >&2
+    echo "build-zenoh-pico-cli: z_get.c already prints 'with reply source_info' at the pin;" >&2
+    echo "  re-verify the patch against the current vendor pin." >&2
     exit 2
 fi
 if grep -q "z_drop(z_move(replystr));" "$z_get_src"; then
@@ -838,11 +861,13 @@ cmake --build "${BUILD_DIR_INTEG}" --target z_info -j"$(nproc)" >&2
 #    with the receive fixed, the scenario's z_pub still never put, its filter waiting on an
 #    interest no raweth member sends. The patch names the raweth transport's type beside it.
 #
-# `api.c` is every arm's, so both files are patched for this build and restored right after
-# it (and by the `EXIT` trap on a failure), and no other arm is compiled from them.
+# `api.c` is every arm's, so both files of the staged copy are patched for this build and
+# restored from the submodule right after it, with their modification times, and no other arm
+# is compiled from them. A failure in between leaves them patched only in the copy, which the
+# next run makes anew.
 patch_raweth_library() {
-    local read_src="$VENDOR_DIR/src/transport/raweth/read.c"
-    local api_src="$VENDOR_DIR/src/api/api.c"
+    local read_src="$SRC_DIR/src/transport/raweth/read.c"
+    local api_src="$SRC_DIR/src/api/api.c"
     if ! grep -qx "    _z_slice_t addr = _z_slice_alias_buf(NULL, 0);" "$read_src" \
         || ! grep -qx "    _z_slice_t addr;" "$read_src" \
         || [[ "$(grep -c "_tp._type == _Z_TRANSPORT_MULTICAST_TYPE ||" "$api_src")" != 2 ]] \
@@ -868,7 +893,10 @@ patch_raweth_library() {
     echo "build-zenoh-pico-cli: applied the raweth receive-address and write-filter patches" >&2
 }
 restore_raweth_library() {
-    git -C "$VENDOR_DIR" checkout -- src/transport/raweth/read.c src/api/api.c
+    local rel
+    for rel in src/transport/raweth/read.c src/api/api.c; do
+        cp -p "$VENDOR_DIR/$rel" "$SRC_DIR/$rel"
+    done
 }
 
 # The raw Ethernet arm's programs, staged the same way into a root of their own.
@@ -917,14 +945,9 @@ vendored_oracle_stamp_root "${BUILD_DIR_INTEG}" "$_wzpico_token"
 # leaving a hosted lane to discover it. R2326 shipped a stamp that could never
 # match and three hosted jobs paid for it (run 33807238918); this is ~0.1s.
 #
-# The explicit restore is load-bearing and not belt-and-braces. The example
-# patches are still applied at this point — the `EXIT` trap has not fired — so
-# recomputing the token now would see the dirty tree and MISS-match against a
-# token correctly taken from the committed shape. Undoing them first is what
-# makes the comparison the one a consumer will actually make. The call is
-# idempotent by design (it is the same function the top of this script runs for
-# the same reason), and the trap stays as the failure-path net.
-restore_pico_example_patches
+# The patches live in the staged copy, so the submodule the token reads is the
+# one a consumer will read: the comparison needs no restore first, which it did
+# while the patches were written into the submodule.
 vendored_oracle_assert_fresh "$INSTALL_DIR" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 vendored_oracle_assert_fresh "$BUILD_DIR" build-zenoh-pico-cli \

@@ -153,8 +153,9 @@ vendored_oracle_git_token() {
 #
 # R2326 added this after the first real provisioner run FAILED its own gate,
 # and the finding is worth the space because it is not obvious:
-# `build-zenoh-pico-cli.sh` PATCHES four vendored examples in place, builds,
-# and reverts them in an `EXIT` trap. A token taken after the install therefore
+# `build-zenoh-pico-cli.sh` then PATCHED four vendored examples in place, built,
+# and reverted them in an `EXIT` trap (it patches a copy under `target/` since
+# 2026-11-06, because a killed build skipped the trap). A token taken after the install therefore
 # folded those patches into the dirty digest, the trap then reverted them, and
 # the stamp could never match again — a correct, fresh oracle read STALE. That
 # is the "the record changes the thing it records" trap this file already warns

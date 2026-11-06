@@ -104,12 +104,14 @@ changelog that authorized the bump.
   rounds; bumps follow zenoh-pico release tags rather than main
   branch HEAD.
 - **Build-time divergence (R216)**: `scripts/build-zenoh-pico-cli.sh`
-  applies an in-place patch to `vendor/zenoh-pico/examples/unix/
-  c11/z_put.c` switching the PUT congestion control default from
-  upstream's DROP to BLOCK, then reverts the file via
-  `git checkout` on exit (success, error, or signal — see the
-  `trap restore_pico_example_patches EXIT` block, renamed from
-  `restore_z_put` in R311y240 when a second example patch landed).
+  patches `examples/unix/c11/z_put.c`, switching the PUT congestion
+  control default from upstream's DROP to BLOCK. Every patch below is
+  applied to a copy of the submodule at `target/zenoh-pico-src` and
+  built from there; the submodule itself is only read. (Until
+  2026-11-06 the patches were written into `vendor/zenoh-pico` and an
+  `EXIT` trap reverted them, which a killed build skipped: a fleet run
+  that ended builds at their memory ceiling left the submodule
+  patched.)
   DROP is the upstream default
   per `include/zenoh-pico/api/constants.h::z_internal_congestion_
   control_default_push()` and is correct for sustained
@@ -184,13 +186,11 @@ changelog that authorized the bump.
   z_put patch (whose anchor `z_put(.., NULL)` is consumed by its own
   edit, so a leftover patch fails the anchor grep and errors loudly),
   those anchors survive the insert — so the script hard-rejects a run
-  where the respective marker is already present (a dirty submodule tree
-  from a missed revert) rather than silently double-inserting. The four
-  example patches (z_put / z_sub_attachment / z_queryable / z_get) share
-  the single `trap restore_pico_example_patches EXIT` handler (bash keeps
-  one EXIT trap), which reverts all four files via `git checkout` on
-  exit. Same harness-only scope as the R216 patch: runtime FFI use via
-  `crates/zenoh-pico-sys` is unaffected.
+  where the respective marker is already present (a pin whose example
+  prints it natively) rather than silently double-inserting; a submodule
+  whose patched files carry uncommitted changes is refused before the
+  copy is made. Same harness-only scope as the R216 patch: runtime FFI
+  use via `crates/zenoh-pico-sys` is unaffected.
 - **Build-time divergence (open-debt items 911 and 913)**: two patches to
   the LIBRARY rather than to an example, for the raw Ethernet reference
   arm (`target/zenoh-pico-build-reth`) alone. At the pin pico's raweth
@@ -207,8 +207,9 @@ changelog that authorized the bump.
   but the test names the UDP transport's type alone, so with the receive
   fixed the scenario's z_pub still never put; the patch names the raweth
   transport's type beside it. `api.c` is every arm's, so the build script
-  patches both files for the raweth arm's build and restores them right
-  after it (and on exit); no other arm is compiled from them.
+  patches both files of its copy for the raweth arm's build and restores
+  them from the submodule right after it; no other arm is compiled from
+  them.
 
 ## vendor/lwip — lightweight TCP/IP stack
 
