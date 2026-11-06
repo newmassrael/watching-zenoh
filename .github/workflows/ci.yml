@@ -2811,7 +2811,18 @@ jobs:
     # release (zenohd AND the storage-manager plugin), four differently-featured
     # wz-ap-demo builds, the six wz-e2e-* subset binaries, and then Layer Z's serial
     # zenohd sweep. 60 was optimistic; the steady state is cached and fast.
-    timeout-minutes: 120
+    #
+    # 240 (2026-11-07). Until the legs of this job named their tests by their path in the
+    # merged executable (rounds 4338 and c73b871e37's netns re-run) most of them selected no
+    # test, and the job FAILED at 225 to 271 s (runs 42087308054, 42121505586, 42144563863),
+    # so no run had ever read its length with the tests running. Run 42182407682 did: the
+    # layers before Layer Z took 84 minutes (setup 16, then C1cd to C1bp) and Layer Z was
+    # still in its sweep at the 120 minute ceiling (36 minutes in, 16 tests running), with
+    # E5z, Ewirez and what follows them not reached. The ceiling moves to 240, a measurement
+    # run and not a budget: the next run that ends reads the real length, and the job is cut
+    # at the layer boundary it names if that is past two hours (a cut duplicates the cold
+    # builds above, which is why it follows the reading).
+    timeout-minutes: 240
     env:
       # A hosted lane that SKIPs green on a binary THIS JOB PROVISIONS is a provisioning
       # regression wearing a green badge — and it lies twice, because Layer A4 reads
