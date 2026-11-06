@@ -58,17 +58,6 @@ use wz_integration_tests::common::{
 };
 
 const READER_ENV: &str = "WZ_MULTICAST_TTL_READER";
-const READER_ENTRY: &str = "multicast_ttl_reader_entry";
-
-/// The name libtest knows the reader entry by: its path below the crate root, which is this file's
-/// module when the file is one of a merged executable (`files::<name>::`) and nothing when it is an
-/// executable of its own. The child is named EXACTLY, so the name must be the whole path.
-fn reader_entry() -> String {
-    match module_path!().split_once("::") {
-        Some((_, below_root)) => format!("{below_root}::{READER_ENTRY}"),
-        None => READER_ENTRY.to_string(),
-    }
-}
 const READER_MARKER: &str = "<<<WZ-TTL-READER>>>";
 
 const HOST_CIDR: &str = "10.251.10.1/30";
@@ -93,7 +82,7 @@ const READ_BUDGET: Duration = Duration::from_secs(12);
 fn spawn_reader(netns: &NetnsPair, group: Ipv4Addr, port: u16) -> std::process::Child {
     let exe = std::env::current_exe().expect("the test binary's path");
     let request = format!("{group} {port} {PEER_ADDR} {}", READ_BUDGET.as_millis());
-    let entry = reader_entry();
+    let entry = wz_integration_tests::libtest_name!(multicast_ttl_reader_entry);
     netns
         .command(std::path::Path::new("env"))
         .arg(format!("{READER_ENV}={request}"))

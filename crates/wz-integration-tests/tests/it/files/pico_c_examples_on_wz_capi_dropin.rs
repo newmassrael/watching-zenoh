@@ -3015,8 +3015,12 @@ fn pico_zscout_legs_hold_in_a_namespace_with_no_default_route_against_a_zenohd()
     // own; the leg's bound is a stall bound over the whole of that.
     netns.rerun_tests_inside(
         &[
-            "pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd",
-            "pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group",
+            wz_integration_tests::libtest_name!(
+                pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd
+            ),
+            wz_integration_tests::libtest_name!(
+                pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group
+            ),
         ],
         Duration::from_secs(600),
     );

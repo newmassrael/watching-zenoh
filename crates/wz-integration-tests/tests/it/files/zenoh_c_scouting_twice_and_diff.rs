@@ -1262,8 +1262,12 @@ fn the_scouting_legs_hold_in_a_namespace_with_no_default_route() {
     // namespace; each leg's bound is a stall bound several times that.
     netns.rerun_tests_inside(
         &[
-            "a_node_with_no_endpoint_finds_a_router_by_scouting_identically_on_wz_and_libzenohc",
-            "a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzenohc",
+            wz_integration_tests::libtest_name!(
+                a_node_with_no_endpoint_finds_a_router_by_scouting_identically_on_wz_and_libzenohc
+            ),
+            wz_integration_tests::libtest_name!(
+                a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzenohc
+            ),
         ],
         std::time::Duration::from_secs(600),
     );

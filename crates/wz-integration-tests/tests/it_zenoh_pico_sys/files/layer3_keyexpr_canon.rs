@@ -259,13 +259,7 @@ fn probe_pico_canon(input: &str) -> PicoCanonOutcome {
     use wz_integration_tests::bounded::BoundedOutput as _;
 
     let exe = std::env::current_exe().expect("test binary path");
-    // The name libtest knows the entry by: its path below the crate root, which is this file's
-    // module when the file is one of a merged executable (`files::<name>::`) and nothing when it
-    // is an executable of its own.
-    let entry = match module_path!().split_once("::") {
-        Some((_, below_root)) => format!("{below_root}::pico_canon_subprocess_probe_entry"),
-        None => "pico_canon_subprocess_probe_entry".to_string(),
-    };
+    let entry = wz_integration_tests::libtest_name!(pico_canon_subprocess_probe_entry);
     let out = std::process::Command::new(exe)
         // Name the child test EXACTLY so libtest does not fan out into
         // the rest of this file inside the child.

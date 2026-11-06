@@ -15,6 +15,33 @@
 
 pub mod bounded;
 
+/// The name libtest knows test function `$test` of the calling file by, for a test binary that
+/// runs one of its own tests again as a child (`<exe> --exact <name>`).
+///
+/// That name is the function's path below the crate root, so it moves when the file moves: a file
+/// that is one of a merged executable is the module `files::<file>`, and the merge of the test
+/// files made every bare name a child was started with match nothing. The child ran 0 tests,
+/// exited 0, and a caller that counted `1 passed` failed (Layer Z, the namespaced zscout legs); one
+/// that did not count would have been green over nothing. Spelling the name from the function and
+/// `module_path!()` here keeps it right wherever the file goes, and naming the function makes a
+/// rename a compile error instead of a child that runs nothing.
+#[macro_export]
+macro_rules! libtest_name {
+    ($test:ident) => {{
+        let _: fn() = $test;
+        $crate::libtest_path(::core::module_path!(), ::core::stringify!($test))
+    }};
+}
+
+/// [`libtest_name!`]'s rule: `module` (a `module_path!()`) less its first segment, the crate,
+/// then `test`. A test at the crate root has no module below it, and its name is itself.
+pub fn libtest_path(module: &str, test: &str) -> String {
+    match module.split_once("::") {
+        Some((_, below_root)) => format!("{below_root}::{test}"),
+        None => test.to_string(),
+    }
+}
+
 pub mod common {
     //! Test harness primitives shared by the `wz_*_round_trip` /
     //! `ap_demo_*` integration tests. See module-level rationale for
@@ -7471,8 +7498,10 @@ pub mod common {
             String::from_utf8_lossy(&out.stdout).trim().to_owned()
         }
 
-        /// Run each of `tests`, tests of the CURRENT test binary, inside the namespace, one
-        /// at a time, and fail by name unless each ran and passed.
+        /// Run each of `tests`, tests of the CURRENT test binary named as libtest knows them
+        /// (spell each with [`crate::libtest_name!`]; a bare function name matches nothing in
+        /// a merged executable), inside the namespace, one at a time, and fail by name unless
+        /// each ran and passed.
         ///
         /// What runs there is what runs on the host: the same binary, as the user that
         /// owns the build tree (the namespace is entered as root through `sudo`), with this
@@ -7484,7 +7513,7 @@ pub mod common {
         ///
         /// `bound` is each leg's, and is the caller's to state: a leg here is a whole test
         /// with its own bounded children inside, longer than one child run.
-        pub fn rerun_tests_inside(&self, tests: &[&str], bound: Duration) {
+        pub fn rerun_tests_inside(&self, tests: &[String], bound: Duration) {
             let user = std::env::var("USER")
                 .or_else(|_| std::env::var("LOGNAME"))
                 .expect("the user name, to run the legs as the tree's owner");
@@ -7510,7 +7539,7 @@ pub mod common {
                 };
                 run.args([
                     "--exact",
-                    test,
+                    test.as_str(),
                     "--ignored",
                     "--nocapture",
                     "--test-threads=1",
