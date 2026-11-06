@@ -314320,6 +314320,38 @@
         "Stage 3 waits on fleet provisioning, not on the tree. U needs gh and an API token in the fleet run account, and C1cc needs valgrind on more than one machine (or a free pc2); both are the owner's. A capability tested exactly as the namespace sandbox is used (NET_ADMIN, SYS_ADMIN and NET_RAW plus a veth pair) is with the fleet's owner. After that, run the whole set again. C1's get-timeout stays unattributed (300 of 300 clean on a build machine). Read the next hosted run per job."
       ]
     },
+    "Round 4358": {
+      "decision_summary": "Round 4345 carried that Layer Z, run alone in a fresh checkout, fails at its fifth leg: the close scope witness reads the wz-ap-demo binary at its default features, and nothing in the lane built it; in the hosted job the E lanes that run before Z in the same job leave one in the target directory. A lane that reads a wz artifact it does not produce is graded by whatever ran before it, which a fleet unit or a developer's single-lane run does not reproduce, and this file already states the rule that a lane builds the wz artifacts it reads (the consolidation leg builds its two binaries for that reason). The demo is now built at its default features at the head of the lane, before the first leg that reads it; the legs further down that need another feature set already build it themselves.",
+      "changes_bullets": [
+        "run-ci.sh layer_z_zenohd_interop: builds wz-ap-demo at its default features after the upstream API surface check and before the close scope witness, with a comment naming the failure and the lane's standing rule."
+      ],
+      "verification_bullets": [
+        "Layer Z run alone on a build machine with zenohd (and its unixpipe build), the pico CLIs and zenoh-c provisioned, skipping refused, and the wz-ap-demo and every wz-e2e binary deleted from the target directory before the lane (none left, counted): Layer Z pass in 3,556 s, every guarded leg reached.",
+        "bash -n of run-ci.sh, the count-guard lint, the guarded count lattice, the lane reach, feature membership and census arm reach gates, and the reason pin and citation gates pass."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "A Layer Z run stopped once at its 92nd leg when cargo could not execute the zenoh-pico-sys build script it had just linked (text file busy); why that build script is rebuilt on every leg, and whether the linker returns before its output is closed, are not yet read.",
+        "The oracle lanes' placement on the fleet (which machine has zenohd, zenoh-c and the pico CLIs) is held by the session that owns the fleet verdicts, by per-unit requirements in the run-ci plan."
+      ],
+      "publishable_decision_summary": "Round 4345 carried that Layer Z, run alone in a fresh checkout, fails at its fifth leg: the close scope witness reads the wz-ap-demo binary at its default features, and nothing in the lane built it; in the hosted job the E lanes that run before Z in the same job leave one in the target directory. A lane that reads a wz artifact it does not produce is graded by whatever ran before it, which a fleet unit or a developer's single-lane run does not reproduce, and this file already states the rule that a lane builds the wz artifacts it reads (the consolidation leg builds its two binaries for that reason). The demo is now built at its default features at the head of the lane, before the first leg that reads it; the legs further down that need another feature set already build it themselves.",
+      "publishable_changes_bullets": [
+        "run-ci.sh layer_z_zenohd_interop: builds wz-ap-demo at its default features after the upstream API surface check and before the close scope witness, with a comment naming the failure and the lane's standing rule."
+      ],
+      "publishable_verification_bullets": [
+        "Layer Z run alone on a build machine with zenohd (and its unixpipe build), the pico CLIs and zenoh-c provisioned, skipping refused, and the wz-ap-demo and every wz-e2e binary deleted from the target directory before the lane (none left, counted): Layer Z pass in 3,556 s, every guarded leg reached.",
+        "bash -n of run-ci.sh, the count-guard lint, the guarded count lattice, the lane reach, feature membership and census arm reach gates, and the reason pin and citation gates pass."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A Layer Z run stopped once at its 92nd leg when cargo could not execute the zenoh-pico-sys build script it had just linked (text file busy); why that build script is rebuilt on every leg, and whether the linker returns before its output is closed, are not yet read.",
+        "The oracle lanes' placement on the fleet (which machine has zenohd, zenoh-c and the pico CLIs) is held by the session that owns the fleet verdicts, by per-unit requirements in the run-ci plan."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
