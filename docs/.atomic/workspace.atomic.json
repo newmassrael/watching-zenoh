@@ -314352,6 +314352,34 @@
         "The oracle lanes' placement on the fleet (which machine has zenohd, zenoh-c and the pico CLIs) is held by the session that owns the fleet verdicts, by per-unit requirements in the run-ci plan."
       ]
     },
+    "Round 4359": {
+      "decision_summary": "The analyzer-crate job (analyzer-crates) read 1,593 to 1,781 s of its 1,800 s in the hosted runs read, and Layer C1bz alone was 1,380 s of that; the other four lanes (C1bt, C1bw, C1bx, C1by) are a few minutes each. A job that sits at 89 to 99 percent of its limit is cancelled by the next lane the genre gains, and a cancel grades nothing, so the limit is not raised: C1bz, which documents every workspace member, moves to a job of its own, analyzer-docs, with the same runner setup and the same 30 minute limit. The cmake package leaves analyzer-crates, because C1bz was the one lane there that reached the crate that needs it, and the apt census says so; analyzer-docs takes the cmake row. Both jobs are readers of the shared ci cache and carry their own apt archives. Not done: splitting C1bz itself by crate; the new job is read first, and it is the way out only if it reads near its limit.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: the analyzer-crates job loses its Layer C1bz step, its cmake package and the word docs in its name; a new job analyzer-docs (30 minute limit, analyzer-crates' setup) runs Layer C1bz. scripts/lib/apt_package_census.py: analyzer-docs joins the package rows analyzer-crates was in, and takes the cmake row in its place. .github/cache-classes.json: analyzer-docs is a reader of the apt class and of rust-ci."
+      ],
+      "verification_bullets": [
+        "apt_package_census.py (rc 0) and its selftest (rc 0), job_budget_binding.py (18 of 36 jobs bound, unchanged), workflow_cache_budget_gate.py (OK, 15 classes, budgets unchanged), unwired_lane_lint.py (180 lanes, 0 absent from ci.yml), lane_locality_claim_gate.py (OK) and actionlint on ci.yml (no output). The census first failed on analyzer-crates installing cmake with no lane reaching its consumer, then on the ADJUDICATED row naming it, which is how the cmake row moved. Not run: the two jobs hosted; analyzer-docs reads the length of C1bz alone, and the next run that ends gives it."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The next run that ends reads analyzer-docs (C1bz alone, 1,380 s of 1,800 s before the split) and analyzer-crates without it; C1bz is split by crate only if analyzer-docs reads near its limit. The C0mut four shards, the interop job on 240 minutes, the C1cs budgets of round 4349, the demo budget of round 4351 and the snapshot change of round 4350 are still unread by a hosted run."
+      ],
+      "publishable_decision_summary": "The analyzer-crate job (analyzer-crates) read 1,593 to 1,781 s of its 1,800 s in the hosted runs read, and Layer C1bz alone was 1,380 s of that; the other four lanes (C1bt, C1bw, C1bx, C1by) are a few minutes each. A job that sits at 89 to 99 percent of its limit is cancelled by the next lane the genre gains, and a cancel grades nothing, so the limit is not raised: C1bz, which documents every workspace member, moves to a job of its own, analyzer-docs, with the same runner setup and the same 30 minute limit. The cmake package leaves analyzer-crates, because C1bz was the one lane there that reached the crate that needs it, and the apt census says so; analyzer-docs takes the cmake row. Both jobs are readers of the shared ci cache and carry their own apt archives. Not done: splitting C1bz itself by crate; the new job is read first, and it is the way out only if it reads near its limit.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml: the analyzer-crates job loses its Layer C1bz step, its cmake package and the word docs in its name; a new job analyzer-docs (30 minute limit, analyzer-crates' setup) runs Layer C1bz. scripts/lib/apt_package_census.py: analyzer-docs joins the package rows analyzer-crates was in, and takes the cmake row in its place. .github/cache-classes.json: analyzer-docs is a reader of the apt class and of rust-ci."
+      ],
+      "publishable_verification_bullets": [
+        "apt_package_census.py (rc 0) and its selftest (rc 0), job_budget_binding.py (18 of 36 jobs bound, unchanged), workflow_cache_budget_gate.py (OK, 15 classes, budgets unchanged), unwired_lane_lint.py (180 lanes, 0 absent from ci.yml), lane_locality_claim_gate.py (OK) and actionlint on ci.yml (no output). The census first failed on analyzer-crates installing cmake with no lane reaching its consumer, then on the ADJUDICATED row naming it, which is how the cmake row moved. Not run: the two jobs hosted; analyzer-docs reads the length of C1bz alone, and the next run that ends gives it."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The next run that ends reads analyzer-docs (C1bz alone, 1,380 s of 1,800 s before the split) and analyzer-crates without it; C1bz is split by crate only if analyzer-docs reads near its limit. The C0mut four shards, the interop job on 240 minutes, the C1cs budgets of round 4349, the demo budget of round 4351 and the snapshot change of round 4350 are still unread by a hosted run."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
