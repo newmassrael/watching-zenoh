@@ -279,7 +279,7 @@ where
     multicast_pump_task(pump, on_event, next_tx, || false)
 }
 
-/// The bytes of the task cell that holds a group's task ([`group_task`]) over these types, as a
+/// The bytes of the task cell that holds a group's task (`group_task`) over these types, as a
 /// constant of them: the size an image declares for its runtime's cells, so that a group that
 /// grows (more publications, a larger member table) is a number that follows and not a spawn the
 /// runtime refuses.

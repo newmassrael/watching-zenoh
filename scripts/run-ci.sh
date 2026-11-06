@@ -13133,8 +13133,14 @@ layer_c1bf_cargo_clippy_all_features() {
     # `unstable` arm adds fields to public structs (the sample, the builders) and its sessions
     # are built per engine, so a struct literal names the fields of the build its author made. Its
     # features are independent axes, so `--all-features` is a real arm and no narrowing is needed.
+    #
+    # `wz-admin` joined it when the admin space left the core (the server-layer split, caught
+    # hosted 2026-11-06): the `cfg(feature)`-gated pub fields of the admin rows moved with it. Its
+    # features follow the core's and are independent axes, so `--all-features` is a real arm (it
+    # builds clean, read on a build machine) and no narrowing is needed.
     local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c wz-capi-core wz-capi-pico
-        wz-zenoh-buffers wz-zenoh-protocol wz-session-mcu wz-zenoh-config wz-ext-pubsub wz-zenoh)
+        wz-zenoh-buffers wz-zenoh-protocol wz-session-mcu wz-zenoh-config wz-ext-pubsub wz-zenoh
+        wz-admin)
 
     # Drift audit: re-derive the hazard class from source. A crate qualifies when
     # a `#[cfg(feature ...)]` attribute is immediately followed by a `pub <field>:`
