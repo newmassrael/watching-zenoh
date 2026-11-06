@@ -5967,7 +5967,7 @@ jobs:
   # these five share a subject of their own (the analyzer's crates: wz-capture, wz-analyze,
   # wz-tls-record, wz-replay) and run here, on a runner of their own.
   analyzer-crates:
-    name: analyzer-crate lanes (capture, command line, decryptor, docs, replay)
+    name: analyzer-crate lanes (capture, command line, decryptor, replay)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -6009,9 +6009,10 @@ jobs:
             apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
-        # The set `isolated-crates` ran these lanes with, carried over with them.
+        # The set `isolated-crates` ran these lanes with, less `cmake`: the only lane here that
+        # reached the crate that needs it was Layer C1bz, which now runs in `analyzer-docs`.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `isolated-crates` copy for why `always()` and why the dirty gate.
@@ -6066,8 +6067,8 @@ jobs:
       # itself. Builds the crate isolated and pins the SET of oracle test names.
       - name: Layer C1bx — the TLS decryptor vs rustls (R311y668)
         run: bash scripts/run-ci.sh --layer C1bx
-      - name: Layer C1bz — the analyzer crates' docs resolve (R311y710)
-        run: bash scripts/run-ci.sh --layer C1bz
+      # Layer C1bz is not here: it documents every workspace member and read 1,380 s of this
+      # job's 1,800 s alone, so it runs in `analyzer-docs` below (R4359).
 
       # R311y701 — the REPLAY engine's lane, which R311y700 wrote into
       # run-ci.sh and never wired here. Found by C0's own unwired-lane gate on
@@ -6077,6 +6078,81 @@ jobs:
       # the worst candidate for coverage nobody runs.
       - name: Layer C1by — the replay engine (R311y700)
         run: bash scripts/run-ci.sh --layer C1by
+
+  # ─────────────────────────────────────────────────────────────────
+  # R4359 -- Layer C1bz, out of `analyzer-crates`. That job read 1,593 to 1,781 s of its
+  # 1,800 s in the runs read (run 42182407682), and C1bz alone was 1,380 s of it: the lanes
+  # before it (C1bt, C1bw, C1bx) and after it (C1by) are a few minutes each. Raising the
+  # limit would be spent by the next lane the genre gains ("split rather than raise"), so
+  # the one lane that is most of the job gets a runner of its own and the job's budget
+  # reads what the other four cost. The setup is `analyzer-crates`' copy, for the reason
+  # its steps state; C1bz documents every workspace member, so it keeps that job's rows in
+  # the apt census and the cache classes.
+  analyzer-docs:
+    name: analyzer-crate docs (Layer C1bz)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Free runner disk space (headroom for the documented feature sets)
+        run: |
+          echo "=== free space BEFORE prune ==="
+          df -h /
+          prune() {
+            local started=$SECONDS
+            "$@" || true
+            echo "prune: $* took $((SECONDS - started))s"
+          }
+          prune sudo rm -rf /usr/share/dotnet &
+          prune sudo rm -rf /usr/local/lib/android &
+          prune sudo rm -rf /opt/ghc &
+          prune sudo rm -rf /usr/local/share/boost &
+          prune sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          prune sudo docker image prune --all --force &
+          wait
+          echo "=== free space AFTER prune ==="
+          df -h /
+
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        run: |
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`), as `analyzer-crates` is.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Layer C1bz — the analyzer crates' docs resolve (R311y710)
+        run: bash scripts/run-ci.sh --layer C1bz
 
   # ─────────────────────────────────────────────────────────────────
   # Layer C1bzr — the docs resolve in the REDUCED configurations, C1bz's other direction.
