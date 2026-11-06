@@ -3261,24 +3261,28 @@ def selftest() -> int:
         for fault, want in {
             # A step that was not run prints as a failure too, so each fault reds what it breaks and what
             # needed it.
-            "leak_on_reset": {38, 39, 40, 41, 42},
-            "leak_on_close": {38, 39, 40, 41, 42},
+            "leak_on_reset": {38, 39, 40, 41, 42, 43},
+            "leak_on_close": {38, 39, 40, 41, 42, 43},
             "fin_ignored": {36},
             "reset_ignored": {37},
-            "accept_stuck": {37, 38, 39, 40, 41, 42},
-            "kills_other": {36, 37, 38, 39, 40, 41, 42},
+            "accept_stuck": {37, 38, 39, 40, 41, 42, 43},
+            "kills_other": {36, 37, 38, 39, 40, 41, 42, 43},
             "silence_never_detected": {39},
             "silence_premature": {39},
             "redial_no_wait": {40},
             "redial_no_backoff": {40},
             "redial_no_restart": {40},
-            "redial_never": {40, 41, 42},
-            "framing_no_reassembly": {41, 42},
+            "redial_never": {40, 41, 42, 43},
+            "framing_no_reassembly": {41, 42, 43},
             "framing_cut_not_applied": {41},
-            "admission_harms_sessions": {42},
-            "admission_leaks_cells": {42},
-            "admission_not_applied": {42},
-            "admission_accepts_all": {42},
+            "admission_harms_sessions": {42, 43},
+            "admission_leaks_cells": {42, 43},
+            "admission_not_applied": {42, 43},
+            "admission_accepts_all": {42, 43},
+            "query_leaks_entry": {43},
+            "query_answer_wrong": {43},
+            "query_leaks_cells": {43},
+            "query_loses_session": {43},
         }.items():
             rc, so, se = stream_case((fault,))
             steps = _grammar_steps(so)

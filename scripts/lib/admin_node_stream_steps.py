@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import re
 import sys
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
@@ -111,6 +112,24 @@ class StreamSpec:
     #: a reap.
     refuse_bound_ms: int = 2_000
 
+    #: Entries of the largest fixed table the node holds (its timers; the connection pool and the task
+    #: table are smaller). A table that never frees one entry in a long run is what the sustained step
+    #: looks for, so its size is what the run is measured against.
+    timers: int = 4
+
+    @property
+    def queries(self) -> int:
+        """Queries of the sustained run: five hundred for each entry of the largest table, so a node that
+        loses one entry in four hundred queries or faster has none left before the run ends, and far more
+        than the 128 a one-byte request number holds, so a counter that does not carry is reached."""
+        return 500 * self.timers
+
+    @property
+    def leak_caught_every(self) -> int:
+        """The slowest leak the run is sure to find: one entry lost every this many queries empties the
+        largest table (and each smaller one sooner) before the run's last query is answered."""
+        return self.queries // (self.timers + 1)
+
     @property
     def pressure(self) -> int:
         """Extra connections for the admission step: more than the node can hold, and a few more, so a
@@ -158,7 +177,10 @@ SENTENCES[41] = "a message is read whole whatever the segmentation: the peer is 
 SENTENCES[42] = (
     "a peer past the node's capacity does not harm the sessions it holds, and the node takes its peer back once it has gone"
 )
-STEPS = (36, 37, 38, 39, 40, 41, 42)
+SENTENCES[43] = (
+    "a long run of queries is answered whole, one after another, and the node's sessions and cells are as they were after it"
+)
+STEPS = (36, 37, 38, 39, 40, 41, 42, 43)
 #: What the grammar's `<...>` is for a step that was not run or could not be judged (the printed sentence
 #: is an instance of the grammar either way).
 UNRUN_TAIL = {
@@ -167,6 +189,7 @@ UNRUN_TAIL = {
     40: ": waits 0 ms, restart 0 ms",
     41: ": 0 one-byte writes towards the node and 0 from it",
     42: ": 0 extra connections made, 0 closed by the node",
+    43: ": 0 of 0 queries answered in 0 ms",
 }
 
 
@@ -214,6 +237,18 @@ def judge_admission(
         and seen_b == both
         and recovered
     )
+
+
+def judge_sustained(
+    answered: int,
+    final: set[str] | None,
+    recovered: bool,
+    spec: StreamSpec = SPEC,
+) -> bool:
+    """Every query of the run was answered with both sessions (the run stops at the first that was not, so
+    the count is the queries answered before it), the node still holds both sessions when the run is
+    over, and it still takes its peer back after a release (no cell was lost to the run)."""
+    return answered == spec.queries and final == {A_ID, B_ID} and recovered
 
 
 def judge_framing(
@@ -410,9 +445,41 @@ def _admitted(
         seen_b = env.sessions("B")
     finally:
         env.fault("A", "unflood")
+    return opened, closed, answered, seen_b, _given_back(env, spec, interval_s)
+
+
+def _given_back(env: StreamEnv, spec: StreamSpec, interval_s: float) -> bool:
+    """The pool is whole: the connection of A is released, and the node notices and takes the peer back.
+    A cell lost earlier leaves the node one short, and a node one short of a cell for the peer does not
+    take it back (the pool holds exactly the cells of its sessions and one waiting)."""
+    both = {A_ID, B_ID}
     landed, _, gone, _ = _released(env, "close", spec, interval_s)
     back, _ = _await(env, lambda: env.sessions("B") == both, spec.return_guard_ms / 1000, interval_s)
-    return opened, closed, answered, seen_b, bool(landed) and gone and back
+    return bool(landed) and gone and back
+
+
+def _sustained(env: StreamEnv, spec: StreamSpec, interval_s: float) -> tuple[int, float, set[str] | None, bool, object]:
+    """Ask the node through router A, one query after another, for as many as the run holds, and read what
+    the node holds when it is over.
+
+    A query through A is a request to the node and its reply, across the leg to A, answered with the
+    sessions the node holds. The run stops at the first query that is not answered with both sessions (a
+    node that has stopped answering would otherwise cost a hang guard for each of the rest), and keeps
+    that answer. Returns (queries answered, milliseconds the run took, the sessions router B reports when
+    it is over, whether the node still took its peer back after a release, the first answer that was not
+    the sessions of both, None if there was none)."""
+    both = {A_ID, B_ID}
+    start = env.now()
+    answered, bad = 0, None
+    for _ in range(spec.queries):
+        got = env.sessions("A")
+        if got != both:
+            bad = got if got is not None else "unanswered"
+            break
+        answered += 1
+    ms = (env.now() - start) * 1000.0
+    final = env.sessions("B")
+    return answered, ms, final, _given_back(env, spec, interval_s), bad
 
 
 def _segmented(
@@ -634,6 +701,37 @@ def run_stream_steps(env: StreamEnv, spec: StreamSpec = SPEC, interval_s: float 
             else:
                 why = "the node did not take its peer back after the extra connections were closed: what they held was not given back"
             out[42] = Result(42, False, said, f"admission FAIL: {why}")
+
+    if not conserved or env.sessions("B") != both:
+        out[43] = Result(
+            43, None, unrun_sentence(43), "not run: the node does not hold A and B after the steps before it"
+        )
+    elif not out[42].held:
+        # The run is judged by what the pool is after it, which a pool the admission step found short would
+        # fail for that step's reason.
+        out[43] = Result(
+            43, None, unrun_sentence(43), "not run: HW.42 did not hold, so the pool was not whole before the run"
+        )
+    else:
+        answered, ms, final, recovered, bad = _sustained(env, spec, interval_s)
+        said = f"{SENTENCES[43]}: {answered} of {spec.queries} queries answered in {ms:.0f} ms"
+        if judge_sustained(answered, final, recovered, spec):
+            out[43] = Result(43, True, said)
+        else:
+            if answered != spec.queries:
+                what = "no answer" if bad == "unanswered" else f"the sessions {sorted(bad) if bad is not None else None}"
+                why = (
+                    f"query {answered + 1} of {spec.queries} was not answered with both sessions ({what}): "
+                    f"the node stopped answering or answered wrongly after {answered}"
+                )
+            elif final != both:
+                why = (
+                    f"the run was answered throughout and the node then held "
+                    f"{sorted(final) if final is not None else None}: it lost a session without a query showing it"
+                )
+            else:
+                why = "the node did not take its peer back after the run: cells it held were not given back"
+            out[43] = Result(43, False, said, f"sustained FAIL: {why}")
     return [out[s] for s in STEPS]
 
 
@@ -659,6 +757,10 @@ FAULTS = (
     "admission_leaks_cells",  # a connection past the capacity keeps its cell after it has gone
     "admission_not_applied",  # the extra connections are never made, so the node was shown no pressure
     "admission_accepts_all",  # every extra connection is held and none refused: nothing bounds the node
+    "query_leaks_entry",  # a query loses an entry of a fixed table now and then, and the node stops answering
+    "query_answer_wrong",  # past some number of queries the answer names the wrong set of sessions
+    "query_leaks_cells",  # the run loses cells of the connection pool: every query is answered, the pool is short
+    "query_loses_session",  # a session the queries never renew ends after the run, with every answer right
 )
 
 
@@ -684,6 +786,9 @@ class StreamModel:
         self.seg = 0  # the size the proxy on the leg to A cuts every write to (0: as read)
         self.small = [0, 0]  # one-byte writes the proxy made towards the node and from it
         self.flooded = 0  # idle connections standing at the node's listener, past its capacity
+        self.queried = 0  # queries the node has answered through router A
+        self.a_since_b = 0  # of them, since router B was last asked
+        self.entries_lost = 0  # entries of a fixed table that queries leaked
 
     def _cut(self) -> bool:
         """The cut is in force on the leg and really made the writes small."""
@@ -750,6 +855,22 @@ class StreamModel:
             if self._cut():
                 self.small[0] += 10
                 self.small[1] += 10
+            self.queried += 1
+            self.a_since_b += 1
+            every = self.spec.leak_caught_every
+            if "query_leaks_entry" in self.faults and self.queried % every == 0:
+                self.entries_lost += 1  # an entry of a fixed table that a query never gives back
+            if "query_leaks_entry" in self.faults and self.entries_lost >= self.spec.timers:
+                return None  # the table is empty: the node can take no more
+            if "query_answer_wrong" in self.faults and self.queried > self.spec.queries // 2:
+                return {A_ID}  # a counter that does not carry: the answer names the wrong set
+            if "query_leaks_cells" in self.faults and self.queried % (self.spec.queries // 3) == 0:
+                self.cells_used += 1  # a cell of the connection pool lost to the run, three times over
+        else:
+            if "query_loses_session" in self.faults and self.a_since_b >= self.spec.queries:
+                self.sess[B_ID] = False  # a lease timer the queries never renew runs out after the run
+                self._schedule_b_dial()  # and the node dials it again, as it does for any lost peer
+            self.a_since_b = 0
         return {p for p, up in self.sess.items() if up}
 
     def small_writes(self, leg: str, size: int) -> tuple[int, int]:
@@ -875,6 +996,9 @@ def check_spec_against_source(spec: StreamSpec = SPEC, root: Path = ROOT) -> lis
         queue = re.search(r"const QUEUE: usize = (\d+);", src)
         if not sessions or int(sessions.group(1)) != spec.sessions:
             problems.append(f"{rel}: SESSIONS is {sessions.group(1) if sessions else None}, the steps hold {spec.sessions}")
+        timers = re.search(r"const TIMERS: usize = (\d+);", src)
+        if not timers or int(timers.group(1)) != spec.timers:
+            problems.append(f"{rel}: TIMERS is {timers.group(1) if timers else None}, the steps hold {spec.timers}")
         accepts = re.search(r"const ACCEPTS: usize = (\d+);", src)
         if not accepts or int(accepts.group(1)) != spec.accepts:
             problems.append(f"{rel}: ACCEPTS is {accepts.group(1) if accepts else None}, the steps hold {spec.accepts}")
@@ -900,6 +1024,10 @@ def selftest() -> int:
     # The contract the steps hold is the node's.
     drift = check_spec_against_source()
     check("the steps' contract is the node's source", not drift, "; ".join(drift))
+    # Each constant the steps hold is checked against the source: a copy that moved is a problem named.
+    for name, moved in (("timers", 5), ("accepts", 2), ("sessions", 3), ("cells", 4), ("lease_ms", 9_000)):
+        problems = check_spec_against_source(dataclasses.replace(SPEC, **{name: moved}))
+        check(f"the drift check finds {name} moved", len(problems) >= 1, str(problems))
     check(
         "the prompt bound is below the earliest lease detection",
         SPEC.prompt_bound_ms < SPEC.earliest_lease_detection_ms == 7500,
@@ -915,9 +1043,14 @@ def selftest() -> int:
     # A node that keeps its contract holds all four.
     healthy = run_stream_steps(StreamModel())
     check(
-        "healthy: HW.36 to HW.42 held",
-        _held(healthy) == {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True},
+        "healthy: HW.36 to HW.43 held",
+        _held(healthy) == {s: True for s in STEPS},
         str([(r.step, r.held, r.fail_text) for r in healthy]),
+    )
+    check(
+        "healthy: HW.43 counts the queries it asked",
+        healthy[-1].sentence.endswith(f": {SPEC.queries} of {SPEC.queries} queries answered in 0 ms"),
+        healthy[-1].sentence,
     )
     check(
         "healthy: HW.39 says when the lease was enforced (the lease, to the poll interval)",
@@ -932,25 +1065,30 @@ def selftest() -> int:
 
     # Each way a node breaks a property is caught by the step that holds it, and by no other.
     expect: dict[str, dict[int, bool | None]] = {
-        "leak_on_reset": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None, 42: None},
-        "leak_on_close": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None, 42: None},
-        "fin_ignored": {36: False, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True},
-        "reset_ignored": {36: True, 37: False, 38: True, 39: True, 40: True, 41: True, 42: True},
-        "accept_stuck": {36: True, 37: None, 38: False, 39: None, 40: None, 41: None, 42: None},
-        "kills_other": {36: False, 37: None, 38: False, 39: None, 40: None, 41: None, 42: None},
-        "silence_never_detected": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True, 42: True},
-        "silence_premature": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True, 42: True},
-        "redial_no_wait": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True},
-        "redial_no_backoff": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True},
-        "redial_no_restart": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True},
-        "redial_never": {36: True, 37: True, 38: True, 39: True, 40: False, 41: None, 42: None},
+        "leak_on_reset": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None},
+        "leak_on_close": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None},
+        "fin_ignored": {36: False, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: True},
+        "reset_ignored": {36: True, 37: False, 38: True, 39: True, 40: True, 41: True, 42: True, 43: True},
+        "accept_stuck": {36: True, 37: None, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None},
+        "kills_other": {36: False, 37: None, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None},
+        "silence_never_detected": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True, 42: True, 43: True},
+        "silence_premature": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True, 42: True, 43: True},
+        "redial_no_wait": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True, 43: True},
+        "redial_no_backoff": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True, 43: True},
+        "redial_no_restart": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True, 43: True},
+        "redial_never": {36: True, 37: True, 38: True, 39: True, 40: False, 41: None, 42: None, 43: None},
         # A node that cannot read a message in pieces does not take A back, so the steps after it have no fixture.
-        "framing_no_reassembly": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False, 42: None},
-        "framing_cut_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False, 42: True},
-        "admission_harms_sessions": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False},
-        "admission_leaks_cells": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False},
-        "admission_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False},
-        "admission_accepts_all": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False},
+        "framing_no_reassembly": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False, 42: None, 43: None},
+        "framing_cut_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False, 42: True, 43: True},
+        # The run is judged by the pool after it, so a pool HW.42 found short leaves it no fixture.
+        "admission_harms_sessions": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None},
+        "admission_leaks_cells": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None},
+        "admission_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None},
+        "admission_accepts_all": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None},
+        "query_leaks_entry": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False},
+        "query_answer_wrong": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False},
+        "query_leaks_cells": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False},
+        "query_loses_session": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False},
     }
     check("every fault has an expectation", set(expect) == set(FAULTS), str(set(expect) ^ set(FAULTS)))
     for fault, want in expect.items():
@@ -959,8 +1097,25 @@ def selftest() -> int:
 
     # The comparisons weakened let their fault through: the faults are red for the comparison's own sake.
     global judge_release, judge_conservation, judge_silence, judge_redial, judge_framing, judge_admission
+    global judge_sustained
     saved = (judge_release, judge_conservation, judge_silence, judge_redial, judge_framing, judge_admission)
+    saved_sustained = judge_sustained
     try:
+        both_s = {A_ID, B_ID}
+        # No count of the answers: a node that stops answering, or answers wrongly, goes green.
+        judge_sustained = lambda answered, final, recovered, spec=SPEC: final == both_s and recovered
+        for fault in ("query_leaks_entry", "query_answer_wrong"):
+            got = _held(run_stream_steps(StreamModel(faults=(fault,))))
+            check(f"weakened HW.43: {fault} goes green there", got.get(43) is True, str(got))
+        # No read of the sessions after the run: a session lost with every answer right goes green.
+        judge_sustained = lambda answered, final, recovered, spec=SPEC: answered == spec.queries and recovered
+        got = _held(run_stream_steps(StreamModel(faults=("query_loses_session",))))
+        check("weakened HW.43: a session lost after the run goes green there", got.get(43) is True, str(got))
+        # No recovery: cells the run lost, with every answer right, go green.
+        judge_sustained = lambda answered, final, recovered, spec=SPEC: answered == spec.queries and final == both_s
+        got = _held(run_stream_steps(StreamModel(faults=("query_leaks_cells",))))
+        check("weakened HW.43: cells lost to the run go green there", got.get(43) is True, str(got))
+        judge_sustained = saved_sustained
         # No recovery: a pool that is not given back after the pressure goes green.
         judge_admission = lambda opened, closed, answered, seen_b, recovered, spec=SPEC: (
             opened >= 1 and opened - closed <= spec.holds_extra and answered == {A_ID, B_ID} and seen_b == {A_ID, B_ID}
@@ -1005,6 +1160,7 @@ def selftest() -> int:
         check("weakened HW.38: a cell lost on a reset goes green there", got.get(38) is True, str(got))
     finally:
         judge_release, judge_conservation, judge_silence, judge_redial, judge_framing, judge_admission = saved
+        judge_sustained = saved_sustained
 
     # The comparisons themselves.
     both_ids_a = {A_ID, B_ID}
@@ -1019,6 +1175,20 @@ def selftest() -> int:
     check("judge_admission: an unanswered query through A is harm", not judge_admission(5, 5 - hx, None, both_ids_a, True))
     check("judge_admission: a session lost through B is harm", not judge_admission(5, 5 - hx, both_ids_a, {A_ID}, True))
     check("judge_admission: a pool not given back is not held", not judge_admission(5, 5 - hx, both_ids_a, both_ids_a, False))
+    q = SPEC.queries
+    check("the run is 500 queries for each entry of the largest table: 2,000", q == 2000, str(q))
+    check("the run is past a one-byte request number", q > 128, str(q))
+    check(
+        "a leak every leak_caught_every queries empties the largest table inside the run",
+        SPEC.timers * SPEC.leak_caught_every < q and SPEC.leak_caught_every == 400,
+        f"{SPEC.timers} {SPEC.leak_caught_every} {q}",
+    )
+    check("judge_sustained: all answered, both held, pool whole", judge_sustained(q, both_ids_a, True))
+    check("judge_sustained: one query short is not the run", not judge_sustained(q - 1, both_ids_a, True))
+    check("judge_sustained: no query is not a run", not judge_sustained(0, both_ids_a, True))
+    check("judge_sustained: a session lost at the end is not held", not judge_sustained(q, {A_ID}, True))
+    check("judge_sustained: sessions unreadable at the end is not held", not judge_sustained(q, None, True))
+    check("judge_sustained: a pool not given back is not held", not judge_sustained(q, both_ids_a, False))
     n = SPEC.framing_min_writes
     both_ids = {A_ID, B_ID}
     check("judge_framing: back, answered, and cut enough each way", judge_framing(True, both_ids, n, n))

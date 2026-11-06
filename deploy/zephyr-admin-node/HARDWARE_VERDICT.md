@@ -69,9 +69,9 @@ pool images (HW.26 to HW.35) read a packet capture frame by frame and are the da
 the program refuses them for a `tcp/` node. A stream has failure modes a datagram has not, and the
 steps that hold them are designed below and not yet in this file's grammar.
 
-### The steps for what only a stream suffers (HW.36 to HW.42 are built; the rest is design)
+### The steps for what only a stream suffers (HW.36 to HW.43 are built; the rest is design)
 
-The steps built so far are the release, conservation, silence, re-establishment, framing and admission properties, run with `--stream-steps` on a
+The steps built so far are the release, conservation, silence, re-establishment, framing, admission and sustained-run properties, run with `--stream-steps` on a
 `tcp/` node (the base HW.0 to HW.7 are unchanged without it). The leg to A runs through the program's
 proxy and B carries a REST port of its own, so a release on A's leg is read through B:
 
@@ -83,7 +83,21 @@ HW.39 a peer that falls silent is detected by the lease and only its session end
 HW.40 the node re-dials a lost peer on upstream's schedule of waits, and a new outage restarts it: waits <W> ms, restart <R> ms
 HW.41 a message is read whole whatever the segmentation: the peer is taken back and answers, a byte at a time: <N> one-byte writes towards the node and <M> from it
 HW.42 a peer past the node's capacity does not harm the sessions it holds, and the node takes its peer back once it has gone: <N> extra connections made, <M> closed by the node
+HW.43 a long run of queries is answered whole, one after another, and the node's sessions and cells are as they were after it: <N> of <N> queries answered in <T> ms
 ```
+
+HW.43 asks through router A, one query after another, 2,000 times: a request to the node and its reply
+across the leg to A, each answered with the sessions the node holds, which must be both. The count is
+derived and not round: five hundred for each entry of the largest fixed table the node holds (its four
+timers, from its source), so a node that loses one entry in four hundred queries or faster has none left
+before the run ends, and it is far past the 128 a one-byte request number holds, so a counter that does not
+carry is reached. The run stops at the first query that is not answered with both sessions (a node that has
+stopped answering would otherwise cost a hang guard for each of the rest) and says which query and what
+came back. When the run is over, router B must still report both sessions (a session that ends after the
+run, with every answer right, is found there and nowhere else), and A's connection is released and the node
+must take A back (a cell the run lost is found there and nowhere else). The step is not run when HW.42
+did not hold, because the pool it judges would then be short for that step's reason. The time is measured
+and printed, not bounded: the comparison has no clock in it.
 
 HW.42 stands idle connections at the node's listener, five (the cells and two) where the node can hold two
 beyond its sessions (the cell it keeps for a connection waiting to be taken and the one handshake it reads
