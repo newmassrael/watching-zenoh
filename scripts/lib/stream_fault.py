@@ -40,9 +40,11 @@ when it likes) is not that: it is a second subject.
   refuse(on)    the listener's absence: while on, the listening socket is closed, so a connect is
                 refused; held connections are untouched.
   segment(n)    the stream's lack of boundaries: bytes are forwarded in writes of at most n bytes.
-  hold(on) / flush()
-                the other direction: while on, what is read is buffered and nothing is forwarded;
-                flush() sends each direction's buffer as ONE write.
+  hold(on) / release()
+                the other direction: while on, what is read is buffered and nothing is forwarded (what was
+                buffered is logged as it is, `stats().held_log`, so a barrier can be a content and not a
+                size or a time); release() ends the hold and sends each direction's buffer as ONE write,
+                in one step under the direction's lock, and returns the writes it made.
 
 ## Why it does not flake (the design, not the luck)
 
@@ -99,6 +101,7 @@ class Stats:
     rejected: int = 0  # connections taken from the listener and reset at once by `reject`
     attempts: list = field(default_factory=list)  # time.monotonic() at each connection taken, joined or not
     writes: list = field(default_factory=list)  # (direction, size) of each write the proxy made
+    held_log: list = field(default_factory=list)  # (direction, bytes) of each read `hold` buffered, in order
 
 
 class _Pair:
@@ -116,6 +119,10 @@ class _Pair:
         self._closed = False
         self._left = 2
         self._held = {True: b"", False: b""}
+        # One lock for each direction orders what is held, what is written and the end of a hold: a write
+        # that follows the end of a hold in a direction goes after every byte that hold buffered.
+        self._dlock = {True: threading.Lock(), False: threading.Lock()}
+        self.holding = {True: False, False: False}
         self.threads = [
             threading.Thread(target=self._pump, args=(client, upstream, True), daemon=True),
             threading.Thread(target=self._pump, args=(upstream, client, False), daemon=True),
@@ -171,12 +178,12 @@ class _Pair:
         if proxy._blackhole:
             proxy._count(dropped=len(data))
             return
-        if proxy._hold:
-            with self._lock:
+        with self._dlock[up]:
+            if self.holding[up]:
                 self._held[up] += data
-            proxy._count(held=len(data))
-            return
-        self._write(dst, data, up)
+                proxy._count(held=len(data), held_log=[("up" if up else "down", data)])
+                return
+            self._write(dst, data, up)
 
     def _write(self, dst: socket.socket, data: bytes, up: bool) -> None:
         size = self.proxy._segment or len(data)
@@ -193,17 +200,32 @@ class _Pair:
         except OSError:
             pass
 
-    def _flush_direction(self, up: bool, dst: socket.socket) -> None:
-        with self._lock:
+    def _flush_direction(self, up: bool, dst: socket.socket, end_hold: bool = False) -> int:
+        """Send what is buffered in a direction as one write; returns its size (0: nothing was buffered)."""
+        with self._dlock[up]:
+            if end_hold:
+                self.holding[up] = False
             data, self._held[up] = self._held[up], b""
-        if data:
-            self.proxy._count(held=-len(data))
-            self._write(dst, data, up)
+            if data:
+                self.proxy._count(held=-len(data))
+                self._write(dst, data, up)
+            return len(data)
 
-    def flush(self) -> None:
-        """Send what `hold` buffered, each direction as one write."""
-        self._flush_direction(True, self.upstream)
-        self._flush_direction(False, self.client)
+    def set_hold(self, on: bool) -> None:
+        for up in (True, False):
+            with self._dlock[up]:
+                self.holding[up] = on
+
+    def flush(self, end_hold: bool = False) -> list[tuple[str, int]]:
+        """Send what `hold` buffered, each direction as one write; with `end_hold` the hold ends in the
+        same step, under the direction's lock, so nothing read afterwards can be sent before it. Returns
+        the writes it made, (direction, size): the proxy's own account of what this call sent, which no
+        write made by a later read can be mistaken for."""
+        made = [
+            ("up", self._flush_direction(True, self.upstream, end_hold)),
+            ("down", self._flush_direction(False, self.client, end_hold)),
+        ]
+        return [(d, n) for d, n in made if n]
 
     def _finish(self, reset: bool = False) -> None:
         """The one place the sockets are closed, once: a zero linger first when the end is a RST."""
@@ -346,6 +368,7 @@ class StreamProxy:
         client.setblocking(True)
         pair = _Pair(self, client, upstream)
         with self._cv:
+            pair.holding = {True: self._hold, False: self._hold}  # read where `hold` takes its pairs: one or the other sees it
             self._pairs.append(pair)
         self._count(accepted=1)
         pair.start()
@@ -412,6 +435,7 @@ class StreamProxy:
         rejected: int = 0,
         attempt: float | None = None,
         writes: list | None = None,
+        held_log: list | None = None,
     ) -> None:
         with self._cv:
             s = self._stats
@@ -427,11 +451,18 @@ class StreamProxy:
                 s.attempts.append(attempt)
             if writes:
                 s.writes.extend(writes)
+            if held_log:
+                s.held_log.extend(held_log)
             self._cv.notify_all()
 
     def _snapshot(self) -> Stats:
         """A copy of the counters; the caller holds `_cv`."""
-        return replace(self._stats, writes=list(self._stats.writes), attempts=list(self._stats.attempts))
+        return replace(
+            self._stats,
+            writes=list(self._stats.writes),
+            attempts=list(self._stats.attempts),
+            held_log=list(self._stats.held_log),
+        )
 
     def stats(self) -> Stats:
         with self._cv:
@@ -499,15 +530,37 @@ class StreamProxy:
         self._segment = size or 0
 
     def hold(self, on: bool) -> None:
-        """While on, what is read is buffered and not forwarded; `flush()` sends it."""
-        self._hold = on
-
-    def flush(self) -> None:
-        """Send what `hold` buffered, each direction as one write."""
+        """While on, what is read is buffered and not forwarded, on the connections there are and on the ones
+        made meanwhile; `release()` sends it. What was buffered is logged (`stats().held_log`) as it is, so
+        a barrier can be a content the buffer holds and not a size or a time."""
         with self._cv:
+            self._hold = on
             pairs = [p for p in self._pairs if not p.ended.is_set()]
         for pair in pairs:
-            pair.flush()
+            pair.set_hold(on)
+
+    def flush(self) -> list[tuple[str, int]]:
+        """Send what `hold` buffered, each direction as one write, leaving the hold on. Returns the writes
+        this call made, (direction, size)."""
+        with self._cv:
+            pairs = [p for p in self._pairs if not p.ended.is_set()]
+        made: list[tuple[str, int]] = []
+        for pair in pairs:
+            made += pair.flush()
+        return made
+
+    def release(self) -> list[tuple[str, int]]:
+        """End the hold: what it buffered is sent, each direction as one write, and what is read afterwards
+        goes after it. The end and the send are one step under each direction's lock, so a read that lands
+        between them is neither sent ahead of the buffer nor left in it. Returns the writes this call made,
+        (direction, size): exactly the buffer's, and none that a read after the hold made."""
+        with self._cv:
+            self._hold = False
+            pairs = [p for p in self._pairs if not p.ended.is_set()]
+        made: list[tuple[str, int]] = []
+        for pair in pairs:
+            made += pair.flush(end_hold=True)
+        return made
 
 
 # ------------------------------------------------------------------------------------ selftest --
@@ -730,16 +783,29 @@ def _cases(proxy: StreamProxy, reads: list, failures: list) -> None:
     proxy.hold(True)
     n = len(proxy.stats().writes)
     up_before = proxy.stats().up
+    log0 = len(proxy.stats().held_log)  # before the writes: a read the proxy buffers early must still be in view
     c.sendall(b"ab")
     c.sendall(b"cd")
-    proxy.wait(lambda s: s.held >= 4, "four bytes buffered")
+    # The barrier is a content the buffer holds, as the log of what was buffered says it, and not a size.
+    proxy.wait(
+        lambda s: b"abcd" in b"".join(d for k, d in s.held_log[log0:] if k == "up"), "the two writes buffered"
+    )
     check("hold: nothing was forwarded while held", proxy.stats().up == up_before, str(proxy.stats()))
-    proxy.hold(False)
-    proxy.flush()
-    check("hold: the bytes arrive unchanged", _recv_exact(c, 4) == b"abcd")
+    made = proxy.release()
+    check("hold: release returns the one write it made, and no other", made == [("up", 4)], str(made))
+    c.sendall(b"ef")  # read after the end of the hold: it goes after the buffer, never ahead of it
+    check("hold: the bytes arrive unchanged and in order", _recv_exact(c, 6) == b"abcdef")
     up_writes = [size for d, size in proxy.stats().writes[n:] if d == "up"]
-    check("hold: they were sent as one write", up_writes == [4], str(up_writes))
+    check("hold: the buffer was one write and what followed another", up_writes == [4, 2], str(up_writes))
     check("hold: nothing is left held", proxy.stats().held == 0, str(proxy.stats()))
+    # A connection made while the hold is on is held too, and the hold ends on it with the rest.
+    proxy.hold(True)
+    c2 = _client(port)
+    c2.sendall(b"zz")
+    proxy.wait(lambda s: b"zz" in b"".join(d for k, d in s.held_log if k == "up"), "a new connection's bytes held")
+    proxy.release()
+    check("hold: a connection made during the hold is held and released", _recv_exact(c2, 2) == b"zz")
+    c2.close()
     c.close()
 
 

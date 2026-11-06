@@ -69,9 +69,9 @@ pool images (HW.26 to HW.35) read a packet capture frame by frame and are the da
 the program refuses them for a `tcp/` node. A stream has failure modes a datagram has not, and the
 steps that hold them are designed below and not yet in this file's grammar.
 
-### The steps for what only a stream suffers (HW.36 to HW.43 are built; the rest is design)
+### The steps for what only a stream suffers (HW.36 to HW.44 are built; the rest is design)
 
-The steps built so far are the release, conservation, silence, re-establishment, framing, admission and sustained-run properties, run with `--stream-steps` on a
+The steps built so far are the release, conservation, silence, re-establishment, framing, admission, sustained-run and coalescing properties, run with `--stream-steps` on a
 `tcp/` node (the base HW.0 to HW.7 are unchanged without it). The leg to A runs through the program's
 proxy and B carries a REST port of its own, so a release on A's leg is read through B:
 
@@ -84,7 +84,22 @@ HW.40 the node re-dials a lost peer on upstream's schedule of waits, and a new o
 HW.41 a message is read whole whatever the segmentation: the peer is taken back and answers, a byte at a time: <N> one-byte writes towards the node and <M> from it
 HW.42 a peer past the node's capacity does not harm the sessions it holds, and the node takes its peer back once it has gone: <N> extra connections made, <M> closed by the node
 HW.43 a long run of queries is answered whole, one after another, and the node's sessions and cells are as they were after it: <N> of <N> queries answered in <T> ms
+HW.44 several requests that arrive in one read are each answered whole, and the node's sessions are as they were: <N> requests held, <M> answered, in <K> writes
 ```
+
+HW.44 is the other half of framing (HW.41 cuts one message into many reads; this joins many messages into one
+read). The leg to A is held: the proxy buffers what router A sends the node and forwards nothing. Eight
+requests are made through router A together (more than one, and eight at 128 bytes each are 1,024 bytes, inside
+the 1,460 of a batch, so what is handed over is one segment), each carrying a tag of its own in its selector
+(`wzq=00` to `wzq=07`), which router A passes to the node as it is. The barrier is the buffer's content, not a
+size and not a time: the wait is for every tag to be in what the proxy buffered, on the proxy's own condition
+and to a guard of five seconds (below the lease), so the keep-alives that also cross the held leg cannot stand
+in for a request. The hold then ends and the buffer is sent as ONE write, in one step under the direction's lock
+(a read that lands in between is neither sent ahead of the buffer nor left in it), and the proxy returns the
+writes that call made, so a write made by a later read cannot be taken for it. The node must read every request
+out of what it is handed: all eight answered with both sessions, exactly one write towards the node, every tag
+in the buffer, and router B still reporting both sessions afterwards. A run in which a request did not reach the
+buffer, or the buffer went as several writes, shows the node nothing and fails.
 
 HW.43 asks through router A, one query after another, 2,000 times: a request to the node and its reply
 across the leg to A, each answered with the sessions the node holds, which must be both. The count is

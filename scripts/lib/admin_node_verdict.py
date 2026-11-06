@@ -1055,6 +1055,58 @@ class HostStreamEnv:
             sum(1 for d, n in writes if d == "down" and n <= size),
         )
 
+    def coalesce_hold(self, count: int) -> int:
+        """Hold the leg to A and make `count` requests through router A together, each with a tag of its own
+        in its selector (router A passes the selector on as it is). Returns when the requests are being made;
+        they can only complete once the hold ends."""
+        proxy = self._proxy_of("A")
+        self._co_tags = [f"wzq={i:02d}".encode() for i in range(count)]
+        self._co_log0 = len(proxy.stats().held_log)
+        self._co_replies: list[bytes] = [b""] * count
+
+        def ask(i: int) -> None:
+            self._co_replies[i] = self.env.get("?" + self._co_tags[i].decode())
+
+        proxy.hold(True)
+        self._co_threads = [threading.Thread(target=ask, args=(i,), daemon=True) for i in range(count)]
+        for t in self._co_threads:
+            t.start()
+        return count
+
+    def _tags_held(self, stats: "stream_fault.Stats") -> int:
+        buffered = b"".join(d for k, d in stats.held_log[self._co_log0 :] if k == "up")
+        return sum(1 for tag in self._co_tags if tag in buffered)
+
+    def coalesce_held(self, count: int, guard_s: float) -> int:
+        """How many of the requests are in the leg's buffer: the wait is for their tags to be in what the
+        proxy buffered (its condition, to a hang guard), so keep-alives that also cross the leg are not
+        requests. A guard reached is a count short of `count`, which the comparison fails."""
+        proxy = self._proxy_of("A")
+        try:
+            st = proxy.wait(lambda s: self._tags_held(s) >= count, f"{count} requests buffered", timeout=guard_s)
+        except TimeoutError:
+            st = proxy.stats()
+        return self._tags_held(st)
+
+    def coalesce_release(self) -> int:
+        """End the hold: the buffer goes to the node as one write. Returns the writes towards the node this
+        call made (the proxy's own account of it, not the writes of any read that follows)."""
+        return sum(1 for d, _ in self._proxy_of("A").release() if d == "up")
+
+    def coalesce_answers(self, guard_s: float) -> list[set[str] | None]:
+        """What each request was answered with, in the order they were made: the sessions its reply lists,
+        or None when it had no reply by the guard."""
+        deadline = time.monotonic() + guard_s
+        for t in self._co_threads:
+            t.join(max(deadline - time.monotonic(), 0.0))
+        out: list[set[str] | None] = []
+        for body in self._co_replies:
+            try:
+                out.append({s["peer"] for r in _replies(body) for s in r["value"].get("sessions", [])})
+            except (ValueError, KeyError, TypeError, AttributeError):
+                out.append(None)
+        return out
+
     @property
     def b_dial(self) -> str:
         return self.env.b_dial_via
@@ -3261,28 +3313,33 @@ def selftest() -> int:
         for fault, want in {
             # A step that was not run prints as a failure too, so each fault reds what it breaks and what
             # needed it.
-            "leak_on_reset": {38, 39, 40, 41, 42, 43},
-            "leak_on_close": {38, 39, 40, 41, 42, 43},
+            "leak_on_reset": {38, 39, 40, 41, 42, 43, 44},
+            "leak_on_close": {38, 39, 40, 41, 42, 43, 44},
             "fin_ignored": {36},
             "reset_ignored": {37},
-            "accept_stuck": {37, 38, 39, 40, 41, 42, 43},
-            "kills_other": {36, 37, 38, 39, 40, 41, 42, 43},
+            "accept_stuck": {37, 38, 39, 40, 41, 42, 43, 44},
+            "kills_other": {36, 37, 38, 39, 40, 41, 42, 43, 44},
             "silence_never_detected": {39},
             "silence_premature": {39},
             "redial_no_wait": {40},
             "redial_no_backoff": {40},
             "redial_no_restart": {40},
-            "redial_never": {40, 41, 42, 43},
-            "framing_no_reassembly": {41, 42, 43},
+            "redial_never": {40, 41, 42, 43, 44},
+            "framing_no_reassembly": {41, 42, 43, 44},
             "framing_cut_not_applied": {41},
-            "admission_harms_sessions": {42, 43},
-            "admission_leaks_cells": {42, 43},
-            "admission_not_applied": {42, 43},
-            "admission_accepts_all": {42, 43},
+            "admission_harms_sessions": {42, 43, 44},
+            "admission_leaks_cells": {42, 43, 44},
+            "admission_not_applied": {42, 43, 44},
+            "admission_accepts_all": {42, 43, 44},
             "query_leaks_entry": {43},
             "query_answer_wrong": {43},
-            "query_leaks_cells": {43},
+            "query_leaks_cells": {43, 44},
             "query_loses_session": {43},
+            "coalesce_drops_tail": {44},
+            "coalesce_wrong_answer": {44},
+            "coalesce_not_merged": {44},
+            "coalesce_not_held": {44},
+            "coalesce_ends_session": {44},
         }.items():
             rc, so, se = stream_case((fault,))
             steps = _grammar_steps(so)

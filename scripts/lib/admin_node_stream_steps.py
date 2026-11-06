@@ -130,6 +130,15 @@ class StreamSpec:
         largest table (and each smaller one sooner) before the run's last query is answered."""
         return self.queries // (self.timers + 1)
 
+    #: Requests held at the leg and let through as one write, for the coalescing step: more than one, and
+    #: few enough that they fit the batch the node reads at 128 bytes each (eight of them are 1,024 bytes,
+    #: a batch is 1,460), so what is written is one segment and, at the node, one read.
+    coalesced: int = 8
+    batch_bytes: int = 1_460  # the batch the node advertises (BATCH_SIZE)
+    #: A guard against a hang for the barrier and the answers of the coalescing step, below the lease so the
+    #: leg's silence while requests are held is never a lease run out.
+    coalesce_guard_ms: int = 5_000
+
     @property
     def pressure(self) -> int:
         """Extra connections for the admission step: more than the node can hold, and a few more, so a
@@ -180,7 +189,8 @@ SENTENCES[42] = (
 SENTENCES[43] = (
     "a long run of queries is answered whole, one after another, and the node's sessions and cells are as they were after it"
 )
-STEPS = (36, 37, 38, 39, 40, 41, 42, 43)
+SENTENCES[44] = "several requests that arrive in one read are each answered whole, and the node's sessions are as they were"
+STEPS = (36, 37, 38, 39, 40, 41, 42, 43, 44)
 #: What the grammar's `<...>` is for a step that was not run or could not be judged (the printed sentence
 #: is an instance of the grammar either way).
 UNRUN_TAIL = {
@@ -190,6 +200,7 @@ UNRUN_TAIL = {
     41: ": 0 one-byte writes towards the node and 0 from it",
     42: ": 0 extra connections made, 0 closed by the node",
     43: ": 0 of 0 queries answered in 0 ms",
+    44: ": 0 requests held, 0 answered, in 0 writes",
 }
 
 
@@ -251,6 +262,28 @@ def judge_sustained(
     return answered == spec.queries and final == {A_ID, B_ID} and recovered
 
 
+def judge_coalescing(
+    started: int,
+    held: int,
+    writes: int,
+    answers: list[set[str] | None],
+    final: set[str] | None,
+    spec: StreamSpec = SPEC,
+) -> bool:
+    """The requests were made, every one of them was in the leg's buffer before it was let through (the
+    barrier is their content), the buffer went to the node as ONE write (so several messages arrived
+    together), every request was answered with both sessions, and the node still holds both afterwards."""
+    both = {A_ID, B_ID}
+    return (
+        started == spec.coalesced
+        and held == started
+        and writes == 1
+        and len(answers) == started
+        and all(a == both for a in answers)
+        and final == both
+    )
+
+
 def judge_framing(
     back: bool,
     answered: set[str] | None,
@@ -304,6 +337,10 @@ class StreamEnv(Protocol):
     def await_attempts(self, leg: str, since: int, count: int, guard_s: float) -> list[float] | None: ...
     def small_writes(self, leg: str, size: int) -> tuple[int, int]: ...
     def flood_closed(self, want: int, guard_s: float) -> int: ...
+    def coalesce_hold(self, count: int) -> int: ...
+    def coalesce_held(self, count: int, guard_s: float) -> int: ...
+    def coalesce_release(self) -> int: ...
+    def coalesce_answers(self, guard_s: float) -> list[set[str] | None]: ...
     def sleep(self, seconds: float) -> None: ...
     def now(self) -> float: ...
 
@@ -480,6 +517,28 @@ def _sustained(env: StreamEnv, spec: StreamSpec, interval_s: float) -> tuple[int
     ms = (env.now() - start) * 1000.0
     final = env.sessions("B")
     return answered, ms, final, _given_back(env, spec, interval_s), bad
+
+
+def _coalesced(env: StreamEnv, spec: StreamSpec) -> tuple[int, int, int, list[set[str] | None], set[str] | None]:
+    """Hold the leg to A, make several requests through router A at once, let them through as one write,
+    and read what the node answered.
+
+    The leg buffers what router A sends the node and forwards nothing. The requests are made together, each
+    carrying a tag of its own in its selector, which router A passes to the node as it is, so the barrier
+    is the content of the buffer: the wait is for every tag to be in it (the proxy's condition, to a hang
+    guard) and not for a time, and keep-alives that also cross the leg cannot stand in for a request. The
+    buffer is then let through in one step, as ONE write, so the node is handed the requests together and
+    must read each out of what it reads. Returns (requests made, requests that were in the buffer, writes
+    towards the node the release made, the sessions each request was answered with, the sessions router B
+    reports afterwards)."""
+    guard = spec.coalesce_guard_ms / 1000
+    started = env.coalesce_hold(spec.coalesced)
+    try:
+        held = env.coalesce_held(started, guard)
+    finally:
+        writes = env.coalesce_release()
+    answers = env.coalesce_answers(guard)
+    return started, held, writes, answers, env.sessions("B")
 
 
 def _segmented(
@@ -732,6 +791,39 @@ def run_stream_steps(env: StreamEnv, spec: StreamSpec = SPEC, interval_s: float 
             else:
                 why = "the node did not take its peer back after the run: cells it held were not given back"
             out[43] = Result(43, False, said, f"sustained FAIL: {why}")
+
+    if not conserved or env.sessions("B") != both or not out[42].held:
+        out[44] = Result(
+            44, None, unrun_sentence(44), "not run: the node does not hold A and B, or HW.42 did not hold, after the steps before it"
+        )
+    else:
+        started, held, writes, answers, final = _coalesced(env, spec)
+        right = sum(1 for a in answers if a == both)
+        said = f"{SENTENCES[44]}: {held} requests held, {right} answered, in {writes} writes"
+        if judge_coalescing(started, held, writes, answers, final, spec):
+            out[44] = Result(44, True, said)
+        else:
+            if started != spec.coalesced:
+                why = f"{started} of the {spec.coalesced} requests were made"
+            elif held != started:
+                why = (
+                    f"only {held} of the {started} requests were in the leg's buffer within {spec.coalesce_guard_ms} ms: "
+                    f"they did not arrive together, so nothing was shown"
+                )
+            elif writes != 1:
+                why = f"the buffer went to the node as {writes} writes and not one: the requests were not handed over together"
+            elif right != started:
+                bad = [sorted(a) if a is not None else None for a in answers if a != both][0]
+                why = (
+                    f"{started - right} of {started} requests were not answered with both sessions (first: {bad}): "
+                    f"the node did not read each request out of what it was handed"
+                )
+            else:
+                why = (
+                    f"every request was answered and the node then held "
+                    f"{sorted(final) if final is not None else None}: it lost a session reading them together"
+                )
+            out[44] = Result(44, False, said, f"coalescing FAIL: {why}")
     return [out[s] for s in STEPS]
 
 
@@ -761,6 +853,11 @@ FAULTS = (
     "query_answer_wrong",  # past some number of queries the answer names the wrong set of sessions
     "query_leaks_cells",  # the run loses cells of the connection pool: every query is answered, the pool is short
     "query_loses_session",  # a session the queries never renew ends after the run, with every answer right
+    "coalesce_drops_tail",  # of several messages in one read only the first is taken
+    "coalesce_wrong_answer",  # one of several requests read together is answered with the wrong state
+    "coalesce_not_merged",  # the requests are never handed over together, so the node was shown one at a time
+    "coalesce_not_held",  # a request never reaches the buffer, so the barrier is not met
+    "coalesce_ends_session",  # every request read together is answered and then a session is reset
 )
 
 
@@ -789,6 +886,7 @@ class StreamModel:
         self.queried = 0  # queries the node has answered through router A
         self.a_since_b = 0  # of them, since router B was last asked
         self.entries_lost = 0  # entries of a fixed table that queries leaked
+        self.co_n = 0  # requests of the coalescing step in the leg's buffer
 
     def _cut(self) -> bool:
         """The cut is in force on the leg and really made the writes small."""
@@ -875,6 +973,30 @@ class StreamModel:
 
     def small_writes(self, leg: str, size: int) -> tuple[int, int]:
         return self.small[0], self.small[1]
+
+    def coalesce_hold(self, count: int) -> int:
+        self.co_n = count
+        return count
+
+    def coalesce_held(self, count: int, guard_s: float) -> int:
+        """Requests in the leg's buffer: all, unless one never reached it."""
+        return count - 1 if "coalesce_not_held" in self.faults else count
+
+    def coalesce_release(self) -> int:
+        """Writes towards the node the release made: one, unless the buffer was never merged."""
+        return self.co_n if "coalesce_not_merged" in self.faults else 1
+
+    def coalesce_answers(self, guard_s: float) -> list[set[str] | None]:
+        now = {p for p, up in self.sess.items() if up}
+        answers: list[set[str] | None] = [set(now) for _ in range(self.co_n)]
+        if "coalesce_drops_tail" in self.faults:
+            answers = [answers[0]] + [None] * (self.co_n - 1)  # only the first message of a read is taken
+        if "coalesce_wrong_answer" in self.faults:
+            answers[-1] = {B_ID}  # a reply built from the wrong request's state
+        if "coalesce_ends_session" in self.faults:
+            self.sess[B_ID] = False  # every request answered, and then a session reset
+            self._schedule_b_dial()
+        return answers
 
     def flood_closed(self, want: int, guard_s: float) -> int:
         """The extra connections the node has closed by the bound: all it cannot hold, unless it holds all."""
@@ -996,6 +1118,10 @@ def check_spec_against_source(spec: StreamSpec = SPEC, root: Path = ROOT) -> lis
         queue = re.search(r"const QUEUE: usize = (\d+);", src)
         if not sessions or int(sessions.group(1)) != spec.sessions:
             problems.append(f"{rel}: SESSIONS is {sessions.group(1) if sessions else None}, the steps hold {spec.sessions}")
+        if "mcu-admin-node" in rel:  # the Zephyr node's batch is a Kconfig value, not a constant of this file
+            batch = re.search(r"const BATCH_SIZE: u16 = ([\d_]+);", src)
+            if not batch or int(batch.group(1).replace("_", "")) != spec.batch_bytes:
+                problems.append(f"{rel}: BATCH_SIZE is {batch.group(1) if batch else None}, the steps hold {spec.batch_bytes}")
         timers = re.search(r"const TIMERS: usize = (\d+);", src)
         if not timers or int(timers.group(1)) != spec.timers:
             problems.append(f"{rel}: TIMERS is {timers.group(1) if timers else None}, the steps hold {spec.timers}")
@@ -1025,7 +1151,7 @@ def selftest() -> int:
     drift = check_spec_against_source()
     check("the steps' contract is the node's source", not drift, "; ".join(drift))
     # Each constant the steps hold is checked against the source: a copy that moved is a problem named.
-    for name, moved in (("timers", 5), ("accepts", 2), ("sessions", 3), ("cells", 4), ("lease_ms", 9_000)):
+    for name, moved in (("timers", 5), ("accepts", 2), ("sessions", 3), ("cells", 4), ("lease_ms", 9_000), ("batch_bytes", 1_024)):
         problems = check_spec_against_source(dataclasses.replace(SPEC, **{name: moved}))
         check(f"the drift check finds {name} moved", len(problems) >= 1, str(problems))
     check(
@@ -1049,7 +1175,12 @@ def selftest() -> int:
     )
     check(
         "healthy: HW.43 counts the queries it asked",
-        healthy[-1].sentence.endswith(f": {SPEC.queries} of {SPEC.queries} queries answered in 0 ms"),
+        healthy[-2].sentence.endswith(f": {SPEC.queries} of {SPEC.queries} queries answered in 0 ms"),
+        healthy[-2].sentence,
+    )
+    check(
+        "healthy: HW.44 counts the requests held and answered and the writes",
+        healthy[-1].sentence.endswith(f": {SPEC.coalesced} requests held, {SPEC.coalesced} answered, in 1 writes"),
         healthy[-1].sentence,
     )
     check(
@@ -1065,30 +1196,36 @@ def selftest() -> int:
 
     # Each way a node breaks a property is caught by the step that holds it, and by no other.
     expect: dict[str, dict[int, bool | None]] = {
-        "leak_on_reset": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None},
-        "leak_on_close": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None},
-        "fin_ignored": {36: False, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: True},
-        "reset_ignored": {36: True, 37: False, 38: True, 39: True, 40: True, 41: True, 42: True, 43: True},
-        "accept_stuck": {36: True, 37: None, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None},
-        "kills_other": {36: False, 37: None, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None},
-        "silence_never_detected": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True, 42: True, 43: True},
-        "silence_premature": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True, 42: True, 43: True},
-        "redial_no_wait": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True, 43: True},
-        "redial_no_backoff": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True, 43: True},
-        "redial_no_restart": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True, 43: True},
-        "redial_never": {36: True, 37: True, 38: True, 39: True, 40: False, 41: None, 42: None, 43: None},
+        "leak_on_reset": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None, 44: None},
+        "leak_on_close": {36: True, 37: True, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None, 44: None},
+        "fin_ignored": {36: False, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: True, 44: True},
+        "reset_ignored": {36: True, 37: False, 38: True, 39: True, 40: True, 41: True, 42: True, 43: True, 44: True},
+        "accept_stuck": {36: True, 37: None, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None, 44: None},
+        "kills_other": {36: False, 37: None, 38: False, 39: None, 40: None, 41: None, 42: None, 43: None, 44: None},
+        "silence_never_detected": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True, 42: True, 43: True, 44: True},
+        "silence_premature": {36: True, 37: True, 38: True, 39: False, 40: True, 41: True, 42: True, 43: True, 44: True},
+        "redial_no_wait": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True, 43: True, 44: True},
+        "redial_no_backoff": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True, 43: True, 44: True},
+        "redial_no_restart": {36: True, 37: True, 38: True, 39: True, 40: False, 41: True, 42: True, 43: True, 44: True},
+        "redial_never": {36: True, 37: True, 38: True, 39: True, 40: False, 41: None, 42: None, 43: None, 44: None},
         # A node that cannot read a message in pieces does not take A back, so the steps after it have no fixture.
-        "framing_no_reassembly": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False, 42: None, 43: None},
-        "framing_cut_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False, 42: True, 43: True},
+        "framing_no_reassembly": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False, 42: None, 43: None, 44: None},
+        "framing_cut_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: False, 42: True, 43: True, 44: True},
         # The run is judged by the pool after it, so a pool HW.42 found short leaves it no fixture.
-        "admission_harms_sessions": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None},
-        "admission_leaks_cells": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None},
-        "admission_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None},
-        "admission_accepts_all": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None},
-        "query_leaks_entry": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False},
-        "query_answer_wrong": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False},
-        "query_leaks_cells": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False},
-        "query_loses_session": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False},
+        "admission_harms_sessions": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None, 44: None},
+        "admission_leaks_cells": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None, 44: None},
+        "admission_not_applied": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None, 44: None},
+        "admission_accepts_all": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: False, 43: None, 44: None},
+        "query_leaks_entry": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False, 44: True},
+        "query_answer_wrong": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False, 44: True},
+        # A pool the run left short does not take A back, so the node holds one session and the step has no fixture.
+        "query_leaks_cells": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False, 44: None},
+        "query_loses_session": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: False, 44: True},
+        "coalesce_drops_tail": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: True, 44: False},
+        "coalesce_wrong_answer": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: True, 44: False},
+        "coalesce_not_merged": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: True, 44: False},
+        "coalesce_not_held": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: True, 44: False},
+        "coalesce_ends_session": {36: True, 37: True, 38: True, 39: True, 40: True, 41: True, 42: True, 43: True, 44: False},
     }
     check("every fault has an expectation", set(expect) == set(FAULTS), str(set(expect) ^ set(FAULTS)))
     for fault, want in expect.items():
@@ -1097,9 +1234,10 @@ def selftest() -> int:
 
     # The comparisons weakened let their fault through: the faults are red for the comparison's own sake.
     global judge_release, judge_conservation, judge_silence, judge_redial, judge_framing, judge_admission
-    global judge_sustained
+    global judge_sustained, judge_coalescing
     saved = (judge_release, judge_conservation, judge_silence, judge_redial, judge_framing, judge_admission)
     saved_sustained = judge_sustained
+    saved_coalescing = judge_coalescing
     try:
         both_s = {A_ID, B_ID}
         # No count of the answers: a node that stops answering, or answers wrongly, goes green.
@@ -1116,6 +1254,33 @@ def selftest() -> int:
         got = _held(run_stream_steps(StreamModel(faults=("query_leaks_cells",))))
         check("weakened HW.43: cells lost to the run go green there", got.get(43) is True, str(got))
         judge_sustained = saved_sustained
+        ok_all = lambda answers: len(answers) > 0 and all(a == both_s for a in answers)
+        # No barrier: a request that never reached the buffer goes green.
+        judge_coalescing = lambda started, held, writes, answers, final, spec=SPEC: (
+            started == spec.coalesced and writes == 1 and ok_all(answers) and final == both_s
+        )
+        got = _held(run_stream_steps(StreamModel(faults=("coalesce_not_held",))))
+        check("weakened HW.44: a request that never reached the buffer goes green there", got.get(44) is True, str(got))
+        # No count of the writes: requests handed over one at a time go green.
+        judge_coalescing = lambda started, held, writes, answers, final, spec=SPEC: (
+            started == spec.coalesced and held == started and ok_all(answers) and final == both_s
+        )
+        got = _held(run_stream_steps(StreamModel(faults=("coalesce_not_merged",))))
+        check("weakened HW.44: requests never handed over together go green there", got.get(44) is True, str(got))
+        # No read of the answers: a tail dropped, or a wrong reply, goes green.
+        judge_coalescing = lambda started, held, writes, answers, final, spec=SPEC: (
+            started == spec.coalesced and held == started and writes == 1 and final == both_s
+        )
+        for fault in ("coalesce_drops_tail", "coalesce_wrong_answer"):
+            got = _held(run_stream_steps(StreamModel(faults=(fault,))))
+            check(f"weakened HW.44: {fault} goes green there", got.get(44) is True, str(got))
+        # No read of the sessions afterwards: a session reset after right answers goes green.
+        judge_coalescing = lambda started, held, writes, answers, final, spec=SPEC: (
+            started == spec.coalesced and held == started and writes == 1 and ok_all(answers)
+        )
+        got = _held(run_stream_steps(StreamModel(faults=("coalesce_ends_session",))))
+        check("weakened HW.44: a session reset after right answers goes green there", got.get(44) is True, str(got))
+        judge_coalescing = saved_coalescing
         # No recovery: a pool that is not given back after the pressure goes green.
         judge_admission = lambda opened, closed, answered, seen_b, recovered, spec=SPEC: (
             opened >= 1 and opened - closed <= spec.holds_extra and answered == {A_ID, B_ID} and seen_b == {A_ID, B_ID}
@@ -1161,6 +1326,7 @@ def selftest() -> int:
     finally:
         judge_release, judge_conservation, judge_silence, judge_redial, judge_framing, judge_admission = saved
         judge_sustained = saved_sustained
+        judge_coalescing = saved_coalescing
 
     # The comparisons themselves.
     both_ids_a = {A_ID, B_ID}
@@ -1189,6 +1355,20 @@ def selftest() -> int:
     check("judge_sustained: a session lost at the end is not held", not judge_sustained(q, {A_ID}, True))
     check("judge_sustained: sessions unreadable at the end is not held", not judge_sustained(q, None, True))
     check("judge_sustained: a pool not given back is not held", not judge_sustained(q, both_ids_a, False))
+    k = SPEC.coalesced
+    check("the requests held together are more than one and fit one batch at 128 bytes each", 2 <= k and k * 128 <= SPEC.batch_bytes, f"{k} {SPEC.batch_bytes}")
+    check("the barrier's guard is below the lease", SPEC.coalesce_guard_ms < SPEC.lease_ms, str(SPEC.coalesce_guard_ms))
+    ok_k = [set(both_ids_a) for _ in range(k)]
+    check("judge_coalescing: all held, one write, all answered, both sessions kept", judge_coalescing(k, k, 1, ok_k, both_ids_a))
+    check("judge_coalescing: a request short of the buffer is not the barrier", not judge_coalescing(k, k - 1, 1, ok_k, both_ids_a))
+    check("judge_coalescing: two writes are not one", not judge_coalescing(k, k, 2, ok_k, both_ids_a))
+    check("judge_coalescing: no write is not one", not judge_coalescing(k, k, 0, ok_k, both_ids_a))
+    check("judge_coalescing: requests not all made are not the run", not judge_coalescing(k - 1, k - 1, 1, ok_k[:-1], both_ids_a))
+    check("judge_coalescing: an unanswered request is not held", not judge_coalescing(k, k, 1, ok_k[:-1] + [None], both_ids_a))
+    check("judge_coalescing: a wrong answer is not held", not judge_coalescing(k, k, 1, ok_k[:-1] + [{B_ID}], both_ids_a))
+    check("judge_coalescing: fewer answers than requests are not held", not judge_coalescing(k, k, 1, ok_k[:-1], both_ids_a))
+    check("judge_coalescing: a session lost after is not held", not judge_coalescing(k, k, 1, ok_k, {A_ID}))
+    check("judge_coalescing: sessions unreadable after is not held", not judge_coalescing(k, k, 1, ok_k, None))
     n = SPEC.framing_min_writes
     both_ids = {A_ID, B_ID}
     check("judge_framing: back, answered, and cut enough each way", judge_framing(True, both_ids, n, n))
