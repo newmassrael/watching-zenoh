@@ -33,7 +33,7 @@ use wz_capi_port::observation::Refusal;
 use crate::abi::z_loaned_session_t;
 use crate::ffi::guarded;
 use crate::result::{ZResult, WZ_CAPI_C_E_FULL, Z_EGENERIC, Z_ENULL, Z_OK};
-use crate::session::{not_a_registry, session_state};
+use crate::session::{session_handle, SessionHandle};
 
 /// What a source writes: the readings it has, and which of them it has.
 ///
@@ -91,10 +91,18 @@ pub unsafe extern "C" fn wz_capi_c_snapshot_set_source(
 pub unsafe extern "C" fn wz_capi_c_snapshot_poll(session: *const z_loaned_session_t) -> ZResult {
     guarded(|| {
         // SAFETY: the caller's contract.
-        let Some(state) = (unsafe { session_state(session) }) else {
-            return unsafe { not_a_registry(session) };
+        let Some(handle) = (unsafe { session_handle(session) }) else {
+            return Z_ENULL;
         };
-        ZResult::from(snapshot::poll(|| Some(state.shared.message_reading())))
+        // What the receive paths of the faces have counted: the registry's faces, or the faces a
+        // node holds and the ones that have gone, of which the router's tables keep a ledger.
+        ZResult::from(snapshot::poll(|| {
+            Some(match handle {
+                SessionHandle::Registry(state) => state.shared.message_reading(),
+                #[cfg(feature = "router-node")]
+                SessionHandle::Node(node) => node.forwarder().messages_view().reading(),
+            })
+        }))
     })
 }
 

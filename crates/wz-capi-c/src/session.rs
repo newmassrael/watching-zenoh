@@ -202,11 +202,10 @@ pub(crate) unsafe fn session_handle<'a>(
 /// As [`session_handle`].
 ///
 /// Compiled where an operation written over the registry is: the modules that call it carry these
-/// gates (`group`, `snapshot`, `zenoh_ext` in `lib.rs`), and a build with none of them (the fuzz
+/// gates (`group`, `zenoh_ext` in `lib.rs`), and a build with none of them (the fuzz
 /// targets' `e2e-sender` alone) has no caller.
 #[cfg(any(
     all(feature = "group", not(feature = "zenoh-c-no-unstable-api")),
-    feature = "resource-snapshot",
     all(
         feature = "query",
         feature = "queryable",

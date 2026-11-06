@@ -81,17 +81,12 @@ use wz_capi_c::querier::{
 use wz_capi_c::query::{
     z_closure_query, z_declare_queryable, z_query_reply, z_undeclare_queryable,
 };
-// The tests that read what a node does not carry: the resource snapshot, and the provider of a
-// session opened with shared memory off.
+// The test that reads what a node does not carry: the provider of a session opened with shared
+// memory off.
 #[cfg(all(
     feature = "router-node",
-    any(
-        feature = "resource-snapshot",
-        all(
-            feature = "zenoh-c-shared-memory",
-            not(feature = "zenoh-c-no-unstable-api")
-        )
-    )
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
 ))]
 use wz_capi_c::result::Z_EUNAVAILABLE;
 use wz_capi_c::result::{Z_EINVAL, Z_ENETWORK, Z_OK};
@@ -344,6 +339,61 @@ fn a_gateway_south_of_subregions_is_refused_and_the_preset_is_not() {
     unsafe { close_session(session) };
 }
 
+/// The resource snapshot of a node counts the messages its faces received: the node a peer dials
+/// reads the handshake of that peer, as the registry's session does.
+///
+/// The only test of this executable that polls, because the sampler is the process's: the first
+/// poll takes a snapshot and a second one finds none due until the period has passed.
+#[cfg(all(feature = "router-node", feature = "resource-snapshot"))]
+#[test]
+fn a_node_counts_the_messages_its_faces_received_for_a_snapshot() {
+    use wz_capi_c::snapshot::{
+        wz_capi_c_snapshot_poll, wz_capi_c_snapshot_read, wz_capi_c_snapshot_size,
+    };
+    use wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS;
+    use wz_session_core::resource_snapshot::Snapshot;
+
+    let port = free_port();
+    let mut node_entries = stated("router", Some(port), None);
+    node_entries.push((
+        "gateway",
+        r#"{ south: [ { filters: [ { modes: ["peer"] } ] } ] }"#.to_owned(),
+    ));
+    // SAFETY: fresh configs and sessions, each loaned for one call and closed at the end.
+    unsafe {
+        let (rc, node) = open_with(&node_entries);
+        assert_eq!(
+            rc, Z_OK,
+            "a router that partitions its south opens as a node"
+        );
+        // The dialler's open returns once the node has answered its handshake, which the node's
+        // face counted when it received it.
+        let (rc, dialler) = open_with(&stated("peer", None, Some(port)));
+        assert_eq!(rc, Z_OK, "a peer dials the node");
+
+        assert_eq!(
+            wz_capi_c_snapshot_poll(z_session_loan(&node)),
+            1,
+            "the first poll of a node takes a snapshot"
+        );
+        let mut bytes = vec![0u8; wz_capi_c_snapshot_size()];
+        let mut length = 0usize;
+        assert_eq!(
+            wz_capi_c_snapshot_read(bytes.as_mut_ptr(), bytes.len(), &mut length),
+            Z_OK
+        );
+        let snapshot = Snapshot::<SNAPSHOT_HISTOGRAM_BUCKETS>::from_bytes(&bytes[..length])
+            .expect("the record decodes");
+        assert!(
+            snapshot.messages >= 2,
+            "the node's face received the dialler's handshake and the snapshot counted it: \
+             {snapshot:?}"
+        );
+        close_session(dialler);
+        close_session(node);
+    }
+}
+
 /// A build with `router-node` opens a config that keeps its south apart as the node that places a
 /// remote by it, and the handle of that session is answered where the node carries the operation
 /// (the id, the closing) and by `Z_EUNAVAILABLE` where it does not yet: a `z_put` through it is
@@ -372,14 +422,6 @@ fn a_gateway_south_of_subregions_opens_a_node_that_carries_little_yet() {
                 "the node has its own id ({mode})"
             );
             assert!(!z_session_is_closed(z_session_loan(&session)));
-            // The resource snapshot counts the messages a session received, which a node does not
-            // count, so it answers that it is unavailable and not a snapshot of nothing.
-            #[cfg(feature = "resource-snapshot")]
-            assert_eq!(
-                wz_capi_c::snapshot::wz_capi_c_snapshot_poll(z_session_loan(&session)),
-                Z_EUNAVAILABLE,
-                "a node does not count messages for a snapshot ({mode})"
-            );
             assert_eq!(
                 z_close(z_session_loan_mut(&mut session), std::ptr::null_mut()),
                 Z_OK

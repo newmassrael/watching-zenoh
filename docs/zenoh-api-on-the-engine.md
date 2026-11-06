@@ -1130,9 +1130,10 @@ Each lands whole with its surface lines, tests and faults in one round.
       its undeclaration has none to retract), then what the faces of the node say: the peers
       and routers it is linked to, its transports and links, and the listeners that hear of
       one coming and going, read off the node's own face table through the one `FaceSource`
-      the registry shares (`SessionHandle::face_source`), then what is left (the resource
-      snapshot, which counts the messages a session received and a node does not count, so
-      it answers unavailable and not a snapshot of nothing), and a group is carried: the
+      the registry shares (`SessionHandle::face_source`), then the resource snapshot (the
+      messages the node's faces received, read through `RouterMessagesView`, which sums the
+      faces that are up with the ledger of the ones that have gone, as the registry's own
+      count does), and a group is carried: the
       membership rules the runtime's group runs (the keys, the ids refused, the table of leases
       and what an event does to it) are `wz_session_core::group_view`'s and shared by both hosts,
       and a node joins ONE copy of the group over its engine (`NodeGroup`, where the registry
