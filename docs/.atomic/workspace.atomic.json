@@ -314112,6 +314112,52 @@
         "The next hosted run reads: the demo lanes on 900 s (whether 626 s was the slow case), C1bz of every crate, the analyzer-crate job which read 1781 s of 1800 s and 1806 s in the run before (its C1bz alone 1380 s: split it or move its budget if it reads past the alarm again), C1cs on the budgets of round 4349 (the hosted reading at d6428b was 5,965,281 and 11,053,165, 3,219 and 2,035 under them) and on the snapshot change of round 4350, and the cross-impl lanes whose netns re-runs the name fix of c73b871e37 now lets run."
       ]
     },
+    "Round 4352": {
+      "decision_summary": "A build now states what it is from the configuration it was built with: wz_config.py prints its conformance statement (ISO/IEC 9646-7 sense) as JSON, listing every capability of the ABI with whether the build has it, every limit and policy with its value, and a digest of those values alone, by the three routes that already give a build's cargo arguments (presets, an upstream original, a pico header). Decision C15 of docs/build-configuration.md.",
+      "changes_bullets": [
+        "scripts/lib/wz_config.py: new modes --resolve-conformance-statement ABI PRESET..., --original-conformance-statement ORIGINAL and --conformance-statement pico [--engine coop] CONFIG; conformance_statement, statement_digest, resolved_statement and pico_header_statement build the JSON (format wz-conformance-statement, version 1).",
+        "A capability is supported when the build's final feature list has it, so the cooperative engine's statement drops what selects the tokio engine (multicast-transport) and differs in digest from the tokio build of the same header.",
+        "The digest is SHA-256 over the canonical JSON of format, ABI, catalogue version and each support and value; derived_from (file names only) and the catalogue defaults are beside it and outside it, so two routes to one build share a digest.",
+        "pico_limit_values reads the value of every declared limit from a pico header; pico_value_env now derives its WZ_LIMIT lines from it, output unchanged. A Kconfig .config given to the pico-header mode is refused and pointed at the presets route.",
+        "docs/build-configuration.md: decision C15 and step 15 (a done; b the same digest built into each image and readable through the C ABI; c the zenoh-c drop-in's statement from zenoh_configure.h)."
+      ],
+      "verification_bullets": [
+        "wz_config.py --selftest: 254/254 with kconfiglib (WZ_KCONFIG_REQUIRE=1), 235/235 without; 12 new arms (every capability of the ABI listed in order, off ones included; every limit and policy; the cooperative build states what it has; digest independent of derived_from and of the defaults; one limit, policy or capability changes the digest; header numbers, switches and upstream policies; .config refused; preset value and features agree with --resolve-features; each original states every policy at upstream's).",
+        "wz_config.py --check: rc 0 (no generated file moved).",
+        "--original-conformance-statement zenoh-pico: 22 capabilities (9 supported), 52 limits all at default, 14 policies all upstream's.",
+        "--conformance-statement pico on a test header: supported set and off-default limit equal what --features pico and --env pico print for the same header; --engine coop drops multicast-transport and gives another digest; a .config input exits 1 with the refusal."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention/2-2-presets",
+        "watching-zenoh/build-and-verify"
+      ],
+      "carry_forward_bullets": [
+        "Step 15b: build the statement's digest into each image and expose it through the C ABI so a tester can check that the running build is the stated one.",
+        "Step 15c: the zenoh-c drop-in's statement from an installed zenoh_configure.h (the --drop-in-features c route)."
+      ],
+      "publishable_decision_summary": "A build now states what it is from the configuration it was built with: wz_config.py prints its conformance statement (ISO/IEC 9646-7 sense) as JSON, listing every capability of the ABI with whether the build has it, every limit and policy with its value, and a digest of those values alone, by the three routes that already give a build's cargo arguments (presets, an upstream original, a pico header). Decision C15 of docs/build-configuration.md.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_config.py: new modes --resolve-conformance-statement ABI PRESET..., --original-conformance-statement ORIGINAL and --conformance-statement pico [--engine coop] CONFIG; conformance_statement, statement_digest, resolved_statement and pico_header_statement build the JSON (format wz-conformance-statement, version 1).",
+        "A capability is supported when the build's final feature list has it, so the cooperative engine's statement drops what selects the tokio engine (multicast-transport) and differs in digest from the tokio build of the same header.",
+        "The digest is SHA-256 over the canonical JSON of format, ABI, catalogue version and each support and value; derived_from (file names only) and the catalogue defaults are beside it and outside it, so two routes to one build share a digest.",
+        "pico_limit_values reads the value of every declared limit from a pico header; pico_value_env now derives its WZ_LIMIT lines from it, output unchanged. A Kconfig .config given to the pico-header mode is refused and pointed at the presets route.",
+        "docs/build-configuration.md: decision C15 and step 15 (a done; b the same digest built into each image and readable through the C ABI; c the zenoh-c drop-in's statement from zenoh_configure.h)."
+      ],
+      "publishable_verification_bullets": [
+        "wz_config.py --selftest: 254/254 with kconfiglib (WZ_KCONFIG_REQUIRE=1), 235/235 without; 12 new arms (every capability of the ABI listed in order, off ones included; every limit and policy; the cooperative build states what it has; digest independent of derived_from and of the defaults; one limit, policy or capability changes the digest; header numbers, switches and upstream policies; .config refused; preset value and features agree with --resolve-features; each original states every policy at upstream's).",
+        "wz_config.py --check: rc 0 (no generated file moved).",
+        "--original-conformance-statement zenoh-pico: 22 capabilities (9 supported), 52 limits all at default, 14 policies all upstream's.",
+        "--conformance-statement pico on a test header: supported set and off-default limit equal what --features pico and --env pico print for the same header; --engine coop drops multicast-transport and gives another digest; a .config input exits 1 with the refusal."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention/2-2-presets",
+        "watching-zenoh/build-and-verify"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 15b: build the statement's digest into each image and expose it through the C ABI so a tester can check that the running build is the stated one.",
+        "Step 15c: the zenoh-c drop-in's statement from an installed zenoh_configure.h (the --drop-in-features c route)."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
