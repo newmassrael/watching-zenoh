@@ -313408,6 +313408,34 @@
         "Next: the sustained run of 2,000 queries; coalescing, the other half of framing (several messages in one read, with a barrier that shows every held request arrived without a timer); a fresh 20-run volume job on a build host for HW.36 to HW.42 (the last passed 20 of 20 for HW.36 to HW.40), the kit run, and a board table row for the stream steps after an evidence round. HW.42's refusal bound of two seconds rests on one measurement on QEMU (six closes inside half a second, the reap at three seconds); the kit's lwIP may drop a connection it cannot take instead of closing it, and then the step reads fewer closes and says so. The capacity of two is the queue and the accepts and is held to the source; that the node holds exactly two is shown by one run, not derived from the code path."
       ]
     },
+    "Round 4331": {
+      "decision_summary": "The files of a crate that read or set a registry the process owns were kept out of the pico and capi merge by a list a person made with grep, which does not hold for the next crate or the next file. The merge tool now detects them: a call into the wz_ext clock, event log, supervisor, sampler or snapshot doors of the C ABI library, or a file that states it needs a process of its own, stays an executable of its own, with the reason printed. The detection selects exactly the seven files that had been kept by hand, and no other file of the two C ABI crates.",
+      "changes_bullets": [
+        "merge_tests gains PROCESS_REGISTRY and PROCESS_OWN, two branches of classify placed before the environment rule, selftest cases for a call into a registry, a file that states it needs its own process, and prose that only names the family, and two bullets of its documentation. No test file or manifest moved."
+      ],
+      "verification_bullets": [
+        "The selftest of merge_tests passes with the new cases. The rule was checked against the tree by listing the files of the two C ABI crates that name those doors: seven, the ones kept by hand. Nothing else was run: the change is to a tool that no gate calls."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The detection is textual: a registry reached through an API outside the wz_ext families, or a global of another library, is not seen, so a merge still needs the whole crate run once and its tests read for shared state. The seventeen wz-runtime-tokio files the platform legs name stay executables of their own: their measured size is about 0.25 GB for a feature set against a 22 GB peak, and merging them needs the platform matrix, its workflow and the hosted legs changed together, which cannot be checked from here."
+      ],
+      "publishable_decision_summary": "The files of a crate that read or set a registry the process owns were kept out of the pico and capi merge by a list a person made with grep, which does not hold for the next crate or the next file. The merge tool now detects them: a call into the wz_ext clock, event log, supervisor, sampler or snapshot doors of the C ABI library, or a file that states it needs a process of its own, stays an executable of its own, with the reason printed. The detection selects exactly the seven files that had been kept by hand, and no other file of the two C ABI crates.",
+      "publishable_changes_bullets": [
+        "merge_tests gains PROCESS_REGISTRY and PROCESS_OWN, two branches of classify placed before the environment rule, selftest cases for a call into a registry, a file that states it needs its own process, and prose that only names the family, and two bullets of its documentation. No test file or manifest moved."
+      ],
+      "publishable_verification_bullets": [
+        "The selftest of merge_tests passes with the new cases. The rule was checked against the tree by listing the files of the two C ABI crates that name those doors: seven, the ones kept by hand. Nothing else was run: the change is to a tool that no gate calls."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The detection is textual: a registry reached through an API outside the wz_ext families, or a global of another library, is not seen, so a merge still needs the whole crate run once and its tests read for shared state. The seventeen wz-runtime-tokio files the platform legs name stay executables of their own: their measured size is about 0.25 GB for a feature set against a 22 GB peak, and merging them needs the platform matrix, its workflow and the hosted legs changed together, which cannot be checked from here."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
