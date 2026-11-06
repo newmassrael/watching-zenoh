@@ -51,7 +51,7 @@
  * (wz-integration-tests/tests/layer3_serial_framing.rs). wz's encode_frame
  * / decode_frame (wz-session-core::serial_link, R311ns-nt) mirror these; the
  * test compares the wz codec against the REAL pico C functions rather than
- * the hand-derived vectors of wz-codecs/tests/serial_framing.rs. These are
+ * the hand-derived vectors of wz-codecs/tests/it/files/serial_framing.rs. These are
  * platform-independent codec/util functions with NO Z_FEATURE_LINK_SERIAL
  * guard (protocol/codec/serial.c + utils/encoding.c + utils/checksum.c are
  * GLOB_RECURSE-compiled into libzenohpico.a), so the symbols exist even

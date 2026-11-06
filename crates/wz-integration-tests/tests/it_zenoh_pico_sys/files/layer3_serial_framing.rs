@@ -12,7 +12,7 @@
 //! `_z_serial_msg_deserialize` / `_z_cobs_encode` / `_z_cobs_decode` /
 //! `_z_crc32`, via `zenoh_pico_sys` FFI) and BYTE-COMPARES.
 //!
-//! ## Why this exists alongside `wz-codecs/tests/serial_framing.rs`
+//! ## Why this exists alongside `wz-codecs/tests/it/files/serial_framing.rs`
 //!
 //! R311ns already pins the wz serial codec against HAND-DERIVED vectors
 //! (my transcription of pico's algorithm). Those vectors are a SECONDARY

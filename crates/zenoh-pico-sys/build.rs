@@ -204,7 +204,7 @@ fn main() {
         // The wz serial wire format (encode_frame / decode_frame, R311ns-nt)
         // mirrors these; layer3_serial_framing.rs byte-compares the wz codec
         // against the REAL pico C functions (vs the hand-derived vectors in
-        // wz-codecs/tests/serial_framing.rs). serial.c / encoding.c /
+        // wz-codecs/tests/it/files/serial_framing.rs). serial.c / encoding.c /
         // checksum.c carry no Z_FEATURE_LINK_SERIAL guard, so the symbols are
         // in libzenohpico.a even though pico's serial LINK backend is MCU-only.
         .allowlist_function("_z_serial_msg_serialize")
