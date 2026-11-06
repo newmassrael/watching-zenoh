@@ -8,8 +8,9 @@
 //! by trying every face's every interest, so each declaration cost as many tries as faces were up
 //! (`docs/router-table-snapshots.md`, sections 6.3 and 7). This index answers it from a trie of
 //! keyexpr chunks, the structure upstream's resource tree and its `KeTree`s are
-//! (`zenoh-keyexpr/src/keyexpr_tree/mod.rs`): a key is the path of its chunks from the root, and a
-//! query walks only the branches its own chunks can meet.
+//! (`commons/zenoh-keyexpr/src/keyexpr_tree/mod.rs` @ `Key Expression Trees (KeTrees)`): a key is
+//! the path of its chunks from the root, and a query walks only the branches its own chunks can
+//! meet.
 //!
 //! The index is the FILTER half of filter and refine (the shape spatial indexes take, Orenstein
 //! 1986; Guttman 1984): [`KeyexprIndex::intersecting`] yields every member whose keyexpr can
