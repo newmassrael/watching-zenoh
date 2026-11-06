@@ -77,6 +77,37 @@ What is not carried, and why:
     they change the machine, which a unit may not. Those are the image's
     (stage 2) or a machine's declaration in `bx.toml`.
 
+## What a unit asks of a machine
+
+What a lane fails without, and a unit cannot make for itself, is declared on
+the unit's plan line, and bx gives the unit only to a machine that has all of
+it (bx's per-unit requirements, installed 2026-11-07). A unit no machine
+satisfies is reported with what each machine lacks, never run where it would
+fail for want of it. A requirement is something the LANE fails without, not
+something its hosted job happens to install: each is read from where the tree
+states the lane's dependence on it.
+
+  * An arming in the lane's function (`WZ_*_REQUIRE=1 cargo ...`): the oracles
+    `armed_oracle_census.py` declares for that flag, a program as `needs` and
+    a file or Python module as the Debian package that provides it
+    (`packages`).
+  * `capabilities: ["userns-net-raw"]`: a lane whose function wraps a witness
+    in `scripts/lib/netns-sandbox.sh`, the user and network namespace with
+    CAP_NET_RAW over it that a lane falls back to where there is no sudo. A
+    hosted runner has sudo; a build machine has the sandbox or nothing.
+  * `needs` from `JOB_ARMED_COMMANDS`: a program a lane fails without because
+    its hosted job arms it (a `WZ_*_REQUIRE` in the job's env, or a lane that
+    has no skip), which the runner image or an apt step of that job provides.
+    No tree file states those per lane, so they are written here, each with
+    the lane's own failure sentence.
+
+The packages a job's apt steps install are NOT read as requirements. Measured
+2026-11-07: read that way, 177 of 180 units asked for packages, and every
+machine the fleet answered with lacked `liblz4-dev` and `libsnappy-dev`, which
+would have placed 114 lanes nowhere. Those same lanes had passed on those
+machines. A job installs for all of its lanes, and for speed; a lane's verdict
+depends on less.
+
 Until 2026-11-06 a unit ran `env WZ_DECLINED_EXPECT= bash scripts/run-ci.sh
 --layer <id>` and nothing else: it got neither the oracles the hosted job
 provisions nor the env that arms a leg. A full run of the set placed lanes on
@@ -105,6 +136,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import armed_oracle_census as census
+
 RUNCI = Path("scripts/run-ci.sh")
 CI_YML = Path(".github/workflows/ci.yml")
 
@@ -114,6 +147,21 @@ PREP = re.compile(r"^bash (scripts/(?:build|install|provision)-[\w.-]+\.sh)((?: 
 
 # A lane line of a hosted step, the only form `ci.yml` writes.
 LANE = re.compile(r"^bash scripts/run-ci\.sh --layer ([A-Za-z0-9]+)$")
+
+# The namespace sandbox a lane wraps a witness in when the machine gives it no sudo, and the
+# closest name bx has for what it needs. `userns-net-raw` is tested by bx as CAP_NET_RAW alone in
+# an unprivileged user and network namespace; the sandbox also adds CAP_NET_ADMIN and
+# CAP_SYS_ADMIN there and builds a veth pair (`netns_sandbox_exec`). A host that passes the name
+# and fails the rest takes the unit and the lane reports the broken sandbox as its failure. A
+# capability tested as the sandbox is used was put to the fleet's owner on 2026-11-07.
+SANDBOX = "scripts/lib/netns-sandbox.sh"
+SANDBOX_CAPABILITY = "userns-net-raw"
+
+# Programs a lane fails without because its HOSTED JOB arms it, so no arming in run-ci.sh says so
+# and the census cannot (see the docstring). Each entry quotes the lane's failure sentence.
+#   U:    "gh is not on PATH, so the releases API cannot be read" (Layer U has no skip).
+#   C1cc: "valgrind is absent ... WZ_C1CC_REQUIRE is set, so this is a failure" (the job's env).
+JOB_ARMED_COMMANDS: dict[str, list[str]] = {"U": ["gh"], "C1cc": ["valgrind"]}
 
 # The workflow keys that tune the hosted runner's cargo and not a lane (see the docstring).
 BUILD_TUNING_PREFIX = "CARGO_"
@@ -140,6 +188,40 @@ def lanes(text: str) -> list[str]:
     if twice:
         raise ValueError(f"lane id(s) registered twice: {', '.join(twice)}")
     return ids
+
+
+def lane_bodies(text: str) -> dict[str, str]:
+    """Each lane's function, the one the dispatch table names, from its `name() {` line to the
+    first `}` in column 0. A lane whose function is not found has an empty body."""
+    out: dict[str, str] = {}
+    for m in DISPATCH.finditer(text):
+        body = re.search(rf"^{re.escape(m.group(2))}\(\) \{{\n(.*?)^\}}", text, re.M | re.S)
+        out[m.group(1)] = body.group(1) if body else ""
+    return out
+
+
+@dataclass
+class Asks:
+    """What one unit asks of a machine (the docstring's three sources)."""
+
+    needs: list[str] = field(default_factory=list)
+    packages: list[str] = field(default_factory=list)
+    capabilities: list[str] = field(default_factory=list)
+
+
+def lane_asks(text: str, commands: dict[str, list[str]]) -> dict[str, Asks]:
+    """What each lane asks of a machine, read from its function and the census."""
+    out: dict[str, Asks] = {}
+    for lane, body in lane_bodies(text).items():
+        needs = set(commands.get(lane, []))
+        packages: set[str] = set()
+        for flag in census.armings(body):
+            progs, pkgs = census.requirements(flag)
+            needs.update(progs)
+            packages.update(pkgs)
+        caps = [SANDBOX_CAPABILITY] if SANDBOX in body else []
+        out[lane] = Asks(sorted(needs), sorted(packages), caps)
+    return out
 
 
 @dataclass
@@ -208,17 +290,29 @@ def read_workflow() -> dict:
     return yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
 
 
-def unit(lane: str) -> dict:
-    return {
+def unit(lane: str, asks: Asks) -> dict:
+    """One plan line. A requirement field is written only when it names something: bx reads
+    an absent field as nothing asked."""
+    u: dict = {
         "name": lane,
         "argv": ["python3", "scripts/lib/runci_plan.py", "--layer", lane],
         "exclusive": [EXCLUSIVE],
     }
+    for key in ("needs", "packages", "capabilities"):
+        if getattr(asks, key):
+            u[key] = list(getattr(asks, key))
+    return u
 
 
-def plan(text: str, only: list[str] | None, hosted: dict[str, Hosted]) -> list[dict]:
+def plan(
+    text: str,
+    only: list[str] | None,
+    hosted: dict[str, Hosted],
+    commands: dict[str, list[str]] = JOB_ARMED_COMMANDS,
+) -> list[dict]:
     """The units. Raises on a lane the workflow does not run: its unit would have nothing to
-    say how the hosted job runs it (`unwired_lane_lint.py` holds the same set)."""
+    say how the hosted job runs it (`unwired_lane_lint.py` holds the same set). Raises too on
+    a `commands` entry for a lane the table no longer has, which would ask nothing of anyone."""
     ids = lanes(text)
     if only is not None:
         unknown = [o for o in only if o not in ids]
@@ -228,7 +322,11 @@ def plan(text: str, only: list[str] | None, hosted: dict[str, Hosted]) -> list[d
     unwired = [i for i in ids if i not in hosted]
     if unwired:
         raise ValueError(f"lane(s) no step of {CI_YML} runs: {', '.join(unwired)}")
-    return [unit(i) for i in ids]
+    stale = sorted(set(commands) - set(lanes(text)))
+    if stale:
+        raise ValueError(f"JOB_ARMED_COMMANDS names lane(s) the table no longer has: {', '.join(stale)}")
+    asks = lane_asks(text, commands)
+    return [unit(i, asks[i]) for i in ids]
 
 
 def run_lane(lane: str, hosted: dict[str, Hosted]) -> int:
@@ -251,6 +349,8 @@ def run_lane(lane: str, hosted: dict[str, Hosted]) -> int:
 
 def selftest() -> int:
     table = (
+        "layer_a_x() {\n    WZ_PROTOC_REQUIRE=1 cargo test -p x\n}\n"
+        "layer_c1_y() {\n    runner=(bash \"$PWD/scripts/lib/netns-sandbox.sh\")\n}\n"
         "run_layer A layer_a_x || overall=1\n"
         "# run_layer Z layer_z_in_a_comment || overall=1\n"
         "    run_layer Y layer_y_indented || overall=1\n"
@@ -265,6 +365,7 @@ def selftest() -> int:
                     {"run": "bash scripts/build-zenohd.sh", "env": {"ZENOHD_ALLOW_CLONE": "1"},
                      "if": "steps.c.outputs.cache-hit != 'true'"},
                     {"run": "# bash scripts/build-in-a-comment.sh\nbash scripts/run-ci.sh --layer A"},
+                    {"run": "bash scripts/lib/apt-install.sh libsnappy-dev \\\n    valgrind"},
                     {"run": "bash scripts/install-zenoh-c-arm.sh unstable\nsudo apt-get install -y x"},
                     {"run": "bash scripts/run-ci.sh --layer C1", "env": {"WZ_C1_REQUIRE": True}},
                 ],
@@ -277,14 +378,34 @@ def selftest() -> int:
         },
     }
     hosted = hosted_runs(workflow)
+    commands = {"A": ["gh"]}
     cases = 0
-    got = [u["name"] for u in plan(table, None, hosted)]
+    got = [u["name"] for u in plan(table, None, hosted, commands)]
     assert got == ["A", "C1"], f"the table reads {got}, want ['A', 'C1'] (comment and indented lines are not lanes)"
     cases += 1
-    u = plan(table, ["C1"], hosted)[0]
+    u = plan(table, ["C1"], hosted, commands)[0]
     assert u["argv"] == ["python3", "scripts/lib/runci_plan.py", "--layer", "C1"], u
     assert u["exclusive"] == [EXCLUSIVE], u
     cases += 1
+    a_unit, c1_unit = plan(table, None, hosted, commands)
+    assert a_unit == {"name": "A", "argv": ["python3", "scripts/lib/runci_plan.py", "--layer", "A"],
+                      "exclusive": [EXCLUSIVE], "needs": ["gh", "protoc"],
+                      "packages": ["libprotobuf-dev"]}, (
+        f"unit A is {a_unit}: its job-armed command, and its arming's oracles from the census "
+        f"(a program by name, a file by its package)"
+    )
+    assert c1_unit == {"name": "C1", "argv": ["python3", "scripts/lib/runci_plan.py", "--layer", "C1"],
+                       "exclusive": [EXCLUSIVE], "capabilities": [SANDBOX_CAPABILITY]}, (
+        f"unit C1 is {c1_unit}: its function wraps a witness in the sandbox, and the apt step "
+        f"of its job asks nothing (a job installs for all its lanes)"
+    )
+    cases += 1
+    try:
+        plan(table, None, hosted, {"Gone": ["gh"]})
+    except ValueError:
+        cases += 1
+    else:
+        raise AssertionError("a runner-image command for a lane the table lacks was planned instead of refused")
     a = hosted["A"]
     assert a.env == {"WZ_DECLINED_EXPECT": "", "RUST_BACKTRACE": "1", "WZ_PICO_REQUIRE": "1"}, (
         f"lane A carries {a.env}: the workflow's and the job's env, no CARGO_ key"

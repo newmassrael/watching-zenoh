@@ -14519,18 +14519,32 @@ layer_c1bs_live_capture() {
         return 1
     fi
 
-    local runner=()
+    # Three ways to hold CAP_NET_RAW, tried in this order: the process already
+    # has it, non-interactive sudo (a hosted runner), or the namespace sandbox of
+    # `netns-topology.sh`. The sandbox is a user and network namespace of its
+    # own with CAP_NET_RAW over it, which is what a build machine with neither
+    # gives (bx names that facility `userns-net-raw`). Its `lo` is its own and
+    # bwrap brings it up, so every read below, the tests' probe packets and the
+    # live arm's feeder, has to run inside the same wrapper.
+    local runner=() sandbox_rc=0
     if ./crates/"$bin" --list >/dev/null 2>&1 && _c1bs_has_net_raw; then
         runner=()
     elif sudo -n true 2>/dev/null; then
         runner=(sudo -n)
     else
-        if [[ "${WZ_LIVECAP_REQUIRE:-0}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
-            echo "  C1bs FAIL: CAP_NET_RAW is absent and no passwordless sudo, and WZ_LIVECAP_REQUIRE/GITHUB_ACTIONS is set" >&2
+        (source scripts/lib/netns-topology.sh && netns_sandbox_probe) || sandbox_rc=$?
+        if (( sandbox_rc == 0 )); then
+            runner=(bash "$PWD/scripts/lib/netns-sandbox.sh")
+        elif (( sandbox_rc != 2 )); then
+            echo "  C1bs FAIL: the namespace sandbox broke (rc=$sandbox_rc), so the socket half could not run" >&2
             return 1
+        elif [[ "${WZ_LIVECAP_REQUIRE:-0}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+            echo "  C1bs FAIL: CAP_NET_RAW is absent, with no passwordless sudo and no bwrap sandbox, and WZ_LIVECAP_REQUIRE/GITHUB_ACTIONS is set" >&2
+            return 1
+        else
+            echo "  C1bs SKIP (the socket half needs CAP_NET_RAW, sudo or a bwrap sandbox; set WZ_LIVECAP_REQUIRE=1 to make it a FAIL)"
+            return 0
         fi
-        echo "  C1bs SKIP (the socket half needs CAP_NET_RAW; set WZ_LIVECAP_REQUIRE=1 to make it a FAIL)"
-        return 0
     fi
 
     # BOTH ignored tests: the real socket read AND the flood measurement. The
@@ -14556,17 +14570,10 @@ layer_c1bs_live_capture() {
     # interface exits non-zero for the honest reason (an incomplete capture), so
     # a status check would pass on a tap that read nothing at all.
     (cd crates && cargo build -p wz-analyze --quiet) || return 1
-    local feeder live
-    (
-        sleep 0.4
-        for _ in $(seq 1 200); do
-            printf '\x14' >/dev/udp/127.0.0.1/7447 2>/dev/null || true
-        done
-    ) &
-    feeder=$!
-    live="$("${runner[@]}" ./crates/target/debug/wz-analyze \
-        --interface lo --for 2 2>&1)"
-    wait "$feeder" 2>/dev/null || true
+    # The feeder and the tap run under ONE runner: in the sandbox, a feeder left
+    # outside would write to the host's `lo`, which the tap does not see.
+    local live
+    live="$("${runner[@]}" bash -c "$(declare -f _c1bs_live_read); _c1bs_live_read" 2>&1)"
     grep -qE 'live tap on lo: read [1-9][0-9]* packet\(s\) in .*stopped by --for' <<<"$live" || {
         echo "  C1bs FAIL: the live command line read nothing, or stopped for a"
         echo "             reason it did not name"; echo "$live"; return 1; }
@@ -14583,6 +14590,25 @@ layer_c1bs_live_capture() {
     # exactly the way its own comment warns about.
     grep -oE 'live tap: .*' <<<"$out" || true
     return 0
+}
+
+# The live arm of C1bs: a feeder writes zenoh-shaped datagrams to 127.0.0.1:7447
+# while `wz-analyze` taps `lo` for two seconds. Defined as a function so the lane
+# hands its body to whichever runner holds CAP_NET_RAW (`declare -f`), and the
+# two halves always share one network namespace. The tap's status is not this
+# function's verdict: a quiet read exits non-zero for the honest reason, and the
+# lane judges what it decoded.
+_c1bs_live_read() {
+    local feeder
+    (
+        sleep 0.4
+        for _ in $(seq 1 200); do
+            printf '\x14' >/dev/udp/127.0.0.1/7447 2>/dev/null || true
+        done
+    ) &
+    feeder=$!
+    ./crates/target/debug/wz-analyze --interface lo --for 2
+    wait "$feeder" 2>/dev/null || true
 }
 
 # CAP_NET_RAW in the process's own effective set, read from /proc rather than

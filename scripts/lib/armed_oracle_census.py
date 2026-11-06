@@ -165,6 +165,28 @@ ROWS: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
 
 KINDS = ("file", "program", "python-module")
 
+#: The Debian package that provides each `file` and `python-module` oracle, so a machine can be
+#: ASKED for it by package: `runci_plan.py` puts these on a unit's plan line and bx gives the unit
+#: only to a machine whose dpkg lists them. A `program` oracle is asked for by its name on PATH
+#: and needs no entry. `--check` refuses a `file` or `python-module` oracle with no provider here
+#: (a lane could then be placed on a machine that lacks it) and a provider no row's oracle names.
+PROVIDED_BY: dict[tuple[str, str], str] = {
+    ("file", "/usr/include/pcap/dlt.h"): "libpcap-dev",
+    ("file", "/etc/protocols"): "netbase",
+    ("file", "/usr/include/google/protobuf/descriptor.proto"): "libprotobuf-dev",
+    ("python-module", "yaml"): "python3-yaml",
+    ("python-module", "ensurepip"): "python3-venv",
+}
+
+
+def requirements(flag: str) -> tuple[list[str], list[str]]:
+    """What a machine is asked for so a lane arming `flag` can run there: the commands its
+    `program` oracles name, and the packages that provide its `file` and `python-module` ones."""
+    _test, oracles = ROWS[flag]
+    commands = [name for kind, name in oracles if kind == "program"]
+    packages = [PROVIDED_BY[(kind, name)] for kind, name in oracles if kind != "program"]
+    return commands, packages
+
 
 def test_path(test: str) -> pathlib.Path:
     """A row's test file: a bare name is in `wz-integration-tests/tests`."""
@@ -277,6 +299,19 @@ def check() -> int:
                     f"test actually reaches for, which is the direction that "
                     f"sends somebody to provision the wrong thing."
                 )
+            if kind != "program" and (kind, name) not in PROVIDED_BY:
+                findings.append(
+                    f"`{flag}` declares the {kind} `{name}` and PROVIDED_BY names no Debian "
+                    f"package for it, so a fleet unit arming the flag cannot ask a machine "
+                    f"for it and may be placed where it is absent."
+                )
+
+    named = {(kind, name) for _t, oracles in ROWS.values() for kind, name in oracles}
+    for kind, name in sorted(set(PROVIDED_BY) - named):
+        findings.append(
+            f"PROVIDED_BY names a package for the {kind} `{name}` and no row's oracle is "
+            f"that {kind}. Delete the entry: it asks every machine for a package nothing needs."
+        )
 
     if findings:
         print(f"armed-oracle: FAIL -- {len(findings)} finding(s)")
@@ -346,7 +381,7 @@ def probe(host: str | None) -> int:
 
 def selftest() -> int:
     """Drive each refusal, past controls that must NOT be refused."""
-    global ROWS
+    global ROWS, PROVIDED_BY
     real_rows = dict(ROWS)
     cases: list[tuple[str, str, dict, str]] = [
         (
@@ -384,7 +419,23 @@ def selftest() -> int:
             {"WZ_TCPDUMP_REQUIRE": ("bsd_af_tcpdump_adjudicator.rs", ())},
             "names no oracle",
         ),
+        (
+            "a file oracle with no package",
+            "WZ_TCPDUMP_REQUIRE=1 cargo test\n",
+            {
+                "WZ_TCPDUMP_REQUIRE": (
+                    "bsd_af_tcpdump_adjudicator.rs",
+                    (("program", "tcpdump"), ("file", "/nonexistent/armed-oracle/x.h")),
+                )
+            },
+            "names no Debian package",
+        ),
     ]
+    real_provided = dict(PROVIDED_BY)
+
+    def providers_for(rows: dict) -> dict[tuple[str, str], str]:
+        named = {(k, n) for _t, oracles in rows.values() for k, n in oracles}
+        return {key: pkg for key, pkg in real_provided.items() if key in named}
     # Two shapes of prose in one control -- a comment line and an `echo` -- so
     # a gate that started refusing either would be caught here rather than by
     # somebody reading a lane log.
@@ -399,21 +450,39 @@ def selftest() -> int:
     failures: list[str] = []
     for label, script, rows, needle in cases:
         ROWS = rows
+        PROVIDED_BY = providers_for(rows)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = _check_text(script)
         if rc == 0 or needle not in buf.getvalue():
             failures.append(f"{label}: rc={rc}, output did not carry {needle!r}")
+    # A package entry for an oracle no row names, against the one-row table.
+    ROWS = {"WZ_TCPDUMP_REQUIRE": real_rows["WZ_TCPDUMP_REQUIRE"]}
+    PROVIDED_BY = {("file", "/usr/include/pcap/dlt.h"): "libpcap-dev"}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = _check_text("WZ_TCPDUMP_REQUIRE=1 cargo test\n")
+    if rc == 0 or "no row's oracle is" not in buf.getvalue():
+        failures.append(f"a package for an oracle no row names: rc={rc}, not refused for that reason")
     # THE CONTROLS. Without them every refusal above is satisfied by a gate
     # that refuses everything, which is the shape this workspace keeps paying
     # for.
     ROWS = {"WZ_TCPDUMP_REQUIRE": real_rows["WZ_TCPDUMP_REQUIRE"]}
+    PROVIDED_BY = providers_for(ROWS)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = _check_text(control)
     if rc != 0:
         failures.append(f"the clean control was refused: {buf.getvalue()}")
     ROWS = real_rows
+    PROVIDED_BY = real_provided
+    # What a lane arming a flag asks of a machine: a program by name, a file by its package.
+    commands, packages = requirements("WZ_PROTOC_REQUIRE")
+    if commands != ["protoc"] or packages != ["libprotobuf-dev"]:
+        failures.append(
+            f"WZ_PROTOC_REQUIRE asks commands {commands} and packages {packages}; "
+            f"want ['protoc'] and ['libprotobuf-dev']"
+        )
 
     # THE PRESENCE TEST ITSELF, driven both ways. `--probe` is the mode that
     # answers "can this machine run the armed lanes", and a presence test that
@@ -453,7 +522,8 @@ def selftest() -> int:
         f"  armed-oracle selftest OK -- {len(cases)} damage probe(s) refused "
         f"for their own stated reason (an arming with no row, a row nothing "
         f"arms, an assignment in neither shape, an oracle the test does not "
-        f"name, a row naming none); a clean script carrying an arming AND both "
+        f"name, a row naming none, a file oracle with no package) and a package "
+        f"for an oracle no row names is refused; a clean script carrying an arming AND both "
         f"shapes of prose about it passes; the presence test tells a present "
         f"file, program and python module from an absent one in all six "
         f"directions; and an "

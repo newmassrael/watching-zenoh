@@ -82,9 +82,12 @@ Each stage is its own round and lands on its own.
      without the provisioning lines its hosted job runs first. A unit is now
      `runci_plan.py --layer <id>`, which runs those lines and the lane under
      the job's env; the six pass.
-   - Left: U (`gh`), C1bs (CAP_NET_RAW) and C1cc (valgrind) need what a
-     machine has, and wait for bx's per-unit requirements (`needs`,
-     `capabilities`, `packages` on a plan line).
+   - Each unit now states what the lane fails without (`needs`, `packages`,
+     `capabilities`, read from the armed-oracle census and the lane's use of
+     the namespace sandbox), and bx places it only where that is present.
+     C1bn and C1bs (the latter through the sandbox) pass there.
+   - Left, all fleet provisioning: U needs `gh` and a token in the run
+     account, and C1cc needs valgrind beyond the one machine that has it.
 4. **Judged before landing.** `scripts/land.sh` already holds the clone's push
    lock, so it is already a serial integrator for this machine. It runs
    `bx --checks ci` on the rebased candidate and pushes only a pass, which is
