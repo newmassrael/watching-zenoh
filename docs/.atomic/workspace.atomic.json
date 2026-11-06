@@ -313864,6 +313864,48 @@
         "The other reds of run 42121505586 are covered: the C1bf list and the private doc link by d41e5a31b0, the C1cs budgets by 7f907e51ef, the census names by 47f58984a0, the exact test names by 214e9bb867 and the filters after the double dash by ac99457a4c. The next hosted run reads whether they hold."
       ]
     },
+    "Round 4345": {
+      "decision_summary": "Rounds 4338 to 4344 repaid most reds of the test merge by naming a leg's test in full under exact matching, the form a shared prefix variable carries. Two things that form does not reach stayed red or open. A test that starts its own legs as children inside a network namespace names them from Rust, not from the shell, and it still used the bare name, which matches nothing in a merged executable; the child ran no test and the witness failed. The name is now built from the function and its module path, so a moved file keeps it and a renamed test does not build. And nothing refused the shape that caused those reds in the first place, a filter beside the merged array that is not exact and whole; the count-guard lint now does.",
+      "changes_bullets": [
+        "wz-integration-tests: a libtest_name macro spells the name libtest knows a test of the calling file by, from the function and its module path; the namespace runner takes those names, and Layer Z's zscout witness, Layer C1cc's zenoh-c scouting witness and the two self-probes that spelled the rule by hand use it.",
+        "count_guard_lint.py refuses a test filter written beside the merged test array unless it is exact and carries the prefix of its file, with a selftest of three wrong forms and the two right ones; run-ci.sh as it stands has none.",
+        "reduced_docs_ledger.txt: the link.rs row the admin split left (the link it records is no longer written) is dropped; two comments of the census table name the test files the merge moved."
+      ],
+      "verification_bullets": [
+        "The fleet ran the lanes this round touches: C0, C1bf, C1bz, C1bzr, C1bm, C1cf, C1cn, C1bp, C1cc, E5, E7b, E7b2, E9, E12, E14 and E16 pass; C1cc exited 1 on a build machine short of memory and passed on another.",
+        "The lanes that need an oracle declined on the build machine that has none, so they ran again on a machine with zenohd, the pico CLIs and both zenoh-c arms provisioned and skipping refused: C1cc, C1cd, C1ce, E8t, E10, E11, E13 and E15 pass, and Layer Z passes all 114 of its guarded legs with the zscout witness running its two tests. On the tree as landed Layer Z ran again on a second machine: the 105 legs it reached pass, and it stopped because the unixpipe zenohd its last 9 legs read was not provisioned there; those legs do not run the changed names, and the first run passed them on the same test sources.",
+        "The count-guard lint (it finds no filter beside the merged array in run-ci.sh, and its selftest refuses the three wrong forms), the guarded count lattice, the lane reach, feature membership and census arm reach lints, the selftests of the retarget and merge tools, the reason pin and citation gates and the prose feature check pass; clippy of wz-integration-tests with all targets and warnings denied passes, and cargo fmt is clean."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "A Layer Z run on a build machine stopped at its 92nd leg when cargo could not execute the build script of zenoh-pico-sys it had just linked (text file busy); every leg before it passed. Each Z leg rebuilds that crate's build script, which is what gives the race a window; why it is dirty again on every leg, and whether the linker the build machines use returns before its output is closed, are not yet read.",
+        "The fleet's oracle lanes (C1cd, C1ce, E8t, E10, E11, E13, E15, Z) ran nothing on a build machine with no oracle store, and four of them reported a pass for it; the fleet plan does not yet provision the oracles a lane needs.",
+        "Layer Z run alone in a fresh checkout fails at its fifth leg, because the leg reads a wz-ap-demo binary that only the E lanes before it in the hosted job build; the lane does not build what it reads.",
+        "The rest of the hosted run the earlier rounds answered is held by another session: Layer Q's frt chain, C1bnl's shared-memory provider, Z8 regions and the macOS leg."
+      ],
+      "publishable_decision_summary": "Rounds 4338 to 4344 repaid most reds of the test merge by naming a leg's test in full under exact matching, the form a shared prefix variable carries. Two things that form does not reach stayed red or open. A test that starts its own legs as children inside a network namespace names them from Rust, not from the shell, and it still used the bare name, which matches nothing in a merged executable; the child ran no test and the witness failed. The name is now built from the function and its module path, so a moved file keeps it and a renamed test does not build. And nothing refused the shape that caused those reds in the first place, a filter beside the merged array that is not exact and whole; the count-guard lint now does.",
+      "publishable_changes_bullets": [
+        "wz-integration-tests: a libtest_name macro spells the name libtest knows a test of the calling file by, from the function and its module path; the namespace runner takes those names, and Layer Z's zscout witness, Layer C1cc's zenoh-c scouting witness and the two self-probes that spelled the rule by hand use it.",
+        "count_guard_lint.py refuses a test filter written beside the merged test array unless it is exact and carries the prefix of its file, with a selftest of three wrong forms and the two right ones; run-ci.sh as it stands has none.",
+        "reduced_docs_ledger.txt: the link.rs row the admin split left (the link it records is no longer written) is dropped; two comments of the census table name the test files the merge moved."
+      ],
+      "publishable_verification_bullets": [
+        "The fleet ran the lanes this round touches: C0, C1bf, C1bz, C1bzr, C1bm, C1cf, C1cn, C1bp, C1cc, E5, E7b, E7b2, E9, E12, E14 and E16 pass; C1cc exited 1 on a build machine short of memory and passed on another.",
+        "The lanes that need an oracle declined on the build machine that has none, so they ran again on a machine with zenohd, the pico CLIs and both zenoh-c arms provisioned and skipping refused: C1cc, C1cd, C1ce, E8t, E10, E11, E13 and E15 pass, and Layer Z passes all 114 of its guarded legs with the zscout witness running its two tests. On the tree as landed Layer Z ran again on a second machine: the 105 legs it reached pass, and it stopped because the unixpipe zenohd its last 9 legs read was not provisioned there; those legs do not run the changed names, and the first run passed them on the same test sources.",
+        "The count-guard lint (it finds no filter beside the merged array in run-ci.sh, and its selftest refuses the three wrong forms), the guarded count lattice, the lane reach, feature membership and census arm reach lints, the selftests of the retarget and merge tools, the reason pin and citation gates and the prose feature check pass; clippy of wz-integration-tests with all targets and warnings denied passes, and cargo fmt is clean."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A Layer Z run on a build machine stopped at its 92nd leg when cargo could not execute the build script of zenoh-pico-sys it had just linked (text file busy); every leg before it passed. Each Z leg rebuilds that crate's build script, which is what gives the race a window; why it is dirty again on every leg, and whether the linker the build machines use returns before its output is closed, are not yet read.",
+        "The fleet's oracle lanes (C1cd, C1ce, E8t, E10, E11, E13, E15, Z) ran nothing on a build machine with no oracle store, and four of them reported a pass for it; the fleet plan does not yet provision the oracles a lane needs.",
+        "Layer Z run alone in a fresh checkout fails at its fifth leg, because the leg reads a wz-ap-demo binary that only the E lanes before it in the hosted job build; the lane does not build what it reads.",
+        "The rest of the hosted run the earlier rounds answered is held by another session: Layer Q's frt chain, C1bnl's shared-memory provider, Z8 regions and the macOS leg."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
