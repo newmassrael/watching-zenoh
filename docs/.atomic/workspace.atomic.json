@@ -316128,6 +316128,34 @@
         "The readers of zenoh_pico_include_dirs carry no freshness assertion (existed before this round)."
       ]
     },
+    "Round 4402": {
+      "decision_summary": "The gate headers the artifact-root round added cite the round that introduced them, and they cited R4400 because two other rounds landed while that round was being verified; it was filed as round 4401. gate_provenance_lint checks only the citation's shape, so the wrong number passed, and it sends a reader to an unrelated round. The headers now cite R4401. A descriptor cannot know its own number before it is filed, so a citation written beside one is a prediction; the residue is stated in carry rather than worked around here.",
+      "changes_bullets": [
+        "scripts/lib/artifact-root.sh, artifact_root.py, artifact_root_lint.py, read-only-tree.sh, armed_oracle_census.py (the nested-lane arming comment) and the artifact_root_lint.py entry of .githooks/pre-push cite R4401 instead of R4400."
+      ],
+      "verification_bullets": [
+        "gate_provenance_lint: every gate script declares what it answers for (0 findings). hook_gate_boundary_gate --check passes. The ledger entry for round 4401 is the artifact-root round (scripts/land.sh output: filing docs/rounds/pending/artifact-root.toml as ledger round 4401)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "A round citation written in a commit that travels with a round descriptor predicts the number file-round.sh will give it; when other rounds land first it is wrong and no gate resolves it against the ledger. Either the descriptor carries a token that file-round.sh substitutes, or gate_provenance_lint resolves a round citation against the store."
+      ],
+      "publishable_decision_summary": "The gate headers the artifact-root round added cite the round that introduced them, and they cited R4400 because two other rounds landed while that round was being verified; it was filed as round 4401. gate_provenance_lint checks only the citation's shape, so the wrong number passed, and it sends a reader to an unrelated round. The headers now cite R4401. A descriptor cannot know its own number before it is filed, so a citation written beside one is a prediction; the residue is stated in carry rather than worked around here.",
+      "publishable_changes_bullets": [
+        "scripts/lib/artifact-root.sh, artifact_root.py, artifact_root_lint.py, read-only-tree.sh, armed_oracle_census.py (the nested-lane arming comment) and the artifact_root_lint.py entry of .githooks/pre-push cite R4401 instead of R4400."
+      ],
+      "publishable_verification_bullets": [
+        "gate_provenance_lint: every gate script declares what it answers for (0 findings). hook_gate_boundary_gate --check passes. The ledger entry for round 4401 is the artifact-root round (scripts/land.sh output: filing docs/rounds/pending/artifact-root.toml as ledger round 4401)."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A round citation written in a commit that travels with a round descriptor predicts the number file-round.sh will give it; when other rounds land first it is wrong and no gate resolves it against the ledger. Either the descriptor carries a token that file-round.sh substitutes, or gate_provenance_lint resolves a round citation against the store."
+      ]
+    },
     "Round 45": {
       "decision_summary": "Layer 3 hello codec validated. parent.L gate + locator-array zero-boundary verified (L=0 no locators, L=1 with empty locator array writes VLE(0) trailing byte). 8 of 18 codecs now Layer 3 wire-validated. Non-empty locator construction deferred (requires _z_string_t + _z_str_intmap_t FFI plumbing).",
       "changes_bullets": [
