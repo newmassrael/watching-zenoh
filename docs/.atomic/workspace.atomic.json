@@ -315012,6 +315012,34 @@
         "Open: a hosted run of rounds 4369 and 4370, which were cancelled by the account's job limit; Layers C1g, C1m, C1n, the nondefault-tests gate and Layer C0 meet a `files::<file>::` filter for the first time there."
       ]
     },
+    "Round 4376": {
+      "decision_summary": "The router node counts the messages its faces received for the resource snapshot (round 4350), and the router keeps a ledger of the faces that are gone so that a count does not fall when a face does; no witness at the C door read that ledger, so a node that dropped a gone face's count would have passed every test. The snapshot test of the node now closes the dialler after its first reading and takes three more snapshots, a period and 100 ms apart, and holds each reading no lower than the one before. It is the same test, not a second one, because the sampler is the process's: only one test of the merged executable may poll. The test cannot see the face go: the node's handle answers the peers enumeration as a registry's only, so the door that would say it is not the node's; the close is long dealt with by the first snapshot a period later, and the test states that premise instead of hiding it. Not done: a control that fails when the ledger is removed, which needs the ledger's removal as a build, and the other carries of the node's C door.",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/it/files/session_roles.rs: a_node_counts_the_messages_its_faces_received_for_a_snapshot reads its snapshot through a closure, closes the dialler, and takes three further snapshots a period apart, each held no lower than the last."
+      ],
+      "verification_bullets": [
+        "On pc3, session_roles of wz-capi-c with router-node and resource-snapshot: 17 passed, the extended test among them, 18.8 s. Not run: a control that fails when the ledger is gone, so the test is shown to pass on the tree as it is and not shown to fail on a node that loses a gone face's count; the claim it carries is the narrower one that no reading falls over a period after the close."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Carries of the node's C door that remain: group and advanced below zenohd as a router node with three or more members, and the zenoh-ext group interop; the engine port's methods of the node that no test takes (queryable, token, matching, face watch, shm publish, its own liveliness subscription); a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node; a control that fails when the router's ledger of gone faces is removed. The scratch worktree and branch size-measure may be removed with bx-wt."
+      ],
+      "publishable_decision_summary": "The router node counts the messages its faces received for the resource snapshot (round 4350), and the router keeps a ledger of the faces that are gone so that a count does not fall when a face does; no witness at the C door read that ledger, so a node that dropped a gone face's count would have passed every test. The snapshot test of the node now closes the dialler after its first reading and takes three more snapshots, a period and 100 ms apart, and holds each reading no lower than the one before. It is the same test, not a second one, because the sampler is the process's: only one test of the merged executable may poll. The test cannot see the face go: the node's handle answers the peers enumeration as a registry's only, so the door that would say it is not the node's; the close is long dealt with by the first snapshot a period later, and the test states that premise instead of hiding it. Not done: a control that fails when the ledger is removed, which needs the ledger's removal as a build, and the other carries of the node's C door.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/tests/it/files/session_roles.rs: a_node_counts_the_messages_its_faces_received_for_a_snapshot reads its snapshot through a closure, closes the dialler, and takes three further snapshots a period apart, each held no lower than the last."
+      ],
+      "publishable_verification_bullets": [
+        "On pc3, session_roles of wz-capi-c with router-node and resource-snapshot: 17 passed, the extended test among them, 18.8 s. Not run: a control that fails when the ledger is gone, so the test is shown to pass on the tree as it is and not shown to fail on a node that loses a gone face's count; the claim it carries is the narrower one that no reading falls over a period after the close."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carries of the node's C door that remain: group and advanced below zenohd as a router node with three or more members, and the zenoh-ext group interop; the engine port's methods of the node that no test takes (queryable, token, matching, face watch, shm publish, its own liveliness subscription); a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node; a control that fails when the router's ledger of gone faces is removed. The scratch worktree and branch size-measure may be removed with bx-wt."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
