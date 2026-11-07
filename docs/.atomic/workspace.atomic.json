@@ -315426,6 +315426,52 @@
         "The statement cases build with the dev profile in their own target directory, so a cold C1cs run builds the wz-capi-c default tree once more there; the lane's time on hosted CI is to be read on its next run."
       ]
     },
+    "Round 4387": {
+      "decision_summary": "A client program asks a node's lifecycle verbs through two C doors, so no consumer spells the key grammar or parses an answer line. lifecycle_wire is the one source: VerbWords::write makes @/<of>/<whatami>/session/<verb>/[<gen>/|passive/]<about> from words and refuses with a closed KeyRefusal word set; Answer::read reads a reply or control-port line as a verdict, a whoami zid or an error word, and anything else as none. The control port now takes its error words and its zid line from lifecycle_wire. wz-capi-c ABI 10 adds wz_capi_c_lifecycle_key (refusal word, nothing written on refusal or a short buffer) and wz_capi_c_lifecycle_read (UNREADABLE for empty or non-answer bytes; reason strings byte-equal to RefusedReason words). One vectors file holds the key rule for Rust, the Python generator and the door; a C consumer in C1cc writes the struct layout out itself.",
+      "changes_bullets": [
+        "wz-session-core lifecycle_wire: ControlError, write_zid_json, Answer::read, VerbWords::write, KeyRefusal, VERB_KEY_MAX_BYTES (109)",
+        "wz-session-mcu control_port: Malformed is lifecycle_wire::ControlError; whoami writes through write_zid_json",
+        "wz-capi-c: src/lifecycle.rs, header section with WZ_CAPI_C_LIFECYCLE_KEY_MAX 110, ABI revision 10, wz-session-core as a dependency",
+        "scripts/lib/verb_key_vectors.txt read by lifecycle_wire, wz-capi-c and wz_node.py selftest; capi_c_abi_pin expects revision 10 and both symbols",
+        "run-ci.sh C1cc compiles and runs c_lifecycle_consumer.c; wz-fuzz Cargo.lock refreshed for the new edge"
+      ],
+      "verification_bullets": [
+        "lifecycle_wire 14 tests, control_port 8 tests, wz-capi-c lifecycle 4 tests pass; wz_node.py selftest OK",
+        "clippy -D warnings: wz-session-core, wz-session-mcu, wz-capi-c --all-targets rc=0; host-slot-node build rc=0",
+        "Layer C1ch pass on pc2 (ABI pin), Layer C1cc pass on pc2 (4113s, lifecycle consumer printed its verdict)",
+        "pre-push static bundle 137 gates 0 fails; citation anchor, doc revision consumer pin and guarded count gates rc=0"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "Next stage: a declaration word that selects the control port (stdin pipe) for host nodes, with the stdout contract of one answer line per command",
+        "Then an identity maker door without a session, then a witness test of a C client asking a declared node with a commander list",
+        "Values door carries: values memory absent from the memory document; no max_rows window"
+      ],
+      "publishable_decision_summary": "A client program asks a node's lifecycle verbs through two C doors, so no consumer spells the key grammar or parses an answer line. lifecycle_wire is the one source: VerbWords::write makes @/<of>/<whatami>/session/<verb>/[<gen>/|passive/]<about> from words and refuses with a closed KeyRefusal word set; Answer::read reads a reply or control-port line as a verdict, a whoami zid or an error word, and anything else as none. The control port now takes its error words and its zid line from lifecycle_wire. wz-capi-c ABI 10 adds wz_capi_c_lifecycle_key (refusal word, nothing written on refusal or a short buffer) and wz_capi_c_lifecycle_read (UNREADABLE for empty or non-answer bytes; reason strings byte-equal to RefusedReason words). One vectors file holds the key rule for Rust, the Python generator and the door; a C consumer in C1cc writes the struct layout out itself.",
+      "publishable_changes_bullets": [
+        "wz-session-core lifecycle_wire: ControlError, write_zid_json, Answer::read, VerbWords::write, KeyRefusal, VERB_KEY_MAX_BYTES (109)",
+        "wz-session-mcu control_port: Malformed is lifecycle_wire::ControlError; whoami writes through write_zid_json",
+        "wz-capi-c: src/lifecycle.rs, header section with WZ_CAPI_C_LIFECYCLE_KEY_MAX 110, ABI revision 10, wz-session-core as a dependency",
+        "scripts/lib/verb_key_vectors.txt read by lifecycle_wire, wz-capi-c and wz_node.py selftest; capi_c_abi_pin expects revision 10 and both symbols",
+        "run-ci.sh C1cc compiles and runs c_lifecycle_consumer.c; wz-fuzz Cargo.lock refreshed for the new edge"
+      ],
+      "publishable_verification_bullets": [
+        "lifecycle_wire 14 tests, control_port 8 tests, wz-capi-c lifecycle 4 tests pass; wz_node.py selftest OK",
+        "clippy -D warnings: wz-session-core, wz-session-mcu, wz-capi-c --all-targets rc=0; host-slot-node build rc=0",
+        "Layer C1ch pass on pc2 (ABI pin), Layer C1cc pass on pc2 (4113s, lifecycle consumer printed its verdict)",
+        "pre-push static bundle 137 gates 0 fails; citation anchor, doc revision consumer pin and guarded count gates rc=0"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next stage: a declaration word that selects the control port (stdin pipe) for host nodes, with the stdout contract of one answer line per command",
+        "Then an identity maker door without a session, then a witness test of a C client asking a declared node with a commander list",
+        "Values door carries: values memory absent from the memory document; no max_rows window"
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
