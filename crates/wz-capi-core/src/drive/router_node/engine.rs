@@ -466,6 +466,12 @@ impl SessionEngine for RouterState {
     }
 }
 
+// A client of the registry offers QoS in its handshake, and a node built without
+// `transport-qos` answers it with an unsupported capability and no link: a `wz-capi-core` test
+// build that leaves the feature out (the crate's default does) has no link to test over.
+#[cfg(all(test, feature = "transport-qos"))]
+mod port_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
