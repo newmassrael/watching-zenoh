@@ -12173,6 +12173,28 @@
         "mnemosyne: a sealed store's validate-workspace reads verification records as UNDECIDABLE (the committed main file is read as one blob, the segments are not spliced from git)",
         "core.hooksPath is absolute and points at the main checkout's working tree, so a worktree push can run a stale pre-push; the owner decides whether it becomes relative"
       ]
+    },
+    "Round 4406": {
+      "decision_summary": "The lifecycle doors of the C library become a capability that is off by default. Round 4387 added wz_capi_c_lifecycle_key and wz_capi_c_lifecycle_read ungated, so every C ABI build, client-small included, carried about 19 KB of code and two exports zenoh-c does not have (hosted C1cs, attributed by nm by the red-4386 session: capic-default exported 839 against a pin of 837). They are now lifecycle-doors, declared default off in deploy/wz-config.toml as identity-make and the observation plane are, and the lanes that grade them turn it on. About half of the cost was a run-time table: each word was copied into a CString in a OnceLock'd sorted map on first use. Each lifecycle word is now spelled once in lifecycle_wire as a C string literal, its text derived from it at compile time, so the doors hand out static strings and link no sorting or one-time initialisation code.",
+      "changes_bullets": [
+        "deploy/wz-config.toml capability lifecycle-doors (abis core and c, default off, upstream off); wz-capi-core carries the name; wz-capi-c gates pub mod lifecycle on it; regenerated Kconfig.capabilities and the conformance items",
+        "lifecycle_wire: RefusedReason, ControlError and KeyRefusal gain const c_words() as the one spelling, words() derived through a const to_str; VERDICT_C_WORDS spells the verdicts and VERDICT_WORDS is derived from it",
+        "wz-capi-c lifecycle: the OnceLock<BTreeMap<&str, CString>> is gone; reasons, errors and key refusals are handed out by c_words(), a verdict by its index in VERDICT_C_WORDS",
+        "run-ci plane lists (ABI pin, C1cc), the nondefault wz-capi-c row, the OFF_AXIS row and the archive-arm capability list add lifecycle-doors; the header, abi.rs and capi_c_abi_pin.py say the doors are off by default"
+      ],
+      "verification_bullets": [
+        "pc2: wz-session-core lifecycle_wire 14 and wz-session-mcu control_port 9 passed; the default wz-capi-c exports no wz_capi_c_lifecycle_ symbol (nm -D); with the plane features its lifecycle and identity tests 7 passed, the ABI pin is revision 11 with 101 doors over debug and release, and c_lifecycle_consumer and c_identity_consumer are ok; clippy all targets clean with and without the features and for wz-session-core; host-slot-node checks with tls,control",
+        "wz_config.py --check; feature census, gate diagnostic and archive-arm checks; static bundle 139 gates",
+        "the capic sizes and the export pin are re-measured by C1cs on the next hosted run"
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The za consumer builds its library with --features lifecycle-doors,identity-make",
+        "The keyexpr memo cost in capic (about 2 KB, c74d81592c) is not this round's",
+        "mnemosyne: a sealed store's validate-workspace reads verification records as UNDECIDABLE"
+      ]
     }
   },
   "inventory_entries": {
