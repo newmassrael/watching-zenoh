@@ -104,7 +104,8 @@ ARMING = re.compile(r"\b(WZ_[A-Z0-9_]*REQUIRE[A-Z0-9_]*)=1\s+cargo\b")
 ANY_ASSIGN = re.compile(r"\b(WZ_[A-Z0-9_]*REQUIRE[A-Z0-9_]*)=1\s+(\S+)")
 
 #: R4398 (no register item) -- a NESTED-LANE arming: the flag prefixed on a run of
-#: another layer of this script, `WZ_X_REQUIRE=1 bash scripts/run-ci.sh --layer L`.
+#: another layer of this script, as Layer Ero's
+#: `WZ_PICO_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire`.
 #: It states for one inner run what a hosted job's `env:` states for a whole job
 #: (Layer Ero runs Layer Ewire under WZ_PICO_REQUIRE in a read-only checkout), so it
 #: is held to that statement and not to a row: `check()` accepts it only when
