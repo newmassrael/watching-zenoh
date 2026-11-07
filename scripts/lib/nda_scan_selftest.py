@@ -68,6 +68,34 @@ def scan(terms: str | None, first: str, second: str,
         return run.returncode, run.stdout + run.stderr
 
 
+def scan_files(terms: str, first: dict[str, str], second: dict[str, str | None]) -> tuple[int, str]:
+    """`wz_nda_scan base..head` over two commits that write several files; a `None` body
+    removes the file."""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        for files, message in ((first, "base"), (second, "change")):
+            for rel, body in files.items():
+                path = repo / rel
+                if body is None:
+                    path.unlink()
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(body, encoding="utf-8")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-q", "-m", message)
+            if message == "base":
+                git(repo, "tag", "base")
+        listing = Path(tmp) / "terms.txt"
+        listing.write_text(terms, encoding="utf-8")
+        run = subprocess.run(
+            ["bash", "-c", 'source "$1" && wz_nda_scan base..HEAD', "_", str(SCAN)],
+            cwd=repo, env={"PATH": "/usr/bin:/bin", "HOME": tmp, "WZ_NDA_TERMS": str(listing)},
+            capture_output=True, text=True)
+        return run.returncode, run.stdout + run.stderr
+
+
 def message_scan(terms: str, message: str) -> tuple[int, str]:
     """Run `wz_nda_scan_message <file>` over one commit message."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -115,6 +143,22 @@ def main() -> int:
     expect("deleting an id passes", scan(shape, "a\nsee TKT-1234\n", "a\nsee the round\n"), 0)
     # A line that is UNCHANGED context is not an added line.
     expect("untouched id passes", scan(shape, "TKT-1234 stays\n", "TKT-1234 stays\nnew line\n"), 0)
+
+    # The sealed ledger (mnemosyne Round 1344): a line MOVED from the store's main file into
+    # a segment was published where it stood, so the move passes; a line the ledger did not
+    # hold before is added wherever it lands, and a move between two ordinary files is two
+    # files, not one record, so it is still an added line.
+    main = "docs/.atomic/workspace.atomic.json"
+    seg = "docs/.atomic/ledger/segment-0001.json"
+    old = "  \"decision\": \"see TKT-1234\",\n"
+    expect("ledger move passes",
+           scan_files(shape, {main: "{\n" + old + "}\n"}, {main: "{\n}\n", seg: "{\n" + old + "}\n"}), 0)
+    expect("a new line in a segment blocks",
+           scan_files(shape, {main: "{\n" + old + "}\n"},
+                      {main: "{\n}\n", seg: "{\n" + old + "  \"x\": \"TKT-9\",\n}\n"}), 1, "segment-0001.json")
+    expect("a move between ordinary files blocks",
+           scan_files(shape, {"a.txt": "keep\nsee TKT-1234\n", "b.txt": "other\n"},
+                      {"a.txt": "keep\n", "b.txt": "other\nsee TKT-1234\n"}), 1, "b.txt")
 
     # The commit messages of the range, where the known incident put it.
     expect("message id blocks", scan(shape, "a\n", "a\nb\n", second_msg="fix TKT-77 thing"), 1, "commit message")

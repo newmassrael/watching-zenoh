@@ -168,6 +168,37 @@ _wz_nda_matches() {
     } | sort -u
 }
 
+# _wz_nda_added_lines <range> — every line the range adds, as `<file><TAB><line>`.
+#
+# The ledger is ONE append-only record across the store's main file and the segments
+# its frozen entries are sealed into (mnemosyne Round 1344). A line the range removes
+# from one ledger file and adds to another MOVED: it was published where it stood, and
+# the move discloses nothing, so it is not an added line here. Exact lines, counted, so
+# a line added once more than it was removed is still added. Every other file is read
+# as before. One pass, because a sealing range is tens of megabytes of diff.
+_wz_nda_added_lines() {
+    git diff -U0 "$1" 2>/dev/null | awk '
+        function ledger(f) {
+            return f == "docs/.atomic/workspace.atomic.json" ||
+                   f ~ /^docs\/\.atomic\/ledger\/[^\/]*\.json$/
+        }
+        /^diff --git / { file = $0; sub(/^.* b\//, "", file); hunk = 0; next }
+        /^@@/ { hunk = 1; next }
+        !hunk { next }
+        /^-/ { if (ledger(file)) removed[substr($0, 2)]++; next }
+        /^\+/ {
+            if (ledger(file)) { n++; pfile[n] = file; pline[n] = substr($0, 2) }
+            else print file "\t" substr($0, 2)
+            next
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                if (removed[pline[i]] > 0) { removed[pline[i]]--; continue }
+                print pfile[i] "\t" pline[i]
+            }
+        }'
+}
+
 # wz_nda_scan <range>  e.g. wz_nda_scan "origin/main..HEAD"
 # 0 = clean, 1 = blocked.
 wz_nda_scan() {
@@ -188,22 +219,20 @@ wz_nda_scan() {
     esac
 
     # Added lines only: a diff that DELETES protected text is a scrub, and
-    # blocking it would block the fix. `git diff -U0` keeps the file/line
-    # context lines this walk attributes hits to.
-    while IFS= read -r line; do
-        case "$line" in
-            '+++ b/'*) file="${line#+++ b/}" ;;
-            '@@'*)     : ;;
-            '+'*)
-                found="$(_wz_nda_matches "$dir" <<<"${line:1}")"
-                if [[ -n "$found" ]]; then
-                    echo "nda-scan: BLOCKED — protected vocabulary in ${file:-<unknown>}" >&2
-                    _wz_nda_report_terms "$found"
-                    hits=1
-                fi
-                ;;
-        esac
-    done < <(git diff -U0 "$range" 2>/dev/null || true)
+    # blocking it would block the fix. The whole set is matched once; only when it
+    # holds a term is it walked line by line, to name the file each hit is in.
+    local added
+    added="$(_wz_nda_added_lines "$range")"
+    if [[ -n "$(cut -f2- <<<"$added" | _wz_nda_matches "$dir")" ]]; then
+        while IFS=$'\t' read -r file line; do
+            found="$(_wz_nda_matches "$dir" <<<"$line")"
+            if [[ -n "$found" ]]; then
+                echo "nda-scan: BLOCKED — protected vocabulary in ${file:-<unknown>}" >&2
+                _wz_nda_report_terms "$found"
+                hits=1
+            fi
+        done <<<"$added"
+    fi
 
     # The commit MESSAGES in the range, which is where the known incident put it.
     found="$(git log --format=%B "$range" 2>/dev/null | _wz_nda_matches "$dir" || true)"
