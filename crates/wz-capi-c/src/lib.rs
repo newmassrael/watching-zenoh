@@ -147,6 +147,12 @@ pub mod keyexpr;
 // wz-own door like `config_verdict`, so ungated for the same reason: upstream has no lifecycle
 // verbs to be a drop-in for.
 pub mod lifecycle;
+// The identity a client presents over TLS, made on the computer it runs on by the contract of a
+// declared node's `--make-identity`. A wz-own door, behind `identity-make` (the maker links a
+// certificate writer a TLS build given its identity does not need); unix only, which the module
+// states of itself, since the key is its owner's alone by its file mode.
+#[cfg(feature = "identity-make")]
+pub mod identity;
 // What one message may weigh, asked before it is sent. A wz-own door like
 // `config_verdict`, so ungated for the same reason: upstream reports no limit.
 pub mod limits;

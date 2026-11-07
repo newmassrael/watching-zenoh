@@ -20,7 +20,9 @@ it runs on, held to what the target profile can build.
                                         provisioned with that identity proves (`[identity]`); the
                                         files are made on the device by the node's executable,
                                         `--make-identity <certificate> <private_key>`, which prints
-                                        the certificate and never overwrites either file
+                                        the certificate and never overwrites either file; a client
+                                        makes its own the same way with the C library's
+                                        `wz_capi_c_identity_make`, which answers this zid
     wz_node.py --selftest
 
 A node is a declaration and not an argument vector. This module is the first half of turning one
@@ -372,6 +374,10 @@ CONTROL_PIPE = {
                "(decision D12); the commanders a declaration names grant the verbs asked in band only",
     "repeat": "a command is safe to send again: `open` is idempotent, a repeated `close` is "
               "`already_closed`, a repeated `reset` carries its generation",
+    "end": "the end of standard input (or none at all, `/dev/null`) closes the channel and nothing "
+           "else: the lines that came whole before it are answered, the node runs on with its "
+           "session and its verbs asked in band, reads no line again and writes nothing more on "
+           "standard output; it stops on a signal",
 }
 
 

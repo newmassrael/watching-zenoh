@@ -1188,7 +1188,10 @@ says, its `HOST-WZ-` lines, its certificate and its diagnostics, is on standard 
 reads its answers by reading standard output line by line. The authority of the channel is
 possession of the pipe: the commanders a declaration names grant only what is asked in band. A
 line is at most 128 bytes, its end not counted, and a longer one is answered once, as
-`line-too-long`. The vocabulary states the word, its lines, its bound, each stream and the error
+`line-too-long`. The end of standard input, or none at all (`/dev/null`), closes the channel and
+nothing else: the lines that came whole before it are answered, and the node runs on with its
+session and the verbs asked in band, reads no line again and writes nothing more on standard
+output, until a signal stops it. The vocabulary states the word, its lines, its bound, each stream and the error
 words (`control`), and a target builds the word only where its image has the feature. The node
 `slot-commander` has a pipe, and the witness drives it with every command the vocabulary states and
 with lines that are none, and reads one answer for each line and nothing else on standard output.

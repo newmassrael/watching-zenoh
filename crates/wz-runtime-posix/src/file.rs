@@ -12,6 +12,9 @@
 
 use core::ffi::CStr;
 
+// The sentences are the identity contract's, shared with the C library's identity door.
+use wz_session_core::identity_provision::file_words;
+
 /// Why a file was not read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileRefused {
@@ -31,11 +34,11 @@ impl FileRefused {
     /// The console line's reason.
     pub const fn reason(self) -> &'static str {
         match self {
-            Self::Open(_) => "it could not be opened",
-            Self::Status(_) => "its status could not be read",
-            Self::Read(_) => "it could not be read",
-            Self::TooLong => "it is longer than the buffer it is read into",
-            Self::Exposed(_) => "it is a secret the group or others may read (chmod 600 it)",
+            Self::Open(_) => file_words::NOT_OPENED,
+            Self::Status(_) => file_words::NO_STATUS,
+            Self::Read(_) => file_words::NOT_READ,
+            Self::TooLong => file_words::TOO_LONG,
+            Self::Exposed(_) => file_words::EXPOSED,
         }
     }
 }
@@ -57,10 +60,10 @@ impl CreateRefused {
     /// The console line's reason.
     pub const fn reason(self) -> &'static str {
         match self {
-            Self::Exists => "a file is there already, and is not overwritten",
-            Self::Open(_) => "it could not be made",
-            Self::Write(_) => "it could not be written",
-            Self::Sync(_) => "what was written could not be made durable",
+            Self::Exists => file_words::EXISTS,
+            Self::Open(_) => file_words::NOT_MADE,
+            Self::Write(_) => file_words::NOT_WRITTEN,
+            Self::Sync(_) => file_words::NOT_DURABLE,
         }
     }
 }

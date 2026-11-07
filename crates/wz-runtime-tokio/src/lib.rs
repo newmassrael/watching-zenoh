@@ -1880,6 +1880,14 @@ pub mod tls_pipeline;
 #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
 pub mod tls_config;
 
+// The identity a client presents over the TLS link, made on the computer it runs on by the rule a
+// declared node's `--make-identity` holds to, and the zid a peer computes for it
+// (`tls-identity-make`, the C library's identity door). Unix only, which the module states of
+// itself: the key is its owner's alone by its file mode, which is what the contract asks of a
+// secret.
+#[cfg(feature = "tls-identity-make")]
+pub mod tls_identity;
+
 // R311y578 (G10) — TLS / QUIC session-key export in the NSS key-log format,
 // the mechanism that lets wz WITNESS its own encrypted transport rather than
 // only assert that the handshake completed (the standing R311y534 debt).

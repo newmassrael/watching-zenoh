@@ -589,6 +589,10 @@ pub mod accept_state;
 /// [`accept_state`] is: the rule allocates nothing, the MCU profile shares it,
 /// and the `sha2` it hashes with is already a dependency of every build.
 pub mod credential_identity;
+/// The rule an identity's two files are provisioned by (make both, keep both, refuse half), and
+/// the words a maker refuses with: shared by a declared node's `--make-identity` and the C
+/// library's identity door. Ungated for the reason [`credential_identity`] is.
+pub mod identity_provision;
 
 /// Which of two links to one node a session keeps: the first up, and of two that went opposite
 /// ways the one the lower zid dialled, which both ends read alike (`docs/capi-pico-on-coop-engine.md`,

@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 10
+#define WZ_CAPI_C_ABI_REVISION 11
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -1108,10 +1108,54 @@ typedef struct wz_capi_c_lifecycle_read_t {
  * WZ_CAPI_C_LIFECYCLE_UNREADABLE, which is a reading and still Z_OK. Only the
  * node's own spelling is read: its members in the order the node writes them
  * (`verdict` first), with no white space, so the same members in another order
- * are UNREADABLE. Z_ENULL
- * for a NULL `out`, or a NULL `bytes` with a non-zero `len`. */
+ * are UNREADABLE. Z_ENULL for a NULL `out`, or a NULL `bytes` with a non-zero
+ * `len`. */
 z_result_t wz_capi_c_lifecycle_read(const uint8_t *bytes, size_t len,
                                     wz_capi_c_lifecycle_read_t *out);
+
+/* THE IDENTITY A CLIENT PRESENTS (revision 11): a P-256 key and a
+ * certificate self-signed over it, made on this computer by the contract of a
+ * declared node's `--make-identity`, and the zid the key names. A pure call
+ * over two paths: no session, no runtime. Call it once, before the first
+ * session over TLS:
+ *
+ *     wz_capi_c_identity_t id;
+ *     if (wz_capi_c_identity_make("me.crt", "me.key", &id) == Z_OK)
+ *         ... the config names me.crt and me.key as
+ *             transport/link/tls/connect_certificate and connect_private_key,
+ *             enable_mtls true, and `id` the zid id.zid
+ *
+ * Neither file there: both are made, the key first and readable by its owner
+ * alone (0600), each created exclusively, so nothing is ever replaced. Both
+ * there: nothing is made. Only one there: nothing is made, and the missing one
+ * is named. Either way the two files are then read back as the TLS link reads
+ * them, the key must be the certificate's own and its owner's alone, and the
+ * zid is the one a peer computes from the certificate. In builds with the
+ * `identity-make` feature (the default) on unix. */
+
+/* The bytes the zid's text takes: at most 32 hex digits and its NUL. */
+#define WZ_CAPI_C_IDENTITY_ZID_MAX 33
+
+/* An identity made or found, or why there is none. `made`: this call made both
+ * files. `zid`: lower-case hex as z_id_to_string prints it, NUL-terminated,
+ * empty on a refusal. On a refusal `file` is "the certificate", "the private
+ * key" or "the identity" and `reason` the contract's sentence, static strings
+ * this library owns; both NULL otherwise. */
+typedef struct wz_capi_c_identity_t {
+  bool made;
+  char zid[WZ_CAPI_C_IDENTITY_ZID_MAX];
+  const char *file;
+  const char *reason;
+} wz_capi_c_identity_t;
+
+/* Make the identity whose certificate is the file `certificate` and whose
+ * private key is the file `private_key`, both PEM, unless both are there, and
+ * write the zid into `out`, filled from scratch. Z_OK when the identity is
+ * there; Z_EIO when it is not, with `file` and `reason` (nothing is made then,
+ * and nothing that was there changes); Z_ENULL for a NULL argument. */
+z_result_t wz_capi_c_identity_make(const char *certificate,
+                                   const char *private_key,
+                                   wz_capi_c_identity_t *out);
 
 #ifdef __cplusplus
 }

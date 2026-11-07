@@ -274,6 +274,10 @@ CAPABILITY_FEATURES = frozenset({
     # which are off in a build made as the reference is. They add doors and no type, so none of
     # them moves an axis, and they are off in the default and in every arm.
     "clock-source", "event-ring", "supervision", "resource-snapshot",
+    # The identity a client presents over TLS, made on its computer (`wz_capi_c_identity_make`):
+    # a wz-own door and the struct it fills, which no zenoh-c type holds, so no footprint moves.
+    # On in the default, as `transport_tls` it extends is.
+    "identity-make",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"

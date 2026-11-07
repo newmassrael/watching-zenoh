@@ -22,6 +22,9 @@ use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::{PosixTcpDial, PosixTcpListener};
 use wz_runtime_posix::PosixClock;
 use wz_session_core::byte_cells::ByteSource;
+use wz_session_core::identity_provision::{
+    IdentityFile, Provision, HALF_AN_IDENTITY, KEY_NOT_MADE, NOT_ITS_KEY,
+};
 use wz_tls_mbedtls::channel::{
     make_identity_der, pem, Arena, Identity, IdentitySlot, PemLabel, MADE_CERT_DER_MAX,
     MADE_KEY_DER_MAX,
@@ -125,7 +128,7 @@ fn read_identity_files(
     let identity = match file::read_secret(key, &mut key_text) {
         Ok(key_pem) => IDENTITY
             .from_pem(chain_pem, key_pem)
-            .map_err(|_| "it is not the private key of the certificate, or either does not parse"),
+            .map_err(|_| NOT_ITS_KEY),
         Err(why) => Err(why.reason()),
     };
     // The key's text is the device's secret: it does not stay on the stack once the channel holds
@@ -149,7 +152,8 @@ fn read_identity_files(
 /// The key is made here, by the library the node presents it with, and never leaves the device:
 /// the lab that registers the node receives the certificate alone, from which it computes the zid
 /// (`wz_node.py --zid-of`) and writes it into the declarations of the nodes that grant or ask this
-/// one. So this
+/// one. So this, by the rule `wz_session_core::identity_provision` states for every maker (the C
+/// library's identity door is the other):
 ///
 /// - makes a P-256 key and a certificate self-signed over it ([`make_identity_der`]) when neither
 ///   file is there, and writes the key to `key`, readable by its owner alone (0600) from the moment
@@ -178,20 +182,20 @@ pub fn make_identity_files<const N: usize>(
         );
         return 2;
     }
-    match (file::exists(chain), file::exists(key)) {
-        (true, true) => {}
-        (false, false) => {
+    match Provision::of(file::exists(chain), file::exists(key)) {
+        Provision::Keep => {}
+        Provision::Make => {
             if let Err((file, why)) = write_made_identity(chain, key) {
                 say(file, why);
                 return 2;
             }
         }
-        (true, false) => {
-            say(key, HALF_AN_IDENTITY);
-            return 2;
-        }
-        (false, true) => {
-            say(chain, HALF_AN_IDENTITY);
+        Provision::Half { missing } => {
+            let path = match missing {
+                IdentityFile::Certificate => chain,
+                IdentityFile::PrivateKey => key,
+            };
+            say(path, HALF_AN_IDENTITY);
             return 2;
         }
     }
@@ -203,11 +207,6 @@ pub fn make_identity_files<const N: usize>(
         None => 2,
     }
 }
-
-/// Why `--make-identity` makes nothing when one of the two files is there and the other is not.
-const HALF_AN_IDENTITY: &str = "it is not there while the other file of the identity is: \
-                                nothing is made, so that a key is never paired with a certificate \
-                                that is not its own";
 
 /// The subject a made identity's certificate names. The certificate is only the container of the
 /// key (decision D9): the zid is the key's, and no peer reads the name.
@@ -224,7 +223,7 @@ fn write_made_identity(chain: &CStr, key: &CStr) -> Result<(), (&'static CStr, &
     let mut cert_pem = PemText::<CHAIN_PEM_BYTES>::new();
     let result = (|| {
         let (cert, secret) = make_identity_der(MADE_SUBJECT, &mut cert_der, &mut key_der)
-            .map_err(|_| (c"the identity", "the secure channel could not make a key"))?;
+            .map_err(|_| (c"the identity", KEY_NOT_MADE))?;
         pem(PemLabel::EcPrivateKey, secret, |line| key_pem.line(line));
         pem(PemLabel::Certificate, cert, |line| cert_pem.line(line));
         let (Some(key_text), Some(cert_text)) = (key_pem.text(), cert_pem.text()) else {

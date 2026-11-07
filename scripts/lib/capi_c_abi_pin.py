@@ -139,10 +139,13 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # in `wz_capi_c.h` can change on its own -- and still has to be a deliberate
 # edit here, because a revision that moves for a reason nobody wrote down is a
 # revision nobody can reason about.
-EXPECTED_REVISION = 10
+EXPECTED_REVISION = 11
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",
+    # Revision 11 — the identity a client presents over TLS, made on the computer it runs on
+    # (`identity-make`, in the default build).
+    "wz_capi_c_identity_make",
     # Revision 10 — a node's lifecycle verbs from a client: the key a verb is asked by and the
     # answer read back, in every build.
     "wz_capi_c_lifecycle_key",

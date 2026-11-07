@@ -12685,7 +12685,8 @@ layer_c1m_session_lwip() {
     # the channel read again after one, and the channel held to the conformance table of decision D7
     # on the cases a node with no room can show: 3 = what that command PRINTED. The node is built
     # for no peers by their zid, so a hold that succeeds over a secure channel is not run here.
-    _runci_guarded_test "C1m host node control channel" 4 \
+    # 4 -> 5: the end of standard input closes the channel and the node runs on.
+    _runci_guarded_test "C1m host node control channel" 5 \
         cargo test --locked --manifest-path ../deploy/host-slot-node/Cargo.toml \
         --features control --test control_channel --quiet || return 1
     # The group plane of the client node (`slot_group`, the slot profile with `group`): what a
@@ -24131,6 +24132,24 @@ layer_c1cc_api_compat_c() {
     grep -q '^c_lifecycle_consumer: ok$' <<<"$c_life_out" || {
         echo "  C1cc FAIL: the lifecycle C consumer printed no verdict"
         echo "$c_life_out"; return 1; }
+    # The identity a client presents, made from C the same way: the struct's layout, the key's
+    # mode as C reads it, made once and kept, and half an identity refused.
+    local c_id_bin c_id_out
+    c_id_bin="$(mktemp -d)/c_identity_consumer"
+    c_id_out="$("${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -I crates/wz-capi-c/include \
+        -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
+        crates/wz-capi-c/tests/c_identity_consumer.c \
+        -L crates/target/debug -lwz_capi_c -o "$c_id_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the identity C consumer did not compile or link"
+        echo "$c_id_out"; return 1; }
+    c_id_out="$(LD_LIBRARY_PATH=crates/target/debug "$c_id_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the identity C consumer failed"
+        echo "$c_id_out"; rm -rf "$(dirname "$c_id_bin")"; return 1; }
+    rm -rf "$(dirname "$c_id_bin")"
+    grep -q '^c_identity_consumer: ok$' <<<"$c_id_out" || {
+        echo "  C1cc FAIL: the identity C consumer printed no verdict"
+        echo "$c_id_out"; return 1; }
     # R2278 (open-debt item 612) — RE-DERIVE which build upstream publishes,
     # now that this lane has established an oracle is present. `--require`
     # rather than the bare form on purpose: past this point the checkout and

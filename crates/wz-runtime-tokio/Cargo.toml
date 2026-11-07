@@ -1002,6 +1002,13 @@ transport-link-serial = [
 # later frame, so it is a channel the session lifecycle verbs may be taken over
 # (decision D2 of docs/session-lifecycle-intent.md). The QUIC link says the same.
 transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:wz-tls-pem", "dep:webpki-roots", "dep:x509-parser", "wz-session-core/secure-channel"]
+# The identity a client presents over the TLS link, made on the computer it runs on and
+# never replaced (`tls_identity`, decision D9 of docs/session-lifecycle-intent.md): a
+# P-256 key and a certificate self-signed over it, by the rule a declared node's
+# `--make-identity` holds to (`wz_session_core::identity_provision`), read back with the
+# link's own loaders and answering the zid a peer computes for it. A feature of its own,
+# so a TLS build that is given its identity does not link the maker.
+tls-identity-make = ["transport-link-tls", "dep:rcgen", "dep:libc"]
 # R311y578 (G10) — TLS / QUIC session-key export in the NSS key-log format
 # (`crate::tls_keylog`). OFF by default and deliberately a compile-time gate
 # rather than a runtime one: exporting session keys makes the traffic readable
@@ -2038,7 +2045,9 @@ quinn-proto = { version = "0.11", default-features = false, optional = true }
 # once per process at run time because its clients trust any certificate.
 # Upstream generates it with the same crate, and it was already locked here as
 # a dev-dependency. `ring` only: the provider every other wz rustls config uses.
-rcgen = { version = "0.13", default-features = false, features = ["ring"], optional = true }
+# `pem` for `tls-identity-make`, which writes the identity it makes as the PEM files
+# a TLS config names (`tls_identity`); the `pem` crate it adds is already locked.
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"], optional = true }
 # R311ob — host WebSocket link backend, behind the optional `transport-link-ws`
 # feature. tokio-tungstenite is the async RFC6455 protocol layer: `client_async`
 # / `accept_async` run the HTTP-Upgrade handshake over a `TcpStream`, then the

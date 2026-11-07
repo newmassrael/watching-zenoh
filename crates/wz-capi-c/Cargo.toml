@@ -97,6 +97,7 @@ default = [
     "group",
     "gossip",
     "transport_tls",
+    "identity-make",
     "transport_quic",
     "transport_quic_datagram",
     "transport_ws",
@@ -169,6 +170,10 @@ router-node = ["peer", "multicast-transport", "query", "queryable", "liveliness"
 # it dials against the peer's certificate, as upstream does when `verify_name_on_connect` is
 # left unstated.
 transport_tls = ["wz-runtime-tokio/transport-link-tls", "wz-capi-core/transport_tls"]
+# `wz_capi_c_identity_make` (`src/identity.rs`): the identity a client presents over TLS, made on
+# the computer it runs on by the contract of a declared node's `--make-identity`, answering the
+# zid a node's commander list names. In the default build, as `transport_tls` is.
+identity-make = ["transport_tls", "wz-capi-core/identity-make"]
 # The `quic/` link, over the same certificate material as `tls/`.
 transport_quic = ["wz-runtime-tokio/transport-link-quic", "wz-capi-core/transport_quic"]
 # The `quic-datagram/` link, on the `quic/` link's connection.

@@ -78,6 +78,7 @@ default = [
     "transport_multilink",
     "auth_pubkey",
     "e2e-sender",
+    "identity-make",
     "transport_compression",
     "auth_usrpwd",
     "interceptors",
@@ -213,6 +214,9 @@ auth_pubkey = ["access-extauth-pubkey"]
 # and the frame writer they use are the zenoh-c ABI's own (`wz-capi-c/e2e-sender`), so this
 # feature only carries the capability's name, as the declaration requires of every capability.
 e2e-sender = []
+# The identity a client presents over TLS, made on the computer it runs on: the runtime's maker
+# (`wz_runtime_tokio::tls_identity`), behind the C ABI's door `wz_capi_c_identity_make`.
+identity-make = ["transport_tls", "wz-runtime-tokio/tls-identity-make"]
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

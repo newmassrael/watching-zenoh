@@ -25,7 +25,8 @@ const WAIT: Duration = Duration::from_secs(20);
 
 struct Agent {
     child: Child,
-    stdin: ChildStdin,
+    /// The node's standard input, until the agent ends it ([`Agent::end_input`]).
+    stdin: Option<ChildStdin>,
     answers: Receiver<String>,
     /// The zid the node said it has, in the spelling the READY line prints.
     zid: String,
@@ -68,16 +69,30 @@ impl Agent {
         });
         Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             answers,
             zid,
         }
     }
 
+    /// Write `bytes` to the node's standard input as they are.
+    fn write(&mut self, bytes: &[u8]) {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .expect("the agent has not ended the input");
+        stdin.write_all(bytes).expect("the channel is open");
+        stdin.flush().expect("flush");
+    }
+
+    /// End the node's standard input: the agent closes its end of the pipe.
+    fn end_input(&mut self) {
+        self.stdin = None;
+    }
+
     /// Send one line and take the one answer it gets.
     fn ask(&mut self, line: &str) -> String {
-        writeln!(self.stdin, "{line}").expect("the channel is open");
-        self.stdin.flush().expect("flush");
+        self.write(format!("{line}\n").as_bytes());
         self.answers
             .recv_timeout(WAIT)
             .unwrap_or_else(|_| panic!("no answer to {line:?}"))
@@ -203,4 +218,34 @@ fn a_line_that_is_no_command_is_answered_with_an_error_word_and_opens_nothing() 
 
     // The channel is still read after a bad line.
     assert_eq!(agent.ask("open abc"), refused(RefusedReason::NoRoom));
+}
+
+/// The end of standard input closes the channel and nothing else (the `end` of the vocabulary's
+/// `control` section): the lines that came whole are answered, a last line with no line feed is
+/// not, nothing more is written on standard output, and the node runs on.
+#[test]
+fn the_end_of_standard_input_closes_the_channel_and_the_node_runs_on() {
+    let mut agent = Agent::start();
+    let own = format!("{{\"zid\":\"{}\"}}", agent.zid);
+    agent.write(b"whoami\nstatus 1f");
+    agent.end_input();
+    assert_eq!(
+        agent.answers.recv_timeout(WAIT).as_deref(),
+        Ok(own.as_str()),
+        "a line that came whole before the end is answered"
+    );
+
+    // Long enough for many rounds of the node's loop to have read the end.
+    const AFTER: Duration = Duration::from_secs(2);
+    match agent.answers.recv_timeout(AFTER) {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("standard output ended: the node stopped at the end of its input")
+        }
+        Ok(line) => panic!("an answer after the end of the input: {line:?}"),
+    }
+    assert!(
+        agent.child.try_wait().expect("the node's state").is_none(),
+        "the node runs on after the end of its input"
+    );
 }

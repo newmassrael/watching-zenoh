@@ -220,8 +220,8 @@ pub unsafe extern "C" fn wz_capi_c_lifecycle_key(
 /// closed sets, a document cut short) is `WZ_CAPI_C_LIFECYCLE_UNREADABLE`; that is a reading and
 /// not an error, so the call still returns `Z_OK`. Only the node's own spelling is read
 /// (`lifecycle_wire::Answer::read`): its members in the order the node writes them, `verdict`
-/// first, with no white space, so the same members in another order are unreadable. `Z_ENULL` for a NULL `out`, or a NULL `bytes`
-/// with a non-zero `len`.
+/// first, with no white space, so the same members in another order are unreadable. `Z_ENULL`
+/// for a NULL `out`, or a NULL `bytes` with a non-zero `len`.
 ///
 /// # Safety
 /// `bytes` is readable for `len` bytes (or NULL with `len` 0), `out` writable.
