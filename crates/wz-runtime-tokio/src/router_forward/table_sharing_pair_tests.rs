@@ -233,6 +233,52 @@ fn routing_table_sharing_snapshot_refuses_a_grace_period_to_a_thread_that_holds_
     fwd.tables.synchronize();
 }
 
+/// Under `snapshot` a reader never frees a version, as read-copy-update's readers never reclaim
+/// (`docs/router-table-snapshots.md`, section 6.7): the version a publish replaces while a reader
+/// holds it stays among the retired ones after the reader lets it go, and a writer frees it, at
+/// the next publish or at a grace period. Turned red by a retired version held by a weak count,
+/// which the last reader to let it go freed on the thread that routes.
+#[test]
+fn routing_table_sharing_snapshot_frees_a_retired_version_on_the_writer_not_the_reader() {
+    let fwd = router_with_a_client(RoutingTableSharing::Snapshot);
+    assert_eq!(
+        fwd.tables.retired(),
+        (0, 0),
+        "nothing retired is kept unread"
+    );
+
+    let held = fwd.on_tables();
+    fwd.on_tables_mut().tables.north_is_client = true;
+    assert_eq!(
+        fwd.tables.retired(),
+        (1, 0),
+        "the version the reader holds is retired, and read"
+    );
+    drop(held);
+    assert_eq!(
+        fwd.tables.retired(),
+        (1, 1),
+        "the reader let the version go and did not free it"
+    );
+    fwd.on_tables_mut().tables.north_is_client = false;
+    assert_eq!(
+        fwd.tables.retired(),
+        (0, 0),
+        "the next publish freed it, and the version it replaced, which nobody read"
+    );
+
+    let held = fwd.on_tables();
+    fwd.on_tables_mut().tables.north_is_client = true;
+    drop(held);
+    assert_eq!(fwd.tables.retired(), (1, 1));
+    fwd.tables.synchronize();
+    assert_eq!(
+        fwd.tables.retired(),
+        (0, 0),
+        "a grace period frees what no reader holds"
+    );
+}
+
 /// Under `snapshot` a write that panics is not published: the version the readers load stays the
 /// last whole one. Turned red by a commit point that publishes while the thread unwinds.
 #[test]

@@ -200,8 +200,39 @@ fn routed_while(
     fwd: &Arc<RouterForwarder>,
     publishers: &[FaceId],
     subscribers: &[Arc<CountingLinkDriver>],
-    mut meanwhile: impl FnMut(),
+    meanwhile: impl FnMut(),
 ) -> f64 {
+    routed_and_spent_while(fwd, publishers, subscribers, meanwhile).puts_per_s
+}
+
+/// What a window of [`routed_and_spent_while`] measured.
+struct Routed {
+    /// The Puts routed a second.
+    puts_per_s: f64,
+    /// The time the publishers' threads ran on a core, over the Puts they routed: what a Put
+    /// cost the readers, whatever share of the host they were given. On a host other work also
+    /// runs on, the Puts a second move with that work and this does not.
+    cpu_ns_per_put: f64,
+}
+
+/// The time the calling thread has run on a core, in nanoseconds: the first field of its
+/// `schedstat` (`Documentation/scheduler/sched-stats.rst`).
+fn thread_cpu_ns() -> u64 {
+    let stat = std::fs::read_to_string("/proc/thread-self/schedstat")
+        .expect("the thread's schedstat (a Linux host)");
+    stat.split_whitespace()
+        .next()
+        .and_then(|ns| ns.parse().ok())
+        .expect("schedstat starts with the time run in nanoseconds")
+}
+
+/// [`routed_while`], with the time the publishers' threads ran on a core.
+fn routed_and_spent_while(
+    fwd: &Arc<RouterForwarder>,
+    publishers: &[FaceId],
+    subscribers: &[Arc<CountingLinkDriver>],
+    mut meanwhile: impl FnMut(),
+) -> Routed {
     for sink in subscribers {
         sink.reset();
     }
@@ -211,16 +242,26 @@ fn routed_while(
     let mut threads = Vec::new();
     for &id in publishers {
         let (fwd, routing, done) = (Arc::clone(fwd), Arc::clone(&routing), done.clone());
-        threads.push(std::thread::spawn(move || {
-            let mut sent = 0usize;
-            while routing.load(Ordering::Acquire) {
-                let put = wz_session_core::push_build::build_push_literal("demo/data", b"x")
-                    .expect("build push");
-                bring(&fwd, id, NetworkMessage::Push(Box::new(put)));
-                sent += 1;
-            }
-            done.send(sent).expect("the test is waiting");
-        }));
+        // Named, so that a profile of the run can be read for the readers alone
+        // (`perf report --comm wz-publisher`).
+        let publisher = std::thread::Builder::new().name("wz-publisher".into());
+        threads.push(
+            publisher
+                .spawn(move || {
+                    let mut sent = 0usize;
+                    let ran_before = thread_cpu_ns();
+                    while routing.load(Ordering::Acquire) {
+                        let put =
+                            wz_session_core::push_build::build_push_literal("demo/data", b"x")
+                                .expect("build push");
+                        bring(&fwd, id, NetworkMessage::Push(Box::new(put)));
+                        sent += 1;
+                    }
+                    let ran = thread_cpu_ns() - ran_before;
+                    done.send((sent, ran)).expect("the test is waiting");
+                })
+                .expect("a publisher's thread starts"),
+        );
     }
     drop(done);
 
@@ -231,11 +272,13 @@ fn routed_while(
     routing.store(false, Ordering::Release);
     let window = began.elapsed();
 
-    let mut total = 0usize;
+    let (mut total, mut ran) = (0usize, 0u64);
     for _ in publishers {
-        total += finished
+        let (sent, spent) = finished
             .recv_timeout(Duration::from_secs(60))
             .expect("every publisher finishes: one that does not is waiting for the tables");
+        total += sent;
+        ran += spent;
     }
     for thread in threads {
         thread.join().expect("a publisher of the router finishes");
@@ -252,7 +295,10 @@ fn routed_while(
             "subscriber {s} was given every Put"
         );
     }
-    total as f64 / window.as_secs_f64()
+    Routed {
+        puts_per_s: total as f64 / window.as_secs_f64(),
+        cpu_ns_per_put: ran as f64 / total.max(1) as f64,
+    }
 }
 
 /// How many client faces the admission instrument brings up, as many as the starved router of
@@ -468,4 +514,136 @@ fn the_puts_routed_measured_against_the_faces_up() {
         "table-sharing: structure={structure} idle_faces=0 after_all_left publishers={PUBLISHERS} \
          fan_out={FAN_OUT} puts_routed_per_s={routed:.0}"
     );
+}
+
+/// What a writer's version costs the readers, apart from what its declaration does to the routes.
+///
+/// The phase 0 publishers and subscribers route Puts through windows of five kinds, in turn:
+///
+/// - `none`: no writer;
+/// - `declaring`: a writer that declares and undeclares subscriptions of keys nobody puts to, as
+///   in phase 0 but with no face coming up or going (a transition waits for a grace period);
+/// - `declaring_elsewhere`: the same writer declaring into a second router that nobody routes
+///   through, so that the readers share the host with the writer's work and not its tables;
+/// - `unchanged_paced`: a writer that publishes versions which change nothing, at the rate the
+///   declaring writer published in the window before, spinning between them so that it holds a
+///   core as the declaring writer does;
+/// - `unchanged`: the same writer without the pacing.
+///
+/// A version that changes nothing moves no input of a route, so what the readers lose under it is
+/// what loading, holding and letting go of versions costs them, with the writer's own thread on
+/// the host. What the declaring writer costs them beyond that, at the same rate of versions, is
+/// what its declarations do: the path copies the versions are made of, and the routes and the
+/// route caches they reach. The routes the readers computed in each window are counted beside it:
+/// keys nobody puts to retire no route the Puts are served from, so the count is expected to stay
+/// at zero, and a window where it does not measured something else.
+#[test]
+#[ignore = "a measurement of what a busy writer's versions cost the readers \
+            (docs/router-table-snapshots.md, section 6.7); run with --release --ignored \
+            --nocapture on a build host"]
+fn the_readers_under_a_busy_writer_measured_by_what_the_writes_change() {
+    let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+    let mut subscribers = Vec::new();
+    for s in 0..FAN_OUT {
+        let (actions, sink) = client(zid(0xC0 + s as u8));
+        fwd.register(FaceId(s), &actions);
+        bring(&fwd, FaceId(s), declare_sub("demo/data"));
+        subscribers.push(sink);
+    }
+    let mut publishers = Vec::new();
+    for p in 0..PUBLISHERS {
+        let id = FaceId(100 + p);
+        let (actions, _sink) = client(zid(0xA0 + p as u8));
+        fwd.register(id, &actions);
+        publishers.push(id);
+    }
+    let writer_face = FaceId(200);
+    let (writer_actions, _writer_sink) = client(zid(0xE0));
+    fwd.register(writer_face, &writer_actions);
+    let structure = fwd.table_sharing().id();
+    // A router nobody routes through, with the same writer face: the `declaring_elsewhere`
+    // writer does the declaring writer's work there, so that the readers share the host with
+    // that work and not the tables it writes.
+    let elsewhere = RouterForwarder::new(zid(0x02));
+    let (elsewhere_actions, _elsewhere_sink) = client(zid(0xE0));
+    elsewhere.register(writer_face, &elsewhere_actions);
+
+    // One window of `kind`: the Puts routed a second, the writes published a second (as the
+    // cell counts them: one message can be one write or several), and the client routes
+    // computed in it.
+    let window = |kind: &str, meanwhile: &mut dyn FnMut()| {
+        let computes_before = fwd.client_route_computes();
+        let writes_before = fwd.tables.writes_published();
+        let elsewhere_before = elsewhere.tables.writes_published();
+        let began = Instant::now();
+        let routed = routed_and_spent_while(&fwd, &publishers, &subscribers, &mut *meanwhile);
+        let seconds = began.elapsed().as_secs_f64();
+        let writes_per_s = (fwd.tables.writes_published() - writes_before) as f64 / seconds;
+        let elsewhere_per_s =
+            (elsewhere.tables.writes_published() - elsewhere_before) as f64 / seconds;
+        let computes = fwd.client_route_computes() - computes_before;
+        println!(
+            "readers-under-writer: structure={structure} window={kind} \
+             puts_routed_per_s={:.0} reader_cpu_ns_per_put={:.0} \
+             writes_per_s={writes_per_s:.0} elsewhere_writes_per_s={elsewhere_per_s:.0} \
+             client_route_computes={computes}",
+            routed.puts_per_s, routed.cpu_ns_per_put
+        );
+        writes_per_s
+    };
+
+    // `WZ_WRITER_WINDOWS` names the kinds to run, in order (all five by default), and
+    // `WZ_WRITER_ROUNDS` how many times (3): a profile is taken of one kind at a time. The paced
+    // writer keeps the declaring writer's last rate, or `WZ_WRITER_RATE` (20,000 a second) when
+    // no declaring window ran before it.
+    let kinds = std::env::var("WZ_WRITER_WINDOWS")
+        .unwrap_or_else(|_| "none,declaring,declaring_elsewhere,unchanged_paced,unchanged".into());
+    let rounds: usize = std::env::var("WZ_WRITER_ROUNDS")
+        .ok()
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(3);
+    let mut rate: f64 = std::env::var("WZ_WRITER_RATE")
+        .ok()
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(20_000.0);
+    let mut round = 0u64;
+    for _ in 0..rounds {
+        for kind in kinds.split(',') {
+            match kind {
+                "none" => {
+                    window(kind, &mut || std::thread::sleep(Duration::from_millis(1)));
+                }
+                "declaring" => {
+                    rate = window(kind, &mut || {
+                        let key = format!("demo/churn/{}", round % 64);
+                        round += 1;
+                        bring(&fwd, writer_face, declare_sub(&key));
+                        bring(&fwd, writer_face, undeclare_sub(&key));
+                    });
+                }
+                "declaring_elsewhere" => {
+                    window(kind, &mut || {
+                        let key = format!("demo/churn/{}", round % 64);
+                        round += 1;
+                        bring(&elsewhere, writer_face, declare_sub(&key));
+                        bring(&elsewhere, writer_face, undeclare_sub(&key));
+                    });
+                }
+                "unchanged_paced" => {
+                    let interval = Duration::from_secs_f64(1.0 / rate.max(1.0));
+                    let mut next = Instant::now();
+                    window(kind, &mut || {
+                        if Instant::now() >= next {
+                            next += interval;
+                            fwd.tables.write().publish();
+                        }
+                    });
+                }
+                "unchanged" => {
+                    window(kind, &mut || fwd.tables.write().publish());
+                }
+                other => panic!("WZ_WRITER_WINDOWS names {other:?}, which is not a window"),
+            }
+        }
+    }
 }

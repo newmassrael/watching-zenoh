@@ -12,15 +12,19 @@
 //! holds it by its count for as long as it reads, with no lock. A writer takes the writers' lock,
 //! copies the published version into a draft (a path copy: every part the write does not reach
 //! stays shared with the version before), writes the draft and publishes it with one store
-//! ([`TablesWrite::publish`]). A version is freed when the last reader that loaded it lets it go.
-//! A writer that must know a version is gone from every reader (a face that left must be sent
-//! nothing more) waits for it with [`TablesCell::synchronize`], read-copy-update's grace period.
+//! ([`TablesWrite::publish`]). A version it replaces is kept among the retired ones, and freed by
+//! a writer, at a later publish or a grace period, once no reader holds it: a reader lets its
+//! version go and never frees one, as read-copy-update defers reclamation to the updater
+//! (`call_rcu`). A writer that must know a version is gone from every reader (a face that left
+//! must be sent nothing more) waits for it with [`TablesCell::synchronize`], read-copy-update's
+//! grace period.
 //!
 //! The router's code is one for both forms: it reads through [`TablesCell::read`] and
 //! [`TablesCell::read_behind_a_writer_waiting`], and writes through [`TablesCell::write`], each of
 //! which answers a value that derefs to [`Tables`].
 
 use super::Tables;
+use crate::counter::Counter;
 use crate::sync::{PlainGuard, PlainMutex, PlainReadGuard, PlainRwLock, PlainWriteGuard};
 use arc_swap::ArcSwap;
 use std::cell::RefCell;
@@ -41,6 +45,10 @@ const LONGEST_PAUSE: Duration = Duration::from_millis(1);
 /// that change them, as the `routing-table-sharing` policy says.
 pub(crate) struct TablesCell {
     form: Form,
+    /// How many writes were published: under `snapshot` the versions the readers have been given
+    /// after the first. What an instrument paces a writer by, since one message can be one write
+    /// or several.
+    published: Counter,
 }
 
 /// The lock holds the tables in place, which makes `Locked` the larger variant by the size of the
@@ -62,9 +70,31 @@ struct Snapshot {
     /// Held by the one writer that drafts the next version, from its copy of the published one to
     /// its publishing, so that no two writers draft from the same version and one's write is lost.
     writer: PlainMutex<()>,
-    /// The versions replaced by a publish that some reader may still hold, which a grace period
-    /// waits for. Pruned of the versions no reader holds at each publish and each grace period.
-    retired: PlainMutex<Vec<Weak<Tables>>>,
+    /// The versions replaced by a publish, held here so that no reader is the last to let one go:
+    /// a reader that was, freed what the version alone held (the path copies of the write after
+    /// it), on the thread that routes the faces' messages. A version here that no reader holds
+    /// (this list's count is its only one) is freed by the writer at the next publish and at each
+    /// grace period, which also waits for the ones readers hold.
+    retired: PlainMutex<Vec<Arc<Tables>>>,
+}
+
+/// The retired versions no reader holds, taken out of `retired` to be freed once the caller has
+/// let its locks go: freeing a version runs the drops of what it held, which may read the tables
+/// again, or write them.
+fn unread(retired: &mut Vec<Arc<Tables>>) -> Vec<Arc<Tables>> {
+    let mut free = Vec::new();
+    let mut at = 0;
+    while at < retired.len() {
+        // A retired version can no longer be loaded, and a nested read clones the version its
+        // thread already holds, so a count of one cannot rise again: no reader holds it, and none
+        // will.
+        if Arc::strong_count(&retired[at]) == 1 {
+            free.push(retired.swap_remove(at));
+        } else {
+            at += 1;
+        }
+    }
+    free
 }
 
 thread_local! {
@@ -97,7 +127,34 @@ impl TablesCell {
                 retired: PlainMutex::new(Vec::new()),
             }),
         };
-        Self { form }
+        Self {
+            form,
+            published: Counter::new(),
+        }
+    }
+
+    /// How many writes were published ([`TablesWrite::publish`]); a write abandoned unpublished
+    /// is not counted. Read by the instruments only.
+    #[cfg(test)]
+    pub(crate) fn writes_published(&self) -> usize {
+        self.published.get()
+    }
+
+    /// The retired versions a `snapshot` cell keeps, and how many of them no reader holds. Read by
+    /// the tests only.
+    #[cfg(test)]
+    pub(crate) fn retired(&self) -> (usize, usize) {
+        match &self.form {
+            Form::Locked(_) => (0, 0),
+            Form::Snapshot(snapshot) => {
+                let retired = snapshot.retired.guard();
+                let unread = retired
+                    .iter()
+                    .filter(|version| Arc::strong_count(version) == 1)
+                    .count();
+                (retired.len(), unread)
+            }
+        }
     }
 
     /// The value of the policy this cell was made with.
@@ -143,7 +200,7 @@ impl TablesCell {
     /// lock and a draft copied from the published version; the readers go on routing by the
     /// published version, and see the write once it is published.
     pub(crate) fn write(&self) -> TablesWrite<'_> {
-        TablesWrite(match &self.form {
+        let write = match &self.form {
             Form::Locked(lock) => Write::Locked(lock.write()),
             Form::Snapshot(snapshot) => {
                 let writer = snapshot.writer.guard();
@@ -156,7 +213,11 @@ impl TablesCell {
                     _writer: writer,
                 })
             }
-        })
+        };
+        TablesWrite {
+            write,
+            published: &self.published,
+        }
     }
 
     /// Wait until no reader holds a version of the tables that was replaced before this call: the
@@ -176,13 +237,18 @@ impl TablesCell {
             "a thread that holds a version of the router's tables waited for the readers of the \
              versions before, and would have waited for itself"
         );
-        let waited: Vec<Weak<Tables>> = {
+        // Waited for by a weak count, which the list's own count keeps at one or more until a
+        // writer frees the version: a version is still read while any count beside the list's
+        // holds it, and gone from every reader once it has none.
+        let (free, waited) = {
             let mut retired = snapshot.retired.guard();
-            retired.retain(|version| version.strong_count() > 0);
-            retired.clone()
+            let free = unread(&mut retired);
+            let waited: Vec<Weak<Tables>> = retired.iter().map(Arc::downgrade).collect();
+            (free, waited)
         };
+        drop(free);
         let mut pause = None;
-        while waited.iter().any(|version| version.strong_count() > 0) {
+        while waited.iter().any(|version| version.strong_count() > 1) {
             match pause {
                 None => {
                     std::thread::yield_now();
@@ -194,6 +260,10 @@ impl TablesCell {
                 }
             }
         }
+        // The versions waited for are read by nobody now: free them here, where the caller
+        // asked to wait, rather than leave them to the next publish.
+        let free = unread(&mut snapshot.retired.guard());
+        drop(free);
     }
 }
 
@@ -234,13 +304,15 @@ impl Snapshot {
         PINS.with(|pins| pins.borrow().iter().any(|pin| pin.cell == cell))
     }
 
-    /// Make `tables` the version the readers load, and keep the one it replaces among the
-    /// versions a grace period waits for. Called with the writers' lock held.
-    fn publish(&self, tables: Arc<Tables>) {
+    /// Make `tables` the version the readers load, and keep the one it replaces among the retired
+    /// versions. Called with the writers' lock held; answers the retired versions no reader holds,
+    /// for the caller to free once it has let that lock go.
+    #[must_use = "the versions answered are freed by dropping them, after the writers' lock"]
+    fn publish(&self, tables: Arc<Tables>) -> Vec<Arc<Tables>> {
         let replaced = self.published.swap(tables);
         let mut retired = self.retired.guard();
-        retired.retain(|version| version.strong_count() > 0);
-        retired.push(Arc::downgrade(&replaced));
+        retired.push(replaced);
+        unread(&mut retired)
     }
 }
 
@@ -294,7 +366,11 @@ impl std::ops::Deref for TablesRead<'_> {
 /// The tables held for writing: [`TablesCell::write`]. [`Self::publish`] ends the write; a write
 /// dropped without it is abandoned under `snapshot` (its draft is never seen by a reader), and
 /// under `rwlock` its changes stay, as the lock's do.
-pub(crate) struct TablesWrite<'a>(Write<'a>);
+pub(crate) struct TablesWrite<'a> {
+    write: Write<'a>,
+    /// The cell's count of published writes.
+    published: &'a Counter,
+}
 
 enum Write<'a> {
     Locked(PlainWriteGuard<'a, Tables>),
@@ -316,15 +392,19 @@ impl TablesWrite<'_> {
     /// published with one store, and only then the writers' lock let go, so that the next writer
     /// copies the version this one published.
     pub(crate) fn publish(self) {
-        match self.0 {
+        self.published.bump();
+        match self.write {
             Write::Locked(guard) => drop(guard),
             Write::Draft(Draft {
                 snapshot,
                 tables,
                 _writer: writer,
             }) => {
-                snapshot.publish(tables);
+                let free = snapshot.publish(tables);
                 drop(writer);
+                // On the writer's thread, after its lock: what the versions no reader holds were
+                // alone in holding is freed here and not on a reader's thread.
+                drop(free);
             }
         }
     }
@@ -334,7 +414,7 @@ impl std::ops::Deref for TablesWrite<'_> {
     type Target = Tables;
 
     fn deref(&self) -> &Tables {
-        match &self.0 {
+        match &self.write {
             Write::Locked(guard) => guard,
             Write::Draft(draft) => &draft.tables,
         }
@@ -343,7 +423,7 @@ impl std::ops::Deref for TablesWrite<'_> {
 
 impl std::ops::DerefMut for TablesWrite<'_> {
     fn deref_mut(&mut self) -> &mut Tables {
-        match &mut self.0 {
+        match &mut self.write {
             Write::Locked(guard) => guard,
             Write::Draft(draft) => Arc::make_mut(&mut draft.tables),
         }
