@@ -1604,7 +1604,11 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 ///
 /// It moves to 9 for the conformance digest of the build (`crate::conformance`,
 /// `wz_capi_c_conformance_digest`, decision C15), one new symbol present in every build.
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 9;
+///
+/// It moves to 10 for a node's lifecycle verbs from a client (`crate::lifecycle`): the key a verb
+/// is asked by (`wz_capi_c_lifecycle_key`) and the answer read back (`wz_capi_c_lifecycle_read`),
+/// two new symbols present in every build, and the two structs they take.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 10;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;

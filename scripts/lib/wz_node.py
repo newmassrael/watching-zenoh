@@ -1843,6 +1843,20 @@ def _selftest() -> int:
         expect(f"{what}: expected a finding naming {needle!r}, got {found}", any(needle in p for p in found))
 
     expect("the sample is a valid node", problems(SAMPLE) == [])
+    # The generator's key is the one `lifecycle_wire::VerbWords` writes: both are held to one file.
+    vectors = (ROOT / "scripts/lib/verb_key_vectors.txt").read_text(encoding="utf-8").splitlines()
+    held = 0
+    for line in vectors:
+        if not line or line.startswith("#"):
+            continue
+        verb, of, about, whatami, generation, mode, key = line.split(" ")
+        ent = {"kind": "querier", "verb": verb, "of": of, "about": about, "whatami": whatami,
+               "mode": mode}
+        if generation != "-":
+            ent["generation"] = int(generation)
+        expect(f"the generator makes {key} from {line!r}", verb_key(ent, about) == key)
+        held += 1
+    expect("the key vectors were read", held >= 7)
     data = wz_config.read_decl_toml(SAMPLE)
     sha = "0" * 64
     rs = emit("n", data, sha)

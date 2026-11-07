@@ -30,7 +30,7 @@
 use wz_session_core::lifecycle_node::{
     lifecycle_verdict, Command as Asked, Commander, LifecycleNode,
 };
-use wz_session_core::lifecycle_wire::{OpenMode, PASSIVE_CHUNK};
+use wz_session_core::lifecycle_wire::{write_zid_json, OpenMode, PASSIVE_CHUNK};
 use wz_session_core::text_out::TextOut;
 
 /// The word that asks the node to hold a peer.
@@ -44,15 +44,9 @@ pub const STATUS_COMMAND: &str = "status";
 /// The word that asks the node its own zid.
 pub const WHOAMI_COMMAND: &str = "whoami";
 
-/// The error words, a closed set like the refusals' (a line that is no command names no peer, so
-/// it has no verdict).
-const UNKNOWN_COMMAND: &str = "unknown-command";
-const OPEN_TAKES_ONE_PEER: &str = "open-takes-one-peer";
-const CLOSE_TAKES_ONE_PEER: &str = "close-takes-one-peer";
-const RESET_TAKES_A_PEER_AND_A_GENERATION: &str = "reset-takes-a-peer-and-a-generation";
-const STATUS_TAKES_ONE_PEER: &str = "status-takes-one-peer";
-const WHOAMI_TAKES_NOTHING: &str = "whoami-takes-nothing";
-const LINE_TOO_LONG: &str = "line-too-long";
+/// Why a line is no command, as the word the port answers with: the wire's closed set
+/// ([`wz_session_core::lifecycle_wire::ControlError`]), which the reader of an answer reads too.
+pub use wz_session_core::lifecycle_wire::ControlError as Malformed;
 
 /// What a line asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,59 +62,6 @@ pub enum Command<'a> {
     Status(&'a str),
     /// Say the node's own zid.
     Whoami,
-}
-
-/// Why a line is no command, as the word the port answers with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Malformed {
-    /// The first word is not a command the port knows, or there is none.
-    UnknownCommand,
-    /// `open` with no peer, or with more than one.
-    OpenTakesOnePeer,
-    /// `close` with no peer, or with more than one.
-    CloseTakesOnePeer,
-    /// `reset` without exactly a peer and a generation.
-    ResetTakesAPeerAndAGeneration,
-    /// `status` with no peer, or with more than one.
-    StatusTakesOnePeer,
-    /// `whoami` followed by anything.
-    WhoamiTakesNothing,
-    /// The line was longer than the channel's buffer: the channel reads no part of it, since the
-    /// part it kept would be a different command from the one sent.
-    LineTooLong,
-}
-
-impl Malformed {
-    /// Every error word, for the declared set to be held to.
-    pub const ALL: [Self; 7] = [
-        Self::UnknownCommand,
-        Self::OpenTakesOnePeer,
-        Self::CloseTakesOnePeer,
-        Self::ResetTakesAPeerAndAGeneration,
-        Self::StatusTakesOnePeer,
-        Self::WhoamiTakesNothing,
-        Self::LineTooLong,
-    ];
-
-    /// The word on the wire.
-    pub const fn words(self) -> &'static str {
-        match self {
-            Self::UnknownCommand => UNKNOWN_COMMAND,
-            Self::OpenTakesOnePeer => OPEN_TAKES_ONE_PEER,
-            Self::CloseTakesOnePeer => CLOSE_TAKES_ONE_PEER,
-            Self::ResetTakesAPeerAndAGeneration => RESET_TAKES_A_PEER_AND_A_GENERATION,
-            Self::StatusTakesOnePeer => STATUS_TAKES_ONE_PEER,
-            Self::WhoamiTakesNothing => WHOAMI_TAKES_NOTHING,
-            Self::LineTooLong => LINE_TOO_LONG,
-        }
-    }
-
-    /// The answer document: one JSON object with the one word.
-    pub fn write_json<W: TextOut + ?Sized>(self, out: &mut W) {
-        out.push_str("{\"error\":\"");
-        out.push_str(self.words());
-        out.push_str("\"}");
-    }
 }
 
 /// Read one line (its line end already cut, or not: surrounding white space is ignored).
@@ -163,12 +104,7 @@ where
         Ok(Command::Status(peer)) => Asked::Status { peer },
         Ok(Command::Whoami) => {
             match own_zid {
-                // Lower-case hex: nothing in it needs escaping.
-                Some(zid) => {
-                    out.push_str("{\"zid\":\"");
-                    out.push_str(zid);
-                    out.push_str("\"}");
-                }
+                Some(zid) => write_zid_json(zid, out),
                 None => Malformed::UnknownCommand.write_json(out),
             }
             return;

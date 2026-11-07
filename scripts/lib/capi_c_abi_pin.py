@@ -139,10 +139,14 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # in `wz_capi_c.h` can change on its own -- and still has to be a deliberate
 # edit here, because a revision that moves for a reason nobody wrote down is a
 # revision nobody can reason about.
-EXPECTED_REVISION = 9
+EXPECTED_REVISION = 10
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",
+    # Revision 10 — a node's lifecycle verbs from a client: the key a verb is asked by and the
+    # answer read back, in every build.
+    "wz_capi_c_lifecycle_key",
+    "wz_capi_c_lifecycle_read",
     # Revision 9 — the conformance digest of the build (decision C15), in every build.
     "wz_capi_c_conformance_digest",
     # The observation plane (revision 8): the clock a program registers, the event log, the

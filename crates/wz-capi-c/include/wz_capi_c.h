@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 9
+#define WZ_CAPI_C_ABI_REVISION 10
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -1015,6 +1015,100 @@ z_result_t wz_capi_c_snapshot_read(uint8_t *out, size_t capacity, size_t *length
  * tester holding a statement can tell whether this library is that build.
  * Present in every build. */
 const char *wz_capi_c_conformance_digest(void);
+
+/* A NODE'S LIFECYCLE VERBS FROM A CLIENT (revision 10): the key a verb is
+ * asked by, and the answer read back. Both are pure calls over the caller's
+ * memory, with no session and no allocation, and both are the library's one
+ * copy: the key is the one a declared node's querier stated with the same
+ * words asks (both are held to scripts/lib/verb_key_vectors.txt), and the
+ * reading is the one the node's own HOST-WZ-VERDICT line makes.
+ *
+ *     wz_capi_c_lifecycle_words_t w = { .verb = "close", .of = node_zid,
+ *                                       .about = peer_zid };
+ *     char key[WZ_CAPI_C_LIFECYCLE_KEY_MAX]; const char *why = NULL;
+ *     if (wz_capi_c_lifecycle_key(&w, key, sizeof key, &why) == Z_OK)
+ *         ... z_get(session, key, ...), then for each reply's payload:
+ *     wz_capi_c_lifecycle_read_t r;
+ *     wz_capi_c_lifecycle_read(bytes, len, &r);
+ *     if (r.kind == WZ_CAPI_C_LIFECYCLE_VERDICT) ... r.verdict, r.reason */
+
+/* The bytes a key buffer needs: the longest key (a reset of u64's largest
+ * generation between two 32-digit zids) and its NUL. */
+#define WZ_CAPI_C_LIFECYCLE_KEY_MAX 110
+
+/* The words a verb's key is made from; every pointer a NUL-terminated C
+ * string. `verb` is open, close, reset or status; `of` the zid of the node
+ * asked and `about` the zid of the peer, lower-case hex as z_id_to_string
+ * prints them; `whatami` client, peer or router (NULL: client); a reset takes
+ * `generation` with `has_generation` true, every other verb none; `mode` dial
+ * or passive, an open's (NULL: dial). */
+typedef struct wz_capi_c_lifecycle_words_t {
+  const char *verb;
+  const char *of;
+  const char *about;
+  const char *whatami;
+  bool has_generation;
+  uint64_t generation;
+  const char *mode;
+} wz_capi_c_lifecycle_words_t;
+
+/* Make the key `@/<of>/<whatami>/session/<verb>/<about>`, with
+ * `<generation>/` before `<about>` for a reset and `passive/` for a passive
+ * open, into `out` (`out_len` bytes, NUL included). Z_OK; Z_EINVAL when the
+ * words make no key, `*refusal` (when not NULL) then naming why with one of
+ * no-such-verb, no-such-role, no-such-mode, of-is-no-zid, about-is-no-zid,
+ * reset-takes-a-generation, only-reset-takes-a-generation,
+ * only-open-is-passive, or NULL for a buffer shorter than the key; Z_ENULL
+ * for a NULL `words`, `verb`, `of`, `about` or `out`, or a word that is not
+ * UTF-8. Nothing is written to `out` on a refusal. */
+z_result_t wz_capi_c_lifecycle_key(const wz_capi_c_lifecycle_words_t *words,
+                                   char *out, size_t out_len,
+                                   const char **refusal);
+
+/* What an answer was read as. */
+typedef int32_t wz_capi_c_lifecycle_kind_t;
+/* No document a node writes: empty, another document, cut short. */
+#define WZ_CAPI_C_LIFECYCLE_UNREADABLE 0
+/* A verb's verdict on a peer, in band or on the control channel. */
+#define WZ_CAPI_C_LIFECYCLE_VERDICT 1
+/* The control channel's answer to `whoami`. */
+#define WZ_CAPI_C_LIFECYCLE_WHOAMI 2
+/* The control channel's answer to a line that is no command. */
+#define WZ_CAPI_C_LIFECYCLE_ERROR 3
+
+/* An answer read back. Every `const char *` is a static string this library
+ * owns, or NULL where the kind does not carry it: `verdict` the verdict word
+ * (opening, closing, resetting, already_closed, not_found, duplicate, status,
+ * refused), `reason` a refusal's sentence, byte for byte the vocabulary's
+ * `verdicts.reasons`, `error` the control channel's error word. A `has_` flag
+ * says whether the number beside it was in the answer: `links` on closing and
+ * resetting, `generation` on duplicate, `open` and `closing` (the node's links
+ * to the peer) and `intent` on status. `zid` is the node's zid on whoami,
+ * NUL-terminated, and empty otherwise. */
+typedef struct wz_capi_c_lifecycle_read_t {
+  wz_capi_c_lifecycle_kind_t kind;
+  const char *verdict;
+  const char *reason;
+  const char *error;
+  bool has_links;
+  uint32_t links;
+  bool has_generation;
+  uint64_t generation;
+  bool has_held;
+  uint32_t open;
+  uint32_t closing;
+  bool has_intent;
+  bool intent;
+  char zid[33];
+} wz_capi_c_lifecycle_read_t;
+
+/* Read an answer a node gave: a verb's reply payload in band, or one line its
+ * control channel answered with (line end cut). `out` is filled from scratch.
+ * An answer that is no document a node writes reads as
+ * WZ_CAPI_C_LIFECYCLE_UNREADABLE, which is a reading and still Z_OK. Z_ENULL
+ * for a NULL `out`, or a NULL `bytes` with a non-zero `len`. */
+z_result_t wz_capi_c_lifecycle_read(const uint8_t *bytes, size_t len,
+                                    wz_capi_c_lifecycle_read_t *out);
 
 #ifdef __cplusplus
 }

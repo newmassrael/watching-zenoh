@@ -24083,6 +24083,25 @@ layer_c1cc_api_compat_c() {
     grep -q '^c_observation_plane_consumer: ok$' <<<"$c_obs_out" || {
         echo "  C1cc FAIL: the observation plane C consumer printed no verdict"
         echo "$c_obs_out"; return 1; }
+    # A node's lifecycle verbs from a client, driven from C the same way: the key a verb is asked
+    # by and the answer read back, with the two structs' layout and the expected keys written out
+    # in the consumer and not taken from the library.
+    local c_life_bin c_life_out
+    c_life_bin="$(mktemp -d)/c_lifecycle_consumer"
+    c_life_out="$("${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -I crates/wz-capi-c/include \
+        -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
+        crates/wz-capi-c/tests/c_lifecycle_consumer.c \
+        -L crates/target/debug -lwz_capi_c -o "$c_life_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the lifecycle C consumer did not compile or link"
+        echo "$c_life_out"; return 1; }
+    c_life_out="$(LD_LIBRARY_PATH=crates/target/debug "$c_life_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the lifecycle C consumer failed"
+        echo "$c_life_out"; rm -rf "$(dirname "$c_life_bin")"; return 1; }
+    rm -rf "$(dirname "$c_life_bin")"
+    grep -q '^c_lifecycle_consumer: ok$' <<<"$c_life_out" || {
+        echo "  C1cc FAIL: the lifecycle C consumer printed no verdict"
+        echo "$c_life_out"; return 1; }
     # R2278 (open-debt item 612) — RE-DERIVE which build upstream publishes,
     # now that this lane has established an oracle is present. `--require`
     # rather than the bare form on purpose: past this point the checkout and

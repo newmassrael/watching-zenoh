@@ -143,6 +143,10 @@ mod loan_at;
 pub mod group;
 pub mod handlers;
 pub mod keyexpr;
+// A node's lifecycle verbs from a client: the key a verb is asked by and the answer read back. A
+// wz-own door like `config_verdict`, so ungated for the same reason: upstream has no lifecycle
+// verbs to be a drop-in for.
+pub mod lifecycle;
 // What one message may weigh, asked before it is sent. A wz-own door like
 // `config_verdict`, so ungated for the same reason: upstream reports no limit.
 pub mod limits;

@@ -1,0 +1,12 @@
+# The keys of lifecycle verbs, from their words: what `wz_session_core::lifecycle_wire::VerbWords`
+# writes and what `wz_node.py`'s `verb_key` generates for a declared node's querier. Both read this
+# file (the Rust test with `include_str!`, the Python selftest), so the two makers of one key cannot
+# drift. One vector a line, seven fields: verb, of, about, whatami, generation (`-` for none), mode,
+# and the key.
+close a1b2 c3d4 client - dial @/a1b2/client/session/close/c3d4
+status a1b2 c3d4 router - dial @/a1b2/router/session/status/c3d4
+open a1b2 c3d4 client - dial @/a1b2/client/session/open/c3d4
+open a1b2 c3d4 peer - passive @/a1b2/peer/session/open/passive/c3d4
+reset a1b2 c3d4 client 0 dial @/a1b2/client/session/reset/0/c3d4
+reset a1b2 c3d4 client 7 dial @/a1b2/client/session/reset/7/c3d4
+reset ffffffffffffffffffffffffffffffff 1 router 9223372036854775807 dial @/ffffffffffffffffffffffffffffffff/router/session/reset/9223372036854775807/1

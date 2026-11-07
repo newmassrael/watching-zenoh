@@ -707,6 +707,267 @@ impl ReplyRead {
     }
 }
 
+/// Why a line on a node's control channel is no command, as the word the port answers with
+/// (`{"error":"<word>"}`): a closed set, like the refusals', since a line that is no command names
+/// no peer and so has no verdict.
+///
+/// Here, beside the verdicts, and not in the port that writes it: an answer of the control channel
+/// is read by [`Answer::read`] with the same reader as an answer in band, so the words are the
+/// wire's and the port (`wz_session_mcu::control_port`) only uses them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlError {
+    /// The first word is not a command the port knows, or there is none.
+    UnknownCommand,
+    /// `open` with no peer, or with more than one.
+    OpenTakesOnePeer,
+    /// `close` with no peer, or with more than one.
+    CloseTakesOnePeer,
+    /// `reset` without exactly a peer and a generation.
+    ResetTakesAPeerAndAGeneration,
+    /// `status` with no peer, or with more than one.
+    StatusTakesOnePeer,
+    /// `whoami` followed by anything.
+    WhoamiTakesNothing,
+    /// The line was longer than the channel's buffer: the channel reads no part of it, since the
+    /// part it kept would be a different command from the one sent.
+    LineTooLong,
+}
+
+impl ControlError {
+    /// Every error word, for the declared set to be held to.
+    pub const ALL: [Self; 7] = [
+        Self::UnknownCommand,
+        Self::OpenTakesOnePeer,
+        Self::CloseTakesOnePeer,
+        Self::ResetTakesAPeerAndAGeneration,
+        Self::StatusTakesOnePeer,
+        Self::WhoamiTakesNothing,
+        Self::LineTooLong,
+    ];
+
+    /// The word on the wire.
+    pub const fn words(self) -> &'static str {
+        match self {
+            Self::UnknownCommand => "unknown-command",
+            Self::OpenTakesOnePeer => "open-takes-one-peer",
+            Self::CloseTakesOnePeer => "close-takes-one-peer",
+            Self::ResetTakesAPeerAndAGeneration => "reset-takes-a-peer-and-a-generation",
+            Self::StatusTakesOnePeer => "status-takes-one-peer",
+            Self::WhoamiTakesNothing => "whoami-takes-nothing",
+            Self::LineTooLong => "line-too-long",
+        }
+    }
+
+    /// The answer document: one JSON object with the one word.
+    pub fn write_json<W: TextOut + ?Sized>(self, out: &mut W) {
+        out.push_str("{\"error\":\"");
+        out.push_str(self.words());
+        out.push_str("\"}");
+    }
+}
+
+/// Write the control channel's answer to `whoami`, `{"zid":"<zid>"}`, the zid spelled as a key
+/// spells it (lower-case hex: nothing in it needs escaping).
+pub fn write_zid_json<W: TextOut + ?Sized>(zid: &str, out: &mut W) {
+    out.push_str("{\"zid\":\"");
+    out.push_str(zid);
+    out.push_str("\"}");
+}
+
+/// An answer a node gave about its sessions, read back: a verb's reply in band, or a line its
+/// control channel answered with.
+///
+/// The one reader of both, so a consumer that asked a node by a key or by its pipe reads the
+/// answer without a second decoder of either spelling, and reads them as the node's own console
+/// line (`HOST-WZ-VERDICT`) does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer<'a> {
+    /// A verdict on a peer: the reply of any verb, in band or on the channel.
+    Verdict(ReplyRead),
+    /// The channel's answer to `whoami`: the node's zid, as a key spells it.
+    Whoami(&'a str),
+    /// The channel's answer to a line that is no command.
+    Error(ControlError),
+}
+
+impl<'a> Answer<'a> {
+    /// The answer `bytes` are, or `None` when they are none of the documents a node writes: empty,
+    /// another spelling, a word or reason outside the closed sets, a zid that is not one, or a
+    /// document cut before what its verdict carries.
+    pub fn read(bytes: &'a [u8]) -> Option<Self> {
+        let text = core::str::from_utf8(bytes).ok()?;
+        if text.starts_with("{\"verdict\":\"") {
+            return ReplyRead::parse(bytes).map(Self::Verdict);
+        }
+        if let Some(rest) = text.strip_prefix("{\"zid\":\"") {
+            let zid = rest.strip_suffix("\"}")?;
+            return zid_from_key_text(zid).map(|_| Self::Whoami(zid));
+        }
+        let word = text.strip_prefix("{\"error\":\"")?.strip_suffix("\"}")?;
+        ControlError::ALL
+            .into_iter()
+            .find(|error| error.words() == word)
+            .map(Self::Error)
+    }
+}
+
+/// The roles a lifecycle key may name the node it asks as: zenoh's three.
+pub const WHATAMI_WORDS: [&str; 3] = ["client", "peer", "router"];
+
+/// The words a lifecycle verb's key is made from: the verb, the node it is asked of (`of`), the peer
+/// it is about (`about`), the role the node is asked as, a reset's generation and an open's mode.
+///
+/// The one maker of such a key, so the generator of a declared node's queriers
+/// (`scripts/lib/wz_node.py`, `verb_key`) and a consumer that asks by a C call make the same key;
+/// both are held to `scripts/lib/verb_key_vectors.txt`. What it writes, [`VerbKey::parse`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerbWords<'a> {
+    /// The verb: one of [`VERBS`].
+    pub verb: &'a str,
+    /// The zid of the node asked, as a key spells it.
+    pub of: &'a str,
+    /// The zid of the peer the verb is about, as a key spells it.
+    pub about: &'a str,
+    /// The role the node is asked as: one of [`WHATAMI_WORDS`].
+    pub whatami: &'a str,
+    /// A reset's generation; `None` for every other verb.
+    pub generation: Option<u64>,
+    /// An open's mode, one of [`OPEN_MODE_WORDS`]; `dial` for every other verb.
+    pub mode: &'a str,
+}
+
+/// The words an open's mode is stated in (decision D10): dial the peer, or wait for its session.
+pub const OPEN_MODE_WORDS: [&str; 2] = ["dial", PASSIVE_CHUNK];
+
+/// Why words make no lifecycle key, as a word a consumer branches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyRefusal {
+    /// The verb is none of [`VERBS`].
+    NoSuchVerb,
+    /// The role is none of [`WHATAMI_WORDS`].
+    NoSuchRole,
+    /// The mode is none of [`OPEN_MODE_WORDS`].
+    NoSuchMode,
+    /// `of` does not spell a zid.
+    OfIsNoZid,
+    /// `about` does not spell a zid.
+    AboutIsNoZid,
+    /// A reset with no generation.
+    ResetTakesAGeneration,
+    /// A generation given to a verb that is not reset.
+    OnlyResetTakesAGeneration,
+    /// A passive mode given to a verb that is not open.
+    OnlyOpenIsPassive,
+}
+
+impl KeyRefusal {
+    /// Every refusal, for a consumer's set to be held to.
+    pub const ALL: [Self; 8] = [
+        Self::NoSuchVerb,
+        Self::NoSuchRole,
+        Self::NoSuchMode,
+        Self::OfIsNoZid,
+        Self::AboutIsNoZid,
+        Self::ResetTakesAGeneration,
+        Self::OnlyResetTakesAGeneration,
+        Self::OnlyOpenIsPassive,
+    ];
+
+    /// The refusal's word.
+    pub const fn words(self) -> &'static str {
+        match self {
+            Self::NoSuchVerb => "no-such-verb",
+            Self::NoSuchRole => "no-such-role",
+            Self::NoSuchMode => "no-such-mode",
+            Self::OfIsNoZid => "of-is-no-zid",
+            Self::AboutIsNoZid => "about-is-no-zid",
+            Self::ResetTakesAGeneration => "reset-takes-a-generation",
+            Self::OnlyResetTakesAGeneration => "only-reset-takes-a-generation",
+            Self::OnlyOpenIsPassive => "only-open-is-passive",
+        }
+    }
+}
+
+/// The longest key [`VerbWords::write`] writes, in bytes: a reset's, the one verb whose key carries
+/// a number. `@/`, a zid of 32 digits, `/`, the longest role, `/session/`, `reset`, `/`, a
+/// generation of 20 digits (`u64::MAX`), `/`, and a zid of 32 digits. Every other verb's key is
+/// shorter: its longest extra chunk is the `passive/` of an open.
+pub const VERB_KEY_MAX_BYTES: usize = 2 + 32 + 1 + 6 + 9 + RESET_VERB.len() + 1 + 20 + 1 + 32;
+
+impl VerbWords<'_> {
+    /// Write the key, `@/<of>/<whatami>/session/<verb>/<about>` with `<generation>/` before
+    /// `<about>` for a reset and `passive/` for a passive open, or say why the words make none.
+    /// Nothing is written on a refusal.
+    ///
+    /// # Errors
+    ///
+    /// The first refusal, in the order of [`KeyRefusal::ALL`].
+    pub fn write<W: TextOut + ?Sized>(&self, out: &mut W) -> Result<(), KeyRefusal> {
+        if !VERBS.contains(&self.verb) {
+            return Err(KeyRefusal::NoSuchVerb);
+        }
+        if !WHATAMI_WORDS.contains(&self.whatami) {
+            return Err(KeyRefusal::NoSuchRole);
+        }
+        if !OPEN_MODE_WORDS.contains(&self.mode) {
+            return Err(KeyRefusal::NoSuchMode);
+        }
+        let passive = self.mode == PASSIVE_CHUNK;
+        if zid_from_key_text(self.of).is_none() {
+            return Err(KeyRefusal::OfIsNoZid);
+        }
+        if zid_from_key_text(self.about).is_none() {
+            return Err(KeyRefusal::AboutIsNoZid);
+        }
+        let reset = self.verb == RESET_VERB;
+        match (reset, self.generation) {
+            (true, None) => return Err(KeyRefusal::ResetTakesAGeneration),
+            (false, Some(_)) => return Err(KeyRefusal::OnlyResetTakesAGeneration),
+            _ => {}
+        }
+        if passive && self.verb != OPEN_VERB {
+            return Err(KeyRefusal::OnlyOpenIsPassive);
+        }
+        for part in [
+            "@/",
+            self.of,
+            "/",
+            self.whatami,
+            "/session/",
+            self.verb,
+            "/",
+        ] {
+            out.push_str(part);
+        }
+        if let Some(generation) = self.generation {
+            let mut digits = [0u8; 20];
+            out.push_str(decimal_text(generation, &mut digits));
+            out.push_str("/");
+        }
+        if passive {
+            out.push_str(PASSIVE_CHUNK);
+            out.push_str("/");
+        }
+        out.push_str(self.about);
+        Ok(())
+    }
+}
+
+/// `n` in decimal, in `buf`.
+fn decimal_text(mut n: u64, buf: &mut [u8; 20]) -> &str {
+    let mut at = buf.len();
+    loop {
+        at -= 1;
+        buf[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    // Only ASCII digits were written.
+    core::str::from_utf8(&buf[at..]).unwrap_or("")
+}
+
 /// A number as the writers here spell it: decimal digits and nothing else.
 fn decimal<N: core::str::FromStr>(text: &str) -> Option<N> {
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
@@ -1113,6 +1374,177 @@ mod tests {
                 vocabulary.contains(line),
                 "wz_node.py does not state the refusal {line:?}"
             );
+        }
+    }
+
+    /// The words of every vector of `scripts/lib/verb_key_vectors.txt` make its key, and the key
+    /// reads back as those words: the file the declared node's generator is held to as well.
+    #[test]
+    fn the_key_of_every_vector_is_what_the_generator_makes_and_reads_back() {
+        let vectors = include_str!("../../../scripts/lib/verb_key_vectors.txt");
+        let mut seen = 0;
+        for line in vectors
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let mut fields = line.split(' ');
+            let mut next = || fields.next().expect("seven fields");
+            let (verb, of, about, whatami, generation, mode, key) =
+                (next(), next(), next(), next(), next(), next(), next());
+            let generation = (generation != "-").then(|| generation.parse::<u64>().expect("a u64"));
+            let words = VerbWords {
+                verb,
+                of,
+                about,
+                whatami,
+                generation,
+                mode,
+            };
+            let mut out: FixedText<{ VERB_KEY_MAX_BYTES }> = FixedText::new();
+            words.write(&mut out).expect("the words make a key");
+            let written = out.finish().expect("within VERB_KEY_MAX_BYTES");
+            assert_eq!(written, key, "{line}");
+            let read = VerbKey::parse(written).expect("the key reads back");
+            assert_eq!(
+                (read.node_zid, read.whatami, read.verb, read.peer_zid),
+                (of, whatami, verb, about)
+            );
+            seen += 1;
+        }
+        assert!(seen >= 7, "the vectors were read");
+    }
+
+    #[test]
+    fn the_longest_key_fits_and_every_refusal_is_its_own() {
+        let widest = "ffffffffffffffffffffffffffffffff";
+        let words = VerbWords {
+            verb: RESET_VERB,
+            of: widest,
+            about: widest,
+            whatami: "router",
+            generation: Some(u64::MAX),
+            mode: "dial",
+        };
+        let mut out: FixedText<{ VERB_KEY_MAX_BYTES }> = FixedText::new();
+        words.write(&mut out).expect("a key");
+        assert_eq!(out.finish().expect("fits").len(), VERB_KEY_MAX_BYTES);
+
+        let base = VerbWords {
+            verb: CLOSE_VERB,
+            of: "a1",
+            about: "b2",
+            whatami: "client",
+            generation: None,
+            mode: "dial",
+        };
+        let refused = |words: VerbWords<'_>| {
+            let mut out: FixedText<{ VERB_KEY_MAX_BYTES }> = FixedText::new();
+            let why = words.write(&mut out).expect_err("refused");
+            assert_eq!(out.finish().expect("empty"), "", "nothing is written");
+            why
+        };
+        assert_eq!(
+            refused(VerbWords {
+                verb: "hold",
+                ..base
+            }),
+            KeyRefusal::NoSuchVerb
+        );
+        assert_eq!(
+            refused(VerbWords {
+                whatami: "server",
+                ..base
+            }),
+            KeyRefusal::NoSuchRole
+        );
+        assert_eq!(
+            refused(VerbWords {
+                mode: "wait",
+                ..base
+            }),
+            KeyRefusal::NoSuchMode
+        );
+        assert_eq!(
+            refused(VerbWords { of: "0a", ..base }),
+            KeyRefusal::OfIsNoZid
+        );
+        assert_eq!(
+            refused(VerbWords {
+                about: "B2",
+                ..base
+            }),
+            KeyRefusal::AboutIsNoZid
+        );
+        assert_eq!(
+            refused(VerbWords {
+                verb: RESET_VERB,
+                ..base
+            }),
+            KeyRefusal::ResetTakesAGeneration
+        );
+        assert_eq!(
+            refused(VerbWords {
+                generation: Some(1),
+                ..base
+            }),
+            KeyRefusal::OnlyResetTakesAGeneration
+        );
+        assert_eq!(
+            refused(VerbWords {
+                mode: "passive",
+                ..base
+            }),
+            KeyRefusal::OnlyOpenIsPassive
+        );
+        for (at, a) in KeyRefusal::ALL.iter().enumerate() {
+            for b in &KeyRefusal::ALL[at + 1..] {
+                assert_ne!(a.words(), b.words());
+            }
+        }
+    }
+
+    /// One reader of an answer in band and on the control channel: every document the writers
+    /// here write reads back as what it says, and anything else reads as nothing.
+    #[test]
+    fn an_answer_reads_as_its_verdict_zid_or_error_and_anything_else_as_none() {
+        let mut text: FixedText<192> = FixedText::new();
+        CloseVerdict::of(CloseOrder {
+            newly_ordered: 2,
+            already_ordered: 0,
+        })
+        .write_json(&mut text);
+        let closing = text.finish().expect("fits");
+        match Answer::read(closing.as_bytes()) {
+            Some(Answer::Verdict(read)) => {
+                assert_eq!((read.verdict, read.links), ("closing", Some(2)));
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut text: FixedText<64> = FixedText::new();
+        write_zid_json("a1b2", &mut text);
+        assert_eq!(
+            Answer::read(text.finish().expect("fits").as_bytes()),
+            Some(Answer::Whoami("a1b2"))
+        );
+        for error in ControlError::ALL {
+            let mut text: FixedText<64> = FixedText::new();
+            error.write_json(&mut text);
+            assert_eq!(
+                Answer::read(text.finish().expect("fits").as_bytes()),
+                Some(Answer::Error(error))
+            );
+        }
+        for not_one in [
+            &b""[..],
+            b"{}",
+            b"{\"verdict\":\"closing\"",
+            b"{\"verdict\":\"closing\",\"links\":}",
+            b"{\"zid\":\"0a\"}",
+            b"{\"error\":\"nope\"}",
+            b"{\"members\":[]}",
+            b"\xff",
+        ] {
+            assert_eq!(Answer::read(not_one), None, "{not_one:?}");
         }
     }
 

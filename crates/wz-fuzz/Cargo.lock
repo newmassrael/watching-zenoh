@@ -1131,6 +1131,7 @@ dependencies = [
  "wz-cdylib-build",
  "wz-conformance-build",
  "wz-runtime-tokio",
+ "wz-session-core",
 ]
 
 [[package]]
