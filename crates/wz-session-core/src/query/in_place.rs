@@ -458,6 +458,36 @@ mod tests {
         assert_eq!(finals, cases.len() - 1, "every case but the unroutable one");
     }
 
+    /// A query whose parameters are past the build's bound is refused alike on both receive
+    /// paths: no queryable runs, nothing is staged, and its final is owed, as for a query that
+    /// matched nobody. The build fixes the bound, so the build with none sees the query run.
+    #[test]
+    fn a_query_past_the_builds_bound_is_refused_alike_on_both_paths() {
+        // The request builder cannot write more parameters than its own bound, so the query is
+        // the longest it can be made, or one byte past the build's bound when that is shorter.
+        let bound = crate::caps::QUERY_PARAMETERS_MAX_BYTES;
+        let most = crate::request_build::REQUEST_QUERY_PARAMETERS_MAX_LEN;
+        let length = if bound == 0 {
+            most
+        } else {
+            (bound + 1).min(most)
+        };
+        let long = alloc::vec![b'x'; length];
+        let request = RequestQueryBuilder::new(19, 0, Some("demo/a"))
+            .parameters(&long)
+            .build()
+            .expect("build");
+        let (owned, lent) = both(&request);
+        assert_eq!(lent, owned);
+        let (seen, replies, finals) = owned;
+        assert_eq!(finals.len(), 1, "owed its final either way");
+        let refused = bound != 0 && length > bound;
+        assert_eq!(
+            (seen.len(), replies.len()),
+            if refused { (0, 0) } else { (1, 1) }
+        );
+    }
+
     /// A Request that carries a timestamp stack is dispatched with it: the lent form has no stack
     /// of its own for the nodes to add to, so it takes the owned path, and a queryable is shown
     /// the same stack either way. A Request that carries none is shown none.

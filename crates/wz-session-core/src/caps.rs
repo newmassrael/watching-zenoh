@@ -148,6 +148,15 @@ const _: () = assert!(
 /// (`RegisterError::TableFull`) rather than growing the table.
 pub const MAX_QUERYABLES: usize = generated::MAX_QUERYABLES;
 
+/// The most bytes of selector parameters a query from a peer may carry for the node to run it;
+/// 0 sets no bound. A longer query reaches no queryable and is counted
+/// ([`crate::query::QueryableRegistry::oversize_refusals`]).
+pub const QUERY_PARAMETERS_MAX_BYTES: usize = generated::QUERY_PARAMETERS_MAX_BYTES;
+
+/// The most bytes of attachment a query from a peer may carry for the node to run it; 0 sets no
+/// bound. Applied as [`QUERY_PARAMETERS_MAX_BYTES`] is.
+pub const QUERY_ATTACHMENT_MAX_BYTES: usize = generated::QUERY_ATTACHMENT_MAX_BYTES;
+
 /// Maximum number of concurrently-outstanding pending z_get queries in a
 /// [`crate::reply::ReplyRegistry`]. Bounds the registry's pending table
 /// on the no-alloc backing; a `register` past this is rejected

@@ -95,6 +95,16 @@ original reproduced by naming it. Three things follow from it:
   refuses its OPEN (the node does not report it). The growable profile keeps any length.
   The Zephyr build passes every limit of the image's Kconfig to cargo, so the three reach an
   image with no further rule.
+- **The size of a query a node runs**: `QUERY_PARAMETERS_MAX_BYTES` and
+  `QUERY_ATTACHMENT_MAX_BYTES` (0 each, no bound, which is how a node behaved before them)
+  bound the selector parameters and the attachment of a query a peer sends. A longer query
+  reaches no queryable and is counted
+  (`QueryableRegistry::oversize_refusals`), and its final is still owed, so the asker's
+  query ends with no reply and does not wait out its timeout. The bound is read where both
+  receive paths fire a query (the copying and the in-place one), so they cannot differ; a
+  query of the node's own session is not bounded. The two limits count the bytes of the
+  field, not the frame: a query whose value is long is not refused for it. As with every
+  limit, the Zephyr build passes them to the image's cargo line.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and

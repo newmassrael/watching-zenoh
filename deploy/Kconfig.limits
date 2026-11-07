@@ -292,6 +292,27 @@ config WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER
 	  closes the session, which is the policy as it was before this limit. At most
 	  65535: a larger value counts as 65535. It is read only when that policy is on.
 
+config WZ_LIMIT_QUERY_PARAMETERS_MAX_BYTES
+	int "QUERY_PARAMETERS_MAX_BYTES"
+	default 0
+	help
+	  The most bytes of selector parameters a query from a peer may carry for this
+	  node to run it. A query whose parameters are longer reaches no queryable, is
+	  counted as refused for its size, and is still owed its final, so the asker's
+	  query ends with no reply and does not wait out its timeout. 0 sets no bound,
+	  which is how a node behaved before this limit. A query of the node's own
+	  session is not bounded: the caller already holds what it passed.
+
+config WZ_LIMIT_QUERY_ATTACHMENT_MAX_BYTES
+	int "QUERY_ATTACHMENT_MAX_BYTES"
+	default 0
+	help
+	  The most bytes of attachment a query from a peer may carry for this node to
+	  run it. It is applied as QUERY_PARAMETERS_MAX_BYTES is: a longer attachment
+	  reaches no queryable, is counted as refused for its size, and the query is
+	  still owed its final. 0 sets no bound, which is how a node behaved before this
+	  limit.
+
 config WZ_LIMIT_HANDSHAKE_INIT_MS
 	int "HANDSHAKE_INIT_MS"
 	default 2000

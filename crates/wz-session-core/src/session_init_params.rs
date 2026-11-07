@@ -636,23 +636,22 @@ mod cookie_bound_tests {
             !element.contains("sce:max-size"),
             "the OPEN cookie field now has a bound: {element:?}"
         );
-        for body in ["init_body.scxml"] {
-            let text = std::fs::read_to_string(sources.join(body)).expect("a codec source is read");
-            // The element that carries the cookie's length field, whole: its attributes run over
-            // several lines in one source and not in the other.
-            let at = text
-                .find("sce:length-field=\"cookie_len\"")
-                .unwrap_or_else(|| panic!("{body} declares no cookie_len field"));
-            let start = text[..at]
-                .rfind('<')
-                .expect("the field is inside an element");
-            let end = at + text[at..].find("/>").expect("the element is closed");
-            let element = &text[start..end];
-            assert!(
-                element.contains(&std::format!("sce:max-size=\"{COOKIE_FIELD_MAX}\"")),
-                "{body}: the cookie field is {element:?}, not {COOKIE_FIELD_MAX} bytes"
-            );
-        }
+        let init =
+            std::fs::read_to_string(sources.join("init_body.scxml")).expect("init body source");
+        // The element that carries the cookie's length field, whole: its attributes may run over
+        // several lines.
+        let at = init
+            .find("sce:length-field=\"cookie_len\"")
+            .expect("init_body.scxml declares no cookie_len field");
+        let start = init[..at]
+            .rfind('<')
+            .expect("the field is inside an element");
+        let end = at + init[at..].find("/>").expect("the element is closed");
+        let element = &init[start..end];
+        assert!(
+            element.contains(&std::format!("sce:max-size=\"{COOKIE_FIELD_MAX}\"")),
+            "init_body.scxml: the cookie field is {element:?}, not {COOKIE_FIELD_MAX} bytes"
+        );
     }
 
     /// The build's bound is in range (the build refuses one that is not), and the fixed form keeps a

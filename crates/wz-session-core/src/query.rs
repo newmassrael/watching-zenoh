@@ -2070,6 +2070,11 @@ pub struct QueryableRegistry<C: QuerySink, P: Storage = Profile> {
     /// (decision D12): handed to every matched queryable as [`QueryView::requester`]. Set by the
     /// session before it dispatches, since the registry is the session's and so is the link.
     requester: Option<[u8; 16]>,
+    /// How many queries from a peer were not run because their parameters or their attachment
+    /// were longer than the build's bound ([`caps::QUERY_PARAMETERS_MAX_BYTES`],
+    /// [`caps::QUERY_ATTACHMENT_MAX_BYTES`]). Saturating: a counter that wrapped would hide the
+    /// refusals it exists to show.
+    oversize_refused: u32,
     /// transport-shm -- the receive side of shared memory for the VALUE of a
     /// query: the same state a push and a reply have (the negotiated capability,
     /// the resolver, the means of acknowledging the peer's slices, the drop
@@ -2086,6 +2091,7 @@ impl<C: QuerySink, P: Storage> Default for QueryableRegistry<C, P> {
             queryables: BoundedVec::default(),
             next_id: 1,
             requester: None,
+            oversize_refused: 0,
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
         }
@@ -2093,6 +2099,12 @@ impl<C: QuerySink, P: Storage> Default for QueryableRegistry<C, P> {
 }
 
 impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
+    /// How many queries from a peer were refused for their size: not run by any queryable, and
+    /// owed their final as a query that matched nobody is.
+    pub fn oversize_refusals(&self) -> u32 {
+        self.oversize_refused
+    }
+
     /// Say which zid the key of the session's link proved, or `None` when it proved none
     /// (decision D12). The queries dispatched from now on carry it as [`QueryView::requester`].
     pub fn set_requester(&mut self, requester: Option<[u8; 16]>) {
@@ -2559,6 +2571,25 @@ struct QueryProjection<'q> {
     /// The timestamp stack the query carried, when it is instrumented.
     #[cfg(feature = "pubsub-ts-stack")]
     ts_stack: Option<&'q crate::ts_stack::TsStack>,
+}
+
+/// Whether a query's parameters or its attachment are longer than the bound for each, `0`
+/// meaning none. Taking the bounds as arguments keeps the rule testable at every value, where
+/// the build fixes only one.
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+const fn request_past_bounds(
+    parameters: Option<&[u8]>,
+    attachment: Option<&[u8]>,
+    max_parameters: usize,
+    max_attachment: usize,
+) -> bool {
+    const fn past(field: Option<&[u8]>, bound: usize) -> bool {
+        match field {
+            Some(bytes) => bound != 0 && bytes.len() > bound,
+            None => false,
+        }
+    }
+    past(parameters, max_parameters) || past(attachment, max_attachment)
 }
 
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
@@ -3059,6 +3090,21 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
             let _ = plain_value;
             None
         };
+        // A query from a peer that is longer than the build allows runs nowhere. It is still a
+        // query that was routed (the caller owes its final, as for one that matched nobody), so
+        // the asker's query ends with no reply and does not wait out its timeout. The one body
+        // both receive paths fire through is the one place the bound is read.
+        if is_remote
+            && request_past_bounds(
+                parameters_view,
+                attachment_view,
+                caps::QUERY_PARAMETERS_MAX_BYTES,
+                caps::QUERY_ATTACHMENT_MAX_BYTES,
+            )
+        {
+            self.oversize_refused = self.oversize_refused.saturating_add(1);
+            return 0;
+        }
         // R311y834 — resolved ONCE per inbound query beside the other
         // projections, because it is a property of the query rather than of any
         // matched queryable. Non-UTF-8 parameters cannot spell the ASCII
@@ -3960,6 +4006,70 @@ mod tests {
             Some(&b"key=value"[..]),
             "wire parameters slice must reach QueryView when query-selector-parameters is on"
         );
+    }
+
+    /// The rule at every value of the two bounds, which the build fixes only one of: `0` is no
+    /// bound, a bound is a length that may be filled and not passed, and each field has its own.
+    #[test]
+    fn a_query_is_past_a_bound_only_when_a_field_is_longer_than_its_own() {
+        let (p, a) = (Some(&b"12345678"[..]), Some(&b"abc"[..]));
+        // No bound for either: whatever the length.
+        assert!(!request_past_bounds(p, a, 0, 0));
+        // A bound that the field fills exactly is not passed; one byte past it is.
+        assert!(!request_past_bounds(p, None, 8, 0));
+        assert!(request_past_bounds(p, None, 7, 0));
+        assert!(!request_past_bounds(None, a, 0, 3));
+        assert!(request_past_bounds(None, a, 0, 2));
+        // The bounds are separate: one field under its own does not excuse the other.
+        assert!(request_past_bounds(p, a, 8, 2));
+        assert!(request_past_bounds(p, a, 7, 3));
+        assert!(!request_past_bounds(p, a, 8, 3));
+        // A field that is absent is never past a bound.
+        assert!(!request_past_bounds(None, None, 1, 1));
+        // A bound of one field does not read the other.
+        assert!(!request_past_bounds(p, a, 0, 3));
+        assert!(!request_past_bounds(p, a, 8, 0));
+    }
+
+    /// A node of this build refuses, or does not, a query of a peer past the build's bound, and
+    /// says so through the counter; the build fixes the bound, so each build runs the arm that
+    /// is its own, and the default build (no bound) runs the other. Either way the query is
+    /// routed, so its final is owed, and a query of the node's own session is never refused.
+    #[test]
+    fn a_query_past_the_builds_bound_runs_nowhere_and_is_counted() {
+        let bound = caps::QUERY_PARAMETERS_MAX_BYTES;
+        let params = std::vec![b'x'; if bound == 0 { 4096 } else { bound + 1 }];
+        let mut reg = QueryableRegistry::new();
+        let runs = Arc::new(Mutex::new(0usize));
+        let seen = runs.clone();
+        reg.register("home/temp", move |_event, _responder| {
+            *seen.lock().unwrap() += 1;
+        });
+
+        let req = request_query_with_parameters(21, "home/temp", &params);
+        let mut replies = ReplyStage::new();
+        let outcome = reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        assert!(outcome.dispatched, "routed either way: its final is owed");
+        if bound == 0 {
+            assert_eq!(outcome.matched, 1);
+            assert_eq!(*runs.lock().unwrap(), 1);
+            assert_eq!(reg.oversize_refusals(), 0);
+        } else {
+            assert_eq!(outcome.matched, 0);
+            assert_eq!(*runs.lock().unwrap(), 0);
+            assert_eq!(reg.oversize_refusals(), 1);
+            // A query at the bound is run.
+            let at_bound = std::vec![b'x'; bound];
+            let req = request_query_with_parameters(22, "home/temp", &at_bound);
+            let outcome = reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+            assert_eq!(outcome.matched, 1);
+            assert_eq!(
+                reg.oversize_refusals(),
+                1,
+                "a query at the bound is not counted"
+            );
+        }
     }
 
     /// A `Request(Query)` carrying a source-info ext (id 0x01 ENC_ZBUF,

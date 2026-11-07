@@ -143,6 +143,16 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         1000000,
     ),
     ("TX_EXPIRY_CLOSE_AFTER", "WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER", 0),
+    (
+        "QUERY_PARAMETERS_MAX_BYTES",
+        "WZ_LIMIT_QUERY_PARAMETERS_MAX_BYTES",
+        0,
+    ),
+    (
+        "QUERY_ATTACHMENT_MAX_BYTES",
+        "WZ_LIMIT_QUERY_ATTACHMENT_MAX_BYTES",
+        0,
+    ),
     ("HANDSHAKE_INIT_MS", "WZ_LIMIT_HANDSHAKE_INIT_MS", 2000),
     ("HANDSHAKE_OPEN_MS", "WZ_LIMIT_HANDSHAKE_OPEN_MS", 2000),
     (

@@ -61,6 +61,10 @@ pub(super) const TX_NO_PROGRESS_WINDOW_US: usize =
     limit(option_env!("WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US"), 1000000);
 pub(super) const TX_EXPIRY_CLOSE_AFTER: usize =
     limit(option_env!("WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER"), 0);
+pub(super) const QUERY_PARAMETERS_MAX_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_QUERY_PARAMETERS_MAX_BYTES"), 0);
+pub(super) const QUERY_ATTACHMENT_MAX_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_QUERY_ATTACHMENT_MAX_BYTES"), 0);
 pub(super) const HANDSHAKE_INIT_MS: usize = limit(option_env!("WZ_LIMIT_HANDSHAKE_INIT_MS"), 2000);
 pub(super) const HANDSHAKE_OPEN_MS: usize = limit(option_env!("WZ_LIMIT_HANDSHAKE_OPEN_MS"), 2000);
 pub(super) const HANDSHAKE_COOKIE_BYTES: usize =
