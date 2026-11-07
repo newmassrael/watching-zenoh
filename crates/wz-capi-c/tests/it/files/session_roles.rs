@@ -350,7 +350,7 @@ fn a_node_counts_the_messages_its_faces_received_for_a_snapshot() {
     use wz_capi_c::snapshot::{
         wz_capi_c_snapshot_poll, wz_capi_c_snapshot_read, wz_capi_c_snapshot_size,
     };
-    use wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS;
+    use wz_session_core::caps::{SNAPSHOT_HISTOGRAM_BUCKETS, SNAPSHOT_PERIOD_MS};
     use wz_session_core::resource_snapshot::Snapshot;
 
     let port = free_port();
@@ -376,20 +376,45 @@ fn a_node_counts_the_messages_its_faces_received_for_a_snapshot() {
             1,
             "the first poll of a node takes a snapshot"
         );
-        let mut bytes = vec![0u8; wz_capi_c_snapshot_size()];
-        let mut length = 0usize;
-        assert_eq!(
-            wz_capi_c_snapshot_read(bytes.as_mut_ptr(), bytes.len(), &mut length),
-            Z_OK
-        );
-        let snapshot = Snapshot::<SNAPSHOT_HISTOGRAM_BUCKETS>::from_bytes(&bytes[..length])
-            .expect("the record decodes");
+        let read_latest = || {
+            let mut bytes = vec![0u8; wz_capi_c_snapshot_size()];
+            let mut length = 0usize;
+            assert_eq!(
+                wz_capi_c_snapshot_read(bytes.as_mut_ptr(), bytes.len(), &mut length),
+                Z_OK
+            );
+            Snapshot::<SNAPSHOT_HISTOGRAM_BUCKETS>::from_bytes(&bytes[..length])
+                .expect("the record decodes")
+        };
+        let snapshot = read_latest();
         assert!(
             snapshot.messages >= 2,
             "the node's face received the dialler's handshake and the snapshot counted it: \
              {snapshot:?}"
         );
+
+        // The face goes. What it received was counted and stays counted: the router keeps a
+        // ledger of the faces that are gone, and a count that fell when its face went would read
+        // as a node that received fewer messages than it had. No door of the node says when the
+        // face is gone (the peers enumeration is a registry's), so three snapshots follow the
+        // close, a period apart, and the node's own face loop has long dealt with it by the first.
         close_session(dialler);
+        let mut before = snapshot.messages;
+        for round in 1..=3 {
+            std::thread::sleep(Duration::from_millis(SNAPSHOT_PERIOD_MS as u64 + 100));
+            assert_eq!(
+                wz_capi_c_snapshot_poll(z_session_loan(&node)),
+                1,
+                "a period after the last, a poll takes a snapshot (round {round})"
+            );
+            let after = read_latest().messages;
+            assert!(
+                after >= before,
+                "the messages a node counted fell from {before} to {after} after the face that \
+                 sent them went (round {round})"
+            );
+            before = after;
+        }
         close_session(node);
     }
 }
