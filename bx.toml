@@ -204,6 +204,30 @@ run = "bash scripts/regen-codegen.sh"
 inputs = ["**"]
 outputs = ["out/**"]
 
+# THE LEDGER ROUND A COMMIT CARRIES (`scripts/file-round.sh`): a descriptor under
+# `docs/rounds/pending/` is the round's prose and impact ids without its number; the action takes the
+# number the store gives it on the candidate (last round + 1), files the round and deletes the
+# descriptor. A candidate with no descriptor changes nothing. This is what a queue integrator runs
+# after it cherry-picks an item onto the remote tip (`bx --land`, bx RFC 0024), because the number
+# is a fact of the tree it lands on and not of the commit. `scripts/land.sh` files the same
+# descriptors through the same script, so there is one way to file a round.
+#
+# The inputs are listed here, unlike `regen-codegen`'s, because what a filing reads is small and
+# known: the descriptors, the store, the workspace declaration and the scripts. A missed input is
+# not silent: the run is judged by what it writes, and a read outside this list is what
+# `bx --action file-round --trace` names.
+[actions.file-round]
+run = "bash scripts/file-round.sh"
+inputs = [
+    "docs/rounds/pending/**",
+    "docs/.atomic/**",
+    "mnemosyne.toml",
+    "scripts/file-round.sh",
+    "scripts/append-round.sh",
+    "scripts/lib/**",
+]
+outputs = ["docs/.atomic/**", "docs/rounds/pending/**"]
+
 # THE WHOLE GATE AS A SET OF CHECKS the fleet judges unit by unit (bx RFC 0004): `bx --checks ci`.
 # A unit is one lane of `scripts/run-ci.sh`, run the way a hosted job runs it; the planner reads the
 # lanes from the script's dispatch table and its header says why each field of a unit is what it is

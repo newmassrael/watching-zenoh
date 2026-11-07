@@ -4125,8 +4125,23 @@ layer_c0i_impact_ref_gate() {
         return 1
     fi
 
+    # A ROUND CARRIED AS A DESCRIPTOR (`scripts/file-round.sh`, the script the queue
+    # integrator's `file-round` action runs). The descriptor's reader refuses every
+    # malformed form (its own selftest), and the script refuses a file that is not
+    # there rather than reporting a round it never read. --check throughout: nothing
+    # is filed.
+    if ! python3 -I scripts/lib/round_descriptor.py --selftest >/dev/null; then
+        echo "  Layer C0i FAIL: scripts/lib/round_descriptor.py --selftest failed" >&2
+        return 1
+    fi
+    if bash scripts/file-round.sh --check docs/rounds/pending/no-such-round.toml >/dev/null 2>&1; then
+        echo "  Layer C0i FAIL: file-round --check ACCEPTED a descriptor that is not a file" >&2
+        return 1
+    fi
+
     echo "  impact-ref gate: OK (accepts a real section id, refuses Round 1811's" \
-        "own '5.4-session' and an absent --impact)"
+        "own '5.4-session' and an absent --impact; the round descriptor reader" \
+        "passes its selftest and file-round refuses a missing descriptor)"
     return 0
 }
 

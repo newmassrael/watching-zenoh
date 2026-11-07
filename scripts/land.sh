@@ -43,6 +43,10 @@
 #   bash scripts/land.sh --ack-red <run-id>       # WZ_ACK_RED for this push only
 #   bash scripts/land.sh -- --decision-file d --changes-file c \
 #       --verification-file v --carry-file k --impact <id>[,<id>...]
+#   bash scripts/land.sh                          # a round committed as a descriptor
+#                                                 # (docs/rounds/pending/*.toml) is filed
+#                                                 # by scripts/file-round.sh, the script a
+#                                                 # queue integrator's action runs too
 #   bash scripts/land.sh --status                 # who holds the lock
 #
 # The arguments after `--` are `scripts/append-round.sh`'s own, without
@@ -99,8 +103,15 @@ while [[ $# -gt 0 ]]; do
         ;;
     esac
 done
-if [[ -n "$want_round" && ${#ledger_args[@]} -eq 0 ]]; then
-    echo "land: --round names the ledger round, so ledger arguments must follow --" >&2
+shopt -s nullglob
+pending_descriptors=(docs/rounds/pending/*.toml)
+shopt -u nullglob
+if [[ ${#ledger_args[@]} -gt 0 && ${#pending_descriptors[@]} -gt 0 ]]; then
+    echo "land: the tree holds a round descriptor (docs/rounds/pending), so ledger arguments after -- would file a second round" >&2
+    exit 2
+fi
+if [[ -n "$want_round" && ${#ledger_args[@]} -eq 0 && ${#pending_descriptors[@]} -eq 0 ]]; then
+    echo "land: --round names the ledger round, so ledger arguments or a descriptor must exist" >&2
     exit 2
 fi
 for a in "${ledger_args[@]+"${ledger_args[@]}"}"; do
@@ -127,13 +138,12 @@ token="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 printf '%s pid=%s tree=%s since=%s\n' "$token" "$$" "$repo_root" "$(date -u +%FT%TZ)" >"$owner"
 trap ': >"$owner"' EXIT
 
-# The highest `Round N` the store holds. The store is read after the rebase, so
+# The highest `Round N` the store holds (`scripts/lib/ledger-round.sh`, which
+# `scripts/file-round.sh` reads the same way). The store is read after the rebase, so
 # this is origin's ledger plus nothing: every unpushed round is this push's own.
-last_round() {
-    mnemosyne-cli query --list-changelog \
-        | sed -n 's/^Round \([0-9][0-9]*\)$/\1/p' \
-        | sort -n | tail -n 1
-}
+# shellcheck source=scripts/lib/ledger-round.sh
+source "$repo_root/scripts/lib/ledger-round.sh"
+last_round() { wz_last_round; }
 
 attempt=1
 while :; do
@@ -145,7 +155,12 @@ while :; do
     fi
 
     filed=0
-    if [[ ${#ledger_args[@]} -gt 0 ]]; then
+    # The rounds the commits of the batch carry as descriptors, read after the rebase because
+    # the rebase is what brings in or drops them (`scripts/file-round.sh`).
+    shopt -s nullglob
+    descriptors=(docs/rounds/pending/*.toml)
+    shopt -u nullglob
+    if [[ ${#ledger_args[@]} -gt 0 || ${#descriptors[@]} -gt 0 ]]; then
         last="$(last_round)"
         [[ -n "$last" ]] || { echo "land: the store lists no ledger round" >&2; exit 1; }
         round=$((last + 1))
@@ -153,7 +168,6 @@ while :; do
             echo "land: the next round is $round, not $want_round; renumber the batch" >&2
             exit 5
         fi
-        echo "land: filing ledger round $round"
         # What the tree already differs from the index by is not the append's: a submodule whose
         # checkout sits at another commit than the one recorded, or a file another session is
         # editing in this tree, shows in `git diff` before the append writes anything. Rounds
@@ -161,7 +175,21 @@ while :; do
         # recorded SCE pin three times in a row. Only the paths the append itself changed are
         # the round's.
         before="$(git diff --name-only)"
-        bash scripts/append-round.sh --entry-id "Round $round" "${ledger_args[@]}"
+        if [[ ${#descriptors[@]} -gt 0 ]]; then
+            # The same script the queue integrator's action runs, so a round is filed one way.
+            echo "land: filing ${#descriptors[@]} descriptor round(s) from round $round"
+            bash scripts/file-round.sh
+            last_filed=$((round + ${#descriptors[@]} - 1))
+            if [[ ${#descriptors[@]} -eq 1 ]]; then
+                subject="docs: File ledger round $round"
+            else
+                subject="docs: File ledger rounds $round to $last_filed"
+            fi
+        else
+            echo "land: filing ledger round $round"
+            bash scripts/append-round.sh --entry-id "Round $round" "${ledger_args[@]}"
+            subject="docs: File ledger round $round"
+        fi
         changed=()
         while IFS= read -r path; do
             [[ -n "$path" ]] || continue
@@ -171,7 +199,7 @@ while :; do
             changed+=("$path")
         done < <(git diff --name-only)
         [[ ${#changed[@]} -gt 0 ]] || { echo "land: the append changed no file" >&2; exit 1; }
-        printf 'docs: File ledger round %s\n' "$round" | git commit -q -F - -- "${changed[@]}"
+        printf '%s\n' "$subject" | git commit -q -F - -- "${changed[@]}"
         filed=1
     fi
 
