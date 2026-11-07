@@ -86,6 +86,14 @@ LITERAL: dict[str, tuple[str, ...]] = {
     # print was `Unknown` over its own record (S1). Cut from the crash to the one
     # datagram it needed: a `Frame` whose `Push` carries a `Del` with that
     # timestamp (`SpanCursor::zid` now refuses a zid past sixteen bytes).
+    # `keyexpr_relate` of two patterns with many `**` on both sides took over
+    # ten seconds: the intersection and inclusion tried each `**` both ways and
+    # asked the same pair of suffixes again on every path. Cut from the night's
+    # timeout to its shape, door 3 with `(**/x/)x24 y` against `(**/x/)x24 z`
+    # (the two relations remember the suffix pairs they refuted now).
+    "text": (
+        "AwAqKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC95ACoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94LyoqL3gvKioveC8qKi94L3o=",
+    ),
     "selector_term": (
         "AQQBAAABAQDUw7KhAgAEAAAAAAAAAAAA//8AAAEAAAAAAAAAAAAAAEgAAABIAAAAAAAAAAAAAgAAAAABCABFAAA6AAAAAEARZrEKAAABCgAAAqjKHRcAJgAAJb3B8T9dASJBFFsgIDQ5XSBjb3JwdXMgc2FtcGxl",
     ),

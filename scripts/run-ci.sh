@@ -11582,15 +11582,16 @@ layer_c1k_cargo_test_scouting_static() {
 layer_c1o_keyexpr_gating_behavior() {
     # 9 -> 12, 20 -> 23, 20 -> 23: three tests more in every arm, measured on 2026-10-28. Two of
     # them are the tests of the key facts (`KeyFacts`) that `keyexpr_match` gained; the third was
-    # not attributed to a commit.
-    _runci_guarded_test "C1o keyexpr alloc" 12 \
+    # not attributed to a commit. 12 -> 14, 23 -> 25, 23 -> 25 (2026-11-07): the two tests of the
+    # descent that remembers refuted suffix pairs, which run in every arm.
+    _runci_guarded_test "C1o keyexpr alloc" 14 \
         cargo test -p wz-session-core --no-default-features --features alloc \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr alloc+wildcards" 23 \
+    _runci_guarded_test "C1o keyexpr alloc+wildcards" 25 \
         cargo test -p wz-session-core --no-default-features \
         --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 23 \
+    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 25 \
         cargo test -p wz-session-core --no-default-features \
         --features keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1

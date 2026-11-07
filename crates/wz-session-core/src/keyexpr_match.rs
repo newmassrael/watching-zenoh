@@ -527,16 +527,25 @@ fn chunk_matches_with_dsl(pattern: &str, target: &str) -> bool {
 /// ⇒ YES) for every two-sided `$*` input — both implementations
 /// agree on the answer in this branch.
 ///
-/// The matcher is implemented as a recursive descent with
-/// `**`-backtracking on either side. Worst-case complexity is
-/// `O(|a| * |b|)` when at most one `**` is present per side; with
-/// multiple `**` on both sides the algorithm degrades on
-/// pathological inputs (productive zenoh patterns like
-/// `home/*/temp` vs `*/sensor/temp` stay linear).
+/// The matcher is a descent that tries each `**` both ways and
+/// remembers the suffix pairs it has refuted ([`Refuted`]): whether
+/// `a[i..]` and `b[j..]` intersect depends on nothing else, so a
+/// pair reached again by another path is answered at once. Without
+/// that memory the descent was exponential in the number of `**`
+/// (the nightly fuzzer's `text` target spent over ten seconds on one
+/// pair of 369 bytes); with it each pair a `**` stands at is
+/// expanded once, `O(|a| * |b| * min(|a|, |b|))` at worst. The
+/// descent stops at the first chunk pair that cannot meet, so the
+/// shapes a router asks once a message cost what they did before the
+/// memory. On the fixed backing the memory is held inline, large
+/// enough for two keys the backing splits ([`MAX_KEYEXPR_CHUNKS`]
+/// chunks each); longer sequences handed in directly are no-match,
+/// the refusal every split in this module already makes of a key
+/// deeper than the backing holds.
 ///
 /// Symmetry: `keyexpr_intersect_patterns(a, b) ==
 /// keyexpr_intersect_patterns(b, a)` for every pair (the
-/// recursive cases are written symmetrically; `$*`-both-sides
+/// descent's cases are written symmetrically; `$*`-both-sides
 /// over-approx tests both order combinations).
 pub fn keyexpr_intersect_patterns(a_chunks: &[&str], b_chunks: &[&str]) -> bool {
     intersect_chunks(a_chunks, b_chunks)
@@ -789,41 +798,278 @@ pub fn keyexpr_includes_target(superset: &str, target_chunks: &[&str]) -> bool {
     keyexpr_includes_patterns(&superset_chunks, target_chunks)
 }
 
+/// How many 64-bit words [`Refuted`] holds without the heap: one bit for every
+/// pair of suffixes of two keys as deep as [`MAX_KEYEXPR_CHUNKS`], the empty
+/// suffix included.
+const REFUTED_INLINE_WORDS: usize =
+    ((MAX_KEYEXPR_CHUNKS + 1) * (MAX_KEYEXPR_CHUNKS + 1)).div_ceil(64);
+
+/// The suffix pairs `(a[i..], b[j..])` a descent has found to answer `false`,
+/// one bit for each, so that a pair reached again by another path is not
+/// expanded again. This is the memory of a top-down dynamic programme over the
+/// suffixes, the form of `scripts/lib/wz_keyexpr.py`'s `lru_cache` port.
+///
+/// Only the pairs a `**` stands at are written: every other pair leads to one
+/// pair after it, so the walk from it to the next `**` (or to the answer) is a
+/// loop with no choice in it. The bits are cleared the first time one is
+/// written, which is the first time a `**` refutes one of its two ways: a pair
+/// of keys the descent answers without that pays nothing for the memory.
+#[cfg_attr(not(feature = "keyexpr-wildcard-double"), allow(dead_code))]
+struct Refuted {
+    rows: usize,
+    columns: usize,
+    /// How many words the bits take; written by `clear`.
+    words: usize,
+    cleared: bool,
+    inline: core::mem::MaybeUninit<[u64; REFUTED_INLINE_WORDS]>,
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    spilled: Option<alloc::vec::Vec<u64>>,
+}
+
+// Without `keyexpr-wildcard-double` there is no `**` to refute a way of, so
+// only `fits` and `new` are called.
+#[cfg_attr(not(feature = "keyexpr-wildcard-double"), allow(dead_code))]
+impl Refuted {
+    /// Whether the pairs of `a_len` chunks against `b_len` fit the memory:
+    /// always on the growable backing, whose bits spill to the heap, and within
+    /// the inline words on the fixed one, which two keys the backing splits
+    /// always are.
+    #[inline(always)]
+    fn fits(a_len: usize, b_len: usize) -> bool {
+        let pairs = a_len
+            .checked_add(1)
+            .zip(b_len.checked_add(1))
+            .and_then(|(rows, columns)| rows.checked_mul(columns));
+        #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+        {
+            pairs.is_some_and(|pairs| pairs.div_ceil(64) <= REFUTED_INLINE_WORDS)
+        }
+        #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+        {
+            pairs.is_some()
+        }
+    }
+
+    /// The memory for `a_len` chunks against `b_len` that [`Self::fits`],
+    /// nothing refuted. It is built in the caller's frame (`inline(always)`):
+    /// the value holds the inline words, and a value returned from a call is
+    /// moved into the caller's slot, which is the copy [`KeyChunks::empty`]
+    /// describes.
+    #[inline(always)]
+    fn new(a_len: usize, b_len: usize) -> Self {
+        Self {
+            rows: a_len + 1,
+            columns: b_len + 1,
+            words: 0,
+            cleared: false,
+            inline: core::mem::MaybeUninit::uninit(),
+            #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+            spilled: None,
+        }
+    }
+
+    /// Whether `(i, j)` is refuted.
+    #[inline(always)]
+    fn holds(&self, i: usize, j: usize) -> bool {
+        if !self.cleared {
+            return false;
+        }
+        let at = i * self.columns + j;
+        self.bits()[at / 64] >> (at % 64) & 1 == 1
+    }
+
+    /// Record that `(i, j)` is refuted.
+    #[inline(always)]
+    fn insert(&mut self, i: usize, j: usize) {
+        if !self.cleared {
+            self.clear();
+        }
+        let at = i * self.columns + j;
+        self.bits_mut()[at / 64] |= 1 << (at % 64);
+    }
+
+    fn clear(&mut self) {
+        // No overflow: `fits` checked the product.
+        self.words = (self.rows * self.columns).div_ceil(64);
+        #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+        if self.words > REFUTED_INLINE_WORDS {
+            self.spilled = Some(alloc::vec![0; self.words]);
+            self.cleared = true;
+            return;
+        }
+        // SAFETY: `words <= REFUTED_INLINE_WORDS` here (on the fixed backing
+        // `fits` admits no more, and the growable one took the vector above),
+        // so the first `words` words are inside the array.
+        unsafe {
+            self.inline
+                .as_mut_ptr()
+                .cast::<u64>()
+                .write_bytes(0, self.words);
+        }
+        self.cleared = true;
+    }
+
+    fn bits(&self) -> &[u64] {
+        #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+        if let Some(spilled) = &self.spilled {
+            return spilled;
+        }
+        // SAFETY: called only once `clear` has written the first `words` words,
+        // which are inside the array (see `clear`).
+        unsafe { core::slice::from_raw_parts(self.inline.as_ptr().cast::<u64>(), self.words) }
+    }
+
+    fn bits_mut(&mut self) -> &mut [u64] {
+        #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+        if let Some(spilled) = &mut self.spilled {
+            return spilled;
+        }
+        // SAFETY: as in `bits`.
+        unsafe {
+            core::slice::from_raw_parts_mut(self.inline.as_mut_ptr().cast::<u64>(), self.words)
+        }
+    }
+}
+
+/// One question of [`intersect_chunks`] or [`includes_chunks`]: the two
+/// sequences and the pairs of their suffixes refuted so far. The descents are
+/// its methods, so a step of them passes the two indices and this one
+/// reference, where passing both sequences and the memory took more arguments
+/// than the registers that carry them.
+#[cfg_attr(not(feature = "keyexpr-wildcard-double"), allow(dead_code))]
+struct Descent<'s, 'c> {
+    a: &'s [&'c str],
+    b: &'s [&'c str],
+    refuted: Refuted,
+}
+
 fn intersect_chunks(a: &[&str], b: &[&str]) -> bool {
-    match (a.first(), b.first()) {
-        (None, None) => true,
-        #[cfg(feature = "keyexpr-wildcard-double")]
-        (Some(&"**"), _) => {
-            // ** on a-side consumes 0+ chunks from b-side. Try 0
-            // consumed (advance a past **) first, then 1+ (advance
-            // b by one, keep a's ** for further consumption).
-            if intersect_chunks(&a[1..], b) {
-                return true;
-            }
-            // R311y543 — `**` does not cross a verbatim chunk, so the
-            // consume-one-more step is unavailable when b's next chunk is one.
-            // Zero-consumption above is unaffected: `**` may still END before an
-            // `@` chunk that the rest of `a` then matches byte-equally.
-            match b.first() {
-                None => false,
-                Some(next) if is_verbatim_chunk(next) => false,
-                Some(_) => intersect_chunks(a, &b[1..]),
+    if !Refuted::fits(a.len(), b.len()) {
+        return false;
+    }
+    Descent {
+        a,
+        b,
+        refuted: Refuted::new(a.len(), b.len()),
+    }
+    .intersect_from(0, 0)
+}
+
+#[cfg(feature = "keyexpr-includes")]
+fn includes_chunks(a: &[&str], b: &[&str]) -> bool {
+    if !Refuted::fits(a.len(), b.len()) {
+        return false;
+    }
+    Descent {
+        a,
+        b,
+        refuted: Refuted::new(a.len(), b.len()),
+    }
+    .includes_from(0, 0)
+}
+
+impl Descent<'_, '_> {
+    /// Whether `a[i..]` and `b[j..]` share a key.
+    ///
+    /// * Both sides exhausted: they share the empty remainder.
+    /// * `a[i]` is `**`: it stops here (`(i + 1, j)`), or it takes `b[j]` and
+    ///   stays (`(i, j + 1)`). R311y543 — `**` does not cross a verbatim chunk,
+    ///   so it cannot take one; it may still stop before an `@` chunk that the
+    ///   rest of `a` then meets byte-equally.
+    /// * `b[j]` is `**`: the same with the sides exchanged, because
+    ///   intersection is symmetric. `a[i]` is tried first when both are `**`;
+    ///   either order gives the same answer.
+    /// * One side exhausted while the other has a chunk that is not `**`: no.
+    /// * Otherwise the two chunks must meet, and the walk goes on to the next
+    ///   pair without a call.
+    ///
+    /// With `keyexpr-wildcard-double` off `**` is a literal chunk and takes the
+    /// last arm, and nothing is refuted.
+    fn intersect_from(&mut self, mut i: usize, mut j: usize) -> bool {
+        loop {
+            match (self.a.get(i).copied(), self.b.get(j).copied()) {
+                (None, None) => return true,
+                #[cfg(feature = "keyexpr-wildcard-double")]
+                (Some("**"), next) => {
+                    if self.refuted.holds(i, j) {
+                        return false;
+                    }
+                    let met = self.intersect_from(i + 1, j)
+                        || (next.is_some_and(|c| !is_verbatim_chunk(c))
+                            && self.intersect_from(i, j + 1));
+                    if !met {
+                        self.refuted.insert(i, j);
+                    }
+                    return met;
+                }
+                #[cfg(feature = "keyexpr-wildcard-double")]
+                (next, Some("**")) => {
+                    if self.refuted.holds(i, j) {
+                        return false;
+                    }
+                    let met = self.intersect_from(i, j + 1)
+                        || (next.is_some_and(|c| !is_verbatim_chunk(c))
+                            && self.intersect_from(i + 1, j));
+                    if !met {
+                        self.refuted.insert(i, j);
+                    }
+                    return met;
+                }
+                (None, _) | (_, None) => return false,
+                (Some(x), Some(y)) => {
+                    if !chunk_intersects(x, y) {
+                        return false;
+                    }
+                    i += 1;
+                    j += 1;
+                }
             }
         }
-        #[cfg(feature = "keyexpr-wildcard-double")]
-        (_, Some(&"**")) => intersect_chunks(b, a),
-        (None, _) | (_, None) => {
-            // One side exhausted while the other still has chunks
-            // (none of which can be `**` — that case is handled
-            // above when the feature is on; off, `**` is a literal
-            // chunk and falls to the `(Some, Some)` arm). Mismatch.
-            false
-        }
-        (Some(ap), Some(bp)) => {
-            if !chunk_intersects(ap, bp) {
-                return false;
+    }
+
+    /// Whether `a[i..]` covers every key `b[j..]` covers, by the descent of
+    /// [`Self::intersect_from`] with the same memory.
+    ///
+    /// * Both sides exhausted: yes.
+    /// * `a[i]` is `**`: it covers none of `b` from here on (`(i + 1, j)`), or
+    ///   it covers `b[j]` and stays (`(i, j + 1)`). A `**` of `a` also covers a
+    ///   `**` of `b`. R311y543 — the same verbatim stop as the intersection: it
+    ///   cannot cover an `@` chunk of `b`'s.
+    /// * `b[j]` is `**` and `a[i]` is not: a chunk that is not `**` cannot
+    ///   cover arbitrarily many of `b`'s. This is where inclusion is not
+    ///   symmetric.
+    /// * One side exhausted while the other is not: no.
+    /// * Otherwise `a[i]` must cover `b[j]`, and the walk goes on to the next
+    ///   pair.
+    #[cfg(feature = "keyexpr-includes")]
+    fn includes_from(&mut self, mut i: usize, mut j: usize) -> bool {
+        loop {
+            match (self.a.get(i).copied(), self.b.get(j).copied()) {
+                (None, None) => return true,
+                #[cfg(feature = "keyexpr-wildcard-double")]
+                (Some("**"), next) => {
+                    if self.refuted.holds(i, j) {
+                        return false;
+                    }
+                    let met = self.includes_from(i + 1, j)
+                        || (next.is_some_and(|c| !is_verbatim_chunk(c))
+                            && self.includes_from(i, j + 1));
+                    if !met {
+                        self.refuted.insert(i, j);
+                    }
+                    return met;
+                }
+                #[cfg(feature = "keyexpr-wildcard-double")]
+                (_, Some("**")) => return false,
+                (None, _) | (_, None) => return false,
+                (Some(x), Some(y)) => {
+                    if !chunk_includes(x, y) {
+                        return false;
+                    }
+                    i += 1;
+                    j += 1;
+                }
             }
-            intersect_chunks(&a[1..], &b[1..])
         }
     }
 }
@@ -932,46 +1178,8 @@ pub fn keyexpr_includes_patterns(a_chunks: &[&str], b_chunks: &[&str]) -> bool {
     includes_chunks(a_chunks, b_chunks)
 }
 
-#[cfg(feature = "keyexpr-includes")]
-fn includes_chunks(a: &[&str], b: &[&str]) -> bool {
-    match (a.first(), b.first()) {
-        (None, None) => true,
-        #[cfg(feature = "keyexpr-wildcard-double")]
-        (Some(&"**"), _) => {
-            // a's ** can cover 0+ of b's chunks. Try consuming 0
-            // (advance a past **), then 1+ (advance b by one, keep
-            // a's ** to cover more). a `**` also includes b `**`.
-            if includes_chunks(&a[1..], b) {
-                return true;
-            }
-            // R311y543 — same verbatim stop as `intersect_chunks`: a's `**`
-            // cannot cover an `@` chunk of b's.
-            match b.first() {
-                None => false,
-                Some(next) if is_verbatim_chunk(next) => false,
-                Some(_) => includes_chunks(a, &b[1..]),
-            }
-        }
-        #[cfg(feature = "keyexpr-wildcard-double")]
-        (_, Some(&"**")) => {
-            // b has `**` but a does not start with `**` (handled
-            // above): a's single non-`**` chunk cannot cover b's
-            // arbitrarily-many chunks. Asymmetric vs intersect.
-            false
-        }
-        (None, _) | (_, None) => false,
-        (Some(ap), Some(bp)) => {
-            if !chunk_includes(ap, bp) {
-                return false;
-            }
-            includes_chunks(&a[1..], &b[1..])
-        }
-    }
-}
-
 /// Single-chunk directional inclusion (`a ⊇ b`, neither chunk is
-/// `**` — that is resolved at the [`includes_chunks`] recursion
-/// level). With both wildcard toggles off this reduces to chunk
+/// `**` — that is resolved by [`Descent::includes_from`]). With both wildcard toggles off this reduces to chunk
 /// equality.
 #[cfg(feature = "keyexpr-includes")]
 fn chunk_includes(a: &str, b: &str) -> bool {
@@ -1267,6 +1475,136 @@ mod tests {
             keyexpr_intersects_target("", &[]),
             keyexpr_intersect_patterns(&KeyChunks::split("").expect("one chunk"), &[])
         );
+    }
+
+    /// The descent `intersect_chunks` was before it remembered refuted pairs,
+    /// kept as the reference the memory is held to. It is exponential in the
+    /// number of `**`, so it is asked only of short sequences.
+    fn intersect_by_descent(a: &[&str], b: &[&str]) -> bool {
+        match (a.first(), b.first()) {
+            (None, None) => true,
+            #[cfg(feature = "keyexpr-wildcard-double")]
+            (Some(&"**"), _) => {
+                intersect_by_descent(&a[1..], b)
+                    || match b.first() {
+                        None => false,
+                        Some(next) if is_verbatim_chunk(next) => false,
+                        Some(_) => intersect_by_descent(a, &b[1..]),
+                    }
+            }
+            #[cfg(feature = "keyexpr-wildcard-double")]
+            (_, Some(&"**")) => intersect_by_descent(b, a),
+            (None, _) | (_, None) => false,
+            (Some(ap), Some(bp)) => {
+                chunk_intersects(ap, bp) && intersect_by_descent(&a[1..], &b[1..])
+            }
+        }
+    }
+
+    /// The descent `includes_chunks` was before it remembered refuted pairs.
+    #[cfg(feature = "keyexpr-includes")]
+    fn includes_by_descent(a: &[&str], b: &[&str]) -> bool {
+        match (a.first(), b.first()) {
+            (None, None) => true,
+            #[cfg(feature = "keyexpr-wildcard-double")]
+            (Some(&"**"), _) => {
+                includes_by_descent(&a[1..], b)
+                    || match b.first() {
+                        None => false,
+                        Some(next) if is_verbatim_chunk(next) => false,
+                        Some(_) => includes_by_descent(a, &b[1..]),
+                    }
+            }
+            #[cfg(feature = "keyexpr-wildcard-double")]
+            (_, Some(&"**")) => false,
+            (None, _) | (_, None) => false,
+            (Some(ap), Some(bp)) => chunk_includes(ap, bp) && includes_by_descent(&a[1..], &b[1..]),
+        }
+    }
+
+    /// The chunks every kind of arm reads: two literals, `*`, `**`, a verbatim
+    /// chunk and `$*` at either end of a chunk.
+    const TABLE_ALPHABET: [&str; 7] = ["a", "b", "*", "**", "@v", "a$*", "$*b"];
+
+    /// The `index`-th sequence of at most three chunks of [`TABLE_ALPHABET`],
+    /// counting the empty one first: held in a fixed array, because the test
+    /// runs where there is no allocator too.
+    fn table_sequence(mut index: usize) -> ([&'static str; 3], usize) {
+        let mut chunks = [""; 3];
+        let mut len = 0;
+        let mut count = 1;
+        while index >= count && len < 3 {
+            index -= count;
+            len += 1;
+            count *= TABLE_ALPHABET.len();
+        }
+        for slot in chunks[..len].iter_mut() {
+            *slot = TABLE_ALPHABET[index % TABLE_ALPHABET.len()];
+            index /= TABLE_ALPHABET.len();
+        }
+        (chunks, len)
+    }
+
+    /// The descent that remembers refuted pairs answers what the descent
+    /// without that memory answered, for every pair of sequences of at most
+    /// three chunks over every kind of chunk (two `**` on a side reach a pair
+    /// twice, which is what the memory answers from).
+    #[test]
+    fn the_remembering_descent_answers_what_the_plain_descent_answered() {
+        let sequences = 1 + 7 + 7 * 7 + 7 * 7 * 7;
+        for x in 0..sequences {
+            let (a, a_len) = table_sequence(x);
+            let a = &a[..a_len];
+            for y in 0..sequences {
+                let (b, b_len) = table_sequence(y);
+                let b = &b[..b_len];
+                assert_eq!(
+                    keyexpr_intersect_patterns(a, b),
+                    intersect_by_descent(a, b),
+                    "intersect {a:?} {b:?}"
+                );
+                #[cfg(feature = "keyexpr-includes")]
+                assert_eq!(
+                    keyexpr_includes_patterns(a, b),
+                    includes_by_descent(a, b),
+                    "includes {a:?} {b:?}"
+                );
+            }
+        }
+        assert_eq!(
+            table_sequence(sequences - 1).1,
+            3,
+            "the count reaches length three"
+        );
+    }
+
+    /// Two patterns of fifteen `**/x` pairs and a last chunk, as deep as the
+    /// fixed backing splits, that end in different chunks share no key, and
+    /// the descent tried each `**` both ways: about 2^30 paths before it could
+    /// say so (the nightly fuzzer's `text` target found a pair of this shape
+    /// taking over ten seconds). With the memory each of the 32 x 32 pairs is
+    /// expanded at most once. A regression shows as this test not finishing.
+    #[test]
+    fn many_double_stars_on_both_sides_are_answered_in_polynomial_time() {
+        const PAIRS: usize = (MAX_KEYEXPR_CHUNKS - 1) / 2;
+        const LAST: usize = 2 * PAIRS;
+        let mut a = ["x"; LAST + 1];
+        let mut b = ["x"; LAST + 1];
+        for pair in 0..PAIRS {
+            a[2 * pair] = "**";
+            b[2 * pair] = "**";
+        }
+        a[LAST] = "y";
+        b[LAST] = "z";
+        assert!(!keyexpr_intersect_patterns(&a, &b));
+        b[LAST] = "y";
+        assert!(keyexpr_intersect_patterns(&a, &b));
+        #[cfg(feature = "keyexpr-includes")]
+        {
+            assert!(keyexpr_includes_patterns(&a, &b));
+            b[LAST] = "z";
+            assert!(!keyexpr_includes_patterns(&a, &b));
+        }
     }
 
     #[test]
@@ -1579,5 +1917,143 @@ mod tests {
         let target: [&str; MAX_KEYEXPR_CHUNKS + 1] = ["a"; MAX_KEYEXPR_CHUNKS + 1];
         // AP backing grows past the bound -> the deep candidate still matches.
         assert!(keyexpr_intersects_target(deep, &target));
+    }
+
+    /// The shapes a router asks of the matchers once a message: a declaration
+    /// with a wildcard against the message's key, split once, matching and not.
+    /// Each pair is (declaration, key, intersects, includes).
+    #[cfg(all(
+        feature = "keyexpr-wildcard-single",
+        feature = "keyexpr-wildcard-double",
+        feature = "keyexpr-dollar-star",
+        feature = "keyexpr-includes"
+    ))]
+    const ROUTER_SHAPES: [(&str, &str, bool, bool); 10] = [
+        ("home/**", "home/kitchen/temp", true, true),
+        ("home/*/temp", "home/kitchen/temp", true, true),
+        ("**/temp", "home/kitchen/temp", true, true),
+        ("home/kitchen/*", "home/garage/temp", false, false),
+        ("home/**", "office/desk/lamp", false, false),
+        ("demo/**/pose", "demo/robot/arm/joint/pose", true, true),
+        ("a/**/b/**/c", "a/x/b/y/z/c", true, true),
+        ("a/**/b/**/c", "a/x/b/y/z/d", false, false),
+        (
+            "@/5a1c0ffee001/**",
+            "@/5a1c0ffee001/peer/status/connect",
+            true,
+            true,
+        ),
+        ("robot/$*arm/**", "robot/leftarm/joint/0", true, true),
+    ];
+
+    /// Instrument, not a gate: the time and the answers of the per-message
+    /// matchers over [`ROUTER_SHAPES`], each asked `WZ_KEYEXPR_ROUNDS` times
+    /// (default 2,000,000). Read the instructions per run with `perf stat`
+    /// beside the time, because time moves with code layout between builds.
+    #[cfg(all(
+        feature = "keyexpr-wildcard-single",
+        feature = "keyexpr-wildcard-double",
+        feature = "keyexpr-dollar-star",
+        feature = "keyexpr-includes"
+    ))]
+    #[test]
+    #[ignore = "instrument: run with --ignored --nocapture"]
+    fn the_matchers_measured_on_the_shapes_a_router_meets() {
+        use std::hint::black_box;
+        let rounds: usize = std::env::var("WZ_KEYEXPR_ROUNDS")
+            .ok()
+            .and_then(|r| r.parse().ok())
+            .unwrap_or(2_000_000);
+        let mut keys: [KeyChunks<'static>; ROUTER_SHAPES.len()] =
+            core::array::from_fn(|_| KeyChunks::empty());
+        for (slot, (_, key, _, _)) in keys.iter_mut().zip(ROUTER_SHAPES.iter()) {
+            assert!(slot.split_into(key));
+        }
+        for ((declaration, key, intersects, includes), chunks) in
+            ROUTER_SHAPES.iter().zip(keys.iter())
+        {
+            assert_eq!(
+                keyexpr_intersects_target(declaration, chunks),
+                *intersects,
+                "intersects {declaration:?} {key:?}"
+            );
+            assert_eq!(
+                keyexpr_includes_target(declaration, chunks),
+                *includes,
+                "includes {declaration:?} {key:?}"
+            );
+        }
+        let started = std::time::Instant::now();
+        let mut met = 0usize;
+        for _ in 0..rounds {
+            for ((declaration, _, _, _), chunks) in ROUTER_SHAPES.iter().zip(keys.iter()) {
+                met += usize::from(keyexpr_intersects_target(
+                    black_box(declaration),
+                    black_box(chunks),
+                ));
+                met += usize::from(keyexpr_includes_target(
+                    black_box(declaration),
+                    black_box(chunks),
+                ));
+            }
+        }
+        let calls = rounds * ROUTER_SHAPES.len() * 2;
+        let elapsed = started.elapsed();
+        std::println!(
+            "keyexpr_matchers rounds={rounds} calls={calls} met={met} ns_per_call={:.2}",
+            elapsed.as_nanos() as f64 / calls as f64
+        );
+
+        // The two relations against the descent without memory they replaced,
+        // in one process over the same split chunks. The blocks alternate which
+        // goes first, so a change of load on a shared host falls on both.
+        let mut patterns: [KeyChunks<'static>; ROUTER_SHAPES.len()] =
+            core::array::from_fn(|_| KeyChunks::empty());
+        for (slot, (declaration, _, _, _)) in patterns.iter_mut().zip(ROUTER_SHAPES.iter()) {
+            assert!(slot.split_into(declaration));
+        }
+        type Relations = [fn(&[&str], &[&str]) -> bool; 2];
+        let remembering: Relations = [keyexpr_intersect_patterns, keyexpr_includes_patterns];
+        let plain: Relations = [intersect_by_descent, includes_by_descent];
+        let time = |relations: &Relations, count: usize| {
+            let started = std::time::Instant::now();
+            let mut met = 0usize;
+            for _ in 0..count {
+                for (pattern, key) in patterns.iter().zip(keys.iter()) {
+                    for relation in relations {
+                        met += usize::from(black_box(*relation)(
+                            black_box(&pattern[..]),
+                            black_box(&key[..]),
+                        ));
+                    }
+                }
+            }
+            (started.elapsed().as_nanos(), met)
+        };
+        const BLOCKS: usize = 10;
+        let per_block = (rounds / BLOCKS).max(1);
+        let (mut remembering_ns, mut plain_ns) = (0u128, 0u128);
+        let (mut remembering_met, mut plain_met) = (0usize, 0usize);
+        for block in 0..BLOCKS {
+            for remember_first in [block % 2 == 0, block % 2 == 1] {
+                if remember_first {
+                    let (ns, met) = time(&remembering, per_block);
+                    remembering_ns += ns;
+                    remembering_met += met;
+                } else {
+                    let (ns, met) = time(&plain, per_block);
+                    plain_ns += ns;
+                    plain_met += met;
+                }
+            }
+        }
+        assert_eq!(remembering_met, plain_met, "the two descents disagree");
+        let relation_calls = (BLOCKS * per_block * ROUTER_SHAPES.len() * 2) as f64;
+        std::println!(
+            "keyexpr_relations calls={relation_calls} remembering_ns_per_call={:.2} \
+             plain_ns_per_call={:.2}",
+            remembering_ns as f64 / relation_calls,
+            plain_ns as f64 / relation_calls
+        );
     }
 }
