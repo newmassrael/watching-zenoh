@@ -80,7 +80,7 @@ there — it builds.
 ## The population, derived twice and required to agree
 
 Each oracle's build is selected by an environment variable, and the pairing is
-structural in `build-zenohd.sh`: the `INSTALL_DIR="$ROOT/target/…"` assignment
+structural in `build-zenohd.sh`: the `INSTALL_DIR="$WZ_ARTIFACTS/target/…"` assignment
 that follows an `if/elif [[ "${ZENOHD_X:-0}" -eq 1 ]]; then` line belongs to
 that variable, and the one that follows no such line is the DEFAULT oracle,
 built with no variant variable at all. That derivation is run here and its
@@ -107,7 +107,7 @@ import oracle_pin_gate as g  # noqa: E402
 #: An `if`/`elif` line selecting a variant, capturing its environment variable.
 GUARD_RE = re.compile(r'^\s*(?:el)?if\s+\[\[\s*"\$\{(ZENOHD_[A-Z0-9_]+):-0\}"\s*-eq\s*1\s*\]\]')
 #: An install-directory assignment, capturing the `target/…` path.
-INSTALL_RE = re.compile(r'^\s*INSTALL_DIR="\$ROOT/(target/[^"]+)"')
+INSTALL_RE = re.compile(r'^\s*INSTALL_DIR="\$(?:WZ_ARTIFACTS|\{WZ_ARTIFACTS\})/(target/[^"]+)"')
 
 
 def variant_envs(script_text: str) -> dict[str, str | None]:
@@ -177,11 +177,11 @@ def resolve(script_text: str) -> dict[str, str | None]:
 def _fixture(variants: list[str], with_default: bool = True) -> str:
     lines = ['ZENOHD_VERSION="${ZENOHD_VERSION:-9.9.9}"', ""]
     if with_default:
-        lines.append('INSTALL_DIR="$ROOT/target/zenohd"')
+        lines.append('INSTALL_DIR="$WZ_ARTIFACTS/target/zenohd"')
     for i, name in enumerate(variants):
         keyword = "if" if i == 0 else "elif"
         lines.append('%s [[ "${ZENOHD_%s:-0}" -eq 1 ]]; then' % (keyword, name))
-        lines.append('    INSTALL_DIR="$ROOT/target/zenohd-%s"' % name.lower())
+        lines.append('    INSTALL_DIR="$WZ_ARTIFACTS/target/zenohd-%s"' % name.lower())
     if variants:
         lines.append("fi")
     return "\n".join(lines) + "\n"
@@ -248,7 +248,7 @@ def selftest() -> int:
     # does; the repairer must refuse rather than fix a set nobody grades.
     saved = g.INSTALL_DIR_RE
     try:
-        g.INSTALL_DIR_RE = re.compile(r'^\s*INSTALL_DIR="\$ROOT/(target/zenohd)"', re.M)
+        g.INSTALL_DIR_RE = re.compile(r'^\s*INSTALL_DIR="\$WZ_ARTIFACTS/(target/zenohd)"', re.M)
         try:
             resolve(text)
         except SystemExit as exc:
@@ -319,8 +319,11 @@ def main() -> int:
         )
 
     rc = 0
+    # The oracles are products: judged where the artifact root puts them, which
+    # is where build-zenohd.sh installs them (scripts/lib/artifact-root.sh).
+    products = g.artifact_root()
     for rel in roots:
-        finding = g.inspect(g.ROOT, rel, pinned)
+        finding = g.inspect(products, rel, pinned)
         if not decide(finding.verdict):
             print("ensure-zenohd-at-pin: OK       %s -- %s" % (rel, finding.detail))
             continue
@@ -338,7 +341,7 @@ def main() -> int:
             print("ensure-zenohd-at-pin: FAIL     %s -- build exited %d" % (rel, built))
             rc = 1
             continue
-        after = g.inspect(g.ROOT, rel, pinned)
+        after = g.inspect(products, rel, pinned)
         if decide(after.verdict):
             print(
                 "ensure-zenohd-at-pin: FAIL     %s -- still %s after a rebuild: %s"

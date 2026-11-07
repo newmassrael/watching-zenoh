@@ -37,24 +37,30 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # "which submodule state is this oracle". See scripts/lib/vendored-oracle.sh.
 # shellcheck source=scripts/lib/vendored-oracle.sh
 source "$ROOT/scripts/lib/vendored-oracle.sh"
+# Every directory below except the submodule is a PRODUCT of this checkout, so it is where the
+# artifact root puts products (scripts/lib/artifact-root.sh): `$WZ_ARTIFACTS` is the checkout
+# unless WZ_ARTIFACT_ROOT is set, in which case nothing is written into the checkout.
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$ROOT/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$ROOT" || exit 2
 
 VENDOR_DIR="$ROOT/vendor/zenoh-pico"
 # The copy of the submodule this script patches and builds from, so the submodule itself is
 # only read (see `stage_pico_source` below for why).
-SRC_DIR="$ROOT/target/zenoh-pico-src"
+SRC_DIR="$WZ_ARTIFACTS/target/zenoh-pico-src"
 EXAMPLES_DIR="$SRC_DIR/examples"
-BUILD_DIR="$ROOT/target/zenoh-pico-build"
-INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
+BUILD_DIR="$WZ_ARTIFACTS/target/zenoh-pico-build"
+INSTALL_DIR="$WZ_ARTIFACTS/target/zenoh-pico-cli"
 # The arm built with Z_FEATURE_MULTICAST_DECLARATIONS (below). Variables of their own, because
 # the provenance gate binds a root to its stamp by the variable the root is assigned to.
-BUILD_DIR_MCDECL="$ROOT/target/zenoh-pico-build-mcdecl"
-INSTALL_DIR_MCDECL="$ROOT/target/zenoh-pico-cli-mcdecl"
+BUILD_DIR_MCDECL="$WZ_ARTIFACTS/target/zenoh-pico-build-mcdecl"
+INSTALL_DIR_MCDECL="$WZ_ARTIFACTS/target/zenoh-pico-cli-mcdecl"
 # The arm built with Z_FEATURE_RAWETH_TRANSPORT (below), named for the same reason.
-BUILD_DIR_RETH="$ROOT/target/zenoh-pico-build-reth"
-INSTALL_DIR_RETH="$ROOT/target/zenoh-pico-cli-reth"
+BUILD_DIR_RETH="$WZ_ARTIFACTS/target/zenoh-pico-build-reth"
+INSTALL_DIR_RETH="$WZ_ARTIFACTS/target/zenoh-pico-cli-reth"
 # The arm upstream's integration workflow builds its API tests with (below), named for the same
 # reason. Only its library is used, so it has a build root and no install root.
-BUILD_DIR_INTEG="$ROOT/target/zenoh-pico-build-integration"
+BUILD_DIR_INTEG="$WZ_ARTIFACTS/target/zenoh-pico-build-integration"
 
 # Curated CLI binary set: the four that the AP MVP demo round-trip
 # matrix needs (R121c+ integration tests). Adding more here costs
@@ -130,7 +136,7 @@ if ! command -v cmake >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "build-zenoh-pico-cli: building from a copy of vendor/zenoh-pico at target/zenoh-pico-src" >&2
+echo "build-zenoh-pico-cli: building from a copy of vendor/zenoh-pico at $SRC_DIR" >&2
 echo "build-zenoh-pico-cli: pin = $(git -C "$VENDOR_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)" >&2
 
 # R216 — wz-side build-time patch on vendor/zenoh-pico/examples/
@@ -446,7 +452,7 @@ mkdir -p "$BUILD_DIR" "$INSTALL_DIR"
 # provisioning step is a thing that can be forgotten in one of them. The
 # installer is idempotent and returns immediately once the pin is in place.
 bash "$ROOT/scripts/install-mbedtls.sh" >&2
-MBEDTLS_PREFIX="${WZ_MBEDTLS_PREFIX:-$ROOT/target/mbedtls}"
+MBEDTLS_PREFIX="${WZ_MBEDTLS_PREFIX:-$WZ_ARTIFACTS/target/mbedtls}"
 export PKG_CONFIG_PATH="$MBEDTLS_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
 # Configure (idempotent — CMake re-uses the build dir cache).

@@ -47,10 +47,15 @@ pub_cpus="${PICO_CMP_PUB_CPUS:-6,7}"
 sub_cpus="${PICO_CMP_SUB_CPUS:-10,11}"
 wz_env="${PICO_CMP_WZ_ENV:-}"
 
+# Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$root/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$root" || exit 2
+
 examples="$root/vendor/zenoh-pico/examples/unix/c11"
-pico_lib="$root/target/zenoh-pico-build/lib"
-wz_lib="$root/crates/target/release"
-out="$root/target/pico-compare"
+pico_lib="$WZ_ARTIFACTS/target/zenoh-pico-build/lib"
+wz_lib="$WZ_ARTIFACTS/crates/target/release"
+out="$WZ_ARTIFACTS/target/pico-compare"
 mkdir -p "$out/bin"
 
 if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ]; then
@@ -61,9 +66,9 @@ if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ]; then
 fi
 
 include=(
-    -I"$root/target/zenoh-pico-build/zenohpico/include"
+    -I"$WZ_ARTIFACTS/target/zenoh-pico-build/zenohpico/include"
     -I"$root/vendor/zenoh-pico/include"
-    -I"$root/target/mbedtls/include"
+    -I"$WZ_ARTIFACTS/target/mbedtls/include"
 )
 
 # build_example <example> <P|W>
@@ -107,7 +112,7 @@ build_bench() {
 build_zenoh_c_family() {
     local prefix="${WZ_ZENOH_C_PREFIX:-$HOME/.local}"
     local ref="${WZ_ZENOH_C_REF:-$HOME/zenoh-c-ref}"
-    local wz_c_lib="$root/crates/target/release" args bench variant lib libname
+    local wz_c_lib="$WZ_ARTIFACTS/crates/target/release" args bench variant lib libname
     mkdir -p "$out/bin-c"
     WZ_ZENOH_C_PREFIX="$prefix" WZ_ZENOH_C_REF="$ref" bash scripts/install-zenoh-c.sh >"$out/build-zenoh-c.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the zenoh-c release did not install (see $out/build-zenoh-c.log)"; exit 2; }

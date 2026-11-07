@@ -16,7 +16,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-WORK="$ROOT/target/validation"
+# Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$ROOT/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$ROOT" || exit 2
+WORK="$WZ_ARTIFACTS/target/validation"
 EXAMPLES=(z_pub z_sub z_get z_queryable)
 
 prefix="$WORK/zenoh-c"

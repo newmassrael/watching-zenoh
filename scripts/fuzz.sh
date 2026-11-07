@@ -31,7 +31,11 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fuzz_dir="$repo_root/crates/wz-fuzz"
-fuzz_home="${WZ_FUZZ_HOME:-$repo_root/crates/target/fuzz}"
+# Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$repo_root/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$repo_root" || exit 2
+fuzz_home="${WZ_FUZZ_HOME:-$WZ_ARTIFACTS/crates/target/fuzz}"
 build_dir="$fuzz_home/build"
 seeds_py="$repo_root/scripts/lib/fuzz_seeds.py"
 triple="x86_64-unknown-linux-gnu"

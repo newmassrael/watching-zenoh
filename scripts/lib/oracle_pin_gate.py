@@ -48,7 +48,7 @@ it made by something else:
 
 ## What it derives rather than declares
 
-  * THE POPULATION is every `INSTALL_DIR="$ROOT/target/…"` assignment in
+  * THE POPULATION is every `INSTALL_DIR="$WZ_ARTIFACTS/target/…"` assignment in
     `build-zenohd.sh`. Four today. A fifth variant added there is covered the
     day it is added, with no edit here — and a population of zero is a HARD
     FAIL, because a gate that found no subjects must not report a pass.
@@ -95,12 +95,26 @@ import sys
 import tempfile
 import typing
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from artifact_root import artifact_root  # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BUILD_SCRIPT = ROOT / "scripts" / "build-zenohd.sh"
+#: The population is read from the build script (a SOURCE of the checkout); the
+#: oracles it names are PRODUCTS, judged where the artifact root puts them
+#: (`scripts/lib/artifact-root.sh`): the checkout unless WZ_ARTIFACT_ROOT is set.
 
-# `INSTALL_DIR="$ROOT/target/zenohd-shm"` and friends. Anchored on the
+# `INSTALL_DIR="$WZ_ARTIFACTS/target/zenohd-shm"` and friends. Anchored on the
 # assignment so a mention of the path in a comment cannot enlarge the set.
-INSTALL_DIR_RE = re.compile(r'^\s*INSTALL_DIR="\$ROOT/(target/[A-Za-z0-9._-]+)"', re.M)
+#
+# ONLY the `$WZ_ARTIFACTS` spelling counts: that is the product location under
+# the artifact root (scripts/lib/artifact-root.sh). A `$ROOT/target/…` install
+# directory would write into the checkout when a root is set, so it is not an
+# oracle this gate recognises -- the set shrinks and the agreement check in
+# ensure_zenohd_at_pin.py, or an empty population, fails loudly.
+INSTALL_DIR_RE = re.compile(
+    r'^\s*INSTALL_DIR="\$(?:WZ_ARTIFACTS|\{WZ_ARTIFACTS\})/(target/[A-Za-z0-9._-]+)"', re.M
+)
 # `ZENOHD_VERSION="${ZENOHD_VERSION:-1.10.0}"`
 PIN_RE = re.compile(r'^\s*ZENOHD_VERSION="\$\{ZENOHD_VERSION:-([^}"]+)\}"', re.M)
 # `zenohd v1.10.0 built with rustc 1.97.1 (…)`. The version token is NOT
@@ -262,12 +276,12 @@ def selftest() -> int:
     """
     fake_script = (
         'ZENOHD_VERSION="${ZENOHD_VERSION:-9.9.9}"\n'
-        'INSTALL_DIR="$ROOT/target/ok"\n'
-        'INSTALL_DIR="$ROOT/target/old"\n'
-        'INSTALL_DIR="$ROOT/target/mute"\n'
-        'INSTALL_DIR="$ROOT/target/gone"\n'
-        'INSTALL_DIR="$ROOT/target/meta-disagrees"\n'
-        '# INSTALL_DIR="$ROOT/target/a-comment-must-not-count"\n'
+        'INSTALL_DIR="$WZ_ARTIFACTS/target/ok"\n'
+        'INSTALL_DIR="$WZ_ARTIFACTS/target/old"\n'
+        'INSTALL_DIR="$WZ_ARTIFACTS/target/mute"\n'
+        'INSTALL_DIR="$WZ_ARTIFACTS/target/gone"\n'
+        'INSTALL_DIR="$WZ_ARTIFACTS/target/meta-disagrees"\n'
+        '# INSTALL_DIR="$WZ_ARTIFACTS/target/a-comment-must-not-count"\n'
     )
     failures: list[str] = []
     with tempfile.TemporaryDirectory() as td:
@@ -316,12 +330,12 @@ def selftest() -> int:
 
         # And it must PASS when only the good one is present, so the failure
         # above is attributable to the stale entry rather than to the fixture.
-        only_ok = 'ZENOHD_VERSION="${ZENOHD_VERSION:-9.9.9}"\nINSTALL_DIR="$ROOT/target/ok"\n'
+        only_ok = 'ZENOHD_VERSION="${ZENOHD_VERSION:-9.9.9}"\nINSTALL_DIR="$WZ_ARTIFACTS/target/ok"\n'
         if run(root, only_ok, require=False) != 0:
             failures.append("run() failed on a population whose single oracle matches")
 
         # An empty-but-derived population is a skip, and a FAIL when armed.
-        empty = 'ZENOHD_VERSION="${ZENOHD_VERSION:-9.9.9}"\nINSTALL_DIR="$ROOT/target/gone"\n'
+        empty = 'ZENOHD_VERSION="${ZENOHD_VERSION:-9.9.9}"\nINSTALL_DIR="$WZ_ARTIFACTS/target/gone"\n'
         if run(root, empty, require=False) != 0:
             failures.append("an all-absent population should skip, not fail, unarmed")
         if run(root, empty, require=True) == 0:
@@ -373,7 +387,7 @@ def main() -> int:
         for directory in population(BUILD_SCRIPT.read_text()):
             print(directory)
         return 0
-    return run(ROOT, BUILD_SCRIPT.read_text(), require=args.require)
+    return run(artifact_root(), BUILD_SCRIPT.read_text(), require=args.require)
 
 
 if __name__ == "__main__":

@@ -53,7 +53,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INSTALL_DIR="$ROOT/target/zenohd"
+# The oracle is a PRODUCT of this checkout, installed where the artifact root
+# puts products (scripts/lib/artifact-root.sh): `$WZ_ARTIFACTS` is the checkout
+# unless WZ_ARTIFACT_ROOT is set, in which case nothing is written into the
+# checkout. The store and its cargo target directories are outside it either way.
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$ROOT/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$ROOT" || exit 2
+INSTALL_DIR="$WZ_ARTIFACTS/target/zenohd"
 ZENOHD_VERSION="${ZENOHD_VERSION:-1.10.2}"
 
 # R2229 (open-debt item 579) — the toolchain that release pins, DERIVED.
@@ -133,11 +140,11 @@ zenohd_toolchain() {
 VARIANT_FEATURE=""
 VARIANT_NAME=""
 if [[ "${ZENOHD_UNIXPIPE:-0}" -eq 1 ]]; then
-    INSTALL_DIR="$ROOT/target/zenohd-unixpipe"
+    INSTALL_DIR="$WZ_ARTIFACTS/target/zenohd-unixpipe"
     VARIANT_FEATURE="--features zenoh/transport_unixpipe"
     VARIANT_NAME="transport_unixpipe"
 elif [[ "${ZENOHD_VSOCK:-0}" -eq 1 ]]; then
-    INSTALL_DIR="$ROOT/target/zenohd-vsock"
+    INSTALL_DIR="$WZ_ARTIFACTS/target/zenohd-vsock"
     VARIANT_FEATURE="--features zenoh/transport_vsock"
     VARIANT_NAME="transport_vsock"
 # R311y505 — the SHARED-MEMORY-enabled variant, the same pattern a third time, and
@@ -158,7 +165,7 @@ elif [[ "${ZENOHD_VSOCK:-0}" -eq 1 ]]; then
 # question, and reading it as such would be the "a foreign CLI can hide the
 # property" trap. This variant is the oracle that HAS the extension.
 elif [[ "${ZENOHD_SHM:-0}" -eq 1 ]]; then
-    INSTALL_DIR="$ROOT/target/zenohd-shm"
+    INSTALL_DIR="$WZ_ARTIFACTS/target/zenohd-shm"
     VARIANT_FEATURE="--features zenoh/shared-memory"
     VARIANT_NAME="shared-memory"
 fi
@@ -166,7 +173,7 @@ fi
 # R3978 — the store's paths for this oracle (STORE_LOCK, STORE_SRC, STORE_BUILD,
 # STORE_PRODUCT), derived by the module the readers use, so the two cannot name
 # different places.
-ORACLE_DIR="${INSTALL_DIR#"$ROOT"/}"
+ORACLE_DIR="${INSTALL_DIR#"$WZ_ARTIFACTS"/}"
 ORACLE_STORE="$ROOT/scripts/lib/oracle_store.py"
 eval "$(python3 "$ORACLE_STORE" paths "$ORACLE_DIR")"
 BUILD_DIR="$STORE_BUILD"

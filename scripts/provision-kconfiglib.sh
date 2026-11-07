@@ -11,7 +11,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV="$ROOT/target/kconfig-venv"
+# A product of this checkout, under the artifact root (scripts/lib/artifact-root.sh); wz_config.py
+# reads it there under the same rule.
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$ROOT/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$ROOT" || exit 2
+VENV="$WZ_ARTIFACTS/target/kconfig-venv"
 REQ="$ROOT/scripts/requirements-kconfig.txt"
 
 if [[ -x "$VENV/bin/python" ]] \

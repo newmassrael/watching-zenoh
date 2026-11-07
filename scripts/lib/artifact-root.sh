@@ -109,6 +109,9 @@ wz_artifact_root_init() {
     # Python writes `__pycache__` beside every module it imports; under a root it
     # writes there instead (the interpreter's own switch, 3.8 and later).
     export PYTHONPYCACHEPREFIX="$root/.pycache"
+    # `git status` refreshes the checkout's index as a side effect; git's own
+    # switch turns the optional write off, and nothing a lane asks git needs it.
+    export GIT_OPTIONAL_LOCKS=0
     return 0
 }
 

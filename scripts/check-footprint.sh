@@ -42,6 +42,12 @@
 #   2  setup error (unknown target / bad argument)
 set -uo pipefail
 
+# The binaries measured are products of this checkout, so they are read where the artifact root
+# puts them (scripts/lib/artifact-root.sh): the checkout unless WZ_ARTIFACT_ROOT is set.
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/artifact-root.sh"
+wz_artifact_root_init || exit 2
+
 # ─── baseline ───────────────────────────────────────────────────────
 #
 # Per-target-triple baseline. Authoritative source: R311bj caveat
@@ -1165,12 +1171,12 @@ fi
 artifact="${2:-qemu-demo}"
 case "$artifact" in
     qemu-demo)
-        bin="deploy/mcu-qemu-demo/target/${target}/release/mcu-qemu-demo"
+        bin="$WZ_ARTIFACTS/deploy/mcu-qemu-demo/target/${target}/release/mcu-qemu-demo"
         declare -n _bt=BASELINE_TEXT _bd=BASELINE_DATA _bb=BASELINE_BSS
         baseline_anchor="§6.7 preset-cortex-m4-default caveat (a)/(b)"
         ;;
     multicast-e2e)
-        bin="deploy/mcu-multicast-e2e/target/${target}/release/mcu-multicast-e2e"
+        bin="$WZ_ARTIFACTS/deploy/mcu-multicast-e2e/target/${target}/release/mcu-multicast-e2e"
         declare -n _bt=BASELINE_MC_TEXT _bd=BASELINE_MC_DATA _bb=BASELINE_MC_BSS
         baseline_anchor="the R311mi multicast footprint ledger entry"
         ;;
@@ -1246,7 +1252,12 @@ fi
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 leaked=""
-for prefix in "$repo_root" "$cargo_home"; do
+# Under an artifact root the build's own directories (OUT_DIR, generated sources) are there, and
+# footprint_remap_rustflags() maps it to the same prefix as the checkout; a binary that still
+# names it would measure a different size from the same tree built without the root.
+prefixes=("$repo_root" "$cargo_home")
+[[ "$WZ_ARTIFACTS" != "$repo_root" ]] && prefixes+=("$WZ_ARTIFACTS")
+for prefix in "${prefixes[@]}"; do
     if strings "$bin" 2>/dev/null | grep -qF -- "$prefix"; then
         leaked="${leaked:+$leaked, }$prefix"
     fi

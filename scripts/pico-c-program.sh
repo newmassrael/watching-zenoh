@@ -33,7 +33,11 @@ fi
 src="$1"
 what="$2"
 os="${RUNNER_OS:-$(uname -s)}"
-lib_dir="$PWD/crates/target/debug"
+# Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$(dirname "$0")/lib/artifact-root.sh"
+wz_artifact_root_init "$PWD" || exit 2
+lib_dir="$WZ_ARTIFACTS/crates/target/debug"
 
 say() {
     echo "$1"
@@ -55,7 +59,7 @@ fi
 # The newest include directory the vendored library's build installed: a restored build
 # cache can hold an older one beside it.
 # shellcheck disable=SC2012
-inc="$PWD/$(ls -dt crates/target/debug/build/zenoh-pico-sys-*/out/include | head -n 1)"
+inc="$(ls -dt "$lib_dir"/build/zenoh-pico-sys-*/out/include | head -n 1)"
 echo "pico headers: $inc"
 
 if command -v cygpath > /dev/null 2>&1 && [ -n "${RUNNER_TEMP:-}" ]; then

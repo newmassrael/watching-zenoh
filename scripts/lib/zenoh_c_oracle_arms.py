@@ -95,10 +95,14 @@ PARAMETRIC_RE = re.compile(r"^target/zenoh-c-(" + "|".join(ARMS) + r")$")
 
 
 def normalise(expr: str) -> str:
-    """A prefix expression as a stable name: `~/x` for HOME, repo-relative else."""
+    """A prefix expression as a stable name: `~/x` for HOME, tree-relative else.
+
+    `$WZ_ARTIFACTS/<rel>` is the product location of the tree path `<rel>`
+    (scripts/lib/artifact-root.sh), so it names the same prefix as `<rel>`.
+    """
     e = expr.strip()
     e = re.sub(r"^\$\{?HOME\}?/", "~/", e)
-    e = re.sub(r"^\$\{?(ROOT|repo_root)\}?/", "", e)
+    e = re.sub(r"^\$\{?(ROOT|repo_root|WZ_ARTIFACTS)\}?/", "", e)
     return e.rstrip("/")
 
 

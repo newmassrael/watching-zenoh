@@ -35,7 +35,9 @@ directory, MATERIALIZED from the store by copy. It is not a link, because the
 hosted job caches and archives those directories with tar, which would store a
 link and not the oracle. `target/zenohd-build/zenoh-src`, the source tree the
 census and the citation gate read, is materialized from the store's clone the
-same way.
+same way. Both are tree paths of PRODUCTS, so with `WZ_ARTIFACT_ROOT` set they
+are materialized under that root instead (`scripts/lib/artifact-root.sh`), and
+the consumers read them there under the same rule.
 
 ## Invariants this module holds
 
@@ -72,7 +74,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import ensure_zenohd_at_pin as ensure  # noqa: E402
 import oracle_pin_gate as g  # noqa: E402
 
-ROOT = g.ROOT
 #: Written into every product and every materialized directory, last.
 KEY_FILE = ".oracle-key"
 #: The materialized source view the census and the citation gate read.
@@ -496,13 +497,17 @@ def main() -> int:
 
     if args.command == "materialize":
         named = [known(o) for o in args.oracles]
+        # The materialized copies are products of the checkout, so they go where
+        # the artifact root puts products (scripts/lib/artifact-root.sh): the
+        # checkout itself unless WZ_ARTIFACT_ROOT is set.
+        products = g.artifact_root()
         rc = 0
         for oracle in named or oracles:
-            state = materialize_oracle(ROOT, layout, oracle)
+            state = materialize_oracle(products, layout, oracle)
             print(f"  oracle-store: {state:<8} {oracle}")
             if named and state == "ABSENT":
                 rc = NOT_IN_STORE
-        print(f"  oracle-store: {materialize_source(ROOT, layout):<8} {SOURCE_VIEW}")
+        print(f"  oracle-store: {materialize_source(products, layout):<8} {SOURCE_VIEW}")
         return rc
 
     ap.print_help()

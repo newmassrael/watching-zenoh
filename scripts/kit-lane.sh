@@ -64,6 +64,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$ROOT/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$ROOT" || exit 2
 LAB_ENV="${KIT_LAB_ENV:-$HOME/.config/wz-kit-lab.env}"
 LANE_HOME="${KIT_LANE_HOME:-$HOME/wz-kit-lane}"
 KIT_LOCK="${KIT_LANE_LOCK:-$HOME/.local/state/wz/kit.lock}"
@@ -1498,7 +1502,7 @@ build_responder() {
     # The host node with the getter, built here from this tree: the peer the asking image asks.
     mkdir -p "$LANE_HOME"
     if (cd "$ROOT/deploy/host-slot-node" && cargo build --release -p host-slot-node --features get) >"$LANE_HOME/build-responder.log" 2>&1; then
-        cp "$ROOT/deploy/host-slot-node/target/release/host-slot-node" "$LANE_HOME/host-slot-node-get"
+        cp "$WZ_ARTIFACTS/deploy/host-slot-node/target/release/host-slot-node" "$LANE_HOME/host-slot-node-get"
         ok responder "built $LANE_HOME/host-slot-node-get ($LANE_HOME/build-responder.log)"
     else
         bad responder "the build failed ($LANE_HOME/build-responder.log)"

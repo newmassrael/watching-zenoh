@@ -20,7 +20,11 @@ label="${2:?label}"
 shift 2
 # The cargo workspace is `crates/`, wherever the caller stands (a build host starts at the root).
 cd "$(dirname "$0")/../../crates" || exit 1
-T="$PWD/target-ab-$label"
+# A product of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$PWD/../scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$PWD/.." || exit 1
+T="$WZ_ARTIFACTS/crates/target-ab-$label"
 rm -rf "$T"
 export CARGO_TARGET_DIR="$T"
 start=$(date +%s)

@@ -91,6 +91,9 @@
 # copy number two and the ceiling.
 # shellcheck source=scripts/lib/vendored-oracle.sh
 source "$(dirname "${BASH_SOURCE[0]}")/vendored-oracle.sh"
+# `wz_artifact_dir`: where a product of a tree path is (the rule, scripts/lib/artifact-root.sh).
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/artifact-root.sh"
 
 WZ_SCE_DIR="vendor/sce"
 WZ_SCE_CODEGEN_BIN="vendor/sce/target/release/sce-codegen"
@@ -198,7 +201,9 @@ sce_codegen_ensure() {
         return "$unavailable"
     fi
 
-    local log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/sce-codegen-oracle-rebuild.log"
+    # A log is a product: under the artifact root (scripts/lib/artifact-root.sh).
+    local log
+    log="${RUNCI_LOG_DIR:-$(wz_artifact_dir crates/target/run-ci-logs)}/sce-codegen-oracle-rebuild.log"
     mkdir -p "$(dirname "$log")" 2>/dev/null || true
     if ! bash scripts/build-sce.sh >"$log" 2>&1; then
         # KEEP WHAT IT SAID (R311y756 / R311y889): a build that failed silently

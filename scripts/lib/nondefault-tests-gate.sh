@@ -115,6 +115,10 @@ export LC_ALL=C
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
+# Products (cargo's target directory) are under the artifact root, scripts/lib/artifact-root.sh.
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$here/artifact-root.sh"
+wz_artifact_root_init "$repo" || exit 2
 
 # package|scope|features|test-name-filter|handed-off-tests
 #
@@ -1549,7 +1553,7 @@ leg_filter_args() {
 # proc-macro all have one). `WZ_KEEP_TEST_EXECUTABLES=1` keeps them, for a reader who reruns a leg.
 reap_test_executables() {
     [[ "${WZ_KEEP_TEST_EXECUTABLES:-}" == 1 ]] && return 0
-    local deps="${CARGO_TARGET_DIR:-$repo/crates/target}/debug/deps"
+    local deps="${CARGO_TARGET_DIR:-$WZ_ARTIFACTS/crates/target}/debug/deps"
     [[ -d "$deps" ]] || return 0
     find "$deps" -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete 2>/dev/null || true
 }

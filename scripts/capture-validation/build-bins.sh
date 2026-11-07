@@ -19,7 +19,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VERSION="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import upstream_feature_census as c; print(c.UPSTREAM_VERSION)' "$ROOT/scripts/lib")"
-WORK="$ROOT/target/validation"
+# Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$ROOT/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$ROOT" || exit 2
+WORK="$WZ_ARTIFACTS/target/validation"
 SRC="${ZENOH_SRC:-$WORK/src}"
 OUT="$WORK/bin"
 

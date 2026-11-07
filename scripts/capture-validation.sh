@@ -23,7 +23,12 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERE="$ROOT/scripts/capture-validation"
-RAW="$ROOT/target/validation/raw"
+# Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$ROOT/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$ROOT" || exit 2
+VALIDATION="$WZ_ARTIFACTS/target/validation"
+RAW="$VALIDATION/raw"
 IMAGE=wz-validation:1
 mkdir -p "$RAW"
 
@@ -39,9 +44,9 @@ shift || true
 failed=0
 case "$kind" in
 zenoh)
-    mounts=(-v "$ROOT/target/validation/bin:/z:ro" -v "$HERE:/w:ro" -v "$RAW:/out")
-    [[ -d $ROOT/target/validation/bin-c ]] && mounts+=(-v "$ROOT/target/validation/bin-c:/zc:ro")
-    [[ -d $ROOT/target/validation/bin-pico ]] && mounts+=(-v "$ROOT/target/validation/bin-pico:/zp:ro")
+    mounts=(-v "$VALIDATION/bin:/z:ro" -v "$HERE:/w:ro" -v "$RAW:/out")
+    [[ -d $VALIDATION/bin-c ]] && mounts+=(-v "$VALIDATION/bin-c:/zc:ro")
+    [[ -d $VALIDATION/bin-pico ]] && mounts+=(-v "$VALIDATION/bin-pico:/zp:ro")
     for w in "$@"; do
         docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW \
             --sysctl net.ipv6.conf.all.disable_ipv6=0 \

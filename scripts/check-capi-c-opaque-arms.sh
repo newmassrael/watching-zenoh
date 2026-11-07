@@ -61,8 +61,12 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$ROOT/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$ROOT" || exit 2
 REF="${WZ_ZENOH_C_REF:-$HOME/zenoh-c-ref}"
-OUT="$ROOT/target/zenoh-c-opaque"
+OUT="$WZ_ARTIFACTS/target/zenoh-c-opaque"
 MANIFEST="$REF/build-resources/opaque-types/Cargo.toml"
 
 say() { printf '[capi-c-opaque-arms] %s\n' "$*"; }
@@ -233,7 +237,7 @@ check_arm() {
     (cd "$ROOT/crates" && cargo build -p wz-capi-c "$@" --quiet) || return 1
     python3 "$ROOT/scripts/lib/capi_c_opaque_arms.py" \
         --generator-stderr "$OUT/$table.stderr" \
-        --cdylib "$ROOT/crates/target/debug/libwz_capi_c.so" \
+        --cdylib "$WZ_ARTIFACTS/crates/target/debug/libwz_capi_c.so" \
         --arm "$label"
 }
 

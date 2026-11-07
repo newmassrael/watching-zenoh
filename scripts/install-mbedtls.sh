@@ -52,7 +52,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MBEDTLS_VERSION="${MBEDTLS_VERSION:-3.6.4}"
 MBEDTLS_SHA256="${MBEDTLS_SHA256:-ec35b18a6c593cf98c3e30db8b98ff93e8940a8c4e690e66b41dfc011d678110}"
 
-PREFIX="${WZ_MBEDTLS_PREFIX:-$ROOT/target/mbedtls}"
+# A product of this checkout: under the artifact root (scripts/lib/artifact-root.sh), which is
+# the checkout itself unless WZ_ARTIFACT_ROOT is set.
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$ROOT/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$ROOT" || exit 2
+PREFIX="${WZ_MBEDTLS_PREFIX:-$WZ_ARTIFACTS/target/mbedtls}"
 
 # R2326 (unregistered open-debt item 10) — the provenance stamp this prefix
 # carries, in the same shape and the same filename as every other foreign-oracle

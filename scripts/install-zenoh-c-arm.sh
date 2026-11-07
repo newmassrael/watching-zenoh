@@ -45,15 +45,20 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh): the
+# checkout itself unless WZ_ARTIFACT_ROOT is set.
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$ROOT/scripts/lib/artifact-root.sh"
+wz_artifact_root_init "$ROOT" || exit 2
 ARM="${1:?usage: install-zenoh-c-arm.sh <arm> [prefix]}"
-PREFIX="${2:-$ROOT/target/zenoh-c-$ARM}"
+PREFIX="${2:-$WZ_ARTIFACTS/target/zenoh-c-$ARM}"
 REF="${WZ_ZENOH_C_REF:-$HOME/zenoh-c-ref}"
 
 # Per-arm scratch, so two arms can build CONCURRENTLY. The shm installer
 # hardcoded one `-src` / `-build` pair, which is correct for one arm and silent
 # corruption for two at once.
-SRC="$ROOT/target/zenoh-c-$ARM-src"
-BUILD="$ROOT/target/zenoh-c-$ARM-build"
+SRC="$WZ_ARTIFACTS/target/zenoh-c-$ARM-src"
+BUILD="$WZ_ARTIFACTS/target/zenoh-c-$ARM-build"
 
 say() { printf '[install-zenoh-c-arm %s] %s\n' "$ARM" "$*"; }
 
