@@ -359,12 +359,22 @@ mod tests {
         assert!(seen >= 7);
     }
 
-    /// The header's key buffer size is this library's.
+    /// The header's key buffer size is this library's. The size is read off
+    /// its `#define` line, so a checkout that ends lines with CRLF reads the
+    /// same number.
     #[test]
     fn the_headers_key_buffer_is_the_librarys() {
         let header = include_str!("../include/wz_capi_c.h");
-        let line = format!("#define WZ_CAPI_C_LIFECYCLE_KEY_MAX {WZ_CAPI_C_LIFECYCLE_KEY_MAX}\n");
-        assert!(header.contains(&line), "the header states {line:?}");
+        let defined: Vec<usize> = header
+            .lines()
+            .filter_map(|line| line.strip_prefix("#define WZ_CAPI_C_LIFECYCLE_KEY_MAX "))
+            .map(|n| n.trim().parse().expect("the define is a plain integer"))
+            .collect();
+        assert_eq!(
+            defined,
+            [WZ_CAPI_C_LIFECYCLE_KEY_MAX],
+            "the header defines WZ_CAPI_C_LIFECYCLE_KEY_MAX once, as this library's size"
+        );
     }
 
     #[test]
