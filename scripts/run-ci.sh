@@ -4147,6 +4147,51 @@ layer_c0i_impact_ref_gate() {
         echo "  Layer C0i FAIL: scripts/lib/hosted_red_ack.py --selftest failed" >&2
         return 1
     fi
+    # THE KINDS OF REF A PUSH CARRIES (`scripts/lib/push-refs.sh`, read by the pre-push
+    # hook). The branch is graded by every gate, a queue's item and its log by the public
+    # gates over what they add, and a ref whose kind is read wrong is graded as the wrong
+    # thing: the log's chain as the branch, or the branch as a record. Both directions, and
+    # the range each queue kind adds.
+    # shellcheck disable=SC1091  # constant path, resolved at run time
+    source scripts/lib/push-refs.sh
+    local kind_arm kind_got zero40
+    zero40="0000000000000000000000000000000000000000"
+    for kind_arm in "refs/heads/main=main" "refs/heads/topic=other" "refs/tags/v1=other" \
+        "refs/bx-land/main/items/ab12=queue-items" "refs/bx-land/main/log=queue-log" \
+        "refs/bx-land/main/lease=queue-log" "refs/heads/bx-land/main/items/ab12=queue-items" \
+        "refs/heads/bx-land/main/log=queue-log" "refs/bx-land/main/other=queue-log"; do
+        kind_got="$(wz_push_ref_kind "${kind_arm%%=*}")"
+        if [[ "$kind_got" != "${kind_arm#*=}" ]]; then
+            echo "  Layer C0i FAIL: push ref ${kind_arm%%=*} is read as '$kind_got'," \
+                "want '${kind_arm#*=}'" >&2
+            return 1
+        fi
+    done
+    local head_id new_range new_base
+    head_id="$(git rev-parse HEAD)"
+    if [[ "$(wz_queue_push_range queue-items "$zero40" tip "$zero40" origin/main)" != "origin/main..tip" \
+        || "$(wz_queue_push_range queue-log "$head_id" tip "$zero40" origin/main)" != "$head_id..tip" ]]; then
+        echo "  Layer C0i FAIL: a queue ref's range is not the one it adds" >&2
+        return 1
+    fi
+    # A chain that is new, and one whose old value this clone lacks, both start at the
+    # empty base: a bare tip would make `git diff` grade the chain against the checkout.
+    for new_range in "$(wz_queue_push_range queue-log "$zero40" tip "$zero40" origin/main)" \
+        "$(wz_queue_push_range queue-log "" tip "$zero40" "")" \
+        "$(wz_queue_push_range queue-log "$(printf '%040d' 7)" tip "$zero40" "")"; do
+        new_base="${new_range%..tip}"
+        if [[ "$new_base" == "$new_range" ]] \
+            || [[ -n "$(git rev-list --parents -n1 "$new_base" | cut -s -d' ' -f2-)" ]] \
+            || [[ "$(git rev-parse "$new_base^{tree}")" != "$(git hash-object -t tree --stdin </dev/null)" ]]; then
+            echo "  Layer C0i FAIL: a new queue chain's range '$new_range' does not start" \
+                "at the empty base" >&2
+            return 1
+        fi
+    done
+    if wz_queue_push_range queue-items "$zero40" tip "$zero40" "" >/dev/null; then
+        echo "  Layer C0i FAIL: an item with no branch to bound it was given a range" >&2
+        return 1
+    fi
 
     echo "  impact-ref gate: OK (accepts a real section id, refuses Round 1811's" \
         "own '5.4-session' and an absent --impact; the round descriptor reader" \

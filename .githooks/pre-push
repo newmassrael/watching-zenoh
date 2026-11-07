@@ -48,11 +48,26 @@ zero_sha="0000000000000000000000000000000000000000"
 local_sha=""
 remote_sha=""
 has_work=0
-push_shas=()          # every non-delete local sha, for the per-ref schema gate
+push_shas=()          # every non-delete local sha of a branch, for the per-ref schema gate
 pushes_main=0         # a non-delete ref lands on main: gate 0p's subject
+queue_pushes=()       # "<kind> <remote sha> <local sha>" of each queue ref (push-refs.sh)
+# shellcheck disable=SC1091  # constant path, resolved at run time
+if ! source scripts/lib/push-refs.sh; then
+    echo "pre-push: scripts/lib/push-refs.sh missing or unreadable." >&2
+    exit 1
+fi
 while read -r _local_ref l_sha remote_ref r_sha; do
     if [[ "$l_sha" != "$zero_sha" ]]; then
         has_work=1
+        # A queue ref (a submitted item, the queue's log) is not a branch and is never the
+        # range of the branch gates below. An integrator's push carries the branch, the log
+        # and the deletion of the finished items in ONE transaction, so "the last ref" is not
+        # the branch there; each ref is graded by its kind (scripts/lib/push-refs.sh).
+        case "$(wz_push_ref_kind "$remote_ref")" in
+        queue-items) queue_pushes+=("queue-items $r_sha $l_sha"); continue ;;
+        queue-log) queue_pushes+=("queue-log $r_sha $l_sha"); continue ;;
+        *) ;;
+        esac
         local_sha="$l_sha"
         remote_sha="$r_sha"
         push_shas+=("$l_sha")
@@ -66,6 +81,61 @@ if [[ $has_work -eq 0 ]]; then
     exit 0
 fi
 
+# ─── the queue's refs — the PUBLIC gates, and nothing else (bx RFC 0024, 12) ──
+# grades: pushed-range
+# An item a session submits and the queue's log are published to origin like any
+# commit, so what makes a publication irreversible applies to them in full: the
+# confidential vocabulary (gate 0), a line naming a home directory (gate 0b2) and an
+# identity that must not be public (gate 0c), each over exactly what the ref adds. The
+# repository's own gates (the schema pin, the SSOT, the tests) are NOT run on them: an
+# item is judged by the integrator on the tip it will land on, and the log is no
+# repository content. A ref whose range cannot be bounded is refused, because an
+# ungraded public push is what these gates exist to stop.
+#
+# bx records the submitting worktree's absolute path in the log, so gate 0b2 refuses a
+# submit from this machine until bx records something that is not a path (or the owner
+# accepts publishing it). That is this repository's rule applied to the record, not a
+# defect of the gate.
+if [[ ${#queue_pushes[@]} -gt 0 ]]; then
+    # shellcheck disable=SC1091  # constant paths, resolved at run time
+    if ! source scripts/lib/nda-scan.sh || ! source scripts/lib/home-path-scan.sh \
+        || ! source scripts/lib/ident-gate.sh; then
+        echo "pre-push: [queue refs] a public gate's library is missing or unreadable." >&2
+        exit 1
+    fi
+    queue_trunk=""
+    if git rev-parse --verify --quiet origin/main >/dev/null; then
+        queue_trunk="origin/main"
+    fi
+    for queue_push in "${queue_pushes[@]}"; do
+        read -r q_kind q_remote q_tip <<<"$queue_push"
+        if ! q_range="$(wz_queue_push_range "$q_kind" "$q_remote" "$q_tip" "$zero_sha" "$queue_trunk")"; then
+            echo "pre-push: [queue refs] no range for a $q_kind push (no origin/main);" >&2
+            echo "          what it publishes cannot be graded, so it is refused." >&2
+            exit 1
+        fi
+        if ! wz_nda_scan "$q_range"; then
+            echo "pre-push: [queue refs] confidential-vocabulary gate FAILED on $q_kind $q_range." >&2
+            exit 1
+        fi
+        if ! wz_home_path_range 'pre-push' "$q_range"; then
+            echo "pre-push: [queue refs] $q_kind $q_range adds a line naming a home directory." >&2
+            echo "          Origin is public and a push does not un-publish. For the queue's" >&2
+            echo "          log this means bx recorded the submitting worktree's path." >&2
+            exit 1
+        fi
+        if ! wz_ident_gate_range 'pre-push' "$q_range"; then
+            echo "pre-push: [queue refs] an identity that must not be public is in $q_range." >&2
+            exit 1
+        fi
+        echo "pre-push: [queue refs] $q_kind $q_range: the public gates passed."
+    done
+    if [[ ${#push_shas[@]} -eq 0 ]]; then
+        echo "pre-push: only queue refs are pushed; the repository's gates judge the candidate, not the item."
+        exit 0
+    fi
+fi
+
 # ─── gate 0p — a push to main holds the clone's push lock (2026-10-27) ─
 # grades: not-a-file
 # Owner decision, 2026-10-27. Sessions in several worktrees of this clone push
@@ -77,17 +147,29 @@ fi
 # the run. This gate refuses a push to main unless the lock is held AND the push
 # carries the holder's token, so a push goes through the lock or does not go.
 # A push to another ref (a branch) does not race the ledger and is not held.
+#
+# The queue integrator (`bx --land`, bx RFC 0024) is the other way to main. It orders
+# the pushes itself, one integrator per branch, and a round's number is taken on the
+# tree it lands on (scripts/file-round.sh), so it neither needs nor can hold this lock.
+# Its clone says so in its own git config (`wz.land-integrator`, set when the owner
+# installs the service), which is state of the clone and not of an environment: the
+# integrator runs this hook with `git hook run` for its judgement and again through the
+# real push, and only the clone is there both times. A local marker is not a wall (a
+# session could set it in its own clone); the wall is the server's rule that only the
+# integrator's identity moves main (RFC 4.12), and this gate is the convenience in
+# front of it, as it always was.
 if [[ $pushes_main -eq 1 ]]; then
     push_lock="$(git rev-parse --path-format=absolute --git-common-dir)/wz-push.lock"
     lock_token="$(cut -d' ' -f1 "$push_lock.owner" 2>/dev/null || true)"
-    if flock -n "$push_lock" true 2>/dev/null; then
+    if [[ "$(git config --type=bool --get wz.land-integrator 2>/dev/null || true)" == "true" ]]; then
+        echo "pre-push: [gate 0p] this clone is the queue integrator's; the queue orders its pushes."
+    elif flock -n "$push_lock" true 2>/dev/null; then
         echo "pre-push: [gate 0p] a push to main must hold the push lock." >&2
         echo "          Push with \`bash scripts/land.sh\`: it rebases, numbers the" >&2
         echo "          ledger round and pushes under the lock. A tree based before" >&2
         echo "          it existed rebases onto origin/main first." >&2
         exit 1
-    fi
-    if [[ -z "${WZ_LAND_TOKEN:-}" || "$WZ_LAND_TOKEN" != "$lock_token" ]]; then
+    elif [[ -z "${WZ_LAND_TOKEN:-}" || "$WZ_LAND_TOKEN" != "$lock_token" ]]; then
         echo "pre-push: [gate 0p] the push lock is held by another push:" >&2
         echo "          $(cat "$push_lock.owner" 2>/dev/null || echo unknown)" >&2
         echo "          Push with \`bash scripts/land.sh\`; it waits for the lock." >&2

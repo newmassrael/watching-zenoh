@@ -54,7 +54,12 @@ git config core.hooksPath .githooks
   push: it rebases HEAD onto `origin/main`, files the ledger round with the
   next number when append-round arguments follow `--` (without `--entry-id`),
   and pushes `HEAD:main` through the hooks. Gate 0p refuses a push to `main`
-  that does not hold the lock. A red previous run is acknowledged by a row in
+  that does not hold the lock, unless the clone is the queue integrator's
+  (`git config wz.land-integrator true`, set once where `bx --land` runs).
+  Refs of the queue (`refs/bx-land/<branch>/...`) get only the public gates
+  (confidential vocabulary, home paths, identities) over what they add
+  (`scripts/lib/push-refs.sh`); the repository's own gates judge the candidate
+  after the integrator has put it on the tip. A red previous run is acknowledged by a row in
   `docs/hosted-red-acks.md` that the pushed range adds, naming the run
   (`scripts/lib/hosted_red_ack.py`); `--ack-red` and `WZ_ACK_RED` are gone, since
   a verdict that depends on the pusher's environment cannot be reproduced by a
