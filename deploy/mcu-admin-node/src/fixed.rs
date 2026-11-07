@@ -321,7 +321,7 @@ pub fn run() -> ! {
         zid_hex,
         "peer",
         LISTEN_PORT,
-        SessionTimeouts::spec_defaults(),
+        SessionTimeouts::from_build(),
     );
     let mut node = match node {
         Ok(node) => node,

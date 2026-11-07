@@ -1770,7 +1770,7 @@ mod wake_budget_tests {
         actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
-            timeouts: SessionTimeouts::spec_defaults(),
+            timeouts: SessionTimeouts::from_build(),
             role: SessionRole::Acceptor,
             max_iters: None,
         };
@@ -1791,7 +1791,7 @@ mod wake_budget_tests {
         actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
-            timeouts: SessionTimeouts::spec_defaults(),
+            timeouts: SessionTimeouts::from_build(),
             role: SessionRole::Acceptor,
             max_iters: None,
         };
@@ -1830,7 +1830,7 @@ mod wake_budget_tests {
         let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
-            timeouts: SessionTimeouts::spec_defaults(),
+            timeouts: SessionTimeouts::from_build(),
             role: SessionRole::Acceptor,
             max_iters: None,
         };

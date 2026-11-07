@@ -82,6 +82,19 @@ original reproduced by naming it. Three things follow from it:
   configuration; a policy it names outside its profile is Zephyr's own warning that the
   assignment was not honoured, which Zephyr does not make an error. With no policy
   stated every image of the board table builds with the cargo line it had before.
+- **The handshake's windows and cookie buffer**: the INIT and OPEN phases of the unicast
+  handshake wait `HANDSHAKE_INIT_MS` and `HANDSHAKE_OPEN_MS` (2000 each, the session
+  machine's reference values) for the peer's acknowledgement, and the engines hand their
+  drive loops `SessionTimeouts::from_build()`, which is `spec_defaults()` with those two
+  limits (the link-open, accepting and closing windows are unchanged; the pico drop-in's
+  connect and accept timeouts are their own limits). A value of 0 does not compile. On the
+  `session-slot` profile a session keeps a peer's cookie in buffers of
+  `HANDSHAKE_COOKIE_BYTES` (128), at most the INIT body's cookie capacity (65535) and, for
+  a node that accepts, at least the widest cookie it issues; a build outside that does not
+  compile. A cookie longer than the buffer is not kept, so the node echoes none and the peer
+  refuses its OPEN (the node does not report it). The growable profile keeps any length.
+  The Zephyr build passes every limit of the image's Kconfig to cargo, so the three reach an
+  image with no further rule.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and

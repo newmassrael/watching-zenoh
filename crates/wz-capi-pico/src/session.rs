@@ -1067,7 +1067,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             // `PICO_ACCEPT` says.
             timeouts: wz_session_core::session_timeouts::SessionTimeouts {
                 accepting_inactivity_ms: wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
-                ..wz_session_core::session_timeouts::SessionTimeouts::spec_defaults()
+                ..wz_session_core::session_timeouts::SessionTimeouts::from_build()
             },
             open_timeout_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
             // pico tries again every 1000 ms while the reopen fails

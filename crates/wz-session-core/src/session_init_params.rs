@@ -29,10 +29,33 @@ use crate::signing_key::SigningKey;
 /// four bits.
 pub const ZID_MAX: usize = 16;
 
-/// The longest cookie a session keeps, in bytes: the INIT and OPEN bodies' own
-/// declared capacity for it (`sce:max-size` of the generated `InitBody` and
-/// `OpenBody`), so a cookie the decoder accepts always fits.
-pub const COOKIE_MAX: usize = 128;
+/// The longest cookie a session keeps on the `session-slot` profile, in bytes: the build's
+/// `HANDSHAKE_COOKIE_BYTES` limit, 128 unless it says otherwise. It is the node's own bound and not
+/// the codec's: the INIT body declares a cookie of up to [`COOKIE_FIELD_MAX`] (`sce:max-size` of the
+/// generated `InitBody`) and the OPEN body declares none, so a cookie the decoder accepts may be
+/// longer than this, and the fixed form then keeps none (see [`session_bytes`]). The growable
+/// profile keeps any length and does not read it.
+pub const COOKIE_MAX: usize = crate::caps::HANDSHAKE_COOKIE_BYTES;
+
+/// The capacity the generated `InitBody` declares for its cookie field
+/// (`sce:max-size="65535"` in sources/codecs/init_body.scxml): the most [`COOKIE_MAX`] may be, since
+/// the cookie an INIT acknowledgement delivers is the one an OPEN echoes. The OPEN body's own cookie
+/// field has no bound (its source says so: upstream reads it with the length of a slice).
+pub const COOKIE_FIELD_MAX: usize = 65535;
+
+// The cookie bound is refused when the build is made, not when a handshake meets a cookie that does
+// not fit: above the INIT field's capacity it buys nothing, and below the widest cookie this node
+// issues itself a fixed-memory acceptor could not keep the cookie its own peer echoes, so no session
+// it accepted would be admitted.
+const _: () = assert!(
+    COOKIE_MAX >= 1 && COOKIE_MAX <= COOKIE_FIELD_MAX,
+    "HANDSHAKE_COOKIE_BYTES is in 1..=65535, the INIT cookie field's capacity"
+);
+#[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
+const _: () = assert!(
+    COOKIE_MAX >= crate::accept_cookie::ACCEPT_COOKIE_MAX_BYTES,
+    "HANDSHAKE_COOKIE_BYTES is at least the widest cookie an accepting node issues"
+);
 
 /// Bytes a session keeps for the length of one handshake: a zid, a cookie.
 ///
@@ -69,7 +92,7 @@ pub fn zid_bytes(src: &[u8]) -> SessionBytes<ZID_MAX> {
 /// A cookie for [`SessionInitParams::cookie`], written the same way on every
 /// profile. Panics when `src` is longer than [`COOKIE_MAX`].
 pub fn cookie_bytes(src: &[u8]) -> SessionBytes<COOKIE_MAX> {
-    session_bytes::<COOKIE_MAX>(src).expect("a cookie is at most 128 bytes in an INIT or OPEN body")
+    session_bytes::<COOKIE_MAX>(src).expect("a cookie the node sets is at most COOKIE_MAX bytes")
 }
 
 /// Per-deploy parameters that drive the codec field values for the
@@ -589,6 +612,60 @@ mod keep_alive_tests {
         assert_eq!(KeepAliveConf::pico(3).interval_ms(0, 0), 1);
         assert_eq!(KeepAliveConf::zenoh(4).interval_ms(2, 2), 1);
         assert_eq!(KeepAliveConf::zenoh(0).interval_ms(10_000, 10_000), 10_000);
+    }
+}
+
+#[cfg(test)]
+mod cookie_bound_tests {
+    use super::{session_bytes, COOKIE_FIELD_MAX, COOKIE_MAX};
+
+    /// `COOKIE_FIELD_MAX` is the capacity the INIT body declares for its cookie, read from its
+    /// source, so a codec that changed it would fail here and not leave the bound's ceiling a copy of
+    /// a number that moved. The OPEN body's cookie has no bound: its source carries no `max-size` on
+    /// the field, which is why the ceiling is the INIT body's.
+    #[test]
+    fn the_ceiling_is_the_capacity_the_init_body_declares() {
+        let sources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sources/codecs");
+        let open =
+            std::fs::read_to_string(sources.join("open_body.scxml")).expect("open body source");
+        let at = open
+            .find("sce:length-field=\"cookie_len\"")
+            .expect("the open cookie field");
+        let element = &open[open[..at].rfind('<').unwrap()..at + open[at..].find("/>").unwrap()];
+        assert!(
+            !element.contains("sce:max-size"),
+            "the OPEN cookie field now has a bound: {element:?}"
+        );
+        for body in ["init_body.scxml"] {
+            let text = std::fs::read_to_string(sources.join(body)).expect("a codec source is read");
+            // The element that carries the cookie's length field, whole: its attributes run over
+            // several lines in one source and not in the other.
+            let at = text
+                .find("sce:length-field=\"cookie_len\"")
+                .unwrap_or_else(|| panic!("{body} declares no cookie_len field"));
+            let start = text[..at]
+                .rfind('<')
+                .expect("the field is inside an element");
+            let end = at + text[at..].find("/>").expect("the element is closed");
+            let element = &text[start..end];
+            assert!(
+                element.contains(&std::format!("sce:max-size=\"{COOKIE_FIELD_MAX}\"")),
+                "{body}: the cookie field is {element:?}, not {COOKIE_FIELD_MAX} bytes"
+            );
+        }
+    }
+
+    /// The build's bound is in range (the build refuses one that is not), and the fixed form keeps a
+    /// cookie that fits and none that does not, where the growable form keeps any.
+    #[test]
+    fn a_cookie_longer_than_the_buffer_is_not_kept_on_the_fixed_profile() {
+        assert!((1..=COOKIE_FIELD_MAX).contains(&COOKIE_MAX));
+        assert!(session_bytes::<8>(&[7; 8]).is_some());
+        let too_long = session_bytes::<8>(&[7; 9]);
+        #[cfg(feature = "session-slot")]
+        assert!(too_long.is_none());
+        #[cfg(not(feature = "session-slot"))]
+        assert_eq!(too_long.map(|b| b.len()), Some(9));
     }
 }
 

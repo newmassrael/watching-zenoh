@@ -789,7 +789,7 @@ fn start_server(
         &CONTROL.status,
         zid_text.prefix(),
         "peer",
-        SessionTimeouts::spec_defaults(),
+        SessionTimeouts::from_build(),
     )
     .map_err(|_| c"wz: FAIL - the node's admin keys do not fit")?;
     let node = SERVER

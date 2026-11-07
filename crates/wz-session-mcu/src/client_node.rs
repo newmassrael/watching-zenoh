@@ -326,7 +326,7 @@ mod tests {
             far_actions.clone(),
             CoopTime::new(&runtime),
             SessionDriveConfig {
-                timeouts: SessionTimeouts::spec_defaults(),
+                timeouts: SessionTimeouts::from_build(),
                 role: SessionRole::Acceptor,
                 max_iters: None,
             },
@@ -356,7 +356,7 @@ mod tests {
             &local,
             node_links,
             &ENDPOINTS,
-            SessionTimeouts::spec_defaults(),
+            SessionTimeouts::from_build(),
             || params(0xb1),
         );
         let settle = |node: &mut ClientNode<'_, _, _, _>| {

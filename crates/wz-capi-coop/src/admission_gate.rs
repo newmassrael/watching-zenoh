@@ -149,7 +149,7 @@ mod tests {
 
     fn config(role: SessionRole) -> SessionDriveConfig {
         SessionDriveConfig {
-            timeouts: SessionTimeouts::spec_defaults(),
+            timeouts: SessionTimeouts::from_build(),
             role,
             max_iters: None,
         }

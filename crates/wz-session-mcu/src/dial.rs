@@ -579,7 +579,7 @@ mod tests {
             acceptor_actions.clone(),
             CoopTime::new(&runtime),
             SessionDriveConfig {
-                timeouts: SessionTimeouts::spec_defaults(),
+                timeouts: SessionTimeouts::from_build(),
                 role: SessionRole::Acceptor,
                 max_iters: None,
             },
@@ -589,7 +589,7 @@ mod tests {
         let mut dialer = UdpDialer::new(
             &local,
             near.clone(),
-            SessionTimeouts::spec_defaults(),
+            SessionTimeouts::from_build(),
             || params(0xb1),
             quiet,
         );
@@ -643,7 +643,7 @@ mod tests {
         let mut unanswered = UdpDialer::new(
             &local,
             near.clone(),
-            SessionTimeouts::spec_defaults(),
+            SessionTimeouts::from_build(),
             || params(0xc1),
             quiet,
         )
@@ -698,7 +698,7 @@ mod tests {
                 actions.clone(),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
-                    timeouts: SessionTimeouts::spec_defaults(),
+                    timeouts: SessionTimeouts::from_build(),
                     role: SessionRole::Acceptor,
                     max_iters: None,
                 },
@@ -710,7 +710,7 @@ mod tests {
         let mut dialer = UdpDialer::new(
             &local,
             near.clone(),
-            SessionTimeouts::spec_defaults(),
+            SessionTimeouts::from_build(),
             || params(0xb1),
             quiet,
         );
@@ -783,7 +783,7 @@ mod tests {
         let mut dialer = UdpDialer::new(
             &local,
             Rc::new(NoLinks),
-            SessionTimeouts::spec_defaults(),
+            SessionTimeouts::from_build(),
             || params(0xd1),
             quiet,
         );

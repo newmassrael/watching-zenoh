@@ -1859,7 +1859,7 @@ async fn drive_face<F: FaceForwarder + ?Sized>(
     mut opened: OpenedSession,
     forwarder: &F,
 ) -> (Face, DriverOutcome) {
-    let timeouts = SessionTimeouts::spec_defaults();
+    let timeouts = SessionTimeouts::from_build();
     // R311y296 — the forwarder's per-face deadline joins this face's wake
     // `min`. Every stock forwarder keeps both `None` defaults, so their arming
     // is unchanged; `wz-capi-pico`'s returns its pending-`z_get` deadline and
@@ -1941,7 +1941,7 @@ async fn drive_joined_face(
     joined: Arc<SessionLinkActions>,
     forwarder: &dyn FaceForwarder,
 ) -> (Face, DriverOutcome) {
-    let timeouts = SessionTimeouts::spec_defaults();
+    let timeouts = SessionTimeouts::from_build();
     let outcome = drive_session_until_terminal(
         &mut opened.inbound,
         &joined,
@@ -5464,7 +5464,7 @@ mod tests {
         .await
         .expect("initiator reaches Established");
 
-        let timeouts = SessionTimeouts::spec_defaults();
+        let timeouts = SessionTimeouts::from_build();
         tokio::select! {
             _ = go.wait_for(|&v| v) => {}
             _ = drive_session_until_terminal(
@@ -5499,7 +5499,7 @@ mod tests {
         .await
         .expect("udp initiator reaches Established");
 
-        let timeouts = SessionTimeouts::spec_defaults();
+        let timeouts = SessionTimeouts::from_build();
         tokio::select! {
             _ = go.wait_for(|&v| v) => {}
             _ = drive_session_until_terminal(
@@ -5536,7 +5536,7 @@ mod tests {
         .await
         .expect("unixsock initiator reaches Established");
 
-        let timeouts = SessionTimeouts::spec_defaults();
+        let timeouts = SessionTimeouts::from_build();
         tokio::select! {
             _ = go.wait_for(|&v| v) => {}
             _ = drive_session_until_terminal(
@@ -5572,7 +5572,7 @@ mod tests {
         .await
         .expect("ws initiator reaches Established");
 
-        let timeouts = SessionTimeouts::spec_defaults();
+        let timeouts = SessionTimeouts::from_build();
         tokio::select! {
             _ = go.wait_for(|&v| v) => {}
             _ = drive_session_until_terminal(
@@ -5608,7 +5608,7 @@ mod tests {
         .await
         .expect("unixpipe initiator reaches Established");
 
-        let timeouts = SessionTimeouts::spec_defaults();
+        let timeouts = SessionTimeouts::from_build();
         tokio::select! {
             _ = go.wait_for(|&v| v) => {}
             _ = drive_session_until_terminal(
@@ -5682,7 +5682,7 @@ mod tests {
             let _ = go_tx.send(true);
         }
 
-        let timeouts = SessionTimeouts::spec_defaults();
+        let timeouts = SessionTimeouts::from_build();
         tokio::select! {
             _ = go.wait_for(|&v| v) => {}
             _ = drive_session_until_terminal(
@@ -5747,7 +5747,7 @@ mod tests {
             let _ = go_tx.send(true);
         }
 
-        let timeouts = SessionTimeouts::spec_defaults();
+        let timeouts = SessionTimeouts::from_build();
         tokio::select! {
             _ = go.wait_for(|&v| v) => {}
             _ = drive_session_until_terminal(
@@ -5875,7 +5875,7 @@ mod tests {
             }
             std::future::pending::<()>().await;
         };
-        let timeouts = SessionTimeouts::spec_defaults();
+        let timeouts = SessionTimeouts::from_build();
         tokio::select! {
             _ = go.wait_for(|&v| v) => {}
             _ = sender => {}
@@ -7247,7 +7247,7 @@ mod tests {
             .await
             .expect("the tty peer reaches Established against the loop");
 
-            let timeouts = SessionTimeouts::spec_defaults();
+            let timeouts = SessionTimeouts::from_build();
             let mut go = go_rx.clone();
             tokio::select! {
                 _ = go.wait_for(|&v| v) => {}

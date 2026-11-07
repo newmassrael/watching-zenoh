@@ -292,6 +292,40 @@ config WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER
 	  closes the session, which is the policy as it was before this limit. At most
 	  65535: a larger value counts as 65535. It is read only when that policy is on.
 
+config WZ_LIMIT_HANDSHAKE_INIT_MS
+	int "HANDSHAKE_INIT_MS"
+	default 2000
+	help
+	  How long, in milliseconds, a node that has sent its INIT waits for the peer's
+	  INIT acknowledgement before it gives the link up. It is the INIT phase of the
+	  unicast handshake, and its default is the 2 seconds the session machine's
+	  reference values state. At least 1: a build with 0 does not compile, since a
+	  deadline of 0 would fire as the phase begins.
+
+config WZ_LIMIT_HANDSHAKE_OPEN_MS
+	int "HANDSHAKE_OPEN_MS"
+	default 2000
+	help
+	  How long, in milliseconds, a node that has sent its OPEN waits for the peer's
+	  OPEN acknowledgement before it gives the link up. It is the OPEN phase of the
+	  unicast handshake, and its default is the 2 seconds the session machine's
+	  reference values state. At least 1: a build with 0 does not compile, since a
+	  deadline of 0 would fire as the phase begins.
+
+config WZ_LIMIT_HANDSHAKE_COOKIE_BYTES
+	int "HANDSHAKE_COOKIE_BYTES"
+	default 128
+	help
+	  How many bytes of a peer's cookie a session keeps on the fixed-memory profile:
+	  the cookie in the peer's INIT acknowledgement, which the node echoes in its
+	  OPEN, and the cookie a peer echoes in its OPEN, which an accepting node checks
+	  against the one it issued. A longer cookie is not kept, so the node echoes none
+	  and the peer refuses its OPEN. At most 65535, the INIT cookie field's capacity, and for a
+	  node that accepts sessions at least the widest cookie it issues itself: a build
+	  with a smaller value does not compile. Each session holds buffers of this size,
+	  so the value is memory. The growable profile keeps a cookie of any length and
+	  does not read it.
+
 config WZ_LIMIT_PICO_TX_QUEUE_SIZE
 	int "PICO_TX_QUEUE_SIZE"
 	default 8

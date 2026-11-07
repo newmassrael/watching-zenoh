@@ -369,7 +369,7 @@ async fn serve(
     let mut held: HashMap<u64, Box<dyn Any>> = HashMap::new();
     let mut next_id = 0u64;
     let mut on_end: Option<EndCallback> = None;
-    let timeouts = SessionTimeouts::spec_defaults();
+    let timeouts = SessionTimeouts::from_build();
     let router_ended = {
         let drive = drive_session_until_terminal(
             &mut opened.inbound,

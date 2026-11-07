@@ -2002,7 +2002,7 @@ async fn drive_face(
     };
 
     let mut driver = inbound;
-    let timeouts = SessionTimeouts::spec_defaults();
+    let timeouts = SessionTimeouts::from_build();
     let dispatch_shared = shared.clone();
     // The `IterationEvent<'_, '_>` annotation is load-bearing: `drive_session_until_terminal`
     // needs a HIGHER-RANKED `FnMut(IterationEvent<'_, '_>)`, and without it inference

@@ -323,7 +323,7 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
             locators: locators.clone(),
         },
         LISTEN_PORT,
-        SessionTimeouts::spec_defaults(),
+        SessionTimeouts::from_build(),
         move || params(WhatAmI::Peer, &dial_zid, &key),
         move |sink| {
             new_session_actions(
@@ -464,7 +464,7 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
         &local,
         net.links(),
         &ENDPOINTS,
-        SessionTimeouts::spec_defaults(),
+        SessionTimeouts::from_build(),
         move || params(WhatAmI::Client, &zid, &key),
     );
     if node.queryable(STATUS_KEY, answer(STATUS_BODY)).is_err()

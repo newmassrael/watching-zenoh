@@ -198,7 +198,7 @@ async fn play_into_session(
     let mut driver = inbound;
     let actions_for_loop = actions.clone();
     let session_for_dispatch = session.clone();
-    let timeouts = SessionTimeouts::spec_defaults();
+    let timeouts = SessionTimeouts::from_build();
     // RACED against the drive loop rather than sequenced after it, because the
     // two are mutually necessary: the FSM has to keep running for the writer to
     // put a Push on the wire, and the loop only ends when the session does.

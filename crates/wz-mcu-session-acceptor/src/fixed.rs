@@ -269,7 +269,7 @@ where
                     entropy,
                     move || params,
                     SessionDriveConfig {
-                        timeouts: SessionTimeouts::spec_defaults(),
+                        timeouts: SessionTimeouts::from_build(),
                         role: SessionRole::Acceptor,
                         max_iters: Some(MAX_ITERS),
                     },

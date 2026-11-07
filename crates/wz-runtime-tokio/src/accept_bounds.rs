@@ -59,7 +59,7 @@ impl AcceptBounds {
     pub fn timeouts_after(&self, spent_ms: u64) -> SessionTimeouts {
         SessionTimeouts {
             accepting_inactivity_ms: self.timeout_ms.saturating_sub(spent_ms).max(1),
-            ..SessionTimeouts::spec_defaults()
+            ..SessionTimeouts::from_build()
         }
     }
 }

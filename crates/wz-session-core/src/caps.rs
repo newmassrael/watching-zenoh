@@ -415,6 +415,27 @@ pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;
 /// size: it sizes no memory.
 pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 
+/// How long, in milliseconds, a node that has sent its INIT waits for the peer's INIT acknowledgement
+/// before the link is given up: the `init_ack` window of
+/// [`crate::session_timeouts::SessionTimeouts::from_build`]. The default is the 2 seconds
+/// docs/session-fsm.md §2.5 states; `from_build` refuses 0 at compile time. A time and not a table
+/// size: it sizes no memory.
+pub const HANDSHAKE_INIT_MS: usize = generated::HANDSHAKE_INIT_MS;
+
+/// How long, in milliseconds, a node that has sent its OPEN waits for the peer's OPEN acknowledgement
+/// before the link is given up: the `open_ack` window of
+/// [`crate::session_timeouts::SessionTimeouts::from_build`]. The default is the 2 seconds
+/// docs/session-fsm.md §2.5 states; `from_build` refuses 0 at compile time. A time and not a table
+/// size: it sizes no memory.
+pub const HANDSHAKE_OPEN_MS: usize = generated::HANDSHAKE_OPEN_MS;
+
+/// How many bytes of a peer's cookie a session keeps on the `session-slot` profile
+/// ([`crate::session_init_params::COOKIE_MAX`]): each buffer that holds one is this long. The default
+/// is 128. At most the generated INIT cookie field's 65535 and, for a node that accepts, at least
+/// [`crate::accept_cookie::ACCEPT_COOKIE_MAX_BYTES`]; `session_init_params` refuses a value outside
+/// that at compile time. The growable profile does not read it.
+pub const HANDSHAKE_COOKIE_BYTES: usize = generated::HANDSHAKE_COOKIE_BYTES;
+
 /// How many batches each priority's outbound queue holds for the pico C ABI
 /// ([`crate::session_init_params::TxQueueConf::pico`]), in upstream's `1..=16` for a queue size (a
 /// value outside it counts as the nearest end). zenoh-pico has no bounded queue, a put writes on

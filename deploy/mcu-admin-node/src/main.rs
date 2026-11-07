@@ -245,7 +245,7 @@ fn run_heap() -> ! {
             locators: vec![String::from("udp/10.0.2.15:7447")],
         },
         LISTEN_PORT,
-        SessionTimeouts::spec_defaults(),
+        SessionTimeouts::from_build(),
         move || params(&key),
         move |sink| {
             new_session_actions(

@@ -69,7 +69,27 @@ impl SessionTimeouts {
             closing_ms: 100,
         }
     }
+
+    /// The values a build states: [`Self::spec_defaults`] with the two handshake phases the
+    /// build's limits give (`HANDSHAKE_INIT_MS`, `HANDSHAKE_OPEN_MS`, deploy/wz-config.toml),
+    /// which are those same 2 seconds unless the build says otherwise. What an engine hands its
+    /// drive loop is this, so a deployer's window is the one the loop arms; `spec_defaults` stays
+    /// the reference a test names.
+    pub const fn from_build() -> Self {
+        Self {
+            init_ack_ms: crate::caps::HANDSHAKE_INIT_MS as u64,
+            open_ack_ms: crate::caps::HANDSHAKE_OPEN_MS as u64,
+            ..Self::spec_defaults()
+        }
+    }
 }
+
+// A deadline of 0 fires as its phase begins, so no handshake could complete: refused when the
+// build is made, not when the first link is opened.
+const _: () = assert!(
+    crate::caps::HANDSHAKE_INIT_MS >= 1 && crate::caps::HANDSHAKE_OPEN_MS >= 1,
+    "HANDSHAKE_INIT_MS and HANDSHAKE_OPEN_MS are at least 1"
+);
 
 /// One armed handshake deadline: the state whose entry arms it (the
 /// re-arm key), the spec-sourced window, and the event the host raises
@@ -213,6 +233,22 @@ mod tests {
         assert_eq!(t.open_ack_ms, 2_000);
         assert_eq!(t.accepting_inactivity_ms, 1_000);
         assert_eq!(t.closing_ms, 100);
+    }
+
+    /// `from_build` changes the two handshake phases the limits name and nothing else: the
+    /// link-open, accepting and closing windows are `spec_defaults`' in every build, and the two
+    /// phases are the build's limits, which are the §2.5 values when the build states none.
+    #[test]
+    fn from_build_states_the_two_handshake_limits_and_keeps_the_rest() {
+        let (spec, build) = (
+            SessionTimeouts::spec_defaults(),
+            SessionTimeouts::from_build(),
+        );
+        assert_eq!(build.init_ack_ms, crate::caps::HANDSHAKE_INIT_MS as u64);
+        assert_eq!(build.open_ack_ms, crate::caps::HANDSHAKE_OPEN_MS as u64);
+        assert_eq!(build.link_open_ms, spec.link_open_ms);
+        assert_eq!(build.accepting_inactivity_ms, spec.accepting_inactivity_ms);
+        assert_eq!(build.closing_ms, spec.closing_ms);
     }
 
     #[test]

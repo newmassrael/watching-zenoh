@@ -408,7 +408,7 @@ mod tests {
             far_actions.clone(),
             CoopTime::new(&runtime),
             SessionDriveConfig {
-                timeouts: SessionTimeouts::spec_defaults(),
+                timeouts: SessionTimeouts::from_build(),
                 role: SessionRole::Acceptor,
                 max_iters: None,
             },
@@ -438,7 +438,7 @@ mod tests {
                 locators: vec![String::from("udp/10.0.0.2:7521")],
             },
             7521,
-            SessionTimeouts::spec_defaults(),
+            SessionTimeouts::from_build(),
             || params(0xb1),
             move |sink| {
                 new_session_actions(
@@ -542,7 +542,7 @@ mod tests {
                 locators: vec![String::from("udp/10.0.0.2:7531")],
             },
             7531,
-            SessionTimeouts::spec_defaults(),
+            SessionTimeouts::from_build(),
             || params(0xb2),
             move |sink| {
                 new_session_actions(
@@ -627,7 +627,7 @@ mod tests {
                 locators: vec![String::from("udp/10.0.0.2:7541")],
             },
             7541,
-            SessionTimeouts::spec_defaults(),
+            SessionTimeouts::from_build(),
             || params(0xb3),
             move |sink| {
                 new_session_actions(
@@ -658,7 +658,7 @@ mod tests {
             host_actions.clone(),
             CoopTime::new(&runtime),
             SessionDriveConfig {
-                timeouts: SessionTimeouts::spec_defaults(),
+                timeouts: SessionTimeouts::from_build(),
                 role: SessionRole::Initiator,
                 max_iters: None,
             },

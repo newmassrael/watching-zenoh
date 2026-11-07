@@ -428,7 +428,7 @@ fn start() -> Running {
         &CONTROL.status,
         zid_hex,
         "peer",
-        SessionTimeouts::spec_defaults(),
+        SessionTimeouts::from_build(),
     ) {
         Ok(node) => node,
         Err(_) => fail("the node's admin keys do not fit"),

@@ -292,7 +292,7 @@ mod tests {
                 acceptor_actions.clone(),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
-                    timeouts: SessionTimeouts::spec_defaults(),
+                    timeouts: SessionTimeouts::from_build(),
                     role: SessionRole::Acceptor,
                     max_iters: None,
                 },
@@ -321,7 +321,7 @@ mod tests {
                 initiator_actions.clone(),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
-                    timeouts: SessionTimeouts::spec_defaults(),
+                    timeouts: SessionTimeouts::from_build(),
                     role: SessionRole::Initiator,
                     max_iters: None,
                 },

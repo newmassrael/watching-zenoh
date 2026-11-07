@@ -4543,7 +4543,7 @@ pub(crate) async fn drive_open_loop(
         clock,
         max_iters,
         tick_interval_ms,
-        SessionTimeouts::spec_defaults(),
+        SessionTimeouts::from_build(),
     )
     .await
 }
@@ -5711,7 +5711,7 @@ pub async fn accept_and_open_session_with_multilink(
         clock,
         max_iters,
         tick_interval_ms,
-        SessionTimeouts::spec_defaults(),
+        SessionTimeouts::from_build(),
     )
     .await
 }
@@ -5812,7 +5812,7 @@ pub async fn accept_and_open_session_with_offer(
         clock,
         max_iters,
         tick_interval_ms,
-        SessionTimeouts::spec_defaults(),
+        SessionTimeouts::from_build(),
     )
     .await
 }

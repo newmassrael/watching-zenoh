@@ -1503,7 +1503,7 @@ where
             factory,
             endpoints,
             &storage.peers,
-            SessionTimeouts::spec_defaults(),
+            SessionTimeouts::from_build(),
             declarations,
         )
     })
