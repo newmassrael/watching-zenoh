@@ -591,6 +591,7 @@ impl<'a> Walk<'a> {
             value: String::new(),
             start: 0,
             end: 0,
+            typed: None,
         });
         Some(at)
     }
@@ -607,6 +608,7 @@ impl<'a> Walk<'a> {
             value,
             start,
             end,
+            typed: None,
         };
     }
 
@@ -940,6 +942,7 @@ impl<'a> Walk<'a> {
             value,
             start,
             end,
+            typed: None,
         });
     }
 

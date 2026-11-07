@@ -1368,7 +1368,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":56,"key":"kind","values":[...],
+ *     {"name":"fields","revision":57,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -3027,12 +3027,67 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *     demo/pose=demo-a@pkg.Pose  the same, naming the BODY SCHEMA the bytes
  *                                after the header are an instance of. It is
  *                                carried to the row as `body_schema`, and the
- *                                capture's walk does not read it yet (a
- *                                declaration names the schema and does not
- *                                carry its files); the `message` of
+ *                                body is READ by it when the text also
+ *                                carries the schema's files (the next two
+ *                                lines); the `message` of
  *                                wz_dissect_e2e_wrap's `@body` member and of
  *                                wz_dissect_e2e_open_body's description is the
  *                                same name
+ *     #@pose.proto="syntax ..."  field-document revision 57 -- a .proto FILE:
+ *                                `#@`, the name other files import it by,
+ *                                and the file's text as ONE JSON string, so
+ *                                the line stays a line.
+ *                                wz_dissect_declarations_from_proto writes
+ *                                these lines for you
+ *     demo/pose=protobuf@pkg.Pose  a protobuf rule naming the message the
+ *                                payload is an instance of: the payload is
+ *                                READ by the types the declared files give
+ *                                it instead of walked by the wire
+ *
+ * READING BY THE SCHEMA, at field-document revision 57. The files are read
+ * together, once per call, when the first rule naming a message is installed;
+ * a file may import one declared anywhere in the text, and the same file
+ * declared twice with the same text is one declaration. A rule is REFUSED
+ * (WZ_DISSECT_ERR_DECLARATION, and wz_dissect_declarations_diagnose says why)
+ * when the text carries schema files and none defines its message, when the
+ * name is an enum's, when the files are not a schema the reader accepts (the
+ * message names the file and line), or when `@` follows a format that reads
+ * no schema (`json@...`). A text that carries NO schema file and a rule that
+ * names a message installs as a profile rule always has: the name is
+ * carried, the payload is walked by the wire, and the row says so.
+ *
+ * A `decoded` block then carries
+ *
+ *     `typed`   true when the fields were read by a type: a body schema whose
+ *               files are declared, or a described record (#name=layout)
+ *     `schema`  the body schema the rule names, or `null`. With `typed` it
+ *               tells three cases apart: none named; named and read; named
+ *               and not read, because the text carries no schema file
+ *
+ * and every entry of its `fields`
+ *
+ *     `type`         the schema's scalar keyword (`sint32`), an enum's or a
+ *                    message's full name, `map<K, V>` for a map entry, or a
+ *                    described record's type (`u16le`)
+ *     `typed_value`  the value in protobuf's JSON mapping, as
+ *                    wz_dissect_e2e_open_body writes it: a number (its digits
+ *                    in a string past 2^53 - 1), "NaN", "Infinity" and
+ *                    "-Infinity", true or false, a string, standard base64
+ *                    for bytes, an enum value's name (its number when the enum
+ *                    names none)
+ *     `enum_number`  an enum value's number, beside its name
+ *
+ * each `null` where it does not apply: a message and a map entry have a type
+ * and no value (their fields are the entries after them, a path deeper), a
+ * field the schema does not know has neither, and every field walked by the
+ * wire has none of the three. `value` KEEPS ITS MEANING, the text a person
+ * reads (`-3` where the wire walk says `varint 5`): read a number from
+ * `typed_value` and never parse `value`. Read by a schema, a packed run is one
+ * entry per element under one `path`, a map entry holds `key` (`.1`) and
+ * `value` (`.2`), and `name` is the schema's, unless a field-name line names
+ * the path. An empty payload is a message whose every field is absent and
+ * decodes to no fields; bytes that are not the message are a `refused` block
+ * whose `why` names the schema field and the byte.
  *
  * A profile rule competes with the other rules like any rule: the first one
  * that covers a key decides, so a `json` rule ahead of it keeps that key out
@@ -3507,6 +3562,7 @@ int wz_dissect_pcap_fields_where_limited(const unsigned char *bytes, size_t len,
  *     `format_rule`        <keyexpr>=<format>
  *     `field_name`         <keyexpr>:<path>=<name>
  *     `format_definition`  #<format>=<layout>
+ *     `schema_file`        #@<file>="<text>"   (verdict revision 3)
  *
  * `pattern` is the key expression AS READ, with the dialect's quoting removed,
  * and is present for the two kinds that have a key. `rule_index` is present for
@@ -3664,9 +3720,18 @@ typedef struct wz_dissect_proto_file {
  * numbers and no names, so a payload read under a protobuf rule shows 3.2 where
  * the author wrote temperature. The names are DECLARED, a line each --
  *
- *     demo/temp=protobuf          the rule, first
- *     demo/temp:3=sensor          field 3 is called sensor
- *     demo/temp:3.2=celsius       field 2 INSIDE field 3 is called celsius
+ *     #@a.proto="syntax ..."         each file read, as one JSON string
+ *     demo/temp=protobuf@pkg.Root    the rule, naming the root message
+ *     demo/temp:3=sensor             field 3 is called sensor
+ *     demo/temp:3.2=celsius          field 2 INSIDE field 3 is called celsius
+ *
+ * At document revision 2 the text carries the schema: one #@ line per file the
+ * root file reaches, in the order you listed them, and a rule that names the
+ * root message, so a door that takes the text READS each payload by its types
+ * (the field document's `typed`, `type` and `typed_value`). The name lines
+ * name what the schema names already, and keep naming the fields of a rule you
+ * rewrite to a bare `protobuf`. Two texts this door wrote for two keys of one
+ * schema concatenate into one valid text.
  *
  * A person who owns the .proto file should not type those lines, and a program
  * that lets them choose the file must not read .proto itself: that is a second
@@ -3787,9 +3852,9 @@ typedef struct wz_dissect_proto_file {
  *
  * THE VERDICT. Returns WZ_DISSECT_OK for any well-formed arguments and writes
  *
- *     {"document":{"name":"declarations_from_proto","revision":1},
- *      "ok":true,"declarations":"demo/temp=protobuf\ndemo/temp:1=value\n",
- *      "installed":2}
+ *     {"document":{"name":"declarations_from_proto","revision":2},
+ *      "ok":true,"declarations":"#@a.proto=\"...\"\ndemo/temp=protobuf@pkg.M\n
+ *      demo/temp:1=value\n","installed":3}
  *
  * or
  *
@@ -5130,7 +5195,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":56,"key":"state",
+ *     "value_families":[{"name":"fields","revision":57,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

@@ -400,6 +400,13 @@ impl<'a> Declarations<'a> {
         if let Some(definition) = self.map.definition_of(id) {
             self.used.borrow_mut().insert(definition);
         }
+        // And every schema file, when the rule read its payload by them: the
+        // files are read together, so a rule that read one applied them all,
+        // and reporting an imported file as unused would send a reader to
+        // delete what the message it read was built from.
+        if self.map.reads_schema_files(id) {
+            self.used.borrow_mut().extend(self.map.schema_file_ids());
+        }
     }
 
     /// The declared name for this path, RECORDING that the declaration applied.
@@ -1176,6 +1183,17 @@ pub enum PayloadDecoding {
         /// keeps paying for; the reason belongs to the payload plane, which is
         /// where that finding is produced.
         despite_encoding: Option<String>,
+        /// Whether the fields carry their TYPE
+        /// ([`PayloadField::typed`]): read by a body schema the declarations
+        /// carry the files of, or by a described record. `false` for a walk of
+        /// the wire, which is what a consumer is told by this and not by
+        /// testing every field.
+        typed: bool,
+        /// The body schema the rule names (`protobuf@pkg.Pose`,
+        /// `demo-a@pkg.Pose`), or `None`. With `typed` it tells the three cases
+        /// apart: no schema named, a schema named and read, and a schema named
+        /// whose files the declarations do not carry.
+        schema: Option<String>,
     },
     /// R311y873 — the sample's OWN declared encoding contradicts the rule, so
     /// the format was never applied.
@@ -1379,6 +1397,8 @@ impl PayloadDecoding {
                 format: String::new(),
                 fields: Vec::new(),
                 despite_encoding: None,
+                typed: false,
+                schema: None,
             },
             // R2170 (open-debt item 546) — the chain grew by one, and it had
             // to: the walk's length is compared against `STATES`, so an eighth
@@ -2120,7 +2140,14 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
                 // because this is the one place that holds both the resolved
                 // keyexpr and the decoded paths; the decoder has the paths and
                 // no keyexpr, and the map has neither until now.
-                f.name = map.field_name(&keyexpr, &f.path);
+                //
+                // A decoder that READ A SCHEMA returns the schema's name for
+                // the field, which is a source as honest as a declaration: a
+                // declared name still wins, so an operator's rename means what
+                // it says whichever reader ran.
+                if let Some(declared) = map.field_name(&keyexpr, &f.path) {
+                    f.name = Some(declared);
+                }
             }
             PayloadDecoding::Decoded {
                 keyexpr,
@@ -2128,6 +2155,10 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
                 format: format.name().to_string(),
                 fields,
                 despite_encoding,
+                typed: format.reads_types(),
+                schema: format
+                    .body_schema()
+                    .map(|schema| String::from(schema.message)),
             }
         }
         Err(why) => {
@@ -2256,12 +2287,24 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             format,
             fields,
             despite_encoding,
+            typed,
+            schema,
         } => {
             open(out);
             out.push_str(",\"keyexpr\":");
             escape_into(keyexpr, out);
             out.push_str(",\"matched_rule\":");
             push_matched_rule(rule, out);
+            // Whether the fields carry their type, and the body schema the rule
+            // names: both always written, on the rule `despite_encoding`
+            // states just below.
+            out.push_str(",\"typed\":");
+            out.push_str(if *typed { "true" } else { "false" });
+            out.push_str(",\"schema\":");
+            match schema {
+                Some(message) => escape_into(message, out),
+                None => out.push_str("null"),
+            }
             // R311y874 — present with a `null` rather than absent, R311y720's
             // rule: a consumer must never have to test for a key to learn that
             // a fact is unknown. Here the fact is "was this decoded over the
@@ -2305,6 +2348,24 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
                 out.push_str(",\"parent\":");
                 match path_parent(&f.path) {
                     Some(parent) => escape_into(parent, out),
+                    None => out.push_str("null"),
+                }
+                // The field as its type reads it (`PayloadField::typed`), in
+                // three keys every entry carries: `type`, `typed_value` (JSON in
+                // protobuf's mapping, written as `proto_decode_json` writes it)
+                // and `enum_number`. `null` where a member does not apply or no
+                // type is known, so a row walked by the wire has the same keys.
+                let typed = f.typed.as_ref();
+                out.push_str(",\"type\":");
+                match typed.and_then(|t| t.ty.as_deref()) {
+                    Some(ty) => escape_into(ty, out),
+                    None => out.push_str("null"),
+                }
+                out.push_str(",\"typed_value\":");
+                out.push_str(typed.and_then(|t| t.json.as_deref()).unwrap_or("null"));
+                out.push_str(",\"enum_number\":");
+                match typed.and_then(|t| t.enum_number) {
+                    Some(number) => out.push_str(&number.to_string()),
                     None => out.push_str("null"),
                 }
                 out.push('}');
@@ -2670,10 +2731,14 @@ mod tests {
                 format,
                 fields,
                 despite_encoding,
+                typed,
+                schema,
             } => {
                 assert_eq!(keyexpr, "demo/a");
                 assert_eq!(rule, demo_rule(), "the one rule declared won");
                 assert_eq!(format, "json");
+                assert!(!typed, "a JSON walk knows no schema type");
+                assert_eq!(schema, None);
                 assert_eq!(
                     despite_encoding, None,
                     "the label and the bytes agree, so nothing was overridden"
@@ -3133,6 +3198,7 @@ mod tests {
                 value: alloc::format!("{} byte(s)", payload.len()),
                 start: 0,
                 end: payload.len(),
+                typed: None,
             }])
         }
         // `encodings()` NOT overridden — see the struct doc.
@@ -4150,13 +4216,13 @@ mod tests {
         // And the same two cells are in the DOCUMENT, in the entry's own object.
         assert!(
             json.contains(
-                r#"{"path":"3.2.1","name":null,"value":"varint 5","start":8,"end":10,"depth":2,"parent":"3.2"}"#
+                r#"{"path":"3.2.1","name":null,"value":"varint 5","start":8,"end":10,"depth":2,"parent":"3.2","type":null,"typed_value":null,"enum_number":null}"#
             ),
             "{json}"
         );
         assert!(
             json.contains(
-                r#"{"path":"1","name":null,"value":"varint 7","start":0,"end":2,"depth":0,"parent":null}"#
+                r#"{"path":"1","name":null,"value":"varint 7","start":0,"end":2,"depth":0,"parent":null,"type":null,"typed_value":null,"enum_number":null}"#
             ),
             "{json}"
         );

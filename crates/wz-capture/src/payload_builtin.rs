@@ -282,6 +282,8 @@ fn walk(
             value: format!("{kind} {value}"),
             start: base + start,
             end: base + at,
+            // The wire alone says no type: see `PayloadField::typed`.
+            typed: None,
         });
         out.append(&mut children);
     }

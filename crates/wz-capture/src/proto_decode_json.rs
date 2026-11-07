@@ -94,6 +94,27 @@ fn push_value(value: &Value, base: usize, out: &mut String) {
         _ => {}
     }
     out.push_str(",\"value\":");
+    push_scalar(value, out);
+}
+
+/// A value that is not a message, as JSON text: the rendering behind a
+/// listing's `value` and behind every other document that carries a typed
+/// value ([`crate::payload::formats::TypedValue::json`]). `None` for a message,
+/// whose fields are its value, and for a field the schema does not know, which
+/// has a wire value and no typed one.
+pub(crate) fn value_json(value: &Value) -> Option<String> {
+    match value {
+        Value::Message(_) | Value::Unknown(_) => None,
+        _ => {
+            let mut out = String::new();
+            push_scalar(value, &mut out);
+            Some(out)
+        }
+    }
+}
+
+/// The value itself, by the JSON mapping the module doc states.
+fn push_scalar(value: &Value, out: &mut String) {
     match value {
         Value::Signed(v) => push_integer(i128::from(*v), out),
         Value::Unsigned(v) => push_integer(i128::from(*v), out),

@@ -9726,8 +9726,11 @@ mod tests {
                         value: String::from("1"),
                         start: 0,
                         end: 1,
+                        typed: None,
                     }],
                     despite_encoding: None,
+                    typed: false,
+                    schema: None,
                 },
                 &mut out,
             );
@@ -10969,7 +10972,9 @@ mod tests {
         ];
         let mut declaration_verdicts: Vec<String> = alloc::vec![
             crate::diagnose_json::declarations_diagnose_json(
-                "demo/a=protobuf\ndemo/a:1=name\n#profile=a:u8\ndemo/b=profile"
+                "demo/a=protobuf\ndemo/a:1=name\n#profile=a:u8\ndemo/b=profile\n\
+                 #@m.proto=\"syntax = \\\"proto3\\\"; message M { int32 a = 1; }\"\n\
+                 demo/c=protobuf@M"
             ),
             crate::diagnose_json::declarations_diagnose_json("not a declaration"),
         ];
@@ -11925,6 +11930,7 @@ mod tests {
             block.starts_with(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
+                 \"typed\":false,\"schema\":null,\
                  \"despite_encoding\":null,\"format\":\"protobuf\",\"fields\":["
             ),
             "the covering rule must DECODE, naming the topic and the decoder: {block}"

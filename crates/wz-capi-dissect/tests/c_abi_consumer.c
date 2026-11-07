@@ -1712,9 +1712,16 @@ static int check_proto_door(void) {
     CHECK(doc != NULL, "OK came back with no string");
     CHECK(strstr(doc, "\"ok\":true") != NULL, "a valid schema was refused: %s",
           doc);
+    /* Document revision 2: the text opens with one line per schema file the
+     * root file reaches, in the order they were handed over, and the rule
+     * names the root message, so the payload is read by its types. */
+    CHECK(strstr(doc, "\"declarations\":\"#@m/root.proto=\\\"") != NULL,
+          "the root file's line must open the text: %s", doc);
+    CHECK(strstr(doc, "\\n#@common/stamp.proto=\\\"") != NULL,
+          "the imported file's line must follow: %s", doc);
     /* A map is its repeated entry message: key is field 1, value is field 2. */
     CHECK(strstr(doc,
-                 "\"declarations\":\"demo/temp=protobuf\\n"
+                 "\\ndemo/temp=protobuf@m.Root\\n"
                  "demo/temp:1=id\\n"
                  "demo/temp:2=at\\n"
                  "demo/temp:2.1=secs\\n"
@@ -1722,7 +1729,7 @@ static int check_proto_door(void) {
                  "demo/temp:3.1=key\\n"
                  "demo/temp:3.2=value\\n\"") != NULL,
           "unexpected declarations: %s", doc);
-    CHECK(strstr(doc, "\"installed\":7") != NULL, "unexpected count: %s", doc);
+    CHECK(strstr(doc, "\"installed\":9") != NULL, "unexpected count: %s", doc);
     wz_dissect_string_free(doc);
 
     /* What came out goes to the validation door unchanged, and it counts the
@@ -3564,9 +3571,10 @@ int main(void) {
     rc = wz_dissect_declarations_diagnose("demo/temp=protobuf", &declared);
     CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
     /* Revision 2 names the KIND each line was read as, and a rule its position
-     * among the rules: the number a field row's matched_rule.index reports. */
+     * among the rules: the number a field row's matched_rule.index reports.
+     * Revision 3 adds the kind `schema_file`, which this text has none of. */
     CHECK(strcmp(declared,
-                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":2},"
+                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":3},"
                  "\"ok\":true,\"installed\":1,\"lines\":[{\"line\":0,"
                  "\"kind\":\"format_rule\",\"pattern\":\"demo/temp\","
                  "\"rule_index\":0}]}") == 0,
@@ -4031,8 +4039,12 @@ int main(void) {
      * retires.
      * 56: every field object's `selector_path`, the name a selector gives
      * the node, and a record a Frame carried judged inside that Frame. A key
-     * arrives and the `kind` shapes move; nothing retires. */
-    revisioned[2].revision = 56;
+     * arrives and the `kind` shapes move; nothing retires.
+     * 57: a decoded payload block's `typed` and `schema`, and each of its
+     * fields' `type`, `typed_value` and `enum_number`: a payload read by the
+     * types its declared .proto files give it. Keys arrive and the `state`
+     * shapes move; nothing retires. */
+    revisioned[2].revision = 57;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4087,11 +4099,12 @@ int main(void) {
         wz_dissect_live_close(healthy);
     }
     /* (ABI 25) -- the .proto door's document. 1: the first revision a consumer
-     * could read. Built from a one-message schema, which is the cheapest way to
-     * hold the document's opening to the revision this consumer was written
-     * against. */
+     * could read. 2: the text carries the schema files and its rule names the
+     * root message; no key moves. Built from a one-message schema, which is
+     * the cheapest way to hold the document's opening to the revision this
+     * consumer was written against. */
     revisioned[6].name = "declarations_from_proto";
-    revisioned[6].revision = 1;
+    revisioned[6].revision = 2;
     revisioned[6].doc = NULL;
     {
         static const char tiny[] = "syntax = \"proto3\"; message M { int32 a = 1; }";

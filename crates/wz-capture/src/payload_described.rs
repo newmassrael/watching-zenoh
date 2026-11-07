@@ -50,7 +50,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::payload::formats::{PayloadField, PayloadFormat, PayloadFormatError};
+use crate::payload::formats::{PayloadField, PayloadFormat, PayloadFormatError, TypedValue};
 
 /// One field's width and how its bytes are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,45 +313,81 @@ fn kind_of(spelling: &str) -> Result<Kind, LayoutError> {
     Err(LayoutError::NoSuchType(spelling.to_owned()))
 }
 
+/// Render one field's bytes: the text a person reads, and the value as its type
+/// reads it ([`TypedValue`]), from ONE reading of the bytes.
+///
+/// The typed value is written by the rendering every typed decoding uses
+/// ([`crate::proto_decode_json`]), so a described `u16le` and a schema's
+/// `uint32` reach a consumer in one JSON form.
+fn render_typed(kind: Kind, spelling: &str, bytes: &[u8]) -> (String, TypedValue) {
+    use crate::proto_decode::Value;
+    let shown = render(kind, bytes);
+    let value = match kind {
+        Kind::UnsignedLe(_) | Kind::UnsignedBe(_) => Value::Unsigned(read_unsigned(kind, bytes)),
+        Kind::SignedLe(_) | Kind::SignedBe(_) => Value::Signed(read_signed(kind, bytes)),
+        Kind::FloatLe(4) | Kind::FloatBe(4) => {
+            Value::Float(f32::from_bits(read_unsigned(kind, bytes) as u32))
+        }
+        Kind::FloatLe(_) | Kind::FloatBe(_) => {
+            Value::Double(f64::from_bits(read_unsigned(kind, bytes)))
+        }
+        Kind::Bytes(_) | Kind::Rest => Value::Bytes(bytes.to_vec()),
+    };
+    let typed = TypedValue {
+        ty: Some(spelling.to_owned()),
+        json: crate::proto_decode_json::value_json(&value),
+        enum_number: None,
+    };
+    (shown, typed)
+}
+
+/// The bytes as an unsigned integer in the byte order `kind` names.
+fn read_unsigned(kind: Kind, bytes: &[u8]) -> u64 {
+    let be = matches!(
+        kind,
+        Kind::UnsignedBe(_) | Kind::SignedBe(_) | Kind::FloatBe(_)
+    );
+    let mut v: u64 = 0;
+    if be {
+        for b in bytes {
+            v = (v << 8) | u64::from(*b);
+        }
+    } else {
+        for b in bytes.iter().rev() {
+            v = (v << 8) | u64::from(*b);
+        }
+    }
+    v
+}
+
+/// The bytes as a two's-complement integer of their own width, sign-extended
+/// from that width rather than from 64 bits.
+fn read_signed(kind: Kind, bytes: &[u8]) -> i64 {
+    let raw = read_unsigned(kind, bytes);
+    let bits = bytes.len() * 8;
+    if bits >= 64 {
+        raw as i64
+    } else {
+        let shift = 64 - bits;
+        ((raw << shift) as i64) >> shift
+    }
+}
+
 /// Render one field's bytes.
 ///
 /// `bytes.len()` is the width the walk already checked, so every arm here reads
 /// exactly what it was handed and none of them can be short.
 fn render(kind: Kind, bytes: &[u8]) -> String {
-    let unsigned = |be: bool| -> u64 {
-        let mut v: u64 = 0;
-        if be {
-            for b in bytes {
-                v = (v << 8) | u64::from(*b);
-            }
-        } else {
-            for b in bytes.iter().rev() {
-                v = (v << 8) | u64::from(*b);
-            }
-        }
-        v
-    };
-    // Sign-extend from the field's own width rather than from 64 bits: a
-    // one-byte 0xff is -1 and not 255, and the shift pair is what says so.
-    let signed = |be: bool| -> i64 {
-        let raw = unsigned(be);
-        let bits = bytes.len() * 8;
-        if bits >= 64 {
-            raw as i64
-        } else {
-            let shift = 64 - bits;
-            ((raw << shift) as i64) >> shift
-        }
-    };
     match kind {
-        Kind::UnsignedLe(_) => format!("{}", unsigned(false)),
-        Kind::UnsignedBe(_) => format!("{}", unsigned(true)),
-        Kind::SignedLe(_) => format!("{}", signed(false)),
-        Kind::SignedBe(_) => format!("{}", signed(true)),
-        Kind::FloatLe(4) => format!("{}", f32::from_bits(unsigned(false) as u32)),
-        Kind::FloatBe(4) => format!("{}", f32::from_bits(unsigned(true) as u32)),
-        Kind::FloatLe(_) => format!("{}", f64::from_bits(unsigned(false))),
-        Kind::FloatBe(_) => format!("{}", f64::from_bits(unsigned(true))),
+        Kind::UnsignedLe(_) | Kind::UnsignedBe(_) => format!("{}", read_unsigned(kind, bytes)),
+        // Sign-extended from the field's own width: a one-byte 0xff is -1.
+        Kind::SignedLe(_) | Kind::SignedBe(_) => format!("{}", read_signed(kind, bytes)),
+        Kind::FloatLe(4) | Kind::FloatBe(4) => {
+            format!("{}", f32::from_bits(read_unsigned(kind, bytes) as u32))
+        }
+        Kind::FloatLe(_) | Kind::FloatBe(_) => {
+            format!("{}", f64::from_bits(read_unsigned(kind, bytes)))
+        }
         Kind::Bytes(_) | Kind::Rest => hex(bytes),
     }
 }
@@ -369,6 +405,11 @@ fn hex(bytes: &[u8]) -> String {
 impl PayloadFormat for DescribedFormat {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Every field's type is the layout's, so every field carries it.
+    fn reads_types(&self) -> bool {
+        true
     }
 
     /// Walk the record.
@@ -390,12 +431,14 @@ impl PayloadFormat for DescribedFormat {
                 Some(end) if end <= payload.len() => end,
                 _ => return Err(PayloadFormatError::Truncated(at)),
             };
+            let (value, typed) = render_typed(item.kind, &item.spelling, &payload[at..end]);
             out.push(PayloadField {
                 path: item.name.clone(),
                 name: None,
-                value: render(item.kind, &payload[at..end]),
+                value,
                 start: at,
                 end,
+                typed: Some(typed),
             });
             at = end;
         }

@@ -690,11 +690,23 @@ pub enum RunTransport {
 /// before the first push and the count a reader reports is the pushes plus those
 /// four.
 pub fn push_run_capture(pushes: usize, transport: RunTransport) -> Vec<u8> {
+    push_run_capture_of("gate/row", pushes, transport, &|_| alloc::vec![0xA5u8; 16])
+}
+
+/// [`push_run_capture`] under the literal `keyexpr`, with the `i`-th push
+/// carrying `payload(i)`: the capture a cost measured per decoded payload is
+/// taken on, where the bytes must be a message of the schema being read.
+pub fn push_run_capture_of(
+    keyexpr: &str,
+    pushes: usize,
+    transport: RunTransport,
+    payload: &dyn Fn(usize) -> Vec<u8>,
+) -> Vec<u8> {
     const ISN: u32 = 1000;
     const PORT: u16 = 43210;
     let mut units = full_handshake();
     for i in 0..pushes {
-        let record = wz_session_core::push_build::build_push_literal("gate/row", &[0xA5u8; 16])
+        let record = wz_session_core::push_build::build_push_literal(keyexpr, &payload(i))
             .expect("a literal put builds");
         // Reliable, numbered from the OPEN's initial number: every frame is one
         // step after the one before, so the SN verdict of each is `Continuous`.

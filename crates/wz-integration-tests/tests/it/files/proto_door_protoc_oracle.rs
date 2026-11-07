@@ -682,7 +682,12 @@ fn derive(msgs: &BTreeMap<String, MsgDesc>, root: &str) -> Result<Vec<String>, S
         stack.pop();
         Ok(())
     }
-    let mut lines = vec![format!("{KEY}=protobuf")];
+    // The rule names the root message by its full name, without the leading
+    // dot protoc's descriptor writes (`.p.Outer` is `p.Outer`).
+    let mut lines = vec![format!(
+        "{KEY}=protobuf@{}",
+        root.strip_prefix('.').unwrap_or(root)
+    )];
     walk(msgs, root, "", &mut Vec::new(), &mut lines)?;
     Ok(lines)
 }
@@ -824,7 +829,14 @@ fn compare_success(msgs: &BTreeMap<String, MsgDesc>, root: &str, door: &Door) ->
             if !door.ok {
                 return Some(format!("{root}: the door refused: {}", door.reason));
             }
-            let got: Vec<&str> = door.declarations.lines().collect();
+            // The schema file lines carry the files the door was handed, which
+            // protoc's descriptor does not describe; the rule and the names
+            // after them are what it implies.
+            let got: Vec<&str> = door
+                .declarations
+                .lines()
+                .filter(|l| !l.starts_with("#@"))
+                .collect();
             if got != want {
                 return Some(format!(
                     "{root}: the declarations differ.\n  protoc's descriptor implies:\n    {}\n  the door wrote:\n    {}",
@@ -832,13 +844,13 @@ fn compare_success(msgs: &BTreeMap<String, MsgDesc>, root: &str, door: &Door) ->
                     got.join("\n    ")
                 ));
             }
+            let lines = door.declarations.lines().count();
             let (accepted, installed) = diagnose(&door.declarations);
-            if !accepted || installed != want.len() || door.installed != want.len() {
+            if !accepted || installed != lines || door.installed != lines {
                 return Some(format!(
                     "{root}: the validation door says ok={accepted} installed={installed} and the \
-                     door says installed={} for {} lines",
+                     door says installed={} for {lines} lines",
                     door.installed,
-                    want.len()
                 ));
             }
             None
@@ -2331,7 +2343,7 @@ fn the_descriptor_reader_derives_the_tree_the_door_is_held_to() {
     assert_eq!(
         want,
         [
-            "demo/sensor=protobuf",
+            "demo/sensor=protobuf@p.Outer",
             "demo/sensor:1=id",
             "demo/sensor:2=in",
             "demo/sensor:2.5=tag",

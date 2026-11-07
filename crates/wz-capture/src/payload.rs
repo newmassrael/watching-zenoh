@@ -631,6 +631,7 @@ impl<'a> Scanner<'a> {
             value: alloc::string::String::new(),
             start: 0,
             end: 0,
+            typed: None,
         });
         Some(at)
     }
@@ -665,6 +666,7 @@ impl<'a> Scanner<'a> {
             value,
             start,
             end,
+            typed: None,
         };
     }
 
@@ -2124,11 +2126,13 @@ pub mod formats {
         /// R311y720 (PF4) — the DECLARED name for this path, where a
         /// deployment gave one.
         ///
-        /// Always `None` as a decoder returns it, and that is the invariant
-        /// worth stating: protobuf's wire format carries no names, so a decoder
-        /// filling this in would be inventing one. It is set afterwards, and
-        /// only from [`FormatMap::field_name`] -- see that method for why the
-        /// declaration is the only honest source.
+        /// `None` as a decoder of the WIRE returns it, and that is the
+        /// invariant worth stating: protobuf's wire format carries no names, so
+        /// such a decoder filling this in would be inventing one. A decoder
+        /// that read a SCHEMA ([`crate::proto_decode`]) returns the schema's
+        /// name, which is not invented. A declaration
+        /// ([`FormatMap::field_name`]) is applied afterwards and wins over
+        /// either.
         pub name: Option<String>,
         /// What the decoder made of it, rendered.
         pub value: String,
@@ -2136,6 +2140,47 @@ pub mod formats {
         pub start: usize,
         /// One past the last.
         pub end: usize,
+        /// The field AS ITS TYPE READS IT, from a decoder that knows the type:
+        /// one reading by a schema ([`crate::proto_decode`]) or a described
+        /// record (a `#name=layout` definition). `None` from a walk that knows
+        /// only the wire.
+        ///
+        /// Beside `value` and not in place of it, so `value` keeps one meaning
+        /// in every row of every document: the text a person reads. A
+        /// consumer that plots or compares a field reads this, and never parses
+        /// `value` to get a number back -- a second reader of the display
+        /// grammar, wrong exactly where the wire hides the type (a `sint32`, a
+        /// `double`, a packed run).
+        pub typed: Option<TypedValue>,
+    }
+
+    /// What a decoder that knows a field's type made of it.
+    ///
+    /// Every member is `None` where it does not apply, so a document writes the
+    /// same keys for every field: a nested message has a type and no value (its
+    /// fields are the rows below it), and a field the schema does not know has
+    /// neither.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct TypedValue {
+        /// The type as the schema writes it: a scalar keyword (`sint32`), an
+        /// enum's or a message's full name, `map<K, V>` for a map entry, or a
+        /// described record's type spelling (`u16le`). `None` for a field the
+        /// schema does not know.
+        pub ty: Option<String>,
+        /// The value as JSON text, in protobuf's JSON mapping
+        /// ([`crate::proto_decode_json`]): a number (in a string past 2^53 - 1),
+        /// `"NaN"` and the two infinities, `true` / `false`, a string, standard
+        /// base64 for bytes, and an enum value's name (its number when the enum
+        /// names none). `None` for a message, a map entry, and a field the
+        /// schema does not know.
+        ///
+        /// JSON text and not a number type, so this record stays `Eq` and the
+        /// one rendering of a decoded value ([`crate::proto_decode_json`]) is
+        /// the one every document writes.
+        pub json: Option<String>,
+        /// An enum value's number, beside its name in `json`. `None` for
+        /// anything but an enum.
+        pub enum_number: Option<i32>,
     }
 
     /// Why a payload did not decode.
@@ -2260,6 +2305,40 @@ pub mod formats {
         fn encodings(&self) -> Option<&[&str]> {
             None
         }
+
+        /// The BODY SCHEMA the rule that installed this format names
+        /// (`protobuf@pkg.Pose`, `demo-a@pkg.Pose`), and whether the payload is
+        /// read by it, or `None` for a format no schema is named for.
+        ///
+        /// What a row reports as `schema` and `typed`, so a consumer can tell a
+        /// field read by its type from one walked by the wire without testing
+        /// every field. A default for the reason [`Self::encodings`] gives.
+        fn body_schema(&self) -> Option<BodySchema<'_>> {
+            None
+        }
+
+        /// Whether the fields this format returns carry their TYPE
+        /// ([`PayloadField::typed`]): a described record does, a schema that
+        /// was read does, a walk of the wire does not.
+        ///
+        /// Asked of the format and not read off the fields, because a message
+        /// with no fields is still a typed reading. The default is the answer
+        /// for the body schema, where there is one, and `false` otherwise; a
+        /// format that knows its types without a schema says so.
+        fn reads_types(&self) -> bool {
+            self.body_schema().is_some_and(|schema| schema.read)
+        }
+    }
+
+    /// The body schema a rule names. See [`PayloadFormat::body_schema`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct BodySchema<'s> {
+        /// The message's full name, package included, as the rule wrote it.
+        pub message: &'s str,
+        /// `true` when the declarations carry a schema file that defines it, so
+        /// the payload is read by its types; `false` when the name is only
+        /// carried.
+        pub read: bool,
     }
 
     /// Why a mapping rule was refused.
@@ -2354,8 +2433,23 @@ pub mod formats {
             described: String,
         },
         /// A rule whose format token names a body schema that is not a message
-        /// name (`profile@pkg.Message`).
+        /// name (`profile@pkg.Message`), that the declared schema files do not
+        /// define, or that follows a format no schema is read by.
         BadBodySchema(String, crate::e2e_rule::SchemaRefusal),
+        /// A schema file line (`#@<file>=<text>`) whose text is not one JSON
+        /// string, or a second file under a name already declared.
+        BadSchemaFile(String, String),
+        /// The declared schema files, read together for the rule whose token is
+        /// carried, were refused by the schema reader: its diagnostic, with the
+        /// file, line and column where there is one.
+        ///
+        /// Boxed: the diagnostic is the largest thing this enum would carry
+        /// inline, and every declaration call returns this type, so it would
+        /// set the size of every `Result` for one rare refusal.
+        SchemaRefused(
+            String,
+            alloc::boxed::Box<crate::proto_schema::ProtoDiagnostic>,
+        ),
     }
 
     impl core::fmt::Display for FormatMapError {
@@ -2386,8 +2480,8 @@ pub mod formats {
                 Self::NotADeclaration(line) => write!(
                     f,
                     "`{line}` is not a declaration -- expected \
-                     `<keyexpr>=<format>`, `<keyexpr>:<path>=<name>` or \
-                     `#<format>=<layout>`"
+                     `<keyexpr>=<format>`, `<keyexpr>:<path>=<name>`, \
+                     `#<format>=<layout>` or `#@<file>=\"<schema text>\"`"
                 ),
                 Self::NoSuchFormat(name, available) => write!(
                     f,
@@ -2422,6 +2516,13 @@ pub mod formats {
                 Self::BadBodySchema(token, why) => {
                     write!(f, "the body schema in `{token}` is refused: {why}")
                 }
+                Self::BadSchemaFile(name, why) => {
+                    write!(f, "the schema file `{name}` is refused: {why}")
+                }
+                Self::SchemaRefused(token, why) => write!(
+                    f,
+                    "the declared schema files cannot be read for `{token}`: {why}"
+                ),
             }
         }
     }
@@ -2462,6 +2563,20 @@ pub mod formats {
         /// schema the rule names. Owned by the map like a described format, for
         /// the same reason, and an index for the same one.
         E2e(usize),
+        /// `protobuf` with a body schema (`protobuf@pkg.Pose`), owned by the
+        /// map for the reason a profile rule's format is.
+        Schema(usize),
+    }
+
+    /// One `.proto` file a deployment declared with `#@<file>="<text>"`.
+    struct SchemaFileDef {
+        /// The name other files import it by.
+        name: String,
+        /// The value as the line wrote it, so the declaration reads back byte
+        /// for byte as it was typed.
+        written: String,
+        /// The file's text, the JSON string read.
+        text: String,
     }
 
     /// One end-to-end profile a deployment registered with `#name={...}`.
@@ -2491,6 +2606,15 @@ pub mod formats {
         /// bound format). One entry per RULE, because two rules may name one
         /// profile with different body schemas.
         e2e_rules: Vec<(usize, crate::e2e_rule::E2eFormat)>,
+        /// The `.proto` files this run declared, in the order of the text.
+        schema_files: Vec<SchemaFileDef>,
+        /// Those files read together, once, by the first rule that names a
+        /// message in them; dropped when a file is declared after it, so a rule
+        /// installed later reads every file. Rules hold their own handle, so a
+        /// rule installed earlier keeps the set it was resolved against.
+        schema_set: Option<alloc::rc::Rc<crate::proto_decode::SchemaSet>>,
+        /// The `protobuf@pkg.Msg` rules' formats, one per rule.
+        schema_rules: Vec<crate::payload_typed::SchemaProtobuf>,
     }
 
     /// R311y726 — a handle to ONE declaration installed in a [`FormatMap`].
@@ -2535,12 +2659,22 @@ pub mod formats {
         /// cannot have. That is why it carries a handle of its own — see
         /// [`FormatMap::declarations`].
         FormatDefinition,
+        /// A `.proto` file the deployment declared (`#@<file>="<text>"`), which
+        /// a rule naming a body schema reads. A kind of its own and not a
+        /// format definition: it names a file, not a format, and no rule refers
+        /// to it by its name.
+        SchemaFile,
     }
 
     impl DeclarationKind {
         /// Every kind, so the vocabulary a consumer switches on and a test's
         /// walk of it are one list.
-        pub const ALL: [Self; 3] = [Self::FormatRule, Self::FieldName, Self::FormatDefinition];
+        pub const ALL: [Self; 4] = [
+            Self::FormatRule,
+            Self::FieldName,
+            Self::FormatDefinition,
+            Self::SchemaFile,
+        ];
 
         /// The word a machine reads for this kind: the `kind` of a line in
         /// `wz_dissect_declarations_diagnose`'s verdict. Exhaustive, so a kind
@@ -2550,6 +2684,7 @@ pub mod formats {
                 Self::FormatRule => "format_rule",
                 Self::FieldName => "field_name",
                 Self::FormatDefinition => "format_definition",
+                Self::SchemaFile => "schema_file",
             }
         }
     }
@@ -2692,6 +2827,9 @@ pub mod formats {
                 described: Vec::new(),
                 e2e_profiles: Vec::new(),
                 e2e_rules: Vec::new(),
+                schema_files: Vec::new(),
+                schema_set: None,
+                schema_rules: Vec::new(),
             }
         }
 
@@ -2777,26 +2915,148 @@ pub mod formats {
                     }),
                 });
             }
+            // The schema files, last, for the reason the profiles follow the
+            // described formats.
+            let first_file = self.first_schema_file_id();
+            for (at, file) in self.schema_files.iter().enumerate() {
+                let name = escape_field(&file.name);
+                out.push(Declaration {
+                    id: DeclarationId(first_file + at),
+                    kind: DeclarationKind::SchemaFile,
+                    text: declaration_text(&DeclarationText::SchemaFile {
+                        name: &name,
+                        text: &file.written,
+                    }),
+                });
+            }
             out
         }
 
-        /// The format one rule points at, whether shipped, described or an
-        /// end-to-end profile.
+        /// The handle of the first schema file: every other kind's range comes
+        /// before it.
+        fn first_schema_file_id(&self) -> usize {
+            self.rules.len() + self.names.len() + self.described.len() + self.e2e_profiles.len()
+        }
+
+        /// The format one rule points at, whether shipped, described, an
+        /// end-to-end profile or `protobuf` with a body schema.
         fn target_format<'s>(&'s self, target: &'s RuleTarget<'a>) -> &'s dyn PayloadFormat {
             match target {
                 RuleTarget::Builtin(f) => *f,
                 RuleTarget::Described(at) => &self.described[*at],
                 RuleTarget::E2e(at) => &self.e2e_rules[*at].1,
+                RuleTarget::Schema(at) => &self.schema_rules[*at],
             }
         }
 
         /// The format token one rule is written with: the format's name, and for
-        /// a profile rule also the body schema it names.
+        /// a rule that names a body schema also the schema.
         fn target_token(&self, target: &RuleTarget<'a>) -> String {
             match target {
                 RuleTarget::E2e(at) => self.e2e_rules[*at].1.token(),
+                RuleTarget::Schema(at) => self.schema_rules[*at].token(),
                 other => self.target_format(other).name().to_owned(),
             }
+        }
+
+        /// Whether the rule `rule` reads its payload by the declared schema
+        /// files, so every one of them applied when it did: the files are read
+        /// together, and a message's imports are files too.
+        pub fn reads_schema_files(&self, rule: DeclarationId) -> bool {
+            match self.rules.get(rule.0) {
+                Some((_, target @ (RuleTarget::Schema(_) | RuleTarget::E2e(_)))) => self
+                    .target_format(target)
+                    .body_schema()
+                    .is_some_and(|schema| schema.read),
+                _ => false,
+            }
+        }
+
+        /// The handles of every schema file, for a run's ledger of what applied.
+        pub fn schema_file_ids(&self) -> impl Iterator<Item = DeclarationId> {
+            let first = self.first_schema_file_id();
+            (first..first + self.schema_files.len()).map(DeclarationId)
+        }
+
+        /// Declare a `.proto` file: its import name and its text as ONE JSON
+        /// string (`written`), so a file of many lines is one declaration line.
+        ///
+        /// Two DIFFERENT files under one name are refused here, because imports
+        /// are resolved by name. The same file declared again is the same
+        /// declaration and installs nothing new: two declaration texts the
+        /// `.proto` door wrote for two topics of one schema concatenate. The
+        /// text itself is read with the other files when a rule first names a
+        /// message, so a file may import one declared after it.
+        pub fn define_schema_file(
+            &mut self,
+            name: &str,
+            written: &str,
+        ) -> Result<(), FormatMapError> {
+            let bad = |why: &str| FormatMapError::BadSchemaFile(name.to_owned(), why.to_owned());
+            if name.is_empty() {
+                return Err(FormatMapError::NotADeclaration(written.to_owned()));
+            }
+            let text = match wz_session_core::json5::parse(written) {
+                Ok(wz_session_core::json5::Json5Value::String(text)) => text,
+                Ok(_) => return Err(bad("the text after `=` is not one JSON string")),
+                Err(e) => return Err(bad(&alloc::format!("the text after `=` is not JSON: {e}"))),
+            };
+            if let Some(known) = self.schema_files.iter().find(|f| f.name == name) {
+                return if known.text == text {
+                    Ok(())
+                } else {
+                    Err(bad(
+                        "a different file of this name is already declared, and an import \
+                         names one file",
+                    ))
+                };
+            }
+            self.schema_files.push(SchemaFileDef {
+                name: name.to_owned(),
+                written: written.to_owned(),
+                text,
+            });
+            self.schema_set = None;
+            Ok(())
+        }
+
+        /// The message `message` in the declared schema files, or `None` when
+        /// the declarations carry none (the name is then only carried, as a
+        /// profile rule's has always been).
+        fn link_body(
+            &mut self,
+            token: &str,
+            message: &str,
+        ) -> Result<Option<crate::payload_typed::LinkedBody>, FormatMapError> {
+            if self.schema_files.is_empty() {
+                return Ok(None);
+            }
+            let set = match &self.schema_set {
+                Some(set) => set.clone(),
+                None => {
+                    let files: Vec<crate::proto_schema::ProtoFile<'_>> = self
+                        .schema_files
+                        .iter()
+                        .map(|f| crate::proto_schema::ProtoFile {
+                            name: &f.name,
+                            text: f.text.as_bytes(),
+                        })
+                        .collect();
+                    let set = crate::proto_decode::SchemaSet::read(&files).map_err(|why| {
+                        FormatMapError::SchemaRefused(token.to_owned(), alloc::boxed::Box::new(why))
+                    })?;
+                    let set = alloc::rc::Rc::new(set);
+                    self.schema_set = Some(set.clone());
+                    set
+                }
+            };
+            let found = set.message(message).map_err(|why| {
+                FormatMapError::BadBodySchema(token.to_owned(), crate::e2e_rule::SchemaRefusal(why))
+            })?;
+            Ok(Some(crate::payload_typed::LinkedBody {
+                set,
+                message: found,
+            }))
         }
 
         /// Whether `name` is already a format name: shipped, described, or a
@@ -2903,13 +3163,37 @@ pub mod formats {
         }
 
         /// [`Self::insert_named`] for a token that names no shipped or described
-        /// format: a registered profile, with or without a body schema, or an
-        /// unknown name.
+        /// format: `protobuf@schema`, a registered profile with or without a
+        /// body schema, or an unknown name.
+        ///
+        /// A body schema is looked up in the declared schema files
+        /// ([`crate::payload_typed`]) before anything is installed, so a rule
+        /// whose schema is refused leaves the map as it was.
         fn insert_e2e(&mut self, pattern: &str, token: &str) -> Result<(), FormatMapError> {
             let (name, schema) = match token.split_once(crate::e2e_rule::SCHEMA_MARK) {
                 Some((name, schema)) => (name, Some(schema)),
                 None => (token, None),
             };
+            let refused = |why: crate::e2e_rule::SchemaRefusal| {
+                FormatMapError::BadBodySchema(token.to_owned(), why)
+            };
+            if let (Some(shipped), Some(schema)) = (builtin(name), schema) {
+                if shipped.name() != Protobuf.name() {
+                    return Err(refused(crate::e2e_rule::SchemaRefusal(alloc::format!(
+                        "a body schema is read by `protobuf` and by the end-to-end profiles, \
+                         and `{name}` reads none"
+                    ))));
+                }
+                crate::e2e_rule::check_schema(schema).map_err(refused)?;
+                let linked = self.link_body(token, schema)?;
+                self.push_rule(pattern, RuleTarget::Schema(self.schema_rules.len()))?;
+                self.schema_rules
+                    .push(crate::payload_typed::SchemaProtobuf::new(
+                        schema.to_owned(),
+                        linked,
+                    ));
+                return Ok(());
+            }
             let Some(profile_at) = self.e2e_profiles.iter().position(|p| p.name == name) else {
                 return Err(FormatMapError::NoSuchFormat(
                     token.to_owned(),
@@ -2920,7 +3204,12 @@ pub mod formats {
                 self.e2e_profiles[profile_at].profile.clone(),
                 schema.map(str::to_owned),
             )
-            .map_err(|why| FormatMapError::BadBodySchema(token.to_owned(), why))?;
+            .map_err(refused)?;
+            let linked = match schema {
+                Some(schema) => self.link_body(token, schema)?,
+                None => None,
+            };
+            let bound = bound.linked(linked);
             // The rule first and the bound format after, so a pattern that is
             // refused leaves no orphan format behind for a later rule's index to
             // collide with.
@@ -3028,7 +3317,9 @@ pub mod formats {
                         + self.described.len()
                         + self.e2e_rules[at].0,
                 )),
-                RuleTarget::Builtin(_) => None,
+                // The schema files it read are marked through
+                // `reads_schema_files`: a rule reads all of them, not one.
+                RuleTarget::Builtin(_) | RuleTarget::Schema(_) => None,
             }
         }
 
@@ -3237,6 +3528,21 @@ pub mod formats {
             /// The record layout, in `crate::payload_described`'s grammar.
             layout: &'a str,
         },
+        /// `#@<file>="<text>"` -- one `.proto` file, which a rule naming a body
+        /// schema (`protobuf@pkg.Pose`) reads by its types.
+        ///
+        /// Told from a definition by BOTH marks: the name opens with
+        /// [`crate::e2e_rule::SCHEMA_MARK`] and the value with `"`, the opening
+        /// of a JSON string. A format definition reads the same as before this
+        /// kind existed unless its name opens with `@` AND its layout's first
+        /// field name opens with a quote.
+        SchemaFile {
+            /// The file's name, quoted as the dialect quotes a field, without
+            /// the `@`.
+            name: &'a str,
+            /// The file's text as one JSON string, as written.
+            text: &'a str,
+        },
     }
 
     impl DeclarationText<'_> {
@@ -3246,9 +3552,14 @@ pub mod formats {
                 Self::Rule { .. } => DeclarationKind::FormatRule,
                 Self::Name { .. } => DeclarationKind::FieldName,
                 Self::Definition { .. } => DeclarationKind::FormatDefinition,
+                Self::SchemaFile { .. } => DeclarationKind::SchemaFile,
             }
         }
     }
+
+    /// The character a JSON string opens with: what a schema file's value
+    /// opens with ([`DeclarationText::SchemaFile`]).
+    const SCHEMA_TEXT_OPEN: char = '"';
 
     /// R311y884 — how a declaration is WRITTEN, once.
     ///
@@ -3275,6 +3586,9 @@ pub mod formats {
             } => alloc::format!("{pattern}:{path}={name}"),
             DeclarationText::Definition { name, layout } => {
                 alloc::format!("{DEFINE}{name}={layout}")
+            }
+            DeclarationText::SchemaFile { name, text } => {
+                alloc::format!("{DEFINE}{}{name}={text}", crate::e2e_rule::SCHEMA_MARK)
             }
         }
     }
@@ -3414,6 +3728,19 @@ pub mod formats {
             // The record-layout grammar has no `{`, so no layout line changes
             // meaning.
             if let Some((name, value)) = split_once_unescaped(rest, '=') {
+                // A schema file: `#@<file>="<text>"`. Split at the first `=`
+                // for the profile's reason: the text is JSON and may hold one.
+                if let Some(file) = name.strip_prefix(crate::e2e_rule::SCHEMA_MARK) {
+                    if value.starts_with(SCHEMA_TEXT_OPEN) {
+                        if file.is_empty() {
+                            return Err(bad());
+                        }
+                        return Ok(DeclarationText::SchemaFile {
+                            name: file,
+                            text: value,
+                        });
+                    }
+                }
                 if value.starts_with(E2E_PROFILE_OPEN) {
                     if name.is_empty() {
                         return Err(bad());
@@ -3555,6 +3882,15 @@ pub mod formats {
                         rule_index: None,
                     })
                 }
+                DeclarationText::SchemaFile { name, text } => {
+                    let name = unquote(name)?;
+                    self.define_schema_file(&name, text)?;
+                    Ok(DeclaredLine {
+                        kind: DeclarationKind::SchemaFile,
+                        pattern: None,
+                        rule_index: None,
+                    })
+                }
                 DeclarationText::Name {
                     pattern,
                     path,
@@ -3621,9 +3957,12 @@ pub mod formats {
                     // FIRST pass, so the diagnostic points at the first bad
                     // line rather than at the first bad line that is not a
                     // definition.
+                    // A schema file is installed with the definitions, so a
+                    // rule naming a body schema finds every file wherever the
+                    // text puts it.
                     let is_definition = matches!(
                         parse_declaration(line).map_err(bad)?,
-                        DeclarationText::Definition { .. }
+                        DeclarationText::Definition { .. } | DeclarationText::SchemaFile { .. }
                     );
                     if is_definition != definitions_pass {
                         continue;
@@ -3884,6 +4223,7 @@ mod format_map_tests {
                 value: alloc::format!("{} byte(s)", payload.len()),
                 start: 0,
                 end: payload.len(),
+                typed: None,
             }])
         }
     }

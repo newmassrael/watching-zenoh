@@ -79,7 +79,9 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::proto_parse::{Label, ScalarKind, MAX_FIELD_NUMBER};
-use crate::proto_schema::{FieldKind, Linker, MapValueKind, ProtoDiagnostic, ProtoFile};
+use crate::proto_schema::{
+    EnumInfo, FieldKind, Linker, MapValueKind, Msg, ProtoDiagnostic, ProtoFile,
+};
 
 /// How many messages deep the reader walks: a message inside a message is one
 /// level. The writer's values may nest about thirty messages
@@ -257,9 +259,93 @@ impl<'f, 'a> LinkedSchema<'f, 'a> {
     /// documentation.
     pub fn decode(&self, bytes: &[u8]) -> Result<Vec<DecodedField>, WireError> {
         Reader {
-            schema: &self.linker,
+            msgs: &self.linker.msgs,
+            enums: &self.linker.enums,
         }
         .message(Owner::Message(self.root), bytes, 0, 0)
+    }
+}
+
+/// A schema read from EVERY file given and held without borrowing them: what a
+/// declaration text that carries `.proto` files keeps for as long as the map it
+/// built is consulted ([`crate::payload::formats::FormatMap`]).
+///
+/// [`LinkedSchema`] borrows its files and names one root, which is right for a
+/// door that reads one frame. A map is consulted for every message of a capture
+/// and names a message per rule, so it reads the files ONCE, into this, and each
+/// rule holds the [`SchemaMessage`] it names. Every file is read, as
+/// `proto_message_list` reads them, because a rule may name a message of any
+/// of them; a problem in any file is therefore a problem of the set.
+pub struct SchemaSet {
+    msgs: Vec<Msg>,
+    enums: Vec<EnumInfo>,
+}
+
+/// One message of a [`SchemaSet`], as [`SchemaSet::message`] found it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchemaMessage(usize);
+
+impl fmt::Debug for SchemaSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchemaSet")
+            .field("messages", &self.msgs.len())
+            .field("enums", &self.enums.len())
+            .finish()
+    }
+}
+
+impl SchemaSet {
+    /// Read every file of `files`, each with what it imports.
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, in the order the files are listed, with the
+    /// diagnostic [`crate::proto_encode`] gives for the same file.
+    pub fn read(files: &[ProtoFile<'_>]) -> Result<Self, ProtoDiagnostic> {
+        let (msgs, enums) = Linker::read_all(files)?.into_types();
+        Ok(Self { msgs, enums })
+    }
+
+    /// The message whose full name, package included, is `full_name`.
+    ///
+    /// # Errors
+    ///
+    /// A sentence saying the name is an enum's, or that no file of the set
+    /// defines it.
+    pub fn message(&self, full_name: &str) -> Result<SchemaMessage, String> {
+        if let Some(at) = self.msgs.iter().position(|m| m.full_name == full_name) {
+            return Ok(SchemaMessage(at));
+        }
+        if self.enums.iter().any(|e| e.full_name == full_name) {
+            return Err(format!("`{full_name}` is an enum, not a message"));
+        }
+        Err(format!(
+            "no declared schema file defines the message `{full_name}` (the name is the full \
+             name, package included)"
+        ))
+    }
+
+    /// The full name of `message`.
+    pub fn message_name(&self, message: SchemaMessage) -> &str {
+        &self.msgs[message.0].full_name
+    }
+
+    /// Read `bytes` as one `message`, on [`LinkedSchema::decode`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// A [`WireError`] for the first problem found; see the module
+    /// documentation.
+    pub fn decode(
+        &self,
+        message: SchemaMessage,
+        bytes: &[u8],
+    ) -> Result<Vec<DecodedField>, WireError> {
+        Reader {
+            msgs: &self.msgs,
+            enums: &self.enums,
+        }
+        .message(Owner::Message(message.0), bytes, 0, 0)
     }
 }
 
@@ -499,17 +585,21 @@ enum Owner<'s> {
     },
 }
 
-struct Reader<'s, 'f, 'a> {
-    schema: &'s Linker<'f, 'a>,
+/// The reader borrows the schema's TYPE TABLES and nothing else: the messages
+/// and the enums a link produced. That is what lets [`SchemaSet`] hold a schema
+/// without borrowing the files it was read from.
+struct Reader<'s> {
+    msgs: &'s [Msg],
+    enums: &'s [EnumInfo],
 }
 
-impl<'s> Reader<'s, '_, '_> {
+impl<'s> Reader<'s> {
     /// The type of a value as the schema writes it.
     fn type_name(&self, holds: Holds) -> String {
         match holds {
             Holds::Scalar(k) => String::from(k.keyword()),
-            Holds::Enum(e) => self.schema.enums[e].full_name.clone(),
-            Holds::Message(m) => self.schema.msgs[m].full_name.clone(),
+            Holds::Enum(e) => self.enums[e].full_name.clone(),
+            Holds::Message(m) => self.msgs[m].full_name.clone(),
             Holds::Map { key, value } => {
                 format!("map<{}, {}>", key.keyword(), self.type_name(value.into()))
             }
@@ -521,7 +611,7 @@ impl<'s> Reader<'s, '_, '_> {
     fn spec(&self, owner: Owner<'s>, number: u64) -> Option<Spec<'s>> {
         match owner {
             Owner::Message(m) => {
-                let msg = &self.schema.msgs[m];
+                let msg = &self.msgs[m];
                 let f = msg.fields.iter().find(|f| f.number == number)?;
                 let holds = match f.kind {
                     FieldKind::Scalar(k) => Holds::Scalar(k),
@@ -724,7 +814,7 @@ impl<'s> Reader<'s, '_, '_> {
 
     fn enum_value(&self, e: usize, v: u64) -> Value {
         let number = v as u32 as i32;
-        let name = self.schema.enums[e]
+        let name = self.enums[e]
             .values
             .iter()
             .find(|(_, n)| *n == i128::from(number))

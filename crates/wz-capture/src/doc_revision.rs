@@ -2502,6 +2502,33 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R56_CARRIES,
     },
+    // Revision 57 ADDS the TYPE of a decoded payload field, and retires
+    // nothing. A `decoded` payload block gains `typed` (whether its fields were
+    // read by a type: a body schema whose `.proto` files the declarations
+    // carry, or a described record) and `schema` (the body schema the rule
+    // names, `protobuf@pkg.Pose` or `demo-a@pkg.Pose`, else `null`). Every
+    // entry of its `fields` gains `type` (the schema's scalar keyword, an
+    // enum's or a message's full name, `map<K, V>` for a map entry, or a
+    // described record's type spelling), `typed_value` (the value in
+    // protobuf's JSON mapping: a number, digits in a string past 2^53 - 1,
+    // `"NaN"` and the infinities, a boolean, a string, base64 for bytes, an
+    // enum value's name) and `enum_number`. All three are `null` where they do
+    // not apply and on a field walked by the wire, so every entry has one
+    // shape.
+    //
+    // `value` KEEPS ITS MEANING, the text a person reads, in every row. A
+    // field read by a schema shows its typed value there (`-3` where the wire
+    // walk shows `varint 5`); a consumer that wants a number reads
+    // `typed_value` and never parses `value`.
+    DocumentShape {
+        document: FIELDS,
+        revision: 57,
+        keys: FIELDS_R57_KEYS,
+        retiring: &[],
+        families: FIELDS_R55_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R57_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -2798,6 +2825,28 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: DECLARATIONS_DIAGNOSE_R2_CARRIES,
     },
+    // A FOURTH KIND OF LINE: A `.proto` FILE.
+    //
+    // Revision 3 widens `kind` by `schema_file` and moves no key. The line is
+    // `#@<file>="<text>"`: the name other files import it by and the file's text
+    // as one JSON string, read by a rule that names a body schema
+    // (`demo/pose=protobuf@pkg.Pose`, or a profile rule's `demo-a@pkg.Pose`).
+    // Like a format definition it has no key, so it carries `line` alone.
+    //
+    // ⚠ A VALUE MOVES under keys that do not: a rule naming a body schema is now
+    // refused when the text carries schema files and none defines the message,
+    // or when the files are not a schema the reader accepts (`message` names the
+    // file, line and reason). A text that carries no schema file installs as it
+    // did, the name carried and not read.
+    DocumentShape {
+        document: DECLARATIONS_DIAGNOSE,
+        revision: 3,
+        keys: DECLARATIONS_DIAGNOSE_R2_KEYS,
+        retiring: &[],
+        families: DECLARATIONS_DIAGNOSE_R3_FAMILIES,
+        planes: &[],
+        carries: DECLARATIONS_DIAGNOSE_R3_CARRIES,
+    },
     // A SINGLE KEY EXPRESSION, JUDGED, WITHOUT BUILDING A DECLARATION LINE.
     //
     // A document of its own because it is the verdict of a door of its own
@@ -2831,6 +2880,28 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: DECLARATIONS_FROM_PROTO,
         revision: 1,
+        keys: DECLARATIONS_FROM_PROTO_R1_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
+    // THE TEXT CARRIES THE SCHEMA, AND THE RULE NAMES THE MESSAGE.
+    //
+    // Revision 2 moves no key. `declarations` now opens with one
+    // `#@<file>="<text>"` line per file the root file reaches, and its rule is
+    // `K=protobuf@<root message full name>` where it was `K=protobuf`; the name
+    // lines follow as before. A text this door writes therefore READS each
+    // payload by its schema (the field document's `typed`, `type` and
+    // `typed_value`) instead of walking the wire, and `installed` counts the
+    // file lines too. Two texts it wrote for two keys of one schema still
+    // concatenate: a file declared twice with the same text installs once.
+    //
+    // ⚠ THE REVISION IS THE WHOLE NOTICE: a consumer that compared the text to
+    // a stored one, or counted its lines, reads a different text.
+    DocumentShape {
+        document: DECLARATIONS_FROM_PROTO,
+        revision: 2,
         keys: DECLARATIONS_FROM_PROTO_R1_KEYS,
         retiring: &[],
         families: &[],
@@ -10867,6 +10938,58 @@ pub const DECLARATIONS_DIAGNOSE_R2_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// What a `lines[].kind` says at declaration-verdict revision 3: revision 2's
+/// words and `schema_file`, a `.proto` file declared as `#@<file>="<text>"`.
+pub const DECLARATION_KIND_R3: &[&str] = &[
+    "field_name",
+    "format_definition",
+    "format_rule",
+    "schema_file",
+];
+
+/// The declaration verdict's value families at revision 3.
+pub const DECLARATIONS_DIAGNOSE_R3_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "kind",
+        values: DECLARATION_KIND_R3,
+    },
+    ValueFamily {
+        key: "reason",
+        values: KEYEXPR_FAULT_R1,
+    },
+];
+
+/// What the declaration verdict's words decide at revision 3: revision 2's, and
+/// a `schema_file` line, which has no key, carries `line` alone as a format
+/// definition does.
+pub const DECLARATIONS_DIAGNOSE_R3_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(&[
+            WordCarries {
+                word: "field_name",
+                shapes: &[&["line", "pattern"]],
+            },
+            WordCarries {
+                word: "format_definition",
+                shapes: &[&["line"]],
+            },
+            WordCarries {
+                word: "format_rule",
+                shapes: &[&["line", "pattern", "rule_index"]],
+            },
+            WordCarries {
+                word: "schema_file",
+                shapes: &[&["line"]],
+            },
+        ]),
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The key-expression verdict's key set at revision 1, over BOTH branches:
 /// `{ok:true}` and `{ok:false,chunk,offset,reason,message}`.
 pub const KEYEXPR_DIAGNOSE_R1_KEYS: &[&str] = &[
@@ -17824,6 +17947,264 @@ pub const FIELDS_R56_KEYS: &[&str] = &[
     "zid",
 ];
 
+/// The keys the field document carries at revision 57: revision 56's PLUS
+/// `typed` and `schema` on a `decoded` payload block, and `type`,
+/// `typed_value` and `enum_number` on every decoded payload field.
+pub const FIELDS_R57_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "announced_version",
+    "answers",
+    "at_least",
+    "at_most_bytes",
+    "basis",
+    "batch_header",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "check",
+    "checks",
+    "close_seen",
+    "closes",
+    "completion_ns",
+    "compression",
+    "conduit",
+    "confirmed",
+    "context",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "crossed_at_packet",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "enum_number",
+    "eps_basis",
+    "evidence",
+    "example",
+    "expired_chains",
+    "explained",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "first_reply",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "headed_resyncs",
+    "headed_units",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "log2_lr_max_millibits",
+    "log2_lr_millibits",
+    "log2_lr_min_millibits",
+    "log2_lr_no_max_millibits",
+    "log2_lr_no_millibits",
+    "log2_lr_no_min_millibits",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "millibits",
+    "missing",
+    "model",
+    "name",
+    "negotiated",
+    "no_at_millibits",
+    "no_millibits",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "outcome",
+    "packet",
+    "parameters",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "payload_size",
+    "phase",
+    "plain_resyncs",
+    "plain_units",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "q_basis",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "residual",
+    "revised",
+    "revision",
+    "round_trip_ns",
+    "rst_seen",
+    "samples",
+    "schema",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "selector_path",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "size_verdict",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stated",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "strength",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "type",
+    "typed",
+    "typed_value",
+    "undecoded",
+    "under",
+    "unit_readings",
+    "units",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "violated",
+    "why",
+    "window",
+    "wrong",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+    "zid",
+];
+
+/// What a payload block's `state` brings at field-document revision 57:
+/// revision 28's, with `schema` and `typed` on `decoded`.
+pub const PAYLOAD_STATE_CARRIES_R57: &[WordCarries] = &[
+    WordCarries {
+        word: "decoded",
+        shapes: &[&[
+            "despite_encoding",
+            "fields",
+            "format",
+            "keyexpr",
+            "matched_rule",
+            "schema",
+            "typed",
+        ]],
+    },
+    WordCarries {
+        word: "encoding_mismatch",
+        shapes: &[&[
+            "declaration_checked",
+            "declared",
+            "format",
+            "keyexpr",
+            "matched_rule",
+        ]],
+    },
+    WordCarries {
+        word: "keyexpr_unresolved",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "no_payload",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "no_rule",
+        shapes: &[&["keyexpr", "matched_rule"]],
+    },
+    WordCarries {
+        word: "no_rules",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "not_on_the_wire",
+        shapes: &[&["descriptor_bytes"]],
+    },
+    WordCarries {
+        word: "refused",
+        shapes: &[&["format", "keyexpr", "matched_rule", "why"]],
+    },
+];
+
 /// The value families the field document declares at revision 55: revision
 /// 50's PLUS `size_verdict`, drawn from [`SIZE_VERDICT_R55`].
 pub const FIELDS_R55_FAMILIES: &[ValueFamily] = &[
@@ -18218,6 +18599,131 @@ pub const FIELDS_R56_CARRIES: &[KeyCarries] = &[
     KeyCarries {
         key: "state",
         shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R28),
+    },
+    KeyCarries {
+        key: "strength",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// What each family's word decides at field-document revision 57: revision
+/// 56's, with `state` read from [`PAYLOAD_STATE_CARRIES_R57`].
+pub const FIELDS_R57_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "announced_version",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "batch_header",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "check",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "eps_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R56),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "q_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "request_kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "size_verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R57),
     },
     KeyCarries {
         key: "strength",
@@ -22881,7 +23387,9 @@ mod tests {
             // is declared.
             // To 56 when every field object gained `selector_path`, and a
             // record a `Frame` carried began to be judged inside it.
-            (FIELDS, 56),
+            // To 57 when a decoded payload block gained `typed` and `schema`
+            // and each of its fields `type`, `typed_value` and `enum_number`.
+            (FIELDS, 57),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -22934,10 +23442,13 @@ mod tests {
             (SELECTOR_FIELDS, 5),
             // To 2 when the success branch named the kind each line was read
             // as and a refused key named its chunk, byte and reason.
-            (DECLARATIONS_DIAGNOSE, 2),
+            // To 3 when a line could be a `.proto` file, `schema_file`.
+            (DECLARATIONS_DIAGNOSE, 3),
             // The verdict on one key expression.
             (KEYEXPR_DIAGNOSE, 1),
-            (DECLARATIONS_FROM_PROTO, 1),
+            // To 2 when the text began to carry the schema files and to name
+            // the root message in its rule.
+            (DECLARATIONS_FROM_PROTO, 2),
             // The relation of two key expressions.
             (KEYEXPR_RELATE, 1),
             // Which rule of a declaration text covers a key.

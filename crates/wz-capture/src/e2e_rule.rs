@@ -22,10 +22,11 @@
 //! under a second name that nothing else knows it by. The other lines are
 //! RULES: the first whose pattern covers a key wins, exactly as for any other
 //! format. `@pkg.Pose` is the BODY SCHEMA the rule names: the message type the
-//! bytes after the header are an instance of. In a capture it is carried and
-//! reported, and the capture's walk does not read it yet: a declaration carries
-//! the schema's NAME and not its files, and the seam a walk that read it would
-//! use is [`E2eFormat::schema`]. The two stateless doors use the same name: the
+//! bytes after the header are an instance of. In a capture the body is READ by
+//! it when the declaration text also carries the schema's files (`#@<file>=`,
+//! `payload_typed`), exactly as a `protobuf@pkg.Pose` rule reads a
+//! whole payload; a text that carries no file carries the name alone, and the
+//! body is walked by the wire. The two stateless doors use the same name: the
 //! `message` of the wrap door's `@body` member ([`crate::e2e_body`]) and of the
 //! open door's body description
 //! ([`crate::e2e_json::open_body_document`], which reads the body with
@@ -43,8 +44,9 @@
 //! # What the format decodes
 //!
 //! The payload walk ([`crate::payload::formats::PayloadFormat::decode`]) reads
-//! the BODY: the bytes after the header, as the schema-less protobuf walk reads
-//! them, with spans in payload coordinates. The header, its CRC and the
+//! the BODY: the bytes after the header, by the body schema when its files are
+//! declared and as the schema-less protobuf walk reads them otherwise, with
+//! spans in payload coordinates. The header, its CRC and the
 //! counter are not a decode: they are judged, with state, by
 //! [`crate::e2e_slots`], and reported beside the decode under the entry's
 //! `e2e` key.
@@ -56,8 +58,9 @@ use alloc::vec::Vec;
 
 use crate::e2e_profile::Profile;
 use crate::payload::formats::{
-    MessagePaths, PayloadField, PayloadFormat, PayloadFormatError, Protobuf,
+    BodySchema, MessagePaths, PayloadField, PayloadFormat, PayloadFormatError, Protobuf,
 };
+use crate::payload_typed::LinkedBody;
 
 /// The character that separates a profile name from a body schema in a rule's
 /// format token.
@@ -116,6 +119,9 @@ pub fn check_schema(schema: &str) -> Result<(), SchemaRefusal> {
 pub struct E2eFormat {
     profile: Rc<Profile>,
     schema: Option<String>,
+    /// Where the body schema was found, when the declarations carry the files
+    /// that define it ([`crate::payload_typed`]).
+    linked: Option<LinkedBody>,
 }
 
 impl E2eFormat {
@@ -128,7 +134,17 @@ impl E2eFormat {
         if let Some(schema) = &schema {
             check_schema(schema)?;
         }
-        Ok(Self { profile, schema })
+        Ok(Self {
+            profile,
+            schema,
+            linked: None,
+        })
+    }
+
+    /// This format with its body READ by the schema `linked` found, where the
+    /// declarations carry the files that define the message it names.
+    pub(crate) fn linked(self, linked: Option<LinkedBody>) -> Self {
+        Self { linked, ..self }
     }
 
     /// The profile.
@@ -167,6 +183,13 @@ impl PayloadFormat for E2eFormat {
         self.profile.name()
     }
 
+    fn body_schema(&self) -> Option<BodySchema<'_>> {
+        self.schema.as_deref().map(|message| BodySchema {
+            message,
+            read: self.linked.is_some(),
+        })
+    }
+
     /// Walk the BODY: what follows the header, read as protobuf.
     ///
     /// The header is not walked here and its verdict does not gate the body: a
@@ -189,9 +212,11 @@ impl PayloadFormat for E2eFormat {
         let Some(body) = payload.get(header..) else {
             return Err(PayloadFormatError::Truncated(payload.len()));
         };
-        let mut fields = Protobuf
-            .decode_declared(body, messages)
-            .map_err(|error| rebase_error(error, header))?;
+        let read = match &self.linked {
+            Some(linked) => linked.read(body),
+            None => Protobuf.decode_declared(body, messages),
+        };
+        let mut fields = read.map_err(|error| rebase_error(error, header))?;
         for field in &mut fields {
             field.start += header;
             field.end += header;

@@ -44,8 +44,15 @@ fn refused(root: &str, text: &str) -> ProtoDiagnostic {
     one(root, text).expect_err("the schema must be refused")
 }
 
+/// The NAME lines: what follows the schema files and the rule. The files and
+/// the rule are a function of the schema and the root, and
+/// `the_schema_files_then_the_rule_open_the_text` holds them; a test about the
+/// names reads the names.
 fn lines(text: &str) -> Vec<&str> {
-    text.lines().collect()
+    let mut rest = text.lines().skip_while(|l| l.starts_with("#@"));
+    let rule = rest.next().expect("a rule follows the schema files");
+    assert!(rule.contains("=protobuf@"), "not a rule: {rule}");
+    rest.collect()
 }
 
 #[test]
@@ -62,7 +69,6 @@ fn a_flat_message_declares_its_fields_in_declaration_order() {
     assert_eq!(
         lines(&text),
         [
-            "demo/sensor=protobuf",
             "demo/sensor:7=value",
             "demo/sensor:2=unit",
             "demo/sensor:100=valid",
@@ -89,7 +95,6 @@ fn a_nested_message_field_is_addressed_by_dotted_field_numbers() {
     assert_eq!(
         lines(&text),
         [
-            "demo/sensor=protobuf",
             "demo/sensor:1=id",
             "demo/sensor:3=meta",
             "demo/sensor:3.2=tag",
@@ -141,7 +146,6 @@ fn oneof_members_are_ordinary_fields_and_the_oneof_itself_is_not_a_path() {
     assert_eq!(
         lines(&text),
         [
-            "demo/sensor=protobuf",
             "demo/sensor:1=before",
             "demo/sensor:2=s",
             "demo/sensor:3=i",
@@ -165,7 +169,6 @@ fn proto2_labels_and_a_repeated_message_field_share_one_path() {
     assert_eq!(
         lines(&text),
         [
-            "demo/sensor=protobuf",
             "demo/sensor:1=a",
             "demo/sensor:2=n",
             "demo/sensor:2.1=x",
@@ -202,7 +205,6 @@ fn a_map_field_declares_its_entry_message_key_and_value() {
     assert_eq!(
         lines(&text),
         [
-            "demo/sensor=protobuf",
             "demo/sensor:1=id",
             "demo/sensor:5=counts",
             "demo/sensor:5.1=key",
@@ -227,7 +229,6 @@ fn a_map_whose_value_is_a_message_declares_that_messages_fields_under_the_value(
     assert_eq!(
         lines(&text),
         [
-            "demo/sensor=protobuf",
             "demo/sensor:4=by_id",
             "demo/sensor:4.1=key",
             "demo/sensor:4.2=value",
@@ -273,7 +274,7 @@ fn an_enum_typed_field_names_its_own_path_and_nothing_under_it() {
            enum Unit { UNIT_UNSPECIFIED = 0; CELSIUS = 1; }
            message M { Unit unit = 2; }"#,
     );
-    assert_eq!(lines(&text), ["demo/sensor=protobuf", "demo/sensor:2=unit"]);
+    assert_eq!(lines(&text), ["demo/sensor:2=unit"]);
 }
 
 #[test]
@@ -294,7 +295,6 @@ fn the_innermost_scope_that_has_the_first_name_wins() {
     assert_eq!(
         lines(&text),
         [
-            "demo/sensor=protobuf",
             "demo/sensor:1=i",
             "demo/sensor:1.1=deep",
             "demo/sensor:2=top",
@@ -504,7 +504,7 @@ fn a_cycle_not_reachable_from_the_root_does_not_matter() {
            message Root { int32 a = 1; }
            message Loop { Loop again = 1; }"#,
     );
-    assert_eq!(lines(&text), ["demo/sensor=protobuf", "demo/sensor:1=a"]);
+    assert_eq!(lines(&text), ["demo/sensor:1=a"]);
 }
 
 #[test]
@@ -518,7 +518,6 @@ fn a_message_used_twice_without_a_cycle_is_expanded_twice() {
     assert_eq!(
         lines(&text),
         [
-            "demo/sensor=protobuf",
             "demo/sensor:1=first",
             "demo/sensor:1.1=x",
             "demo/sensor:2=second",
@@ -548,8 +547,9 @@ fn an_expansion_with_no_cycle_is_still_bounded_in_size() {
 }
 
 #[test]
-fn the_line_budget_is_exact_the_rule_line_included() {
-    // A flat message of N fields is N + 1 lines. The budget admits exactly
+fn the_line_budget_is_exact_the_file_and_rule_lines_included() {
+    // A flat message of N fields in one file is N + 2 lines: the schema file,
+    // the rule, and a name per field. The budget admits exactly
     // MAX_DECLARATIONS of them and refuses the next, so a result is never one
     // line longer than the bound the header states.
     let flat = |fields: usize| {
@@ -560,9 +560,9 @@ fn the_line_budget_is_exact_the_rule_line_included() {
         schema.push_str("}\n");
         schema
     };
-    let at_the_bound = ok("M", &flat(MAX_DECLARATIONS - 1));
+    let at_the_bound = ok("M", &flat(MAX_DECLARATIONS - 2));
     assert_eq!(at_the_bound.lines().count(), MAX_DECLARATIONS);
-    let d = refused("M", &flat(MAX_DECLARATIONS));
+    let d = refused("M", &flat(MAX_DECLARATIONS - 1));
     assert!(d.reason.contains("more than"), "{d}");
 }
 
@@ -615,7 +615,6 @@ fn an_import_is_resolved_by_exact_name_against_the_list() {
     assert_eq!(
         lines(&text),
         [
-            "demo/sensor=protobuf",
             "demo/sensor:1=at",
             "demo/sensor:1.1=secs",
             "demo/sensor:1.2=nanos",
@@ -947,7 +946,7 @@ fn extension_ranges_alone_are_accepted_in_proto2() {
         "M",
         "syntax = \"proto2\"; message M { optional int32 a = 1; extensions 100 to max; }",
     );
-    assert_eq!(lines(&text), ["demo/sensor=protobuf", "demo/sensor:1=a"]);
+    assert_eq!(lines(&text), ["demo/sensor:1=a"]);
 }
 
 #[test]
@@ -961,7 +960,7 @@ fn comments_strings_options_services_and_whitespace_do_not_disturb_the_names() {
            ;
            message M {}"#,
     );
-    assert_eq!(lines(&text), ["demo/sensor=protobuf"]);
+    assert!(lines(&text).is_empty(), "{text}");
 
     let text = ok(
         "M",
@@ -976,11 +975,7 @@ fn comments_strings_options_services_and_whitespace_do_not_disturb_the_names() {
     );
     assert_eq!(
         lines(&text),
-        [
-            "demo/sensor=protobuf",
-            "demo/sensor:1=shown",
-            "demo/sensor:2=tricky",
-        ]
+        ["demo/sensor:1=shown", "demo/sensor:2=tricky",]
     );
 }
 
@@ -1063,7 +1058,6 @@ fn an_options_file_that_extends_a_descriptor_message_is_read_and_changes_nothing
     assert_eq!(
         lines(&with),
         [
-            "demo/sensor=protobuf",
             "demo/sensor:1=id",
             "demo/sensor:2=label",
             "demo/sensor:3=meta",
@@ -1082,7 +1076,15 @@ fn an_options_file_that_extends_a_descriptor_message_is_read_and_changes_nothing
         ],
     )
     .expect("declares");
-    assert_eq!(with, without);
+    // The rule and the names are the same; the schema file lines carry each
+    // file's own text, which the block is part of.
+    let after_files = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|l| !l.starts_with("#@"))
+            .map(String::from)
+            .collect()
+    };
+    assert_eq!(after_files(&with), after_files(&without));
 }
 
 /// Three files: a message `b.Base` that takes extensions, a file that extends
@@ -1137,7 +1139,7 @@ fn the_same_files_are_declared_from_a_root_that_does_not_reach_the_extended_mess
     // The refusal belongs to the ROOT and not to the schema: the files that
     // refuse `app.Direct` declare `app.Unrelated`.
     let text = declare("app.Unrelated", &[REACHERS, BASE, EXTENDER]).expect("declares");
-    assert_eq!(lines(&text), ["demo/sensor=protobuf", "demo/sensor:1=n"]);
+    assert_eq!(lines(&text), ["demo/sensor:1=n"]);
 }
 
 #[test]
@@ -1251,14 +1253,7 @@ fn an_extendee_is_looked_up_from_the_innermost_scope_that_has_its_name() {
         message RootTop { optional Inner i = 1; }\n\
         message RootDeep { optional Outer.Inner i = 1; }\n";
     let text = ok("RootTop", schema);
-    assert_eq!(
-        lines(&text),
-        [
-            "demo/sensor=protobuf",
-            "demo/sensor:1=i",
-            "demo/sensor:1.1=top"
-        ]
-    );
+    assert_eq!(lines(&text), ["demo/sensor:1=i", "demo/sensor:1.1=top"]);
     let d = refused("RootDeep", schema);
     assert_eq!((d.line, d.column), (Some(5), Some(3)), "{d}");
     assert!(d.reason.contains("it extends `Outer.Inner`"), "{d}");
@@ -1277,7 +1272,7 @@ const GROUPS: &str = "syntax = \"proto2\";\n\
 fn a_group_is_refused_where_the_message_that_holds_it_is_reached_and_read_elsewhere() {
     // Not reached: declared as if the group were not there.
     let text = ok("Root", GROUPS);
-    assert_eq!(lines(&text), ["demo/sensor=protobuf", "demo/sensor:1=a"]);
+    assert_eq!(lines(&text), ["demo/sensor:1=a"]);
     // The holder as the root, and the holder through a field.
     for (root, how) in [
         ("Holder", "which is the root message"),
@@ -1306,14 +1301,7 @@ fn the_message_of_a_group_is_an_ordinary_message_for_a_root_that_reaches_only_it
     // `Uses` reaches `Holder.G` and not `Holder`: the group is a field of
     // `Holder` and of nothing else, so nothing here is a group field.
     let text = ok("Uses", GROUPS);
-    assert_eq!(
-        lines(&text),
-        [
-            "demo/sensor=protobuf",
-            "demo/sensor:1=g",
-            "demo/sensor:1.1=x"
-        ]
-    );
+    assert_eq!(lines(&text), ["demo/sensor:1=g", "demo/sensor:1.1=x"]);
 }
 
 #[test]
@@ -1343,14 +1331,7 @@ fn a_group_in_an_extend_block_is_a_message_and_not_a_field_of_the_extended_messa
     // The group's message is declared in the scope of the block, so `Root` can
     // name it, and its fields come out as an ordinary message's do.
     let text = ok("Root", schema);
-    assert_eq!(
-        lines(&text),
-        [
-            "demo/sensor=protobuf",
-            "demo/sensor:1=g",
-            "demo/sensor:1.1=q"
-        ]
-    );
+    assert_eq!(lines(&text), ["demo/sensor:1=g", "demo/sensor:1.1=q"]);
     // A root that reaches `Base` is refused for the `extend` and for no group:
     // the group belongs to the extension field, which `Base` does not hold.
     let d = refused("ReachesBase", schema);
@@ -1486,7 +1467,7 @@ fn the_fields_of_an_extend_block_are_read_for_syntax_and_not_judged() {
          message Base { extensions 100 to 199; }\n\
          extend Base { optional Missing m = 5; optional int32 z = 0; optional int32 y = 7; }\n",
     );
-    assert_eq!(lines(&text), ["demo/sensor=protobuf", "demo/sensor:1=a"]);
+    assert_eq!(lines(&text), ["demo/sensor:1=a"]);
 }
 
 // ---- the key pattern ---------------------------------------------------------
@@ -1515,14 +1496,10 @@ fn a_wildcard_pattern_is_declared_as_written() {
     let out = with_key("demo/**", SMALL).expect("declares");
     assert_eq!(
         lines(&out.text),
-        [
-            "demo/**=protobuf",
-            "demo/**:1=a",
-            "demo/**:2=b",
-            "demo/**:2.3=c",
-        ]
+        ["demo/**:1=a", "demo/**:2=b", "demo/**:2.3=c",]
     );
-    assert_eq!(out.installed, 4);
+    // The schema file, the rule and three names.
+    assert_eq!(out.installed, 5);
 }
 
 /// A build whose keyexpr matcher has no wildcards cannot honour `demo/**`, and
@@ -1546,7 +1523,11 @@ fn the_characters_the_dialect_reserves_are_quoted_for_the_caller() {
     // The pattern is a key expression, not declaration text: the `:` in it
     // would otherwise read back as the separator of a field-name line.
     let out = with_key("demo/temp:c", SMALL).expect("declares");
-    assert_eq!(out.text.lines().next(), Some("demo/temp\\:c=protobuf"));
+    assert!(
+        out.text.lines().any(|l| l == "demo/temp\\:c=protobuf@M"),
+        "{}",
+        out.text
+    );
     let mut map = FormatMap::new();
     assert_eq!(map.declare_all(&out.text).expect("installs"), out.installed);
     assert_eq!(
@@ -1696,9 +1677,12 @@ fn a_diagnostic_reads_as_one_line_in_each_of_its_three_shapes() {
 }
 
 #[test]
-fn the_first_declaration_line_is_the_rule_and_every_line_ends_in_a_newline() {
+fn the_schema_files_then_the_rule_open_the_text_and_every_line_ends_in_a_newline() {
     let out = with_key("k", SMALL).expect("declares");
-    assert!(out.text.starts_with("k=protobuf\n"));
+    let mut expected = String::from("#@a.proto=");
+    wz_session_core::json::escape_into(SMALL, &mut expected);
+    expected.push_str("\nk=protobuf@M\n");
+    assert!(out.text.starts_with(&expected), "{}", out.text);
     assert!(out.text.ends_with('\n'));
     assert_eq!(out.text.lines().count(), out.installed);
     // Two results concatenate into one valid text: no line is left open.
@@ -1719,5 +1703,6 @@ fn the_text_of_a_big_flat_message_declares_every_field_once() {
     }
     schema.push_str("}\n");
     let out = with_key("k", &schema).expect("declares");
-    assert_eq!(out.installed, 2001);
+    // The schema file, the rule, and a name per field.
+    assert_eq!(out.installed, 2002);
 }

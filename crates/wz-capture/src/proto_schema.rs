@@ -12,9 +12,10 @@
 //! declaration per line --
 //!
 //! ```text
-//! demo/**=protobuf        which decoder reads this topic's payload
-//! demo/**:3=sensor        what field 3 is called
-//! demo/**:3.2=celsius     what field 2 INSIDE field 3 is called
+//! #@a.proto="syntax ..."           the schema file, as one JSON string
+//! demo/**=protobuf@pkg.Outer       which decoder and message read the payload
+//! demo/**:3=sensor                 what field 3 is called
+//! demo/**:3.2=celsius              what field 2 INSIDE field 3 is called
 //! ```
 //!
 //! A person who owns a `.proto` file should not have to type those lines, and
@@ -29,7 +30,15 @@
 //!
 //! For a key pattern `K` and a root message `pkg.Outer`:
 //!
-//! * the rule `K=protobuf`, first;
+//! * one schema file line `#@<file>="<text>"` per file the root file reaches
+//!   (itself and what it imports), in the order the files were handed over, so
+//!   the text carries the schema and the payload is READ by its types
+//!   ([`crate::proto_decode`]);
+//! * the rule `K=protobuf@pkg.Outer`, naming the root message by its full name;
+//! * the name lines below. They name what the typed reading names already, and
+//!   are kept so that a rule a consumer rewrites to a bare `protobuf` (a walk of
+//!   the wire) still names its fields, as the text this door wrote before it
+//!   carried the files did;
 //! * one `K:path=name` line per field of the root message, in declaration order,
 //!   where `path` is the field NUMBER and `name` the field name as written;
 //! * and, directly after the line of a field whose type is a message, the lines
@@ -250,8 +259,8 @@ impl ProtoDiagnostic {
 /// The declarations a schema produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtoDeclarations {
-    /// The declaration text: the rule line, then one line per named path, each
-    /// ending in a newline.
+    /// The declaration text: a schema file line per file read, the rule line,
+    /// then one line per named path, each ending in a newline.
     pub text: String,
     /// How many declarations the text holds, which is the number
     /// [`FormatMap::declare_all`] reports installing for it.
@@ -320,7 +329,14 @@ pub fn declarations_from_proto(
         text: String::new(),
         lines: 0,
     };
-    out.rule()?;
+    // The files the root file reaches, which are exactly the ones read: a
+    // file nothing imports is left out, as it is never read here either.
+    for (at, file) in files.iter().enumerate() {
+        if linker.state[at] == State::Done {
+            out.schema_file(file, text_of(file.name, file.text)?)?;
+        }
+    }
+    out.rule(&linker.msgs[root].full_name)?;
     linker.expand(root, "", &mut Vec::new(), &mut out)?;
 
     // The text goes through the installer it is meant for, so the result and
@@ -562,6 +578,13 @@ impl<'f, 'a> Linker<'f, 'a> {
             linker.load(file, &mut Vec::new())?;
         }
         Ok(linker)
+    }
+
+    /// The type tables a link produced, given up by the linker that borrows the
+    /// files: what the typed reader needs to read a message after the files are
+    /// gone ([`crate::proto_decode::SchemaSet`]).
+    pub(crate) fn into_types(self) -> (Vec<Msg>, Vec<EnumInfo>) {
+        (self.msgs, self.enums)
     }
 
     /// An empty linker over `files`, once the names are known to be distinct.
@@ -1417,10 +1440,32 @@ impl Emitter {
         Ok(())
     }
 
-    fn rule(&mut self) -> Result<(), ProtoDiagnostic> {
+    /// One schema file: `#@<file>="<text>"`, the text as one JSON string so a
+    /// file of many lines is one declaration line ([`crate::payload_typed`]).
+    fn schema_file(&mut self, file: &ProtoFile<'_>, text: &str) -> Result<(), ProtoDiagnostic> {
+        if file.name.contains(['\n', '\r']) {
+            return Err(ProtoDiagnostic::argument(format!(
+                "the file name `{}` holds a line break, which would end its declaration",
+                file.name.escape_debug()
+            )));
+        }
+        self.reserve()?;
+        self.text.push_str("#@");
+        self.text.push_str(&escape_field(file.name));
+        self.text.push('=');
+        wz_session_core::json::escape_into(text, &mut self.text);
+        self.text.push('\n');
+        Ok(())
+    }
+
+    /// The rule, naming the root message as the body schema, so the payload is
+    /// read by its types with the files above.
+    fn rule(&mut self, root_message: &str) -> Result<(), ProtoDiagnostic> {
         self.reserve()?;
         self.text.push_str(&self.key);
-        self.text.push_str("=protobuf\n");
+        self.text.push_str("=protobuf@");
+        self.text.push_str(root_message);
+        self.text.push('\n');
         Ok(())
     }
 

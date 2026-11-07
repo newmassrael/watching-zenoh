@@ -747,9 +747,14 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                 // pattern handed straight to `insert` arrived with its
                 // backslashes still in it and matched no topic at all.
                 let declaration = payload_formats::parse_declaration(raw).map_err(|_| bad())?;
+                // A schema file (`#@<file>="<text>"`) is typed here too, beside
+                // the `protobuf@pkg.Msg` rule that reads by it, for the reason a
+                // definition is: one subject, which decoder reads a topic and
+                // what it reads with.
                 match declaration {
                     payload_formats::DeclarationText::Rule { .. }
-                    | payload_formats::DeclarationText::Definition { .. } => {}
+                    | payload_formats::DeclarationText::Definition { .. }
+                    | payload_formats::DeclarationText::SchemaFile { .. } => {}
                     payload_formats::DeclarationText::Name { .. } => return Err(bad()),
                 }
                 payload_formats.push(raw.clone());
@@ -2769,6 +2774,9 @@ fn declaration_flag(kind: wz_capture::payload::formats::DeclarationKind) -> &'st
         // are one subject: a reader saying which decoder reads which topic, and
         // saying what that decoder is when this build does not already know.
         wz_capture::payload::formats::DeclarationKind::FormatDefinition => "--payload-format",
+        // A `.proto` file is typed at the flag of the rule that reads by it,
+        // for the definition's reason.
+        wz_capture::payload::formats::DeclarationKind::SchemaFile => "--payload-format",
     }
 }
 
@@ -2783,6 +2791,9 @@ fn declaration_note_kind(kind: wz_capture::payload::formats::DeclarationKind) ->
         // pattern that missed, and an unbound definition is a format nothing
         // referred to at all.
         wz_capture::payload::formats::DeclarationKind::FormatDefinition => "payload_format_unused",
+        // Its own kind as well: a file is unused when no rule READ by the files,
+        // which is a different remedy from a format nobody named.
+        wz_capture::payload::formats::DeclarationKind::SchemaFile => "payload_schema_file_unused",
     }
 }
 
@@ -2799,6 +2810,9 @@ fn declaration_remedy(kind: wz_capture::payload::formats::DeclarationKind) -> &'
         }
         wz_capture::payload::formats::DeclarationKind::FormatDefinition => {
             "no rule named this format, so nothing was decoded with it"
+        }
+        wz_capture::payload::formats::DeclarationKind::SchemaFile => {
+            "no rule naming a message of the schema files read a payload, so no file was used"
         }
     }
 }
@@ -4819,6 +4833,8 @@ fn payload_block(
             format: name,
             fields,
             despite_encoding,
+            typed,
+            schema,
         } => {
             // R311y874 — the override is said on its OWN line, above the
             // fields. A reader whose rule was right and whose publisher is
@@ -4834,7 +4850,17 @@ fn payload_block(
                 ),
                 None => String::new(),
             };
-            out.push_str(&format!("    payload `{keyexpr}` as {name}:\n"));
+            // The body schema the rule names, and whether its files were
+            // declared: a reader told `as protobuf` alone cannot tell a typed
+            // reading from a walk of the wire.
+            let schema = match (schema, *typed) {
+                (Some(message), true) => format!(" by {message}"),
+                (Some(message), false) => {
+                    format!(" ({message} named, no schema file declared, so walked by the wire)")
+                }
+                (None, _) => String::new(),
+            };
+            out.push_str(&format!("    payload `{keyexpr}` as {name}{schema}:\n"));
             for f in fields {
                 // R311y720 (PF4) — the declared name follows the path rather
                 // than replacing it. Both, because they answer different
@@ -4845,6 +4871,11 @@ fn payload_block(
                 let named = match &f.name {
                     Some(name) => format!("{} ({name})", f.path),
                     None => f.path.clone(),
+                };
+                // The type, where the reader that decoded it knew one.
+                let named = match f.typed.as_ref().and_then(|t| t.ty.as_deref()) {
+                    Some(ty) => format!("{named}: {ty}"),
+                    None => named,
                 };
                 out.push_str(&format!(
                     "      [{}..{}] {} = {}\n",

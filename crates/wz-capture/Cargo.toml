@@ -189,6 +189,14 @@ network-codecs = [
 name = "decode_cost"
 harness = false
 
+# What one row of the field document costs against the few typed values a
+# plotting consumer keeps from it: the measurement behind the question whether
+# a narrower door is warranted. `harness = false` for decode_cost's reason.
+[[bench]]
+name = "fields_row_cost"
+harness = false
+required-features = ["fixtures", "dissect"]
+
 [dependencies]
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",

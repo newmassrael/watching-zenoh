@@ -1836,8 +1836,9 @@ pub struct WzDissectProtoFile {
 /// [`WZ_DISSECT_OK`] with a verdict, for any arguments that are well formed:
 ///
 /// ```text
-/// {"document":{"name":"declarations_from_proto","revision":1},
-///  "ok":true,"declarations":"demo/**=protobuf\ndemo/**:1=value\n","installed":2}
+/// {"document":{"name":"declarations_from_proto","revision":2},
+///  "ok":true,"declarations":"#@a.proto=\"...\"\ndemo/**=protobuf@pkg.M\ndemo/**:1=value\n",
+///  "installed":3}
 /// {"document":{...},"ok":false,"file":"a.proto","line":3,"column":9,
 ///  "reason":"...","message":"a.proto: line 3: ..."}
 /// ```
@@ -9847,6 +9848,7 @@ mod tests {
             over.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
+                 \"typed\":false,\"schema\":null,\
                  \"despite_encoding\":\"application/json\""
             ),
             "a label the bytes refute must not hide the data, and the override \
@@ -11026,28 +11028,45 @@ mod tests {
             "{doc}"
         );
         let text = json_string(&doc, "declarations");
+        // Document revision 2: the schema file, then the rule naming the root
+        // message, then the names.
+        let mut file_line = String::from("#@a.proto=");
+        wz_session_core::json::escape_into(READING, &mut file_line);
         assert_eq!(
             text,
-            "demo/sensor=protobuf\ndemo/sensor:1=temperature\ndemo/sensor:2=meta\n\
-             demo/sensor:2.1=unit\n"
+            format!(
+                "{file_line}\ndemo/sensor=protobuf@Reading\ndemo/sensor:1=temperature\n\
+                 demo/sensor:2=meta\ndemo/sensor:2.1=unit\n"
+            )
         );
 
         // The existing validation door says the same about it.
         let verdict = call_declarations_diagnose(&text);
         assert!(verdict.contains("\"ok\":true"), "{verdict}");
+        assert!(
+            verdict.contains("{\"line\":0,\"kind\":\"schema_file\"}"),
+            "{verdict}"
+        );
         assert_eq!(
             json_count(&verdict, "installed"),
             json_count(&doc, "installed"),
             "the count this door reports is the count the installer reports"
         );
-        assert_eq!(json_count(&doc, "installed"), 4);
+        assert_eq!(json_count(&doc, "installed"), 5);
 
-        // And the existing field door names the decoded field with it.
+        // And the existing field door READS the decoded field by its type: the
+        // name, the type and the number, where the wire walk says `varint 150`.
         let decoded =
             call_fields_with_payloads(&protobuf_capture(), 0, &text).expect("the capture reads");
         assert!(
-            decoded.contains("\"path\":\"1\",\"name\":\"temperature\",\"value\":\"varint 150\""),
-            "the name a SCHEMA declared must ride the decoded field: {decoded}"
+            decoded.contains("\"typed\":true,\"schema\":\"Reading\""),
+            "the row must say it was read by the schema: {decoded}"
+        );
+        assert!(
+            decoded
+                .contains("\"path\":\"1\",\"name\":\"temperature\",\"value\":\"150\",\"start\":")
+                && decoded.contains("\"type\":\"int32\",\"typed_value\":150,\"enum_number\":null"),
+            "the field a SCHEMA declared must come back typed: {decoded}"
         );
     }
 
@@ -11076,10 +11095,19 @@ mod tests {
         let doc =
             call_from_proto("demo/sensor", "app.Sensor", &files, 0).expect("the door answers");
         assert!(doc.contains("\"ok\":true"), "{doc}");
+        // The three files are read, so the three are declared, and the rule
+        // and the names follow them.
+        let text = json_string(&doc, "declarations");
+        let after_files: Vec<&str> = text.lines().filter(|l| !l.starts_with("#@")).collect();
         assert_eq!(
-            json_string(&doc, "declarations"),
-            "demo/sensor=protobuf\ndemo/sensor:1=id\ndemo/sensor:2=label\n"
+            after_files,
+            [
+                "demo/sensor=protobuf@app.Sensor",
+                "demo/sensor:1=id",
+                "demo/sensor:2=label"
+            ]
         );
+        assert_eq!(text.lines().filter(|l| l.starts_with("#@")).count(), 3);
 
         let doc = call_from_proto("demo/sensor", "google.protobuf.FieldOptions", &files, 0)
             .expect("the door answers");
@@ -11101,14 +11129,19 @@ mod tests {
     fn a_key_pattern_is_quoted_for_the_dialect_and_escaped_for_json() {
         let doc = from_proto_one("demo/temp:c", "Reading", READING);
         let text = json_string(&doc, "declarations");
-        assert!(text.starts_with("demo/temp\\:c=protobuf\n"), "{text}");
+        assert!(
+            text.lines().any(|l| l == "demo/temp\\:c=protobuf@Reading"),
+            "{text}"
+        );
         let verdict = call_declarations_diagnose(&text);
         assert!(verdict.contains("\"ok\":true"), "{verdict}");
 
         let doc = from_proto_one("demo/\"q\"", "Reading", READING);
         assert!(doc.contains("\\\"q\\\""), "{doc}");
         assert!(
-            json_string(&doc, "declarations").starts_with("demo/\"q\"=protobuf\n"),
+            json_string(&doc, "declarations")
+                .lines()
+                .any(|l| l == "demo/\"q\"=protobuf@Reading"),
             "{doc}"
         );
     }
@@ -11189,10 +11222,13 @@ mod tests {
             0,
         )
         .expect("the door answers");
-        assert_eq!(
-            json_string(&doc, "declarations"),
-            "k=protobuf\nk:1=at\nk:1.1=secs\n"
-        );
+        // Both files are read, so both are declared, in the order of the list.
+        let mut want = String::from("#@m/root.proto=");
+        wz_session_core::json::escape_into(core::str::from_utf8(root).expect("utf-8"), &mut want);
+        want.push_str("\n#@common/stamp.proto=");
+        wz_session_core::json::escape_into(core::str::from_utf8(stamp).expect("utf-8"), &mut want);
+        want.push_str("\nk=protobuf@m.Root\nk:1=at\nk:1.1=secs\n");
+        assert_eq!(json_string(&doc, "declarations"), want);
 
         // The root file is whichever the caller says, not the first.
         let doc = call_from_proto(
@@ -11202,7 +11238,12 @@ mod tests {
             1,
         )
         .expect("the door answers");
-        assert_eq!(json_string(&doc, "declarations"), "k=protobuf\nk:1=secs\n");
+        // And only the files that root reaches are declared: `m/root.proto`
+        // imports `common/stamp.proto`, not the other way round.
+        let mut want = String::from("#@common/stamp.proto=");
+        wz_session_core::json::escape_into(core::str::from_utf8(stamp).expect("utf-8"), &mut want);
+        want.push_str("\nk=protobuf@common.Stamp\nk:1=secs\n");
+        assert_eq!(json_string(&doc, "declarations"), want);
 
         // Without the imported file in the list the import is refused at the
         // import statement, under the importer's own name.
@@ -11508,20 +11549,35 @@ mod tests {
         );
         let decoded =
             call_fields_with_payloads(&protobuf_capture_of(&bytes), 0, &declared).expect("reads");
-        for (path, name, value) in [
-            ("1", "value", "varint 150"),
-            ("3", "meta", "len 1 field(s)"),
-            ("3.2", "unit", "len \\\"C\\\""),
-            ("4", "deltas", "len 2 byte(s)"),
-            ("5", "tags", "len 2 field(s)"),
-            ("5.1", "key", "len \\\"a\\\""),
-            ("5.2", "value", "varint 1"),
+        // The declarations the `.proto` door wrote carry the schema, so the
+        // reader reads each field by its type: the packed `sint32` run is one
+        // row per element with its sign, where the wire walk saw `len 2
+        // byte(s)`, and the string is a string, where it saw `len "C"`.
+        assert!(
+            decoded.contains("\"typed\":true,\"schema\":\"Sensor\""),
+            "{decoded}"
+        );
+        for (path, name, value, ty, typed) in [
+            ("1", "value", "150", "\"int32\"", "150"),
+            ("3", "meta", "1 field(s)", "\"Sensor.Meta\"", "null"),
+            ("3.2", "unit", "\\\"C\\\"", "\"string\"", "\"C\""),
+            ("4", "deltas", "-1", "\"sint32\"", "-1"),
+            ("4", "deltas", "1", "\"sint32\"", "1"),
+            ("5", "tags", "2 field(s)", "\"map<string, int32>\"", "null"),
+            ("5.1", "key", "\\\"a\\\"", "\"string\"", "\"a\""),
+            ("5.2", "value", "1", "\"int32\"", "1"),
         ] {
+            let entry = format!("\"path\":\"{path}\",\"name\":\"{name}\",\"value\":\"{value}\"");
+            let at = decoded
+                .find(&entry)
+                .unwrap_or_else(|| panic!("{path} {name} {value} in {decoded}"));
+            let rest = &decoded[at..];
+            let object = &rest[..rest.find('}').expect("the entry closes")];
             assert!(
-                decoded.contains(&format!(
-                    "\"path\":\"{path}\",\"name\":\"{name}\",\"value\":\"{value}\""
+                object.ends_with(&format!(
+                    "\"type\":{ty},\"typed_value\":{typed},\"enum_number\":null"
                 )),
-                "{path} {name} {value} in {decoded}"
+                "{path}: {object}"
             );
         }
     }
@@ -13068,6 +13124,7 @@ mod tests {
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
+                 \"typed\":false,\"schema\":null,\
                  \"despite_encoding\":null,\"format\":\"protobuf\""
             ),
             "the covering rule must fire: {decoded}"
@@ -13119,6 +13176,7 @@ mod tests {
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
+                 \"typed\":false,\"schema\":null,\
                  \"despite_encoding\":null,\"format\":\"cbor\""
             ),
             "the publisher said cbor and the rule says cbor, so it decodes with \
@@ -13191,7 +13249,7 @@ mod tests {
     #[test]
     fn the_declaration_diagnostic_names_the_line_and_needs_no_capture() {
         // R2100 (open-debt item 509) — the verdict opens with its own revision.
-        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":2}";
+        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":3}";
         assert_eq!(
             call_declarations_diagnose("demo/**=protobuf\ndemo/**:1=temperature"),
             format!(

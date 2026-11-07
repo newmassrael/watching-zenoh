@@ -406,6 +406,13 @@ pub mod payload_decode;
 /// [`payload::formats`] where the trait, the map and the dialect are. A caller
 /// reads one module.
 mod payload_described;
+
+/// The `protobuf` format with a body schema: a payload read by the types its
+/// `.proto` schema gives it. Private for the reason [`payload_builtin`] is, and
+/// reached through [`payload::formats`].
+mod payload_typed;
+#[cfg(test)]
+mod payload_typed_tests;
 pub mod pcap;
 pub mod pcapng;
 /// Open-debt item 924, step 1 — the differential gate of the two-pass
