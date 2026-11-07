@@ -118,7 +118,7 @@ set -euo pipefail
 # config parses. MNEMOSYNE_MAX_SCHEMA stays 44 because 44 is what the NEW rev
 # reads (see below) — the pairing rule binds a ceiling that moves alone, not a
 # rev that moves alone.
-MNEMOSYNE_REV="183a17a5254f27a246ef20e858de1523e0088815"
+MNEMOSYNE_REV="ee9342762997d6ca0102cb64a0d9e7e509d3576a"
 
 # The pinned rev's CURRENT_SCHEMA_VERSION: the HIGHEST atomic-store schema this
 # CLI can read. Verified at the pin, not inherited from prose —
@@ -154,6 +154,10 @@ MNEMOSYNE_REV="183a17a5254f27a246ef20e858de1523e0088815"
 # carried: `crates/mnemosyne-atomic/src/lib.rs:1782` at 183a17a5 defines
 # `CURRENT_SCHEMA_VERSION: u32 = 46`, and the installed binary's own
 # `describe-schema` answers 46 as well — asserted twice, inherited zero times.
+# MOVED to 49 with the rev ee934276 (mnemosyne Round 1344): the ladder in
+# `crates/mnemosyne-atomic/src/generations.rs` ends at `to: 49` (the publishable
+# half written only where it differs, and a ledger sealed into segments), and
+# CURRENT_SCHEMA_VERSION is derived from it. 47 and 48 are additive rungs between.
 #
 # WHY THIS BUMP HAPPENED AT ALL, which is the part worth keeping: the shared
 # `~/.cargo/bin/mnemosyne-cli` had already moved to 183a17a5 (schema 46) while
@@ -161,7 +165,7 @@ MNEMOSYNE_REV="183a17a5254f27a246ef20e858de1523e0088815"
 # commit until the two agreed. The store was still at 44, so nothing had been
 # migrated past the pinned reader — the hook stopped it BEFORE the mutate that
 # R311y401, y406 and y416 each let through.
-MNEMOSYNE_MAX_SCHEMA="46"
+MNEMOSYNE_MAX_SCHEMA="49"
 
 cargo install --git https://github.com/newmassrael/mnemosyne \
   --rev "$MNEMOSYNE_REV" --bin mnemosyne-cli --force mnemosyne-cli
