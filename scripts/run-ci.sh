@@ -410,6 +410,20 @@ if [[ -z "$repo_root" ]]; then
 fi
 cd "$repo_root" || exit 2
 
+# ─── artifact root ─────────────────────────────────────────────────
+# A checkout may be mounted read-only and still be asked to run every lane, so
+# what a lane writes -- cargo target directories, built oracles, logs -- has to
+# be able to live outside it. With WZ_ARTIFACT_ROOT set, a product of the tree
+# path <rel> is at "$WZ_ARTIFACT_ROOT/<rel>" and nothing is written into the
+# checkout; unset, it is at "$repo_root/<rel>" as it always was. Every product
+# path below is therefore spelled through `$WZ_ARTIFACTS`, and the cargo shim
+# the init puts on PATH gives each workspace its mirrored target directory, so
+# the plain `cargo` calls need no spelling of their own. The one rule and why
+# the layout mirrors the tree: scripts/lib/artifact-root.sh.
+# shellcheck source=scripts/lib/artifact-root.sh
+source scripts/lib/artifact-root.sh
+wz_artifact_root_init "$repo_root" || exit 2
+
 # ─── shared oracle gates ───────────────────────────────────────────
 # Sourced, not invoked: these are function definitions, and the lanes need them
 # in-process so a repair one lane performs is visible to the next. Sourcing is
@@ -511,7 +525,7 @@ export CARGO_TERM_PROGRESS_WHEN="${CARGO_TERM_PROGRESS_WHEN:-never}"
 # writes to the original stdout, so console + hook output is unchanged, and the
 # real exit code is preserved. Opt out with RUNCI_NO_SELF_LOG=1.
 if [[ "${RUNCI_NO_SELF_LOG:-0}" != "1" ]]; then
-    RUNCI_LOG_DIR="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}"
+    RUNCI_LOG_DIR="${RUNCI_LOG_DIR:-$WZ_ARTIFACTS/crates/target/run-ci-logs}"
     mkdir -p "$RUNCI_LOG_DIR"
     RUNCI_LOG_FILE="${RUNCI_LOG_FILE:-$RUNCI_LOG_DIR/run-ci-$(date +%Y%m%d-%H%M%S)-$$.log}"
     exec > >(tee "$RUNCI_LOG_FILE") 2>&1
@@ -564,6 +578,13 @@ _runci_ts() { date +'%Y-%m-%dT%H:%M:%S%z'; }
 # mode owns lane selection). The ledger lives in .git (untracked), like the
 # pre-push run-ci.lock.
 CKPT_FILE="$(git rev-parse --git-dir)/run-ci-checkpoint"
+# Under an artifact root a git directory inside the checkout is as read-only as
+# the rest of it, so the ledger takes the mirrored path; a worktree's git
+# directory lies outside the checkout and is not the checkout's to relocate.
+if [[ -n "${WZ_ARTIFACT_ROOT:-}" ]]; then
+    CKPT_FILE="$(wz_artifact_dir "$(dirname "$CKPT_FILE")")/run-ci-checkpoint"
+    mkdir -p "$(dirname "$CKPT_FILE")" || exit 2
+fi
 [[ -n "$ONLY_LAYER" ]] && RESUME=""   # --layer is a targeted single-lane run
 _runci_fingerprint() {
     {
@@ -600,9 +621,15 @@ fi
 # and $CARGO_HOME (registry dependency sources). rustc already canonicalises
 # std/core to /rustc/<hash>. The replacement strings are arbitrary but must be
 # FIXED — their length is what the baseline encodes.
+#
+# Under an artifact root the OUT_DIR sources sit under `$WZ_ARTIFACTS`, not the
+# workspace; the root takes the workspace's replacement, so the generated path
+# reads `/wz/<tree path>` in both modes and the baseline holds for either.
 footprint_remap_rustflags() {
     local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-    echo "--remap-path-prefix=${repo_root}=/wz --remap-path-prefix=${cargo_home}=/cargo"
+    local artifacts=""
+    [[ "$WZ_ARTIFACTS" != "$repo_root" ]] && artifacts=" --remap-path-prefix=${WZ_ARTIFACTS}=/wz"
+    echo "--remap-path-prefix=${repo_root}=/wz${artifacts} --remap-path-prefix=${cargo_home}=/cargo"
 }
 
 # ─── unreached-leg reporting (R2255, open-debt item 597) ─────────────────────
@@ -1676,7 +1703,7 @@ layer_b2_regen_diff() {
     # real break in the xtask read exactly like a box without libxml2. A
     # should-run lane that skips is the burn; a skip whose reason is unreadable
     # is that burn with the evidence removed.
-    local xtask_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/b2-xtask-build.log"
+    local xtask_log="${RUNCI_LOG_DIR:-$WZ_ARTIFACTS/crates/target/run-ci-logs}/b2-xtask-build.log"
     mkdir -p "$(dirname "$xtask_log")"
     if ! cargo build --manifest-path xtask/Cargo.toml --quiet >"$xtask_log" 2>&1; then
         echo "Layer B2 SKIP (xtask build failed — libxml2/sce-build toolchain absent?)"
@@ -1690,7 +1717,7 @@ layer_b2_regen_diff() {
     # it again — the shape guard rule F2 exists for, inside this repo's own gate.
     # MEASURED: on a build host B2 failed here and the log held nothing but
     # `xtask regen errored`; the cause could not be read at all.
-    local regen_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/b2-xtask-regen.log"
+    local regen_log="${RUNCI_LOG_DIR:-$WZ_ARTIFACTS/crates/target/run-ci-logs}/b2-xtask-regen.log"
     mkdir -p "$(dirname "$regen_log")" 2>/dev/null || true
     if ! cargo run --manifest-path xtask/Cargo.toml --quiet -- regen \
         >"$regen_log" 2>&1; then
@@ -11159,7 +11186,7 @@ layer_c1ch_capi_c_config_surface() {
     local plane="clock-source,event-ring,supervision,resource-snapshot"
     (cd crates && cargo build -p wz-capi-c --quiet --features "$plane") || return 1
     python3 scripts/lib/capi_c_config_surface.py \
-        crates/target/debug/libwz_capi_c.so || return 1
+        "$WZ_ARTIFACTS/crates/target/debug/libwz_capi_c.so" || return 1
     # R2301 (open-debt item 634) — and the SYMBOL SET of those wz-own doors is
     # pinned to a REVISION NUMBER, the way `capi_abi_pin.py` pins the dissect
     # library's in C1bo.
@@ -11200,8 +11227,8 @@ layer_c1ch_capi_c_config_surface() {
     # what proves no door differs between the two builds in the first place.
     (cd crates && cargo build -p wz-capi-c --release --quiet --features "$plane") || return 1
     python3 scripts/lib/capi_c_abi_pin.py \
-        crates/target/debug/libwz_capi_c.so \
-        crates/target/release/libwz_capi_c.so || return 1
+        "$WZ_ARTIFACTS/crates/target/debug/libwz_capi_c.so" \
+        "$WZ_ARTIFACTS/crates/target/release/libwz_capi_c.so" || return 1
     python3 scripts/lib/capi_c_abi_pin.py --selftest >/dev/null || return 1
     return 0
 }
@@ -11278,7 +11305,7 @@ layer_z8_upstream_suite() {
     # The names are words by construction (file stems), so they are left to split.
     # shellcheck disable=SC2086
     python3 scripts/lib/z8_upstream_suite.py measure $names || return 1
-    python3 scripts/lib/z8_expectation_gate.py --check "${Z8_OUT:-$PWD/target/z8-suite}/report.tsv" || return 1
+    python3 scripts/lib/z8_expectation_gate.py --check "${Z8_OUT:-$WZ_ARTIFACTS/target/z8-suite}/report.tsv" || return 1
 }
 
 # ─── Layer C1co — the pico client-only build dials a listener ──────────
@@ -11304,7 +11331,7 @@ layer_c1co_pico_client_dials_a_listener() {
     # (the default build) and the cooperative engine's (`engine-coop` with `peer`, and the
     # multi-threaded arm so its read task accepts). Each build replaces the example in the
     # target directory, so each is kept under a name of its own.
-    local examples="$PWD/crates/target/debug/examples"
+    local examples="$WZ_ARTIFACTS/crates/target/debug/examples"
     (cd crates && cargo build -p wz-capi-pico --example hold_a_listener) || return 1
     cp "$examples/hold_a_listener" "$examples/hold_a_listener-tokio" || return 1
     (cd crates && cargo build -p wz-capi-pico --no-default-features \
@@ -14549,8 +14576,8 @@ layer_c1bzr_reduced_docs_resolve() {
     python3 scripts/lib/doc_feature_sets.py --selftest || return 1
     python3 scripts/lib/reduced_docs_gate.py --selftest || return 1
     [[ -n "${WZ_C1BZ_ONLY:-}" ]] && only=(--only "$WZ_C1BZ_ONLY")
-    mkdir -p crates/target/c1bzr || return 1
-    out="crates/target/c1bzr/shard-$shard.json"
+    mkdir -p "$WZ_ARTIFACTS/crates/target/c1bzr" || return 1
+    out="$WZ_ARTIFACTS/crates/target/c1bzr/shard-$shard.json"
     python3 scripts/lib/reduced_docs_gate.py measure --out "$out" \
         --shard "$shard" --shards "$shards" "${only[@]}" || return 1
     if [[ "$shards" != 1 || ${#only[@]} -gt 0 ]]; then
@@ -14644,6 +14671,8 @@ layer_c1bs_live_capture() {
 
     # The privileged half. Build as THIS user and run the binary under sudo, so
     # the cargo target dir never acquires root-owned artefacts.
+    # Cargo prints the binary relative to the workspace or absolute under an
+    # artifact root; the suffix is the same in both, and the prefix is ours.
     bin="$(cd crates && cargo test -p wz-packet-socket --features tap \
         --lib --no-run --message-format=short 2>&1 \
         | grep -oE 'target/debug/deps/wz_packet_socket-[a-f0-9]+' | tail -1)"
@@ -14651,6 +14680,7 @@ layer_c1bs_live_capture() {
         echo "  C1bs FAIL: could not locate the built test binary" >&2
         return 1
     fi
+    bin="$WZ_ARTIFACTS/crates/$bin"
 
     # Three ways to hold CAP_NET_RAW, tried in this order: the process already
     # has it, non-interactive sudo (a hosted runner), or the namespace sandbox of
@@ -14660,7 +14690,7 @@ layer_c1bs_live_capture() {
     # bwrap brings it up, so every read below, the tests' probe packets and the
     # live arm's feeder, has to run inside the same wrapper.
     local runner=() sandbox_rc=0
-    if ./crates/"$bin" --list >/dev/null 2>&1 && _c1bs_has_net_raw; then
+    if "$bin" --list >/dev/null 2>&1 && _c1bs_has_net_raw; then
         runner=()
     elif sudo -n true 2>/dev/null; then
         runner=(sudo -n)
@@ -14688,7 +14718,7 @@ layer_c1bs_live_capture() {
     # They share the loopback interface -- the flood's 20 000 packets arrive on
     # the other test's tap and push its probe packet past the search budget --
     # so this is resource coupling, not flakiness to retry away.
-    out="$("${runner[@]}" ./crates/"$bin" live_capture::tests:: \
+    out="$("${runner[@]}" "$bin" live_capture::tests:: \
         --ignored --nocapture --test-threads=1 2>&1)" || { echo "$out"; return 1; }
     # A filter that matches nothing reports `ok. 0 passed`, which is green and
     # says nothing -- the exact trap this lane exists to avoid.
@@ -14706,7 +14736,8 @@ layer_c1bs_live_capture() {
     # The feeder and the tap run under ONE runner: in the sandbox, a feeder left
     # outside would write to the host's `lo`, which the tap does not see.
     local live
-    live="$("${runner[@]}" bash -c "$(declare -f _c1bs_live_read); _c1bs_live_read" 2>&1)"
+    live="$("${runner[@]}" bash -c "$(declare -f _c1bs_live_read); _c1bs_live_read \"\$1\"" \
+        _c1bs_live_read "$WZ_ARTIFACTS/crates/target/debug/wz-analyze" 2>&1)"
     grep -qE 'live tap on lo: read [1-9][0-9]* packet\(s\) in .*stopped by --for' <<<"$live" || {
         echo "  C1bs FAIL: the live command line read nothing, or stopped for a"
         echo "             reason it did not name"; echo "$live"; return 1; }
@@ -14730,9 +14761,11 @@ layer_c1bs_live_capture() {
 # hands its body to whichever runner holds CAP_NET_RAW (`declare -f`), and the
 # two halves always share one network namespace. The tap's status is not this
 # function's verdict: a quiet read exits non-zero for the honest reason, and the
-# lane judges what it decoded.
+# lane judges what it decoded. The binary arrives as `$1`: the runner starts a
+# fresh shell (under sudo, with a scrubbed environment), so it cannot read the
+# product location from this one.
 _c1bs_live_read() {
-    local feeder
+    local analyze="$1" feeder
     (
         sleep 0.4
         for _ in $(seq 1 200); do
@@ -14740,7 +14773,7 @@ _c1bs_live_read() {
         done
     ) &
     feeder=$!
-    ./crates/target/debug/wz-analyze --interface lo --for 2
+    "$analyze" --interface lo --for 2
     wait "$feeder" 2>/dev/null || true
 }
 
@@ -14921,9 +14954,9 @@ layer_c1cj_replay_c_abi() {
     out="$("$cc" -std=c11 -Wall -Wextra -Werror \
         -I crates/wz-capi-replay/include \
         crates/wz-capi-replay/tests/c_abi_consumer.c \
-        -L crates/target/release -lwz_capi_replay -o "$bin" 2>&1)" || {
+        -L "$WZ_ARTIFACTS/crates/target/release" -lwz_capi_replay -o "$bin" 2>&1)" || {
         echo "  C1cj FAIL: the C consumer did not compile or link"; echo "$out"; return 1; }
-    out="$(LD_LIBRARY_PATH=crates/target/release "$bin" 2>&1)" || {
+    out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS/crates/target/release" "$bin" 2>&1)" || {
         echo "$out"; rm -rf "$(dirname "$bin")"; return 1; }
     echo "$out"
     rm -rf "$(dirname "$bin")"
@@ -14981,9 +15014,9 @@ layer_c1bo_dissect_c_abi() {
     out="$("$cc" -Wall -Wextra -Werror \
         -I crates/wz-capi-dissect/include \
         crates/wz-capi-dissect/tests/c_abi_consumer.c \
-        -L crates/target/release -lwz_capi_dissect -o "$bin" 2>&1)" || {
+        -L "$WZ_ARTIFACTS/crates/target/release" -lwz_capi_dissect -o "$bin" 2>&1)" || {
         echo "  C1bo FAIL: the C consumer did not compile or link"; echo "$out"; return 1; }
-    out="$(LD_LIBRARY_PATH=crates/target/release "$bin" 2>&1)" || {
+    out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS/crates/target/release" "$bin" 2>&1)" || {
         echo "$out"; rm -rf "$(dirname "$bin")"; return 1; }
     echo "$out"
     rm -rf "$(dirname "$bin")"
@@ -15142,7 +15175,7 @@ layer_c1st_abi_stamp() {
         cargo build --bin declared-node --features declared --quiet) || return 1
     (cd deploy/host-slot-node && WZ_DECLARED_RS="$declared" \
         cargo build --bin declared-node --features declared --release --quiet) || return 1
-    local t=crates/target n=deploy/host-slot-node/target
+    local t="$WZ_ARTIFACTS/crates/target" n="$WZ_ARTIFACTS/deploy/host-slot-node/target"
     python3 scripts/lib/abi_stamp_gate.py --call-doors \
         "capi-pico=$t/debug/libwz_capi_pico.so" "capi-pico=$t/release/libwz_capi_pico.so" \
         "capi-c=$t/debug/libwz_capi_c.so" "capi-c=$t/release/libwz_capi_c.so" \
@@ -16804,7 +16837,7 @@ layer_c1bp_plugin_dynamic_loading() {
     # own BUILD FEATURES line rather than trusting this invocation.
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
         --features preset-ap-full --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get ]]; then
         _pico_cli_unavailable "Layer C1bp" || return 1
         return 0
     fi
@@ -16977,7 +17010,7 @@ _pico_cli_unavailable() {
 # lane — the register recorded that as §11.9 and it stayed true. A proof that
 # only ever runs when someone remembers is a proof the tree cannot depend on.
 layer_epico_library_oracles() {
-    if [[ ! -f target/zenoh-pico-build/lib/libzenohpico.so ]]; then
+    if [[ ! -f "$WZ_ARTIFACTS"/target/zenoh-pico-build/lib/libzenohpico.so ]]; then
         _pico_cli_unavailable "Layer Epico" || return 1
         return 0
     fi
@@ -17045,7 +17078,7 @@ layer_ewire_pico_wire_dissection() {
     # BUILD FIRST, GUARD SECOND — the Layer E9 rule: a wz artifact is never a
     # reason to skip, only the FOREIGN binary is.
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_put ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put ]]; then
         _pico_cli_unavailable "Layer Ewire" || return 1
         return 0
     fi
@@ -17109,7 +17142,7 @@ layer_ewire_pico_wire_dissection() {
 EWIREZ_WITNESS_BUDGET="${EWIREZ_WITNESS_BUDGET:-180}"
 
 layer_ewirez_zenohd_wire_dissection() {
-    local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
+    local zenohd="${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}"
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
     # R2277 (open-debt item 613) — THE VOCABULARY PARTITION, and it runs BEFORE
     # the zenohd guard because it needs no zenohd. The three witnesses below pin
@@ -17168,7 +17201,7 @@ layer_ewirez_zenohd_wire_dissection() {
     # them) but which a developer's tree may lack independently. Folding the
     # two counts into one `_runci_guarded_test` would make either binary's
     # absence report as the other's.
-    local core_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$PWD/target/zenohd}"
+    local core_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$WZ_ARTIFACTS/target/zenohd}"
     local missing_core_example=""
     for ex in zenoh_z_queryable zenoh_z_get; do
         [[ -x "$core_examples_dir/$ex" ]] || missing_core_example="$ex"
@@ -17310,7 +17343,7 @@ layer_e_ap_demo_round_trip() {
     # already unguarded, so a tree that had it and a tree that did not were
     # indistinguishable to this lane — the exact gap the two prior extensions
     # closed for their own binaries.
-    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_sub_attachment || ! -x target/zenoh-pico-cli/z_pub_attachment || ! -x target/zenoh-pico-cli/z_pong || ! -x target/zenoh-pico-cli/z_liveliness || ! -x target/zenoh-pico-cli/z_sub_liveliness || ! -x target/zenoh-pico-cli/z_queryable ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub_attachment || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pub_attachment || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pong || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_liveliness || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub_liveliness || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_queryable ]]; then
         _pico_cli_unavailable "Layer E" || return 1
         return 0
     fi
@@ -17366,10 +17399,10 @@ layer_e_ap_demo_round_trip() {
     local arm arm_features
     for arm in st default local; do
         arm_features="$(python3 scripts/lib/wz_config.py --features pico \
-            "target/zenoh-pico-build-$arm/zenohpico/include/zenoh-pico/config.h")" || return 1
+            "$WZ_ARTIFACTS/target/zenoh-pico-build-$arm/zenohpico/include/zenoh-pico/config.h")" || return 1
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
         (cd crates && cargo build -p wz-capi-pico $arm_features \
-            --target-dir "target/wz-capi-pico-$arm" --quiet) || return 1
+            --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-$arm" --quiet) || return 1
         # Step 2 of docs/build-configuration.md: the default arm is zenoh-pico configured with no
         # switch passed, so wz's build of it must be the build configs/zenoh-pico_defconfig
         # resolves to, and the default-arm leg below is then that defconfig's interop lane. The
@@ -17631,16 +17664,16 @@ layer_e_ap_demo_round_trip() {
     # The count is exact, so a test that stops being selected is a failure and not a smaller pass.
     local coop_features
     coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
-        target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h)" || return 1
+        "$WZ_ARTIFACTS/target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h")" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-pico $coop_features,tls-mbedtls \
-        --target-dir target/wz-capi-pico-coop --quiet) || return 1
+        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-coop" --quiet) || return 1
     for arm in st default local; do
         coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
-            "target/zenoh-pico-build-$arm/zenohpico/include/zenoh-pico/config.h")" || return 1
+            "$WZ_ARTIFACTS/target/zenoh-pico-build-$arm/zenohpico/include/zenoh-pico/config.h")" || return 1
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
         (cd crates && cargo build -p wz-capi-pico $coop_features \
-            --target-dir "target/wz-capi-pico-$arm-coop" --quiet) || return 1
+            --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-$arm-coop" --quiet) || return 1
     done
     wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin
     _runci_guarded_test "E pico drop-in programs on the cooperative engine" 32 \
@@ -17689,10 +17722,10 @@ layer_e_ap_demo_round_trip() {
 # SKIPs with the build hint). Runs only the `wz_e2e_*` family that
 # Layer E skips, so no test runs twice.
 layer_e2_facade_subset_e2e() {
-    if [[ ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_get \
-          || ! -x target/zenoh-pico-cli/z_queryable \
-          || ! -x target/zenoh-pico-cli/z_liveliness \
-          || ! -x target/zenoh-pico-cli/z_get_liveliness ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get \
+          || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_queryable \
+          || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_liveliness \
+          || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get_liveliness ]]; then
         _pico_cli_unavailable "Layer E2" || return 1
         return 0
     fi
@@ -18408,7 +18441,7 @@ layer_q_qemu_mcu_e2e() {
                 || fail=1
             continue
         fi
-        pbin="deploy/mcu-noheap-probe/target/${ptarget}/release/mcu-noheap-probe"
+        pbin="$WZ_ARTIFACTS/deploy/mcu-noheap-probe/target/${ptarget}/release/mcu-noheap-probe"
         if ! run_qemu_case \
             "Q.0.${pmachine} run mcu-noheap-probe via qemu-system-arm ${pmachine}" \
             "$pcpu" "$pmachine" "$pbin" stack; then
@@ -18471,7 +18504,7 @@ gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it" || fail=1
                     "qemu-system-arm not on PATH" || fail=1
                 continue
             fi
-            noalloc_bin="deploy/mcu-link-noalloc-probe/target/${noalloc_target}/release/mcu-link-noalloc-probe"
+            noalloc_bin="$WZ_ARTIFACTS/deploy/mcu-link-noalloc-probe/target/${noalloc_target}/release/mcu-link-noalloc-probe"
             if ! run_qemu_case \
                 "Q.0n.${noalloc_machine} run mcu-link-noalloc-probe via qemu-system-arm ${noalloc_machine}" \
                 "$noalloc_cpu" "$noalloc_machine" "$noalloc_bin"; then
@@ -18595,7 +18628,7 @@ rustup target add ${target}" || fail=1
 install qemu-system-arm" || fail=1
         else
             local bin
-            bin="deploy/mcu-qemu-demo/target/${target}/release/mcu-qemu-demo"
+            bin="$WZ_ARTIFACTS/deploy/mcu-qemu-demo/target/${target}/release/mcu-qemu-demo"
 
             # Q.2.<machine> run — boot the ELF in QEMU. Semihost
             # SYS_EXIT propagates the demo's PASS/FAIL into the QEMU
@@ -18660,7 +18693,7 @@ install qemu-system-arm" || fail=1
             elif ! run_qemu_case \
                 "Q.frt run mcu-freertos-demo via qemu-system-arm mps2-an385" \
                 cortex-m3 mps2-an385 \
-                "deploy/mcu-freertos-demo/target/thumbv7m-none-eabi/release/mcu-freertos-demo"; then
+                "$WZ_ARTIFACTS/deploy/mcu-freertos-demo/target/thumbv7m-none-eabi/release/mcu-freertos-demo"; then
                 fail=1
             fi
         else
@@ -18682,7 +18715,7 @@ install qemu-system-arm" || fail=1
         # wz_mcu_stack::MARGIN_BYTES (the `stack` verdict). Its own target dir,
         # for the reason Q.6 has one: the two lanes' lwIP ports differ.
         if WZ_FREERTOS_CONFIG="$frt_cfg" WZ_LWIP_PORT="$(realpath crates/lwip-sys/port/cross-test-mcast)" \
-            CARGO_TARGET_DIR="$repo_root/deploy/mcu-freertos-demo/target-two-session" \
+            CARGO_TARGET_DIR="$WZ_ARTIFACTS/deploy/mcu-freertos-demo/target-two-session" \
             cargo build --release \
             --manifest-path deploy/mcu-freertos-demo/Cargo.toml \
             --target thumbv7m-none-eabi --features two-session \
@@ -18698,7 +18731,7 @@ install qemu-system-arm" || fail=1
             elif ! run_qemu_case \
                 "Q.frt2 run mcu-freertos-two-session via qemu-system-arm mps2-an385" \
                 cortex-m3 mps2-an385 \
-                "deploy/mcu-freertos-demo/target-two-session/thumbv7m-none-eabi/release/mcu-freertos-two-session" \
+                "$WZ_ARTIFACTS/deploy/mcu-freertos-demo/target-two-session/thumbv7m-none-eabi/release/mcu-freertos-two-session" \
                 stack; then
                 fail=1
             fi
@@ -18771,7 +18804,7 @@ install qemu-system-arm" || fail=1
                     "qemu-system-arm not on PATH" || fail=1
                 continue
             fi
-            abin="deploy/mcu-session-acceptor/target/${atarget}/release/mcu-session-acceptor"
+            abin="$WZ_ARTIFACTS/deploy/mcu-session-acceptor/target/${atarget}/release/mcu-session-acceptor"
             if ! run_qemu_case \
                 "Q.4.${amachine}.${alabel} run mcu-session-acceptor via qemu-system-arm ${amachine}" \
                 "$acpu" "$amachine" "$abin" stack; then
@@ -18796,7 +18829,7 @@ install qemu-system-arm" || fail=1
                     if ! run_qemu_case \
                         "Q.4.${amachine}.clock.${clock_shift} interrupt progress" \
                         "$acpu" "$amachine" \
-                        "deploy/mcu-session-acceptor/target/${atarget}/release/clock-interrupt-probe" \
+                        "$WZ_ARTIFACTS/deploy/mcu-session-acceptor/target/${atarget}/release/clock-interrupt-probe" \
                         "" "$clock_shift"; then
                         fail=1
                     fi
@@ -18834,7 +18867,7 @@ install qemu-system-arm" || fail=1
             elif ! run_qemu_case \
                 "Q.4.microbit.slim run mcu-session-acceptor via qemu-system-arm microbit" \
                 cortex-m0 microbit \
-                "deploy/mcu-session-acceptor/target/thumbv6m-none-eabi/release/mcu-session-acceptor" \
+                "$WZ_ARTIFACTS/deploy/mcu-session-acceptor/target/thumbv6m-none-eabi/release/mcu-session-acceptor" \
                 stack; then
                 fail=1
             fi
@@ -18870,7 +18903,7 @@ install qemu-system-arm" || fail=1
             elif ! run_qemu_case \
                 "Q.4.mps2-an385.fixed run mcu-session-acceptor (fixed-memory) via qemu-system-arm mps2-an385" \
                 cortex-m3 mps2-an385 \
-                "deploy/mcu-session-acceptor/target/thumbv7m-none-eabi/release/mcu-session-acceptor" \
+                "$WZ_ARTIFACTS/deploy/mcu-session-acceptor/target/thumbv7m-none-eabi/release/mcu-session-acceptor" \
                 stack; then
                 fail=1
             fi
@@ -18960,7 +18993,7 @@ install qemu-system-arm" || fail=1
     mcast_port="$(realpath crates/lwip-sys/port/cross-test-mcast)"
     # Q.6's own target dir — see the R311y269 note above. Keeps the
     # loopback-multicast ELF off Q.5's footprint artifact path for good.
-    mcast_target_dir="$repo_root/deploy/mcu-multicast-e2e/target-loopback"
+    mcast_target_dir="$WZ_ARTIFACTS/deploy/mcu-multicast-e2e/target-loopback"
     declare -A mcrun_built=()
     for mcrun_lane in \
         "mps2-an385:cortex-m3:thumbv7m-none-eabi" \
@@ -19397,7 +19430,7 @@ PY
     # pico guard, and (b) the `--scout` path being proven under the MINIMAL
     # feature set that is supposed to carry it — a merged build would prove only
     # that it works alongside router-multicast-faces.
-    local m_zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
+    local m_zenohd="${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}"
     if [[ ! -x "$m_zenohd" ]]; then
         if (( m_required )); then
             echo "  Layer M FAIL: zenohd absent ($m_zenohd) but WZ_M_REQUIRE=1 — the" >&2
@@ -19476,7 +19509,7 @@ run: bash scripts/build-zenohd.sh)"
     # transport-multicast have; a hosted job that provisions the pico CLI and
     # then skips them would restore, silently, exactly the state this round is
     # closing. Same shape as the WZ_QZ_REQUIRE / WZ_A3_REQUIRE arming.
-    if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub ]]; then
         if (( m_required )); then
             echo "  Layer M FAIL: zenoh-pico CLI absent but WZ_M_REQUIRE=1 — this job" >&2
             echo "    provisions it, so its absence is a provisioning regression, not a" >&2
@@ -19541,11 +19574,11 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
     local mcdecl_features
     mcdecl_features=$(python3 scripts/lib/wz_config.py --features pico \
-        target/zenoh-pico-build-mcdecl/zenohpico/include/zenoh-pico/config.h) || return 1
+        "$WZ_ARTIFACTS/target/zenoh-pico-build-mcdecl/zenohpico/include/zenoh-pico/config.h") || return 1
     local -a mcdecl_args
     read -ra mcdecl_args <<< "$mcdecl_features"
     (cd crates && cargo build -p wz-capi-pico --quiet "${mcdecl_args[@]}" \
-        --target-dir target/wz-capi-pico-mcdecl) || return 1
+        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-mcdecl") || return 1
     wz_test_args wz-integration-tests pico_peer_multicast_on_wz_capi
     _runci_guarded_test "M pico multicast peer test on wz" 12 \
         cargo test -p wz-integration-tests \
@@ -19588,11 +19621,11 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     if (( reth_can )); then
         local reth_features
         reth_features=$(python3 scripts/lib/wz_config.py --features pico \
-            target/zenoh-pico-build-reth/zenohpico/include/zenoh-pico/config.h) || return 1
+            "$WZ_ARTIFACTS/target/zenoh-pico-build-reth/zenohpico/include/zenoh-pico/config.h") || return 1
         local -a reth_args
         read -ra reth_args <<< "$reth_features"
         (cd crates && cargo build -p wz-capi-pico --quiet "${reth_args[@]}" \
-            --target-dir target/wz-capi-pico-reth) || return 1
+            --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-reth") || return 1
         wz_test_args wz-integration-tests pico_raweth_on_wz_capi
         _runci_guarded_test "M pico raweth scenario on wz" 3 \
             "${reth_wrap[@]}" cargo test -p wz-integration-tests \
@@ -19982,7 +20015,7 @@ layer_z_zenohd_interop() {
     # built zenohd SKIPs, a machine that voluntarily built it (intending to
     # verify interop) gates on every default sweep. The harness is
     # deterministic (R311ou --test-threads=1 removed the starvation race).
-    local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
+    local zenohd="${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}"
     if [[ ! -x "$zenohd" ]]; then
         _z_unavailable "zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)" || return 1
         return 0
@@ -20379,7 +20412,7 @@ layer_z_zenohd_interop() {
     _runci_guarded_test "Z close scope" 1 \
         env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub ]]; then
         _z_unavailable "zenoh-pico z_sub not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
@@ -20387,7 +20420,7 @@ layer_z_zenohd_interop() {
     # zenohd), which `zenoh_pico_cli_binary` panics on if absent. build-zenoh-pico-
     # cli.sh builds z_pub + z_sub together, so this is a symmetry guard, not an
     # expected split — SKIP (not FAIL) on the near-impossible z_sub-without-z_pub.
-    if [[ ! -x target/zenoh-pico-cli/z_pub ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pub ]]; then
         _z_unavailable "zenoh-pico z_pub not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
@@ -20397,7 +20430,7 @@ layer_z_zenohd_interop() {
     # z_querier was added to build-zenoh-pico-cli.sh in R311y147. Same near-
     # impossible symmetry guard as z_pub: build-zenoh-pico-cli.sh emits all CLIs
     # together, so a missing z_querier means a stale build -> SKIP, not FAIL.
-    if [[ ! -x target/zenoh-pico-cli/z_querier ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_querier ]]; then
         _z_unavailable "zenoh-pico z_querier not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
@@ -20426,19 +20459,19 @@ layer_z_zenohd_interop() {
     # Layer E builds the other arms.
     local local_features
     local_features="$(python3 scripts/lib/wz_config.py --features pico \
-        target/zenoh-pico-build-local/zenohpico/include/zenoh-pico/config.h)" || return 1
+        "$WZ_ARTIFACTS/target/zenoh-pico-build-local/zenohpico/include/zenoh-pico/config.h")" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-pico $local_features \
-        --target-dir target/wz-capi-pico-local --quiet) || return 1
+        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-local" --quiet) || return 1
     # And wz's build of the INTEGRATION arm, the configuration upstream's integration workflow
     # builds its `tests/z_api_*_test.c` under: the sixteen programs of
     # `pico_upstream_api_tests_on_wz` link it below.
     local integration_features
     integration_features="$(python3 scripts/lib/wz_config.py --features pico \
-        target/zenoh-pico-build-integration/zenohpico/include/zenoh-pico/config.h)" || return 1
+        "$WZ_ARTIFACTS/target/zenoh-pico-build-integration/zenohpico/include/zenoh-pico/config.h")" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-pico $integration_features \
-        --target-dir target/wz-capi-pico-integration --quiet) || return 1
+        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-integration" --quiet) || return 1
     # And the reference arm's build for the cooperative engine, which Layer E builds too: the
     # drop-in legs below that need a router run against it as well
     # (`docs/capi-pico-on-coop-engine.md`, step L4). It carries `tls-mbedtls`, the cooperative
@@ -20447,17 +20480,17 @@ layer_z_zenohd_interop() {
     # set would replace the one the TLS legs of Layer E link.
     local coop_features
     coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
-        target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h)" || return 1
+        "$WZ_ARTIFACTS/target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h")" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-pico $coop_features,tls-mbedtls \
-        --target-dir target/wz-capi-pico-coop --quiet) || return 1
+        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-coop" --quiet) || return 1
     # §5.21 token cross-impl leg — the router-hat token lifecycle leg spawns the
     # pico z_sub_liveliness (the liveliness SUBSCRIBER that prints "New alive
     # token" on the future push + "Dropped token" on the undeclare; z_get_liveliness
     # is a one-shot GET that can witness neither). z_sub_liveliness was added to
     # build-zenoh-pico-cli.sh alongside z_liveliness; same near-impossible symmetry
     # guard as z_querier -> SKIP (not FAIL) on a stale build missing it.
-    if [[ ! -x target/zenoh-pico-cli/z_sub_liveliness ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub_liveliness ]]; then
         _z_unavailable "zenoh-pico z_sub_liveliness not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
@@ -20469,7 +20502,7 @@ layer_z_zenohd_interop() {
     # that on a fresh worktree. Same near-impossible symmetry guard as the rest:
     # build-zenoh-pico-cli.sh emits every CLI together, so a missing z_get means
     # a stale build -> SKIP, not FAIL.
-    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get ]]; then
         _z_unavailable "zenoh-pico z_get not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
@@ -20981,7 +21014,7 @@ layer_z_zenohd_interop() {
     # leaves the other three green. That is why the interleave is load-bearing
     # and why neither axis is carrying the other.
     local missing_zpub_example=""
-    local zpub_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$PWD/target/zenohd}"
+    local zpub_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$WZ_ARTIFACTS/target/zenohd}"
     [[ -x "$zpub_examples_dir/zenoh_z_pub" ]] || missing_zpub_example="zenoh_z_pub"
     if [[ -n "$missing_zpub_example" ]]; then
         _z_unavailable "zenoh core publisher oracle not built \
@@ -21496,7 +21529,7 @@ layer_z_zenohd_interop() {
     # a regression, 20s into the lane and after the other legs had already run.
     # WZ_Z_REQUIRE still turns the SKIP into a FAIL on hosted CI, where ci.yml
     # asserts both binaries exist before any lane starts.
-    local ext_examples_dir="${WZ_ZENOH_EXT_EXAMPLES_DIR:-$PWD/target/zenohd}"
+    local ext_examples_dir="${WZ_ZENOH_EXT_EXAMPLES_DIR:-$WZ_ARTIFACTS/target/zenohd}"
     local missing_ext_example=""
     # R311y445 — z_view_size joins the guard for the GROUP-MEMBERSHIP legs. Same
     # provisioning run, same SKIP semantics: a stale target/zenohd/ means a
@@ -21582,11 +21615,12 @@ layer_z_zenohd_interop() {
     (cd deploy/host-slot-node && cargo build --release -p host-slot-node --features tls --quiet) \
         || return 1
     (cd deploy/host-slot-node && WZ_LIMIT_MAX_PEER_NODES=1 cargo build --release -p host-slot-node \
-        --features tls,control --target-dir target/tls-control --quiet) || return 1
+        --features tls,control --target-dir "$WZ_ARTIFACTS/deploy/host-slot-node/target/tls-control" \
+        --quiet) || return 1
     wz_test_args wz-integration-tests wz_fixed_memory_tls_zenohd_interop
     _runci_guarded_test Ztls 4 env WZ_ZENOHD_BIN="$zenohd" \
-        WZ_HOST_SLOT_NODE_TLS_CONTROL="$PWD/deploy/host-slot-node/target/tls-control/release/host-slot-node" \
-        WZ_HOST_SLOT_NODE_TLS="$PWD/deploy/host-slot-node/target/release/host-slot-node" \
+        WZ_HOST_SLOT_NODE_TLS_CONTROL="$WZ_ARTIFACTS/deploy/host-slot-node/target/tls-control/release/host-slot-node" \
+        WZ_HOST_SLOT_NODE_TLS="$WZ_ARTIFACTS/deploy/host-slot-node/target/release/host-slot-node" \
         cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || return 1
     # A node built from its declaration, against the reference router: the file the ENTRY packages
@@ -21798,7 +21832,7 @@ layer_z_zenohd_interop() {
     # wz's read as DEFAULT (droppable) until this round. Needs the core zenoh
     # examples beside zenohd, so it carries the same unavailability guard as the
     # reassembly leg above; its own `1 passed` guard stops a dropped `#[ignore]`.
-    local reply_qos_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$PWD/target/zenohd}"
+    local reply_qos_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$WZ_ARTIFACTS/target/zenohd}"
     local missing_reply_qos_example=""
     for ex in zenoh_z_queryable zenoh_z_get; do
         [[ -x "$reply_qos_examples_dir/$ex" ]] || missing_reply_qos_example="$ex"
@@ -22015,7 +22049,7 @@ layer_z_zenohd_interop() {
     # zenohd(responder) <- wz(get), and all three are load-bearing. Needs the pico
     # z_liveliness CLI on top of zenohd; the presence gates at the top of this
     # lane cover z_sub/z_pub/z_querier, so this one is checked here.
-    if [[ ! -x target/zenoh-pico-cli/z_liveliness ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_liveliness ]]; then
         _z_unavailable "zenoh-pico z_liveliness not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
     fi
@@ -22079,7 +22113,7 @@ layer_z_zenohd_interop() {
     # transport-link-unixpipe (built above). Same --test-threads=1 per-zenohd
     # isolation. MUST precede the storage-replication leg below (whose plugin-absent
     # skip returns from the lane early).
-    local zenohd_uxp="${WZ_ZENOHD_UNIXPIPE_BIN:-$PWD/target/zenohd-unixpipe/zenohd}"
+    local zenohd_uxp="${WZ_ZENOHD_UNIXPIPE_BIN:-$WZ_ARTIFACTS/target/zenohd-unixpipe/zenohd}"
     if [[ -x "$zenohd_uxp" ]]; then
         # Count-guard (`2 passed`) so a future edit that drops `#[ignore]` from the
         # two legs — making `-- --ignored` select 0 tests and exit 0 — reddens the
@@ -22132,7 +22166,7 @@ layer_z_zenohd_interop() {
     # reddens instead of silently passing. Same --test-threads=1 per-zenohd isolation.
     # MUST precede the storage-replication leg below (whose plugin-absent skip returns
     # from the lane early).
-    local zenohd_vsock="${WZ_ZENOHD_VSOCK_BIN:-$PWD/target/zenohd-vsock/zenohd}"
+    local zenohd_vsock="${WZ_ZENOHD_VSOCK_BIN:-$WZ_ARTIFACTS/target/zenohd-vsock/zenohd}"
     if [[ -x "$zenohd_vsock" ]]; then
         wz_test_args wz-integration-tests wz_vsock_acceptor_zenohd_interop
         _runci_guarded_test "Z vsock acceptor" 1 \
@@ -22162,7 +22196,7 @@ ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     # 0 — the lane would report green having proven nothing
     # ([[feedback-a-skip-is-green]]). --test-threads=1 for per-zenohd isolation,
     # as every other leg in this lane.
-    local rest_plugin="${WZ_REST_PLUGIN_SO:-$PWD/target/zenohd/libzenoh_plugin_rest.so}"
+    local rest_plugin="${WZ_REST_PLUGIN_SO:-$WZ_ARTIFACTS/target/zenohd/libzenoh_plugin_rest.so}"
     if [[ -f "$rest_plugin" ]]; then
         wz_test_args wz-integration-tests wz_rest_zenohd_interop
         _runci_guarded_test "Z rest interop" 2 \
@@ -22200,7 +22234,7 @@ scripts/build-zenohd.sh from a source checkout)" || return 1
     # R311wo (A10) — wz<->zenohd storage-manager REPLICATION interop. Needs the
     # storage-manager plugin cdylib (built + installed by build-zenohd.sh from a
     # checkout); SKIP if absent (a crates.io-only zenohd has no plugin .so).
-    local plugin="${WZ_STORAGE_MANAGER_SO:-$PWD/target/zenohd/libzenoh_plugin_storage_manager.so}"
+    local plugin="${WZ_STORAGE_MANAGER_SO:-$WZ_ARTIFACTS/target/zenohd/libzenoh_plugin_storage_manager.so}"
     if [[ ! -f "$plugin" ]]; then
         _z_unavailable "storage-manager plugin not built ($plugin)" || return 1
         return 0
@@ -22371,8 +22405,8 @@ layer_e5_router_forward() {
     # wz_router_forward leg above stays a hard gate. Rides the SAME routing-routes
     # demo binary (built above), so no extra build. --test-threads=1 keeps the
     # per-router pico spawns from contending.
-    if [[ ! -x target/zenoh-pico-cli/z_pub || ! -x target/zenoh-pico-cli/z_put \
-          || ! -x target/zenoh-pico-cli/z_sub ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pub || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put \
+          || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub ]]; then
         _pico_cli_unavailable "Layer E5 (routing-routes pico interop)" || return 1
         return 0
     fi
@@ -22397,7 +22431,7 @@ layer_e5_router_forward() {
     # (`wz_router_hears_a_pico_peer_advanced_subscriber_...`).
     # R2991 — 3 -> 4, the declared publisher options'
     # (`wz_router_hears_a_pico_peer_publisher_with_options_...`).
-    if [[ ! -f target/zenoh-pico-build/lib/libzenohpico.so ]]; then
+    if [[ ! -f "$WZ_ARTIFACTS"/target/zenoh-pico-build/lib/libzenohpico.so ]]; then
         _pico_cli_unavailable "Layer E5 (pico peer beside a router, libzenohpico oracle)" || return 1
         return 0
     fi
@@ -22435,7 +22469,7 @@ layer_e5_router_forward() {
 # and Layer Z's build (which lacks routing-routes) runs in its own invocation.
 layer_e5z_router_query_target() {
     (cd crates && cargo build -p wz-ap-demo --features routing-routes --quiet) || return 1
-    local core_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$PWD/target/zenohd}"
+    local core_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$WZ_ARTIFACTS/target/zenohd}"
     local missing_core_example=""
     for ex in zenoh_z_queryable zenoh_z_get; do
         [[ -x "$core_examples_dir/$ex" ]] || missing_core_example="$ex"
@@ -22576,7 +22610,7 @@ layer_e6_peer_mesh() {
     # a missing binary while this guard SKIPs, so a partial pico build would red
     # the lane as a test failure instead of skipping it — the same shape the
     # R311y443 review hit on Layer Z.
-    if [[ -x target/zenoh-pico-cli/z_put && -x target/zenoh-pico-cli/z_pub ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put && -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pub ]]; then
         wz_test_args wz-integration-tests wz_peer_adminspace_write_from_pico_zput
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
@@ -22598,7 +22632,7 @@ layer_e6_peer_mesh() {
     # FOREIGN z_put binary (like the adminspace leg above); rides the same E6
     # binary (routing-peer pulls access-acl). The atom binds to the AclInterceptor
     # decision (RED: always-admit -> secret leaks as a 2nd admitted push).
-    if [[ -x target/zenoh-pico-cli/z_put ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put ]]; then
         wz_test_args wz-integration-tests wz_peer_acl_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
@@ -22618,7 +22652,7 @@ layer_e6_peer_mesh() {
     # liveliness plane. Needs BOTH foreign binaries, so both are guarded. Rides
     # the same E6 binary (routing-peer pulls access-acl). RED: before y458 none
     # of these kinds was governed and every drop barrier times out.
-    if [[ -x target/zenoh-pico-cli/z_liveliness && -x target/zenoh-pico-cli/z_get_liveliness ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_liveliness && -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get_liveliness ]]; then
         wz_test_args wz-integration-tests wz_peer_acl_liveliness_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
@@ -22632,7 +22666,7 @@ layer_e6_peer_mesh() {
     # routing-token-tables and cannot pass vacuously on a build that omits it.
     # --test-threads=1 because the mesh legs bind two demo listeners plus two pico
     # processes each, and the twins hold an 8s absence window.
-    if [[ -x target/zenoh-pico-cli/z_liveliness && -x target/zenoh-pico-cli/z_sub_liveliness ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_liveliness && -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub_liveliness ]]; then
         wz_test_args wz-integration-tests wz_peer_liveliness_token_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) \
@@ -22651,7 +22685,7 @@ layer_e6_peer_mesh() {
     # promptly) and no upstream (inline). One arm holds a 2.5s GC window inside an
     # 8s budget, so --test-threads=1 keeps the fixtures' ports and frozen
     # processes from overlapping.
-    if [[ -x target/zenoh-pico-cli/z_get_liveliness ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get_liveliness ]]; then
         wz_test_args wz-integration-tests wz_peer_interest_pending_gc_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) \
@@ -22676,7 +22710,7 @@ layer_e6_peer_mesh() {
     # payload would have been dropped by the pre-y451 code too. Needs BOTH foreign
     # binaries, so both are guarded (RED: payload-only accounting admits the
     # attachment put as a 2nd data push and the drop barrier times out).
-    if [[ -x target/zenoh-pico-cli/z_put && -x target/zenoh-pico-cli/z_pub_attachment ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put && -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pub_attachment ]]; then
         wz_test_args wz-integration-tests wz_peer_low_pass_attachment_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
@@ -22695,7 +22729,7 @@ layer_e6_peer_mesh() {
     # at the pre-y452 500ms hardcode — FASTER than pico's cadence — all 4 pushes
     # are admitted, 0 dropped, and the drop barrier times out while the control
     # leg still passes).
-    if [[ -x target/zenoh-pico-cli/z_put && -x target/zenoh-pico-cli/z_pub ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put && -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pub ]]; then
         wz_test_args wz-integration-tests wz_peer_downsampling_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
@@ -22712,7 +22746,7 @@ layer_e6_peer_mesh() {
     # resolved 127.0.0.1 to `lo` at link open. Guarded on the one foreign binary
     # it drives (RED, measured: with both subject matchers made inert, BOTH
     # negative arms throttle and both tests fail).
-    if [[ -x target/zenoh-pico-cli/z_pub ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pub ]]; then
         wz_test_args wz-integration-tests wz_peer_subject_scoping_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
@@ -22726,7 +22760,7 @@ layer_e6_peer_mesh() {
     # across the wz peer mesh (D4b/C3b) to B, which delivers it to z_sub (D4a/C3a). This
     # is the FIRST E6 leg with a pico-CLI dependency, so — like Layer E/Z — SKIP it when
     # the zenoh-pico CLI is absent (the other E6 legs are wz<->wz and need no guard).
-    if [[ -x target/zenoh-pico-cli/z_pub && -x target/zenoh-pico-cli/z_sub ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pub && -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub ]]; then
         wz_test_args wz-integration-tests wz_peer_future_push_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
@@ -22739,7 +22773,7 @@ layer_e6_peer_mesh() {
     # peer-A's co-attached client queryable (the R311y177 hosting plane) and the reply
     # returns in reverse. Same pico-CLI guard as the future-push leg (z_queryable +
     # z_querier are already in build-zenoh-pico-cli.sh TARGETS).
-    if [[ -x target/zenoh-pico-cli/z_queryable && -x target/zenoh-pico-cli/z_querier ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_queryable && -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_querier ]]; then
         wz_test_args wz-integration-tests wz_peer_qabl_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
@@ -22750,7 +22784,7 @@ layer_e6_peer_mesh() {
     # on the terminal C): proves peer-C delivers a multi-hop (non-zero-routing-source)
     # mesh Push to a foreign pico client sub without the pico rejecting the ext_nodeid
     # and closing (the DATA twin of the R311y179 query-source fix).
-    if [[ -x target/zenoh-pico-cli/z_sub ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub ]]; then
         wz_test_args wz-integration-tests wz_peer_transit_push_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1) || return 1
@@ -22790,7 +22824,7 @@ layer_e6b_adminspace_introspection() {
     # never on a wz one — the R311y265 rule. WZ_PICO_REQUIRE escalates that skip to a
     # FAIL wherever the job provisions pico, so a hosted lane cannot go green having
     # run nothing.
-    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get ]]; then
         _pico_cli_unavailable "Layer E6b (pico adminspace z_get)" || return 1
         return 0
     fi
@@ -22918,7 +22952,7 @@ layer_e6e_adminspace_plugins() {
     # SKIPs on the FOREIGN binary only (the pico CLI a machine may legitimately lack),
     # never on a wz one — the R311y265 rule; WZ_PICO_REQUIRE escalates that skip to a
     # FAIL wherever the job provisions pico.
-    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get ]]; then
         _pico_cli_unavailable "Layer E6e (pico adminspace plugins z_get)" || return 1
         return 0
     fi
@@ -22954,7 +22988,7 @@ layer_e6e_adminspace_plugins() {
 # The wz leg needs no foreign binary, so it runs whether or not pico is here.
 layer_e6f_adminspace_metrics() {
     (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-metrics --quiet) || return 1
-    if [[ -x target/zenoh-pico-cli/z_get ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get ]]; then
         wz_test_args wz-integration-tests wz_peer_adminspace_metrics_to_pico_zget
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
@@ -23001,7 +23035,7 @@ layer_e6f_adminspace_metrics() {
 # never on a wz one — the R311y265 rule; WZ_PICO_REQUIRE escalates that SKIP to a FAIL.
 layer_e6g_adminspace_read() {
     (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-read --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get ]]; then
         _pico_cli_unavailable "Layer E6g (pico adminspace read-deny z_get)" || return 1
         return 0
     fi
@@ -23042,7 +23076,7 @@ layer_e6g_adminspace_read() {
 layer_e6h_adminspace_config_hotreload() {
     (cd crates && cargo build -p wz-ap-demo --features adminspace-config-hotreload --quiet) || return 1
     (cd crates && cargo clippy -p wz-ap-demo --features adminspace-config-hotreload -- -D warnings) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_get ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get ]]; then
         _pico_cli_unavailable "Layer E6h (pico config-hotreload z_put/z_get)" || return 1
         return 0
     fi
@@ -23105,7 +23139,7 @@ layer_e6i_storage_host_adminspace_read_deny() {
     # nothing.
     (cd crates && cargo build -p wz-ap-demo \
         --features adminspace-config-hotreload,adminspace-read,adminspace-write --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get ]]; then
         _pico_cli_unavailable "Layer E6i (pico storage-host adminspace read-deny z_get)" || return 1
         return 0
     fi
@@ -23188,7 +23222,7 @@ layer_e7_router_hat() {
     # which is exactly the CURRENT bit on the wire (vendor/zenoh-pico
     # src/net/liveliness.c:196-205), so the twin is what makes the sample the atom's.
     # Guarded on BOTH foreign binaries; rides the token-tables build above.
-    if [[ -x target/zenoh-pico-cli/z_liveliness && -x target/zenoh-pico-cli/z_sub_liveliness ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_liveliness && -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub_liveliness ]]; then
         wz_test_args wz-integration-tests wz_router_hat_liveliness_history_pico_interop
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" \
@@ -23200,7 +23234,7 @@ layer_e7_router_hat() {
     # the computed route-successor table across a two-router federation. FULL (all three
     # legs carry content once a second router exists; probed before the round). Guarded
     # on the FOREIGN binary only (R311y265); WZ_PICO_REQUIRE escalates the skip.
-    if [[ -x target/zenoh-pico-cli/z_get ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get ]]; then
         wz_test_args wz-integration-tests wz_router_hat_adminspace_to_pico_zget
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
@@ -23416,7 +23450,7 @@ layer_e7g_router_adminspace_read_deny() {
     (cd crates && cargo build -p wz-ap-demo \
         --features router-hat-router,adminspace-router-linkstate,adminspace-read,resource-snapshot \
         --quiet) || return 1
-    if [[ -x target/zenoh-pico-cli/z_get ]]; then
+    if [[ -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get ]]; then
         wz_test_args wz-integration-tests wz_router_hat_adminspace_read_deny_to_pico_zget
         (cd crates && cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
@@ -23629,7 +23663,7 @@ layer_e7m_wz_mesh_client_conformance() {
 # test fn's `wz_router_hat_` prefix keeps the default Layer E sweep's `--skip
 # wz_router` from double-running it on an arbitrary-feature binary.
 layer_e8_router_hat_pico() {
-    if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub ]]; then
         _pico_cli_unavailable "Layer E8" || return 1
         return 0
     fi
@@ -23671,7 +23705,7 @@ layer_e8_router_hat_pico() {
 # Count-guarded and ANCHORED (`^test result: ok. 1 passed`) so a dropped `#[ignore]`
 # (0 selected -> exit 0) and a FAILED result line both redden.
 layer_e8t_router_hat_hlc_stamp_pico() {
-    if [[ ! -x target/zenoh-pico-cli/z_sub_attachment ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub_attachment ]]; then
         _pico_cli_unavailable "Layer E8t" || return 1
         return 0
     fi
@@ -23789,7 +23823,7 @@ layer_e8t_router_hat_hlc_stamp_pico() {
 # 15%-red lane, which is the trap this comment exists to keep shut.
 layer_e10_close_frame_on_teardown() {
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_put ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put ]]; then
         _pico_cli_unavailable "Layer E10" || return 1
         return 0
     fi
@@ -23810,10 +23844,10 @@ layer_e9_apfull_preset_pico() {
     # binary is.
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
         --features preset-ap-full --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub \
-        || ! -x target/zenoh-pico-cli/z_pub || ! -x target/zenoh-pico-cli/z_get \
-        || ! -x target/zenoh-pico-cli/z_queryable \
-        || ! -x target/zenoh-pico-cli/z_queryable_attachment ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub \
+        || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pub || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get \
+        || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_queryable \
+        || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_queryable_attachment ]]; then
         _pico_cli_unavailable "Layer E9" || return 1
         return 0
     fi
@@ -23882,8 +23916,8 @@ layer_e9_apfull_preset_pico() {
 layer_e11_apfull_advanced_pubsub_pico() {
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
         --features preset-ap-full --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_advanced_sub \
-        || ! -x target/zenoh-pico-cli/z_advanced_pub ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_advanced_sub \
+        || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_advanced_pub ]]; then
         _pico_cli_unavailable "Layer E11" || return 1
         return 0
     fi
@@ -23941,7 +23975,7 @@ layer_e12_apfull_adminspace_pico() {
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
         --features preset-ap-full --quiet \
         && cargo build -p wz-e2e-admin-probe --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_get || ! -x target/zenoh-pico-cli/z_put ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put ]]; then
         _pico_cli_unavailable "Layer E12" || return 1
         return 0
     fi
@@ -24133,10 +24167,10 @@ layer_c1cc_api_compat_c() {
         -I crates/wz-capi-c/include \
         -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
         crates/wz-capi-c/tests/c_e2e_sender_consumer.c \
-        -L crates/target/debug -lwz_capi_c -o "$c_e2e_bin" 2>&1)" || {
+        -L "$WZ_ARTIFACTS/crates/target/debug" -lwz_capi_c -o "$c_e2e_bin" 2>&1)" || {
         echo "  C1cc FAIL: the e2e sender C consumer did not compile or link"
         echo "$c_e2e_out"; return 1; }
-    c_e2e_out="$(LD_LIBRARY_PATH=crates/target/debug "$c_e2e_bin" 2>&1)" || {
+    c_e2e_out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS/crates/target/debug" "$c_e2e_bin" 2>&1)" || {
         echo "  C1cc FAIL: the e2e sender C consumer failed"
         echo "$c_e2e_out"; rm -rf "$(dirname "$c_e2e_bin")"; return 1; }
     rm -rf "$(dirname "$c_e2e_bin")"
@@ -24153,10 +24187,10 @@ layer_c1cc_api_compat_c() {
         -I crates/wz-capi-c/include \
         -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
         crates/wz-capi-c/tests/c_observation_plane_consumer.c \
-        -L crates/target/debug -lwz_capi_c -o "$c_obs_bin" 2>&1)" || {
+        -L "$WZ_ARTIFACTS/crates/target/debug" -lwz_capi_c -o "$c_obs_bin" 2>&1)" || {
         echo "  C1cc FAIL: the observation plane C consumer did not compile or link"
         echo "$c_obs_out"; return 1; }
-    c_obs_out="$(LD_LIBRARY_PATH=crates/target/debug "$c_obs_bin" 2>&1)" || {
+    c_obs_out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS/crates/target/debug" "$c_obs_bin" 2>&1)" || {
         echo "  C1cc FAIL: the observation plane C consumer failed"
         echo "$c_obs_out"; rm -rf "$(dirname "$c_obs_bin")"; return 1; }
     rm -rf "$(dirname "$c_obs_bin")"
@@ -24172,10 +24206,10 @@ layer_c1cc_api_compat_c() {
         -I crates/wz-capi-c/include \
         -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
         crates/wz-capi-c/tests/c_lifecycle_consumer.c \
-        -L crates/target/debug -lwz_capi_c -o "$c_life_bin" 2>&1)" || {
+        -L "$WZ_ARTIFACTS/crates/target/debug" -lwz_capi_c -o "$c_life_bin" 2>&1)" || {
         echo "  C1cc FAIL: the lifecycle C consumer did not compile or link"
         echo "$c_life_out"; return 1; }
-    c_life_out="$(LD_LIBRARY_PATH=crates/target/debug "$c_life_bin" 2>&1)" || {
+    c_life_out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS/crates/target/debug" "$c_life_bin" 2>&1)" || {
         echo "  C1cc FAIL: the lifecycle C consumer failed"
         echo "$c_life_out"; rm -rf "$(dirname "$c_life_bin")"; return 1; }
     rm -rf "$(dirname "$c_life_bin")"
@@ -25020,7 +25054,7 @@ layer_c1cc_api_compat_c() {
 # the whole zenoh graph; WZ_C1CE_REQUIRE=1 turns the skip into a failure on a
 # job that provisions it.
 layer_c1ce_api_compat_c_unstable_oracle() {
-    local shm="${WZ_ZENOH_C_UNSTABLE_PREFIX:-$repo_root/target/zenoh-c-unstable}"
+    local shm="${WZ_ZENOH_C_UNSTABLE_PREFIX:-$WZ_ARTIFACTS/target/zenoh-c-unstable}"
     if [[ ! -f "$shm/include/zenoh.h" || ! -f "$shm/lib/libzenohc.so" ]]; then
         if [[ -n "${WZ_C1CE_REQUIRE:-}" ]]; then
             echo "  Layer C1ce FAIL — required (WZ_C1CE_REQUIRE set) but the" >&2
@@ -25252,8 +25286,8 @@ layer_c1ce_api_compat_c_unstable_oracle() {
 layer_c1cd_api_compat_c_attachment() {
     if [[ ! -f "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include/zenoh.h" \
        || ! -f "${WZ_ZENOH_C_EXAMPLES:-$HOME/zenoh-c-ref/examples}/z_sub.c" \
-       || ! -x target/zenohd/zenohd \
-       || ! -x target/zenoh-pico-cli/z_pub_attachment ]]; then
+       || ! -x "$WZ_ARTIFACTS"/target/zenohd/zenohd \
+       || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pub_attachment ]]; then
         if [[ -n "${WZ_C1CD_REQUIRE:-}" ]]; then
             echo "  Layer C1cd FAIL — required (WZ_C1CD_REQUIRE set) but an oracle is absent (zenoh-c headers+examples / zenohd / pico z_pub_attachment)" >&2
             return 1
@@ -25330,7 +25364,7 @@ layer_e14_apfull_dynamic_volume_pico() {
     (cd crates && cargo build -p wz-volume-example -p wz-plugin-example --quiet) || return 1
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
         --features preset-ap-full --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_get || ! -x target/zenoh-pico-cli/z_put ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put ]]; then
         _pico_cli_unavailable "Layer E14" || return 1
         return 0
     fi
@@ -25352,7 +25386,7 @@ layer_e14_apfull_dynamic_volume_pico() {
 layer_e13_apfull_storage_plane_pico() {
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
         --features preset-ap-full --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_get || ! -x target/zenoh-pico-cli/z_put ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_get || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put ]]; then
         _pico_cli_unavailable "Layer E13" || return 1
         return 0
     fi
@@ -25394,7 +25428,7 @@ layer_e13_apfull_storage_plane_pico() {
 layer_e15_apfull_reconcile_federation_pico() {
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
         --features preset-ap-full --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_pub ]]; then
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_sub || ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_pub ]]; then
         _pico_cli_unavailable "Layer E15" || return 1
         return 0
     fi
@@ -25688,7 +25722,7 @@ _QA_REST_PORT=17800
 # Returns 0 when everything is there, 10 when a prerequisite is absent and the
 # lane SKIPs (green), 1 when it is absent where it is required.
 _qa_zenohd_prereqs() {
-    local label="$1" zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}" tool
+    local label="$1" zenohd="${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}" tool
     for tool in qemu-system-arm python3; do
         command -v "$tool" >/dev/null 2>&1 \
             || { _qa_unavailable "$label" "$tool not on PATH" && return 10 || return 1; }
@@ -25729,7 +25763,7 @@ _qa_scenario() {
     python3 scripts/lib/admin_node_verdict.py qemu --label "$label" --node-id "$node" \
         --transport "${_QA_TRANSPORT:-udp}" \
         --ready "$ready" ${stack_flag[@]+"${stack_flag[@]}"} \
-        --zenohd "${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}" \
+        --zenohd "${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}" \
         --fwd-port "$_QA_FWD_PORT" --b-port "$_QA_B_PORT" --rest-port "$_QA_REST_PORT" \
         -- "$@"
 }
@@ -25737,7 +25771,7 @@ _qa_scenario() {
 # Layer Qa itself: the bare-metal lwIP firmware under the scenario.
 layer_qa_mcu_admin_node_vs_zenohd() {
     local target=thumbv7m-none-eabi
-    local fw="deploy/mcu-admin-node/target/$target/release/mcu-admin-node"
+    local fw="$WZ_ARTIFACTS/deploy/mcu-admin-node/target/$target/release/mcu-admin-node"
     local rc
     command -v arm-none-eabi-gcc >/dev/null 2>&1 \
         || { _qa_unavailable "Qa" "arm-none-eabi-gcc not on PATH"; return $?; }
@@ -25890,7 +25924,7 @@ _qz_toolchain() {
 _qz_west_build() {
     local label="$1" app="$2" board="$3" build_dir="$4" log_name="$5"
     shift 5
-    local west_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/$log_name"
+    local west_log="${RUNCI_LOG_DIR:-$WZ_ARTIFACTS/crates/target/run-ci-logs}/$log_name"
     mkdir -p "$(dirname "$west_log")"
     if (
         # shellcheck disable=SC1091
@@ -26208,7 +26242,7 @@ layer_qzb_zephyr_board_matrix() {
     while IFS=$'\t' read -r board app triple link starts overlay dtc; do
         n=$((n + 1))
         build_dir="$(mktemp -d)/zbuild"
-        west_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/qzb-$n-west-build.log"
+        west_log="${RUNCI_LOG_DIR:-$WZ_ARTIFACTS/crates/target/run-ci-logs}/qzb-$n-west-build.log"
         # The table's `-` is a field with nothing to say (the reader folds a run of tabs).
         extra=()
         [[ -n "$overlay" && "$overlay" != "-" ]] && extra+=("-DEXTRA_CONF_FILE=$overlay")
@@ -26295,7 +26329,7 @@ layer_qzk_client_images_build() {
     [[ -n "$images" ]] \
         || { echo "  Qzk FAIL — the kit lane lists no image; a lane with no population is not a pass" >&2; return 1; }
     lane_home="$(mktemp -d)"
-    log_dir="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/qzk"
+    log_dir="${RUNCI_LOG_DIR:-$WZ_ARTIFACTS/crates/target/run-ci-logs}/qzk"
     mkdir -p "$log_dir"
     for image in $images; do
         n=$((n + 1))
