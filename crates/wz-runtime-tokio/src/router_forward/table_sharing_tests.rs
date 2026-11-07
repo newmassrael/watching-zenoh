@@ -365,3 +365,52 @@ fn the_writes_of_an_admission_measured_against_the_faces_already_up() {
         }
     }
 }
+
+/// The phase 0 publishers and subscribers routing Puts with no writer, while idle client faces
+/// are brought up between the windows, [`BAND`] at a time to [`ADMITTED`]. Every Put reads the
+/// face map for the face it came from (`classify_inbound`) and the faces it goes to, so the Puts
+/// routed per second against the faces up is what a lookup in the map costs a message as the map
+/// grows: the read that the face map's form is chosen against (`docs/router-table-snapshots.md`,
+/// section 6.6).
+#[test]
+#[ignore = "a measurement of what a message's reads of the face map cost as the faces grow \
+            (docs/router-table-snapshots.md, section 6.6); run with --release --ignored \
+            --nocapture on a build host"]
+fn the_puts_routed_measured_against_the_faces_up() {
+    let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+    let mut subscribers = Vec::new();
+    for s in 0..FAN_OUT {
+        let (actions, sink) = client(zid(0xC0 + s as u8));
+        fwd.register(FaceId(s), &actions);
+        bring(&fwd, FaceId(s), declare_sub("demo/data"));
+        subscribers.push(sink);
+    }
+    let mut publishers = Vec::new();
+    for p in 0..PUBLISHERS {
+        let id = FaceId(100 + p);
+        let (actions, _sink) = client(zid(0xA0 + p as u8));
+        fwd.register(id, &actions);
+        publishers.push(id);
+    }
+    let structure = fwd.table_sharing().id();
+    let mut held = Vec::new();
+    for band in 0..=ADMITTED / BAND {
+        let up = band * BAND;
+        let routed = routed_while(&fwd, &publishers, &subscribers, || {
+            std::thread::sleep(Duration::from_millis(1))
+        });
+        println!(
+            "table-sharing: structure={structure} idle_faces={up} publishers={PUBLISHERS} \
+             fan_out={FAN_OUT} puts_routed_per_s={routed:.0}"
+        );
+        if up == ADMITTED {
+            break;
+        }
+        for i in up..up + BAND {
+            let peer = Zid::from_slice(&(0x0010_0000 + i as u32).to_be_bytes());
+            let (actions, sink) = client(peer);
+            fwd.register(FaceId(10_000 + i), &actions);
+            held.push((actions, sink));
+        }
+    }
+}
