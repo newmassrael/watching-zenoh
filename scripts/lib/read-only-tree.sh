@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# Run a command with this checkout READ-ONLY and an artifact root writable: the
-# shape a consumer gives a checkout it mounts read-only, made on this host so a
+# R4398 (no register item) -- run a command with this checkout READ-ONLY and an
+# artifact root writable: the shape a consumer gives a checkout it mounts
+# read-only, made on this host so a
 # lane can show the artifact-root rule (scripts/lib/artifact-root.sh) holds for
 # it. Any write into the checkout fails with EROFS, so a lane that passes in here
 # wrote nothing there -- a measurement, where a lint can only read spellings.

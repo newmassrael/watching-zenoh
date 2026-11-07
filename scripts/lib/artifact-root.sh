@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# artifact-root.sh -- where the lanes and the oracle scripts WRITE.
+# R4398 (no register item) -- artifact-root.sh: where the lanes and the oracle
+# scripts WRITE.
 #
 # A consumer mounts this checkout read-only (its files are shared between
 # worktrees as hard links) and still has to run lanes and build oracles from it.

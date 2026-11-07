@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""Where a product of this checkout is: the Python reading of the one rule.
+"""R4398 (no register item) -- where a product of this checkout is.
+
+This is the Python reading of the one rule.
 
 `scripts/lib/artifact-root.sh` states the rule and is the place to read it.
 In short: a product of the tree path `<rel>` is at `<checkout>/<rel>` when
