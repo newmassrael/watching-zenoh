@@ -314910,6 +314910,46 @@
         "The consumer is told fields 57, declarations_diagnose 3, declarations_from_proto 2 and the commit. Open: the measured answer to its fourth question is that a narrow door is warranted (a row is 67.5 times the two values a plot keeps, and most of a call is writing rows a plot discards), so a door that writes only the chosen paths' typed values for the rows after a cursor and under a selector is the next item; it is a new symbol and moves the ABI revision."
       ]
     },
+    "Round 4373": {
+      "decision_summary": "Hosted run 42263555835 (54fb9e4bb0) went red on Layer M's multicast TTL witness: the reader it starts inside the network namespace, the merged test executable re-run on one of its own tests, printed no verdict, and its stderr says the loader could not find librocksdb.so.10. Since the test merge that executable links RocksDB, which the hosted job links as a shared library found through LD_LIBRARY_PATH, and the reader was started through sudo with only its own variable, so sudo's reset environment had no library path. The namespace re-runs of the scouting witnesses already carried the whole environment for the oracle variables; the reader had its own spelling of the same re-run. There is now one way a test re-runs itself in a namespace, NetnsPair::test_inside, which carries this process's environment and the caller's extra variables and runs as the tree's owner, and both callers use it.",
+      "changes_bullets": [
+        "wz-integration-tests lib.rs: NetnsPair::test_inside builds the command that runs the current test binary on one ignored test inside the namespace, with the whole environment plus extra variables, as the tree's owner (runuser under sudo, or directly in the sandbox); rerun_tests_inside is built on it.",
+        "wz_multicast_ttl_on_the_wire_netns_zenohd_interop.rs: the TTL reader is started by test_inside with its request variable, instead of `env VAR=... exe` through sudo."
+      ],
+      "verification_bullets": [
+        "Layer M on pc2 with the static engine: pass (1162 s), multicast_ttl_key_reaches_the_wire_as_zenohd_puts_it ok and multicast_ttl_reader_entry ok, both started through test_inside.",
+        "Layer C1cc on pc3: the_scouting_legs_hold_in_a_namespace_with_no_default_route, the caller of rerun_tests_inside, passed at count 1 with every leg before it; the lane stopped later at upstream_z_sub_on_wz_capi_c_receives_from_a_real_pico_zput, whose z_put binary that run never built (64 of 70 legs reached), a provisioning gap of the run and not this change.",
+        "cargo fmt --check and clippy --all-targets -D warnings of wz-integration-tests: clean.",
+        "count_guard_lint, store_reason_citation_gate, reason_citation_gate and reason_review_pin_gate --check: rc 0.",
+        "Not reproduced: the shared-engine condition of the hosted red, which no fleet host can build (see carry)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "No build machine of the fleet can build the shared RocksDB engine the hosted jobs use (libsnappy-dev and liblz4-dev are absent on pc2, pc3, hkl001 and hkl002), so a red that depends on that engine, as this one did, is not reproducible in the fleet until those packages are provisioned there.",
+        "The hosted reading of this witness under the shared engine is the next hosted run's interop job."
+      ],
+      "publishable_decision_summary": "Hosted run 42263555835 (54fb9e4bb0) went red on Layer M's multicast TTL witness: the reader it starts inside the network namespace, the merged test executable re-run on one of its own tests, printed no verdict, and its stderr says the loader could not find librocksdb.so.10. Since the test merge that executable links RocksDB, which the hosted job links as a shared library found through LD_LIBRARY_PATH, and the reader was started through sudo with only its own variable, so sudo's reset environment had no library path. The namespace re-runs of the scouting witnesses already carried the whole environment for the oracle variables; the reader had its own spelling of the same re-run. There is now one way a test re-runs itself in a namespace, NetnsPair::test_inside, which carries this process's environment and the caller's extra variables and runs as the tree's owner, and both callers use it.",
+      "publishable_changes_bullets": [
+        "wz-integration-tests lib.rs: NetnsPair::test_inside builds the command that runs the current test binary on one ignored test inside the namespace, with the whole environment plus extra variables, as the tree's owner (runuser under sudo, or directly in the sandbox); rerun_tests_inside is built on it.",
+        "wz_multicast_ttl_on_the_wire_netns_zenohd_interop.rs: the TTL reader is started by test_inside with its request variable, instead of `env VAR=... exe` through sudo."
+      ],
+      "publishable_verification_bullets": [
+        "Layer M on pc2 with the static engine: pass (1162 s), multicast_ttl_key_reaches_the_wire_as_zenohd_puts_it ok and multicast_ttl_reader_entry ok, both started through test_inside.",
+        "Layer C1cc on pc3: the_scouting_legs_hold_in_a_namespace_with_no_default_route, the caller of rerun_tests_inside, passed at count 1 with every leg before it; the lane stopped later at upstream_z_sub_on_wz_capi_c_receives_from_a_real_pico_zput, whose z_put binary that run never built (64 of 70 legs reached), a provisioning gap of the run and not this change.",
+        "cargo fmt --check and clippy --all-targets -D warnings of wz-integration-tests: clean.",
+        "count_guard_lint, store_reason_citation_gate, reason_citation_gate and reason_review_pin_gate --check: rc 0.",
+        "Not reproduced: the shared-engine condition of the hosted red, which no fleet host can build (see carry)."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "No build machine of the fleet can build the shared RocksDB engine the hosted jobs use (libsnappy-dev and liblz4-dev are absent on pc2, pc3, hkl001 and hkl002), so a red that depends on that engine, as this one did, is not reproducible in the fleet until those packages are provisioned there.",
+        "The hosted reading of this witness under the shared engine is the next hosted run's interop job."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
