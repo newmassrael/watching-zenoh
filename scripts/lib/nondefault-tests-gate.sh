@@ -396,6 +396,12 @@ transport-link-unixpipe,transport-link-ws|"
     # is built only with `router-node`, which no leg named, so its six tests were compiled by
     # none. The filter is the module path, so a test added there is covered.
     "wz-capi-core|hook|router-node|drive::router_node::"
+    # A router node taken through the port's engine (`drive::router_node::engine::port_tests`):
+    # a node and a registry client in one process over one link, which a build without
+    # `transport-qos` does not have, so the module is compiled only with both features. The row
+    # above leaves `transport-qos` off, so the census of the hosted run of c91572906a named its
+    # five tests unclaimed. The filter is the module path, so a test added there is covered.
+    "wz-capi-core|hook|router-node,transport-qos|drive::router_node::engine::port_tests::"
     # Whether a peer that scouts is a forwarding node (`open_plan::peer_fits_node`): it is one only
     # when it holds a gateway. The test is compiled only with `router-node` and `scout` together,
     # which no leg named, so the census reported it as claimed by nothing. The filter is the module
@@ -1258,6 +1264,9 @@ wz-session-core/query-reply-err|"
     # `declarations-synced-event` and `remote-declaration-watch` join for the declaration
     # listener's synced event and the peer it names (`session::tests`, three tests); the census
     # of the hosted run of d7dc86a826 named all three unclaimed.
+    # `tls-identity-make` joins for the TLS identity a node makes at its first start
+    # (`tls_identity::tests`, six tests), which no other feature builds; the census of the hosted
+    # run of c91572906a named all six unclaimed.
     "wz-runtime-tokio|lane|\
         access-acl,\
         access-acl-multicast,\
@@ -1328,6 +1337,7 @@ wz-session-core/query-reply-err|"
         storage-replication,\
         switchboard,\
         time-hlc,\
+        tls-identity-make,\
         transport-compression,\
         transport-fragmentation,\
         transport-link-quic,\
