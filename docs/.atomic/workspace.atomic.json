@@ -12195,6 +12195,33 @@
         "The keyexpr memo cost in capic (about 2 KB, c74d81592c) is not this round's",
         "mnemosyne: a sealed store's validate-workspace reads verification records as UNDECIDABLE"
       ]
+    },
+    "Round 4407": {
+      "decision_summary": "The `datagram-fragment-pacing` policy becomes a strategy type of the tokio datagram writers, the first policy carried as C3 of `docs/build-configuration.md` asks of one that changes the shape of the code: on, a writer holds a clock and waits between two writes, so a writer is generic over `datagram_pacing::Pacing` and the build's policy value selects the type it takes (`OfBuild`: `Unpaced` off, upstream's behaviour, or `Paced` on). Off, the wait a writer awaits is a ready future that never calls the writer's own way to wait, so no pacer, clock or wait is linked. With it the last red of hosted run 42403286547, C1cs, is repaid: the three pico cases shrink by the pacing, and their budgets move by the two growths that were chosen, the keyexpr relation memo and the multicast interface policy. The capic cases were repaid by the identity-make and lifecycle-door moves of rounds 4405 and 4406.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/datagram_pacing.rs: trait `Pacing` (a named wait type `Wait<F>`, `of_build`, `before`, `wrote`), `Unpaced` (its wait is `Ready<()>`), `Paced` (tokio's clock and the pacer; its wait is `PacedWait<F>`), and `OfBuild`, selected by `Policy<{ SessionPolicy::from_build().datagram_fragment_pacing }>` through `Select`.",
+        "crates/wz-runtime-tokio/src/udp_pipeline.rs: `udp_writer_task_paced` is generic over `Pacing` and waits through `OutboundQueue::pause`; `udp_writer_task` takes `OfBuild`. multicast_pipeline.rs: the group writer takes `OfBuild` and waits by `tokio::time::sleep`.",
+        "crates/wz-session-core/src/fragment_pacing.rs: `FragmentPacer::of_build` is the pacer of the build's two limits; whether a writer holds one is the engine's type.",
+        "docs/build-configuration.md: the pacing bullet says it is the first policy of step 9.",
+        "scripts/lib/capability_cost_gate.py: pico-client-udp 1,917,000 -> 1,920,800, pico-peer 2,978,300 -> 2,982,900, pico-default 4,411,700 -> 4,417,100, with a dated note.",
+        "docs/hosted-red-acks.md: the row for run 42403286547 of this batch."
+      ],
+      "verification_bullets": [
+        "On hkl001: `cargo test -p wz-runtime-tokio --features transport-link-udp,transport-multicast --lib -- datagram_pacing:: udp_pipeline::tests::`: 24 passed with the policy off and 24 with `WZ_POLICY_DATAGRAM_FRAGMENT_PACING=on`; `the_policy_names_the_pacing` holds each value's type and the build's. `cargo test -p wz-session-core --lib -- fragment_pacing`: 7 passed. clippy -D warnings of wz-runtime-tokio (lib and tests, both policy values) and wz-session-core passes.",
+        "A first form with the wait as an opaque future returned by the trait did not compile: the spawned writer's future was not shown `Send` across the lifetime its wait borrows; the named wait type replaced it.",
+        "Layer C1cs on hkl001: at `89a002ec77` the three pico cases failed (1,919,044, 2,978,949, 4,413,678) and every capic case passed with 837 exports; with the strategy type 1,915,960, 2,975,865, 4,409,990 and the layer passes with the old budgets.",
+        "Attribution of the capic growth on hkl001 (`nm -C -S`, capi-small): round 4386 -> `cba6d25a40` +19,420 of code and the exports `wz_capi_c_lifecycle_key` and `wz_capi_c_lifecycle_read`; `cba6d25a40` -> head +2,140, the keyexpr memo. Reported to and repaid by the session that owns the lifecycle doors.",
+        "reason_review_pin_gate, reason_citation_gate, store_reason_citation_gate: OK."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The pico budgets are estimated from the offset of hosted run 42403286547 over hkl001 on the same pico code; the next hosted run that grades C1cs reads them.",
+        "`declaration-sync-pacing` is the other policy that waits; whether it changes the shape of its code as fragment pacing did is not measured."
+      ]
     }
   },
   "inventory_entries": {
