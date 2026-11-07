@@ -315720,6 +315720,66 @@
         "Carries of the node's C door that remain: group and advanced below zenohd as a router node with three or more members, and the zenoh-ext group interop; the shared-memory publication of the node's port, which needs a link that negotiated shared memory; a node dialling a node, which did not come up between two nodes of this crate's tests (a registry client dialling the node does) and is to be examined before a test relies on it; a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
       ]
     },
+    "Round 4395": {
+      "decision_summary": "A client that links the C library makes the identity it presents over TLS on the computer it runs on, with no node executable: wz_capi_c_identity_make (ABI 11, feature identity-make, default, unix). It holds to the contract of a declared node's --make-identity, which now lives once in wz_session_core::identity_provision: neither file there, both are made, the key first and 0600, each created exclusively; both there, nothing is made; one there, nothing is made and the missing one is named. The refusal sentences, file words included, are that module's, and wz-runtime-posix answers with them. The files are read back with the TLS link's own loaders, the key must be the certificate's and its owner's alone, and the zid is the one a peer computes from the certificate, in z_id_to_string's spelling. A control pipe's end of input closes the channel and nothing else; the node runs on. The vocabulary and the contract say so.",
+      "changes_bullets": [
+        "wz-session-core identity_provision: Provision::of, IdentityFile, HALF_AN_IDENTITY, NOT_ITS_KEY, KEY_NOT_MADE, THE_IDENTITY, file_words",
+        "wz-runtime-posix file: FileRefused and CreateRefused reasons answer with file_words",
+        "host-slot-node tls: --make-identity reads Provision and the shared sentences",
+        "wz-runtime-tokio tls_identity (feature tls-identity-make, rcgen with pem): make_identity_files, Provisioned::zid_text, IdentityRefused; read back with certs_from_pem, private_key_from_pem, peer_chain_credential_zid",
+        "capability identity-make in deploy/wz-config.toml (abis core and c, implies transport_tls, os filesystem, upstream off), default in wz-capi-core and wz-capi-c, generated Kconfig, defconfigs and conformance items rewritten; archive-arm classifies it as a capability",
+        "wz-capi-c identity: wz_capi_c_identity_make and wz_capi_c_identity_t, header block, ABI 10 -> 11, capi_c_abi_pin.py, C consumer c_identity_consumer.c in C1cc",
+        "control pipe: vocabulary control.end, target-build-contract 5b sentence, control_channel test of the end of input, guard 4 -> 5",
+        "wz_node.py --zid-of help names the C door",
+        "Red found by the static bundle after rebasing on Round 4392 and repaid in its own commit: round_descriptor.py imported tomllib, which the 3.10 floor lacks (python_floor_lint), and it and ledger-round.sh named no provenance (gate_provenance_lint). It now reads with wz_config's floor reader, which gains the one-line ''' string (held to tomllib in its selftest), finds that reader under python3 -I by its own directory, and both cite R4392",
+        "Red of Round 4393 found the same way and repaid in its own commit: gate 2c reads its acknowledgement from the pushed range, so it grades pushed-range (hook_gate_boundary_gate); round_fed_gate_reach follows a scripts/lib library the hook sources, which reaches hosted_red_ack.py through previous-run-gate.sh (a DEFERRED row would have been false); round_descriptor.py gets a DEFERRED row (its descriptors are filed and deleted before a push); hosted_red_ack.py cites R4393"
+      ],
+      "verification_bullets": [
+        "unit on pc2: wz-session-core identity_provision 2, wz-runtime-posix file 3, wz-runtime-tokio tls_identity 6 (an in-memory TLS handshake in which the server pins the made certificate and names the client by the zid the maker answered), wz-capi-c identity 3 (the zid equals wz_node.py --zid-of of the certificate)",
+        "host-slot-node control_channel 5 passed (the end of input closes the channel, the node runs on)",
+        "C consumer c_identity_consumer.c compiled -Werror against the header and linked: ok",
+        "capi_c_abi_pin.py: revision 11, 101 doors, sources, header, debug and release agree; selftest OK",
+        "clippy -D warnings: wz-session-core, wz-runtime-posix, wz-runtime-tokio (tls-identity-make), wz-capi-core, wz-capi-c all targets; host-slot-node tls,control lib and control_channel; declared-node under slot-commander with its budget",
+        "wz_node.py selftest and --check; wz_config.py --check and --check-presets; static bundle 137 gates"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "Next: the pipe's answer reader in a pure library an observing process links (no participant library in its DT_NEEDED), the same lifecycle_wire reading",
+        "Then a witness of a C client that asks a declared node with the identity this door makes, by the commander list, with the canonical config",
+        "src/main.rs of host-slot-node keeps a let_unit_value clippy finding; no lane lints the declared-node bin"
+      ],
+      "publishable_decision_summary": "A client that links the C library makes the identity it presents over TLS on the computer it runs on, with no node executable: wz_capi_c_identity_make (ABI 11, feature identity-make, default, unix). It holds to the contract of a declared node's --make-identity, which now lives once in wz_session_core::identity_provision: neither file there, both are made, the key first and 0600, each created exclusively; both there, nothing is made; one there, nothing is made and the missing one is named. The refusal sentences, file words included, are that module's, and wz-runtime-posix answers with them. The files are read back with the TLS link's own loaders, the key must be the certificate's and its owner's alone, and the zid is the one a peer computes from the certificate, in z_id_to_string's spelling. A control pipe's end of input closes the channel and nothing else; the node runs on. The vocabulary and the contract say so.",
+      "publishable_changes_bullets": [
+        "wz-session-core identity_provision: Provision::of, IdentityFile, HALF_AN_IDENTITY, NOT_ITS_KEY, KEY_NOT_MADE, THE_IDENTITY, file_words",
+        "wz-runtime-posix file: FileRefused and CreateRefused reasons answer with file_words",
+        "host-slot-node tls: --make-identity reads Provision and the shared sentences",
+        "wz-runtime-tokio tls_identity (feature tls-identity-make, rcgen with pem): make_identity_files, Provisioned::zid_text, IdentityRefused; read back with certs_from_pem, private_key_from_pem, peer_chain_credential_zid",
+        "capability identity-make in deploy/wz-config.toml (abis core and c, implies transport_tls, os filesystem, upstream off), default in wz-capi-core and wz-capi-c, generated Kconfig, defconfigs and conformance items rewritten; archive-arm classifies it as a capability",
+        "wz-capi-c identity: wz_capi_c_identity_make and wz_capi_c_identity_t, header block, ABI 10 -> 11, capi_c_abi_pin.py, C consumer c_identity_consumer.c in C1cc",
+        "control pipe: vocabulary control.end, target-build-contract 5b sentence, control_channel test of the end of input, guard 4 -> 5",
+        "wz_node.py --zid-of help names the C door",
+        "Red found by the static bundle after rebasing on Round 4392 and repaid in its own commit: round_descriptor.py imported tomllib, which the 3.10 floor lacks (python_floor_lint), and it and ledger-round.sh named no provenance (gate_provenance_lint). It now reads with wz_config's floor reader, which gains the one-line ''' string (held to tomllib in its selftest), finds that reader under python3 -I by its own directory, and both cite R4392",
+        "Red of Round 4393 found the same way and repaid in its own commit: gate 2c reads its acknowledgement from the pushed range, so it grades pushed-range (hook_gate_boundary_gate); round_fed_gate_reach follows a scripts/lib library the hook sources, which reaches hosted_red_ack.py through previous-run-gate.sh (a DEFERRED row would have been false); round_descriptor.py gets a DEFERRED row (its descriptors are filed and deleted before a push); hosted_red_ack.py cites R4393"
+      ],
+      "publishable_verification_bullets": [
+        "unit on pc2: wz-session-core identity_provision 2, wz-runtime-posix file 3, wz-runtime-tokio tls_identity 6 (an in-memory TLS handshake in which the server pins the made certificate and names the client by the zid the maker answered), wz-capi-c identity 3 (the zid equals wz_node.py --zid-of of the certificate)",
+        "host-slot-node control_channel 5 passed (the end of input closes the channel, the node runs on)",
+        "C consumer c_identity_consumer.c compiled -Werror against the header and linked: ok",
+        "capi_c_abi_pin.py: revision 11, 101 doors, sources, header, debug and release agree; selftest OK",
+        "clippy -D warnings: wz-session-core, wz-runtime-posix, wz-runtime-tokio (tls-identity-make), wz-capi-core, wz-capi-c all targets; host-slot-node tls,control lib and control_channel; declared-node under slot-commander with its budget",
+        "wz_node.py selftest and --check; wz_config.py --check and --check-presets; static bundle 137 gates"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: the pipe's answer reader in a pure library an observing process links (no participant library in its DT_NEEDED), the same lifecycle_wire reading",
+        "Then a witness of a C client that asks a declared node with the identity this door makes, by the commander list, with the canonical config",
+        "src/main.rs of host-slot-node keeps a let_unit_value clippy finding; no lane lints the declared-node bin"
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
