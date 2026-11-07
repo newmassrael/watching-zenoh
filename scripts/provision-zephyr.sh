@@ -7,9 +7,20 @@
 # (pc2 did, on 2026-10-23, and nothing said so until a build failed with "No such file") is put back by
 # one command and not by hand.
 #
-#   scripts/provision-zephyr.sh --check      what is whole and what is not; exit 0 only if all of it is
-#   scripts/provision-zephyr.sh --dry-run    the steps provisioning would take, taken by nobody
-#   scripts/provision-zephyr.sh              check, provision what is missing, check again
+#   scripts/provision-zephyr.sh [PART] --check      what is whole and what is not; exit 0 only if all of it is
+#   scripts/provision-zephyr.sh [PART] --dry-run    the steps provisioning would take, taken by nobody
+#   scripts/provision-zephyr.sh [PART]              check, provision what is missing, check again
+#
+# PART is one of the two trees, each of which bx keeps as a tool of its own (`[tools.zephyr-sdk]` and
+# `[tools.zephyr-venv]` in bx.toml, built into a tool-store prefix by `bx-provision`):
+#
+#   --workspace   the venv, the zephyr tree at the pin and its modules, in ZEPHYR_HOME
+#   --sdk         the SDK, in ZEPHYR_SDK_DIR
+#
+# With no PART both are checked and provisioned. The SDK is fetched by zephyr's own `west sdk install`,
+# as CI's step does, so `--sdk` needs a west and a zephyr tree at the pin too: it makes them in
+# ZEPHYR_HOME (bx points that at the install's scratch directory, so the SDK's entry does not reach
+# into the workspace's) and checks only the SDK.
 #
 # THE PINS ARE CI'S. `ZEPHYR_REF` and `ZEPHYR_SDK_VERSION` are read from the `env:` of the jobs of
 # `.github/workflows/ci.yml` that carry them, and every copy must agree: two numbers for one
@@ -22,23 +33,30 @@
 # `GITHUB_TOKEN` is used for the SDK's release lookup when set (unauthenticated calls are limited per
 # IP and a shared one can be spent before this starts); it is never printed.
 #
-# Needs network for provisioning (GitHub), Python >= 3.12, git, and about 11 GB.
+# Needs network for provisioning (GitHub), Python >= 3.12 with venv, git, cmake and wget (the SDK's
+# setup.sh fetches the toolchain with it), and about 11 GB.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="$ROOT/.github/workflows/ci.yml"
 HOME_DIR="${ZEPHYR_HOME:-$HOME/zephyrproject}"
 
+usage() {
+    echo "usage: $0 [--workspace | --sdk] [--check | --dry-run]" >&2
+    exit 64
+}
+
 mode=provision
-case "${1:-}" in
-    "") ;;
-    --check) mode=check ;;
-    --dry-run) mode=dry ;;
-    *)
-        echo "usage: $0 [--check | --dry-run]" >&2
-        exit 64
-        ;;
-esac
+part=all
+for arg in "$@"; do
+    case "$arg" in
+        --check) [[ "$mode" == provision ]] || usage; mode=check ;;
+        --dry-run) [[ "$mode" == provision ]] || usage; mode=dry ;;
+        --workspace) [[ "$part" == all ]] || usage; part=workspace ;;
+        --sdk) [[ "$part" == all ]] || usage; part=sdk ;;
+        *) usage ;;
+    esac
+done
 
 # One value for a pin, from every place the workflow states it. No copy, or two that differ, is a stop.
 pin() {
@@ -72,9 +90,25 @@ item() {
     fi
 }
 
+# Whether cmake's per-user registry names THIS SDK: it holds whichever SDK was installed last, so a
+# non-empty one says nothing about the directory the other checks looked at. An entry and SDK_DIR
+# are compared as the directories they resolve to, because an SDK bx keeps is registered at its
+# tool-store entry and found by the lanes through the link `~/zephyr-sdk-<version>` to it.
+sdk_registered() {
+    local want entry line
+    want="$(realpath -e "$SDK_DIR/cmake" 2>/dev/null)" || return 1
+    for entry in "$HOME"/.cmake/packages/Zephyr-sdk/*; do
+        [[ -f "$entry" ]] || continue
+        # cmake writes the entry without a final newline, and `read` reports such a last line as false.
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -n "$line" && "$(realpath -e "$line" 2>/dev/null || true)" == "$want" ]] && return 0
+        done <"$entry"
+    done
+    return 1
+}
+
 # Each check runs the thing it names; a file's existence is not what is being asked.
-check() {
-    failures=0
+check_workspace() {
     local west version head listed missing=0 path
     if [[ -x "$VENV/bin/west" ]] && version="$("$VENV/bin/west" --version 2>&1)"; then
         item ok "the venv's west runs ($version)"
@@ -104,6 +138,10 @@ check() {
     else
         item FAIL "west cannot list the workspace in $HOME_DIR"
     fi
+}
+
+check_sdk() {
+    local version
     if [[ -f "$SDK_DIR/sdk_version" && "$(tr -d '[:space:]' <"$SDK_DIR/sdk_version")" == "$SDK_VERSION" ]]; then
         item ok "the SDK in $SDK_DIR is $SDK_VERSION"
     else
@@ -114,23 +152,48 @@ check() {
     else
         item FAIL "the SDK's arm compiler does not run: $SDK_DIR/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc"
     fi
-    # Registered FOR THIS SDK: the registry is per user and holds whichever SDK was installed last, so
-    # a non-empty one says nothing about the directory the checks above looked at.
-    if compgen -G "$HOME/.cmake/packages/Zephyr-sdk/*" >/dev/null \
-        && grep -qsF -x "$SDK_DIR/cmake" "$HOME"/.cmake/packages/Zephyr-sdk/*; then
+    if sdk_registered; then
         item ok "the SDK is registered for cmake (~/.cmake/packages/Zephyr-sdk names $SDK_DIR/cmake)"
     else
         item FAIL "$SDK_DIR/cmake is not registered for cmake (~/.cmake/packages/Zephyr-sdk)"
     fi
+}
+
+check() {
+    failures=0
+    [[ "$part" == sdk ]] || check_workspace
+    [[ "$part" == workspace ]] || check_sdk
     return "$failures"
+}
+
+# A step as it is printed: GITHUB_TOKEN, passed to `west sdk install` as an argument, is shown by name.
+shown() {
+    local text="$*"
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        text="${text//"$GITHUB_TOKEN"/"\$GITHUB_TOKEN"}"
+    fi
+    printf '%s\n' "$text"
 }
 
 run() {
     if [[ "$mode" == dry ]]; then
-        echo "  would run: $*"
+        echo "  would run: $(shown "$@")"
     else
-        echo "  + $*"
+        echo "  + $(shown "$@")"
         "$@"
+    fi
+}
+
+# run_in <dir> <command...>: a step west takes its workspace from the working directory for. A dry
+# run prints it and does not enter the directory, which an earlier step would have made.
+run_in() {
+    local dir="$1"
+    shift
+    if [[ "$mode" == dry ]]; then
+        echo "  would run in $dir: $(shown "$@")"
+    else
+        echo "  + (in $dir) $(shown "$@")"
+        (cd "$dir" && "$@")
     fi
 }
 
@@ -147,7 +210,9 @@ python312() {
     return 1
 }
 
-provision() {
+# What both parts stand on: the venv with west and zephyr's Python requirements, the zephyr tree at
+# the pin, and the west workspace around it.
+provision_west() {
     local py
     py="$(python312)"
     # The venv: rebuilt when its west does not run, which is also the state of a venv whose interpreter
@@ -172,32 +237,54 @@ provision() {
         run git -C "$ZEPHYR" checkout "$REF"
     fi
     if [[ ! -d "$HOME_DIR/.west" ]]; then
-        (cd "$HOME_DIR" && run "$VENV/bin/west" init -l zephyr)
+        run_in "$HOME_DIR" "$VENV/bin/west" init -l zephyr
     fi
-    (
-        cd "$HOME_DIR"
-        run "$VENV/bin/west" update --narrow -o=--depth=1
-        run "$VENV/bin/west" zephyr-export
-        run "$VENV/bin/pip" install --quiet -r zephyr/scripts/requirements-base.txt
-    )
+    # The workspace's tools, and what zephyr's `west sdk` imports (requests, semver, patool).
+    run "$VENV/bin/pip" install --quiet -r "$ZEPHYR/scripts/requirements-base.txt"
+}
+
+provision_workspace() {
+    run_in "$HOME_DIR" "$VENV/bin/west" update --narrow -o=--depth=1
+    run_in "$HOME_DIR" "$VENV/bin/west" zephyr-export
+}
+
+provision_sdk() {
     if ! { [[ -f "$SDK_DIR/sdk_version" && "$(tr -d '[:space:]' <"$SDK_DIR/sdk_version")" == "$SDK_VERSION" ]] \
         && "$SDK_DIR/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc" --version >/dev/null 2>&1; }; then
         local token=()
         if [[ -n "${GITHUB_TOKEN:-}" ]]; then
             token=(--personal-access-token "$GITHUB_TOKEN")
         fi
-        (
-            cd "$HOME_DIR/zephyr"
-            run "$VENV/bin/west" sdk install --version "$SDK_VERSION" -t arm-zephyr-eabi \
-                --install-dir "$SDK_DIR" "${token[@]}"
-        )
+        # `west sdk install` takes an SDK of this version that cmake's per-user registry already names
+        # (one made by hand, or the tool-store entry an older key built) instead of fetching one into
+        # --install-dir, which would stay empty. So it runs with a home of its own, whose registry is
+        # empty, and the SDK it fetched is registered in the user's home afterwards.
+        local own_home="$HOME_DIR/.sdk-install-home"
+        run mkdir -p "$own_home"
+        run_in "$ZEPHYR" env HOME="$own_home" "$VENV/bin/west" sdk install --version "$SDK_VERSION" \
+            -t arm-zephyr-eabi --install-dir "$SDK_DIR" "${token[@]}"
+        run rm -rf "$own_home"
+        run "$SDK_DIR/setup.sh" -c
+    elif ! sdk_registered; then
+        run "$SDK_DIR/setup.sh" -c
     fi
 }
 
+provision() {
+    provision_west
+    [[ "$part" == sdk ]] || provision_workspace
+    [[ "$part" == workspace ]] || provision_sdk
+}
+
+case "$part" in
+    all) what="the workspace and the SDK are" ;;
+    workspace) what="the workspace is" ;;
+    sdk) what="the SDK is" ;;
+esac
 echo "provision-zephyr: pins from ci.yml: zephyr ${REF:0:12}, SDK $SDK_VERSION; workspace $HOME_DIR, SDK $SDK_DIR"
 case "$mode" in
     check)
-        check && echo "provision-zephyr: the workspace and the SDK are whole" && exit 0
+        check && echo "provision-zephyr: $what whole" && exit 0
         echo "provision-zephyr: $failures check(s) failed; scripts/provision-zephyr.sh puts it back" >&2
         exit 1
         ;;
@@ -207,14 +294,14 @@ case "$mode" in
         ;;
     provision)
         if check; then
-            echo "provision-zephyr: the workspace and the SDK are whole; nothing to do"
+            echo "provision-zephyr: $what whole; nothing to do"
             exit 0
         fi
         echo "provision-zephyr: provisioning what is missing"
         provision
         echo "provision-zephyr: checking what was provisioned"
         if check; then
-            echo "provision-zephyr: the workspace and the SDK are whole"
+            echo "provision-zephyr: $what whole"
             exit 0
         fi
         echo "provision-zephyr: FAIL - provisioned, and $failures check(s) still fail" >&2

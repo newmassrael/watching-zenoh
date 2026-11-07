@@ -110,11 +110,18 @@ min_free_gb = 20
 # stays `scripts/provision-zephyr.sh --check`'s to verify; this declaration says "a toolchain of
 # the pinned SDK is here and its venv runs", not "the workspace is at the pin".
 #
-# No `install`: both are put in place by `bash scripts/provision-zephyr.sh` (11 GB, needs the
-# network), run on the machine by hand, which is how the machines that have it got it on
-# 2026-11-03. Having bx keep them (`install` with the script as `install_inputs`, the workspace as
-# a `prefix_link`) would rebuild the three hand-made installs into the tool store and needs the
-# script to take a prefix; that is a separate change, not made here.
+# BX KEEPS BOTH (2026-11-07). `bx-provision <alias> --apply` builds each into the machine's tool
+# store with the repository's own script, one part per tool (`--sdk`, `--workspace`), and links the
+# whole entry at the directory the lanes look in (`prefix_link`). The script reads the pins from
+# ci.yml, so both files are `install_inputs`: a moved pin or a changed step is a new store entry.
+# The workspace's version is the zephyr revision `ZEPHYR_REF`, so a new pin is a new entry too. The
+# SDK is fetched by zephyr's own `west sdk install`, which needs a west and a zephyr tree; its
+# install makes those under `{scratch}`, not in the workspace's entry. `packages` is what the
+# script runs: git and a venv for both, cmake for zephyr's SDK lookup and wget for the SDK's
+# setup.sh, which fetches the toolchain (the SDK's own host tools carry dtc). A machine that gives
+# each run a copy-on-write home keeps nothing a run installs, so a by-hand install made through a
+# run is lost; the store is what lasts. Where `~/zephyrproject` is already a directory (the installs made by hand on
+# 2026-11-03), provisioning does not replace it and those keep working as they are.
 #
 # A full `bash scripts/run-ci.sh` with no `--layer` runs Qz too and its command line names no lane,
 # so bx cannot tell it from a run of another layer: place such a run with `--host` on a machine
@@ -124,12 +131,21 @@ version_file = ".github/workflows/ci.yml"
 version_pattern = 'ZEPHYR_SDK_VERSION: *"?([0-9.]+)"?'
 path = "~/zephyr-sdk-{version}/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc"
 check = "Zephyr SDK {version}"
+install = "ZEPHYR_SDK_DIR={prefix} ZEPHYR_HOME={scratch}/zephyrproject bash scripts/provision-zephyr.sh --sdk"
+install_inputs = ["scripts/provision-zephyr.sh", ".github/workflows/ci.yml"]
+prefix_link = "~/zephyr-sdk-{version}"
+packages = ["cmake", "git", "python3-venv", "wget"]
 needed_by = ["Qz"]
 
 [tools.zephyr-venv]
-version = "1"
+version_file = ".github/workflows/ci.yml"
+version_pattern = 'ZEPHYR_REF: *"?([0-9a-f]+)"?'
 path = "~/zephyrproject/.venv/bin/west"
 check = "West version"
+install = "ZEPHYR_HOME={prefix} bash scripts/provision-zephyr.sh --workspace"
+install_inputs = ["scripts/provision-zephyr.sh", ".github/workflows/ci.yml"]
+prefix_link = "~/zephyrproject"
+packages = ["git", "python3-venv"]
 needed_by = ["Qz"]
 
 # THE SHELLCHECK Layer 0 lints with, at the revision CI installs. `packages` above asks only whether
