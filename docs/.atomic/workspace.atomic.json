@@ -314644,6 +314644,56 @@
         "C1 get-timeout one-off on pc2 stays unattributed."
       ]
     },
+    "Round 4366": {
+      "decision_summary": "Hosted run 42281344423 (7ac0a02510) failed three jobs; each is repaid by its own gate's sentence. C1ch: the conformance digest door `wz_capi_c_conformance_digest` was exported with no entry in the C ABI pin; it joins EXPECTED_SYMBOLS and the revision moves to 9 in the pin, the header and `abi.rs` together, as the pin requires of a new door. C1m: the querier leg expected 9 passes and the module has 10 since the `LaunchedKeys` test of the lifecycle-verb querier; the guard states 10. Windows portability: the lifecycle vocabulary test embeds `scripts/lib/wz_node.py` and matches lines ending in LF, and the Windows checkout rewrote it to CRLF; `*.py text eol=lf` declares the kind, following the R2826 golden precedent, and moves no byte since every tracked .py is LF.",
+      "changes_bullets": [
+        "`scripts/lib/capi_c_abi_pin.py`: EXPECTED_REVISION 9; EXPECTED_SYMBOLS gains `wz_capi_c_conformance_digest`.",
+        "`crates/wz-capi-c/include/wz_capi_c.h`: `WZ_CAPI_C_ABI_REVISION` 9.",
+        "`crates/wz-capi-c/src/abi.rs`: `WZ_CAPI_C_ABI_REVISION` 9, with the revision's line in the constant's history.",
+        "`scripts/run-ci.sh`: the C1m querier guard counts 10 and names the `LaunchedKeys` test.",
+        "`.gitattributes`: `*.py text eol=lf`, with the run and the test that showed the need."
+      ],
+      "verification_bullets": [
+        "Run 42281344423's three failed jobs were read to their own lines: \"capi-c-abi-pin: FAIL ... wz_capi_c_conformance_digest is exported by the debug build and NOT in the pin\"; \"C1m mcu querier FAIL: expected exactly 9 passed\" beside \"10 passed; 111 filtered out\"; Windows `lifecycle_wire.rs:1085` \"wz_node.py does not state ...\\n\".",
+        "Fleet, `bx --checks ci -- python3 scripts/lib/runci_plan.py --only C1ch,C1m`: 2 pass, 0 fail, exit 0 (C1ch on hkl002 112 s, C1m on hkl001 458 s), no retry.",
+        "`git -c core.autocrlf=true checkout-index` into a scratch directory: `wz_node.py` has 0 CRLF lines and README.md, the control with no declaration, has 271; the scratch copy was removed. `git ls-files --eol` shows all 219 tracked .py files as LF in the index.",
+        "138 pre-push static gates including the upstream citation gate pass.",
+        "Not run here: the Windows job itself."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Run 42281344423 still had six jobs queued or running when read; read its last jobs and run 42312454213 (4a489b9966) per job at the next round's start.",
+        "Read the first scheduled upstream-watch run.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: rerun the full `bx --checks ci` set to read the 180.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ],
+      "publishable_decision_summary": "Hosted run 42281344423 (7ac0a02510) failed three jobs; each is repaid by its own gate's sentence. C1ch: the conformance digest door `wz_capi_c_conformance_digest` was exported with no entry in the C ABI pin; it joins EXPECTED_SYMBOLS and the revision moves to 9 in the pin, the header and `abi.rs` together, as the pin requires of a new door. C1m: the querier leg expected 9 passes and the module has 10 since the `LaunchedKeys` test of the lifecycle-verb querier; the guard states 10. Windows portability: the lifecycle vocabulary test embeds `scripts/lib/wz_node.py` and matches lines ending in LF, and the Windows checkout rewrote it to CRLF; `*.py text eol=lf` declares the kind, following the R2826 golden precedent, and moves no byte since every tracked .py is LF.",
+      "publishable_changes_bullets": [
+        "`scripts/lib/capi_c_abi_pin.py`: EXPECTED_REVISION 9; EXPECTED_SYMBOLS gains `wz_capi_c_conformance_digest`.",
+        "`crates/wz-capi-c/include/wz_capi_c.h`: `WZ_CAPI_C_ABI_REVISION` 9.",
+        "`crates/wz-capi-c/src/abi.rs`: `WZ_CAPI_C_ABI_REVISION` 9, with the revision's line in the constant's history.",
+        "`scripts/run-ci.sh`: the C1m querier guard counts 10 and names the `LaunchedKeys` test.",
+        "`.gitattributes`: `*.py text eol=lf`, with the run and the test that showed the need."
+      ],
+      "publishable_verification_bullets": [
+        "Run 42281344423's three failed jobs were read to their own lines: \"capi-c-abi-pin: FAIL ... wz_capi_c_conformance_digest is exported by the debug build and NOT in the pin\"; \"C1m mcu querier FAIL: expected exactly 9 passed\" beside \"10 passed; 111 filtered out\"; Windows `lifecycle_wire.rs:1085` \"wz_node.py does not state ...\\n\".",
+        "Fleet, `bx --checks ci -- python3 scripts/lib/runci_plan.py --only C1ch,C1m`: 2 pass, 0 fail, exit 0 (C1ch on hkl002 112 s, C1m on hkl001 458 s), no retry.",
+        "`git -c core.autocrlf=true checkout-index` into a scratch directory: `wz_node.py` has 0 CRLF lines and README.md, the control with no declaration, has 271; the scratch copy was removed. `git ls-files --eol` shows all 219 tracked .py files as LF in the index.",
+        "138 pre-push static gates including the upstream citation gate pass.",
+        "Not run here: the Windows job itself."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Run 42281344423 still had six jobs queued or running when read; read its last jobs and run 42312454213 (4a489b9966) per job at the next round's start.",
+        "Read the first scheduled upstream-watch run.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: rerun the full `bx --checks ci` set to read the 180.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
