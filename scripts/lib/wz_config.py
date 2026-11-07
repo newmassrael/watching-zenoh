@@ -220,9 +220,13 @@ def read_decl_toml(text: str) -> dict:
     small shape and this reads exactly that: `[table]` and `[[array of tables]]` headers;
     `key = value` on ONE line, the value a string, an integer, a boolean or an array of strings; a `'''`
     literal string whose lines run to the closing `'''` (the newline right after the opening
-    delimiter is not part of it, as TOML says); `#` comments on lines of their own. Anything else
-    is refused by line number rather than skipped, so the file cannot grow a shape this reader
-    silently drops. `--selftest` holds it to `tomllib` wherever the interpreter has one.
+    delimiter is not part of it, as TOML says), or one closed on the line it opens (`'''text'''`,
+    with no `'''` inside); `#` comments on lines of their own. Anything else is refused by line
+    number rather than skipped, so the file cannot grow a shape this reader silently drops.
+    `--selftest` holds it to `tomllib` wherever the interpreter has one.
+
+    It is the repository's one reader of TOML for a script that runs on the floor interpreter:
+    a ledger round's descriptor (`round_descriptor.py`) is read with it too.
     """
     root: dict = {}
     table = root
@@ -256,6 +260,8 @@ def read_decl_toml(text: str) -> dict:
                 raise ValueError(f"line {start}: a ''' string is never closed")
             number += 1
             value: object = "\n".join(body) + "\n"
+        elif re.fullmatch(r"'''(?:(?!''').)*'''", rest):
+            value = rest[3:-3]
         elif rest.startswith("'''"):
             raise ValueError(f"line {number}: a ''' string opens a line of its own")
         else:
@@ -4102,6 +4108,10 @@ requires = "WZ_MODE_P && !WZ_SIDE_R"
     expect("a key set twice is refused", not refuses('a = "x"\na = "y"\n'))
     expect("an unclosed ''' string is refused", not refuses("a = '''\nx\n"))
     expect("a ''' string sharing its opening line is refused", not refuses("a = '''x\n'''\n"))
+    one_line = "a = '''why it is'''\nb = '''  '''\n"
+    expect("a ''' string closed on its own line is read as TOML reads it",
+           read_decl_toml(one_line) == {"a": "why it is", "b": "  "})
+    expect("a ''' string that closes twice on its line is refused", not refuses("a = '''x''' '''\n"))
     expect("a table, a table array, an integer and both string shapes are read",
            read_decl_toml('n = 3\n[t]\nk = "v"\n[[c]]\nx = ["a", "b"]\n[[c]]\nx = []\ny = \'\'\'\nl\n\'\'\'\n')
            == {"n": 3, "t": {"k": "v"}, "c": [{"x": ["a", "b"]}, {"x": [], "y": "l\n"}]})
@@ -4113,6 +4123,8 @@ requires = "WZ_MODE_P && !WZ_SIDE_R"
         text = DECL.read_text(encoding="utf-8")
         expect("the declaration reads the same as tomllib reads it",
                read_decl_toml(text) == stdlib_toml.loads(text))
+        expect("a one-line ''' string reads the same as tomllib reads it",
+               read_decl_toml(one_line) == stdlib_toml.loads(one_line))
     expect("two interpreters agreeing give no difference",
            configuration_diff({"A": "y", "B": "3"}, {"A": "y", "B": "3"}) == [])
     expect("a value the two interpreters give differently is a difference",

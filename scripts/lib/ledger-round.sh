@@ -4,6 +4,8 @@
 #
 # The number a ledger round takes, read from the store and nowhere else.
 #
+# R4392 (no register item) -- one read of the number for land.sh and file-round.sh.
+#
 # Two callers take a number: `scripts/land.sh`, inside its push lock, and
 # `scripts/file-round.sh`, on a queue candidate. They must read the same fact the same
 # way, or a round filed by one could be numbered differently by the other, so the read

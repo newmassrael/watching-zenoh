@@ -3,6 +3,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 """A ledger round written down as DATA, so it can travel in a commit.
 
+R4392 (no register item) -- the descriptor a queue integrator files a round from.
+
 `scripts/land.sh` takes the round's prose from four files outside the repository and
 the round's number from the store inside its lock. A commit cannot carry either, so a
 queue integrator, which cherry-picks a commit onto the remote tip and files nothing,
@@ -36,8 +38,13 @@ from __future__ import annotations
 
 import sys
 import tempfile
-import tomllib
 from pathlib import Path
+
+# The repository's reader of TOML for the floor interpreter: `tomllib` is stdlib only from 3.11,
+# and the hosted floor is 3.10 (`python_floor_lint.py`). Named by this file's own directory, since
+# the callers run it isolated (`python3 -I`), which leaves the script's directory off the path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from wz_config import read_decl_toml  # noqa: E402
 
 PROSE_KEYS = ("decision", "changes", "verification", "carry")
 KEYS = ("impact",) + PROSE_KEYS
@@ -54,8 +61,8 @@ def read(path: Path) -> dict:
     except OSError as err:
         raise NotARound(f"{path}: cannot be read: {err}") from err
     try:
-        data = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as err:
+        data = read_decl_toml(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as err:
         raise NotARound(f"{path}: not a TOML document: {err}") from err
     unknown = sorted(set(data) - set(KEYS))
     if unknown:
@@ -96,7 +103,10 @@ def selftest() -> int:
         ("a missing key is refused", good.replace("carry = '''open'''\n", ""), "`carry` is missing"),
         ("an unknown key is refused", good + "round = 4400\n", "unknown key(s) round"),
         ("an empty impact is refused", good.replace('["a/b", "c/d"]', "[]"), "non-empty list"),
-        ("a non-string impact id is refused", good.replace('"a/b"', "7"), "non-empty list"),
+        # The floor reader reads an array of strings only, so a number among the ids is refused
+        # as no document before the impact rule is asked.
+        ("a non-string impact id is refused", good.replace('"a/b"', "7"), "not a TOML document"),
+        ("an impact that is no list is refused", good.replace('["a/b", "c/d"]', '"a/b"'), "non-empty list"),
         ("a comma in an id is refused", good.replace('"a/b"', '"a,b"'), "holds a comma"),
         ("an empty prose field is refused", good.replace("'''why'''", "'''  '''"), "`decision` must be"),
         ("a non-TOML file is refused", "this is = = not toml", "not a TOML document"),
