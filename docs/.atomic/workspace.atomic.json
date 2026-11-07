@@ -315202,6 +315202,40 @@
         "C1 get-timeout one-off on pc2 stays unattributed."
       ]
     },
+    "Round 4381": {
+      "decision_summary": "Round 4373 carried that no fleet build machine could build the shared RocksDB engine the hosted jobs link, for want of the codec packages, so its Layer M red was not reproducible in the fleet. The CI apt set of the engine (the five codec development packages with cmake, libclang-dev, clang, perl and pkg-config) is now installed on all four fleet build machines, and each builds and verifies the engine. Running a lane against that engine outside CI reads the engine script's stdout as the environment to export, and that stdout also carried every line curl, cmake and the compiler printed; the script now sends a child's output to stderr, so its stdout is the environment alone. With the engine in place the red is still not reproduced in the fleet, for a second condition the carry did not name: the fleet account has no sudo, so Layer M builds its namespace inside the bwrap sandbox, which keeps the environment, while the hosted job goes through sudo, which resets it. The pre-fix tree passed Layer M there against the shared engine.",
+      "changes_bullets": [
+        "scripts/lib/rocksdb_engine.py: run() sends a child's stdout to stderr, so the script's stdout is only the NAME=value lines it exports."
+      ],
+      "verification_bullets": [
+        "The engine builds and passes --verify (version and all five codecs) on all four fleet build machines.",
+        "With the change, the script's stdout under a cold build is exactly two lines (ROCKSDB_LIB_DIR and LD_LIBRARY_PATH), no other line.",
+        "Layer M against the shared engine on one fleet machine: pass, both TTL witness tests ok, at the round 4373 tree and at the pre-fix tree (671a828294) alike; both took the bwrap sandbox, not sudo."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Round 4373's carry is corrected: the shared engine now builds in the fleet, but a red that needs both that engine and the sudo path's reset environment stays hosted-only while the fleet account runs namespace legs in the bwrap sandbox; whether that account gets sudo for them is the owner's to decide.",
+        "The hosted reading of the Layer M fix remains the next hosted run's interop job."
+      ],
+      "publishable_decision_summary": "Round 4373 carried that no fleet build machine could build the shared RocksDB engine the hosted jobs link, for want of the codec packages, so its Layer M red was not reproducible in the fleet. The CI apt set of the engine (the five codec development packages with cmake, libclang-dev, clang, perl and pkg-config) is now installed on all four fleet build machines, and each builds and verifies the engine. Running a lane against that engine outside CI reads the engine script's stdout as the environment to export, and that stdout also carried every line curl, cmake and the compiler printed; the script now sends a child's output to stderr, so its stdout is the environment alone. With the engine in place the red is still not reproduced in the fleet, for a second condition the carry did not name: the fleet account has no sudo, so Layer M builds its namespace inside the bwrap sandbox, which keeps the environment, while the hosted job goes through sudo, which resets it. The pre-fix tree passed Layer M there against the shared engine.",
+      "publishable_changes_bullets": [
+        "scripts/lib/rocksdb_engine.py: run() sends a child's stdout to stderr, so the script's stdout is only the NAME=value lines it exports."
+      ],
+      "publishable_verification_bullets": [
+        "The engine builds and passes --verify (version and all five codecs) on all four fleet build machines.",
+        "With the change, the script's stdout under a cold build is exactly two lines (ROCKSDB_LIB_DIR and LD_LIBRARY_PATH), no other line.",
+        "Layer M against the shared engine on one fleet machine: pass, both TTL witness tests ok, at the round 4373 tree and at the pre-fix tree (671a828294) alike; both took the bwrap sandbox, not sudo."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Round 4373's carry is corrected: the shared engine now builds in the fleet, but a red that needs both that engine and the sudo path's reset environment stays hosted-only while the fleet account runs namespace legs in the bwrap sandbox; whether that account gets sudo for them is the owner's to decide.",
+        "The hosted reading of the Layer M fix remains the next hosted run's interop job."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
