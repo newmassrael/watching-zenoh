@@ -1,0 +1,46 @@
+impact = ["watching-zenoh/build-and-verify", "watching-zenoh/local-ci-gates"]
+
+decision = '''
+Every product this checkout's lanes and oracle scripts write -- cargo target directories, CMake build directories, installed oracles, logs, Python bytecode -- can now be placed outside the checkout by one variable, WZ_ARTIFACT_ROOT, and with it set nothing is written into the checkout. A consumer mounts this checkout read-only (its files are shared between worktrees as hard links) and could only run the upstream lanes by making their run directory writable; the root removes that exception. Unset, every path is where it always was.
+
+The rule is one: a product of the tree path <rel> is at <checkout>/<rel> unset and at $WZ_ARTIFACT_ROOT/<rel> set, the layout mirroring the tree. It is stated once in scripts/lib/artifact-root.sh and read three ways, the shell resolver (wz_artifact_root_init, $WZ_ARTIFACTS, wz_artifact_dir), scripts/lib/artifact_root.py and wz_codegen_build::artifact / artifact_dir, each taking the variable as given and the checkout from its own place; no reader re-derives it. Mirroring was chosen over a table of names so that every path a lane, a test or a comment already names keeps naming the same product, and only the prefix moves.
+
+The cargo calls (over a thousand in run-ci.sh, more in other scripts and in tests that spawn cargo) are not edited. Under a root a cargo shim first on PATH gives each cargo workspace of the checkout its mirrored target directory, honours a target directory the caller chose, and refuses one inside the checkout, so a write that would land there fails at once with the path named instead of landing. A program on PATH reaches cargo however it is called, which a shell function does not.
+
+Whether a lane writes nothing into the checkout is measured, not only read: Layer Ero mounts the checkout and every target link out of it read-only (a bwrap user namespace, or sudo's mount namespace on a hosted runner), builds the pico oracle and runs Layer Ewire with WZ_PICO_REQUIRE=1 and the root as the only writable place. artifact_root_lint.py reads every tracked script, gate and crate for a product path spelled past the root, with line-scoped exemptions that must still excuse something.
+
+The first Ero run found a write that was not a spelling: zenoh-pico's CMakeLists configure_file writes include/zenoh-pico.h into its SOURCE directory, so every pico build wrote into the vendor submodule, with or without a root. zenoh-pico-sys now configures from a copy of the source staged in its OUT_DIR, and its build cache is discarded when it was made from another source directory. The upstream CMake is unchanged; the fix is where wz drives it.
+'''
+
+changes = '''
+scripts/lib/artifact-root.sh (new): the rule; wz_artifact_root_init refuses a relative root and one inside the checkout (by spelling and by resolved path), exports WZ_ARTIFACT_ROOT, $WZ_ARTIFACTS, the cargo shim on PATH, PYTHONPYCACHEPREFIX under the root and GIT_OPTIONAL_LOCKS=0; wz_artifact_dir maps an in-checkout path and leaves an outside one as it is.
+scripts/lib/artifact-root-bin/cargo (new): the cargo shim; maps each in-checkout workspace (cargo locate-project --workspace) to its mirrored target directory, honours an explicit --target-dir or CARGO_TARGET_DIR, refuses one inside the checkout with exit 2.
+scripts/lib/artifact_root.py (new) and wz_codegen_build::{ARTIFACT_ROOT_ENV, checkout_root, artifact, artifact_dir, artifact_dir_in}: the Python and Rust readers of the same rule; locate_sce_codegen and the sce-codegen stamp read through it.
+run-ci.sh: sources the resolver after cd to the checkout; about 124 product paths (log directory, --target-dir, pico and oracle products, MCU binaries, the C1bs checkpoint, the footprint remap) spelled through $WZ_ARTIFACTS; C1cc's identity consumer links and loads from the root.
+Oracle and tool scripts (build-zenohd.sh, build-zenoh-pico-cli.sh, install-mbedtls.sh, build-sce.sh, install-zenoh-c-arm.sh, provision-kconfiglib.sh, capture-validation, fuzz.sh, pico-c-program.sh, pico-compare.sh, kit-lane.sh, check-footprint.sh, test_build_size.sh, nondefault-tests-gate.sh, sce-codegen-oracle.sh) install and build under $WZ_ARTIFACTS.
+Gates that read an install directory out of the oracle scripts (oracle_pin_gate, ensure_zenohd_at_pin, oracle_provenance_gate, oracle_store, zenoh_c_oracle_arms) accept the $WZ_ARTIFACTS spelling and resolve products against the root; about 20 other Python gates read products through artifact().
+wz-integration-tests common::artifact() delegates to wz_codegen_build::artifact and every product reader there uses it; wz-capi-c and wz-runtime-tokio take wz-codegen-build as a dev-dependency for the same.
+crates/zenoh-pico-sys/build.rs: stage_source copies the vendor tree (without .git, keeping mtimes) into OUT_DIR/zenoh-pico-src and configures CMake from it; cmake_cache::cache_is_stale also discards a cache whose CMAKE_HOME_DIRECTORY is another source directory, with the test a_cache_made_from_another_source_is_discarded.
+scripts/lib/read-only-tree.sh (new) and Layer Ero in run-ci.sh and ci.yml: run a command with the checkout and its target links read-only and the root writable; Ero builds the pico oracle and runs Ewire inside it under a persistent root in the user cache.
+scripts/lib/artifact_root_lint.py (new), wired into Layer C0 with its selftest and artifact_root.py's: shell, Python and Rust product paths spelled past the root; population floor 400, 6 line-scoped exemptions each checked for still excusing a use.
+runci_plan.py gives a lane that sources read-only-tree.sh the userns-netns capability. docs/agent-reference.md: new subsection on products outside the checkout.
+Formatting of five merged lwip and acceptor test modules that cargo fmt --check refused on main.
+'''
+
+verification = '''
+Fleet run bx --checks ci, lanes 0, C0, C0i, Ewire, Ero, C1cc on the branch: 0 passed (pc2, 658 s), C0i passed (hkl002, 87 s), Ewire passed (hkl002, 62 s), Ero passed (hkl001, 745 s: pico oracle build and Ewire with WZ_PICO_REQUIRE=1 in a read-only checkout), C1cc passed (pc3, 5079 s). C0 failed on gate-provenance only (the four new gate scripts carried no citation); fixed in this round and C0 rerun on the fleet.
+An earlier fleet run on the branch had Ero fail with "Read-only file system" on zenoh-pico's include/zenoh-pico.h: the configure_file write into the submodule, which is what the staged copy removes.
+zenoh-pico-sys on the fleet: 15 unit tests (with the new source-directory case) and 4 integration tests passed, clippy clean.
+wz-codegen-build: 4 artifact_root tests and 6 others passed; wz-runtime-tokio built_fixture 3 of 3; wz-capi-c tests compile; clippy clean for wz-codegen-build, wz-capi-c, wz-integration-tests and wz-runtime-tokio; cargo fmt --all --check clean.
+Selftests and checks: artifact_root.py --selftest, artifact_root_lint.py --selftest and its run (2166 files, 0 findings, 6 exemptions in use), oracle_store, oracle_pin_gate (--roots), ensure_zenohd_at_pin --check (4 oracles), oracle_provenance_gate --check (11 roots, 0 read from the checkout), zenoh_c_oracle_arms and census_arm_reach, runci_plan, unwired_lane_lint (181 lanes, 0 absent), gate_provenance_lint (249 of 249).
+shellcheck 0.11 clean on every edited script including run-ci.sh. Locally, read-only-tree.sh refuses writes to the checkout and to a target link out of it while the root stays writable.
+'''
+
+carry = '''
+wz-tls-mbedtls is not exercised by Ero (its build runs with GEN_FILES=OFF); a root-only run of its tests is unmeasured.
+The zenohd oracle store recipe digest and the rocksdb cache key changed with the install path spelling: one oracle rebuild per machine.
+Layers Ewirez and Z and the remaining lanes were not run under a root; only Ewire is measured read-only. run-ci.sh --resume checkpoints in worktrees are unmeasured under a root.
+The B2 regeneration writes out/ (generated source in the tree) by design; it is not a product and stays outside the rule.
+The hosted Ero step's cost is unmeasured until the first hosted run.
+The readers of zenoh_pico_include_dirs carry no freshness assertion (existed before this round).
+'''
