@@ -315992,6 +315992,62 @@
         "After codec Layer 3 catalog completes (R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip)."
       ]
     },
+    "Round 4400": {
+      "decision_summary": "The readers' loss under a busy writer of the snapshot tables, left unseparated by round 4388, is separated (docs/router-table-snapshots.md, section 6.7). The Puts a second and the time a reader ran a core both moved with the load of the shared hosts by more than the effect, so the reading is the readers' instructions and cycles a Put under perf, one window kind to a process. Loading versions is not the cost: at the declaring writer's rate a version that changes nothing costs the readers nothing a run tells. The writer's own work on the host is at most half of it (5.7 % more cycles from a writer declaring twice as often into a router nobody reads). The rest, 2.3 % more instructions and some 5 % more cycles, is what the readers do because the tables changed, and a profile names three parts: readers freed the retired versions' path copies, the route caches moved their inputs at every version, and a reader behind the cache computed routes it could not keep. The first contradicted read-copy-update, whose readers never reclaim: the cell now keeps replaced versions by their count and the writer frees those no reader holds at its next publish and at each grace period; the readers' profile no longer has the frees and the writer's has them. The gain in Puts a second was not told apart from the hosts' load and is not claimed. Round 4388 added two ungated tests to `router_forward` without moving Layer C1AY's counts; they move here with this round's pair test, each arm's count as its command printed it.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/tables_cell.rs: the snapshot cell keeps the versions a publish replaces by their count (`retired: Vec<Arc<Tables>>`); `unread` takes out those no reader holds, which the writer frees after its lock at each publish and at the end of each grace period; the cell counts published writes (`writes_published`, read by the instruments) and reports its retired versions to the tests.",
+        "crates/wz-runtime-tokio/src/router_forward/table_sharing_pair_tests.rs: a retired version a reader held stays retired after the reader lets it go, and the next publish or a grace period frees it.",
+        "crates/wz-runtime-tokio/src/router_forward/table_sharing_tests.rs: the instrument `the_readers_under_a_busy_writer_measured_by_what_the_writes_change` (windows none, declaring, declaring_elsewhere, unchanged_paced, unchanged; `WZ_WRITER_WINDOWS`, `WZ_WRITER_ROUNDS`, `WZ_WRITER_RATE`); the publishers' threads are named `wz-publisher` and report the time they ran a core.",
+        "docs/router-table-snapshots.md: section 6.7 (the separation and the reclamation), section 6.6 titled with its round, section 7's bullet on a reader behind the route cache.",
+        "scripts/run-ci.sh: Layer C1AY's nine `router_forward` counts +3 each (309, 314, 337, 317, 320, 367, 309, 311, 322).",
+        "scripts/lib/previous-run-gate.sh: the retired acknowledgement variable named in plain text, which the prose-name gate refused as code."
+      ],
+      "verification_bullets": [
+        "pc2, the instrument one window kind to a process, snapshot, three windows each, perf instructions:u and cycles:u of the `wz-publisher` threads: no writer 18,431 and 18,461 instructions, 16,059 and 16,233 cycles a Put; declaring (70,500 to 81,000 writes a second) 18,850 and 18,886, 17,657 and 18,208; declaring elsewhere 18,472 and 16,976; unchanged paced to 20,000 18,517 and 15,893; paced to 75,000 18,425 and 16,037; unchanged unpaced 18,559 and 17,832.",
+        "pc2 and pc3: Puts a second and reader CPU time a Put moved with host load (pc2 35 to 105, pc3 4 to 22) by more than the effects; recorded in section 6.7 and not used for the attribution.",
+        "pc2, perf record of the readers under the declaring writer: before the change `drop_glue` of the persistent maps' slots 2.55 % (atom) and 0.77 % (core) of the readers' cycles, and `cfree`; after it neither among the readers, and `persistent_map::Node::drop_slow` 1.1 to 1.5 % of the writer's.",
+        "pc2: `cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward` under WZ_POLICY_ROUTING_TABLE_SHARING=snapshot and rwlock, 308 passed each before the pair test; clippy -D warnings over wz-runtime-tokio with routing-router-hat, all targets.",
+        "pc2, on the rebased tree: every Layer C1AY `router_forward` arm printed 309, 314, 337, 317, 320, 367, 309, 311, 322 passed and the frozen scenes 2.",
+        "Static gates before the push: reason_review_pin_gate, prose_named_identifier_gate --check (after the plain-text fix; it failed on 01ab1eb683 before), upstream_citation_anchor_gate, each rc 0.",
+        "Hosted, round 4396 (4626795a75): CI and Platform were pending at this round's start."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "A reader whose version is older than the inputs the route cache was brought to computes its route and does not keep it (1,300 to 30,000 routes a window of three seconds under a busy writer); keeping the routes of the version before is not measured.",
+        "The route caches move their inputs at every version under a write lock (about 1 % of the readers' cycles); not changed.",
+        "What the writer-side reclamation gives the readers in Puts a second was not told apart from the shared hosts' load.",
+        "A route holding its faces' state (section 7) stays open from round 4388."
+      ],
+      "publishable_decision_summary": "The readers' loss under a busy writer of the snapshot tables, left unseparated by round 4388, is separated (docs/router-table-snapshots.md, section 6.7). The Puts a second and the time a reader ran a core both moved with the load of the shared hosts by more than the effect, so the reading is the readers' instructions and cycles a Put under perf, one window kind to a process. Loading versions is not the cost: at the declaring writer's rate a version that changes nothing costs the readers nothing a run tells. The writer's own work on the host is at most half of it (5.7 % more cycles from a writer declaring twice as often into a router nobody reads). The rest, 2.3 % more instructions and some 5 % more cycles, is what the readers do because the tables changed, and a profile names three parts: readers freed the retired versions' path copies, the route caches moved their inputs at every version, and a reader behind the cache computed routes it could not keep. The first contradicted read-copy-update, whose readers never reclaim: the cell now keeps replaced versions by their count and the writer frees those no reader holds at its next publish and at each grace period; the readers' profile no longer has the frees and the writer's has them. The gain in Puts a second was not told apart from the hosts' load and is not claimed. Round 4388 added two ungated tests to `router_forward` without moving Layer C1AY's counts; they move here with this round's pair test, each arm's count as its command printed it.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/tables_cell.rs: the snapshot cell keeps the versions a publish replaces by their count (`retired: Vec<Arc<Tables>>`); `unread` takes out those no reader holds, which the writer frees after its lock at each publish and at the end of each grace period; the cell counts published writes (`writes_published`, read by the instruments) and reports its retired versions to the tests.",
+        "crates/wz-runtime-tokio/src/router_forward/table_sharing_pair_tests.rs: a retired version a reader held stays retired after the reader lets it go, and the next publish or a grace period frees it.",
+        "crates/wz-runtime-tokio/src/router_forward/table_sharing_tests.rs: the instrument `the_readers_under_a_busy_writer_measured_by_what_the_writes_change` (windows none, declaring, declaring_elsewhere, unchanged_paced, unchanged; `WZ_WRITER_WINDOWS`, `WZ_WRITER_ROUNDS`, `WZ_WRITER_RATE`); the publishers' threads are named `wz-publisher` and report the time they ran a core.",
+        "docs/router-table-snapshots.md: section 6.7 (the separation and the reclamation), section 6.6 titled with its round, section 7's bullet on a reader behind the route cache.",
+        "scripts/run-ci.sh: Layer C1AY's nine `router_forward` counts +3 each (309, 314, 337, 317, 320, 367, 309, 311, 322).",
+        "scripts/lib/previous-run-gate.sh: the retired acknowledgement variable named in plain text, which the prose-name gate refused as code."
+      ],
+      "publishable_verification_bullets": [
+        "pc2, the instrument one window kind to a process, snapshot, three windows each, perf instructions:u and cycles:u of the `wz-publisher` threads: no writer 18,431 and 18,461 instructions, 16,059 and 16,233 cycles a Put; declaring (70,500 to 81,000 writes a second) 18,850 and 18,886, 17,657 and 18,208; declaring elsewhere 18,472 and 16,976; unchanged paced to 20,000 18,517 and 15,893; paced to 75,000 18,425 and 16,037; unchanged unpaced 18,559 and 17,832.",
+        "pc2 and pc3: Puts a second and reader CPU time a Put moved with host load (pc2 35 to 105, pc3 4 to 22) by more than the effects; recorded in section 6.7 and not used for the attribution.",
+        "pc2, perf record of the readers under the declaring writer: before the change `drop_glue` of the persistent maps' slots 2.55 % (atom) and 0.77 % (core) of the readers' cycles, and `cfree`; after it neither among the readers, and `persistent_map::Node::drop_slow` 1.1 to 1.5 % of the writer's.",
+        "pc2: `cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward` under WZ_POLICY_ROUTING_TABLE_SHARING=snapshot and rwlock, 308 passed each before the pair test; clippy -D warnings over wz-runtime-tokio with routing-router-hat, all targets.",
+        "pc2, on the rebased tree: every Layer C1AY `router_forward` arm printed 309, 314, 337, 317, 320, 367, 309, 311, 322 passed and the frozen scenes 2.",
+        "Static gates before the push: reason_review_pin_gate, prose_named_identifier_gate --check (after the plain-text fix; it failed on 01ab1eb683 before), upstream_citation_anchor_gate, each rc 0.",
+        "Hosted, round 4396 (4626795a75): CI and Platform were pending at this round's start."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A reader whose version is older than the inputs the route cache was brought to computes its route and does not keep it (1,300 to 30,000 routes a window of three seconds under a busy writer); keeping the routes of the version before is not measured.",
+        "The route caches move their inputs at every version under a write lock (about 1 % of the readers' cycles); not changed.",
+        "What the writer-side reclamation gives the readers in Puts a second was not told apart from the shared hosts' load.",
+        "A route holding its faces' state (section 7) stays open from round 4388."
+      ]
+    },
     "Round 45": {
       "decision_summary": "Layer 3 hello codec validated. parent.L gate + locator-array zero-boundary verified (L=0 no locators, L=1 with empty locator array writes VLE(0) trailing byte). 8 of 18 codecs now Layer 3 wire-validated. Non-empty locator construction deferred (requires _z_string_t + _z_str_intmap_t FFI plumbing).",
       "changes_bullets": [
