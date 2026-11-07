@@ -259,6 +259,19 @@ provision_sdk() {
         # (one made by hand, or the tool-store entry an older key built) instead of fetching one into
         # --install-dir, which would stay empty. So it runs with a home of its own, whose registry is
         # empty, and the SDK it fetched is registered in the user's home afterwards.
+        #
+        # It also moves the SDK it extracted TO --install-dir with `shutil.move`, which puts it INSIDE
+        # a directory that already exists: bx's tool store makes {prefix} before the install runs, and
+        # the first install on a build machine left prefix/zephyr-sdk-<version>/setup.sh and failed.
+        # The SDK is not moved up afterwards, because its setup binds the host tools to the directory
+        # it runs in; an empty SDK_DIR is removed first instead, and one that holds anything is a stop.
+        if [[ -d "$SDK_DIR" ]]; then
+            if [[ -n "$(ls -A "$SDK_DIR")" ]]; then
+                echo "provision-zephyr: FAIL - $SDK_DIR holds something that is not SDK $SDK_VERSION; not installing into it" >&2
+                return 1
+            fi
+            run rmdir "$SDK_DIR"
+        fi
         local own_home="$HOME_DIR/.sdk-install-home"
         run mkdir -p "$own_home"
         run_in "$ZEPHYR" env HOME="$own_home" "$VENV/bin/west" sdk install --version "$SDK_VERSION" \
