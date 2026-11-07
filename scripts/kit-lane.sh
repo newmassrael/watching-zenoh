@@ -68,6 +68,12 @@ LAB_ENV="${KIT_LAB_ENV:-$HOME/.config/wz-kit-lab.env}"
 LANE_HOME="${KIT_LANE_HOME:-$HOME/wz-kit-lane}"
 KIT_LOCK="${KIT_LANE_LOCK:-$HOME/.local/state/wz/kit.lock}"
 ZEPHYR_HOME="${ZEPHYR_HOME:-$HOME/zephyrproject}"
+# The physical path, never one through a link: Zephyr writes linker snippets as paths relative to
+# `${ZEPHYR_BASE}/include`, and a ZEPHYR_BASE through bx's tool-store link resolves them wrong
+# (the reason is written at `_qz_toolchain` in scripts/run-ci.sh).
+if [[ -d "$ZEPHYR_HOME" ]]; then
+    ZEPHYR_HOME="$(cd "$ZEPHYR_HOME" && pwd -P)"
+fi
 BOARD="kit_t2g_b_h_lite/cyt4bf8cds/m7_0"
 REGION_BYTES=524288 # the M7_0 image's code flash region of the CYT4BF8CDS
 M7_ADDR=0x10080000

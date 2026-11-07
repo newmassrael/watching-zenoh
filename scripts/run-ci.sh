@@ -25742,6 +25742,14 @@ _qz_toolchain() {
     if [[ ! -d "$_QZ_BASE" ]]; then
         _qz_unavailable "ZEPHYR_BASE absent: $_QZ_BASE — set WZ_ZEPHYR_BASE" && return 10 || return 1
     fi
+    # The PHYSICAL path, never one through a link. bx keeps the workspace in its tool store
+    # and links ~/zephyrproject to it, and `west zephyr-export` registered the store path, so
+    # Zephyr meets both: it writes each linker snippet as a path relative to
+    # `${ZEPHYR_BASE}/include` (`zephyr_linker_sources`), computed between the link path and
+    # the real one, and the preprocessor resolves that `..` from the real directory. A build
+    # machine's first Qz died there: "snippets-rom-start.ld:4:38: fatal error:
+    # ../../../.local/share/bx/tools/<key>/prefix/zephyr/arch/arm/core/vector_table.ld".
+    _QZ_BASE="$(cd "$_QZ_BASE" && pwd -P)"
     if ! command -v west >/dev/null 2>&1 && [[ ! -x "$_QZ_VENV/bin/west" ]]; then
         _qz_unavailable "west not on PATH nor in the venv" && return 10 || return 1
     fi
