@@ -315870,6 +315870,34 @@
         "C1 get-timeout one-off on pc2 stays unattributed."
       ]
     },
+    "Round 4398": {
+      "decision_summary": "A router node dialled by another node is taken in the port tests, for a router node dialling and for a peer node dialling. The earlier round carried that a node dialling a node did not come up in this harness; that was the build without transport-qos, which refuses the handshake of any peer that offers QoS, a node included. With the feature on, the link comes up between two nodes of this crate, so the carry of the earlier round on this point is closed by this entry.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/drive/router_node/engine/port_tests.rs: one test, a node that dials a node holds it as a face. A router node and a peer node each dial a router node; both sides hold one face, the dialled router names the dialler's identity with its wire role (router 0, peer 1), the dialler names the router with role 0 and has a router peer, and after the dialler closes the router's face snapshots are empty. The helper that opens a node takes its role and the locators it dials."
+      ],
+      "verification_bullets": [
+        "On a build host, wz-capi-core with router-node and transport-qos: the five tests of the port module pass (5 passed), and clippy of the crate with all targets and warnings denied is clean. The cause of the earlier failure was read from the handshake error, an unsupported capability for QoS, in the previous round; this round shows the link with the feature on. Not taken: three or more nodes in one mesh, the shared-memory publication of the port."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Carries of the node's C door that remain: group and advanced below zenohd as a router node with three or more members, and the zenoh-ext group interop; the shared-memory publication of the node's port, which needs a link that negotiated shared memory; a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
+      ],
+      "publishable_decision_summary": "A router node dialled by another node is taken in the port tests, for a router node dialling and for a peer node dialling. The earlier round carried that a node dialling a node did not come up in this harness; that was the build without transport-qos, which refuses the handshake of any peer that offers QoS, a node included. With the feature on, the link comes up between two nodes of this crate, so the carry of the earlier round on this point is closed by this entry.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/drive/router_node/engine/port_tests.rs: one test, a node that dials a node holds it as a face. A router node and a peer node each dial a router node; both sides hold one face, the dialled router names the dialler's identity with its wire role (router 0, peer 1), the dialler names the router with role 0 and has a router peer, and after the dialler closes the router's face snapshots are empty. The helper that opens a node takes its role and the locators it dials."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, wz-capi-core with router-node and transport-qos: the five tests of the port module pass (5 passed), and clippy of the crate with all targets and warnings denied is clean. The cause of the earlier failure was read from the handshake error, an unsupported capability for QoS, in the previous round; this round shows the link with the feature on. Not taken: three or more nodes in one mesh, the shared-memory publication of the port."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carries of the node's C door that remain: group and advanced below zenohd as a router node with three or more members, and the zenoh-ext group interop; the shared-memory publication of the node's port, which needs a link that negotiated shared memory; a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
