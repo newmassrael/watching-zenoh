@@ -315386,6 +315386,46 @@
         "The consumer is told ABI 53, field_values 1 and the commit. Open: the payloads the values memory holds are not in the memory document (wz_dissect_live_memory), which would be a revision of that document; the door has no window bound, as the field document's cursor door had none until a measurement asked for one; a peer session's lifecycle-door claim (control port word, verb key, reply reading, identity, a witness test) is the next item."
       ]
     },
+    "Round 4386": {
+      "decision_summary": "The two writers of a conformance statement's digest are now held to each other over the declaration's whole domain, not one fixture. wz_config.py --emit statement-vectors writes crates/wz-conformance-build/statement_vectors.json, 206 builds with Python's digest for each (each capability and layout switch alone, each limit off its default and one at the largest value read, each policy value, seeded random builds), and the crate's test reproduces every one through of_build, the path a build script takes. Layer C1cs gains two statement cases that build real libraries with a limit and a policy stated through the environment, one of them the zenoh-c drop-in with the shared-memory arm on, and requires each library's digest to equal its statement. Until now no built library had stated a limit, a policy or an arm.",
+      "changes_bullets": [
+        "scripts/lib/wz_config.py: env_statement (the statement of a cargo build from its WZ_LIMIT_* and WZ_POLICY_*, refusing what the build script refuses plus a name the declaration does not read), policy_values, statement_vectors and emit_statement_vectors (draws from SHA-256 of a fixed seed, not the random module), the generated kind statement-vectors, four selftest arms.",
+        "crates/wz-conformance-build: statement_vectors.json (generated, held by --check); serde_json as a dev-dependency; a test that reproduces every vector and refuses a vector naming an environment variable of_build never asked for.",
+        "scripts/lib/capability_cost_gate.py: StatementCase and STATEMENT_CASES (statement-pico-stated, statement-capic-shm-arm), built with the dev profile into target/conformance-statement under an environment cleared of other WZ_LIMIT_* and WZ_POLICY_*, graded on fact 5 alone and on stating something the defaults do not; stated_digest goes through env_statement; four selftest arms.",
+        "docs/build-configuration.md C15 and the C1cs lane comment say so; crates/Cargo.lock."
+      ],
+      "verification_bullets": [
+        "On the build machine (22 cores, 30 GB): capability_cost_gate.py --check statement-pico-stated statement-capic-shm-arm, both libraries carry their statement's digest (pico sha256:bb969406..., against sha256:0c40aca0... with nothing stated; zenoh-c with the shared-memory arm sha256:087d67bf..., against sha256:1cda89a5...).",
+        "Same machine: cargo test -p wz-conformance-build 11 passed, the vector test reproducing all 206; cargo fmt --check and cargo clippy --all-targets -D warnings clean. Red first: one vector's digest corrupted, the test failed naming exactly that vector (1 of 206), then restored.",
+        "wz_config.py --selftest 279/279 with kconfiglib, --check rc 0 (16 generated files current); capability_cost_gate.py --selftest 24/24; the pre-push static gate array, 137 gates, all rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention/2-2-presets",
+        "watching-zenoh/build-and-verify"
+      ],
+      "carry_forward_bullets": [
+        "The statement cases build with the dev profile in their own target directory, so a cold C1cs run builds the wz-capi-c default tree once more there; the lane's time on hosted CI is to be read on its next run."
+      ],
+      "publishable_decision_summary": "The two writers of a conformance statement's digest are now held to each other over the declaration's whole domain, not one fixture. wz_config.py --emit statement-vectors writes crates/wz-conformance-build/statement_vectors.json, 206 builds with Python's digest for each (each capability and layout switch alone, each limit off its default and one at the largest value read, each policy value, seeded random builds), and the crate's test reproduces every one through of_build, the path a build script takes. Layer C1cs gains two statement cases that build real libraries with a limit and a policy stated through the environment, one of them the zenoh-c drop-in with the shared-memory arm on, and requires each library's digest to equal its statement. Until now no built library had stated a limit, a policy or an arm.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_config.py: env_statement (the statement of a cargo build from its WZ_LIMIT_* and WZ_POLICY_*, refusing what the build script refuses plus a name the declaration does not read), policy_values, statement_vectors and emit_statement_vectors (draws from SHA-256 of a fixed seed, not the random module), the generated kind statement-vectors, four selftest arms.",
+        "crates/wz-conformance-build: statement_vectors.json (generated, held by --check); serde_json as a dev-dependency; a test that reproduces every vector and refuses a vector naming an environment variable of_build never asked for.",
+        "scripts/lib/capability_cost_gate.py: StatementCase and STATEMENT_CASES (statement-pico-stated, statement-capic-shm-arm), built with the dev profile into target/conformance-statement under an environment cleared of other WZ_LIMIT_* and WZ_POLICY_*, graded on fact 5 alone and on stating something the defaults do not; stated_digest goes through env_statement; four selftest arms.",
+        "docs/build-configuration.md C15 and the C1cs lane comment say so; crates/Cargo.lock."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machine (22 cores, 30 GB): capability_cost_gate.py --check statement-pico-stated statement-capic-shm-arm, both libraries carry their statement's digest (pico sha256:bb969406..., against sha256:0c40aca0... with nothing stated; zenoh-c with the shared-memory arm sha256:087d67bf..., against sha256:1cda89a5...).",
+        "Same machine: cargo test -p wz-conformance-build 11 passed, the vector test reproducing all 206; cargo fmt --check and cargo clippy --all-targets -D warnings clean. Red first: one vector's digest corrupted, the test failed naming exactly that vector (1 of 206), then restored.",
+        "wz_config.py --selftest 279/279 with kconfiglib, --check rc 0 (16 generated files current); capability_cost_gate.py --selftest 24/24; the pre-push static gate array, 137 gates, all rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention/2-2-presets",
+        "watching-zenoh/build-and-verify"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The statement cases build with the dev profile in their own target directory, so a cold C1cs run builds the wz-capi-c default tree once more there; the lane's time on hosted CI is to be read on its next run."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
