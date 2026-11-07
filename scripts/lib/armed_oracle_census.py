@@ -494,22 +494,25 @@ def selftest() -> int:
         ),
         (
             "a nested arming no hosted job states",
-            "WZ_TCPDUMP_REQUIRE=1 cargo test\nrun_layer Ewire layer_e\n"
-            "  && WZ_NOWHERE_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire\n",
+            # Each nested fixture shares one source line with a `run_layer` statement:
+            # `decline_arming_gate.py` reads a source line that OPENS with a run of
+            # run-ci.sh as a caller, and a fixture string is not one.
+            "WZ_TCPDUMP_REQUIRE=1 cargo test\n"
+            "run_layer Ewire layer_e\nWZ_NOWHERE_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire\n",
             {"WZ_TCPDUMP_REQUIRE": real_rows["WZ_TCPDUMP_REQUIRE"]},
             "no `env:` block of ci.yml",
         ),
         (
             "a nested arming of a flag with a row",
-            "WZ_TCPDUMP_REQUIRE=1 cargo test\nrun_layer Ewire layer_e\n"
-            "  && WZ_TCPDUMP_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire\n",
+            "WZ_TCPDUMP_REQUIRE=1 cargo test\n"
+            "run_layer Ewire layer_e\nWZ_TCPDUMP_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire\n",
             {"WZ_TCPDUMP_REQUIRE": real_rows["WZ_TCPDUMP_REQUIRE"]},
             "has a row of machine oracles",
         ),
         (
             "a nested arming of an unregistered layer",
-            "WZ_TCPDUMP_REQUIRE=1 cargo test\nrun_layer Ewire layer_e\n"
-            "  && WZ_PICO_REQUIRE=1 bash scripts/run-ci.sh --layer Nowhere\n",
+            "WZ_TCPDUMP_REQUIRE=1 cargo test\n"
+            "run_layer Ewire layer_e\nWZ_PICO_REQUIRE=1 bash scripts/run-ci.sh --layer Nowhere\n",
             {"WZ_TCPDUMP_REQUIRE": real_rows["WZ_TCPDUMP_REQUIRE"]},
             "does not register with `run_layer`",
         ),
@@ -527,8 +530,7 @@ def selftest() -> int:
         "# WZ_TCPDUMP_REQUIRE=1 turns the skip into a failure\n"
         '    echo "  SKIP (set WZ_TCPDUMP_REQUIRE=1 — makes it fail)"\n'
         # A nested-lane arming the hosted ci.yml states for its job, of a registered layer.
-        "run_layer Ewire layer_e\n"
-        "    bash -c 'true && WZ_PICO_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire'\n"
+        "run_layer Ewire layer_e\nWZ_PICO_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire\n"
     )
     import io
     import contextlib
