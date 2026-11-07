@@ -148,6 +148,14 @@ const _: () = assert!(
 /// (`RegisterError::TableFull`) rather than growing the table.
 pub const MAX_QUERYABLES: usize = generated::MAX_QUERYABLES;
 
+/// How many fragments a datagram link's writer writes in a row when the
+/// `datagram-fragment-pacing` policy is on ([`crate::fragment_pacing::FragmentPacer`]).
+pub const DATAGRAM_FRAGMENT_BURST: usize = generated::DATAGRAM_FRAGMENT_BURST;
+
+/// The microseconds that pass after the last fragment before the next one past the burst, when
+/// the `datagram-fragment-pacing` policy is on.
+pub const DATAGRAM_FRAGMENT_GAP_US: usize = generated::DATAGRAM_FRAGMENT_GAP_US;
+
 /// The most bytes of selector parameters a query from a peer may carry for the node to run it;
 /// 0 sets no bound. A longer query reaches no queryable and is counted
 /// ([`crate::query::QueryableRegistry::oversize_refusals`]).

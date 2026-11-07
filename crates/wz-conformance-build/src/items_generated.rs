@@ -144,6 +144,16 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
     ),
     ("TX_EXPIRY_CLOSE_AFTER", "WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER", 0),
     (
+        "DATAGRAM_FRAGMENT_BURST",
+        "WZ_LIMIT_DATAGRAM_FRAGMENT_BURST",
+        8,
+    ),
+    (
+        "DATAGRAM_FRAGMENT_GAP_US",
+        "WZ_LIMIT_DATAGRAM_FRAGMENT_GAP_US",
+        1000,
+    ),
+    (
         "QUERY_PARAMETERS_MAX_BYTES",
         "WZ_LIMIT_QUERY_PARAMETERS_MAX_BYTES",
         0,
@@ -253,6 +263,12 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
     (
         "declaration-sync-pacing",
         "WZ_POLICY_DECLARATION_SYNC_PACING",
+        &["off", "on"],
+        "off",
+    ),
+    (
+        "datagram-fragment-pacing",
+        "WZ_POLICY_DATAGRAM_FRAGMENT_PACING",
         &["off", "on"],
         "off",
     ),

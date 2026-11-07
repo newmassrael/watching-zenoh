@@ -1830,6 +1830,11 @@ pub(crate) mod iface_bind {
 #[cfg(feature = "transport-link-udp")]
 pub mod udp_pipeline;
 
+// The `datagram-fragment-pacing` policy at the writers of the two datagram links it paces: the
+// UDP unicast writer and the multicast transmit task.
+#[cfg(any(feature = "transport-link-udp", feature = "transport-multicast"))]
+pub mod datagram_pacing;
+
 // R311nv — host tty backend for the SERIAL link (the 2nd layer of the
 // R311nt 2-layer split; the transport-agnostic framing/handshake logic is
 // `wz_session_core::serial_link`). `dial_serial`/`accept_serial` open the

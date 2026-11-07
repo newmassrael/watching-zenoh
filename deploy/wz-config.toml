@@ -2054,6 +2054,29 @@ closes the session, which is the policy as it was before this limit. At most
 '''
 
 [[limit]]
+id = "DATAGRAM_FRAGMENT_BURST"
+kconfig = "WZ_LIMIT_DATAGRAM_FRAGMENT_BURST"
+default = 8
+help = '''
+How many fragments of a message a UDP link's writer writes in a row when the
+datagram-fragment-pacing policy is on, before the next one waits for
+DATAGRAM_FRAGMENT_GAP_US. At least 1. It is read only when that policy is on.
+'''
+
+[[limit]]
+id = "DATAGRAM_FRAGMENT_GAP_US"
+kconfig = "WZ_LIMIT_DATAGRAM_FRAGMENT_GAP_US"
+default = 1000
+help = '''
+How long, in microseconds, must pass after the last fragment was written
+before a UDP link's writer writes another one past the burst, when the
+datagram-fragment-pacing policy is on. At least 1 and at most 1000000 (one
+second): a longer wait would hold a message's fragments past the time a peer
+keeps a partly received message. The tokio engine rounds it up to its timer's
+millisecond. It is read only when that policy is on.
+'''
+
+[[limit]]
 id = "QUERY_PARAMETERS_MAX_BYTES"
 kconfig = "WZ_LIMIT_QUERY_PARAMETERS_MAX_BYTES"
 default = 0
@@ -2410,6 +2433,27 @@ declarations does not hand its peer a burst or stop answering while it sends
 them. A declaration made while the replay runs is sent in its turn, after
 everything it depends on; the retraction of one the peer was never told of
 sends nothing.
+'''
+
+[[policy]]
+id = "datagram-fragment-pacing"
+kind = "bool"
+kconfig = "WZ_POLICY_DATAGRAM_FRAGMENT_PACING"
+default = "off"
+upstream = "Writes the fragments of a large message to a datagram socket back to back, as fast as the socket takes them, however small the receiver's buffer."
+since = 2
+help = '''
+How fast the fragments of one large message leave a UDP link, unicast or
+multicast. Off, they are written back to back. On, at most
+DATAGRAM_FRAGMENT_BURST fragments are written in a row, and the next waits
+until DATAGRAM_FRAGMENT_GAP_US has passed since the last was written, so a
+receiver with a small buffer is not handed the whole message in one burst. A
+datagram that is not a fragment ends the run and is never delayed. The wait is
+in the link's writer and not in the sender: a sender is held only as long as
+the link's queue is full, as it is without the policy. QUIC datagrams and
+WebSocket are not paced, since their transport paces itself or is a stream.
+The tokio engine's timer has a resolution of one millisecond, so a gap is
+rounded up to it. Only the tokio engine reads this policy.
 '''
 
 [[policy]]

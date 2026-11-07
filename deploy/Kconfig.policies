@@ -73,6 +73,24 @@ config WZ_POLICY_DECLARATION_SYNC_PACING
 	  Upstream: Replays every declaration it holds to a new peer in one call, as
 	  soon as the session is open again.
 
+config WZ_POLICY_DATAGRAM_FRAGMENT_PACING
+	bool "datagram-fragment-pacing"
+	default n
+	help
+	  How fast the fragments of one large message leave a UDP link, unicast or
+	  multicast. Off, they are written back to back. On, at most
+	  DATAGRAM_FRAGMENT_BURST fragments are written in a row, and the next waits
+	  until DATAGRAM_FRAGMENT_GAP_US has passed since the last was written, so a
+	  receiver with a small buffer is not handed the whole message in one burst. A
+	  datagram that is not a fragment ends the run and is never delayed. The wait is
+	  in the link's writer and not in the sender: a sender is held only as long as
+	  the link's queue is full, as it is without the policy. QUIC datagrams and
+	  WebSocket are not paced, since their transport paces itself or is a stream.
+	  The tokio engine's timer has a resolution of one millisecond, so a gap is
+	  rounded up to it. Only the tokio engine reads this policy.
+	  Upstream: Writes the fragments of a large message to a datagram socket back to
+	  back, as fast as the socket takes them, however small the receiver's buffer.
+
 config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
 	bool "entity-timestamp-opt-in"
 	default n

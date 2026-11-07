@@ -3441,6 +3441,32 @@ impl OutboundQueue {
         self.seal = None;
         self.rx.close();
     }
+
+    /// Wait `wait` before the next write, as a pacing writer does between datagrams. A queue
+    /// that is sealed, or is sealed while the writer waits, does not wait out the rest: teardown
+    /// drains what is queued without delay, and a pace is not a reason to hold it. The seal is
+    /// applied here as [`Self::next_wire`] applies it.
+    pub async fn pause(&mut self, wait: std::time::Duration) {
+        if self.sealed {
+            return;
+        }
+        let Some(seal) = self.seal.as_mut() else {
+            tokio::time::sleep(wait).await;
+            return;
+        };
+        let sealed_now = tokio::select! {
+            biased;
+            changed = seal.changed() => match changed {
+                Ok(()) => *seal.borrow_and_update(),
+                // The handle is gone: its disappearance is the seal (R2367).
+                Err(_) => true,
+            },
+            () = tokio::time::sleep(wait) => false,
+        };
+        if sealed_now {
+            self.apply_seal();
+        }
+    }
 }
 
 /// A spawned writer task's lifecycle handle: the join handle, plus the seal that

@@ -175,6 +175,11 @@ pub mod caps;
 /// build states otherwise. Unconditional, no_std and no_alloc, like [`caps`].
 pub mod policy;
 
+/// How fast the fragments of one message leave a datagram link: the rule of the
+/// `datagram-fragment-pacing` policy, over a clock the engine hands it. Unconditional, no_std
+/// and no_alloc.
+pub mod fragment_pacing;
+
 /// A bound on how many of one kind of resource a session holds live at once
 /// (a querier is one): [`quota::Quota`], a counting semaphore that never waits and does no
 /// synchronisation, so each runtime composes it with its own `Mutex`. `0` is no bound,

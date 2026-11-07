@@ -1957,7 +1957,14 @@ def emit_rust_policies(decl: dict) -> str:
         if pol["kind"] == "choice":
             out.append(f"        let {field} = {camel(pol['id'])}::stated();")
         else:
-            out.append(f'        let {field} = policy_bool(option_env!("{pol["kconfig"]}"));')
+            one = f'        let {field} = policy_bool(option_env!("{pol["kconfig"]}"));'
+            if len(one) <= RUST_MAX_WIDTH:
+                out.append(one)
+            else:
+                # rustfmt breaks after the `=` of a binding that is past the width, so a name long
+                # enough to cross it is written in the shape the formatter leaves it in.
+                out += [f"        let {field} =",
+                        f'            policy_bool(option_env!("{pol["kconfig"]}"));']
     fields = ", ".join(snake(p["id"]) for p in pols)
     if len(fields) <= RUST_STRUCT_LIT_WIDTH:
         out.append(f"        Self {{ {fields} }}" if fields else "        Self {}")
@@ -3379,6 +3386,16 @@ def cmd_selftest() -> int:
            and "use super::{policy_bool, policy_choice};" in rpolicies)
     expect("a literal past rustfmt's width goes one field a line",
            "        Self {\n            wire_mode,\n            eager_flush,\n        }\n" in rpolicies)
+    long_id = "a-bool-policy-whose-name-is-long-enough-to-cross-the-line-width"
+    long_decl = {"policies": [dict(p, id=long_id, kconfig="WZ_POLICY_" + long_id.upper().replace("-", "_"))
+                              for p in pdecl["policies"] if p["kind"] == "bool"][:1]}
+    rlong = emit_rust_policies(long_decl)
+    expect("a binding past rustfmt's width breaks after the `=`, as the formatter leaves it",
+           "        let a_bool_policy_whose_name_is_long_enough_to_cross_the_line_width =\n"
+           '            policy_bool(option_env!("WZ_POLICY_A_BOOL_POLICY_WHOSE_NAME_IS_LONG_ENOUGH'
+           '_TO_CROSS_THE_LINE_WIDTH"));\n' in rlong)
+    expect("a binding within the width stays on one line",
+           'let eager_flush = policy_bool(option_env!("WZ_POLICY_EAGER_FLUSH"));' in rpolicies)
     nothing = emit_rust_policies({"policies": []})
     expect("no policy is an empty struct and no import",
            "pub struct SessionPolicy {}\n" in nothing and "        Self {}\n" in nothing

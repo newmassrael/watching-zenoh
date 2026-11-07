@@ -1189,8 +1189,29 @@ impl BoxedLinkDriver for UdpWriteDriver {
 pub async fn udp_writer_task(
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
+    queue: OutboundQueue,
+    fault: DatagramWriteFault,
+) {
+    udp_writer_task_paced(
+        socket,
+        peer,
+        queue,
+        fault,
+        crate::datagram_pacing::DatagramPacing::of_build(),
+    )
+    .await;
+}
+
+/// [`udp_writer_task`] with the pacing of its fragments named: the build's
+/// ([`crate::datagram_pacing::DatagramPacing::of_build`]) in production, a value a test chose
+/// otherwise. A fragment past the burst waits in [`OutboundQueue::pause`], which a seal ends, so
+/// teardown never waits on a pace.
+pub async fn udp_writer_task_paced(
+    socket: Arc<UdpSocket>,
+    peer: SocketAddr,
     mut queue: OutboundQueue,
     fault: DatagramWriteFault,
+    mut pacing: crate::datagram_pacing::DatagramPacing,
 ) {
     // R311y474 — a DIAL socket is `connect`ed to its one peer, so it emits with
     // `send`; the shared LISTENER socket serves N peers and must address each
@@ -1206,6 +1227,9 @@ pub async fn udp_writer_task(
     // pool: started as the send begins, home through the completion edge when
     // the send has returned (`recycle_wire`, or the drop on every other way out).
     while let Some(mut payload) = queue.next_wire().await {
+        if let Some(wait) = pacing.due(&payload) {
+            queue.pause(wait).await;
+        }
         payload.begin_write();
         let send = async {
             if connected {
@@ -1215,7 +1239,10 @@ pub async fn udp_writer_task(
             }
         };
         match queue.guarded(send).await {
-            Some(Ok(_)) => queue.recycle_wire(payload),
+            Some(Ok(_)) => {
+                pacing.wrote();
+                queue.recycle_wire(payload);
+            }
             Some(Err(e)) => {
                 log::warn!("wz-runtime-tokio: udp_writer_task send failed: {e}; closing");
                 fault.trip(&e);
@@ -1236,6 +1263,104 @@ pub async fn udp_writer_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fragment's datagram, by its header.
+    const FRAGMENT: [u8; 2] = [0x46, 0];
+
+    /// Write `datagrams` through a paced UDP writer to a loopback receiver, and say how long
+    /// after they were queued each arrived, on the real clock. Only a LOWER bound of such a
+    /// time is a fact the test can state: a sleep never ends early, and a datagram that
+    /// arrived cannot have left before its writer's wait was over. An upper bound would be a
+    /// bet on the host's scheduling, and a paused clock cannot read it either, because a
+    /// runtime idle on a socket advances a paused clock to the next timer before it sees the
+    /// datagram that is already there.
+    async fn arrivals(
+        pacing: crate::datagram_pacing::DatagramPacing,
+        datagrams: &[[u8; 2]],
+    ) -> Vec<std::time::Duration> {
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.expect("bind receiver");
+        let to = receiver.local_addr().expect("receiver addr");
+        let sender = dial_udp(to, &LinkSocket::NONE).await.expect("dial");
+        let (fault, _watch) = DatagramWriteFault::channel();
+        let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
+        let writer = WriterHandle::spawn(rx, |queue| {
+            udp_writer_task_paced(Arc::new(sender), to, queue, fault, pacing)
+        });
+        let started = tokio::time::Instant::now();
+        for datagram in datagrams {
+            tx.send(wz_session_core::qos::Priority::DEFAULT, datagram.to_vec())
+                .expect("queued");
+        }
+        let mut buffer = [0u8; 16];
+        let mut at = Vec::new();
+        for _ in datagrams {
+            receiver.recv(&mut buffer).await.expect("received");
+            at.push(started.elapsed());
+        }
+        drop(writer);
+        at
+    }
+
+    fn paced(burst: u32, gap_us: u64) -> crate::datagram_pacing::DatagramPacing {
+        crate::datagram_pacing::DatagramPacing::with(Some(
+            wz_session_core::fragment_pacing::FragmentPacer::new(burst, gap_us),
+        ))
+    }
+
+    /// The policy on, at the writer: of six fragments with a burst of two, the third leaves no
+    /// sooner than one gap after the queue was filled and the fifth no sooner than two, since
+    /// each waits a gap after the write before it. (What is NOT delayed, and the run a datagram
+    /// that is not a fragment ends, are the rule's own tests in `fragment_pacing`, and that a
+    /// build with the policy off asks for no wait is `datagram_pacing`'s.)
+    #[tokio::test]
+    async fn with_pacing_on_the_writer_waits_a_gap_before_each_run_past_the_burst() {
+        let gap = std::time::Duration::from_millis(80);
+        let at = arrivals(paced(2, 80_000), &[FRAGMENT; 6]).await;
+        assert!(at[2] >= gap, "the third waited a gap: {at:?}");
+        assert!(at[4] >= 2 * gap, "the fifth waited two: {at:?}");
+        assert!(at[5] >= 2 * gap, "and the sixth, in its run: {at:?}");
+    }
+
+    /// The same six datagrams with the policy off arrive, all of them: the writer that holds no
+    /// pacer is the writer it was.
+    #[tokio::test]
+    async fn with_pacing_off_every_fragment_is_written() {
+        let at = arrivals(
+            crate::datagram_pacing::DatagramPacing::with(None),
+            &[FRAGMENT; 6],
+        )
+        .await;
+        assert_eq!(at.len(), 6);
+    }
+
+    /// A seal ends a pace: teardown drains what is queued without waiting out a gap, so a pacing
+    /// writer never holds a link's close for the length of its gap. Run on the real clock, with a
+    /// gap far longer than the bound.
+    #[tokio::test]
+    async fn a_seal_does_not_wait_out_the_gap() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.expect("bind receiver");
+        let to = receiver.local_addr().expect("receiver addr");
+        let sender = dial_udp(to, &LinkSocket::NONE).await.expect("dial");
+        let (fault, _watch) = DatagramWriteFault::channel();
+        let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
+        let writer = WriterHandle::spawn(rx, |queue| {
+            udp_writer_task_paced(Arc::new(sender), to, queue, fault, paced(1, 60_000_000))
+        });
+        for _ in 0..2 {
+            tx.send(wz_session_core::qos::Priority::DEFAULT, FRAGMENT.to_vec())
+                .expect("queued");
+        }
+        let mut buffer = [0u8; 16];
+        receiver.recv(&mut buffer).await.expect("the first");
+        // The writer is now waiting a minute for the second; sealing it must not wait, and the
+        // bound is ten seconds, so only a writer that waited the gap out can miss it.
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(10), writer.drain());
+        assert!(drained.await.is_ok(), "the seal ended the wait");
+        receiver
+            .recv(&mut buffer)
+            .await
+            .expect("the second, drained");
+    }
 
     /// `dial_udp` binds an ephemeral local socket whose family mirrors the
     /// peer; the bound local addr is a concrete v4 ephemeral port.

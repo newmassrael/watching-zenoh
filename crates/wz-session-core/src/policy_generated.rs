@@ -431,6 +431,10 @@ pub struct SessionPolicy {
     /// `declaration-sync-pacing`. Upstream: Replays every declaration it holds to a new
     /// peer in one call, as soon as the session is open again.
     pub declaration_sync_pacing: bool,
+    /// `datagram-fragment-pacing`. Upstream: Writes the fragments of a large message to a
+    /// datagram socket back to back, as fast as the socket takes them, however small the
+    /// receiver's buffer.
+    pub datagram_fragment_pacing: bool,
     /// `entity-timestamp-opt-in`. Upstream: Hands every received sample's timestamp to the
     /// subscriber and every reply's to the querier, and lets any publisher attach the
     /// timestamp it is given.
@@ -480,6 +484,8 @@ impl SessionPolicy {
         let tx_no_progress_deadline = policy_bool(option_env!("WZ_POLICY_TX_NO_PROGRESS_DEADLINE"));
         let tx_expiry_keeps_session = policy_bool(option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION"));
         let declaration_sync_pacing = policy_bool(option_env!("WZ_POLICY_DECLARATION_SYNC_PACING"));
+        let datagram_fragment_pacing =
+            policy_bool(option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING"));
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
         let reply_auto_timestamp = policy_bool(option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP"));
         let subscriber_overload = SubscriberOverload::stated();
@@ -495,6 +501,7 @@ impl SessionPolicy {
             tx_no_progress_deadline,
             tx_expiry_keeps_session,
             declaration_sync_pacing,
+            datagram_fragment_pacing,
             entity_timestamp_opt_in,
             reply_auto_timestamp,
             subscriber_overload,

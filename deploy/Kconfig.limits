@@ -292,6 +292,25 @@ config WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER
 	  closes the session, which is the policy as it was before this limit. At most
 	  65535: a larger value counts as 65535. It is read only when that policy is on.
 
+config WZ_LIMIT_DATAGRAM_FRAGMENT_BURST
+	int "DATAGRAM_FRAGMENT_BURST"
+	default 8
+	help
+	  How many fragments of a message a UDP link's writer writes in a row when the
+	  datagram-fragment-pacing policy is on, before the next one waits for
+	  DATAGRAM_FRAGMENT_GAP_US. At least 1. It is read only when that policy is on.
+
+config WZ_LIMIT_DATAGRAM_FRAGMENT_GAP_US
+	int "DATAGRAM_FRAGMENT_GAP_US"
+	default 1000
+	help
+	  How long, in microseconds, must pass after the last fragment was written
+	  before a UDP link's writer writes another one past the burst, when the
+	  datagram-fragment-pacing policy is on. At least 1 and at most 1000000 (one
+	  second): a longer wait would hold a message's fragments past the time a peer
+	  keeps a partly received message. The tokio engine rounds it up to its timer's
+	  millisecond. It is read only when that policy is on.
+
 config WZ_LIMIT_QUERY_PARAMETERS_MAX_BYTES
 	int "QUERY_PARAMETERS_MAX_BYTES"
 	default 0

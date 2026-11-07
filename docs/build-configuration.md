@@ -105,6 +105,17 @@ original reproduced by naming it. Three things follow from it:
   query of the node's own session is not bounded. The two limits count the bytes of the
   field, not the frame: a query whose value is long is not refused for it. As with every
   limit, the Zephyr build passes them to the image's cargo line.
+- **Pacing the fragments of a datagram link** (`datagram-fragment-pacing`, off by default,
+  with `DATAGRAM_FRAGMENT_BURST` = 8 and `DATAGRAM_FRAGMENT_GAP_US` = 1000, read only when the
+  policy is on): the writer of a UDP link, unicast or multicast, writes at most the burst of
+  fragments in a row, and holds the next until the gap has passed since the last write. The
+  wait is at the writer that puts datagrams on the socket and not at the sender that cuts the
+  message, which is held only for the room of the link's queue as it is with the policy off.
+  The rule is `fragment_pacing::FragmentPacer`, which owns no clock, so any engine can drive
+  it. Only the tokio engine does: QUIC datagrams (the transport paces itself) and WebSocket (a
+  stream) are not paced, and no Zephyr image, lwIP session or cooperative engine reads the
+  policy, so none of their trees has its symbol. The tokio timer's resolution is one
+  millisecond, so a gap is rounded up to it. A seal (the link closing) ends a wait at once.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and
