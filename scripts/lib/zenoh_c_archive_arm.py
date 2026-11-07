@@ -276,7 +276,7 @@ CAPABILITY_FEATURES = frozenset({
     "clock-source", "event-ring", "supervision", "resource-snapshot",
     # The identity a client presents over TLS, made on its computer (`wz_capi_c_identity_make`):
     # a wz-own door and the struct it fills, which no zenoh-c type holds, so no footprint moves.
-    # On in the default, as `transport_tls` it extends is.
+    # Off in the default and in every arm, as the observation plane's are.
     "identity-make",
 })
 

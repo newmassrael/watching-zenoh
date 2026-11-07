@@ -1611,7 +1611,7 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 ///
 /// It moves to 11 for the identity a client presents over TLS, made on the computer it runs on
 /// (`crate::identity`, `wz_capi_c_identity_make`), one new symbol and the struct it fills, in a
-/// build with `identity-make` (the default) on unix.
+/// build with `identity-make` (off by default, as the observation plane's features are) on unix.
 pub const WZ_CAPI_C_ABI_REVISION: i32 = 11;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it

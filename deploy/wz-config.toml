@@ -1193,6 +1193,10 @@ help = "The sending side of an end-to-end protected message (wz_capi_c_e2e_sende
 [[capability]]
 id = "identity-make"
 kconfig = "WZ_CAP_IDENTITY_MAKE"
+# Off by default: the certificate writer it links cost capic-default 147,929 B (hosted C1cs,
+# run 42403286547) for a door a client calls once, at its first start. A consumer that makes
+# its identity on its own computer turns it on.
+default = "off"
 os_needs = ["filesystem"]
 upstream_off = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]

@@ -1131,7 +1131,9 @@ z_result_t wz_capi_c_lifecycle_read(const uint8_t *bytes, size_t len,
  * is named. Either way the two files are then read back as the TLS link reads
  * them, the key must be the certificate's own and its owner's alone, and the
  * zid is the one a peer computes from the certificate. In builds with the
- * `identity-make` feature (the default) on unix. */
+ * `identity-make` feature, on unix. The feature is OFF by default (the
+ * certificate writer it links is large for a door called once): a program
+ * that makes its identity builds the library with it on. */
 
 /* The bytes the zid's text takes: at most 32 hex digits and its NUL. */
 #define WZ_CAPI_C_IDENTITY_ZID_MAX 33

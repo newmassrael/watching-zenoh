@@ -370,7 +370,7 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-port|hook|clock-source,event-ring,supervision,resource-snapshot|"
     # The same four as the zenoh-c ABI's doors (`wz_capi_c_*`): the unit tests of each module, which
     # a build made as the reference is compiles none of.
-    "wz-capi-c|hook|clock-source,event-ring,supervision,resource-snapshot|"
+    "wz-capi-c|hook|clock-source,event-ring,supervision,resource-snapshot,identity-make|"
     # The node a `z_open` holds behind a session handle (`router-node`): the roles file's one test
     # that opens a config keeping its south apart as the node that places a remote by it. The hosted
     # census refused the tree with "wz-capi-c has 12 test(s) only a feature build reaches ... leaving

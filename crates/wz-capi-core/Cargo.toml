@@ -78,7 +78,6 @@ default = [
     "transport_multilink",
     "auth_pubkey",
     "e2e-sender",
-    "identity-make",
     "transport_compression",
     "auth_usrpwd",
     "interceptors",

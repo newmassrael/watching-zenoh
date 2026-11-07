@@ -417,10 +417,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `supervision` and `snapshot`, whose public items are wz's own `wz_capi_c_*` doors, each
         # `#[no_mangle] extern "C"`, and the types and constants they take, all declared in
         # `wz_capi_c.h`. Off by default as the reference build is; upstream has no name for them.
+        # `identity-make` the same: it gates `pub mod identity`, whose public items are the door
+        # `wz_capi_c_identity_make` and the struct it fills, declared in `wz_capi_c.h`; off by
+        # default for the size of the certificate writer it links.
         frozenset(
             {
                 "clock-source",
                 "event-ring",
+                "identity-make",
                 "resource-snapshot",
                 "supervision",
                 "zenoh-c-no-unstable-api",
