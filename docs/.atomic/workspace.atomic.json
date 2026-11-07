@@ -12091,6 +12091,36 @@
       "carry_forward_bullets": [
         "A round citation written in a commit that travels with a round descriptor predicts the number file-round.sh will give it; when other rounds land first it is wrong and no gate resolves it against the ledger. Either the descriptor carries a token that file-round.sh substitutes, or gate_provenance_lint resolves a round citation against the store."
       ]
+    },
+    "Round 4403": {
+      "decision_summary": "The atomic store stops growing as one file. Measured before: 56 MB, past GitHub's 50 MB advisory, about 2.4 MB a week, and 48 percent of it the publishable half of each entry written again although only 22 of 4389 entries differ. The owner chose both remedies (2026-11-08). Mnemosyne ee934276 (its Round 1344, schema 49) writes a publishable field only where it differs from its audit twin, and lets a store seal its frozen ledger into segment files the main file pins by sha256. This store is sealed in segments of 500: the main file is 3.8 MB and holds sections, inventory and the open tail; eight segments hold the rest, 29 MB in all, and a round rewrites only the main file. Scripts that read the ledger read it through atomic_ledger.py, which joins the segments and refuses one whose bytes are not the pinned ones; the push runs its check. The home-path ceiling counts the segments with the main file.",
+      "changes_bullets": [
+        "Mnemosyne pin 183a17a5 -> ee934276 and MNEMOSYNE_MAX_SCHEMA 46 -> 49, in their own commit; cli and mcp installed at the pin",
+        "mnemosyne-cli set-ledger-segmentation --entries 500: docs/.atomic/workspace.atomic.json (main) and docs/.atomic/ledger/segment-0001..0008.json",
+        "scripts/lib/atomic_ledger.py: the ledger as one mapping without mnemosyne-cli, publishable fields filled from their audit twin, refusals for a missing, changed, other-generation or duplicate segment; --check and --selftest",
+        "pre-push gate list runs atomic_ledger.py --check; zephyr_board_table_gate.py reads changelog entries through it",
+        "home-path-scan.sh counts docs/.atomic/ledger/*.json with the main file; ceiling 137 -> 69, measured after the publishable copies left",
+        "the commit and push home-path checks (wz_home_path_pending, home_path_range_gate.py) grade the ledger's files as one record, so a line moved from the main file into a segment is not an addition; a selftest arm holds a seal (passes) and an append into a segment (named as the ledger)",
+        "nda-scan (pre-push gate 0) reads a line the range removes from one ledger file and adds to another as moved, not added, exact lines counted; every other file as before. The first push of the sealing was refused on lines of history moved into segments; a new line in a segment, and a line moved between two ordinary files, are still refused (selftest arms). Added lines are matched in one pass and attributed per line only on a hit",
+        "Hosted run 42403286547 (round 4402) acknowledged job by job in docs/hosted-red-acks.md; its Layer C1q red repaid here: the udp_multicast_config guard 13 -> 15, the count the run printed",
+        ".gitattributes: docs/.atomic/ledger/*.json text eol=lf, so a checkout keeps the bytes the sha256 pins"
+      ],
+      "verification_bullets": [
+        "mnemosyne-cli validate-workspace on the sealed store: exit 0, T1 orphan new=+0, T3 reject=0, entries 4395, publishable/audit divergence 22 with 22 ledger rows",
+        "mnemosyne-cli query --list-changelog lists 4395 rounds; atomic_ledger.py --check reads 4395 entries in 9 files in 0.11 s; its selftest 7 arms",
+        "verify-mnemosyne-pin: the installed cli reads schema 49; install-mnemosyne-mcp: the server at ee934276 answers initialize",
+        "home-path scan: 0 outside the ledger, 69 lines inside it",
+        "zephyr_board_table_gate selftest and check; round_fed_gate_reach, hook_gate_boundary, gate_provenance, python_floor and store_reader_lane lints; static bundle",
+        "mnemosyne at ee934276: its root suite and side workspaces green through verify.sh on the build host, recorded in its Round 1344"
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The history already pushed keeps its 56 MB blobs; only new rounds are small. Shrinking history would mean rewriting it, which is the owner's call and not this round's",
+        "Other sessions on this machine use the shared mnemosyne-cli, now at ee934276; a worktree still at the old pin is refused by the pin check until it rebases onto this round",
+        "Za claim: Q6 (the answer reader in a pure library) and Q5 (the C client witness) are next"
+      ]
     }
   },
   "inventory_entries": {
