@@ -315524,6 +315524,38 @@
         "The readings of sections 6.1 to 6.3 were taken over the recording link; section 6.6 gives the phase 0 instrument's reading over counting links."
       ]
     },
+    "Round 4389": {
+      "decision_summary": "The last round's carry said no lane names the unit tests of wz-zenoh. That was wrong, and a frozen entry is corrected by a new one. The crate is the package `zenoh`, a member of the workspace, and its tests under `internal` and `unstable` are rows of the table in `nondefault-tests-gate.sh` (two rows: `internal,unstable` and `shared-memory,unstable`). Pre-push gate 2h runs them and Layer C1bnl runs them with every other leg. What failed to happen was a verdict: an ordinary push defers the gate to hosted CI by the owner's sweep policy, and the hosted runs of the day were all cancelled, so the ledger defect of round 4369 met no run until a person ran the crate. The fix is not a new lane. It is to read a verdict where one can be had: the whole table was run on a build host against the current tree, once, and the cause of the missing verdict stays with the hosted job cap.",
+      "changes_bullets": [
+        "No source change. The correction of round 4383's open item is this entry: the unit tests of the package `zenoh` are claimed by two rows of the non-default test table and run by gate 2h and Layer C1bnl."
+      ],
+      "verification_bullets": [
+        "On a build host, `bash scripts/lib/nondefault-tests-gate.sh --all-legs` against the tree at the head of main: exit 0 in 2297 s. The rows of the package `zenoh` ran 227 tests (`internal,unstable`) and 230 (`shared-memory,unstable`); wz-runtime-tokio ran 2780 and wz-ap-demo 258, all passed.",
+        "The hosted CI runs listed for the day's landings are `cancelled` (account job cap), which is why no verdict existed."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Decided: the ordinary push does not gain the rows of reverse dependents. The owner's sweep policy keeps the push light and batches verification, and the missing piece is a verdict that arrives, not a heavier hook; it belongs to the fleet-verdict plan (the land.sh gate of its 4th stage), where the non-default rows run on a build host and not on the hosted job cap.",
+        "Open: the other leftovers of the Z8 list (lane margin gate once measured hosted runs exist, Windows, gossip test flake, client hat)."
+      ],
+      "publishable_decision_summary": "The last round's carry said no lane names the unit tests of wz-zenoh. That was wrong, and a frozen entry is corrected by a new one. The crate is the package `zenoh`, a member of the workspace, and its tests under `internal` and `unstable` are rows of the table in `nondefault-tests-gate.sh` (two rows: `internal,unstable` and `shared-memory,unstable`). Pre-push gate 2h runs them and Layer C1bnl runs them with every other leg. What failed to happen was a verdict: an ordinary push defers the gate to hosted CI by the owner's sweep policy, and the hosted runs of the day were all cancelled, so the ledger defect of round 4369 met no run until a person ran the crate. The fix is not a new lane. It is to read a verdict where one can be had: the whole table was run on a build host against the current tree, once, and the cause of the missing verdict stays with the hosted job cap.",
+      "publishable_changes_bullets": [
+        "No source change. The correction of round 4383's open item is this entry: the unit tests of the package `zenoh` are claimed by two rows of the non-default test table and run by gate 2h and Layer C1bnl."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, `bash scripts/lib/nondefault-tests-gate.sh --all-legs` against the tree at the head of main: exit 0 in 2297 s. The rows of the package `zenoh` ran 227 tests (`internal,unstable`) and 230 (`shared-memory,unstable`); wz-runtime-tokio ran 2780 and wz-ap-demo 258, all passed.",
+        "The hosted CI runs listed for the day's landings are `cancelled` (account job cap), which is why no verdict existed."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Decided: the ordinary push does not gain the rows of reverse dependents. The owner's sweep policy keeps the push light and batches verification, and the missing piece is a verdict that arrives, not a heavier hook; it belongs to the fleet-verdict plan (the land.sh gate of its 4th stage), where the non-default rows run on a build host and not on the hosted job cap.",
+        "Open: the other leftovers of the Z8 list (lane margin gate once measured hosted runs exist, Windows, gossip test flake, client hat)."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
