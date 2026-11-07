@@ -12152,6 +12152,27 @@
         "C1cs pico-client-udp, pico-peer, pico-default (hosted +3,340, +4,141, +5,574 bytes): fragment pacing, the keyexpr relation memo and the interface policy; pacing leaves its paced writer linked when the policy is off. The owner chooses between a strategy type for pacing and a budget move.",
         "C1cs capic-default (+150,253 bytes, 840 exports against 837), capic-client-small, capic-router-node, capic-default-lean: `identity-make` in the default build; its owning session takes it out of the default and re-measures."
       ]
+    },
+    "Round 4405": {
+      "decision_summary": "The identity maker leaves the default C library. Round 4395 put identity-make in the default features of wz-capi-c and wz-capi-core, and the certificate writer it links cost capic-default 147,929 B (hosted C1cs, run 42403286547, measured by the red-4386 session) for a door a client calls once, at its first start. It is now declared default off in deploy/wz-config.toml, as the observation plane's doors are, so the Cargo default agrees with the presets again (the Kconfig and both defconfigs already had it off). The lanes that grade the door turn it on with the observation plane: the ABI pin's debug and release builds, the C1cc library its C consumer links, and the wz-capi-c row of the non-default test gate. A consumer that makes its identity builds the library with the feature on.",
+      "changes_bullets": [
+        "deploy/wz-config.toml identity-make default = off; regenerated Kconfig.capabilities and both defconfigs; wz-capi-c and wz-capi-core default lists drop it",
+        "run-ci: the plane feature lists of the ABI pin builds and of C1cc add identity-make; nondefault-tests-gate wz-capi-c row adds it; feature_public_surface_census names it OFF_AXIS with the observation plane; zenoh_c_archive_arm says off in the default",
+        "wz_capi_c.h, abi.rs, capi_c_abi_pin.py and the Cargo comment say the feature is off by default; conformance/differential*/Cargo.lock refreshed"
+      ],
+      "verification_bullets": [
+        "pc2: default wz-capi-c builds and exports no wz_capi_c_identity_make (nm -D); with the plane features: identity tests 3 passed, clippy all targets clean with and without them, ABI pin revision 11 with 101 doors over debug and release, c_identity_consumer ok",
+        "wz_config.py --check; feature_public_surface_census, feature_gate_diagnostic and zenoh_c_archive_arm checks; static bundle",
+        "capic sizes are re-measured by C1cs on the next hosted run (the red-4386 session reads them)"
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The za consumer builds its library with --features identity-make to keep wz_capi_c_identity_make",
+        "mnemosyne: a sealed store's validate-workspace reads verification records as UNDECIDABLE (the committed main file is read as one blob, the segments are not spliced from git)",
+        "core.hooksPath is absolute and points at the main checkout's working tree, so a worktree push can run a stale pre-push; the owner decides whether it becomes relative"
+      ]
     }
   },
   "inventory_entries": {
