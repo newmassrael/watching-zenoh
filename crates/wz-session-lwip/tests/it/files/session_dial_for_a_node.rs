@@ -16,7 +16,14 @@
 // Decision D4 of docs/session-lifecycle-intent.md -- a dial the fixed-memory host makes for a
 // node closes at an InitAck from another one, with INVALID and no OpenSyn; on the node's real
 // profile, as the exhaustion test above runs it.
-#![cfg(all(feature = "session-unicast-open", feature = "session-unicast-accept", feature = "pubsub-put", feature = "codec-close", feature = "session-slot", feature = "static-link-storage"))]
+#![cfg(all(
+    feature = "session-unicast-open",
+    feature = "session-unicast-accept",
+    feature = "pubsub-put",
+    feature = "codec-close",
+    feature = "session-slot",
+    feature = "static-link-storage"
+))]
 
 use std::rc::Rc;
 
