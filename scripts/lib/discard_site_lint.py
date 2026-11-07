@@ -135,6 +135,15 @@ ACCOUNTING = (
 # excuse another crate's site.
 ALLOWED = [
     (
+        "wz-capture/field_values.rs",
+        "fold.held.retain(|h| {",
+        "The values door gives up the payloads of the rows a caller's cursor has "
+        "passed: they were written to that caller under an earlier cursor, and the "
+        "capture's own evidence (the rows, the census) is untouched. A cursor "
+        "below the one last asked begins the walk again, so nothing a later call "
+        "can ask for is lost.",
+    ),
+    (
         "wz-session-core/passive_messages.rs",
         # R2102 — `self.0` became `self.held` when `MessageList` grew its
         # `produced` counter and stopped being a tuple struct. The line is
