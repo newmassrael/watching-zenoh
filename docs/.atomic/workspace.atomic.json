@@ -314978,6 +314978,40 @@
         "Open: the refusal count is read only through QueryableRegistry::oversize_refusals; no node reports it (the admin space, the C ABIs and the observation instruments do not read it); a query with a long attachment is not dispatched in any test (the rule is); the Zephyr rows of the board table were not configured again for the two new default environment entries; clippy was run with the query features only, not with the fixed-memory profile features; the router's forwarding of a query is not bounded (this limit is the node's own queryables). Remaining of item 3, in the plan's order after this: datagram-fragment-pacing (needs a pause primitive on the link seam that the lock-held fragment walk can use, and a turn-based form for the cooperative and MCU engines), publisher admission retry, refusing a multicast link with no interface, entity-link-restriction, reliable-gap-reconnect (its gap event first), targeted-query, multi-route-atomic-tx."
       ]
     },
+    "Round 4375": {
+      "decision_summary": "The two C ABI crates that round 4291's list left for the platform.yml probe are settled, and the settling is a rule of the merge tool. The probe is already answered in the file: its capi job runs `cargo test --tests` for a crate that holds `tests/*.rs` or `tests/*/main.rs`, so a merged crate is covered on both hosted hosts. What the tool's plan decides is which files may be modules: wz-capi-pico, wz-capi-c and wz-capi-dissect have only files that stay (the seven that call the `wz_ext_*` registries, and the two that install a `#[global_allocator]`), and wz-capi-coop's two files were planned as one target although they start the mbedtls channel library on arenas of different sizes. The library starts once per process, so a shared executable would run the second file on the arena the first chose, and `tls_sessions` measures the peak of the arena it started. The tool now keeps a file that names `wz_tls_mbedtls::channel` or includes that crate's test helper, which is the same reason wz-tls-mbedtls was left alone, now stated by the tool and not by the person running it. No test file moves in this round.",
+      "changes_bullets": [
+        "scripts/lib/merge_tests.py: `PROCESS_TLS_LIBRARY` keeps a file that names `wz_tls_mbedtls::channel` or includes `wz-tls-mbedtls/tests/common`, with its line in the module's list of files that are not merged and a selftest check (`tlslib` stays).",
+        "The plan of every C ABI crate and of wz-tls-mbedtls now reads: wz-capi-pico 0 merge and 7 stay, wz-capi-c 0 and 1, wz-capi-dissect 0 and 1, wz-capi-coop 0 and 2, wz-tls-mbedtls 0 and 7."
+      ],
+      "verification_bullets": [
+        "`scripts/lib/merge_tests.py --selftest`: OK, with the new check. `--plan` of wz-capi-pico, wz-capi-c, wz-capi-dissect, wz-capi-coop and wz-tls-mbedtls on the tree: no file merges, each stay names its reason. The files the new rule keeps are exactly the ten that name the channel library (two of wz-capi-coop, seven of wz-tls-mbedtls and its helper), found by a search of every test source of the workspace before the rule was written.",
+        "Not run: a build of any crate, since no test file moved; hosted CI."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Closed: round 4291's list of crates has none left to move; each file that stays in the C ABI crates and wz-tls-mbedtls is kept by a rule the tool prints (registry statics, a global allocator, the mbedtls channel library).",
+        "Open: a hosted run of rounds 4369 and 4370, which were cancelled by the account's job limit; Layers C1g, C1m, C1n, the nondefault-tests gate and Layer C0 meet a `files::<file>::` filter for the first time there."
+      ],
+      "publishable_decision_summary": "The two C ABI crates that round 4291's list left for the platform.yml probe are settled, and the settling is a rule of the merge tool. The probe is already answered in the file: its capi job runs `cargo test --tests` for a crate that holds `tests/*.rs` or `tests/*/main.rs`, so a merged crate is covered on both hosted hosts. What the tool's plan decides is which files may be modules: wz-capi-pico, wz-capi-c and wz-capi-dissect have only files that stay (the seven that call the `wz_ext_*` registries, and the two that install a `#[global_allocator]`), and wz-capi-coop's two files were planned as one target although they start the mbedtls channel library on arenas of different sizes. The library starts once per process, so a shared executable would run the second file on the arena the first chose, and `tls_sessions` measures the peak of the arena it started. The tool now keeps a file that names `wz_tls_mbedtls::channel` or includes that crate's test helper, which is the same reason wz-tls-mbedtls was left alone, now stated by the tool and not by the person running it. No test file moves in this round.",
+      "publishable_changes_bullets": [
+        "scripts/lib/merge_tests.py: `PROCESS_TLS_LIBRARY` keeps a file that names `wz_tls_mbedtls::channel` or includes `wz-tls-mbedtls/tests/common`, with its line in the module's list of files that are not merged and a selftest check (`tlslib` stays).",
+        "The plan of every C ABI crate and of wz-tls-mbedtls now reads: wz-capi-pico 0 merge and 7 stay, wz-capi-c 0 and 1, wz-capi-dissect 0 and 1, wz-capi-coop 0 and 2, wz-tls-mbedtls 0 and 7."
+      ],
+      "publishable_verification_bullets": [
+        "`scripts/lib/merge_tests.py --selftest`: OK, with the new check. `--plan` of wz-capi-pico, wz-capi-c, wz-capi-dissect, wz-capi-coop and wz-tls-mbedtls on the tree: no file merges, each stay names its reason. The files the new rule keeps are exactly the ten that name the channel library (two of wz-capi-coop, seven of wz-tls-mbedtls and its helper), found by a search of every test source of the workspace before the rule was written.",
+        "Not run: a build of any crate, since no test file moved; hosted CI."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Closed: round 4291's list of crates has none left to move; each file that stays in the C ABI crates and wz-tls-mbedtls is kept by a rule the tool prints (registry statics, a global allocator, the mbedtls channel library).",
+        "Open: a hosted run of rounds 4369 and 4370, which were cancelled by the account's job limit; Layers C1g, C1m, C1n, the nondefault-tests gate and Layer C0 meet a `files::<file>::` filter for the first time there."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
