@@ -24,8 +24,6 @@
 //! resource; each cargo integration-test file is its own process). Mirrors the
 //! per-file split of the other acceptor host tests.
 
-#![cfg(feature = "lwip")]
-
 use wz_mcu_session_acceptor::{
     run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy,
     ReassemblyDropReason,

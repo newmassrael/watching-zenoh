@@ -40,6 +40,9 @@ A file is NOT merged when it must be its own process or cannot be a module:
   * it starts or reads the mbedtls channel library (`PROCESS_TLS_LIBRARY`: it names
     `wz_tls_mbedtls::channel` or includes that crate's test helper): the library starts once per
     process on one arena, and a neighbour would run on the arena the first file chose;
+  * it brings the lwIP stack up itself (`PROCESS_LWIP`): lwIP is brought up once per process, and
+    a neighbour that brought it up again would stop on lwIP's `netif already added` assertion (a
+    file on the shared gate `lwip_test_link` merges);
   * an explicit `--keep NAME` (a file that reads the process's environment, its working directory
     or a signal, which a neighbour in the same process could disturb).
 
@@ -116,6 +119,17 @@ PROCESS_REGISTRY = re.compile(r"\bwz_ext_(?:clock|event|supervision|snapshot|res
 # `wz-capi-coop`'s two files start it on a small and a 4 MiB arena, and exactly the files of
 # `wz-tls-mbedtls` and `wz-capi-coop` that touch it name the channel.
 PROCESS_TLS_LIBRARY = re.compile(r"\bwz_tls_mbedtls::channel\b|wz-tls-mbedtls/tests/common")
+# lwIP under NO_SYS=1 keeps its stack in globals and is brought up ONCE per process: a second
+# `lwip_init` adds the loopback interface again and lwIP asserts (`netif already added`). A file
+# that brings the stack up itself (`LwipLink::init`, `init_static`, `lwip_init`, or the acceptor
+# scenario `run_acceptor_e2e*`, which does it through `LwipTopology::new`) is its own process; a
+# file that takes the shared gate `lwip_test_link` brings it up once for every file and merges.
+# Measured 2026-11-08: the four merged acceptor files, which a shared executable stopped on that
+# assertion (hosted run 42354628317, C1n), and three files that stay for other reasons.
+PROCESS_LWIP = re.compile(
+    r"\bLwipLink::init(?:_static)?\s*\(|\blwip_init\s*\(|\bLwipTopology::new\s*\("
+    r"|\brun_acceptor_e2e\w*\s*\("
+)
 # A file that says of itself that it needs a process of its own (its header gives the reason).
 PROCESS_OWN = re.compile(r"(?i)\b(?:in a process of its own|in its own process|needs? its own process)\b")
 KEYWORDS = {
@@ -301,6 +315,8 @@ def classify(
         elif PROCESS_TLS_LIBRARY.search(text):
             stay.append((name, "starts or reads the mbedtls channel library, which a process "
                                "starts once on one arena"))
+        elif PROCESS_LWIP.search(text):
+            stay.append((name, "brings the lwIP stack up itself, which a process does once"))
         elif PROCESS_OWN.search(text):
             stay.append((name, "says it needs a process of its own"))
         elif PROCESS_WRITE.search(text):
@@ -617,13 +633,17 @@ def selftest() -> int:
                        "#[test] fn t() {}\n",
             "tlslib": "use wz_tls_mbedtls::channel::start;\n#[test] fn t() {}\n",
             "prose": "//! The doors wz_ext are described in the book.\n#[test] fn t() {}\n",
+            "lwipup": "#[test] fn t() { let r = run_acceptor_e2e(C, E, || {}); }\n",
+            "lwipgate": "#[test] fn t() { let (_g, link) = wz_link_lwip::lwip_test_link(); }\n",
         }.items():
             (crate / "tests" / f"{name}.rs").write_text(body)
         merge, stay = classify(crate, {"kept"})
-        check("merge set", merge == {"it": ["envread", "gated", "plain", "prose"]})
+        check("merge set", merge == {"it": ["envread", "gated", "lwipgate", "plain", "prose"]})
         check("stay set", {n for n, _ in stay}
               == {"alloc", "tabled", "mainful", "kept", "9bad", "envset", "registry", "ownproc",
-                  "tlslib"})
+                  "tlslib", "lwipup"})
+        check("a file that brings lwIP up stays, one on the shared gate merges",
+              "lwipup" in {n for n, _ in stay} and "lwipgate" in merge["it"])
         check("a call into a process registry keeps a file, prose naming the family does not",
               "registry" in {n for n, _ in stay} and "prose" not in {n for n, _ in stay})
         check("a file that starts the mbedtls channel library stays",
