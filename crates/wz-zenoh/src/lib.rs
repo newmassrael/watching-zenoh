@@ -402,6 +402,11 @@ pub mod timestamp_stack {
 /// helpers re-exported from the family's crates) arrives with the slices that give them a body.
 #[zenoh_macros::internal]
 pub mod internal {
+    /// The node several sessions share, and the session that is made on it
+    /// ([`session::init`](crate::session::init)).
+    pub mod runtime {
+        pub use crate::api::runtime::{DynamicRuntime, Runtime, RuntimeBuilder};
+    }
     #[zenoh_macros::unstable]
     pub mod builders {
         pub mod close {
@@ -636,7 +641,8 @@ pub mod session {
     #[zenoh_macros::unstable]
     pub use zenoh_protocol::core::EntityId;
 
-    // Of upstream's module the `init` builder, internal there, is not here.
+    #[zenoh_macros::internal]
+    pub use crate::api::runtime::{init, InitBuilder};
     #[zenoh_macros::internal]
     pub use crate::api::session::WeakSession;
     pub use crate::api::{

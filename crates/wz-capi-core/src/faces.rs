@@ -668,8 +668,9 @@ enum Admission {
 /// waits for three peers of a router and was let through with two, which started its
 /// publications before the third peer was linked). Upstream makes the watch and the listing one
 /// step; the engines here take them as two, so the listener keeps the state that makes the order
-/// between them not matter: a face already told up is not told up again, and a down is told
-/// only for a face told up.
+/// between them not matter: a face already told up is not told up again. A down is always told:
+/// it comes from the watch alone, so it cannot be told twice, and a listener declared without
+/// history was never told of the faces that were up before it, which still go down for it.
 pub struct FaceLedger<K>(StdMutex<Vec<K>>);
 
 impl<K: PartialEq + Clone> FaceLedger<K> {
@@ -691,19 +692,17 @@ impl<K: PartialEq + Clone> FaceLedger<K> {
         true
     }
 
-    /// Whether `key` was told up and is now down, and so is to be told.
+    /// Forget `key`, which is down: it is told up again if it comes back. Always `true`, a down
+    /// being told whether or not the listener was told of the face coming up.
     pub fn down(&self, key: &K) -> bool {
         let mut told = self
             .0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match told.iter().position(|held| held == key) {
-            Some(at) => {
-                told.swap_remove(at);
-                true
-            }
-            None => false,
+        if let Some(at) = told.iter().position(|held| held == key) {
+            told.swap_remove(at);
         }
+        true
     }
 }
 
@@ -725,14 +724,16 @@ mod face_ledger_tests {
         assert!(told.up(&7), "the history lists the face: reported");
         assert!(!told.up(&7), "the watch tells of the same face: not again");
         assert!(told.down(&7), "it goes down: reported");
-        assert!(!told.down(&7), "a second down is not");
         assert!(told.up(&7), "it comes up again: reported again");
     }
 
+    /// A listener without history is told of no face that was up before it, and still of its
+    /// going down; the face that comes back is told up as a new one.
     #[test]
-    fn a_down_for_a_face_never_told_up_is_not_reported() {
+    fn a_down_for_a_face_never_told_up_is_reported() {
         let told = FaceLedger::<u8>::new();
-        assert!(!told.down(&1));
+        assert!(told.down(&1));
+        assert!(told.up(&1));
     }
 }
 

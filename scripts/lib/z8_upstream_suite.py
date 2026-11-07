@@ -295,11 +295,12 @@ def manifest(deps: dict[str, str], member: dict[str, list[str]], out: pathlib.Pa
         lines.append(f'{name} = {{ version = "={TAG}", features = {feats!r} }}'.replace("'", '"'))
     for name in UPSTREAM_CRATES:
         lines.append(f'{name} = "={TAG}"')
-    # Without `internal`: that feature of the helper imports `zenoh::internal::runtime::{Runtime,
-    # RuntimeBuilder}`, which the crate does not publish (the engine is the runtime), and with it on
-    # every one of the 33 files failed to compile on that one import (first measurement). Off, the
-    # helper builds and only a test that asks for a `Runtime` of its own stops on it, which is the
-    # file-by-file answer this harness is for.
+    # The helper's `internal` feature imports `zenoh::internal::runtime::{Runtime, RuntimeBuilder}`
+    # and gives the tests a pair of runtimes (`open_pairs_runtime`). It is given by the package's
+    # own `internal` feature, which is on only for the files that ask for it (`FILE_FEATURES`):
+    # when the crate did not publish the runtime, with the feature on every one of the 33 files
+    # failed to compile on that one import (first measurement), and the file-by-file answer this
+    # harness is for needed it off for the others.
     lines.append('zenoh-test = { path = "zenoh-test", features = ["unstable"] }')
     lines.append(
         'tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync", "io-util", "net", "fs", "signal"] }'
@@ -324,7 +325,7 @@ def manifest(deps: dict[str, str], member: dict[str, list[str]], out: pathlib.Pa
         "[features]",
         "default = []",
         'unstable = ["zenoh/unstable", "zenoh-config/unstable", "zenoh-protocol/unstable", "zenoh-keyexpr/unstable"]',
-        'internal = ["zenoh/internal", "zenoh-config/internal", "zenoh-protocol/internal", "zenoh-keyexpr/internal"]',
+        'internal = ["zenoh/internal", "zenoh-config/internal", "zenoh-protocol/internal", "zenoh-keyexpr/internal", "zenoh-test/internal"]',
         # `zenoh-transport` is upstream's, from the registry: its handshake messages carry `ext_shm`
         # only when it is built with the feature too, and the protocol crate it shares with the
         # family has the field exactly when the feature is on, so the two must agree.
@@ -473,9 +474,13 @@ DEFAULT_FEATURES = "unstable,shared-memory,transport_tcp,transport_udp,transport
 #: (the entry of the `regions` test directory opens with `#![cfg(feature = "internal")]`:
 #: measured as 0 tests under the default, 126 with the feature; `keyexpr` and `atexit` hold tests
 #: that only the feature compiles in: 16 against 15, and the close that runs in the background).
-#: The files that ask for a `Runtime` of the node are not in this table: they need
-#: `zenoh::internal::runtime`, which this crate does not carry.
-FILE_FEATURES = {"regions": ("internal",), "keyexpr": ("internal",), "atexit": ("internal",)}
+#: `session` asks for a `Runtime` of the node (`open_pairs_runtime`, `session::init`).
+FILE_FEATURES = {
+    "regions": ("internal",),
+    "keyexpr": ("internal",),
+    "atexit": ("internal",),
+    "session": ("internal",),
+}
 
 #: Files whose tests each run in a process of their own, as upstream's CI runs them (nextest starts
 #: one process per test). Every scenario module of `regions` installs its capture subscriber with

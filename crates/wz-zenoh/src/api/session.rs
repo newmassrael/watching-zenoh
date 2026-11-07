@@ -28,7 +28,7 @@ use std::sync::atomic::AtomicU64;
 use std::{
     fmt,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -41,9 +41,11 @@ use zenoh_config::wrappers::EntityGlobalId;
 use zenoh_config::wrappers::ZenohId;
 use zenoh_core::{Resolve, ResolveClosure, Wait};
 use zenoh_keyexpr::keyexpr_tree::{IKeyExprTree, IKeyExprTreeNode, KeBoxTree};
-use zenoh_protocol::core::{CongestionControl, EntityId, ExprId, Parameters, Timestamp};
+#[cfg(any(feature = "unstable", feature = "internal"))]
+use zenoh_protocol::core::Locator;
 #[cfg(feature = "unstable")]
-use zenoh_protocol::core::{Locator, Reliability};
+use zenoh_protocol::core::Reliability;
+use zenoh_protocol::core::{CongestionControl, EntityId, ExprId, Parameters, Timestamp};
 use zenoh_protocol::network::request::{self, ext::QueryTarget};
 #[cfg(feature = "unstable")]
 use zenoh_protocol::network::timestamp_stack::interception_point;
@@ -754,7 +756,7 @@ impl Engine {
     }
 
     /// The locators the session's listeners got, without the loopback ones, as words.
-    #[cfg(feature = "unstable")]
+    #[cfg(any(feature = "unstable", feature = "internal"))]
     fn listen_locators(&self) -> Vec<String> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().listen_locators(),
@@ -1477,7 +1479,7 @@ impl Engine {
         match *self {}
     }
 
-    #[cfg(feature = "unstable")]
+    #[cfg(any(feature = "unstable", feature = "internal"))]
     fn listen_locators(&self) -> Vec<String> {
         match *self {}
     }
@@ -3677,7 +3679,14 @@ struct QuerierEntry {
 pub(crate) struct SessionInner {
     /// See [`WeakSession`] doc
     strong_counter: AtomicUsize,
-    engine: Engine,
+    /// The node the session runs on, which a runtime of the application can share with other
+    /// sessions ([`Runtime`](crate::api::runtime::Runtime)).
+    engine: Arc<Engine>,
+    /// Whether this session closes the node when it closes: the session `open` makes does, and
+    /// one that `init` makes on a runtime does not (the runtime does, by its own close).
+    owns_engine: bool,
+    /// Set by the close of a session that does not own its node, which the node cannot say.
+    closed: AtomicBool,
     id: EntityId,
     zid: ZenohId,
     /// The group every entity of the session counts its callback in, until the callback is dropped:
@@ -3688,7 +3697,7 @@ pub(crate) struct SessionInner {
     queries_default_timeout: Duration,
     /// The quality of service the configuration (`qos/publication`) sets for the publications on
     /// the keys it names, which a publisher or a put takes in place of what its builder says.
-    publisher_qos_tree: KeBoxTree<PublisherQoSConfig>,
+    publisher_qos_tree: Arc<KeBoxTree<PublisherQoSConfig>>,
     /// The configuration the session was opened with, as the application reads it
     /// ([`Session::config`]).
     #[cfg(feature = "unstable")]
@@ -3708,7 +3717,7 @@ pub(crate) struct SessionInner {
         feature = "shared-memory",
         feature = "engine-tokio"
     ))]
-    shm_promoter: Option<crate::api::shm::transport::Promoter>,
+    shm_promoter: Option<Arc<crate::api::shm::transport::Promoter>>,
     /// The clients of shared memory segments the application opened the session with
     /// ([`OpenBuilder::with_shm_clients`](crate::session::OpenBuilder::with_shm_clients)). The
     /// session negotiates no shared memory with its peers yet, so no segment is read through them:
@@ -3746,6 +3755,12 @@ pub(crate) struct SessionInner {
 }
 
 impl SessionInner {
+    /// Whether the session is closed: its own close ran, or the node it runs on was closed (by the
+    /// close of the session that owns it, or by the runtime).
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire) || self.engine.is_closed()
+    }
+
     fn tokens(&self) -> std::sync::MutexGuard<'_, Vec<Id>> {
         self.tokens
             .lock()
@@ -3764,7 +3779,7 @@ impl SessionInner {
     /// retracts it.
     fn declare_liveliness_inner(self: &Arc<Self>, key_expr: &KeyExpr) -> ZResult<Id> {
         tracing::trace!("declare_liveliness({:?})", key_expr);
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         let anchor: SessionAnchor = self.clone();
@@ -3775,7 +3790,7 @@ impl SessionInner {
             .declare_liveliness_token(key_expr.as_str(), wire.scope, suffix)?;
         self.tokens().push(id);
         // A close that ran between the check and the record has not seen this token.
-        if self.engine.is_closed() {
+        if self.is_closed() {
             self.release_tokens();
             return Err(SessionClosedError.into());
         }
@@ -3785,7 +3800,7 @@ impl SessionInner {
     /// Retract the liveliness token `id`. A closed session has none, and retracting on it is no
     /// error; the retraction of one the session does not hold is none either, as upstream's.
     fn undeclare_liveliness_inner(&self, id: Id) -> ZResult<()> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Ok(());
         }
         let known = {
@@ -3810,7 +3825,7 @@ impl SessionInner {
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
         tracing::trace!("declare_liveliness_subscriber({:?})", key_expr);
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         let anchor: SessionAnchor = self.clone();
@@ -3831,7 +3846,7 @@ impl SessionInner {
             })?;
         self.subscriptions().push(id);
         // A close that ran between the check and the record has not seen this subscription.
-        if self.engine.is_closed() {
+        if self.is_closed() {
             self.release_subscriptions();
             return Err(SessionClosedError.into());
         }
@@ -3848,7 +3863,7 @@ impl SessionInner {
         #[cfg(feature = "unstable")] cancellation_token: Option<CancellationToken>,
     ) -> ZResult<()> {
         tracing::trace!("liveliness.get({}, {:?})", key_expr, timeout);
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         #[cfg(feature = "unstable")]
@@ -3898,7 +3913,7 @@ impl SessionInner {
         callback: Callback<MatchingStatus>,
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         tracing::trace!("declare_matches_listener({kind:?}: {key_expr:?})");
@@ -3911,7 +3926,7 @@ impl SessionInner {
         )?;
         self.matching_listeners().push(id);
         // A close that ran between the check and the record has not seen this listener.
-        if self.engine.is_closed() {
+        if self.is_closed() {
             self.release_matching_listeners();
             return Err(SessionClosedError.into());
         }
@@ -3921,7 +3936,7 @@ impl SessionInner {
     /// Undeclare the matching listener `id`: a closed session has none, and undeclaring on it is
     /// no error; an id the session does not hold is one.
     fn undeclare_matches_listener_inner(&self, id: Id) -> ZResult<()> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Ok(());
         }
         let known = {
@@ -3971,7 +3986,7 @@ impl SessionInner {
         listeners: &std::sync::Mutex<Vec<Id>>,
         sink: FaceSink,
     ) -> ZResult<Id> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         let watch = self.engine.watch_faces(sink);
@@ -3987,7 +4002,7 @@ impl SessionInner {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(id);
         // A close that ran between the check and the record has not seen this listener.
-        if self.engine.is_closed() {
+        if self.is_closed() {
             self.release_connectivity_listeners();
             return Err(SessionClosedError.into());
         }
@@ -4104,7 +4119,7 @@ impl SessionInner {
         id: Id,
         what: &str,
     ) -> ZResult<()> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Ok(());
         }
         let known = {
@@ -4212,7 +4227,7 @@ impl SessionInner {
         key_expr: &KeyExpr,
         destination: Locality,
     ) -> ZResult<Id> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         tracing::trace!("declare_querier({:?})", key_expr);
@@ -4230,7 +4245,7 @@ impl SessionInner {
             pending: vec![],
         });
         // A close that ran between the check and the record has not seen this querier.
-        if self.engine.is_closed() {
+        if self.is_closed() {
             self.release_queriers();
             return Err(SessionClosedError.into());
         }
@@ -4240,7 +4255,7 @@ impl SessionInner {
     /// Undeclare the querier `id`: a closed session has none, and undeclaring on it is no error;
     /// an id the session does not hold is one.
     fn undeclare_querier_inner(&self, id: Id) -> ZResult<()> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Ok(());
         }
         let entry = {
@@ -4267,7 +4282,7 @@ impl SessionInner {
         callback: Callback<Query>,
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         tracing::trace!("declare_queryable({:?})", key_expr);
@@ -4294,7 +4309,7 @@ impl SessionInner {
         })?;
         self.queryables().push((eid, engine_id));
         // A close that ran between the check and the record has not seen this queryable.
-        if self.engine.is_closed() {
+        if self.is_closed() {
             self.release_queryables();
             return Err(SessionClosedError.into());
         }
@@ -4323,7 +4338,7 @@ impl SessionInner {
         key_expr: &KeyExpr,
         destination: Locality,
     ) -> ZResult<Id> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         tracing::trace!("declare_publisher({:?})", key_expr);
@@ -4338,7 +4353,7 @@ impl SessionInner {
         })?;
         self.publishers().push(id);
         // A close that ran between the check and the record has not seen this publisher.
-        if self.engine.is_closed() {
+        if self.is_closed() {
             self.release_publishers();
             return Err(SessionClosedError.into());
         }
@@ -4364,7 +4379,7 @@ impl SessionInner {
         attachment: Option<ZBytes>,
         #[cfg(feature = "unstable")] timestamp_instrumentation: Option<TimestampInstrumentation>,
     ) -> ZResult<()> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         // A publication that asks for its instrumentation starts the stack the nodes it crosses
@@ -4410,7 +4425,7 @@ impl SessionInner {
                 feature = "shared-memory",
                 feature = "engine-tokio"
             ))]
-            shm_promoter: self.shm_promoter.as_ref(),
+            shm_promoter: self.shm_promoter.as_deref(),
         })
     }
 
@@ -4440,7 +4455,7 @@ impl SessionInner {
             target,
             consolidation
         );
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         // A query of a querier counts in the querier's group, which is the session's child. A
@@ -4599,8 +4614,127 @@ impl Session {
             Arc<zenoh_shm::api::client_storage::ShmClientStorage>,
         >,
     ) -> ZResult<Session> {
-        let (engine, zid) = Engine::open(
+        let core = RuntimeCore::open(
             &config,
+            #[cfg(feature = "unstable")]
+            timestamp_callback,
+            #[cfg(feature = "shared-memory")]
+            shm_clients,
+        )?;
+        let session = Session::on(core, true);
+        #[cfg(feature = "unstable")]
+        crate::api::admin::init(session.downgrade());
+        Ok(session)
+    }
+
+    /// A session on the node `core` holds. One that `owns_engine` closes the node when it closes.
+    /// Its entities, its callbacks and its closing are its own: what several sessions of a node
+    /// share is the node, the identity, the configuration and the clocks.
+    pub(crate) fn on(core: RuntimeCore, owns_engine: bool) -> Session {
+        let id = u32::try_from(core.engine.next_entity_id()).unwrap_or(u32::MAX);
+        Session(Arc::new(SessionInner {
+            strong_counter: AtomicUsize::new(1),
+            engine: core.engine,
+            owns_engine,
+            closed: AtomicBool::new(false),
+            id,
+            zid: core.zid,
+            callbacks_drop_sync_group: SyncGroup::default(),
+            queries_default_timeout: core.queries_default_timeout,
+            publisher_qos_tree: core.publisher_qos_tree,
+            #[cfg(feature = "unstable")]
+            config: core.config,
+            #[cfg(feature = "unstable")]
+            timestamps: core.timestamps,
+            #[cfg(all(
+                feature = "unstable",
+                feature = "shared-memory",
+                feature = "engine-tokio"
+            ))]
+            shm_promoter: core.shm_promoter,
+            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            shm_provider: core.shm_provider,
+            #[cfg(feature = "shared-memory")]
+            shm_clients: core.shm_clients,
+            subscriptions: std::sync::Mutex::new(vec![]),
+            publishers: std::sync::Mutex::new(vec![]),
+            queryables: std::sync::Mutex::new(vec![]),
+            queriers: std::sync::Mutex::new(vec![]),
+            pending_queries: std::sync::Mutex::new(PendingQueries::default()),
+            matching_listeners: std::sync::Mutex::new(vec![]),
+            tokens: std::sync::Mutex::new(vec![]),
+            #[cfg(feature = "unstable")]
+            transport_listeners: std::sync::Mutex::new(vec![]),
+            #[cfg(feature = "unstable")]
+            link_listeners: std::sync::Mutex::new(vec![]),
+        }))
+    }
+}
+
+/// What a node and the sessions on it share: the engine, the identity, the configuration, the
+/// clocks and the shared memory. Made once by [`RuntimeCore::open`]; a session takes a clone
+/// ([`Session::on`]), so that two sessions of a node hold the same node and nothing else.
+#[derive(Clone)]
+pub(crate) struct RuntimeCore {
+    engine: Arc<Engine>,
+    zid: ZenohId,
+    queries_default_timeout: Duration,
+    publisher_qos_tree: Arc<KeBoxTree<PublisherQoSConfig>>,
+    #[cfg(feature = "unstable")]
+    config: crate::api::config::Notifier<zenoh_config::ExpandedConfig>,
+    #[cfg(feature = "unstable")]
+    timestamps: Arc<TimestampSource>,
+    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    shm_provider: Option<Arc<crate::api::shm::LazyShmProvider>>,
+    #[cfg(all(
+        feature = "unstable",
+        feature = "shared-memory",
+        feature = "engine-tokio"
+    ))]
+    shm_promoter: Option<Arc<crate::api::shm::transport::Promoter>>,
+    #[cfg(feature = "shared-memory")]
+    shm_clients: Option<Arc<zenoh_shm::api::client_storage::ShmClientStorage>>,
+}
+
+#[cfg(feature = "internal")]
+impl RuntimeCore {
+    /// The locators the node listens on, as upstream's runtime lists them
+    /// (`get_locators_noloopback`). A locator the Rust API cannot hold is left out and said.
+    pub(crate) fn locators(&self) -> Vec<Locator> {
+        self.engine
+            .listen_locators()
+            .iter()
+            .filter_map(|text| match Locator::try_from(text.as_str()) {
+                Ok(locator) => Some(locator),
+                Err(error) => {
+                    tracing::warn!("the engine listens on {text:?}, which is no locator: {error}");
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.engine.is_closed()
+    }
+
+    /// Close the node: its faces end, and every session on it is closed with it.
+    pub(crate) fn close(&self) {
+        self.engine.close();
+    }
+}
+
+impl RuntimeCore {
+    /// Open the node `config` describes on the selected engine.
+    pub(crate) fn open(
+        config: &Config,
+        #[cfg(feature = "unstable")] timestamp_callback: Option<GetTimestampCallback>,
+        #[cfg(feature = "shared-memory")] shm_clients: Option<
+            Arc<zenoh_shm::api::client_storage::ShmClientStorage>,
+        >,
+    ) -> ZResult<RuntimeCore> {
+        let (engine, zid) = Engine::open(
+            config,
             #[cfg(feature = "shared-memory")]
             shm_clients.clone(),
         )?;
@@ -4614,7 +4748,6 @@ impl Session {
         let node_clock = engine.node_clock();
         #[cfg(feature = "unstable")]
         let engine_routes = engine.records_routing();
-        let id = u32::try_from(engine.next_entity_id()).unwrap_or(u32::MAX);
         let queries_default_timeout = Duration::from_millis(
             config
                 .0
@@ -4623,29 +4756,33 @@ impl Session {
         );
         #[cfg(all(feature = "unstable", feature = "shared-memory"))]
         let shm_provider = crate::api::shm::provider_of(&expanded);
-        let session = Session(Arc::new(SessionInner {
-            strong_counter: AtomicUsize::new(1),
-            engine,
-            id,
+        #[cfg(feature = "unstable")]
+        let timestamps = Arc::new(TimestampSource::new(
             zid,
-            callbacks_drop_sync_group: SyncGroup::default(),
+            whatami,
+            timestamp_callback,
+            node_clock,
+            engine_routes,
+        ));
+        // The clock of the node stamps what it intercepts, whichever session the message is of.
+        #[cfg(feature = "unstable")]
+        engine.install_interception_source(&timestamps);
+        Ok(RuntimeCore {
+            engine: Arc::new(engine),
+            zid,
             queries_default_timeout,
-            publisher_qos_tree: config
-                .0
-                .get_json("qos/publication")
-                .ok()
-                .and_then(|json| serde_json::from_str::<PublisherQoSConfList>(&json).ok())
-                .map_or_else(KeBoxTree::new, Into::into),
+            publisher_qos_tree: Arc::new(
+                config
+                    .0
+                    .get_json("qos/publication")
+                    .ok()
+                    .and_then(|json| serde_json::from_str::<PublisherQoSConfList>(&json).ok())
+                    .map_or_else(KeBoxTree::new, Into::into),
+            ),
             #[cfg(feature = "unstable")]
             config: crate::api::config::Notifier::new(config.0.clone().expanded()),
             #[cfg(feature = "unstable")]
-            timestamps: Arc::new(TimestampSource::new(
-                zid,
-                whatami,
-                timestamp_callback,
-                node_clock,
-                engine_routes,
-            )),
+            timestamps,
             #[cfg(all(
                 feature = "unstable",
                 feature = "shared-memory",
@@ -4654,31 +4791,13 @@ impl Session {
             shm_promoter: crate::api::shm::transport::Promoter::new(
                 &expanded,
                 shm_provider.as_ref(),
-            ),
+            )
+            .map(Arc::new),
             #[cfg(all(feature = "unstable", feature = "shared-memory"))]
             shm_provider,
             #[cfg(feature = "shared-memory")]
             shm_clients,
-            subscriptions: std::sync::Mutex::new(vec![]),
-            publishers: std::sync::Mutex::new(vec![]),
-            queryables: std::sync::Mutex::new(vec![]),
-            queriers: std::sync::Mutex::new(vec![]),
-            pending_queries: std::sync::Mutex::new(PendingQueries::default()),
-            matching_listeners: std::sync::Mutex::new(vec![]),
-            tokens: std::sync::Mutex::new(vec![]),
-            #[cfg(feature = "unstable")]
-            transport_listeners: std::sync::Mutex::new(vec![]),
-            #[cfg(feature = "unstable")]
-            link_listeners: std::sync::Mutex::new(vec![]),
-        }));
-        #[cfg(feature = "unstable")]
-        session
-            .0
-            .engine
-            .install_interception_source(&session.0.timestamps);
-        #[cfg(feature = "unstable")]
-        crate::api::admin::init(session.downgrade());
-        Ok(session)
+        })
     }
 }
 
@@ -4752,7 +4871,7 @@ impl WeakSession {
     /// Retract the publisher `pid`. A closed session has none, and undeclaring on it is no error;
     /// an id the session does not hold is one.
     pub(crate) fn undeclare_publisher_inner(&self, pid: Id) -> ZResult<()> {
-        if self.0.engine.is_closed() {
+        if self.0.is_closed() {
             return Ok(());
         }
         let known = {
@@ -4771,7 +4890,7 @@ impl WeakSession {
     /// Stop the queries to the queryable `qid`. A closed session has none to stop, and undeclaring
     /// on it is no error; an id the session does not hold is one.
     pub(crate) fn close_queryable(&self, qid: Id) -> ZResult<()> {
-        if self.0.engine.is_closed() {
+        if self.0.is_closed() {
             return Ok(());
         }
         let engine_id = {
@@ -4901,7 +5020,7 @@ impl WeakSession {
         callback: Callback<Sample>,
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
-        if self.0.engine.is_closed() {
+        if self.0.is_closed() {
             return Err(SessionClosedError.into());
         }
         let anchor: SessionAnchor = self.0.clone();
@@ -4920,7 +5039,7 @@ impl WeakSession {
         })?;
         self.0.subscriptions().push(id);
         // A close that ran between the check and the record has not seen this subscription.
-        if self.0.engine.is_closed() {
+        if self.0.is_closed() {
             self.0.release_subscriptions();
             return Err(SessionClosedError.into());
         }
@@ -5408,7 +5527,7 @@ impl Session {
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
         tracing::trace!("declare_subscriber({:?})", key_expr);
-        if self.0.engine.is_closed() {
+        if self.0.is_closed() {
             return Err(SessionClosedError.into());
         }
         let wire = key_expr.to_wire(&self.anchor());
@@ -5428,7 +5547,7 @@ impl Session {
         })?;
         self.0.subscriptions().push(id);
         // A close that ran between the check and the record has not seen this subscription.
-        if self.0.engine.is_closed() {
+        if self.0.is_closed() {
             self.0.release_subscriptions();
             return Err(SessionClosedError.into());
         }
@@ -5915,13 +6034,13 @@ impl Session {
     /// # }
     /// ```
     pub fn is_closed(&self) -> bool {
-        self.0.engine.is_closed()
+        self.0.is_closed()
     }
 }
 
 impl WireAnchor for SessionInner {
     fn declare_prefix(&self, prefix: &str, _force: bool) -> ZResult<Option<ExprId>> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         // The engine holds a declaration once and counts the holders, so a prefix that is already
@@ -5942,7 +6061,7 @@ impl WireAnchor for SessionInner {
     }
 
     fn undeclare_prefix(&self, expr_id: ExprId) -> ZResult<()> {
-        if self.engine.is_closed() {
+        if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         self.engine.release_keyexpr(u64::from(expr_id));
@@ -5980,7 +6099,13 @@ impl Closee for WeakSession {
                 // upstream's close lets go of them before its transports are closed.
                 #[cfg(feature = "unstable")]
                 session.release_connectivity_listeners();
-                session.engine.close();
+                if session.owns_engine {
+                    session.engine.close();
+                } else {
+                    // The node goes on, and the session is closed without it: what it declared is
+                    // let go of just below, and nothing is declared on it afresh.
+                    session.closed.store(true, Ordering::Release);
+                }
                 // A closed session takes nothing more, and lets go of the callbacks it was to
                 // call: the channel of a subscriber ends with its session, as upstream's does.
                 session.release_subscriptions();
@@ -6143,9 +6268,9 @@ mod tests {
         let weak = session.downgrade();
         let clone = session.clone();
         drop(session);
-        assert!(!weak.0.engine.is_closed(), "a handle is still held");
+        assert!(!weak.0.is_closed(), "a handle is still held");
         drop(clone);
-        assert!(weak.0.engine.is_closed(), "the last handle closed it");
+        assert!(weak.0.is_closed(), "the last handle closed it");
     }
 
     #[test]
@@ -7418,7 +7543,7 @@ mod tests {
         fn ask(session: &Session, key: &str, options: QueryOptions) -> Vec<String> {
             let lines = Arc::new(std::sync::Mutex::new(vec![]));
             let (ended, over) = mpsc::channel::<()>();
-            let Engine::Tokio(state) = &session.0.engine else {
+            let Engine::Tokio(state) = &*session.0.engine else {
                 unreachable!("these tests open peers")
             };
             let issued = state.shared.as_engine().get_on_wire(
@@ -8234,7 +8359,7 @@ mod tests {
         /// Whether the engine still holds the querier `id`: a filter it holds says nothing matches
         /// when no queryable does, and one it does not hold says nothing.
         fn held(session: &Session, id: Id) -> bool {
-            match &session.0.engine {
+            match &*session.0.engine {
                 Engine::Tokio(state) => state.shared.as_engine().write_filter_active(u64::from(id)),
                 Engine::Router(_) => unreachable!("these tests open peers"),
             }
@@ -11261,7 +11386,7 @@ mod tests {
         /// Whether the engine still holds the publisher `id`: a filter it holds says nothing
         /// matches when no subscriber does, and one it does not hold says nothing.
         fn held(session: &Session, id: Id) -> bool {
-            match &session.0.engine {
+            match &*session.0.engine {
                 Engine::Tokio(state) => state.shared.as_engine().write_filter_active(u64::from(id)),
                 Engine::Router(_) => unreachable!("these tests open peers"),
             }

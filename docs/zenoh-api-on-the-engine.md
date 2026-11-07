@@ -1183,8 +1183,16 @@ Each lands whole with its surface lines, tests and faults in one round.
       build host of thirty-two cores, so the harness allows it 1,800 seconds); whether the
       hosted runner meets its multicast groups is read from its first run. The harness raises
       the open files limit of its runs: a dozen sessions of one process pass a shell's 1,024.
-    - **Owed:** the files it asks for a `Runtime` of (the arm with `internal`), Windows, and a
-      margin gate for the lane once it has measured runs.
+    - **The arm with `internal` (2026-11-07):** `keyexpr`, `atexit`, `session` and `regions` run
+      with the feature (`FILE_FEATURES`), which also turns on the helper's own `internal`. The
+      close that runs in the background (`CloseBuilder::in_background`, `NolocalJoinHandle`) is
+      upstream's. `zenoh::internal::runtime::{Runtime, RuntimeBuilder}` and `zenoh::session::init`
+      are a started node that sessions share (the module `runtime` of the crate): the engine is held by an `Arc`
+      (`RuntimeCore`), a session made by `init` has entities, callbacks and a closed flag of its
+      own and does not close the node, and `Runtime::close` closes the node and so every session
+      on it. `session` is 9 of 9 (5 before). The two lists of aggregated keys of upstream's `init`
+      builder are not here: nothing in the crate reads them.
+    - **Owed:** Windows, and a margin gate for the lane once it has measured runs.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

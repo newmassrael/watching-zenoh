@@ -64,6 +64,9 @@ pub(crate) mod shm;
 // R3702: the selector's users, the builders of `get` and the querier, are slice Z3.
 #[allow(dead_code)]
 pub(crate) mod selector;
+// A started node several sessions share, which `zenoh::internal::runtime` hands out.
+#[cfg(feature = "internal")]
+pub(crate) mod runtime;
 pub(crate) mod session;
 pub(crate) mod subscriber;
 // R3706: the instrumentation of a frame at a node (`push_ts_interception`) is slice Z6b.
