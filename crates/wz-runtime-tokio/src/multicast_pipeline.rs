@@ -605,13 +605,12 @@ impl MulticastTxPlane {
             // R3264 — a pooled datagram is a slot of the link's transmit pool:
             // started as the send begins, home through the completion edge once
             // the send has returned.
-            let mut pacing = crate::datagram_pacing::DatagramPacing::of_build();
+            use crate::datagram_pacing::{OfBuild, Pacing};
+            let mut pacing = OfBuild::of_build();
             while let Some((priority, mut datagram)) = queued.recv_wire_tagged().await {
                 // The `datagram-fragment-pacing` policy: a fragment past the burst waits here, in
                 // the writer, so the producers that queued it are held only by the lane's room.
-                if let Some(wait) = pacing.due(&datagram) {
-                    tokio::time::sleep(wait).await;
-                }
+                pacing.before(&datagram, tokio::time::sleep).await;
                 // Best-effort, as every multicast send is: a datagram the
                 // socket refuses is not counted and is not retried. It is
                 // still REPORTED, as done with: the record of what each queued

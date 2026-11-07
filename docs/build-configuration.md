@@ -116,6 +116,11 @@ original reproduced by naming it. Three things follow from it:
   stream) are not paced, and no Zephyr image, lwIP session or cooperative engine reads the
   policy, so none of their trees has its symbol. The tokio timer's resolution is one
   millisecond, so a gap is rounded up to it. A seal (the link closing) ends a wait at once.
+  It is the first policy that changes the shape of the code (step 9): on, a writer holds a
+  clock and waits between two writes, so a writer is generic over a strategy
+  (`datagram_pacing::Pacing`) and the build's policy selects the type it takes
+  (`datagram_pacing::OfBuild`, `Unpaced` or `Paced`). A build with the policy off links no
+  pacer, clock or wait, and a test names either type in one binary.
 - **Refusing a multicast link that names no interface** (`multicast-link-requires-iface`,
   off by default): upstream opens such a link on the first interface that can carry
   multicast, or on the kernel's choice when the host has none, so it may sit on an

@@ -1192,26 +1192,20 @@ pub async fn udp_writer_task(
     queue: OutboundQueue,
     fault: DatagramWriteFault,
 ) {
-    udp_writer_task_paced(
-        socket,
-        peer,
-        queue,
-        fault,
-        crate::datagram_pacing::DatagramPacing::of_build(),
-    )
-    .await;
+    use crate::datagram_pacing::{OfBuild, Pacing};
+    udp_writer_task_paced(socket, peer, queue, fault, OfBuild::of_build()).await;
 }
 
 /// [`udp_writer_task`] with the pacing of its fragments named: the build's
-/// ([`crate::datagram_pacing::DatagramPacing::of_build`]) in production, a value a test chose
-/// otherwise. A fragment past the burst waits in [`OutboundQueue::pause`], which a seal ends, so
-/// teardown never waits on a pace.
-pub async fn udp_writer_task_paced(
+/// ([`crate::datagram_pacing::OfBuild`]) in production, the one a test chose otherwise. A
+/// fragment past the burst waits in [`OutboundQueue::pause`], which a seal ends, so teardown
+/// never waits on a pace.
+pub async fn udp_writer_task_paced<P: crate::datagram_pacing::Pacing>(
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     mut queue: OutboundQueue,
     fault: DatagramWriteFault,
-    mut pacing: crate::datagram_pacing::DatagramPacing,
+    mut pacing: P,
 ) {
     // R311y474 — a DIAL socket is `connect`ed to its one peer, so it emits with
     // `send`; the shared LISTENER socket serves N peers and must address each
@@ -1227,9 +1221,7 @@ pub async fn udp_writer_task_paced(
     // pool: started as the send begins, home through the completion edge when
     // the send has returned (`recycle_wire`, or the drop on every other way out).
     while let Some(mut payload) = queue.next_wire().await {
-        if let Some(wait) = pacing.due(&payload) {
-            queue.pause(wait).await;
-        }
+        pacing.before(&payload, |wait| queue.pause(wait)).await;
         payload.begin_write();
         let send = async {
             if connected {
@@ -1275,7 +1267,7 @@ mod tests {
     /// runtime idle on a socket advances a paused clock to the next timer before it sees the
     /// datagram that is already there.
     async fn arrivals(
-        pacing: crate::datagram_pacing::DatagramPacing,
+        pacing: impl crate::datagram_pacing::Pacing,
         datagrams: &[[u8; 2]],
     ) -> Vec<std::time::Duration> {
         let receiver = UdpSocket::bind("127.0.0.1:0").await.expect("bind receiver");
@@ -1301,9 +1293,9 @@ mod tests {
         at
     }
 
-    fn paced(burst: u32, gap_us: u64) -> crate::datagram_pacing::DatagramPacing {
-        crate::datagram_pacing::DatagramPacing::with(Some(
-            wz_session_core::fragment_pacing::FragmentPacer::new(burst, gap_us),
+    fn paced(burst: u32, gap_us: u64) -> crate::datagram_pacing::Paced {
+        crate::datagram_pacing::Paced::new(wz_session_core::fragment_pacing::FragmentPacer::new(
+            burst, gap_us,
         ))
     }
 
@@ -1325,11 +1317,7 @@ mod tests {
     /// pacer is the writer it was.
     #[tokio::test]
     async fn with_pacing_off_every_fragment_is_written() {
-        let at = arrivals(
-            crate::datagram_pacing::DatagramPacing::with(None),
-            &[FRAGMENT; 6],
-        )
-        .await;
+        let at = arrivals(crate::datagram_pacing::Unpaced, &[FRAGMENT; 6]).await;
         assert_eq!(at.len(), 6);
     }
 

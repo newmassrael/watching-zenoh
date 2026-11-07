@@ -25,8 +25,6 @@
 //! (`T_MID_FRAGMENT`, 0x06). The session writes every fragment as a datagram of its own, so the
 //! first byte of a datagram names it.
 
-use crate::policy::SessionPolicy;
-
 /// The message id of a transport `Fragment` (the low five bits of a header).
 const T_MID_FRAGMENT: u8 = 0x06;
 
@@ -74,17 +72,15 @@ impl FragmentPacer {
         }
     }
 
-    /// The pacer of this build: `None` when the `datagram-fragment-pacing` policy is off, which is
-    /// upstream's behaviour, so a writer that holds none writes as it always did.
-    pub const fn of_build() -> Option<Self> {
-        if SessionPolicy::from_build().datagram_fragment_pacing {
-            Some(Self::new(
-                crate::caps::DATAGRAM_FRAGMENT_BURST as u32,
-                crate::caps::DATAGRAM_FRAGMENT_GAP_US as u64,
-            ))
-        } else {
-            None
-        }
+    /// The pacer of this build's burst and gap. Whether a writer holds one at all is the
+    /// `datagram-fragment-pacing` policy's, which an engine reads as a type (a writer with the
+    /// policy off, upstream's behaviour, holds none and writes as it always did): this is the
+    /// pacer such a writer holds when it is on.
+    pub const fn of_build() -> Self {
+        Self::new(
+            crate::caps::DATAGRAM_FRAGMENT_BURST as u32,
+            crate::caps::DATAGRAM_FRAGMENT_GAP_US as u64,
+        )
     }
 
     /// How long, in microseconds, the writer waits before it writes `datagram` at `now_us`: `0`
@@ -194,30 +190,25 @@ mod tests {
     }
 
     #[test]
-    fn the_pacer_of_a_build_is_none_when_the_policy_is_off_and_holds_its_two_limits_when_on() {
-        // The policy is off unless the build states it, and then no pacer exists; the build
-        // that states it has the pacer of its two limits. Each build runs the arm that is its own.
-        let expected = SessionPolicy::from_build()
-            .datagram_fragment_pacing
-            .then(|| {
-                FragmentPacer::new(
-                    crate::caps::DATAGRAM_FRAGMENT_BURST as u32,
-                    crate::caps::DATAGRAM_FRAGMENT_GAP_US as u64,
-                )
-            });
-        assert_eq!(FragmentPacer::of_build(), expected);
-        // And the pacer a build has behaves by those limits: the first fragment past the burst
-        // waits the gap, in the build that has one.
-        if let Some(mut pacer) = FragmentPacer::of_build() {
-            let burst = crate::caps::DATAGRAM_FRAGMENT_BURST;
-            for _ in 0..burst {
-                assert_eq!(pacer.wait_before(&FRAGMENT, 0), 0);
-            }
-            pacer.wrote(0);
-            assert_eq!(
-                pacer.wait_before(&FRAGMENT, 0),
-                crate::caps::DATAGRAM_FRAGMENT_GAP_US as u64
-            );
+    fn the_pacer_of_a_build_holds_its_two_limits() {
+        // Whether a writer holds the pacer is the policy's, read by the engine as a type; the
+        // pacer itself is the build's two limits, and behaves by them: the first fragment past
+        // the burst waits the gap.
+        let mut pacer = FragmentPacer::of_build();
+        assert_eq!(
+            pacer,
+            FragmentPacer::new(
+                crate::caps::DATAGRAM_FRAGMENT_BURST as u32,
+                crate::caps::DATAGRAM_FRAGMENT_GAP_US as u64,
+            )
+        );
+        for _ in 0..crate::caps::DATAGRAM_FRAGMENT_BURST {
+            assert_eq!(pacer.wait_before(&FRAGMENT, 0), 0);
         }
+        pacer.wrote(0);
+        assert_eq!(
+            pacer.wait_before(&FRAGMENT, 0),
+            crate::caps::DATAGRAM_FRAGMENT_GAP_US as u64
+        );
     }
 }
