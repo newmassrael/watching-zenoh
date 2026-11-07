@@ -455,7 +455,7 @@ is not attributed.
 Layer Z8 passes on the tree after both, and the store's model tests
 (`crates/wz-runtime-tokio/src/client_store.rs`) hold its index to a scan of every face.
 
-### 6.6 The face table (this round)
+### 6.6 The face table (round 4388)
 
 Section 6.5 left one cost of a declaration that grows with the faces under B: the face map's
 spine, copied by every write. The map is now a `PersistentMap` like the stores, so a write copies
@@ -554,6 +554,56 @@ writer, while B's writer completes about 670 times A's writes, each a new versio
 and each retiring the routes it touches; A's readers lose 6 % to a writer that gets in a hundred
 times a second.
 
+### 6.7 What a busy writer costs the readers (this round)
+
+Section 6.6 left the readers' loss under a busy writer unseparated between the versions they load
+and what the writes change. The instrument
+`the_readers_under_a_busy_writer_measured_by_what_the_writes_change` routes the phase 0 Puts through
+windows of five kinds: no writer; the declaring writer of phase 0 without face transitions; the
+same writer declaring into a second router nobody routes through (the host is shared with the
+writer's work, the tables are not); a writer publishing versions that change nothing, paced to a
+rate; and that writer unpaced. The cell counts the writes it publishes
+(`TablesCell::writes_published`), since one message can be one write or several.
+
+The Puts a second moved with the load of the shared hosts by more than the effects (pc2 at 35 to
+105, pc3 at 4 to 22), and so did the time the readers ran a core per Put. What does not move with
+the share of the host a thread is given is what the thread executes, so the reading is the
+readers' instructions and cycles per Put (`perf record -e instructions:u,cycles:u`, the publishers'
+threads only, `--comm wz-publisher`), one window kind to a process, three windows each, on pc2:
+
+| Window (writes a second) | Puts a second | Instructions a Put | Cycles a Put |
+|---|---|---|---|
+| no writer | 2.38 M; 2.25 M | 18,431; 18,461 | 16,059; 16,233 |
+| declaring (70,500 to 81,000) | 2.08 M; 1.95 M | 18,850; 18,886 (+2.3 %, +2.3 %) | 17,657; 18,208 (+10.0 %, +12.2 %) |
+| declaring elsewhere (143,000 to 170,000) | 2.18 M | 18,472 (+0.2 %) | 16,976 (+5.7 %) |
+| unchanged, paced to 20,000 | 2.37 M | 18,517 (+0.5 %) | 15,893 (-1.0 %) |
+| unchanged, paced to 75,000 | 2.33 M | 18,425 (-0.2 %) | 16,037 (-1.2 %) |
+| unchanged, unpaced (516,000 to 544,000) | 1.96 M | 18,559 (+0.5 %) | 17,832 (+9.9 %) |
+
+- **Loading versions is not the cost.** At the declaring writer's rate a version that changes
+  nothing costs the readers nothing a run tells; at seven times that rate it costs 10 % more cycles
+  for the same instructions.
+- **The writer's own work on the host is half of it at most.** Declaring twice as often into a
+  router the readers do not read costs them 5.7 % more cycles and no instructions.
+- **The rest is what the readers do because the tables they read changed:** 2.3 % more
+  instructions and some 5 % more cycles. A profile of the readers names three parts of it. They
+  freed the retired versions' path copies (`drop_glue` of the persistent maps' slots and `cfree`,
+  0.8 to 2.6 % of their cycles), because a version was freed by the last reader to let it go. The
+  route caches moved their inputs at every version (`lock_shared_slow` of their lock, about 1 %).
+  And a reader whose version is older than the inputs the cache was brought to computes its route
+  and does not keep it: 1,300 to 30,000 routes a window, more the less of a core the readers are
+  given, against none under a writer that changes nothing.
+
+The first is not RCU's form, in which a reader never reclaims: the updater does, after the grace
+period (`call_rcu`). `TablesCell` now keeps the versions a publish replaces among the retired ones
+by their count, and the writer frees those no reader holds at its next publish and at each grace
+period, after its lock; a reader only lets its count go. The readers' profile under the declaring
+writer no longer has the slots' drops or `cfree`, and the writer's has them
+(`persistent_map::Node::drop_slow`, 1.1 to 1.5 % of its cycles). What it gives the readers in Puts
+a second was not told apart from the hosts' load and is not claimed. A retired version no reader
+holds lives until the next write or grace period: one version's own paths, as many as the readers
+held at the last publish.
+
 ## 7. What is not decided, and what could make this wrong
 
 - **The graph's copy.** `LinkstateNetwork` holds one shortest-path tree per node, O(N squared) for N nodes
@@ -566,10 +616,12 @@ times a second.
   the message, but a route outlives the version it was computed from, so it would read a face's
   facts as they were, and what may be read stale is not yet stated. Not done until a reading asks
   for it.
-- **The readers under a busy writer.** With a writer declaring without pause, B's readers route
-  17 % fewer Puts than with none and 9 % fewer than A's (section 6.6): each of the writer's
-  versions is loaded by every reader and retires the routes it touches. Which of the two the
-  readers pay is not separated.
+- **The routes of a reader behind the cache.** Under a busy writer a reader whose version is
+  older than the inputs the route cache was brought to computes its route and does not keep it
+  (section 6.7): 1,300 to 30,000 routes in a window of three seconds. A cache that kept the
+  routes of the version before as well would serve them; whether it is worth its memory is not
+  measured. The route caches' move of their inputs at every version (a write lock, about 1 % of
+  the readers' cycles) is the other part section 6.7 names and is not changed.
 - **The tick.** Under B the tick that finds nothing dirty need not publish; whether to split it into a read
   that decides and a write that acts is decided in phase 4 by what it writes (queries and interests timed
   out, egress swept: the last is per-face runtime and needs no version).
