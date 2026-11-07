@@ -37,6 +37,9 @@ A file is NOT merged when it must be its own process or cannot be a module:
   * it calls into a registry the process owns (`PROCESS_REGISTRY`: the `wz_ext_*` clock, event
     log, supervisor, sampler and snapshot of the C ABI library), or says of itself that it needs
     "a process of its own" (`PROCESS_OWN`): a neighbour in the same process would read its state;
+  * it starts or reads the mbedtls channel library (`PROCESS_TLS_LIBRARY`: it names
+    `wz_tls_mbedtls::channel` or includes that crate's test helper): the library starts once per
+    process on one arena, and a neighbour would run on the arena the first file chose;
   * an explicit `--keep NAME` (a file that reads the process's environment, its working directory
     or a signal, which a neighbour in the same process could disturb).
 
@@ -106,6 +109,13 @@ PROCESS_WRITE = re.compile(r"\benv::(set_var|remove_var)\s*\(|\bset_current_dir\
 # executable read each other's state. Measured 2026-11-06: exactly the seven files that had been
 # kept by hand call them, and no other file of the C ABI crates does.
 PROCESS_REGISTRY = re.compile(r"\bwz_ext_(?:clock|event|supervision|snapshot|resource)_\w+")
+# The mbedtls channel library (`wz-tls-mbedtls`) is started ONCE per process on one arena, and its
+# key store, arena peak and error state are statics of that process: a file that names the channel
+# or includes the crate's shared test helper starts it (or reads what it measured), and two such
+# files in one executable share one arena, the size the first of them chose. Measured 2026-11-07:
+# `wz-capi-coop`'s two files start it on a small and a 4 MiB arena, and exactly the files of
+# `wz-tls-mbedtls` and `wz-capi-coop` that touch it name the channel.
+PROCESS_TLS_LIBRARY = re.compile(r"\bwz_tls_mbedtls::channel\b|wz-tls-mbedtls/tests/common")
 # A file that says of itself that it needs a process of its own (its header gives the reason).
 PROCESS_OWN = re.compile(r"(?i)\b(?:in a process of its own|in its own process|needs? its own process)\b")
 KEYWORDS = {
@@ -288,6 +298,9 @@ def classify(
             stay.append((name, "reads or sets a registry the process owns (`wz_ext_*` clock, event "
                                "log, supervisor, sampler, snapshot), which every file of a shared "
                                "executable would share"))
+        elif PROCESS_TLS_LIBRARY.search(text):
+            stay.append((name, "starts or reads the mbedtls channel library, which a process "
+                               "starts once on one arena"))
         elif PROCESS_OWN.search(text):
             stay.append((name, "says it needs a process of its own"))
         elif PROCESS_WRITE.search(text):
@@ -602,15 +615,19 @@ def selftest() -> int:
             "registry": "#[test] fn t() { unsafe { wz_ext_event_emit(0); } }\n",
             "ownproc": "//! One test, in a process of its own, because the log is the process's.\n"
                        "#[test] fn t() {}\n",
+            "tlslib": "use wz_tls_mbedtls::channel::start;\n#[test] fn t() {}\n",
             "prose": "//! The doors wz_ext are described in the book.\n#[test] fn t() {}\n",
         }.items():
             (crate / "tests" / f"{name}.rs").write_text(body)
         merge, stay = classify(crate, {"kept"})
         check("merge set", merge == {"it": ["envread", "gated", "plain", "prose"]})
         check("stay set", {n for n, _ in stay}
-              == {"alloc", "tabled", "mainful", "kept", "9bad", "envset", "registry", "ownproc"})
+              == {"alloc", "tabled", "mainful", "kept", "9bad", "envset", "registry", "ownproc",
+                  "tlslib"})
         check("a call into a process registry keeps a file, prose naming the family does not",
               "registry" in {n for n, _ in stay} and "prose" not in {n for n, _ in stay})
+        check("a file that starts the mbedtls channel library stays",
+              "tlslib" in {n for n, _ in stay})
         (crate / "tests" / "envset.rs").unlink()
         (crate / "tests" / "envread.rs").unlink()
         (crate / "tests" / "pico.rs").write_text("use zenoh_pico_sys::z_close;\n")
