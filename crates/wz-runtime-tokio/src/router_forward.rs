@@ -460,6 +460,8 @@ mod egress;
 #[cfg(test)]
 mod egress_tests;
 mod face_runtime;
+mod face_table;
+use face_table::FaceTable;
 #[cfg(all(test, feature = "transport-multilink"))]
 mod joined_link_tests;
 mod local_publish;
@@ -1771,10 +1773,7 @@ enum InboundFace<'a> {
 ///
 /// A free function over the borrowed map rather than a `&self` method, so it
 /// drops into the existing scoped-borrow blocks without a second borrow.
-fn classify_inbound(
-    faces: &HashMap<FaceId, Arc<RouterFaceState>>,
-    inbound: FaceId,
-) -> InboundFace<'_> {
+fn classify_inbound(faces: &FaceTable, inbound: FaceId) -> InboundFace<'_> {
     // The node's own face asks with no routing identity of its own and no alias table, as a group
     // peer does: its keys are literal.
     if inbound == MCAST_INGRESS_FACE || inbound == LOCAL_FACE {
@@ -2366,8 +2365,10 @@ pub(crate) struct Tables {
     ///
     /// Each face behind an `Arc` of its own, so that a clone of the tables copies the map's
     /// entries and not the faces' alias tables; a write to one face goes through
-    /// [`face_mut`](Self::face_mut).
-    faces: HashMap<FaceId, Arc<RouterFaceState>>,
+    /// [`face_mut`](Self::face_mut). Held by id and by tier in a [`FaceTable`], persistent, so a
+    /// fan-out into one tier visits that tier's faces and a write of one face under `snapshot`
+    /// copies the path to it (`router_forward/face_table.rs`).
+    faces: FaceTable,
     /// `resource-snapshot` — what the receive paths of the faces that have gone had counted when
     /// they went, retired in the step that removes the face, so the router's reading
     /// ([`RouterMessagesView::reading`]) never falls when a link does and a reader may take
@@ -4450,7 +4451,7 @@ impl RouterForwarder {
                     node_mode,
                     partition: SouthPartition::Auto,
                     north_is_client: false,
-                    faces: HashMap::new(),
+                    faces: FaceTable::new(),
                     #[cfg(feature = "resource-snapshot")]
                     receive_ledger: Default::default(),
                     joined_links: Arc::new(HashMap::new()),
@@ -5773,7 +5774,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 
     /// Send to each held face of `tier` the message `build` produces for it,
     /// returning the count of faces that accepted one — the TIER-SCOPED fan-out
-    /// SSOT. The `state.tier == tier` gate is the load-bearing router property
+    /// SSOT. Reaching only the faces of `tier` ([`FaceTable::of_tier`]) is the load-bearing router property
     /// (the module docs' CRITICAL note): a `routers_net` flood reaches only
     /// Router faces and a `linkstatepeers_net` flood only Peer faces, so the two
     /// nets' psid spaces never cross-inject. The retired single-net
@@ -5834,13 +5835,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         mut build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
     ) -> Result<usize, CodecError> {
         let mut sent = 0;
-        for (id, state) in self.tables.faces.iter() {
+        // The tier's faces only: the faces the router holds in other tiers are not asked
+        // (the cost of a message follows the faces it can reach, I1).
+        for (id, state) in self.tables.faces.of_tier(tier) {
             self.fan_out_face_visits.bump();
-            if state.tier != tier {
-                continue;
-            }
-            if let Some(msg) = build(*id, state.peer_zid)? {
-                if self.egress_to_face(*id, state, msg, reliable, express, priority, None) {
+            if let Some(msg) = build(id, state.peer_zid)? {
+                if self.egress_to_face(id, state, msg, reliable, express, priority, None) {
                     sent += 1;
                 }
             }
@@ -9063,17 +9063,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let mut faces: Vec<FaceId> = self
             .tables
             .faces
-            .iter()
             // A link is a number in the graph of its own region: a face of another region has a
             // link in that graph, and the same number in this one names another face's link.
-            .filter(|(_, state)| state.tier == NORTH_REGION)
+            .of_tier(NORTH_REGION)
             .filter(|(_, state)| {
                 state
                     .link
                     .and_then(|link| net.get_link(link))
                     .is_some_and(|link| link.remote_is_gateway)
             })
-            .map(|(id, _)| *id)
+            .map(|(id, _)| id)
             .collect();
         faces.sort_unstable();
         faces
@@ -10816,10 +10815,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return vec![(north, net.dot_with(label))];
         }
         let mut nodes = vec![*net.self_zid()];
-        for state in self.tables.faces.values() {
-            if state.tier != NORTH_REGION {
-                continue;
-            }
+        for (_, state) in self.tables.faces.of_tier(NORTH_REGION) {
             if let Some(zid) = state.peer_zid {
                 if !nodes.contains(&zid) {
                     nodes.push(zid);
@@ -18768,6 +18764,96 @@ mod tests {
                 "{held} held: one subscriber, so one face looked at"
             );
         }
+    }
+
+    /// I1 for a CLIENT's Put: delivered to one client subscriber and re-forwarded
+    /// into the mesh tier, it asks the subscriber and the mesh tier's faces, and
+    /// none of the other clients the router holds. Before the faces were held by
+    /// tier, the re-forward tried every face for the mesh tier's and a router of
+    /// 1024 clients looked at 1025 faces for each such Put
+    /// (`docs/router-table-snapshots.md`, section 6.6).
+    #[test]
+    fn a_push_from_a_client_visits_the_same_faces_whatever_clients_the_router_holds() {
+        let mut visited = Vec::new();
+        for held in [64_usize, 1024] {
+            let (fwd, sinks, _peer) = router_holding_clients(held);
+            for sink in &sinks {
+                sink.reset();
+            }
+            let before = fwd.fan_out_face_visits();
+            forward_one(
+                &fwd,
+                FaceId(4),
+                NetworkMessage::Push(Box::new(
+                    wz_session_core::push_build::build_push_literal("demo/c7", b"x")
+                        .expect("build push"),
+                )),
+            );
+            assert_eq!(
+                sinks[7].frame_count(),
+                1,
+                "{held} held: the subscriber got it"
+            );
+            let others: usize = sinks
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != 7)
+                .map(|(_, s)| s.frame_count())
+                .sum();
+            assert_eq!(others, 0, "{held} held: no other client was sent anything");
+            let looked_at = fwd.fan_out_face_visits() - before;
+            assert!(
+                looked_at <= 2,
+                "{held} held: the subscriber and the one mesh face at most, not {looked_at}"
+            );
+            visited.push(looked_at);
+        }
+        assert_eq!(
+            visited[0], visited[1],
+            "the faces looked at do not grow with the clients held"
+        );
+    }
+
+    /// The faces of each tier the table answers are the faces it holds in that
+    /// tier, after faces of two tiers came up and some of each went.
+    #[test]
+    fn the_faces_of_a_tier_are_the_faces_held_in_it() {
+        let (fwd, _sinks, _peer) = router_holding_clients(16);
+        let (second_peer, _sink) = face(zid(0xAB), WIRE_PEER);
+        fwd.register(FaceId(100), &second_peer);
+        for gone in [FaceId(3), FaceId(9), FaceId(0)] {
+            fwd.deregister(gone);
+        }
+        let on = fwd.on_tables();
+        let mut tiers: Vec<Region> = Vec::new();
+        for state in on.tables.faces.values() {
+            if !tiers.contains(&state.tier) {
+                tiers.push(state.tier);
+            }
+        }
+        assert!(tiers.len() >= 2, "the fixture spans two tiers");
+        for tier in tiers {
+            let mut indexed: Vec<FaceId> =
+                on.tables.faces.of_tier(tier).map(|(id, _)| id).collect();
+            let mut held: Vec<FaceId> = on
+                .tables
+                .faces
+                .iter()
+                .filter(|(_, s)| s.tier == tier)
+                .map(|(id, _)| *id)
+                .collect();
+            indexed.sort_unstable();
+            held.sort_unstable();
+            assert_eq!(indexed, held, "the faces of {tier:?}");
+        }
+        assert!(!on.tables.faces.contains_key(&FaceId(3)));
+        assert_eq!(
+            on.tables
+                .faces
+                .of_tier(on.tables.faces[&FaceId(100)].tier)
+                .count(),
+            1
+        );
     }
 
     /// A face's routing zid is read once, when it is registered, and every
