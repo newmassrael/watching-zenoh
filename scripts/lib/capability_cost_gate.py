@@ -675,7 +675,14 @@ CASES: tuple[Case, ...] = (
     # +171 and one export (the conformance digest). The two add up to the reading after the
     # rebase. Chosen growth (`docs/router-table-snapshots.md` section 6.5); the budget is that
     # reading, 3,600 and 3,500, to the hundred.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 5_995_400,
+    # 2026-11-07, later -- 6,002,476 on pc3 on the face table's branch rebased on `e18b0b27e2`,
+    # 14,192 over the reading above. SPLIT on pc3: `e18b0b27e2` alone 5,993,040, +4,756, the
+    # peers' commits (`capic-default-lean`'s note of this day splits the same commits); the
+    # router's faces held by id and by tier, a persistent map and a set per tier (the commit
+    # "Hold the router's faces by id and by tier"), +9,436. Chosen growth
+    # (`docs/router-table-snapshots.md` section 6.6); the budget is that reading, 3,600 and
+    # 3,500, to the hundred.
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_009_600,
          # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
          # role and the scouting and UDP link under it, and the multicast transport.
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
@@ -733,7 +740,13 @@ CASES: tuple[Case, ...] = (
     # 11,074,936 on pc3 at `a250c2ff26`, of which 26,792 the client store and the tokens' changes
     # and 87 the peers' commits (the lean case 9,543,776, inside); the budget is that reading,
     # 3,600 and 3,500, to the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_082_100,
+    # 2026-11-07, later -- 11,097,952 on pc3 on the face table's branch rebased on `e18b0b27e2`,
+    # 23,016 over the reading above; `e18b0b27e2` alone read 11,089,160, 7,060 over the budget
+    # already. SPLIT on pc3: the peers' commits +14,224 (the same commits as
+    # `capic-default-lean`'s +14,156, split in its note), the face table +8,792
+    # (`capic-router-node`'s note of this day). Chosen growth; the budget is that reading, 3,600
+    # and 3,500, to the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_105_100,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST),
          exports=837,
@@ -781,12 +794,19 @@ CASES: tuple[Case, ...] = (
     # manifest to the declaration, and this case to the manifest (the case's features are read as
     # cargo resolves them, so a feature added to the default and not here shows as a difference in
     # `require`). Its first reading is the budget `capic-default` had at 6dc6c68d9c.
+    # 2026-11-07 -- 9,557,932 on pc3 at `e18b0b27e2`, 9,632 over the budget and 14,156 over the
+    # reading `capic-default`'s note of this day gives (9,543,776). SPLIT by reading on pc3 at the
+    # commits between: `b65c1bbdf`, `0f68d04ea7` and `9655f33d54` each 9,543,776, +0; the bound
+    # on the size of a query a node runs (`0d8b5d8242`) 9,551,516, +7,740; the paced fragments of
+    # a UDP link (`a584247f7e`) 9,556,256, +4,740; the commits after it to `e18b0b27e2` +1,676.
+    # The face table does not reach this build (its reading on the branch is the same). Chosen
+    # growth; the budget is that reading, 3,600 and 3,500, to the hundred.
     Case("capic-default-lean", "wz-capi-c", "libwz_capi_c.so",
          "link-udp,timestamping,peer,scout,query,queryable,liveliness,liveliness-get,advanced,"
          "group,gossip,transport_tls,transport_quic,transport_quic_datagram,transport_ws,"
          "transport_unixsock-stream,transport_multilink,auth_pubkey,e2e-sender,"
          "transport_compression,auth_usrpwd,interceptors,multicast-transport",
-         9_548_300,
+         9_565_100,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),
