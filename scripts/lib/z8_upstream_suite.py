@@ -471,9 +471,11 @@ DEFAULT_FEATURES = "unstable,shared-memory,transport_tcp,transport_udp,transport
 
 #: Features a file asks for beyond the build's, because its tests are compiled out without them
 #: (the entry of the `regions` test directory opens with `#![cfg(feature = "internal")]`:
-#: measured as 0 tests under the default, 126 with the feature). The files that ask for a `Runtime` of the node are not in this
-#: table: they need `zenoh::internal::runtime`, which this crate does not carry.
-FILE_FEATURES = {"regions": ("internal",)}
+#: measured as 0 tests under the default, 126 with the feature; `keyexpr` and `atexit` hold tests
+#: that only the feature compiles in: 16 against 15, and the close that runs in the background).
+#: The files that ask for a `Runtime` of the node are not in this table: they need
+#: `zenoh::internal::runtime`, which this crate does not carry.
+FILE_FEATURES = {"regions": ("internal",), "keyexpr": ("internal",), "atexit": ("internal",)}
 
 #: Files whose tests each run in a process of their own, as upstream's CI runs them (nextest starts
 #: one process per test). Every scenario module of `regions` installs its capture subscriber with

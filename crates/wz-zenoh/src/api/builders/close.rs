@@ -14,11 +14,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
 // src/api/builders/close.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). Without the
-// builder that runs a close in the background and its join handle, which upstream declares for the
-// `internal` feature together with `unstable` and no arm of the surface gate reaches, and without
-// the branch that panics on the two releases of the compiler (1.85.0 and 1.85.1) whose
-// thread-local storage cannot be used at exit, which upstream's build script detects and which this
-// workspace's compiler is newer than (docs/zenoh-api-on-the-engine.md, slice Z1).
+// branch that panics on the two releases of the compiler (1.85.0 and 1.85.1) whose thread-local
+// storage cannot be used at exit, which upstream's build script detects and which this workspace's
+// compiler is newer than (docs/zenoh-api-on-the-engine.md, slice Z1). The builder that runs a close
+// in the background and its join handle are upstream's, behind `unstable` together with
+// `internal` as there: the `atexit` test of upstream's suite closes a session through them.
 
 use std::{
     fmt,
@@ -28,6 +28,8 @@ use std::{
 };
 
 use async_trait::async_trait;
+#[cfg(all(feature = "unstable", feature = "internal"))]
+use tokio::sync::oneshot::Receiver;
 use zenoh_core::{Resolvable, Wait};
 use zenoh_result::ZResult;
 use zenoh_runtime::ZRuntime;
@@ -64,6 +66,15 @@ impl<TCloseable: Closeable> CloseBuilder<TCloseable> {
             timeout: Duration::from_secs(10),
             close_args: <TCloseable::TClosee as Closee>::CloseArgs::default(),
         }
+    }
+
+    #[cfg(all(feature = "unstable", feature = "internal"))]
+    /// Run the Close operation concurrently
+    #[doc(hidden)]
+    pub fn in_background(
+        self,
+    ) -> BackgroundCloseBuilder<<CloseBuilder<TCloseable> as Resolvable>::To> {
+        BackgroundCloseBuilder::new(self.into_future())
     }
 }
 
@@ -113,6 +124,112 @@ impl<TCloseable: Closeable> IntoFuture for CloseBuilder<TCloseable> {
                     bail!("close operation timed out!")
                 }
                 Ok(())
+            }
+            .into_future(),
+        )
+    }
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+/// A builder for close operations running in the background
+#[doc(hidden)]
+pub struct BackgroundCloseBuilder<TOutput: Send + 'static> {
+    inner: Pin<Box<dyn Future<Output = TOutput> + Send>>,
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+impl<TOutput: Send + 'static> fmt::Debug for BackgroundCloseBuilder<TOutput> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("BackgroundCloseBuilder")
+            .field(&"..")
+            .finish()
+    }
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+#[doc(hidden)]
+impl<TOutput: Send + 'static> BackgroundCloseBuilder<TOutput> {
+    fn new(inner: Pin<Box<dyn Future<Output = TOutput> + Send>>) -> Self {
+        Self { inner }
+    }
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+impl<TOutput: Send + 'static> Resolvable for BackgroundCloseBuilder<TOutput> {
+    type To = NolocalJoinHandle<TOutput>;
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+impl<TOutput: Send + 'static> Wait for BackgroundCloseBuilder<TOutput> {
+    fn wait(self) -> Self::To {
+        ZRuntime::Net.block_in_place(self.into_future())
+    }
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+impl<TOutput: Send + 'static> IntoFuture for BackgroundCloseBuilder<TOutput> {
+    type Output = <Self as Resolvable>::To;
+    type IntoFuture = Pin<Box<dyn Future<Output = <Self as IntoFuture>::Output> + Send>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(
+            async move {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                ZRuntime::Net.spawn(async move {
+                    if tx.send(self.inner.await).is_err() {
+                        panic!("BackgroundCloseBuilder: critical error sending the result");
+                    }
+                });
+                NolocalJoinHandle::new(rx)
+            }
+            .into_future(),
+        )
+    }
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+#[doc(hidden)]
+pub struct NolocalJoinHandle<TOutput: Send + 'static> {
+    rx: Receiver<TOutput>,
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+impl<TOutput: Send + 'static> fmt::Debug for NolocalJoinHandle<TOutput> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("NolocalJoinHandle").field(&"..").finish()
+    }
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+impl<TOutput: Send + 'static> NolocalJoinHandle<TOutput> {
+    fn new(rx: Receiver<TOutput>) -> Self {
+        Self { rx }
+    }
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+impl<TOutput: Send + 'static> Resolvable for NolocalJoinHandle<TOutput> {
+    type To = TOutput;
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+impl<TOutput: Send + 'static> Wait for NolocalJoinHandle<TOutput> {
+    fn wait(self) -> Self::To {
+        ZRuntime::Net.block_in_place(self.into_future())
+    }
+}
+
+#[cfg(all(feature = "unstable", feature = "internal"))]
+impl<TOutput: Send + 'static> IntoFuture for NolocalJoinHandle<TOutput> {
+    type Output = <Self as Resolvable>::To;
+    type IntoFuture = Pin<Box<dyn Future<Output = <Self as IntoFuture>::Output> + Send>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(
+            async move {
+                self.rx
+                    .await
+                    .expect("NolocalJoinHandle: critical error receiving the result")
             }
             .into_future(),
         )

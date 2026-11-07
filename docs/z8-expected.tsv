@@ -5,7 +5,7 @@
 # A file that does better than its row is a line to raise in the commit that made it better.
 acl	pass	10	yes	all of it
 adminspace	pass	6	yes	all of it
-atexit	pass	3	yes	3 tests are ignored upstream
+atexit	pass	4	yes	4 tests are ignored upstream (the mains each runs in a process of its own); run with `internal`, which compiles in the close that runs in the background
 attachments	pass	2	yes	all of it
 authentication	pass	7	yes	all of it
 bytes	pass	1	yes	all of it
@@ -18,7 +18,7 @@ formatters	pass	1	yes	all of it
 handler	pass	2	yes	all of it
 interceptors	pass	7	yes	all of it
 interest_undeclare	pass	1	yes	all of it; the file arrived with 1.10.2 (measured on the tree of round 3976)
-keyexpr	pass	15	yes	all of it
+keyexpr	pass	16	yes	all of it; run with `internal`, which compiles in the test of the dummy key expression
 liveliness	pass	46	yes	4 tests are ignored upstream; test_liveliness_regression_3 needs a peer's open to return only after the peers it dialled have replayed their declarations, as upstream's open.return_conditions.declares does: a peer face is now sent the end of its initial declarations and the open waits for it, so a token declared before the subscriber is no longer learnt after it
 low_pass	pass	4	yes	all of it
 matching	pass	24	yes	all of it
