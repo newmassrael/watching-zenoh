@@ -81,18 +81,27 @@ ro_tree_exec() {
         # The mounts need root; the command does not, and must not: it runs as the
         # caller again, with the caller's environment, so what it builds is owned
         # as anything else the caller builds.
+        #
+        # sudo removes the dynamic linker's variables even under `-E`, so
+        # LD_LIBRARY_PATH is carried across as an argument, as PATH and HOME are. A
+        # hosted lane builds against the shared RocksDB engine
+        # (scripts/lib/rocksdb_engine.py exports ROCKSDB_LIB_DIR and LD_LIBRARY_PATH);
+        # without the second, a test binary linked to that engine stops at its start
+        # on `librocksdb.so.10: cannot open shared object file` (hosted run of
+        # c91572906a, Layer Ero).
         sudo -n -E unshare --mount --propagation private -- /bin/bash -c '
             set -e
-            uid="$1" gid="$2" path="$3" home="$4" root="$5" n="$6"
-            shift 6
+            uid="$1" gid="$2" path="$3" home="$4" root="$5" ldpath="$6" n="$7"
+            shift 7
             for ((i = 0; i < n; i++)); do
                 mount --bind "$1" "$1"
                 mount -o remount,bind,ro "$1"
                 shift
             done
             exec setpriv --reuid="$uid" --regid="$gid" --init-groups -- \
-                env PATH="$path" HOME="$home" WZ_ARTIFACT_ROOT="$root" "$@"
-        ' ro-tree "$(id -u)" "$(id -g)" "$PATH" "$HOME" "$root" \
+                env PATH="$path" HOME="$home" ${ldpath:+"LD_LIBRARY_PATH=$ldpath"} \
+                WZ_ARTIFACT_ROOT="$root" "$@"
+        ' ro-tree "$(id -u)" "$(id -g)" "$PATH" "$HOME" "$root" "${LD_LIBRARY_PATH-}" \
             "$((1 + ${#linked[@]}))" "$tree" "${linked[@]}" "$@"
         ;;
     *)
