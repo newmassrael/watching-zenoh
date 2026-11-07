@@ -315472,6 +315472,58 @@
         "Values door carries: values memory absent from the memory document; no max_rows window"
       ]
     },
+    "Round 4388": {
+      "decision_summary": "The router's faces are held in a face table: a persistent map by id and, for each tier, a persistent set of its faces' ids, written together by insert and remove. A fan-out into one tier walks that tier's set, so a message's cost follows the faces it reaches (the contract of docs/router-table-snapshots.md section 5) instead of every face the router holds, and a write under the snapshot value copies one face's path instead of a pointer per face. The instruments of the note count the frames a link is handed instead of keeping them: over the recorder the Puts routed fell window by window and stayed fallen after every idle face left, so that fall was the instrument's.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/face_table.rs (new): FaceTable, the faces by id (PersistentMap) and by tier (RegionMap of PersistentSet); of_tier, insert, remove, Index.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: the tables hold a FaceTable; fan_out_tier_qos, gateway_faces and the regions' admin text read of_tier; two tests (a client's Put visits the same faces with 64 or 1,024 clients held; each tier's set is the faces the map holds in it).",
+        "crates/wz-runtime-tokio/src/router_forward/table_sharing_tests.rs: the instrument the_puts_routed_measured_against_the_faces_up with a control window after every idle face leaves; CountingLinkDriver replaces the recorder in every instrument of the module.",
+        "scripts/lib/capability_cost_gate.py: capic-router-node 6,009,600 (the face table +9,436, peers +4,756), capic-default 11,105,100 (peers +14,224, the face table +8,792), capic-default-lean 9,565,100 (peers +14,156: 0d8b5d8242 +7,740, a584247f7e +4,740, later +1,676); the two default cases were over their budgets on main before this round.",
+        "docs/router-table-snapshots.md: section 6.6 (the walk found, the writes before and after, the read side, the recorder, what the persistent face map costs a message, the phase 0 instrument over counting links); section 7 (a message's face lookups, the readers under a busy writer); section 6.5 titled with its round."
+      ],
+      "verification_bullets": [
+        "pc2: cargo clippy -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --all-targets -D warnings passed; routing-router-hat alone --lib passed; lib tests 1167 passed, 0 failed, 3 ignored.",
+        "pc2, phase 6 instrument, 1,792 to 2,048 faces up, before and after, three runs interleaved: under snapshot a registration 14 to 43 us to 2 us, a token 28 to 79 us to 9 to 10 us; under rwlock a token 10 to 11 us to 3 to 8 us.",
+        "pc2, Puts instrument over counting links, three runs of each value: 1.8 to 2.5 million Puts a second at every band from 0 to 2,048 idle faces and after all left; over the recorder the same windows fell to 0.5 million and the control stayed there.",
+        "pc2, before and after over counting links: perf stat 3 % more instructions per Put after under both values, cycles per Put within each other's spread; perf record puts the trie lookup at 2.4 % of cycles.",
+        "pc2: kernel.perf_event_paranoid set to 2 (sysctl.d) at the owner's request, so the fleet account can run perf there.",
+        "pc3: capability_cost_gate.py --check failed three size cases; origin/main e18b0b27e2 alone already failed capic-default (7,060 over) and capic-default-lean (9,632 over). Split on pc3 by reading at the commits between; the budgets move to the readings with the split in each case's note. --selftest 24/24.",
+        "Static gates before the push: reason_review_pin_gate, prose_named_identifier_gate --check, upstream_citation_anchor_gate, each rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "A message looks each face of its route up by id in the persistent face map (about 3 % more instructions per Put than the hash map). A route that held its faces' state would remove the lookups, once what a route may read stale of a face is stated (docs/router-table-snapshots.md section 7).",
+        "Under snapshot, with a writer declaring without pause, the readers route 17 % fewer Puts than with none; what they pay for loading versions and for the routes each write retires is not separated.",
+        "The readings of sections 6.1 to 6.3 were taken over the recording link; section 6.6 gives the phase 0 instrument's reading over counting links."
+      ],
+      "publishable_decision_summary": "The router's faces are held in a face table: a persistent map by id and, for each tier, a persistent set of its faces' ids, written together by insert and remove. A fan-out into one tier walks that tier's set, so a message's cost follows the faces it reaches (the contract of docs/router-table-snapshots.md section 5) instead of every face the router holds, and a write under the snapshot value copies one face's path instead of a pointer per face. The instruments of the note count the frames a link is handed instead of keeping them: over the recorder the Puts routed fell window by window and stayed fallen after every idle face left, so that fall was the instrument's.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/face_table.rs (new): FaceTable, the faces by id (PersistentMap) and by tier (RegionMap of PersistentSet); of_tier, insert, remove, Index.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: the tables hold a FaceTable; fan_out_tier_qos, gateway_faces and the regions' admin text read of_tier; two tests (a client's Put visits the same faces with 64 or 1,024 clients held; each tier's set is the faces the map holds in it).",
+        "crates/wz-runtime-tokio/src/router_forward/table_sharing_tests.rs: the instrument the_puts_routed_measured_against_the_faces_up with a control window after every idle face leaves; CountingLinkDriver replaces the recorder in every instrument of the module.",
+        "scripts/lib/capability_cost_gate.py: capic-router-node 6,009,600 (the face table +9,436, peers +4,756), capic-default 11,105,100 (peers +14,224, the face table +8,792), capic-default-lean 9,565,100 (peers +14,156: 0d8b5d8242 +7,740, a584247f7e +4,740, later +1,676); the two default cases were over their budgets on main before this round.",
+        "docs/router-table-snapshots.md: section 6.6 (the walk found, the writes before and after, the read side, the recorder, what the persistent face map costs a message, the phase 0 instrument over counting links); section 7 (a message's face lookups, the readers under a busy writer); section 6.5 titled with its round."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: cargo clippy -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --all-targets -D warnings passed; routing-router-hat alone --lib passed; lib tests 1167 passed, 0 failed, 3 ignored.",
+        "pc2, phase 6 instrument, 1,792 to 2,048 faces up, before and after, three runs interleaved: under snapshot a registration 14 to 43 us to 2 us, a token 28 to 79 us to 9 to 10 us; under rwlock a token 10 to 11 us to 3 to 8 us.",
+        "pc2, Puts instrument over counting links, three runs of each value: 1.8 to 2.5 million Puts a second at every band from 0 to 2,048 idle faces and after all left; over the recorder the same windows fell to 0.5 million and the control stayed there.",
+        "pc2, before and after over counting links: perf stat 3 % more instructions per Put after under both values, cycles per Put within each other's spread; perf record puts the trie lookup at 2.4 % of cycles.",
+        "pc2: kernel.perf_event_paranoid set to 2 (sysctl.d) at the owner's request, so the fleet account can run perf there.",
+        "pc3: capability_cost_gate.py --check failed three size cases; origin/main e18b0b27e2 alone already failed capic-default (7,060 over) and capic-default-lean (9,632 over). Split on pc3 by reading at the commits between; the budgets move to the readings with the split in each case's note. --selftest 24/24.",
+        "Static gates before the push: reason_review_pin_gate, prose_named_identifier_gate --check, upstream_citation_anchor_gate, each rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A message looks each face of its route up by id in the persistent face map (about 3 % more instructions per Put than the hash map). A route that held its faces' state would remove the lookups, once what a route may read stale of a face is stated (docs/router-table-snapshots.md section 7).",
+        "Under snapshot, with a writer declaring without pause, the readers route 17 % fewer Puts than with none; what they pay for loading versions and for the routes each write retires is not separated.",
+        "The readings of sections 6.1 to 6.3 were taken over the recording link; section 6.6 gives the phase 0 instrument's reading over counting links."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
