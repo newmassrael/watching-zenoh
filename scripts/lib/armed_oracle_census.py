@@ -103,6 +103,20 @@ ARMING = re.compile(r"\b(WZ_[A-Z0-9_]*REQUIRE[A-Z0-9_]*)=1\s+cargo\b")
 #: between this and the one above is what the prose test has to account for.
 ANY_ASSIGN = re.compile(r"\b(WZ_[A-Z0-9_]*REQUIRE[A-Z0-9_]*)=1\s+(\S+)")
 
+#: R4398 (no register item) -- a NESTED-LANE arming: the flag prefixed on a run of
+#: another layer of this script, `WZ_X_REQUIRE=1 bash scripts/run-ci.sh --layer L`.
+#: It states for one inner run what a hosted job's `env:` states for a whole job
+#: (Layer Ero runs Layer Ewire under WZ_PICO_REQUIRE in a read-only checkout), so it
+#: is held to that statement and not to a row: `check()` accepts it only when
+#: `ci.yml` arms the same flag in an `env:` block, when the flag has no row here
+#: (a row's oracles are machine packages the fleet plan reads from the cargo shape
+#: only, so a nested arming of such a flag would place the lane blind), and when
+#: `run-ci.sh` registers layer L.
+NESTED = re.compile(
+    r"\b(WZ_[A-Z0-9_]*REQUIRE[A-Z0-9_]*)=1\s+bash\s+scripts/run-ci\.sh\s+--layer\s+([A-Za-z0-9_]+)"
+)
+CI_YML = ROOT / ".github" / "workflows" / "ci.yml"
+
 #: `flag -> (test file, oracles)`. An oracle is `("file", path)`,
 #: `("program", name)` or `("python-module", name)`. The test file is a name
 #: under `wz-integration-tests/tests`, or, when it holds a `/`, a path under
@@ -212,13 +226,53 @@ def unclassifiable(text: str) -> list[tuple[int, str, str]]:
     """
     out: list[tuple[int, str, str]] = []
     for number, line in enumerate(text.split("\n"), 1):
+        nested = {n.start() for n in NESTED.finditer(line)}
         for m in ANY_ASSIGN.finditer(line):
-            if m.group(2).startswith("cargo"):
+            if m.group(2).startswith("cargo") or m.start() in nested:
                 continue
             if line.lstrip().startswith("#") or "echo " in line[: m.start()]:
                 continue
             out.append((number, m.group(1), m.group(2)))
     return out
+
+
+def nested_armings(text: str) -> list[tuple[int, str, str]]:
+    """`(line, flag, layer)` for every nested-lane arming (`NESTED`) outside a comment."""
+    out: list[tuple[int, str, str]] = []
+    for number, line in enumerate(text.split("\n"), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for m in NESTED.finditer(line):
+            if "echo " in line[: m.start()]:
+                continue
+            out.append((number, m.group(1), m.group(2)))
+    return out
+
+
+def nested_findings(text: str, ci_text: str) -> list[str]:
+    """What a nested-lane arming owes: the hosted statement, no row, a real layer."""
+    findings: list[str] = []
+    for number, flag, layer in nested_armings(text):
+        if flag in ROWS:
+            findings.append(
+                f"run-ci.sh:{number}: `{flag}=1` arms a nested run of Layer {layer}, and "
+                f"`{flag}` has a row of machine oracles here. The fleet plan reads those "
+                f"only from the `cargo` shape, so this lane would be placed on a machine "
+                f"nobody asked for them; arm it on the `cargo` call instead."
+            )
+        if not re.search(rf"^\s*{flag}:\s*[\"']?1[\"']?\s*$", ci_text, re.M):
+            findings.append(
+                f"run-ci.sh:{number}: `{flag}=1` arms a nested run of Layer {layer}, and no "
+                f"`env:` block of ci.yml arms `{flag}`. A nested arming is accepted as the "
+                f"statement a hosted job already makes for the whole job; with no such job "
+                f"it is a new demand on the machine that no row states."
+            )
+        if not re.search(rf"^\s*run_layer\s+{re.escape(layer)}\s", text, re.M):
+            findings.append(
+                f"run-ci.sh:{number}: `{flag}=1` arms a nested run of Layer {layer}, which "
+                f"run-ci.sh does not register with `run_layer`; the inner run selects nothing."
+            )
+    return findings
 
 
 def probe_command(kind: str, name: str) -> str:
@@ -269,6 +323,13 @@ def check() -> int:
             f"the shape, or the population it walks is smaller than the "
             f"file's, which is item 562 arriving again."
         )
+    try:
+        ci_text = CI_YML.read_text(encoding="utf-8")
+    except OSError as err:
+        ci_text = ""
+        if nested_armings(text):
+            findings.append(f"{CI_YML} is unreadable ({err}), so no nested arming can be held to it")
+    findings.extend(nested_findings(text, ci_text))
 
     for flag, (test, oracles) in sorted(ROWS.items()):
         path = test_path(test)
@@ -324,7 +385,8 @@ def check() -> int:
         f"  armed-oracle: {len(found)} adjudicator(s) armed on every runner by "
         f"`run-ci.sh`, each naming the test that reads it and the {total} "
         f"oracle(s) that machine must already have -- every one of them found "
-        f"in that test's own source. `--probe [--host H]` asks a machine."
+        f"in that test's own source; {len(nested_armings(text))} nested-lane arming(s), "
+        f"each a flag a hosted job arms. `--probe [--host H]` asks a machine."
     )
     return 0
 
@@ -430,6 +492,27 @@ def selftest() -> int:
             },
             "names no Debian package",
         ),
+        (
+            "a nested arming no hosted job states",
+            "WZ_TCPDUMP_REQUIRE=1 cargo test\nrun_layer Ewire layer_e\n"
+            "  && WZ_NOWHERE_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire\n",
+            {"WZ_TCPDUMP_REQUIRE": real_rows["WZ_TCPDUMP_REQUIRE"]},
+            "no `env:` block of ci.yml",
+        ),
+        (
+            "a nested arming of a flag with a row",
+            "WZ_TCPDUMP_REQUIRE=1 cargo test\nrun_layer Ewire layer_e\n"
+            "  && WZ_TCPDUMP_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire\n",
+            {"WZ_TCPDUMP_REQUIRE": real_rows["WZ_TCPDUMP_REQUIRE"]},
+            "has a row of machine oracles",
+        ),
+        (
+            "a nested arming of an unregistered layer",
+            "WZ_TCPDUMP_REQUIRE=1 cargo test\nrun_layer Ewire layer_e\n"
+            "  && WZ_PICO_REQUIRE=1 bash scripts/run-ci.sh --layer Nowhere\n",
+            {"WZ_TCPDUMP_REQUIRE": real_rows["WZ_TCPDUMP_REQUIRE"]},
+            "does not register with `run_layer`",
+        ),
     ]
     real_provided = dict(PROVIDED_BY)
 
@@ -443,6 +526,9 @@ def selftest() -> int:
         "WZ_TCPDUMP_REQUIRE=1 cargo test\n"
         "# WZ_TCPDUMP_REQUIRE=1 turns the skip into a failure\n"
         '    echo "  SKIP (set WZ_TCPDUMP_REQUIRE=1 — makes it fail)"\n'
+        # A nested-lane arming the hosted ci.yml states for its job, of a registered layer.
+        "run_layer Ewire layer_e\n"
+        "    bash -c 'true && WZ_PICO_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire'\n"
     )
     import io
     import contextlib
@@ -522,7 +608,8 @@ def selftest() -> int:
         f"  armed-oracle selftest OK -- {len(cases)} damage probe(s) refused "
         f"for their own stated reason (an arming with no row, a row nothing "
         f"arms, an assignment in neither shape, an oracle the test does not "
-        f"name, a row naming none, a file oracle with no package) and a package "
+        f"name, a row naming none, a file oracle with no package, and a nested-lane "
+        f"arming with no hosted statement, with a row, or of no layer) and a package "
         f"for an oracle no row names is refused; a clean script carrying an arming AND both "
         f"shapes of prose about it passes; the presence test tells a present "
         f"file, program and python module from an absent one in all six "
