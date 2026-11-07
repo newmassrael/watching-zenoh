@@ -315828,6 +315828,48 @@
         "The router's per-message cost of a wildcard declaration rises by about 6 ns a call against the descent without memory; not read in the router Puts instrument."
       ]
     },
+    "Round 4397": {
+      "decision_summary": "Layer C1 stalled for 30 minutes on two fleet hosts in the full `bx --checks ci` run and was ended at bx's idle limit. Both stalls were in wz-runtime-tokio-test-support's `port_tests::a_number_held_by_another_process_is_not_handed_out`. The parent read its holder's stdout for a line starting with \"CLAIMED \". The holder had printed the line and waited on its stdin to be killed. bx had given the run RUST_TEST_THREADS=1, the child inherits it, and with one test thread libtest writes `test <name> ... ` before it runs the test, so the marker followed that text on the same line. The probe test beside it failed the same way. Both readers now take the marker anywhere on the line.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/src/lib.rs `port_tests`: `after_marker(line, marker)` returns what follows the marker wherever it stands on the line. The holder test reads \"CLAIMED \" and the autoselect probe test reads \"PROBE \" through it.",
+        "New test `a_marker_is_found_after_the_harness_text_of_one_test_thread` holds the libtest-prefixed line, the bare line and a line without the marker."
+      ],
+      "verification_bullets": [
+        "Before, on a fleet host: `RUST_TEST_THREADS=1 cargo test -p wz-runtime-tokio-test-support --lib` timed out (rc 124) in 10 of 10 runs. The probe test FAILED and the holder test never ended. With RUST_TEST_THREADS=4, the port_tests filter passed 40 of 40.",
+        "After, on the same host: 23 passed, 0 failed in each of 5 runs with one test thread, 1 with two and 2 with four. `cargo clippy -p wz-runtime-tokio-test-support --all-targets -- -D warnings` is clean, and `cargo fmt --check` passes for the crate.",
+        "Mechanism read in libtest's own source: the one-thread loop announces the test before running it.",
+        "Fleet run `bx --checks ci` at 33bd3cd656 reached bx's 4 h job deadline after 31 units: 26 passed, C1 stalled twice (this), 3 were cut by the deadline. Qza, Qzb and Qzk passed on pc2 under WZ_QZ_REQUIRE=1."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Rerun the full `bx --checks ci` set with a job deadline above 4 h (bx's default `--timeout` 14400 s cut the last run at 31 of 180 units); C1, C1bn and C1bp are unjudged.",
+        "Read the hosted CI runs per job; every CI run since 5f139600 was cancelled with no job or is still queued.",
+        "The first scheduled upstream-watch run did not appear at its 05:41 UTC slot on 11-07; read the next one.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ],
+      "publishable_decision_summary": "Layer C1 stalled for 30 minutes on two fleet hosts in the full `bx --checks ci` run and was ended at bx's idle limit. Both stalls were in wz-runtime-tokio-test-support's `port_tests::a_number_held_by_another_process_is_not_handed_out`. The parent read its holder's stdout for a line starting with \"CLAIMED \". The holder had printed the line and waited on its stdin to be killed. bx had given the run RUST_TEST_THREADS=1, the child inherits it, and with one test thread libtest writes `test <name> ... ` before it runs the test, so the marker followed that text on the same line. The probe test beside it failed the same way. Both readers now take the marker anywhere on the line.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/src/lib.rs `port_tests`: `after_marker(line, marker)` returns what follows the marker wherever it stands on the line. The holder test reads \"CLAIMED \" and the autoselect probe test reads \"PROBE \" through it.",
+        "New test `a_marker_is_found_after_the_harness_text_of_one_test_thread` holds the libtest-prefixed line, the bare line and a line without the marker."
+      ],
+      "publishable_verification_bullets": [
+        "Before, on a fleet host: `RUST_TEST_THREADS=1 cargo test -p wz-runtime-tokio-test-support --lib` timed out (rc 124) in 10 of 10 runs. The probe test FAILED and the holder test never ended. With RUST_TEST_THREADS=4, the port_tests filter passed 40 of 40.",
+        "After, on the same host: 23 passed, 0 failed in each of 5 runs with one test thread, 1 with two and 2 with four. `cargo clippy -p wz-runtime-tokio-test-support --all-targets -- -D warnings` is clean, and `cargo fmt --check` passes for the crate.",
+        "Mechanism read in libtest's own source: the one-thread loop announces the test before running it.",
+        "Fleet run `bx --checks ci` at 33bd3cd656 reached bx's 4 h job deadline after 31 units: 26 passed, C1 stalled twice (this), 3 were cut by the deadline. Qza, Qzb and Qzk passed on pc2 under WZ_QZ_REQUIRE=1."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Rerun the full `bx --checks ci` set with a job deadline above 4 h (bx's default `--timeout` 14400 s cut the last run at 31 of 180 units); C1, C1bn and C1bp are unjudged.",
+        "Read the hosted CI runs per job; every CI run since 5f139600 was cancelled with no job or is still queued.",
+        "The first scheduled upstream-watch run did not appear at its 05:41 UTC slot on 11-07; read the next one.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
