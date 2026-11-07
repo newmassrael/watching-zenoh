@@ -80,14 +80,10 @@ const READ_BUDGET: Duration = Duration::from_secs(12);
 /// killing the child anyway. `NetnsPair`'s drop kills whatever is left in the
 /// namespace.
 fn spawn_reader(netns: &NetnsPair, group: Ipv4Addr, port: u16) -> std::process::Child {
-    let exe = std::env::current_exe().expect("the test binary's path");
     let request = format!("{group} {port} {PEER_ADDR} {}", READ_BUDGET.as_millis());
     let entry = wz_integration_tests::libtest_name!(multicast_ttl_reader_entry);
     netns
-        .command(std::path::Path::new("env"))
-        .arg(format!("{READER_ENV}={request}"))
-        .arg(exe)
-        .args(["--exact", entry.as_str(), "--ignored", "--nocapture"])
+        .test_inside(&entry, &[(READER_ENV, request.as_str())])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

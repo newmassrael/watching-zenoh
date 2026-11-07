@@ -7508,52 +7508,65 @@ pub mod common {
             String::from_utf8_lossy(&out.stdout).trim().to_owned()
         }
 
+        /// The CURRENT test binary, run on its ignored test `test` (named as libtest knows it:
+        /// spell it with [`crate::libtest_name!`]) inside the namespace, with `--nocapture`, as
+        /// the user that owns the build tree, with this process's whole environment and `extra`
+        /// on top of it. This is the one way a test re-runs itself in a namespace, and the
+        /// environment is why: the namespace is entered as root through `sudo`, which resets it,
+        /// and the binary itself may not start without it. The merged test executable links
+        /// RocksDB, which a hosted job links as a shared library found through
+        /// `LD_LIBRARY_PATH`; a child started with only its own variable failed to load
+        /// `librocksdb.so` and printed no verdict. A leg that reads its oracle's location from
+        /// a variable it no longer sees fails less loudly: it SKIPS.
+        pub fn test_inside(&self, test: &str, extra: &[(&str, &str)]) -> Command {
+            let exe = std::env::current_exe().expect("this test binary's path");
+            let mut run = if netns_sandboxed() {
+                // Already the tree's owner, with this process's environment: nothing entered
+                // the namespace as root, so there is nobody to step down from (`runuser`
+                // refuses a user who is not root) and no `sudo` reset the environment.
+                let mut run = self.command(&exe);
+                run.envs(extra.iter().copied());
+                run
+            } else {
+                let user = std::env::var("USER")
+                    .or_else(|_| std::env::var("LOGNAME"))
+                    .expect("the user name, to run the test as the tree's owner");
+                let mut run = self.command(Path::new("runuser"));
+                run.args(["-u", &user, "--", "env"]);
+                let inherited = std::env::vars_os()
+                    .filter(|(key, _)| !extra.iter().any(|(name, _)| key.as_os_str() == *name));
+                for (key, value) in inherited {
+                    let mut pair = key;
+                    pair.push("=");
+                    pair.push(value);
+                    run.arg(pair);
+                }
+                for (key, value) in extra {
+                    run.arg(format!("{key}={value}"));
+                }
+                run.arg(&exe);
+                run
+            };
+            run.args(["--exact", test, "--ignored", "--nocapture"]);
+            run
+        }
+
         /// Run each of `tests`, tests of the CURRENT test binary named as libtest knows them
         /// (spell each with [`crate::libtest_name!`]; a bare function name matches nothing in
         /// a merged executable), inside the namespace, one at a time, and fail by name unless
         /// each ran and passed.
         ///
-        /// What runs there is what runs on the host: the same binary, as the user that
-        /// owns the build tree (the namespace is entered as root through `sudo`), with this
-        /// process's whole environment. The environment is passed on purpose: `sudo` resets
-        /// it, and a leg that reads its oracle's location from a variable it no longer sees
-        /// does not fail, it SKIPS and reports `1 passed`. A leg that skipped anyway (a line
-        /// that begins `skip:`, this crate's form for one) is refused for the same reason:
+        /// What runs there is what runs on the host, started by [`Self::test_inside`]: the same
+        /// binary, as the tree's owner, with this process's whole environment. A leg that
+        /// skipped anyway (a line that begins `skip:`, this crate's form for one) is refused:
         /// the witness would be green over a leg that never ran.
         ///
         /// `bound` is each leg's, and is the caller's to state: a leg here is a whole test
         /// with its own bounded children inside, longer than one child run.
         pub fn rerun_tests_inside(&self, tests: &[String], bound: Duration) {
-            let user = std::env::var("USER")
-                .or_else(|_| std::env::var("LOGNAME"))
-                .expect("the user name, to run the legs as the tree's owner");
-            let exe = std::env::current_exe().expect("this test binary's path");
             for test in tests {
-                let mut run = if netns_sandboxed() {
-                    // Already the tree's owner, with this process's environment: nothing
-                    // entered the namespace as root, so there is nobody to step down from
-                    // (`runuser` refuses a user who is not root) and no `sudo` reset the
-                    // environment.
-                    self.command(&exe)
-                } else {
-                    let mut run = self.command(Path::new("runuser"));
-                    run.args(["-u", &user, "--", "env"]);
-                    for (key, value) in std::env::vars_os() {
-                        let mut pair = key;
-                        pair.push("=");
-                        pair.push(value);
-                        run.arg(pair);
-                    }
-                    run.arg(&exe);
-                    run
-                };
-                run.args([
-                    "--exact",
-                    test.as_str(),
-                    "--ignored",
-                    "--nocapture",
-                    "--test-threads=1",
-                ]);
+                let mut run = self.test_inside(test, &[]);
+                run.arg("--test-threads=1");
                 let out = run
                     .output_within(bound)
                     .unwrap_or_else(|e| panic!("run {test} in {}: {e}", self.ns));
