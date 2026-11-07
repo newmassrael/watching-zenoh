@@ -84,9 +84,15 @@ LICENSE_TEXTS = {
 MIN_FILES = 60
 
 HEAD_LINES = 40
+#: A file derives from one upstream file (`file <path>`) or from several (`files <path> and <path>`,
+#: `files <path>, <path> and <path>`). Each named file is held to the pin on its own, so a file made
+#: from two upstream files keeps the copyright line of each.
 DERIVED = re.compile(
-    r"Derived from (zenoh(?:-[a-z]+)?) (\d+\.\d+\.\d+), file\s*(?://\s*)?([\w./-]+)"
+    r"Derived from (zenoh(?:-[a-z]+)?) (\d+\.\d+\.\d+), "
+    r"(?:file\b\s*(?://\s*)?(?P<one>[\w./-]+)"
+    r"|files\s*(?://\s*)?(?P<many>[\w./-]+(?:(?:,\s*|,?\s+and\s+)[\w./-]+)+))"
 )
+DERIVED_SEPARATOR = re.compile(r",\s*(?:and\s+)?|\s+and\s+")
 UPSTREAM_COPYRIGHT = re.compile(r"Copyright \(c\) \d{4} ZettaScale Technology")
 
 
@@ -184,9 +190,12 @@ def judge(
     return errors
 
 
-def derived_from(text: str) -> tuple[str, str, str] | None:
+def derived_from(text: str) -> tuple[str, str, tuple[str, ...]] | None:
     m = DERIVED.search(flat(text))
-    return (m.group(1), m.group(2), m.group(3)) if m else None
+    if m is None:
+        return None
+    paths = (m["one"],) if m["one"] else tuple(DERIVED_SEPARATOR.split(m["many"]))
+    return (m.group(1), m.group(2), paths)
 
 
 def resolve(files: dict[str, str], pin: pathlib.Path) -> list[str]:
@@ -200,21 +209,25 @@ def resolve(files: dict[str, str], pin: pathlib.Path) -> list[str]:
         if d is None:
             errors.append(f"{rel}: no `Derived from <crate> <version>, file <path>` statement to resolve")
             continue
-        crate, _version, path = d
-        up = upstream_file(pin, crate, path)
-        if not up.is_file():
-            errors.append(f"{rel}: derives from `{crate}` file `{path}`, which is not at the pin")
-            continue
-        upstream_lines = UPSTREAM_COPYRIGHT.findall(head(up.read_text(encoding="utf-8", errors="replace")))
+        crate, _version, paths = d
         h = flat(text)
-        if upstream_lines:
-            for line in upstream_lines:
-                if line not in h:
-                    errors.append(f"{rel}: upstream's `{line}` is not kept")
-        elif not all(m in h for m in HEADERLESS_MARKS):
-            errors.append(
-                f"{rel}: the upstream file has no copyright line, and this file does not say so"
+        for path in paths:
+            up = upstream_file(pin, crate, path)
+            if not up.is_file():
+                errors.append(f"{rel}: derives from `{crate}` file `{path}`, which is not at the pin")
+                continue
+            upstream_lines = UPSTREAM_COPYRIGHT.findall(
+                head(up.read_text(encoding="utf-8", errors="replace"))
             )
+            if upstream_lines:
+                for line in upstream_lines:
+                    if line not in h:
+                        errors.append(f"{rel}: upstream's `{line}` (of `{path}`) is not kept")
+            elif not all(m in h for m in HEADERLESS_MARKS):
+                errors.append(
+                    f"{rel}: the upstream file `{path}` has no copyright line, and this file does "
+                    "not say so"
+                )
     return errors
 
 
@@ -375,6 +388,26 @@ def selftest() -> int:
         nostmt = {"crates/wz-zenoh-x/src/lib.rs": "// nothing\n"}
         if not resolve(nostmt, pin):
             failures.append("RED resolve case 'no statement' passed")
+        # A file derived from two upstream files, the statement wrapped over two comment lines as
+        # a real header wraps it: each file is held to the pin.
+        (pin / "commons" / "zenoh-x" / "src" / "b.rs").write_text(NOTICE_BLOCK.replace("2023", "2024"))
+        two = NOTICE_BLOCK.replace(
+            "// Copyright (c) 2023 ZettaScale Technology\n",
+            "// Copyright (c) 2023 ZettaScale Technology\n// Copyright (c) 2024 ZettaScale Technology\n",
+        ).replace(
+            "file\n// src/lib.rs", "files src/lib.rs\n// and src/b.rs"
+        )
+        if derived_from(two) != ("zenoh-x", PIN, ("src/lib.rs", "src/b.rs")):
+            failures.append(f"the two-file statement reads as {derived_from(two)}")
+        if resolve({"crates/wz-zenoh-x/src/two.rs": two}, pin):
+            failures.append(f"GREEN resolve case (two files) reddened: {resolve({'crates/wz-zenoh-x/src/two.rs': two}, pin)}")
+        if not resolve({"crates/wz-zenoh-x/src/two.rs": two.replace("src/b.rs", "src/gone.rs")}, pin):
+            failures.append("RED resolve case 'the second of two files is not at the pin' passed")
+        if not resolve({"crates/wz-zenoh-x/src/two.rs": two.replace("\n// Copyright (c) 2024 ZettaScale Technology", "")}, pin):
+            failures.append("RED resolve case 'the second file's copyright line is not kept' passed")
+        three = two.replace("files src/lib.rs\n// and src/b.rs", "files src/lib.rs, src/b.rs and src/a.rs")
+        if derived_from(three) != ("zenoh-x", PIN, ("src/lib.rs", "src/b.rs", "src/a.rs")):
+            failures.append(f"the three-file statement reads as {derived_from(three)}")
     if failures:
         print("family-notice gate selftest: FAIL", file=sys.stderr)
         for f in failures:
@@ -382,7 +415,7 @@ def selftest() -> int:
         return 1
     print(
         f"family-notice gate selftest: OK ({len(red)} red case(s) red, 2 green cases green, "
-        "6 red and 3 green resolve cases)"
+        "8 red and 4 green resolve cases, 2 multi-file statements read)"
     )
     return 0
 
