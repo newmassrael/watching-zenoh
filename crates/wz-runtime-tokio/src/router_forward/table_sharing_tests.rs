@@ -413,4 +413,19 @@ fn the_puts_routed_measured_against_the_faces_up() {
             held.push((actions, sink));
         }
     }
+    // The control: each band is also a later window, after millions more Puts were routed and
+    // their frames recorded and let go. With every idle face gone, a rate back near the first
+    // window's is the faces' doing; a rate that stays where the last band left it is the
+    // sequence of windows', and the bands say nothing of the face map.
+    for i in 0..ADMITTED {
+        fwd.deregister(FaceId(10_000 + i));
+    }
+    drop(held);
+    let routed = routed_while(&fwd, &publishers, &subscribers, || {
+        std::thread::sleep(Duration::from_millis(1))
+    });
+    println!(
+        "table-sharing: structure={structure} idle_faces=0 after_all_left publishers={PUBLISHERS} \
+         fan_out={FAN_OUT} puts_routed_per_s={routed:.0}"
+    );
 }
