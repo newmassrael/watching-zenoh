@@ -956,7 +956,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         session-unicast-open,\
         transport-keepalive\
         |"
-    # S9a: `declare-subscriber` joins the row above for `tests/session_peer_tables.rs`
+    # S9a: `declare-subscriber` joins the row above for `tests/it/files/session_peer_tables.rs`
     # (a peer's subscriber interests, answered from the session's own
     # subscriptions, filled through a slot's tables).
     # Fixed-memory step S6, the exhaustion cases of the N-session pool: the row above
@@ -973,7 +973,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         session-unicast-open,\
         static-link-storage\
         |--test=session_dial_exhaustion"
-    # Decision D4 on the fixed-memory host (`tests/session_dial_for_a_node.rs`, Round
+    # Decision D4 on the fixed-memory host (`tests/it/files/session_dial_for_a_node.rs`, Round
     # 3542): the same profile as the dialler's row above, which is the file's
     # `required-features`, and the target by name.
     "wz-session-lwip|hook|\

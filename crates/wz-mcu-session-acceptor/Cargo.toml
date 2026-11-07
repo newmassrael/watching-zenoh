@@ -14,7 +14,7 @@
 # # Why a library (not folded into the deploy bin)
 #
 # The exact same scenario must run in two places: the host integration
-# test (`tests/host_acceptor_e2e.rs`, fast lane, real lwIP on the host
+# test (`tests/it/files/host_acceptor_e2e.rs`, fast lane, real lwIP on the host
 # build) AND the `deploy/mcu-session-acceptor` QEMU bin (the on-target
 # Layer Q.4 e2e). Factoring the scenario into a `ClockSource`-generic
 # `fn` makes the host test and the QEMU bin share ONE implementation —
@@ -74,22 +74,6 @@ path = "src/lib.rs"
 [[test]]
 name = "host_acceptor_fixed_e2e"
 required-features = ["fixed-memory"]
-
-[[test]]
-name = "host_acceptor_e2e"
-required-features = ["lwip"]
-
-[[test]]
-name = "host_acceptor_reassembly_e2e"
-required-features = ["lwip"]
-
-[[test]]
-name = "host_acceptor_reassembly_ooo_e2e"
-required-features = ["lwip"]
-
-[[test]]
-name = "host_acceptor_reassembly_timeout_e2e"
-required-features = ["lwip"]
 
 [dependencies]
 # The composable-framework boundary. `session-lwip` lights up

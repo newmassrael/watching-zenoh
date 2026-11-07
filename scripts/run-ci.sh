@@ -12310,10 +12310,11 @@ layer_c1m_session_lwip() {
     # A batch of two Frames in one datagram
     # (`what_follows_a_second_frame_header_in_a_batch_is_dispatched`, ungated)
     # moved every leg of this file up one again: 4 = what this PRINTED.
+    wz_test_args wz-session-lwip rx_frame_allocations
     _runci_guarded_test "C1m rx frame copying" 4 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put \
-        --test rx_frame_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # Fixed-memory step S3 moved the in-place leg 2 -> 3: a Fragment taking the
     # copying path, counted (`a_fragment_takes_the_copying_path_and_is_counted`,
     # gated on `rx-in-place`). The same file runs again on the FIXED bounded
@@ -12322,44 +12323,51 @@ layer_c1m_session_lwip() {
     # above it costs the matcher's two scratch lists. 3 = what each PRINTED.
     # B3 moved both 3 -> 4 (the extension-chain test above). 4 = what each
     # PRINTED.
+    wz_test_args wz-session-lwip rx_frame_allocations
     _runci_guarded_test "C1m rx frame in place" 5 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
-        --test rx_frame_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-session-lwip rx_frame_allocations
     _runci_guarded_test "C1m rx frame in place fixed" 5 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,wz-session-core/bounded-heapless \
-        --test rx_frame_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # B3 — a session that reassembles reads a Fragment in place too: its
     # payload staged into its slot of the session's own reassembly table
     # straight from the socket, the completed message read in that slot
     # (`mod fragments`, gated on `rx-in-place` + `transport-fragmentation`).
     # The copying-path fragment test gives way to the three fragment tests, on
     # both backings. 6 = what each PRINTED.
+    wz_test_args wz-session-lwip rx_frame_allocations
     _runci_guarded_test "C1m rx fragment in place" 7 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation \
-        --test rx_frame_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-session-lwip rx_frame_allocations
     _runci_guarded_test "C1m rx fragment in place fixed" 7 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation,wz-session-core/bounded-heapless \
-        --test rx_frame_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # B3 — the query and reply planes read in place (`mod query_and_reply`,
     # gated on `query-queryable`): a Response costs the heap nothing, a Request
     # only the queryable matcher's growable scratch; the copying leg is the
     # instrument's control. 6, 6 and 5 = what each command PRINTED.
+    wz_test_args wz-session-lwip rx_frame_allocations
     _runci_guarded_test "C1m rx query in place" 7 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,query-queryable \
-        --test rx_frame_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-session-lwip rx_frame_allocations
     _runci_guarded_test "C1m rx query in place fixed" 7 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,query-queryable,wz-session-core/bounded-heapless \
-        --test rx_frame_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-session-lwip rx_frame_allocations
     _runci_guarded_test "C1m rx query copying" 6 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,query-queryable \
-        --test rx_frame_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # Clause (4) of runtime-zero-copy -- the library's own tests on `rx-in-place`,
     # which hold a lent frame in the session socket: one of them reads the
     # datagram the dispatch is handed in the MAC's own buffer, and no leg above
@@ -12389,14 +12397,16 @@ layer_c1m_session_lwip() {
         --test link_storage_allocations --quiet || return 1
     _runci_guarded_test "C1m link lib fixed" + \
         cargo test -p wz-link-lwip --features static-link-storage --lib --quiet || return 1
+    wz_test_args wz-session-lwip link_state_allocations
     _runci_guarded_test "C1m link state heap" 1 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put \
-        --test link_state_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-session-lwip link_state_allocations
     _runci_guarded_test "C1m link state fixed" 2 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,static-link-storage \
-        --test link_state_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     _runci_guarded_test "C1m session lib fixed" + \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,static-link-storage \
@@ -12451,14 +12461,16 @@ layer_c1m_session_lwip() {
     # under `tx-lend-only`, where every message must cost it nothing and a send
     # the link lends no slot for is an explicit, counted refusal. 4 and 6 = what
     # each command PRINTED.
+    wz_test_args wz-session-lwip tx_allocations
     _runci_guarded_test "C1m tx alloc heap" 4 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close \
-        --test tx_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-session-lwip tx_allocations
     _runci_guarded_test "C1m tx alloc lend-only" 6 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only \
-        --test tx_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # The library's own tests under the lend-only profile, which drives the lwIP
     # driver through the strict lend (`+`: a whole-suite leg, pinned by its own
     # arms above and not by a number that every unrelated test would move).
@@ -12485,22 +12497,25 @@ layer_c1m_session_lwip() {
     # same file on the selectors the
     # slot is built from but without it, which is the instrument's control: there
     # the same windows must cost the heap something, 1 = what that PRINTED.
+    wz_test_args wz-session-lwip session_slot_allocations
     _runci_guarded_test "C1m session slot alloc" 5 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
-        --test session_slot_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-session-lwip session_slot_allocations
     _runci_guarded_test "C1m session slot alloc heap control" 1 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only,rx-in-place \
-        --test session_slot_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # S9a -- the tables a peer writes live in the session slot: two sessions have
     # two sets, a flood through one is refused and counted there and not in the
     # other, a slot comes back empty, and the tables count in the slot's size. 3 =
     # what that command PRINTED.
+    wz_test_args wz-session-lwip session_peer_tables
     _runci_guarded_test "C1m session peer tables" 3 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,session-slot \
-        --test session_peer_tables --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # S9b -- the node's admin GET with no allocator, through the node's own queryable
     # (`admin_fixed`), status and host and a session's own tables: the whole admin
     # surface from one wildcard GET at zero allocations, a leg past the reply buffer
@@ -12559,10 +12574,11 @@ layer_c1m_session_lwip() {
     # one allocation, the answer's owned build, which the file names), a frame that
     # carries a chain of its own costing the same, and the owned builders of the sends
     # bounded: 3 = what that command PRINTED.
+    wz_test_args wz-session-lwip slot_control_records
     _runci_guarded_test "C1m slot control records" 3 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,codec-response-final,session-slot \
-        --test slot_control_records --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # Fixed-memory step S6 -- the PUMP and the RUNTIME under it, counted
     # (`tests/session_pump_allocations.rs`): the same real pair, each end run as a
     # task of one local set, from the runtime's making to the last task's end. Under
@@ -12577,27 +12593,31 @@ layer_c1m_session_lwip() {
     # cell is reused, what a task held is dropped once, a table filled to its
     # capacity refuses every spawn or sleep past it and counts each, by cause, only
     # upward): 16 = what that PRINTED.
+    wz_test_args wz-session-lwip session_pump_allocations
     _runci_guarded_test "C1m session pump alloc" 2 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
-        --test session_pump_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-session-lwip session_pump_allocations
     _runci_guarded_test "C1m session pump alloc reassembly" 2 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot,reassembly \
-        --test session_pump_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # The same pair over the slim receive pool, whose socket carries 256 bytes: the
     # send budget must be bounded by the link, so a Put past it is refused as
     # oversize rather than lent a slot too short (no leg ran this pool on the slot
     # profile until a Put of 512 bytes was found refused as `NoTxSlot`): 2 = what
     # that command PRINTED.
+    wz_test_args wz-session-lwip session_pump_allocations
     _runci_guarded_test "C1m session pump alloc slim" 2 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot,buffer-pool-session-rx-slim \
-        --test session_pump_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-session-lwip session_pump_allocations
     _runci_guarded_test "C1m session pump alloc heap control" 1 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only,rx-in-place \
-        --test session_pump_allocations --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     _runci_guarded_test "C1m coop static runtime" 19 \
         cargo test -p wz-runtime-coop --features alloc,session-slot \
         --lib static_tests:: --quiet || return 1
@@ -12665,59 +12685,66 @@ layer_c1m_session_lwip() {
     # an InitSyn fills the shared queue, is dropped and counted, and takes no cell:
     # 5 = what that command PRINTED, and again with `reassembly`, where a pump cell
     # also holds its staging table.
+    wz_test_args wz-session-lwip session_pool_exhaustion
     _runci_guarded_test "C1m session pool exhaustion" 5 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
-        --test session_pool_exhaustion --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-session-lwip session_pool_exhaustion
     _runci_guarded_test "C1m session pool exhaustion reassembly" 5 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot,reassembly \
-        --test session_pool_exhaustion --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # The dialler's side (`tests/session_dial_exhaustion.rs`), on the node's real
     # profile with the socket pool as well: N dials succeed, the N+1th is refused as
     # a typed error naming the full table (the socket pool, the session table, the
     # pump table, the task table), counted by that table only, sends no InitSyn,
     # gives back what it took and costs the heap nothing, and succeeds again once a
     # session is released: 4 = what that command PRINTED.
+    wz_test_args wz-session-lwip session_dial_exhaustion
     _runci_guarded_test "C1m session dial exhaustion" 4 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage \
-        --test session_dial_exhaustion --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # S9c -- the stack handle of a node on the slot profile is a reference to a
     # `static` (`LwipLink::init_static`), not an `Rc`, and the shell crates do not
     # link `alloc` at all there: the handle costs the heap nothing, and an `Rc` round
     # a zero-sized handle is the instrument's control: 2 = what that command PRINTED.
+    wz_test_args wz-session-lwip static_link_handle
     _runci_guarded_test "C1m static link handle" 2 \
         cargo test -p wz-session-lwip --features session-slot \
-        --test static_link_handle --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # S9c -- the multicast pump on the slot profile: a reply queue that refuses and
     # counts what it has no room for, a pump claimed from a table of cells (a claim on
     # a full table refused, counted, its group socket given back) and run as a task of
     # a static runtime: 3 = what that command PRINTED.
+    wz_test_args wz-session-lwip multicast_slot
     _runci_guarded_test "C1m multicast slot" 3 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response-final,session-slot,static-link-storage \
-        --test multicast_slot --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # S9c -- the admin node of the slot profile, whole: two nodes on one lwIP
     # loopback, a written endpoint dialled, a remote write that makes the other node
     # dial back, a node with fewer slots than endpoints, and the size the task cell
     # has to hold, with the heap counted by the crate that asks for each allocation
     # (none by the shell; what remains is the codec owned mirrors'): 3 = what that
     # command PRINTED.
+    wz_test_args wz-session-lwip admin_node_slot
     _runci_guarded_test "C1m admin node slot" 4 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage,adminspace-core,adminspace-write \
-        --test admin_node_slot --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # Step 6.2b-5 -- a node opened by its zid, on the same lwIP loopback: the build declares a
     # hint, the open is asked, and the session the node holds is dialled for the zid, has the
     # admin space declared on it and is reported by both nodes. A build states no node by
     # default (`MAX_PEER_NODES` is 0) and the test then asserts the refusal for want of room and
     # returns, so this leg states two: 1 = what that command PRINTED.
+    wz_test_args wz-session-lwip admin_node_slot a_node_opened_by_its_zid
     _runci_guarded_test "C1m admin node slot nodes" 1 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage,adminspace-core,adminspace-write \
-        --test admin_node_slot a_node_opened_by_its_zid --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage,adminspace-core,adminspace-write \
@@ -12840,11 +12867,13 @@ layer_c1n_mcu_session_acceptor() {
         && cargo test -p wz-mcu-session-acceptor --features reassembly --quiet \
         && cargo test -p wz-mcu-session-acceptor --features buffer-pool-session-rx-slim --quiet) \
         || return 1
+    wz_test_args wz-mcu-session-acceptor host_acceptor_e2e
     _runci_guarded_test "C1n default e2e" 1 \
-        cargo test -p wz-mcu-session-acceptor --test host_acceptor_e2e --quiet || return 1
+        cargo test -p wz-mcu-session-acceptor "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-mcu-session-acceptor host_acceptor_e2e
     _runci_guarded_test "C1n slim e2e" 1 \
         cargo test -p wz-mcu-session-acceptor --features buffer-pool-session-rx-slim \
-        --test host_acceptor_e2e --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # The link tier's own lib suite on the slim profile. Clippy below compiled it
     # and Layer C1 runs it at the default profile, so nothing RAN it here, and a
     # test that assumed the default queue depth (16 against the slim 4) was red
@@ -12853,24 +12882,29 @@ layer_c1n_mcu_session_acceptor() {
     _runci_guarded_test "C1n link lib slim" + \
         cargo test -p wz-link-lwip --features buffer-pool-session-rx-slim \
         --lib --quiet || return 1
+    wz_test_args wz-mcu-session-acceptor host_acceptor_reassembly_e2e
     _runci_guarded_test "C1n reassembly completion" 1 \
         cargo test -p wz-mcu-session-acceptor --features reassembly \
-        --test host_acceptor_reassembly_e2e --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-mcu-session-acceptor host_acceptor_reassembly_timeout_e2e
     _runci_guarded_test "C1n reassembly timeout" 1 \
         cargo test -p wz-mcu-session-acceptor --features reassembly \
-        --test host_acceptor_reassembly_timeout_e2e --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-mcu-session-acceptor host_acceptor_reassembly_ooo_e2e
     _runci_guarded_test "C1n reassembly out-of-order" 1 \
         cargo test -p wz-mcu-session-acceptor --features reassembly \
-        --test host_acceptor_reassembly_ooo_e2e --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-mcu-session-acceptor host_acceptor_e2e
     _runci_guarded_test "C1n reassembly whole-frame" 1 \
         cargo test -p wz-mcu-session-acceptor --features reassembly \
-        --test host_acceptor_e2e --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # S9c -- the acceptor e2e on the fixed-memory profile: the heap counted over the
     # WHOLE run (zero), and the refusal of a second run on statics that already ran.
     # One test, one file: lwIP is process-global and the listener's socket stays bound.
+    wz_test_args wz-mcu-session-acceptor host_acceptor_fixed_e2e
     _runci_guarded_test "C1n fixed-memory e2e" 1 \
         cargo test -p wz-mcu-session-acceptor --features fixed-memory \
-        --test host_acceptor_fixed_e2e --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # The fixtures' `fixed` forms, which the fixed-memory e2e writes its frames with, are
     # the `Vec` forms byte for byte; the crate's lib suite is the one test of that.
     _runci_guarded_test "C1n wire fixtures fixed forms" 1 \

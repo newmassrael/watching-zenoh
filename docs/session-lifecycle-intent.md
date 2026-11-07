@@ -515,7 +515,7 @@ Each step lands with its own done-when; sizes are not estimated here.
      lwIP's host takes it as a `DialTarget` (an address, or an address and a
      zid). It is installed after the open and before the session's task first
      runs, which is before the InitSyn leaves. A configured endpoint names no
-     node. Witness: `crates/wz-session-lwip/tests/session_dial_for_a_node.rs`
+     node. Witness: `crates/wz-session-lwip/tests/it/files/session_dial_for_a_node.rs`
      on the lwIP loopback, on the node's real profile. The MCU opener of step
      6 dials through it.
    - The rule that two spellings of one zid are one zid is written once,

@@ -24,6 +24,13 @@
 #![cfg(feature = "session-slot")]
 #![allow(clippy::result_large_err)]
 
+// Fixed-memory step S9a -- the tables a peer writes live in the session slot: two
+// real sessions in two slots, a flood through one handle refused and counted
+// there and not in the other, and a slot that comes back empty. It needs the slot
+// (the file is empty without it) and the session halves a pair of sessions is
+// built from.
+#![cfg(all(feature = "session-unicast-open", feature = "session-unicast-accept", feature = "pubsub-put", feature = "declare-subscriber", feature = "session-slot"))]
+
 use std::rc::Rc;
 
 // The binder of `test_bind`: the constructor itself by default, and with

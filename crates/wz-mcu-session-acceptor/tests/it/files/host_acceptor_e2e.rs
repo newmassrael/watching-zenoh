@@ -19,6 +19,8 @@
 //! `host_acceptor_fixed_e2e` runs the same scenario over statics.
 #![cfg(not(feature = "fixed-memory"))]
 
+#![cfg(feature = "lwip")]
+
 use wz_mcu_session_acceptor::{
     run_acceptor_e2e_with_progress, AcceptorE2eOutcome, AcceptorStage, ClockSource, DataMode,
     FixtureEntropy,

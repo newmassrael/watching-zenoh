@@ -27,6 +27,8 @@
 //! resource; each cargo integration-test file is its own process). Mirrors
 //! the per-file split of `host_acceptor_e2e` / `host_acceptor_reassembly_e2e`.
 
+#![cfg(feature = "lwip")]
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 

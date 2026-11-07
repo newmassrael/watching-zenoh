@@ -18,6 +18,11 @@
 //!
 //! Host-test level: no board runs it.
 
+// A session over `tcp/` on the slot profile -- one node dials, one accepts, and the handshake runs
+// through lwIP's TCP and the engine's stream link, then the dialler closes. The selector `session-slot`
+// is the profile; `tcp` the stream.
+#![cfg(all(feature = "session-unicast-open", feature = "session-unicast-accept", feature = "pubsub-put", feature = "transport-keepalive", feature = "codec-close", feature = "session-slot", feature = "tcp"))]
+
 use wz_link_lwip::tcp::LwipTcpListener;
 #[cfg(feature = "static-link-storage")]
 use wz_link_lwip::tcp::TcpSocketPool;

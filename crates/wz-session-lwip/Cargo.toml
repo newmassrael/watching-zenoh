@@ -452,37 +452,6 @@ required-features = [
     "session-slot",
 ]
 
-# The engine's admin node over `tcp/` on lwIP: two nodes, one told by a config write to hold a
-# session with the other, which listens. The node is `wz_session_mcu::slot_admin::AcceptingAdminNode`
-# over the stack of lwIP's streams; it needs the admin surface on both halves beside the selector.
-[[test]]
-name = "admin_node_over_tcp"
-required-features = [
-    "session-unicast-open",
-    "session-unicast-accept",
-    "pubsub-put",
-    "codec-close",
-    "session-slot",
-    "adminspace-core",
-    "adminspace-write",
-    "tcp",
-]
-
-# A session over `tcp/` on the slot profile -- one node dials, one accepts, and the handshake runs
-# through lwIP's TCP and the engine's stream link, then the dialler closes. The selector `session-slot`
-# is the profile; `tcp` the stream.
-[[test]]
-name = "session_over_tcp"
-required-features = [
-    "session-unicast-open",
-    "session-unicast-accept",
-    "pubsub-put",
-    "transport-keepalive",
-    "codec-close",
-    "session-slot",
-    "tcp",
-]
-
 # Fixed-memory step S6 (exhaustion case R2) -- the dialling side: a node dials
 # `MAX_SESSIONS` sessions and is asked for one more, by each table that can be the
 # full one (the socket pool, the session table, the pump table, the task table). On
@@ -490,20 +459,6 @@ required-features = [
 # allocates when a refused dial gives it back.
 [[test]]
 name = "session_dial_exhaustion"
-required-features = [
-    "session-unicast-open",
-    "session-unicast-accept",
-    "pubsub-put",
-    "codec-close",
-    "session-slot",
-    "static-link-storage",
-]
-
-# Decision D4 of docs/session-lifecycle-intent.md -- a dial the fixed-memory host makes for a
-# node closes at an InitAck from another one, with INVALID and no OpenSyn; on the node's real
-# profile, as the exhaustion test above runs it.
-[[test]]
-name = "session_dial_for_a_node"
 required-features = [
     "session-unicast-open",
     "session-unicast-accept",
@@ -551,21 +506,6 @@ required-features = [
 [[test]]
 name = "static_link_handle"
 required-features = ["session-slot"]
-
-# Fixed-memory step S9a -- the tables a peer writes live in the session slot: two
-# real sessions in two slots, a flood through one handle refused and counted
-# there and not in the other, and a slot that comes back empty. It needs the slot
-# (the file is empty without it) and the session halves a pair of sessions is
-# built from.
-[[test]]
-name = "session_peer_tables"
-required-features = [
-    "session-unicast-open",
-    "session-unicast-accept",
-    "pubsub-put",
-    "declare-subscriber",
-    "session-slot",
-]
 
 [lints]
 workspace = true

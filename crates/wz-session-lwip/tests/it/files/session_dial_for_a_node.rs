@@ -13,6 +13,11 @@
 //! It runs on the node's real profile, as `session_dial_exhaustion` does: `session-slot` for
 //! the session tables and `static-link-storage` for the sockets.
 
+// Decision D4 of docs/session-lifecycle-intent.md -- a dial the fixed-memory host makes for a
+// node closes at an InitAck from another one, with INVALID and no OpenSyn; on the node's real
+// profile, as the exhaustion test above runs it.
+#![cfg(all(feature = "session-unicast-open", feature = "session-unicast-accept", feature = "pubsub-put", feature = "codec-close", feature = "session-slot", feature = "static-link-storage"))]
+
 use std::rc::Rc;
 
 use wz_codecs::wire_const::{T_MID_CLOSE, T_MID_OPEN};

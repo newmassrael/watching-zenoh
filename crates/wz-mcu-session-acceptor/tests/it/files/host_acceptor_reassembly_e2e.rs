@@ -24,6 +24,8 @@
 //! loopback netif exactly once (a second `#[test]` in one binary would abort
 //! on the re-init — R71 / YAGNI, the per-file split is the harness).
 
+#![cfg(feature = "lwip")]
+
 use wz_mcu_session_acceptor::{
     run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy,
 };

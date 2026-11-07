@@ -15,6 +15,11 @@
 //! Host-test level: no board runs it. lwIP is process-global: the test holds the harness's lock for
 //! its whole body.
 
+// The engine's admin node over `tcp/` on lwIP: two nodes, one told by a config write to hold a
+// session with the other, which listens. The node is `wz_session_mcu::slot_admin::AcceptingAdminNode`
+// over the stack of lwIP's streams; it needs the admin surface on both halves beside the selector.
+#![cfg(all(feature = "session-unicast-open", feature = "session-unicast-accept", feature = "pubsub-put", feature = "codec-close", feature = "session-slot", feature = "adminspace-core", feature = "adminspace-write", feature = "tcp"))]
+
 use std::cell::RefCell;
 
 use wz_admin::adminspace::SessionAdminRow;
