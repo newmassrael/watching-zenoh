@@ -315556,6 +315556,58 @@
         "Open: the other leftovers of the Z8 list (lane margin gate once measured hosted runs exist, Windows, gossip test flake, client hat)."
       ]
     },
+    "Round 4390": {
+      "decision_summary": "A declaration selects the control channel by a word: [node] control = \"pipe\" builds the image's control feature, and the generated CONTROL constant is held to the build by a const assertion. The vocabulary's control section states the lines a pipe takes, the bytes of a line, what each stream carries and the error words, held to control_port and lifecycle_wire by tests that read wz_node.py. Contract: one answer per line read, in order, on standard output and nothing else there; HOST-WZ lines, the certificate and diagnostics on standard error; the pipe's authority is possession of it. The line reader dropped a line of exactly LINE_BYTES bytes because its buffer had no room for the line end; the buffer is now LINE_BYTES + 1 and an overlong line keeps no text. slot-commander has a pipe, and a Zcmd leg drives it with every command and with lines that are none. The declared-node bin allows absurd_extreme_comparisons, since a zero count is a declaration's value.",
+      "changes_bullets": [
+        "wz_node.py: [node] control word, CONTROL_WORDS/COMMANDS/ERRORS/LINE_BYTES/PIPE, control_features of the slot target, control_refusal, features_of, CONTROL in the generated file, vocabulary control section, selftest",
+        "declared_node.rs: CONTROL const assertion; bin-level allow of absurd_extreme_comparisons with its reason; nine generated files carry CONTROL",
+        "wz-runtime-posix control: buffer of LINE_BYTES + 1, an overlong line returns no text, boundary test",
+        "lifecycle_wire and control_port tests hold CONTROL_ERRORS and CONTROL_COMMANDS to the Rust sets",
+        "slot-commander.toml control = \"pipe\"; Zcmd leg zenohd_lane_pipe_answers_...; Zcmd guard 4 -> 5; C1m guards +1 (mcu 21/22/53/25/63, posix control 5); target-build-contract 5b paragraph",
+        "wz-capi-c: wz_capi_c_lifecycle_read states it reads only the node's own spelling (members in the node's order, no white space); its test reads a reordered and a spaced answer as unreadable"
+      ],
+      "verification_bullets": [
+        "wz_node.py selftest OK, 9 declarations valid and current",
+        "unit on pc2: wz-runtime-posix control 5, lifecycle_wire 14, control_port 9 passed",
+        "host-slot-node control_channel 4 passed; the pipe leg 1 passed on pc2 (package built through wz_package --node-file)",
+        "clippy -D warnings: wz-runtime-posix, wz-session-mcu, wz-integration-tests all targets; declared-node under slot-commander and slot-recorder (slot-recorder with its wz_node.py --env budget)",
+        "wz-capi-c on pc2: lifecycle unit tests 4 passed, clippy all targets; capi_c_wz_door_header.py OK",
+        "static bundle 137 gates (layer_e_oracle_scope and test_discipline after the leg's lane token)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "Next stage: an identity maker as a C door with no session (P-256, O_EXCL, key 0600, never overwrites), answering the certificate and the zid",
+        "Then a witness of a C client that asks a declared node with its own key, by the commander list, with the canonical config",
+        "src/main.rs of host-slot-node keeps a let_unit_value clippy finding; no lane lints the declared-node bin"
+      ],
+      "publishable_decision_summary": "A declaration selects the control channel by a word: [node] control = \"pipe\" builds the image's control feature, and the generated CONTROL constant is held to the build by a const assertion. The vocabulary's control section states the lines a pipe takes, the bytes of a line, what each stream carries and the error words, held to control_port and lifecycle_wire by tests that read wz_node.py. Contract: one answer per line read, in order, on standard output and nothing else there; HOST-WZ lines, the certificate and diagnostics on standard error; the pipe's authority is possession of it. The line reader dropped a line of exactly LINE_BYTES bytes because its buffer had no room for the line end; the buffer is now LINE_BYTES + 1 and an overlong line keeps no text. slot-commander has a pipe, and a Zcmd leg drives it with every command and with lines that are none. The declared-node bin allows absurd_extreme_comparisons, since a zero count is a declaration's value.",
+      "publishable_changes_bullets": [
+        "wz_node.py: [node] control word, CONTROL_WORDS/COMMANDS/ERRORS/LINE_BYTES/PIPE, control_features of the slot target, control_refusal, features_of, CONTROL in the generated file, vocabulary control section, selftest",
+        "declared_node.rs: CONTROL const assertion; bin-level allow of absurd_extreme_comparisons with its reason; nine generated files carry CONTROL",
+        "wz-runtime-posix control: buffer of LINE_BYTES + 1, an overlong line returns no text, boundary test",
+        "lifecycle_wire and control_port tests hold CONTROL_ERRORS and CONTROL_COMMANDS to the Rust sets",
+        "slot-commander.toml control = \"pipe\"; Zcmd leg zenohd_lane_pipe_answers_...; Zcmd guard 4 -> 5; C1m guards +1 (mcu 21/22/53/25/63, posix control 5); target-build-contract 5b paragraph",
+        "wz-capi-c: wz_capi_c_lifecycle_read states it reads only the node's own spelling (members in the node's order, no white space); its test reads a reordered and a spaced answer as unreadable"
+      ],
+      "publishable_verification_bullets": [
+        "wz_node.py selftest OK, 9 declarations valid and current",
+        "unit on pc2: wz-runtime-posix control 5, lifecycle_wire 14, control_port 9 passed",
+        "host-slot-node control_channel 4 passed; the pipe leg 1 passed on pc2 (package built through wz_package --node-file)",
+        "clippy -D warnings: wz-runtime-posix, wz-session-mcu, wz-integration-tests all targets; declared-node under slot-commander and slot-recorder (slot-recorder with its wz_node.py --env budget)",
+        "wz-capi-c on pc2: lifecycle unit tests 4 passed, clippy all targets; capi_c_wz_door_header.py OK",
+        "static bundle 137 gates (layer_e_oracle_scope and test_discipline after the leg's lane token)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next stage: an identity maker as a C door with no session (P-256, O_EXCL, key 0600, never overwrites), answering the certificate and the zid",
+        "Then a witness of a C client that asks a declared node with its own key, by the commander list, with the canonical config",
+        "src/main.rs of host-slot-node keeps a let_unit_value clippy finding; no lane lints the declared-node bin"
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
