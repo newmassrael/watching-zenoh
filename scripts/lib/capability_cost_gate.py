@@ -190,6 +190,18 @@ CASES: tuple[Case, ...] = (
     # lane reads these images up to 3,600 above hkl001, so a margin taken over a build machine's
     # reading went to the lane and left none for growth. The nine budgets are now that run's
     # reading and 3,500, to the hundred, which is the form the older notes below use.
+    # 2026-11-08 -- hosted run 42403286547 (`c91572906a`) read `pico-client-udp` 1,920,340,
+    # `pico-peer` 2,982,441 and `pico-default` 4,417,274, over by 3,340, 4,141 and 5,574. Three
+    # commits since `aefdd5ca0e`: the fragment pacing policy (its writer, clock and wait were
+    # linked with the policy off, about 3,100 to 3,700 here), the keyexpr relation memo
+    # (`c74d81592c`, about 2,400: the double star's descent remembers the suffix pairs it
+    # refuted, which repaid an exponential recursion) and the interface policy of a multicast link
+    # (`cfc80eec5f`, about 500: a value policy, so both values' code is linked, C3). Pacing is now
+    # a strategy type of the writer, so a build with it off links none of it: on hkl001 1,919,044
+    # -> 1,915,960, 2,978,949 -> 2,975,865 and 4,413,678 -> 4,409,990. The memo and the interface
+    # policy are chosen growth. With the lane's offset over hkl001 on the same pico code (that run
+    # against hkl001: +1,296, +3,492, +3,596) the hosted readings are 1,917,256, 2,979,357 and
+    # 4,413,586, and each budget is that and 3,500, to the hundred.
     Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_855_900,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST, COOP_ENGINE),
@@ -228,7 +240,7 @@ CASES: tuple[Case, ...] = (
               "queries pending on a face with it (4,173 over 1,520,800): the head under it was "
               "not measured here, so what is that round's and what the earlier rounds' is not "
               "separated, and the budget is that reading and 3,500, rounded up to the hundred"),
-    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_917_000,
+    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_920_800,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
          require=(UDP, SINGLE_THREADED),
@@ -547,7 +559,7 @@ CASES: tuple[Case, ...] = (
     # hosted reading is about 2,950,300 and the budget is that and 3,500, to the hundred.
     # 2026-11-03, the SCE pins -- 2,978,817 on hosted run 41589047498 (2,978,017 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
-    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_978_300,
+    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_982_900,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
          note="peer implies scout and with it the UDP group"),
@@ -561,7 +573,7 @@ CASES: tuple[Case, ...] = (
     # sort and B-tree), the same commit's release latches and advanced miss listeners (the coop
     # note above), and `436683e036`'s open handoff (`handoff::Reporter`) and runtime pool. Chosen
     # growth, so the budget is the hosted reading and 3,500, to the hundred.
-    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_411_700,
+    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_417_100,
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
