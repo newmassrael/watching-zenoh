@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R4400 (no register item) -- name a product path through the artifact root.
+"""R4401 (no register item) -- name a product path through the artifact root.
 
 `scripts/lib/artifact-root.sh` states the rule: a product of the tree path
 `<rel>` is at `<checkout>/<rel>` when `WZ_ARTIFACT_ROOT` is unset and at

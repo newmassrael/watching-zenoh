@@ -1113,7 +1113,7 @@ round_fed_gates=(
     "gate_test_pin_lint.py"
     "lane_reach_gate.py --check"
     "python_floor_lint.py"
-    # R4400 -- a product path spelled past the artifact root (scripts/lib/artifact-root.sh).
+    # R4401 -- a product path spelled past the artifact root (scripts/lib/artifact-root.sh).
     # Round-fed by the tracked scripts, gates and crate sources it reads. MEASURED: 0.68s,
     # a text read of 2166 files, no build.
     "artifact_root_lint.py"
