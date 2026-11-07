@@ -135,6 +135,27 @@ git hook has neither of; Layer C0 (:1061) FAILs, and that is the shape
 here.
 `commit-msg` needs only bash + GNU grep with the `-P` flag.
 
+### Products outside the checkout (`WZ_ARTIFACT_ROOT`)
+
+Set `WZ_ARTIFACT_ROOT` to an absolute directory outside the checkout and
+`run-ci.sh`, the oracle scripts (`build-zenohd.sh`, `build-zenoh-pico-cli.sh`,
+`install-mbedtls.sh`, `build-sce.sh`, ...) and the test helpers put every
+product there instead: cargo target directories, CMake build directories,
+installed oracles, logs, Python bytecode. The layout under the root mirrors the
+tree (`target/zenohd/zenohd`, `crates/target/debug/...`,
+`deploy/<x>/target/...`), and nothing is written into the checkout, so it can be
+mounted read-only. Unset, every path is where it always was. The rule is stated
+once in `scripts/lib/artifact-root.sh`; its Python and Rust readings are
+`scripts/lib/artifact_root.py` and `wz_codegen_build::artifact`. Under a root a
+cargo shim first on PATH gives each workspace its mirrored target directory and
+refuses an explicit target directory inside the checkout.
+
+Writing a new product path: spell it `$WZ_ARTIFACTS/<rel>` in a script that
+called `wz_artifact_root_init`, `artifact("<rel>")` in a gate or a test helper.
+`artifact_root_lint.py` (Layer C0) fails a spelling that bypasses the root, and
+Layer Ero runs Ewire and its pico oracle build in a read-only mount of the
+checkout to measure it.
+
 ## Stale MCP server and the tool pin
 
 **If the Mnemosyne concept resources are unreachable, the MCP server is STALE,

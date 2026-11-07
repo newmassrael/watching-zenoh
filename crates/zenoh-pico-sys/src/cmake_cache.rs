@@ -98,9 +98,16 @@ pub fn cache_value<'a>(cache: &'a str, name: &str) -> Option<&'a str> {
 /// variable that was never recorded is not evidence of anything, while
 /// discarding on uncertainty would rebuild the whole of zenoh-pico on every
 /// invocation.
-pub fn cache_is_stale(cache: &str, compiler: &str, install_prefix: &str) -> bool {
+///
+/// **The SOURCE** — a `CMAKE_HOME_DIRECTORY` that is not the source this build
+/// configures. CMake refuses outright to reuse a cache made from another
+/// source directory, so a build directory configured before the source moved
+/// (the submodule itself, before the build staged a copy of it) is discarded
+/// rather than left to fail every configure.
+pub fn cache_is_stale(cache: &str, compiler: &str, install_prefix: &str, source_dir: &str) -> bool {
     differs(cache_value(cache, "CMAKE_C_COMPILER"), compiler)
         || differs(cache_value(cache, "CMAKE_INSTALL_PREFIX"), install_prefix)
+        || differs(cache_value(cache, "CMAKE_HOME_DIRECTORY"), source_dir)
 }
 
 /// Does a recorded cache value contradict what this build will pass?
@@ -168,9 +175,9 @@ mod tests {
     #[test]
     fn a_changed_compiler_makes_the_cache_stale() {
         let c = cache("CMAKE_C_COMPILER:STRING=/usr/bin/cc");
-        assert!(cache_is_stale(&c, "/usr/lib/ccache/cc", "/tmp/out"));
+        assert!(cache_is_stale(&c, "/usr/lib/ccache/cc", "/tmp/out", "/src"));
         assert!(
-            !cache_is_stale(&c, "/usr/bin/cc", "/tmp/out"),
+            !cache_is_stale(&c, "/usr/bin/cc", "/tmp/out", "/src"),
             "same compiler and same prefix: keep it"
         );
     }
@@ -188,7 +195,7 @@ mod tests {
                      BUILD_SHARED_LIBS:BOOL=ON\n\
                      CMAKE_INSTALL_PREFIX:PATH=/usr/local\n";
         assert!(
-            cache_is_stale(wiped, "/usr/lib/ccache/cc", "/tmp/out"),
+            cache_is_stale(wiped, "/usr/lib/ccache/cc", "/tmp/out", "/src"),
             "the compiler agrees; the prefix is what gives it away"
         );
     }
@@ -199,8 +206,31 @@ mod tests {
     #[test]
     fn an_unrecorded_value_is_not_a_reason_to_discard() {
         let no_entry = "BUILD_SHARED_LIBS:BOOL=OFF\n";
-        assert!(!cache_is_stale(no_entry, "/usr/bin/cc", "/tmp/out"));
+        assert!(!cache_is_stale(no_entry, "/usr/bin/cc", "/tmp/out", "/src"));
         let empty = cache("CMAKE_C_COMPILER:STRING=");
-        assert!(!cache_is_stale(&empty, "/usr/bin/cc", "/tmp/out"));
+        assert!(!cache_is_stale(&empty, "/usr/bin/cc", "/tmp/out", "/src"));
+    }
+
+    /// THE SOURCE ARM: a directory configured from another source tree (the
+    /// submodule, before the build staged a copy of it) is discarded, because
+    /// CMake refuses to reuse it; the same source keeps it.
+    #[test]
+    fn a_cache_made_from_another_source_is_discarded() {
+        let c = format!(
+            "{}CMAKE_HOME_DIRECTORY:INTERNAL=/repo/vendor/zenoh-pico\n",
+            cache("CMAKE_C_COMPILER:STRING=/usr/bin/cc")
+        );
+        assert!(cache_is_stale(
+            &c,
+            "/usr/bin/cc",
+            "/tmp/out",
+            "/tmp/out/zenoh-pico-src"
+        ));
+        assert!(!cache_is_stale(
+            &c,
+            "/usr/bin/cc",
+            "/tmp/out",
+            "/repo/vendor/zenoh-pico"
+        ));
     }
 }

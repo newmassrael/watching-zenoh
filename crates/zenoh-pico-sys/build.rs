@@ -73,13 +73,25 @@ fn main() {
     // host it is `std::fs::canonicalize` unchanged.
     let zenoh_src = dunce::canonicalize(manifest_dir.join("../../vendor/zenoh-pico"))
         .expect("canonicalize vendor/zenoh-pico");
-    let include_dir = zenoh_src.join("include");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    // The submodule is only READ. zenoh-pico's CMakeLists.txt writes a
+    // generated header into its own source directory (`configure_file` of
+    // `include/zenoh-pico.h`), so configuring the submodule in place wrote into
+    // the checkout on every build -- and failed outright where the checkout is
+    // mounted read-only with its products under WZ_ARTIFACT_ROOT
+    // (scripts/lib/artifact-root.sh; measured by run-ci Layer Ero:
+    // "Could not open file for write ... include/zenoh-pico.h.tmp: Read-only
+    // file system"). CMake configures a copy in OUT_DIR instead, the same
+    // remedy `scripts/build-zenoh-pico-cli.sh` applies to its own build.
+    let pico_src = out_dir.join("zenoh-pico-src");
+    stage_source(&zenoh_src, &pico_src);
+    let include_dir = pico_src.join("include");
 
     // R311y608 — before anything else, throw away a build directory whose
     // cache CMake is about to DELETE. See `src/cmake_cache.rs` for what that
     // costs: every `-D` below evaporates and the install goes to /usr/local.
-    discard_stale_build_dir(&out_dir.join("build"));
+    discard_stale_build_dir(&out_dir.join("build"), &pico_src);
 
     // Stage 1: CMake build → static libzenohpico.a.
     //
@@ -87,7 +99,7 @@ fn main() {
     // additional source trees and link options unrelated to wire-
     // codec interop. The static-lib + minimal-features build keeps
     // the surface lean.
-    let dst = cmake::Config::new(&zenoh_src)
+    let dst = cmake::Config::new(&pico_src)
         .define("BUILD_SHARED_LIBS", "OFF")
         .define("BUILD_EXAMPLES", "OFF")
         .define("BUILD_TESTING", "OFF")
@@ -412,7 +424,7 @@ fn main() {
     // pin advance (or a local edit during diagnosis) triggers a
     // rebuild.
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={}", include_dir.display());
+    println!("cargo:rerun-if-changed={}/include", zenoh_src.display());
     println!("cargo:rerun-if-changed={}/src", zenoh_src.display());
     println!(
         "cargo:rerun-if-changed={}/CMakeLists.txt",
@@ -433,7 +445,7 @@ fn main() {
 /// zenoh-pico rebuild on every invocation, while keeping on uncertainty costs
 /// nothing until the compiler really does change, which is the case this
 /// guard detects positively.
-fn discard_stale_build_dir(build_dir: &Path) {
+fn discard_stale_build_dir(build_dir: &Path, source_dir: &Path) {
     let cache_path = build_dir.join("CMakeCache.txt");
     let Ok(cache) = std::fs::read_to_string(&cache_path) else {
         return;
@@ -454,7 +466,11 @@ fn discard_stale_build_dir(build_dir: &Path) {
         .parent()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    if !cache_is_stale(&cache, &compiler, &install_prefix) {
+    // CMake records the source directory with forward slashes on every host
+    // (`C:/...` on Windows), so the path is compared in that spelling; the
+    // backslash form would read as another source and rebuild every time.
+    let source = source_dir.display().to_string().replace('\\', "/");
+    if !cache_is_stale(&cache, &compiler, &install_prefix, &source) {
         return;
     }
     // SAID OUT LOUD. A silently re-run build looks like a slow one; this is
@@ -464,11 +480,13 @@ fn discard_stale_build_dir(build_dir: &Path) {
     println!(
         "cargo:warning=zenoh-pico-sys: discarding a cmake build directory that \
          does not describe this build (cached compiler {} vs {compiler}; cached \
-         install prefix {} vs {install_prefix}). CMake deletes its cache when \
-         the compiler changes and re-configures with zenoh-pico's DEFAULTS -- \
-         shared libs, examples, tests, and an install into /usr/local",
+         install prefix {} vs {install_prefix}; cached source {} vs {source}). \
+         CMake deletes its cache when the compiler changes and re-configures \
+         with zenoh-pico's DEFAULTS -- shared libs, examples, tests, and an \
+         install into /usr/local -- and refuses a cache made from another source",
         cache_value(&cache, "CMAKE_C_COMPILER").unwrap_or("<unrecorded>"),
         cache_value(&cache, "CMAKE_INSTALL_PREFIX").unwrap_or("<unrecorded>"),
+        cache_value(&cache, "CMAKE_HOME_DIRECTORY").unwrap_or("<unrecorded>"),
     );
     if let Err(e) = std::fs::remove_dir_all(build_dir) {
         println!("cargo:warning=zenoh-pico-sys: could not remove {build_dir:?}: {e}");
@@ -493,4 +511,71 @@ fn resolve_exe(exe: &Path) -> PathBuf {
         .map(|dir| dir.join(exe))
         .find(|candidate| std::fs::metadata(candidate).is_ok())
         .unwrap_or_else(|| exe.to_owned())
+}
+
+/// Make `dst` a fresh copy of the source tree `src`, without its `.git`.
+///
+/// Fresh, so a file removed from the submodule does not linger in the copy and
+/// get compiled. Modification times are KEPT: CMake's build directory sits
+/// beside the copy and decides what to recompile by comparing an object's time
+/// with its source's, so a copy stamped "now" would rebuild all of zenoh-pico
+/// on every run of this script. The tree is a few megabytes; the copy is cheap
+/// next to the build it feeds.
+fn stage_source(src: &Path, dst: &Path) {
+    if dst.exists() {
+        std::fs::remove_dir_all(dst)
+            .unwrap_or_else(|e| panic!("remove the stale copy {}: {e}", dst.display()));
+    }
+    copy_tree(src, dst);
+}
+
+/// `perms` with the owner's write bit set and nothing else widened.
+#[cfg(unix)]
+fn owner_writable(perms: std::fs::Permissions) -> std::fs::Permissions {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::Permissions::from_mode(perms.mode() | 0o200)
+}
+
+/// `perms` writable: Windows has one read-only attribute and no owner bits.
+#[cfg(not(unix))]
+fn owner_writable(mut perms: std::fs::Permissions) -> std::fs::Permissions {
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    perms
+}
+
+fn copy_tree(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap_or_else(|e| panic!("create {}: {e}", dst.display()));
+    let entries = std::fs::read_dir(src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| panic!("read an entry of {}: {e}", src.display()));
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        // `metadata` follows a link, so a linked file or directory is copied as
+        // what it names, which is what CMake would have read through it.
+        let meta =
+            std::fs::metadata(&from).unwrap_or_else(|e| panic!("stat {}: {e}", from.display()));
+        if meta.is_dir() {
+            copy_tree(&from, &to);
+        } else if meta.is_file() {
+            std::fs::copy(&from, &to)
+                .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", from.display(), to.display()));
+            // The submodule's files may be read-only (worktrees share them as
+            // 0444 hard links) and `copy` carries the mode over; the copy is
+            // the build's to write (`configure_file` regenerates a header in it).
+            std::fs::set_permissions(&to, owner_writable(meta.permissions()))
+                .unwrap_or_else(|e| panic!("make {} writable: {e}", to.display()));
+            let modified = meta
+                .modified()
+                .unwrap_or_else(|e| panic!("mtime of {}: {e}", from.display()));
+            std::fs::File::options()
+                .write(true)
+                .open(&to)
+                .and_then(|f| f.set_modified(modified))
+                .unwrap_or_else(|e| panic!("keep the mtime of {}: {e}", to.display()));
+        }
+    }
 }
