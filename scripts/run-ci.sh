@@ -12063,7 +12063,9 @@ layer_c1q_multicast_glue() {
     # non-default test gate; this leg holds what stayed.)
     # 12 -> 13: one more `udp_multicast_config` test (hosted C1q printed `13 passed`); re-derived
     # on the build host.
-    _runci_guarded_test C1q 13 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
+    # 13 -> 15: two more `udp_multicast_config` tests landed on 2026-11-07 without the guard
+    # (hosted run 42403286547 printed `15 passed` for this exact command).
+    _runci_guarded_test C1q 15 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
         || return 1
     # Debt 873 side finding -- a scouting socket goes on past a refused IPv4 membership and
     # a multicast link does not. Its own leg because the one above builds no scouting
