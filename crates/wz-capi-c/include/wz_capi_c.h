@@ -1105,7 +1105,10 @@ typedef struct wz_capi_c_lifecycle_read_t {
 /* Read an answer a node gave: a verb's reply payload in band, or one line its
  * control channel answered with (line end cut). `out` is filled from scratch.
  * An answer that is no document a node writes reads as
- * WZ_CAPI_C_LIFECYCLE_UNREADABLE, which is a reading and still Z_OK. Z_ENULL
+ * WZ_CAPI_C_LIFECYCLE_UNREADABLE, which is a reading and still Z_OK. Only the
+ * node's own spelling is read: its members in the order the node writes them
+ * (`verdict` first), with no white space, so the same members in another order
+ * are UNREADABLE. Z_ENULL
  * for a NULL `out`, or a NULL `bytes` with a non-zero `len`. */
 z_result_t wz_capi_c_lifecycle_read(const uint8_t *bytes, size_t len,
                                     wz_capi_c_lifecycle_read_t *out);

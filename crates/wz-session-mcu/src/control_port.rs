@@ -311,4 +311,54 @@ mod tests {
             "{\"error\":\"unknown-command\"}"
         );
     }
+
+    /// The vocabulary a consumer reads (`scripts/lib/wz_node.py --vocabulary`,
+    /// `control.words.pipe.commands`) states the lines a pipe takes; each is held here to the
+    /// command this port reads it as, with its placeholders filled, and the vocabulary states no
+    /// other line.
+    #[test]
+    fn the_vocabulary_states_the_lines_this_port_reads() {
+        let vocabulary = include_str!("../../../scripts/lib/wz_node.py");
+        let from = vocabulary
+            .find("\nCONTROL_COMMANDS = (\n")
+            .expect("wz_node.py states CONTROL_COMMANDS");
+        let block = &vocabulary[from..];
+        let block = &block[..block.find("\n)\n").expect("its end")];
+        let stated: std::vec::Vec<&str> = block
+            .lines()
+            .skip(2)
+            .map(|line| {
+                line.strip_prefix("    \"")
+                    .and_then(|l| l.strip_suffix("\","))
+                    .expect("one quoted line a row")
+            })
+            .collect();
+        let read: std::vec::Vec<Command<'_>> = stated
+            .iter()
+            .map(|line| {
+                let filled = line.replace("<peer>", "a1b2").replace("<generation>", "7");
+                let command = parse(&filled).unwrap_or_else(|why| panic!("{line}: {why:?}"));
+                match command {
+                    Command::Open("a1b2", mode) => Command::Open("a1b2", mode),
+                    Command::Close("a1b2") => Command::Close("a1b2"),
+                    Command::Reset("a1b2", "7") => Command::Reset("a1b2", "7"),
+                    Command::Status("a1b2") => Command::Status("a1b2"),
+                    Command::Whoami => Command::Whoami,
+                    other => panic!("{line} reads as {other:?}"),
+                }
+            })
+            .collect();
+        assert_eq!(
+            read,
+            [
+                Command::Open("a1b2", OpenMode::Dial),
+                Command::Open("a1b2", OpenMode::Passive),
+                Command::Close("a1b2"),
+                Command::Reset("a1b2", "7"),
+                Command::Status("a1b2"),
+                Command::Whoami,
+            ],
+            "CONTROL_COMMANDS is every command this port reads, once, in this order"
+        );
+    }
 }

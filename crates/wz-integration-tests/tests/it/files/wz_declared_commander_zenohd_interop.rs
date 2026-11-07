@@ -224,6 +224,9 @@ impl Node {
         let child = ChildGuard::wrap(
             what,
             Command::new(binary)
+                // The node's control channel is its standard input (`control = "pipe"`); these
+                // legs send it nothing.
+                .stdin(Stdio::null())
                 .stdout(Stdio::from(out.try_clone().expect("dup capture")))
                 .stderr(Stdio::from(out.try_clone().expect("dup capture")))
                 .spawn()
@@ -387,6 +390,138 @@ fn a_zenoh_zget_granted_nothing_is_refused_status_on_its_own_session() {
     assert!(
         status.contains(STATUS_REFUSED),
         "a zid on no list asked `status` over the same listener and was not refused: {status}"
+    );
+}
+
+/// The lines the agent writes on the node's pipe, each with what its answer must read as: every
+/// command the vocabulary states a pipe takes, and lines that are none of them.
+fn pipe_lines(peer: &str) -> Vec<(String, &'static str)> {
+    let line_bytes = wz_runtime_posix_line_bytes();
+    vec![
+        // At the bound the line is read, and is no command; one byte past it is not read.
+        ("y".repeat(line_bytes), "unknown-command"),
+        ("x".repeat(line_bytes + 1), "line-too-long"),
+        ("whoami".to_owned(), "the zid"),
+        (format!("status {peer}"), "status"),
+        (format!("close {peer}"), "not_found"),
+        // The node holds no peer by its zid, so it has no room to keep a generation in, and a
+        // reset is refused for room before it closes anything; an open is refused the same way.
+        (format!("reset {peer} 3"), "refused"),
+        (format!("open {peer}"), "refused"),
+        ("frobnicate".to_owned(), "unknown-command"),
+        ("open".to_owned(), "open-takes-one-peer"),
+        (String::new(), "unknown-command"),
+        ("whoami".to_owned(), "the zid"),
+    ]
+}
+
+/// The bytes of a command line the node reads (`LINE_BYTES` of wz-runtime-posix's `control`, which
+/// the vocabulary states as `line_bytes`).
+fn wz_runtime_posix_line_bytes() -> usize {
+    let vocabulary = Command::new("python3")
+        .arg(repo_root().join("scripts/lib/wz_node.py"))
+        .args(["--vocabulary", "slot"])
+        .output_bounded()
+        .expect("run wz_node.py --vocabulary");
+    assert!(
+        vocabulary.status.success(),
+        "wz_node.py --vocabulary failed"
+    );
+    let text = String::from_utf8(vocabulary.stdout).expect("UTF-8");
+    let at = text
+        .find("\"line_bytes\": ")
+        .expect("the vocabulary states line_bytes")
+        + 14;
+    text[at..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("a number")
+}
+
+// wz-proves: none -- the declared node of the fixed-memory profile has no catalog atom, and its pipe is the slot profile's own
+#[test]
+#[ignore = "binary-dep e2e (the node is built from deploy/nodes/slot-commander.toml with keys made here); runs via --ignored"]
+fn zenohd_lane_pipe_answers_each_line_once_on_stdout_and_says_everything_else_on_stderr() {
+    use std::io::{BufRead, BufReader, Write};
+    use wz_session_core::lifecycle_wire::{Answer, ControlError};
+
+    let built = built();
+    let err = tempfile::tempfile().expect("a capture for the node's standard error");
+    let mut child = ChildGuard::wrap(
+        "slot-commander (declared node, on its pipe)",
+        Command::new(&built.node)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(err.try_clone().expect("dup capture")))
+            .spawn()
+            .expect("spawn the node"),
+    );
+    let mut stdin = child.child_mut().stdin.take().expect("stdin");
+    let stdout = child.child_mut().stdout.take().expect("stdout");
+    let (lines_tx, lines) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = lines_tx.send(line);
+        }
+    });
+    let said = wait_for_substring(&mut err.try_clone().expect("dup"), LISTENING, BUDGET)
+        .unwrap_or_else(|why| panic!("the node never said {LISTENING:?}\n{why}"));
+    let zid = said
+        .lines()
+        .find_map(|line| line.split(READY).nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("the node never said who it is\n{said}"))
+        .to_owned();
+
+    let sent = pipe_lines(&built.stranger.zid);
+    for (line, _) in &sent {
+        writeln!(stdin, "{line}").expect("write a line on the pipe");
+    }
+    stdin.flush().expect("flush the pipe");
+    let mut answers = Vec::new();
+    for (line, expected) in &sent {
+        let answer = lines.recv_timeout(BUDGET).unwrap_or_else(|_| {
+            panic!(
+                "no answer to {line:?} after {} answers {answers:?}\n{}",
+                answers.len(),
+                read_captured(&mut err.try_clone().expect("dup"))
+            )
+        });
+        let read = Answer::read(answer.as_bytes()).unwrap_or_else(|| {
+            panic!("the answer to {line:?} is no answer a node writes: {answer}")
+        });
+        let word = match read {
+            Answer::Whoami(said) => {
+                assert_eq!(said, zid, "`whoami` answered another zid than READY said");
+                "the zid"
+            }
+            Answer::Verdict(verdict) => verdict.verdict,
+            Answer::Error(error) => error.words(),
+        };
+        assert_eq!(word, *expected, "the answer to {line:?}: {answer}");
+        answers.push(answer);
+    }
+    assert!(
+        answers
+            .iter()
+            .any(|a| a.contains(ControlError::LineTooLong.words())),
+        "a line past line_bytes was answered once, as such"
+    );
+    // One answer a line and nothing else: the pipe closed, the node stopped, standard output ends
+    // with no line beyond the answers.
+    drop(stdin);
+    graceful_terminate(child.child_mut(), Duration::from_secs(5));
+    reader.join().expect("the reader ends with standard output");
+    let rest: Vec<String> = lines.try_iter().collect();
+    assert!(
+        rest.is_empty(),
+        "standard output carried lines that answer no command: {rest:?}"
+    );
+    let console = read_captured(&mut err.try_clone().expect("dup"));
+    assert!(
+        console.contains(READY) && console.contains("-----BEGIN CERTIFICATE-----"),
+        "the node's own lines and its certificate are on standard error\n{console}"
     );
 }
 

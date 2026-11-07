@@ -218,7 +218,9 @@ pub unsafe extern "C" fn wz_capi_c_lifecycle_key(
 ///
 /// An answer that is no document a node writes (empty, another document, a word outside the
 /// closed sets, a document cut short) is `WZ_CAPI_C_LIFECYCLE_UNREADABLE`; that is a reading and
-/// not an error, so the call still returns `Z_OK`. `Z_ENULL` for a NULL `out`, or a NULL `bytes`
+/// not an error, so the call still returns `Z_OK`. Only the node's own spelling is read
+/// (`lifecycle_wire::Answer::read`): its members in the order the node writes them, `verdict`
+/// first, with no white space, so the same members in another order are unreadable. `Z_ENULL` for a NULL `out`, or a NULL `bytes`
 /// with a non-zero `len`.
 ///
 /// # Safety
@@ -457,7 +459,19 @@ mod tests {
         assert_eq!(error.kind, WZ_CAPI_C_LIFECYCLE_ERROR);
         assert_eq!(text(error.error), "line-too-long");
 
-        for other in [&b""[..], b"{}", br#"{"verdict":"closing""#, b"\xff"] {
+        // Only the node's own spelling: the same members in another order, or with white space,
+        // are no document a node writes.
+        let reordered =
+            br#"{"reason":"the last chunk of the key is not a zid","verdict":"refused"}"#;
+        let spaced = br#"{"verdict": "closing","links":1}"#;
+        for other in [
+            &b""[..],
+            b"{}",
+            br#"{"verdict":"closing""#,
+            b"\xff",
+            reordered,
+            spaced,
+        ] {
             let r = read(other);
             assert_eq!(r.kind, WZ_CAPI_C_LIFECYCLE_UNREADABLE, "{other:?}");
             assert!(r.verdict.is_null() && r.error.is_null() && r.zid[0] == 0);

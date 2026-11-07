@@ -12081,9 +12081,11 @@ layer_c1m_session_lwip() {
     # the fixed node held to the table of every verb, a reset that dials again and a close that does
     # not, the order of requests made outside the loop, and the record of generations (26).
     # 19 -> 20: the mode a request carries reaches the node's opener (decision D10).
-    _runci_guarded_test "C1m mcu default" 20 \
+    # +1 in every leg that runs the crate's lib tests (20 -> 21, 21 -> 22, 52 -> 53, 24 -> 25,
+    # 62 -> 63): the control port reads each command line the node vocabulary states.
+    _runci_guarded_test "C1m mcu default" 21 \
         cargo test -p wz-session-mcu --quiet || return 1
-    _runci_guarded_test "C1m mcu unicast app layer" 21 \
+    _runci_guarded_test "C1m mcu unicast app layer" 22 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -12093,7 +12095,7 @@ layer_c1m_session_lwip() {
     # (decision D15), and a close removes it: the one test of the refusal it replaces became two.
     # 49 -> 52: the mode test above, and two of the passive form (decision D10): a node waited
     # for and not dialled, and an opener whose dialling open changes a passive node.
-    _runci_guarded_test "C1m mcu adminspace-write" 52 \
+    _runci_guarded_test "C1m mcu adminspace-write" 53 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     _runci_guarded_test "C1m mcu peer nodes" 25 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
@@ -12107,13 +12109,13 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu \
         --features adminspace-write,lifecycle-close,lifecycle-reset,lifecycle-status --lib \
         connect_manager --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-core" 24 \
+    _runci_guarded_test "C1m mcu adminspace-core" 25 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
     # 57 -> 58: one more test in the lib (hosted C1m ran 59 and one is ignored); re-derived on
     # the build host.
     # 58 -> 59: the same test D15 added (a close removes the row of a node with no locator).
     # 59 -> 62: the same three as the adminspace-write leg (decision D10).
-    _runci_guarded_test "C1m mcu adminspace read+write" 62 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 63 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -12648,9 +12650,10 @@ layer_c1m_session_lwip() {
         cargo test -p wz-runtime-posix --lib group:: --quiet || return 1
     # The host's control channel (`wz_runtime_posix::control`, decision D7 step 7d): the lines a test
     # agent writes to a node's standard input, taken without blocking: an idle channel gives none,
-    # a partial line waits for its end, a line longer than the buffer is cut and says so, and the
-    # end of the stream closes the channel: 4 = what that command PRINTED.
-    _runci_guarded_test "C1m posix control channel" 4 \
+    # a partial line waits for its end, a line longer than LINE_BYTES keeps no text and says so, a
+    # line of exactly LINE_BYTES is read, and the end of the stream closes the channel: 5 = what
+    # that command PRINTED.
+    _runci_guarded_test "C1m posix control channel" 5 \
         cargo test -p wz-runtime-posix --lib control:: --quiet || return 1
     # The out-of-band transport through a real process (`deploy/host-slot-node`, `--features
     # control`): a line on standard input answered on standard output in the words of the in-band
@@ -21574,8 +21577,10 @@ layer_z_zenohd_interop() {
     # the client that asked claims; and two declared nodes provisioned with identities (`[identity]`)
     # that the node's own executable made on the device (`--make-identity`, which overwrites nothing)
     # command each other by zids `wz_node.py --zid-of` printed before either ran (`slot-subject`).
+    # The node's pipe (`control = "pipe"`) answers every command the vocabulary states, and lines
+    # that are none, once each on standard output, with everything else on standard error.
     wz_test_args wz-integration-tests wz_declared_commander_zenohd_interop
-    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zcmd 4 env WZ_ZENOHD_BIN="$zenohd" \
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zcmd 5 env WZ_ZENOHD_BIN="$zenohd" \
         cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     rm -rf "$decl_pkg"

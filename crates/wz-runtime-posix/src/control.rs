@@ -10,23 +10,25 @@
 //! asks the descriptor whether a byte is waiting before it reads, so an idle channel costs the
 //! round one `poll(2)` and a descriptor that is not a pipe or a terminal behaves the same.
 
-/// The bytes of one command line. A longer line is dropped whole (it is no command the port
-/// reads, since the longest is `open` and a 32-digit zid), and the channel says so by returning
-/// it cut at this length with [`Line::overlong`] set.
+/// The bytes of one command line, its end not counted. A longer line is dropped whole (it is no
+/// command the port reads, since the longest is `open passive` and a 32-digit zid), and the
+/// channel says so by returning it empty with [`Line::overlong`] set.
 pub const LINE_BYTES: usize = 128;
+/// The reader's buffer: a line of [`LINE_BYTES`] and its end.
+const BUF_BYTES: usize = LINE_BYTES + 1;
 
 /// One line taken from the channel.
 pub struct Line<'a> {
     /// The text of the line, its end cut. Not valid UTF-8 is an empty line, which no command is.
     pub text: &'a str,
-    /// The line was longer than [`LINE_BYTES`] and `text` is what was kept of it.
+    /// The line was longer than [`LINE_BYTES`], and `text` is empty: none of it was kept.
     pub overlong: bool,
 }
 
 /// A line reader over a descriptor, in a fixed buffer.
 pub struct Lines {
     fd: libc::c_int,
-    buf: [u8; LINE_BYTES],
+    buf: [u8; BUF_BYTES],
     len: usize,
     /// Bytes of the current line that did not fit and were dropped, until its end.
     dropping: bool,
@@ -45,7 +47,7 @@ impl Lines {
     pub const fn on(fd: libc::c_int) -> Self {
         Self {
             fd,
-            buf: [0; LINE_BYTES],
+            buf: [0; BUF_BYTES],
             len: 0,
             dropping: false,
             taken: 0,
@@ -71,12 +73,14 @@ impl Lines {
             if let Some(end) = self.buf[..self.len].iter().position(|b| *b == b'\n') {
                 self.taken = end + 1;
                 let overlong = core::mem::take(&mut self.dropping);
+                // What is left of an overlong line is its tail, which is no part of a command.
+                let kept = if overlong { 0 } else { end };
                 return Some(Line {
-                    text: core::str::from_utf8(&self.buf[..end]).unwrap_or(""),
+                    text: core::str::from_utf8(&self.buf[..kept]).unwrap_or(""),
                     overlong,
                 });
             }
-            if self.len == LINE_BYTES {
+            if self.len == BUF_BYTES {
                 // No end in a full buffer: keep what fits, drop the rest up to the line's end.
                 self.dropping = true;
                 self.len = 0;
@@ -90,7 +94,7 @@ impl Lines {
                 libc::read(
                     self.fd,
                     self.buf[self.len..].as_mut_ptr().cast(),
-                    LINE_BYTES - self.len,
+                    BUF_BYTES - self.len,
                 )
             };
             if n == 0 {
@@ -193,8 +197,30 @@ mod tests {
         writer.write_all(b"\nopen a\n").unwrap();
         let got = drain(&mut lines);
         assert_eq!(got.len(), 2, "{got:?}");
-        assert!(got[0].1, "the long line is marked");
+        assert_eq!(
+            got[0],
+            ("".into(), true),
+            "the long line is marked and none of it kept"
+        );
         assert_eq!(got[1], ("open a".into(), false));
+    }
+
+    /// A line of `LINE_BYTES` bytes is read whole, its end not counted, and one byte more is
+    /// dropped: the bound the vocabulary states (`control.words.pipe.line_bytes`).
+    #[test]
+    fn a_line_of_line_bytes_is_read_and_one_byte_more_is_not() {
+        let (mut writer, mut lines) = pipe();
+        let at_bound = std::vec![b'b'; LINE_BYTES];
+        let past = std::vec![b'c'; LINE_BYTES + 1];
+        for line in [&at_bound, &past, &at_bound] {
+            writer.write_all(line).unwrap();
+            writer.write_all(b"\n").unwrap();
+        }
+        let whole = std::string::String::from_utf8(at_bound).unwrap();
+        assert_eq!(
+            drain(&mut lines),
+            [(whole.clone(), false), ("".into(), true), (whole, false)]
+        );
     }
 
     #[test]

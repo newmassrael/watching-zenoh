@@ -171,7 +171,8 @@ DECLARATION_SCHEMA = 1
 #      querier of a lifecycle verb says of each reply, the words of each verb, what each means and
 #      the sentences of a refusal), and a querier's form of a lifecycle verb (`verb`, `of`, `about`,
 #      `whatami`, `generation`, `mode`, one of `key` and `verb`) with the key the generator makes
-#      (`verdicts.key`).
+#      (`verdicts.key`), and the `control` section (the words of `[node] control`, each built or
+#      refused, with the lines a channel takes and what it writes on each stream).
 VOCABULARY_SCHEMA = 3
 
 # The shape of each word of the vocabulary: the keys it takes and the value of each. An integer's
@@ -322,6 +323,56 @@ REFUSAL_REASONS = (
 VERDICT_LINE = ("HOST-WZ-VERDICT <key> verdict=<word> [links=<n>] [generation=<n>] "
                 "[open=<n> closing=<n> intent=<true|false>] [reason=<sentence>]")
 VERDICT_UNREADABLE = "HOST-WZ-VERDICT <key> unreadable len=<n> kept=<n>"
+
+# The channel a node takes lifecycle commands on beside its in-band verbs (`[node] control`, decision
+# D7 of docs/session-lifecycle-intent.md), by the word that names it and what that word means. Absent,
+# the node has none. A target builds a word when its image has the feature `control_features` names
+# for it (`control_refusal`).
+CONTROL_WORDS = {
+    "pipe": "the node reads one command a line from its standard input and writes one answer a line "
+            "to its standard output: the channel of the agent that started the process",
+}
+# The lines a `pipe` takes, as `wz_session_mcu::control_port` reads them (a test there holds these
+# lines to its words); `<peer>` is a zid spelled as a key spells it.
+CONTROL_COMMANDS = (
+    "open <peer>",
+    "open passive <peer>",
+    "close <peer>",
+    "reset <peer> <generation>",
+    "status <peer>",
+    "whoami",
+)
+# The words of `{"error":"<word>"}`, the answer to a line that is no command, a closed set as
+# `wz_session_core::lifecycle_wire::ControlError` writes them (a test there holds these lines to it).
+CONTROL_ERRORS = (
+    "unknown-command",
+    "open-takes-one-peer",
+    "close-takes-one-peer",
+    "reset-takes-a-peer-and-a-generation",
+    "status-takes-one-peer",
+    "whoami-takes-nothing",
+    "line-too-long",
+)
+# The bytes of a command line the node reads, its end not counted (`LINE_BYTES` of
+# crates/wz-runtime-posix/src/control.rs, which the self-test reads): a longer line is answered once,
+# with `line-too-long`.
+CONTROL_LINE_BYTES = 128
+CONTROL_LINE_SOURCE = "crates/wz-runtime-posix/src/control.rs"
+# What a `pipe` node writes where, the contract an agent reads its output by.
+CONTROL_PIPE = {
+    "stdin": "one command a line, ended by a line feed; white space around and between the words is "
+             "ignored; a line of more than `line_bytes` bytes is no command",
+    "stdout": "exactly one answer for each line read, in the order the lines came, each a JSON "
+              "document on one line, and nothing else: the verdict a lifecycle verb answers with in "
+              "band (`verdicts`), `{\"zid\":\"<zid>\"}` for `whoami`, `{\"error\":\"<word>\"}` for "
+              "a line that is no command (`errors`). A last line with no line feed is not read",
+    "stderr": "every other line the node says: the `HOST-WZ-` lines, the certificate it presents and "
+              "its `wz:` diagnostics",
+    "permits": "every verb a line asks: the authority of the channel is possession of the pipe "
+               "(decision D12); the commanders a declaration names grant the verbs asked in band only",
+    "repeat": "a command is safe to send again: `open` is idempotent, a repeated `close` is "
+              "`already_closed`, a repeated `reset` carries its generation",
+}
 
 
 # What a querier of a lifecycle verb states instead of a key (`querier` in ENTITY_SHAPES): the verb,
@@ -483,7 +534,7 @@ SAMPLE_KEYS = set(SAMPLE_SHAPE["keys"])
 # not build is a refusal with the target's own reason.
 ENDPOINT_ROLES = tuple(ENDPOINT_SHAPES)
 ENTITY_KINDS = tuple(ENTITY_SHAPES)
-NODE_KEYS = {"id", "help", "target"}
+NODE_KEYS = {"id", "help", "target", "control"}
 ENDPOINT_KEYS = {"role"} | {k for shape in ENDPOINT_SHAPES.values() for k in shape["keys"]}
 ENTITY_KEYS = {"kind"} | {k for shape in ENTITY_SHAPES.values() for k in shape["keys"]}
 TOP_KEYS = {"schema", "node", "endpoint", "entity", "sample", "limits", "policy", "allow", "identity"}
@@ -750,6 +801,9 @@ TARGETS = {
         # role exactly when its image does what the role grants. A commander's grant is decided by
         # the verbs the image binds in band.
         "role_features": {"commander": "verbs"},
+        # The feature of the image each word of `[node] control` needs, the same way: the channel
+        # on standard input and output is `src/control.rs`.
+        "control_features": {"pipe": "control"},
         # A peer held by its zid is dialled over a secure channel: only that proves the node that
         # answered is the one the zid names (decision D4 of docs/session-lifecycle-intent.md).
         "peer_schemes": ("tls",),
@@ -838,6 +892,18 @@ def role_refusal(target: dict, role: str) -> str | None:
     return None
 
 
+def control_refusal(target: dict, word: str) -> str | None:
+    """Why `target` does not build the control channel `word` (a word of `CONTROL_WORDS`), or None
+    when it does: the target names no feature for it, or its image does not have that feature."""
+    feature = target.get("control_features", {}).get(word)
+    if feature is None:
+        return f"the target has no `{word}` channel"
+    if feature not in image_features(target):
+        return (f"the image {target['image']} has no `{feature}` feature, which is what does what a "
+                f"`{word}` channel takes")
+    return None
+
+
 def limit_values(decl: dict, stated: dict, image: dict[str, int]) -> tuple[dict[str, int], list[str]]:
     """The effective value of every declared limit: the node's, else the image's, else the
     declaration's default."""
@@ -889,6 +955,12 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
     target = TARGETS.get(node.get("target"))
     if target is None:
         return out + [f"node: target is {node.get('target')!r}, not one of {', '.join(sorted(TARGETS))}"]
+    if "control" in node:
+        control = node["control"]
+        if control not in CONTROL_WORDS:
+            out.append(f"node: control is {control!r}, not one of {', '.join(CONTROL_WORDS)}")
+        elif (why_not := control_refusal(target, control)) is not None:
+            out.append(f"node: a `{control}` control channel is not built on {node['target']}: {why_not}")
 
     values, problems = limit_values(decl, data.get("limits", {}), image_limits(target))
     out += problems
@@ -1491,6 +1563,10 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             "/// which the node's `verbs` feature must be built for.",
             f"pub const VERBS: bool = {'true' if commanders else 'false'};",
             *commander_lines,
+            "/// Whether the node takes lifecycle commands on its standard input and answers each on its",
+            "/// standard output (`[node] control = \"pipe\"`), which the node's `control` feature must be",
+            "/// built for.",
+            f"pub const CONTROL: bool = {'true' if data['node'].get('control') == 'pipe' else 'false'};",
             "/// Whether the node listens, the locator it listens on (empty when it does not) and how many",
             "/// sessions a peer opened it holds at once.",
             f"pub const LISTENS: bool = {'true' if listens else 'false'};",
@@ -1578,7 +1654,8 @@ def features_of(data: dict) -> list[str]:
     `get` for a node that asks (and only such a node: the layer's queries and the pending table are
     not in any other), `token` for a node that declares a liveliness token, `listen` for a node that
     has a port to listen on and `listen-tls` when that port is `tls/`, and `verbs` for a node that
-    names a commander (the verbs it binds in band)."""
+    names a commander (the verbs it binds in band), and the feature of its `[node] control` channel
+    (`control` for a `pipe`)."""
     tls = any(is_secure(ep) for ep in data["endpoint"])
     asks = any(e["kind"] == "querier" for e in data.get("entity", []))
     alive = any(e["kind"] == "liveliness-token" for e in data.get("entity", []))
@@ -1586,10 +1663,12 @@ def features_of(data: dict) -> list[str]:
     listen_tls = any(is_secure(ep) for ep in listens)
     grouped = any(ep["role"] == "multicast" for ep in data["endpoint"])
     commands = any(ep["role"] == "commander" for ep in data["endpoint"])
+    control = TARGETS[data["node"]["target"]].get("control_features", {}).get(data["node"].get("control"))
     return (["declared"] + (["tls"] if tls else []) + (["get"] if asks else [])
             + (["token"] if alive else []) + (["listen"] if listens else [])
             + (["listen-tls"] if listen_tls else [])
-            + (["multicast"] if grouped else []) + (["verbs"] if commands else []))
+            + (["multicast"] if grouped else []) + (["verbs"] if commands else [])
+            + ([control] if control else []))
 
 
 def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
@@ -1755,7 +1834,23 @@ def vocabulary(target_id: str, decl: dict) -> dict:
                      "line": VERDICT_LINE, "unreadable": VERDICT_UNREADABLE,
                      "words": {verb: list(words) for verb, words in VERDICT_WORDS_OF.items()},
                      "means": dict(VERDICT_MEANS), "reasons": list(REFUSAL_REASONS)},
+        "control": {"is": "the key `control` of `[node]`: a channel the node takes lifecycle commands "
+                          "on beside the verbs asked in band, held by whoever started the process "
+                          "(decision D7); without the key the node has none",
+                    "key": "control",
+                    "words": {word: control_entry(target, word) for word in CONTROL_WORDS}},
     }
+
+
+def control_entry(target: dict, word: str) -> dict:
+    """What the vocabulary says of the control channel `word` on `target`: the reason it is not built,
+    or what it means, the lines it takes, the bytes of a line, what it writes on each stream and the
+    words of an error."""
+    why_not = control_refusal(target, word)
+    if why_not is not None:
+        return {"built": False, "reason": why_not}
+    return {"built": True, "is": CONTROL_WORDS[word], "commands": list(CONTROL_COMMANDS),
+            "line_bytes": CONTROL_LINE_BYTES, **CONTROL_PIPE, "errors": list(CONTROL_ERRORS)}
 
 
 def generated_path(name: str, directory: pathlib.Path = NODES) -> pathlib.Path:
@@ -2702,6 +2797,36 @@ document_bytes = 8
     short_keys = head + tls_listen + toml_item("endpoint", least_commander) + "\n[limits]\nMAX_KEYEXPR_BYTES = 64\n"
     expect("a commander's node that states keys too short for its verbs is refused, and says how long",
            any(f"up to {VERB_KEY_BYTES} bytes" in p for p in problems(short_keys)))
+    # The control channel as the vocabulary states it is what the validator holds (decision D7): each
+    # word is built where the image has its feature, the node is built with that feature exactly when
+    # it names the word, and a word outside them is refused by name.
+    control = vocab["control"]["words"]
+    expect("the vocabulary's control words are the ones the validator reads, each built on slot",
+           list(control) == list(CONTROL_WORDS) and all(entry["built"] for entry in control.values()))
+    expect("the pipe states the lines it takes, their bytes, each stream and the error words",
+           control["pipe"]["commands"] == list(CONTROL_COMMANDS)
+           and control["pipe"]["errors"] == list(CONTROL_ERRORS)
+           and all(isinstance(control["pipe"][k], str) and control["pipe"][k]
+                   for k in ("stdin", "stdout", "stderr", "permits", "repeat")))
+    line_bytes = re.search(r"pub const LINE_BYTES: usize = (\d+);",
+                           (ROOT / CONTROL_LINE_SOURCE).read_text(encoding="utf-8"))
+    expect(f"the bytes of a command line are {CONTROL_LINE_SOURCE}'s LINE_BYTES",
+           line_bytes is not None and int(line_bytes[1]) == control["pipe"]["line_bytes"])
+    piped = head + 'control = "pipe"\n' + dial
+    expect(f"a node with a pipe is valid ({problems(piped)})", problems(piped) == [])
+    expect("a node with a pipe is built with `control`, and one with none is not",
+           "control" in features_of(wz_config.read_decl_toml(piped))
+           and "control" not in features_of(wz_config.read_decl_toml(head + dial)))
+    expect("the generated file says the node has a pipe, and one with none does not",
+           "pub const CONTROL: bool = true;" in emit("n", wz_config.read_decl_toml(piped), sha)
+           and "pub const CONTROL: bool = false;" in emit("n", wz_config.read_decl_toml(head + dial), sha))
+    refuses("a control word that is none", head + 'control = "socket"\n' + dial,
+            "control is 'socket', not one of pipe")
+    expect("an image without the feature refuses the word, saying which feature it lacks",
+           "no `control` feature" in (control_refusal({**TARGETS["slot"], "image": "deploy/mcu-noheap-probe"},
+                                                      "pipe") or "")
+           and control_refusal({**TARGETS["slot"], "control_features": {}}, "pipe")
+           == "the target has no `pipe` channel")
     # A provisioned identity: its files are read at start, so the node asks for the filesystem, and
     # its zid is the one the certificate's key names. The vector's certificate was made with
     # OpenSSL and its SPKI digested by `openssl pkey -pubin -outform DER | sha256sum`

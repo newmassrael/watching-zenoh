@@ -20,6 +20,10 @@ pub const TLS: bool = false;
 /// Whether the node names a commander: it binds the lifecycle verbs in band (decision D12),
 /// which the node's `verbs` feature must be built for.
 pub const VERBS: bool = false;
+/// Whether the node takes lifecycle commands on its standard input and answers each on its
+/// standard output (`[node] control = "pipe"`), which the node's `control` feature must be
+/// built for.
+pub const CONTROL: bool = false;
 /// Whether the node listens, the locator it listens on (empty when it does not) and how many
 /// sessions a peer opened it holds at once.
 pub const LISTENS: bool = false;

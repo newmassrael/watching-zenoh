@@ -6,7 +6,7 @@
 
 pub const NODE_ID: &str = "slot-commander";
 /// The digest of the declaration file this was generated from; the node's facts note carries it.
-pub const DECLARATION_SHA256: &str = "1b73d02f5dac084c58595079bc2e8cf205dce12adf51b6f7677314bd826b4a49";
+pub const DECLARATION_SHA256: &str = "9a54b2ab2b4b7d3a0fd6097fa17f37aa4c96ef777393550b8d2e245aed42eddf";
 /// The routers the node dials, as locators.
 pub const DIALS: usize = 1;
 pub const DIALED: [&str; 1] = ["tls/127.0.0.1:17476"];
@@ -38,6 +38,10 @@ pub const COMMANDERS_RESET: [[u8; 16]; 0] = [];
 /// The nodes whose key may command `status` of this node in band (decision D12), each as the
 /// sixteen bytes of its zid.
 pub const COMMANDERS_STATUS: [[u8; 16]; 1] = [[161, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+/// Whether the node takes lifecycle commands on its standard input and answers each on its
+/// standard output (`[node] control = "pipe"`), which the node's `control` feature must be
+/// built for.
+pub const CONTROL: bool = true;
 /// Whether the node listens, the locator it listens on (empty when it does not) and how many
 /// sessions a peer opened it holds at once.
 pub const LISTENS: bool = true;

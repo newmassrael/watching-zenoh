@@ -1375,6 +1375,26 @@ mod tests {
                 "wz_node.py does not state the refusal {line:?}"
             );
         }
+        // The words of the control channel's error answer (`control.words.pipe.errors`), in the
+        // order of `ControlError::ALL`.
+        let errors_from = vocabulary
+            .find("\nCONTROL_ERRORS = (\n")
+            .expect("wz_node.py states CONTROL_ERRORS");
+        let errors_block = &vocabulary[errors_from..];
+        let errors_block = &errors_block[..errors_block.find("\n)\n").expect("its end")];
+        let mut stated = errors_block.lines().skip(2);
+        for error in ControlError::ALL {
+            let mut line: FixedText<64> = FixedText::new();
+            for part in ["    \"", error.words(), "\","] {
+                line.push_str(part);
+            }
+            assert_eq!(
+                stated.next(),
+                Some(line.finish().expect("fits")),
+                "wz_node.py's CONTROL_ERRORS is ControlError::ALL, in its order"
+            );
+        }
+        assert_eq!(stated.next(), None, "CONTROL_ERRORS states no other word");
     }
 
     /// The words of every vector of `scripts/lib/verb_key_vectors.txt` make its key, and the key

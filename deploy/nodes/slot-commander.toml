@@ -20,6 +20,10 @@ schema = 1
 id = "slot-commander"
 help = "A fixed-memory client that dials a router and listens over TLS, and answers the lifecycle verbs it grants to named zids."
 target = "slot"
+# The agent that starts the node drives it on its standard input as well (decision D7): `whoami`
+# answers the zid the node runs with, and the verbs a line asks are the agent's, whatever the
+# commanders below are granted in band. Standard output carries the answers alone.
+control = "pipe"
 
 [[endpoint]]
 role = "dial"

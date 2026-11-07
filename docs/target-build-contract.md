@@ -1178,6 +1178,21 @@ a device. The vocabulary states the command (`identity.make`, `identity.makes`),
 fourth leg makes both nodes' identities with it, makes nothing a second time, and refuses half an
 identity.
 
+A node may also be driven by the agent that starts it (decision D7 of
+`docs/session-lifecycle-intent.md`): `[node] control = "pipe"` builds the image's `control`
+feature, and the node reads one command a line on its standard input (`open`, `open passive`,
+`close`, `reset`, `status` of a peer, and `whoami`) and writes exactly one answer a line on its
+standard output, in the order the lines came: the verdict the same verb answers with in band, the
+node's zid for `whoami`, or an error word for a line that is no command. Everything else the node
+says, its `HOST-WZ-` lines, its certificate and its diagnostics, is on standard error, so an agent
+reads its answers by reading standard output line by line. The authority of the channel is
+possession of the pipe: the commanders a declaration names grant only what is asked in band. A
+line is at most 128 bytes, its end not counted, and a longer one is answered once, as
+`line-too-long`. The vocabulary states the word, its lines, its bound, each stream and the error
+words (`control`), and a target builds the word only where its image has the feature. The node
+`slot-commander` has a pipe, and the witness drives it with every command the vocabulary states and
+with lines that are none, and reads one answer for each line and nothing else on standard output.
+
 ## 5c. The workload: what a node or a driver sends over time (owner, 2026-10-26)
 
 **Decision (owner, 2026-10-26: cost ignored, the textbook one).** A node declaration says what is

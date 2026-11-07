@@ -19,6 +19,12 @@
 //! ```
 #![no_std]
 #![no_main]
+// Every count this file compares is a constant generated from the declaration it is built for, and
+// zero is a count a declaration states (a node with no subscription, no querier): what the lint
+// calls an absurd comparison under one declaration is the bound check or the loop of another, and
+// it cannot tell them apart. Linting this bin under a declaration with zero counts would otherwise
+// fail on correct code.
+#![allow(clippy::absurd_extreme_comparisons)]
 
 use core::ffi::CStr;
 use core::ops::ControlFlow;
@@ -80,7 +86,7 @@ mod declared {
 }
 
 use declared::{
-    ACCEPTS, CELLS, DECLARATION_SHA256, DIALED, DOCS, DOCUMENTS, GROUPS, LISTEN, LISTENS,
+    ACCEPTS, CELLS, CONTROL, DECLARATION_SHA256, DIALED, DOCS, DOCUMENTS, GROUPS, LISTEN, LISTENS,
     LISTEN_TLS, MIRRORED, MIRRORS, NODE_ID, PEERS, PEER_NODES, PUBLISHED, PUBLISHERS, QUERIERS,
     REPLAYED, REPLAYS, REPLAY_SAMPLES, SAMPLE_MAX, SESSIONS, SUBSCRIBERS, SUBSCRIPTIONS, TLS,
     TOKENS, TOKEN_KEYS, VERBS,
@@ -340,6 +346,10 @@ const _: () = assert!(
 const _: () = assert!(
     VERBS == cfg!(feature = "verbs"),
     "the declaration names a commander exactly when the node is built with the `verbs` feature that binds the verbs"
+);
+const _: () = assert!(
+    CONTROL == cfg!(feature = "control"),
+    "the declaration names a `pipe` control channel exactly when the node is built with the `control` feature that reads it"
 );
 const _: () = assert!(
     (GROUPS == 1) == cfg!(feature = "multicast"),
