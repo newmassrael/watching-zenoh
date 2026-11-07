@@ -315076,6 +315076,54 @@
         "Open: the other leftovers of the Z8 list (lane margin gate, Windows, gossip test flake, client hat)."
       ]
     },
+    "Round 4378": {
+      "decision_summary": "bx keeps the Zephyr SDK and workspace in its tool store, at bx-63's request and the owner's: a machine that gives each run a copy-on-write home keeps nothing a by-hand install leaves. provision-zephyr.sh builds one part into a prefix (--sdk, --workspace) with CI's pins; the SDK install fetches with a home of its own, because west sdk install otherwise takes an SDK of the same version the registry names and leaves the new prefix empty. The reason pin gate was red on main: 9655f33d54 changed four files session-close-ingress cites (spec_defaults to from_build) without moving their rows; re-read, no claim moved, so the rows name the new blobs. Run 42281344423's Layer M red was repaid by 94af3727d5 before this round; this round's own fix of it was dropped in favour of that one.",
+      "changes_bullets": [
+        "scripts/provision-zephyr.sh: `--sdk` and `--workspace` check and provision one part each, with or without `--check`/`--dry-run`. The SDK's `west sdk install` runs with a home of its own, and the SDK it fetched is then registered with `setup.sh -c`. The registry check compares resolved directories, so an SDK reached through `~/zephyr-sdk-<version>` matches its store entry, and it reads a registry file that has no final newline. A step that needs a working directory is printed, not entered, in a dry run. GITHUB_TOKEN is printed by name.",
+        "bx.toml: `[tools.zephyr-sdk]` and `[tools.zephyr-venv]` gain `install`, `install_inputs` (the script and ci.yml), `prefix_link` and `packages`. The workspace's version is `ZEPHYR_REF` read from ci.yml. The comment says bx keeps both.",
+        "docs/reason-review-pins.md: the four `session-close-ingress` rows for crates/wz-runtime-coop/src/session_drive.rs, crates/wz-runtime-tokio/src/accept_loop.rs, crates/wz-runtime-tokio/src/session_open.rs and crates/wz-session-lwip/src/session_drive.rs name their current blobs."
+      ],
+      "verification_bullets": [
+        "`scripts/provision-zephyr.sh --check`, `--sdk --check` and `--workspace --check` against this machine's hand-made install: all whole, rc 0. `--sdk --workspace` and `--check --dry-run` are refused with rc 64. `--sdk --check` passes through a link to the SDK.",
+        "`--sdk` for real into an empty prefix and scratch workspace, on a machine whose registry already names an SDK 1.0.1: fetched 1.0.1 into the prefix, arm gcc 14.3.0 runs, registered, rc 0. The test registry entry and trees were removed. The dry runs of both parts reach their last step, and a GITHUB_TOKEN value does not appear in the output.",
+        "shellcheck 0.11.0 is clean. `bx-fleet decl validate bx.toml`: valid. `bx --explain-declaration` shows both tools with install and prefix_link. `bx-provision pc2` and `bx-provision pc3` (no --apply, root holding only wz) plan both as `tool`.",
+        "reason_review_pin_gate.py --check: FAIL before the rows moved, OK after. 138 pre-push static gates pass.",
+        "Not run here: `bx-provision --apply`, which is bx-63's step."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "bx-63 runs `bx-provision pc2|pc3 --apply` scoped to wz once this is on main; then send a Qz lane to pc2 or pc3.",
+        "Read the hosted CI run of this push per job, and run 42330475550 (a2b17e62e1), which was still pending.",
+        "Read the first scheduled upstream-watch run.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: rerun the full `bx --checks ci` set to read the 180.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ],
+      "publishable_decision_summary": "bx keeps the Zephyr SDK and workspace in its tool store, at bx-63's request and the owner's: a machine that gives each run a copy-on-write home keeps nothing a by-hand install leaves. provision-zephyr.sh builds one part into a prefix (--sdk, --workspace) with CI's pins; the SDK install fetches with a home of its own, because west sdk install otherwise takes an SDK of the same version the registry names and leaves the new prefix empty. The reason pin gate was red on main: 9655f33d54 changed four files session-close-ingress cites (spec_defaults to from_build) without moving their rows; re-read, no claim moved, so the rows name the new blobs. Run 42281344423's Layer M red was repaid by 94af3727d5 before this round; this round's own fix of it was dropped in favour of that one.",
+      "publishable_changes_bullets": [
+        "scripts/provision-zephyr.sh: `--sdk` and `--workspace` check and provision one part each, with or without `--check`/`--dry-run`. The SDK's `west sdk install` runs with a home of its own, and the SDK it fetched is then registered with `setup.sh -c`. The registry check compares resolved directories, so an SDK reached through `~/zephyr-sdk-<version>` matches its store entry, and it reads a registry file that has no final newline. A step that needs a working directory is printed, not entered, in a dry run. GITHUB_TOKEN is printed by name.",
+        "bx.toml: `[tools.zephyr-sdk]` and `[tools.zephyr-venv]` gain `install`, `install_inputs` (the script and ci.yml), `prefix_link` and `packages`. The workspace's version is `ZEPHYR_REF` read from ci.yml. The comment says bx keeps both.",
+        "docs/reason-review-pins.md: the four `session-close-ingress` rows for crates/wz-runtime-coop/src/session_drive.rs, crates/wz-runtime-tokio/src/accept_loop.rs, crates/wz-runtime-tokio/src/session_open.rs and crates/wz-session-lwip/src/session_drive.rs name their current blobs."
+      ],
+      "publishable_verification_bullets": [
+        "`scripts/provision-zephyr.sh --check`, `--sdk --check` and `--workspace --check` against this machine's hand-made install: all whole, rc 0. `--sdk --workspace` and `--check --dry-run` are refused with rc 64. `--sdk --check` passes through a link to the SDK.",
+        "`--sdk` for real into an empty prefix and scratch workspace, on a machine whose registry already names an SDK 1.0.1: fetched 1.0.1 into the prefix, arm gcc 14.3.0 runs, registered, rc 0. The test registry entry and trees were removed. The dry runs of both parts reach their last step, and a GITHUB_TOKEN value does not appear in the output.",
+        "shellcheck 0.11.0 is clean. `bx-fleet decl validate bx.toml`: valid. `bx --explain-declaration` shows both tools with install and prefix_link. `bx-provision pc2` and `bx-provision pc3` (no --apply, root holding only wz) plan both as `tool`.",
+        "reason_review_pin_gate.py --check: FAIL before the rows moved, OK after. 138 pre-push static gates pass.",
+        "Not run here: `bx-provision --apply`, which is bx-63's step."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "bx-63 runs `bx-provision pc2|pc3 --apply` scoped to wz once this is on main; then send a Qz lane to pc2 or pc3.",
+        "Read the hosted CI run of this push per job, and run 42330475550 (a2b17e62e1), which was still pending.",
+        "Read the first scheduled upstream-watch run.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: rerun the full `bx --checks ci` set to read the 180.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
