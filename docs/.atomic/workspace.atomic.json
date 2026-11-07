@@ -315352,6 +315352,40 @@
         "C1 get-timeout one-off on pc2 stays unattributed."
       ]
     },
+    "Round 4385": {
+      "decision_summary": "The consumer's fourth question of round 4372 asked whether a plot should read the whole field document or a narrow door, and the measured answer was the door: a row is 67.5 times the two values a plot keeps, and most of a call writes rows a plot discards. So wz_dissect_live_field_values_since (ABI 53) writes the field_values document: one entry per record a selector picks and a rule covers, with its row's seq, its place in the batch, its time, its key and the field document's payload state, and for a decoded record the asked paths with type, typed_value and enum_number. A record and not a row, because a Frame batches samples. The walk is the payload plane's own, handed the payloads it says yes to, kept between calls per selector; what it keeps is the payload and its declared encoding, read at write time by the call's declarations.",
+      "changes_bullets": [
+        "wz-capture: payload_decode gains decode_payload_parts and PayloadParts (keyexpr, bytes, declared encoding), which decode_payload now calls after finding them in the tree, and judge_claim takes the declared encoding.",
+        "wz-capture: the payload plane's record observation can hand the payloads the selector picks to a sink (observe_frame_selecting, PayloadFold::feed_selecting, SelectedPayload) instead of tallying them; field_values is the fold that keeps them and the document that reads them; Resumable gains fold_mut; doc_revision adds field_values 1 with its state family and carries, held by the families and carries gates over one document per state.",
+        "wz-capi-dissect: the live handle keeps a ValuesMemory and answers field_values_since; the door wz_dissect_live_field_values_since, ABI 53, the header and the C consumer state it; capi_abi_pin and analysis_surface_parity carry the symbol."
+      ],
+      "verification_bullets": [
+        "On build machines: wz-capture with dissect 1681 pass, the new values tests among them (each record writes the typed values of the asked paths only; the cursor passes rows and a step folds only the new message; another path list reads the held payloads without a walk; a lower cursor walks again and answers rightly; no rule and a selector keep records out; a refused and an untyped field; one document per state for the families and carries gates); wz-capi-dissect 229 pass, the door reading a payload by the schema the .proto door wrote over a replayed capture; lanes C1bo (the C consumer, the release cdylib, the ABI 53 pin), C1bt, C1bz and C1bn (on pc2, hkl001 holding no libpcap headers) pass.",
+        "The 137 deferred static gates (the discard-site lint with the passed payloads registered), the citation gate, the document revision consumer pin and the guarded count gate pass."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "carry_forward_bullets": [
+        "The consumer is told ABI 53, field_values 1 and the commit. Open: the payloads the values memory holds are not in the memory document (wz_dissect_live_memory), which would be a revision of that document; the door has no window bound, as the field document's cursor door had none until a measurement asked for one; a peer session's lifecycle-door claim (control port word, verb key, reply reading, identity, a witness test) is the next item."
+      ],
+      "publishable_decision_summary": "The consumer's fourth question of round 4372 asked whether a plot should read the whole field document or a narrow door, and the measured answer was the door: a row is 67.5 times the two values a plot keeps, and most of a call writes rows a plot discards. So wz_dissect_live_field_values_since (ABI 53) writes the field_values document: one entry per record a selector picks and a rule covers, with its row's seq, its place in the batch, its time, its key and the field document's payload state, and for a decoded record the asked paths with type, typed_value and enum_number. A record and not a row, because a Frame batches samples. The walk is the payload plane's own, handed the payloads it says yes to, kept between calls per selector; what it keeps is the payload and its declared encoding, read at write time by the call's declarations.",
+      "publishable_changes_bullets": [
+        "wz-capture: payload_decode gains decode_payload_parts and PayloadParts (keyexpr, bytes, declared encoding), which decode_payload now calls after finding them in the tree, and judge_claim takes the declared encoding.",
+        "wz-capture: the payload plane's record observation can hand the payloads the selector picks to a sink (observe_frame_selecting, PayloadFold::feed_selecting, SelectedPayload) instead of tallying them; field_values is the fold that keeps them and the document that reads them; Resumable gains fold_mut; doc_revision adds field_values 1 with its state family and carries, held by the families and carries gates over one document per state.",
+        "wz-capi-dissect: the live handle keeps a ValuesMemory and answers field_values_since; the door wz_dissect_live_field_values_since, ABI 53, the header and the C consumer state it; capi_abi_pin and analysis_surface_parity carry the symbol."
+      ],
+      "publishable_verification_bullets": [
+        "On build machines: wz-capture with dissect 1681 pass, the new values tests among them (each record writes the typed values of the asked paths only; the cursor passes rows and a step folds only the new message; another path list reads the held payloads without a walk; a lower cursor walks again and answers rightly; no rule and a selector keep records out; a refused and an untyped field; one document per state for the families and carries gates); wz-capi-dissect 229 pass, the door reading a payload by the schema the .proto door wrote over a replayed capture; lanes C1bo (the C consumer, the release cdylib, the ABI 53 pin), C1bt, C1bz and C1bn (on pc2, hkl001 holding no libpcap headers) pass.",
+        "The 137 deferred static gates (the discard-site lint with the passed payloads registered), the citation gate, the document revision consumer pin and the guarded count gate pass."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The consumer is told ABI 53, field_values 1 and the commit. Open: the payloads the values memory holds are not in the memory document (wz_dissect_live_memory), which would be a revision of that document; the door has no window bound, as the field document's cursor door had none until a measurement asked for one; a peer session's lifecycle-door claim (control port word, verb key, reply reading, identity, a witness test) is the next item."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
