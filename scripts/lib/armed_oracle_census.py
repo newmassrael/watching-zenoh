@@ -103,7 +103,7 @@ ARMING = re.compile(r"\b(WZ_[A-Z0-9_]*REQUIRE[A-Z0-9_]*)=1\s+cargo\b")
 #: between this and the one above is what the prose test has to account for.
 ANY_ASSIGN = re.compile(r"\b(WZ_[A-Z0-9_]*REQUIRE[A-Z0-9_]*)=1\s+(\S+)")
 
-#: R4398 (no register item) -- a NESTED-LANE arming: the flag prefixed on a run of
+#: R4400 (no register item) -- a NESTED-LANE arming: the flag prefixed on a run of
 #: another layer of this script, as Layer Ero's
 #: `WZ_PICO_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire`.
 #: It states for one inner run what a hosted job's `env:` states for a whole job
