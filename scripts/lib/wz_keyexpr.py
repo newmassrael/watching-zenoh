@@ -15,7 +15,7 @@ Three questions, each a port of what the receive path runs, none to be trusted a
   `keyexpr_match::keyexpr_intersects_text` with every wildcard on.
 
 The last two are held to the real ones by the corpus `wz_key_set.py --write` generates and
-`crates/wz-session-core/tests/key_catalogue_model.rs` compares (see `wz_key_set.py`).
+`crates/wz-session-core/tests/it/files/key_catalogue_model.rs` compares (see `wz_key_set.py`).
 """
 
 from __future__ import annotations

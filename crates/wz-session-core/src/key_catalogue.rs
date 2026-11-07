@@ -25,7 +25,7 @@
 //!   module does not decide what a refusal does.
 //! * What a selection contains is the intersection the glob matcher answers
 //!   ([`crate::keyexpr_match::keyexpr_intersects_text`]); the model test of
-//!   `tests/key_catalogue_model.rs` compares every selection of a generated table with it.
+//!   `tests/it/files/key_catalogue_model.rs` compares every selection of a generated table with it.
 //!
 //! # A bad table is a build error
 //!

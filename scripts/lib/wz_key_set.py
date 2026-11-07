@@ -38,7 +38,7 @@ An entity of kind `c` is in the selection of key `k` and kind `c` when its patte
 (`wz-session-core/src/keyexpr_match.rs`, `keyexpr_intersects_text`, every wildcard on). A port can
 drift, so it is not trusted: `--write` also writes the matcher corpus (every pair of keys over a
 small vocabulary, up to three chunks deep, with this module's answer), and
-`crates/wz-session-core/tests/key_catalogue_model.rs` compares each answer with the real matcher and
+`crates/wz-session-core/tests/it/files/key_catalogue_model.rs` compares each answer with the real matcher and
 every selection of the fixture's table with it. A change to the matcher that this module does not
 follow fails that test, and the fixture's `--check` here fails when this module changes an answer.
 

@@ -260,7 +260,7 @@ pub const MAX_INBOUND_SUB_INTERESTS: usize = generated::MAX_INBOUND_SUB_INTEREST
 /// A fixed backing allocates this many rows of [`MAX_KEYEXPR_BYTES`] text per
 /// SESSION, which is why it is a number the deploy file states and not a hidden
 /// constant: `deploy/mcu_client_and_group.yaml` carries the same 16, and
-/// `tests/session_slot_pool_deploy.rs` holds the two equal.
+/// `tests/it/files/session_slot_pool_deploy.rs` holds the two equal.
 pub const MAX_PEER_KEYEXPR_ALIASES: usize = generated::MAX_PEER_KEYEXPR_ALIASES;
 
 /// Maximum number of declarations of ONE kind (subscribers, queryables, liveliness

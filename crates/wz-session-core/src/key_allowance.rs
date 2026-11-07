@@ -24,7 +24,7 @@
 //! * What a bit says is what the declaration says: key `k` is allowed to a peer for an operation when
 //!   some pattern the declaration lists for that peer and operation intersects `k`. Only the concrete
 //!   keys of the set carry a bit; the keys that are patterns carry none, since a data key is concrete.
-//!   The model test of `tests/key_catalogue_model.rs` compares every bit of a generated table with the
+//!   The model test of `tests/it/files/key_catalogue_model.rs` compares every bit of a generated table with the
 //!   matcher.
 //!
 //! # A bad table is a build error

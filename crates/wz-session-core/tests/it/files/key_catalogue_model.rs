@@ -21,12 +21,12 @@
     feature = "keyexpr-dollar-star"
 ))]
 
-#[path = "key_set_data/corpus.rs"]
+#[path = "../../key_set_data/corpus.rs"]
 mod corpus;
 // The generated table is a module of its own (`key_set`) that a file includes, as a node's
 // generated `declared.rs` does.
 mod fixture {
-    include!("key_set_data/fixture.rs");
+    include!("../../key_set_data/fixture.rs");
 }
 
 use fixture::key_set::{CATALOGUE, DECLARED};

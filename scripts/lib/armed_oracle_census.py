@@ -143,7 +143,7 @@ ROWS: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
     # macOS and Windows legs are exactly that), and the module is the one a
     # `python3` row alone would let a machine pass without.
     "WZ_DEPLOY_REPORT_REQUIRE": (
-        "wz-session-core/tests/session_slot_pool_deploy.rs",
+        "wz-session-core/tests/it/files/session_slot_pool_deploy.rs",
         (("program", "python3"), ("python-module", "yaml")),
     ),
     # The nanopb size arithmetic held to nanopb's own generator

@@ -733,7 +733,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # batching stage, the fragment vectors, `encode_init`'s owned body, the
     # compressed copy) and the refusals in, so added to a row above it would
     # change what every test of that row means. The tests only it reaches are the
-    # proof file `tests/tx_lend_only_encode.rs` (the lend-only encoders against an
+    # proof file `tests/it/files/tx_lend_only_encode.rs` (the lend-only encoders against an
     # oracle written from the codec's own facade) and the chain writer's two unit
     # tests in `ext_chain`. The features are the MCU unicast set the profile is
     # built with, named; the filter is EMPTY so a test added later is claimed

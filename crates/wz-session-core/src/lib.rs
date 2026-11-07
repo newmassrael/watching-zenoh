@@ -1750,7 +1750,7 @@ pub mod observer;
 /// beside the session ([`slot_observer::Requesters`]). Its dispatch and drain take
 /// the session's tables as arguments, in the AP observer's order and by its rules.
 /// On either backing: the fixed one for a node with no allocator, and the heap's for an engine
-/// that holds several peers in one session (`tests/slot_observer_heap.rs`).
+/// that holds several peers in one session (`tests/it/files/slot_observer_heap.rs`).
 #[cfg(feature = "storage-profile")]
 pub mod slot_observer;
 
@@ -2154,7 +2154,7 @@ pub mod peer_planner;
 /// do. The fixed-memory admin nodes assert at compile time that their session
 /// count is within `SLOT_COUNT` and that one typed slot
 /// (`SessionSlots::slot_bytes`) is within `SLOT_SIZE`, and
-/// `crates/wz-session-core/tests/session_slot_pool_deploy.rs` holds the numbers
+/// `crates/wz-session-core/tests/it/files/session_slot_pool_deploy.rs` holds the numbers
 /// equal to the deploy file's. `SLOT_SIZE` stays a ceiling and is not the typed
 /// slot's size: a session's socket queue and reassembly staging are static link
 /// storage, not bytes of the slot. The emitted pool struct is not instantiated

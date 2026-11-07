@@ -172,7 +172,7 @@ beyond its plan:
   aliases against a linear table) the policy picks it through an associated type
   (`Ids`, `Epoch`, `peer_space`); no registry matches on the policy. One body of
   each fill-to-N and refuse-at-N+1 test runs on `Static` and on `Heap` in one
-  build (`tests/storage_policy_tables.rs`, `query.rs`), and a mutation of the
+  build (`tests/it/files/storage_policy_tables.rs`, `query.rs`), and a mutation of the
   refusal count fails the static case only. Left on the profile on purpose:
   scratch buffers on the stack (`MAX_KEYEXPR_CHUNKS` views), the observer's own
   staging, and the matching watches (a watch owns a `String`, so it needs the

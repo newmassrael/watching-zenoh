@@ -10496,21 +10496,24 @@ layer_c1g_cargo_test_observer() {
     # token and inbound interest. 16 = what that command PRINTED.
     _runci_guarded_test C1g + \
         cargo test -p wz-session-core --lib --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
+    wz_test_args wz-session-core bounded_heapless_backing
     _runci_guarded_test C1g 16 \
-        cargo test -p wz-session-core --test bounded_heapless_backing --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
+        cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     # S9a, row R4 -- replies are fallible: the reply past the table or the payload
     # bound is an Err and costs the heap nothing, the request whose Final cannot
     # be owed never reaches a queryable, and a second session is untouched. 4 =
     # what that command PRINTED.
+    wz_test_args wz-session-core reply_budget_refusal
     _runci_guarded_test C1g 4 \
-        cargo test -p wz-session-core --test reply_budget_refusal --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
+        cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     # S9a, decision Q7 end to end -- one application observer serving two
     # sessions, each with its own peer tables: the same alias id from two peers
     # names two keyexprs (the second reason of the decision, inferred when it was
     # taken and driven here), and a peer that filled its alias table loses its own
     # pushes and no one else's. 2 = what that command PRINTED.
+    wz_test_args wz-session-core slot_observer_sessions
     _runci_guarded_test C1g 2 \
-        cargo test -p wz-session-core --test slot_observer_sessions --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
+        cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     # The same observer in a HEAP build, which a node that listens needs: its peer tables are
     # the build's own, the heap's, so one registration serves several sessions with a table
     # of each peer's own. The same alias id from two peers names two keyexprs, two peers that
@@ -10518,15 +10521,17 @@ layer_c1g_cargo_test_observer() {
     # session it sends and delivers what the one-session observer does, byte for byte, and a
     # host that holds the `Final`s back drains the replies alone. The file compiles only where
     # the fixed-backing one above does not. 4 = what that command PRINTED.
+    wz_test_args wz-session-core slot_observer_heap
     _runci_guarded_test C1g 4 \
-        cargo test -p wz-session-core --test slot_observer_heap --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete --quiet || return 1
+        cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete --quiet || return 1
     # R3315 -- the observer's place. The observer is 16 KB and the Zephyr node's stack is
     # 32 KB: a value of it passed through an install cost the node's main function 69 KB of
     # frame on the kit. The cell is built in place, once, lent one holder at a time and
     # dropped with the cell; the stack a build needs is read off the image's own binary, not
     # off a host test. 9 = what that command PRINTED.
+    wz_test_args wz-session-core slot_observer_cell
     _runci_guarded_test C1g 9 \
-        cargo test -p wz-session-core --test slot_observer_cell --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
+        cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     # S9b, row R7 -- the admin space with no allocator. The crate's lib suite on the
     # fixed backing WITH the admin surface and the Err reply (`+`, for the reason the
     # legs above give: the writers, the bounded answerer, the staged-reply arena and
@@ -10555,8 +10560,9 @@ layer_c1g_cargo_test_observer() {
     # per message) is Layer C1m's `tx alloc lend-only`, which needs a link.
     _runci_guarded_test C1g + \
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,tx-lend-only,bounded-heapless --quiet || return 1
+    wz_test_args wz-session-core tx_lend_only_encode
     _runci_guarded_test C1g 8 \
-        cargo test -p wz-session-core --test tx_lend_only_encode --features codec-init-body,codec-open-body,codec-close,tx-lend-only --quiet || return 1
+        cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-init-body,codec-open-body,codec-close,tx-lend-only --quiet || return 1
     # Fixed-memory step S5 — the PER-SESSION SLOT profile (`session-slot`, which
     # implies the two selectors above): the crate's lib suite at the same MCU
     # unicast set with the slot on (`+`, for the reason the legs above give), and
@@ -10566,8 +10572,9 @@ layer_c1g_cargo_test_observer() {
     # is Layer C1m's `session slot alloc`, which needs a link.
     _runci_guarded_test C1g + \
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,session-slot --quiet || return 1
+    wz_test_args wz-session-core tx_lend_only_encode
     _runci_guarded_test C1g 8 \
-        cargo test -p wz-session-core --test tx_lend_only_encode --features codec-init-body,codec-open-body,codec-close,session-slot --quiet || return 1
+        cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-init-body,codec-open-body,codec-close,session-slot --quiet || return 1
     # S9d -- the slot profile lends the control records (a Declare, an Interest, a
     # ResponseFinal) where their frame lies: the walk of every kind against the owned
     # walk, extension refusals included (4 = what that command PRINTED), and each
@@ -10587,8 +10594,9 @@ layer_c1g_cargo_test_observer() {
     # Default features, the three the writers need.
     _runci_guarded_test C1g 10 \
         cargo test -p wz-session-core --lib --features codec-declare,declare-final,codec-response-final --quiet -- lent_control:: || return 1
+    wz_test_args wz-session-core lent_control_alloc
     _runci_guarded_test C1g 1 \
-        cargo test -p wz-session-core --test lent_control_alloc --features codec-declare,declare-final,codec-response-final --quiet || return 1
+        cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-declare,declare-final,codec-response-final --quiet || return 1
     # S9d -- the multicast JOIN beacon through a sink the caller holds
     # (`encode_join_into`, of which `encode_join` is the `VecSink` form): the same
     # datagram across the shapes the beacon takes, read back by the decoders, a sink
@@ -10597,8 +10605,9 @@ layer_c1g_cargo_test_observer() {
     # instrument's control (1 = what the second PRINTED).
     _runci_guarded_test C1g 1 \
         cargo test -p wz-session-core --lib --features session-multicast,codec-join,transport-qos,transport-fragmentation,reassembly --quiet -- encode_join_into || return 1
+    wz_test_args wz-session-core join_into_alloc
     _runci_guarded_test C1g 1 \
-        cargo test -p wz-session-core --test join_into_alloc --features session-multicast,codec-join,transport-qos,transport-fragmentation --quiet || return 1
+        cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features session-multicast,codec-join,transport-qos,transport-fragmentation --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features session-multicast,codec-join,transport-qos,transport-fragmentation,reassembly --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --all-targets --features codec-declare,declare-final,codec-response-final --quiet -- -D warnings \
@@ -10650,8 +10659,9 @@ layer_c1g_cargo_test_observer() {
     # witnesses of the skip decision itself (they need no Python).
     # `cargo` stays on the line of the `env` prefix: that is the shape
     # `armed_oracle_census.py` reads as an arming.
+    wz_test_args wz-session-core session_slot_pool_deploy
     _runci_guarded_test C1g 11 env WZ_DEPLOY_REPORT_REQUIRE=1 cargo test -p wz-session-core \
-        --test session_slot_pool_deploy --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
 }

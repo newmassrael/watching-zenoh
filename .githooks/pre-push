@@ -989,7 +989,7 @@ round_fed_gates=(
     # deploy/wz-config.toml (the key limit) and crates/wz-session-core/tests/key_set_data/: the
     # selftest holds each refusal and ends by checking the fixture's derived table and matcher corpus
     # are current. MEASURED: 0.43s, a text read, no build. The Rust half, which compares them with
-    # the real matcher, is crates/wz-session-core/tests/key_catalogue_model.rs.
+    # the real matcher, is crates/wz-session-core/tests/it/files/key_catalogue_model.rs.
     "wz_key_set.py --selftest"
     # R3440 -- the pico drop-in header against zenoh-pico's own, and wz_ext.h. Round-fed by
     # the two headers and the pico submodule. MEASURED: 0.66s, three `cc -E` runs, no build.

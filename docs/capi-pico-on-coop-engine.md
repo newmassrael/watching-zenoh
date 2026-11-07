@@ -604,7 +604,7 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
 ### The steps, each of which stands alone and proves what it says
 
 - **L0. The observer in a heap build. Done.** The module is no longer gated on the fixed
-  backing; `tests/slot_observer_heap.rs` holds, in a heap build, that two peers numbering from the
+  backing; `tests/it/files/slot_observer_heap.rs` holds, in a heap build, that two peers numbering from the
   same ids are each served under their own, that two peers asking with one request id are each
   answered on their own session's send path with the Final after the replies, and that for one
   session it sends (byte for byte) and delivers what `ApplicationLayerObserver` does. The module's

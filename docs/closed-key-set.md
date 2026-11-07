@@ -160,7 +160,7 @@ publishes it receives) is the per-peer allowance, phase 4.
 - **The oracle is two-sided, because the generator holds a port of the matcher.** Python has no
   matcher, so the generator ports `keyexpr_intersects_text`. `wz_key_set.py --write` also writes every
   pair of 399 keys over `a b @v * ** a$* $*b` up to three chunks deep with the port's answer, and
-  `crates/wz-session-core/tests/key_catalogue_model.rs` compares each with the real matcher in both
+  `crates/wz-session-core/tests/it/files/key_catalogue_model.rs` compares each with the real matcher in both
   orders, compares every selection of the fixture (18 keys, 21 entities, every kind) with the matcher,
   and compares the subscriber cells with what the real `SubscriberTable` delivers to a local publish
   on each key. The test was run against a port with the rule that `**` does not cross an `@` chunk
@@ -191,7 +191,7 @@ publishes it receives) is the per-peer allowance, phase 4.
   closed when nothing is, so it is declared with the first host that refuses on it.
 - **Tested** by the unit tests of the gate (open admits everything and counts nothing, closed numbers
   what it admits, a pattern-covered key is outside the set, a role is admitted or refused, counters
-  saturate) and by `tests/key_catalogue_model.rs` over the fixture: every declared role is admitted,
+  saturate) and by `tests/it/files/key_catalogue_model.rs` over the fixture: every declared role is admitted,
   every other (key, kind) pair is refused by role and counted, a key a declared pattern covers is
   outside the set.
 

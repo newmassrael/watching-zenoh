@@ -92,7 +92,7 @@ original reproduced by naming it. Three things follow from it:
 - **Storage policy** (D1 step 6, landed): `trait Storage` with `Heap` and `Static`
   (`bounded.rs`), associated types for the sequence, the text, the arena offset,
   the id table and the change epoch; the registries are generic over it and one
-  test body runs on both (`tests/storage_policy_tables.rs`). The default policy
+  test body runs on both (`tests/it/files/storage_policy_tables.rs`). The default policy
   `Profile` is still chosen by the `bounded-heapless` feature.
 - **Cost gate** (`scripts/lib/capability_cost_gate.py`): per case, a text budget,
   the absence of the planes a case left out and the presence of those it put in.
