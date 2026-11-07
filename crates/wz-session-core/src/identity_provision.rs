@@ -9,8 +9,9 @@
 //! machine receives the certificate alone and computes from it the zid the key names
 //! ([`crate::credential_identity`]). Two makers hold to this rule: a declared node's
 //! `--make-identity`, on a device, and the C library's identity door, on the computer a client
-//! runs on. Both read the two files' presence through [`Provision::of`] and say the same words
-//! when they refuse, so a lab that provisions both kinds of machine reads one contract:
+//! runs on. Both read the two files' presence through
+//! [`Provision::of`](crate::identity_provision::Provision::of) and say the same words when they
+//! refuse, so a lab that provisions both kinds of machine reads one contract:
 //!
 //! - neither file is there: make a key and a certificate over it, the key first, each created
 //!   exclusively so that nothing is replaced, and of two makers racing only one wins;
@@ -19,7 +20,8 @@
 //!   making the other half would pair a key with a certificate that is not its own.
 //!
 //! In every case that does not refuse, the maker then reads the two files back as a session
-//! reads them, and the key must be the certificate's own ([`NOT_ITS_KEY`]).
+//! reads them, and the key must be the certificate's own
+//! ([`NOT_ITS_KEY`](crate::identity_provision::NOT_ITS_KEY)).
 //!
 //! No allocation and no feature gate: the fixed-memory node and the heap library share it.
 

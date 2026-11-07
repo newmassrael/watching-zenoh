@@ -6,7 +6,8 @@
 //!
 //! # The rule
 //!
-//! A [`FragmentPacer`] sees each datagram a link's writer is about to write, and the time. A
+//! A [`FragmentPacer`](crate::fragment_pacing::FragmentPacer) sees each datagram a link's
+//! writer is about to write, and the time. A
 //! datagram that is not a fragment is never delayed and ends the run of fragments before it. Of
 //! a run of fragments, at most `burst` are written back to back; the next waits until `gap_us`
 //! has passed since the last datagram was written, and starts a new run. A wait that has already

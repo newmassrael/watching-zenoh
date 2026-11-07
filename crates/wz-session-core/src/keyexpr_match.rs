@@ -528,7 +528,7 @@ fn chunk_matches_with_dsl(pattern: &str, target: &str) -> bool {
 /// agree on the answer in this branch.
 ///
 /// The matcher is a descent that tries each `**` both ways and
-/// remembers the suffix pairs it has refuted ([`Refuted`]): whether
+/// remembers the suffix pairs it has refuted (`Refuted`): whether
 /// `a[i..]` and `b[j..]` intersect depends on nothing else, so a
 /// pair reached again by another path is answered at once. Without
 /// that memory the descent was exponential in the number of `**`

@@ -434,15 +434,15 @@ pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 
 /// How long, in milliseconds, a node that has sent its INIT waits for the peer's INIT acknowledgement
 /// before the link is given up: the `init_ack` window of
-/// [`crate::session_timeouts::SessionTimeouts::from_build`]. The default is the 2 seconds
-/// docs/session-fsm.md §2.5 states; `from_build` refuses 0 at compile time. A time and not a table
+/// `session_timeouts::SessionTimeouts::from_build` (built with `session-unicast`). The default is
+/// the 2 seconds docs/session-fsm.md §2.5 states; `from_build` refuses 0 at compile time. A time and not a table
 /// size: it sizes no memory.
 pub const HANDSHAKE_INIT_MS: usize = generated::HANDSHAKE_INIT_MS;
 
 /// How long, in milliseconds, a node that has sent its OPEN waits for the peer's OPEN acknowledgement
 /// before the link is given up: the `open_ack` window of
-/// [`crate::session_timeouts::SessionTimeouts::from_build`]. The default is the 2 seconds
-/// docs/session-fsm.md §2.5 states; `from_build` refuses 0 at compile time. A time and not a table
+/// `session_timeouts::SessionTimeouts::from_build` (built with `session-unicast`). The default is
+/// the 2 seconds docs/session-fsm.md §2.5 states; `from_build` refuses 0 at compile time. A time and not a table
 /// size: it sizes no memory.
 pub const HANDSHAKE_OPEN_MS: usize = generated::HANDSHAKE_OPEN_MS;
 
