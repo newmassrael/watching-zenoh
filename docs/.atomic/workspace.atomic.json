@@ -12121,6 +12121,37 @@
         "Other sessions on this machine use the shared mnemosyne-cli, now at ee934276; a worktree still at the old pin is refused by the pin check until it rebases onto this round",
         "Za claim: Q6 (the answer reader in a pure library) and Q5 (the C client witness) are next"
       ]
+    },
+    "Round 4404": {
+      "decision_summary": "Hosted reds of runs 42354628317 (round 4386) and 42403286547 (round 4402) repaid, each attributed from its job's own log. Broken doc links of `wz-session-core` and one private link of `wz-runtime-tokio` are resolved; the family-notice gate reads a file derived from several upstream files; the acceptor scenarios stay processes of their own because each brings lwIP up; the zenoh-c ABI stamp is pinned at revision 11; two test populations no leg ran are claimed by a leg; and the read-only tree carries `LD_LIBRARY_PATH` across sudo. C1cs is not repaid here: the capic growth is `identity-make` in the default build, which its owning session takes out of the default, and the pico growth waits on the owner's choice between a pacing strategy type and a budget move.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/{fragment_pacing,identity_provision,keyexpr_match,caps}.rs: five links resolved; a link whose module docs resolve in the parent names a crate path, and a private item is named in a code span.",
+        "crates/wz-runtime-tokio/src/tls_identity.rs: the private `stream_link::peer_chain_credential_zid` is named in a code span (C1bz, C1bzr).",
+        "scripts/lib/family_notice_gate.py: `Derived from zenoh X, files A and B` is read, and every named upstream file's copyright line is checked; selftest gains two-file, missing-file, missing-copyright and three-file cases. crates/wz-zenoh/src/api/runtime.rs carries the 2024 line of its second upstream file.",
+        "scripts/lib/merge_tests.py: PROCESS_LWIP keeps a test file that brings lwIP up (a second `lwip_init` in one process stops on `netif already added`) as its own executable; the four acceptor scenarios are back under `tests/` with `required-features = [\"lwip\"]`.",
+        "scripts/lib/abi_stamp_gate.py: `capi-c` pinned at revision 11 (9 the conformance digest, 10 lifecycle_key/read of round 4387, 11 `wz_capi_c_identity_make` of round 4395).",
+        "scripts/lib/nondefault-tests-gate.sh: a `router-node,transport-qos` leg for `drive::router_node::engine::port_tests`; `tls-identity-make` joins `wz-runtime-tokio`'s wide leg for `tls_identity::tests`.",
+        "scripts/lib/read-only-tree.sh: the sudo path passes `LD_LIBRARY_PATH` as an argument, because sudo removes the dynamic linker's variables even under `-E`.",
+        "docs/hosted-red-acks.md: the row for run 42403286547 of this batch."
+      ],
+      "verification_bullets": [
+        "Hosted, read job by job: run 42354628317 (Layer 0, C1bz, C1bzr, Layer Z, C1n, C1st, C1cs) and run 42403286547 (fourteen jobs; C1cn shard 0 named five `port_tests` and six `tls_identity` tests unclaimed; Ero stopped on `librocksdb.so.10: cannot open shared object file`, exit 127).",
+        "`reduced_docs_gate.py measure --only wz-session-core`: 110 configurations, no finding. A `wz-runtime-tokio` doc build with `tls-identity-make` shows no finding in `tls_identity.rs`.",
+        "`family_notice_gate.py --selftest`: 8 red and 4 green resolve cases, 2 multi-file statements read; `--check --resolve` OK over 259 files.",
+        "`merge_tests.py --crate wz-mcu-session-acceptor --plan`: all five files stay; Layer C1n rc=0 on a build machine. Layer C1st rc=0.",
+        "`cargo test -p wz-capi-core --features router-node,transport-qos --lib -- drive::router_node::engine::port_tests::`: 5 passed. `cargo test -p wz-runtime-tokio --features tls-identity-make --lib -- tls_identity::`: 6 passed.",
+        "read-only tree on the sudo path, forced: the old helper gives `LD_LIBRARY_PATH` unset inside, the new one the value, and a write into the checkout still fails read-only.",
+        "reason_review_pin_gate, reason_citation_gate, store_reason_citation_gate: OK."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "watching-zenoh/license",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "C1cs pico-client-udp, pico-peer, pico-default (hosted +3,340, +4,141, +5,574 bytes): fragment pacing, the keyexpr relation memo and the interface policy; pacing leaves its paced writer linked when the policy is off. The owner chooses between a strategy type for pacing and a budget move.",
+        "C1cs capic-default (+150,253 bytes, 840 exports against 837), capic-client-small, capic-router-node, capic-default-lean: `identity-make` in the default build; its owning session takes it out of the default and re-measures."
+      ]
     }
   },
   "inventory_entries": {
