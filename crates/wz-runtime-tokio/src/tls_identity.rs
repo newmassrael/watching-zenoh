@@ -14,7 +14,7 @@
 //! In every case that does not refuse, the two files are read back as the TLS link reads them
 //! ([`crate::tls_config::certs_from_pem`], [`crate::tls_config::private_key_from_pem`]), the key
 //! must be the certificate's own, and the zid answered is the one a peer computes from the
-//! certificate the link presents ([`crate::stream_link::peer_chain_credential_zid`]). A session
+//! certificate the link presents (`stream_link::peer_chain_credential_zid`). A session
 //! configured with these files and that zid as its `id` is a peer whose zid is bound to its key.
 //!
 //! The key is the computer's alone from the moment it exists (mode 0600), and a key read back
