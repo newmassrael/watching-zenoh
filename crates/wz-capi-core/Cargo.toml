@@ -216,6 +216,10 @@ e2e-sender = []
 # The identity a client presents over TLS, made on the computer it runs on: the runtime's maker
 # (`wz_runtime_tokio::tls_identity`), behind the C ABI's door `wz_capi_c_identity_make`.
 identity-make = ["transport_tls", "wz-runtime-tokio/tls-identity-make"]
+# A node's lifecycle verbs from a client. The model has nothing behind it: the doors are the zenoh-c
+# ABI's own (`wz-capi-c/lifecycle-doors`) over `wz_session_core::lifecycle_wire`, which every build
+# has, so this feature only carries the capability's name, as `e2e-sender`'s does.
+lifecycle-doors = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

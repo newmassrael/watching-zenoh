@@ -147,7 +147,7 @@ EXPECTED_SYMBOLS = {
     # (`identity-make`, off by default and on in the lane's build, as the observation plane is).
     "wz_capi_c_identity_make",
     # Revision 10 — a node's lifecycle verbs from a client: the key a verb is asked by and the
-    # answer read back, in every build.
+    # answer read back (`lifecycle-doors`, off by default and on in the lane's build).
     "wz_capi_c_lifecycle_key",
     "wz_capi_c_lifecycle_read",
     # Revision 9 — the conformance digest of the build (decision C15), in every build.

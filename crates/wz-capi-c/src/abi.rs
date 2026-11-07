@@ -1607,7 +1607,8 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 ///
 /// It moves to 10 for a node's lifecycle verbs from a client (`crate::lifecycle`): the key a verb
 /// is asked by (`wz_capi_c_lifecycle_key`) and the answer read back (`wz_capi_c_lifecycle_read`),
-/// two new symbols present in every build, and the two structs they take.
+/// two new symbols and the two structs they take, in a build with `lifecycle-doors` (off by
+/// default since the doors cost every build about 19 KB; zenoh-c has none).
 ///
 /// It moves to 11 for the identity a client presents over TLS, made on the computer it runs on
 /// (`crate::identity`, `wz_capi_c_identity_make`), one new symbol and the struct it fills, in a

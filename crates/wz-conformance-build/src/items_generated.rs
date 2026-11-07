@@ -53,6 +53,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("auth_pubkey", &["core", "c"]),
     ("e2e-sender", &["core", "c"]),
     ("identity-make", &["core", "c"]),
+    ("lifecycle-doors", &["core", "c"]),
     ("transport_compression", &["core", "c"]),
     ("auth_usrpwd", &["core", "c"]),
     ("interceptors", &["core", "c"]),

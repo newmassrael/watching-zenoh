@@ -425,6 +425,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "clock-source",
                 "event-ring",
                 "identity-make",
+                "lifecycle-doors",
                 "resource-snapshot",
                 "supervision",
                 "zenoh-c-no-unstable-api",

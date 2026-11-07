@@ -1017,7 +1017,9 @@ z_result_t wz_capi_c_snapshot_read(uint8_t *out, size_t capacity, size_t *length
 const char *wz_capi_c_conformance_digest(void);
 
 /* A NODE'S LIFECYCLE VERBS FROM A CLIENT (revision 10): the key a verb is
- * asked by, and the answer read back. Both are pure calls over the caller's
+ * asked by, and the answer read back. In builds with the `lifecycle-doors`
+ * feature, which is OFF by default (zenoh-c has no such doors): a client that
+ * asks a node's verbs builds the library with it on. Both are pure calls over the caller's
  * memory, with no session and no allocation, and both are the library's one
  * copy: the key is the one a declared node's querier stated with the same
  * words asks (both are held to scripts/lib/verb_key_vectors.txt), and the

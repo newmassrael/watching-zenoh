@@ -311,6 +311,13 @@ config WZ_CAP_IDENTITY_MAKE
 	  The identity a client presents over TLS, made on the computer it runs on by the contract of a declared node's --make-identity (wz_capi_c_identity_make, a wz-own door), answering the zid its key names.
 	  Exported by: c.
 
+config WZ_CAP_LIFECYCLE_DOORS
+	bool "lifecycle-doors"
+	default n
+	help
+	  A node's lifecycle verbs from a client: the key a verb is asked by and the answer read back (wz_capi_c_lifecycle_key, wz_capi_c_lifecycle_read, wz-own doors over lifecycle_wire).
+	  Exported by: c.
+
 config WZ_CAP_TRANSPORT_COMPRESSION
 	bool "transport_compression"
 	default y

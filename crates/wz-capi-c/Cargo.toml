@@ -175,6 +175,10 @@ transport_tls = ["wz-runtime-tokio/transport-link-tls", "wz-capi-core/transport_
 # default library 147,929 B (hosted C1cs) for a door a client calls once; a consumer that makes
 # its identity turns it on.
 identity-make = ["transport_tls", "wz-capi-core/identity-make"]
+# `wz_capi_c_lifecycle_key` and `wz_capi_c_lifecycle_read` (`src/lifecycle.rs`): a node's lifecycle
+# verbs from a client. OFF by default: zenoh-c has no such doors, and they cost every build about
+# 19 KB (hosted C1cs); a client that asks a node's verbs turns it on.
+lifecycle-doors = ["wz-capi-core/lifecycle-doors"]
 # The `quic/` link, over the same certificate material as `tls/`.
 transport_quic = ["wz-runtime-tokio/transport-link-quic", "wz-capi-core/transport_quic"]
 # The `quic-datagram/` link, on the `quic/` link's connection.

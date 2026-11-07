@@ -144,8 +144,9 @@ pub mod group;
 pub mod handlers;
 pub mod keyexpr;
 // A node's lifecycle verbs from a client: the key a verb is asked by and the answer read back. A
-// wz-own door like `config_verdict`, so ungated for the same reason: upstream has no lifecycle
-// verbs to be a drop-in for.
+// wz-own door upstream has no counterpart of, so it is a capability that is off by default, as the
+// observation plane is (`lifecycle-doors`): a build that names it pays for it, and no other does.
+#[cfg(feature = "lifecycle-doors")]
 pub mod lifecycle;
 // The identity a client presents over TLS, made on the computer it runs on by the contract of a
 // declared node's `--make-identity`. A wz-own door, behind `identity-make` (the maker links a

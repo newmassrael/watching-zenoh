@@ -1204,6 +1204,19 @@ implies = ["transport_tls"]
 help = "The identity a client presents over TLS, made on the computer it runs on by the contract of a declared node's --make-identity (wz_capi_c_identity_make, a wz-own door), answering the zid its key names."
 
 [[capability]]
+id = "lifecycle-doors"
+kconfig = "WZ_CAP_LIFECYCLE_DOORS"
+# Off by default: zenoh-c has no lifecycle verbs, and the two doors cost every C ABI build about
+# 19 KB of code (hosted C1cs, measured by nm against the round before them). A client that asks a
+# node's lifecycle verbs turns it on.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh", "zenoh-c"]
+abis = ["core", "c"]
+implies = []
+help = "A node's lifecycle verbs from a client: the key a verb is asked by and the answer read back (wz_capi_c_lifecycle_key, wz_capi_c_lifecycle_read, wz-own doors over lifecycle_wire)."
+
+[[capability]]
 id = "transport_compression"
 kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
 os_needs = []

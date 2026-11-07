@@ -278,6 +278,9 @@ CAPABILITY_FEATURES = frozenset({
     # a wz-own door and the struct it fills, which no zenoh-c type holds, so no footprint moves.
     # Off in the default and in every arm, as the observation plane's are.
     "identity-make",
+    # A node's lifecycle verbs from a client (`wz_capi_c_lifecycle_*`): two wz-own doors and the
+    # structs they take, no zenoh-c type; off in the default and in every arm.
+    "lifecycle-doors",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"

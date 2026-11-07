@@ -17,6 +17,8 @@
 //! that walk the sessions a host lists, the per-peer reset record, and the status
 //! document whose machines are a list.
 
+use core::ffi::CStr;
+
 use crate::credential_identity::{zid_from_key_text, CREDENTIAL_ZID_BYTES};
 use crate::text_out::TextOut;
 
@@ -135,23 +137,38 @@ impl RefusedReason {
     /// The sentence a querier is shown. Plain ASCII with no quote or backslash, so
     /// it is written into the JSON as it stands.
     pub const fn words(self) -> &'static str {
+        utf8(self.c_words())
+    }
+
+    /// [`Self::words`] as a C string, the one spelling of each sentence: a C ABI hands it out as
+    /// it stands, with no copy made at run time.
+    pub const fn c_words(self) -> &'static CStr {
         match self {
-            Self::NotPermitted => "this node does not permit closing the session with that peer",
-            Self::PeerNotAZid => "the last chunk of the key is not a zid",
+            Self::NotPermitted => c"this node does not permit closing the session with that peer",
+            Self::PeerNotAZid => c"the last chunk of the key is not a zid",
             Self::ResetNotPermitted => {
-                "this node does not permit resetting the session with that peer"
+                c"this node does not permit resetting the session with that peer"
             }
-            Self::GenerationNotANumber => "the generation chunk of the key is not a number",
+            Self::GenerationNotANumber => c"the generation chunk of the key is not a number",
             Self::StatusNotPermitted => {
-                "this node does not permit reading the status of the session with that peer"
+                c"this node does not permit reading the status of the session with that peer"
             }
-            Self::OpenNotPermitted => "this node does not permit opening a session with that peer",
-            Self::OpenerGone => "the loop that would hold that peer is gone",
-            Self::NoRoom => "this node holds as many peers by their zid as it was built for",
+            Self::OpenNotPermitted => c"this node does not permit opening a session with that peer",
+            Self::OpenerGone => c"the loop that would hold that peer is gone",
+            Self::NoRoom => c"this node holds as many peers by their zid as it was built for",
             Self::Unverifiable => {
-                "this node cannot tell which node answers a dial, so it holds no peer by its zid"
+                c"this node cannot tell which node answers a dial, so it holds no peer by its zid"
             }
         }
+    }
+}
+
+/// The text of a word spelled once as a C string. Every word of this module is ASCII, so the
+/// conversion cannot fail; it runs at compile time where the caller is `const`.
+const fn utf8(word: &'static CStr) -> &'static str {
+    match word.to_str() {
+        Ok(text) => text,
+        Err(_) => panic!("a lifecycle word is ASCII"),
     }
 }
 
@@ -604,15 +621,26 @@ impl<'a> VerbKey<'a> {
 
 /// Every `verdict` word a reply of any verb carries, each once, in the order the verbs' own lists
 /// give them ([`verdict_words_of`]).
-pub const VERDICT_WORDS: [&str; 8] = [
-    "opening",
-    "closing",
-    "resetting",
-    "already_closed",
-    "not_found",
-    "duplicate",
-    "status",
-    "refused",
+pub const VERDICT_WORDS: [&str; 8] = {
+    let mut words = [""; 8];
+    let mut i = 0;
+    while i < words.len() {
+        words[i] = utf8(VERDICT_C_WORDS[i]);
+        i += 1;
+    }
+    words
+};
+
+/// [`VERDICT_WORDS`] as C strings, in the same order: the one spelling of each verdict word.
+pub const VERDICT_C_WORDS: [&CStr; 8] = [
+    c"opening",
+    c"closing",
+    c"resetting",
+    c"already_closed",
+    c"not_found",
+    c"duplicate",
+    c"status",
+    c"refused",
 ];
 
 /// The `verdict` words a reply to `verb` can carry, or `None` for a word that is no verb.
@@ -747,14 +775,19 @@ impl ControlError {
 
     /// The word on the wire.
     pub const fn words(self) -> &'static str {
+        utf8(self.c_words())
+    }
+
+    /// [`Self::words`] as a C string, the one spelling of each word.
+    pub const fn c_words(self) -> &'static CStr {
         match self {
-            Self::UnknownCommand => "unknown-command",
-            Self::OpenTakesOnePeer => "open-takes-one-peer",
-            Self::CloseTakesOnePeer => "close-takes-one-peer",
-            Self::ResetTakesAPeerAndAGeneration => "reset-takes-a-peer-and-a-generation",
-            Self::StatusTakesOnePeer => "status-takes-one-peer",
-            Self::WhoamiTakesNothing => "whoami-takes-nothing",
-            Self::LineTooLong => "line-too-long",
+            Self::UnknownCommand => c"unknown-command",
+            Self::OpenTakesOnePeer => c"open-takes-one-peer",
+            Self::CloseTakesOnePeer => c"close-takes-one-peer",
+            Self::ResetTakesAPeerAndAGeneration => c"reset-takes-a-peer-and-a-generation",
+            Self::StatusTakesOnePeer => c"status-takes-one-peer",
+            Self::WhoamiTakesNothing => c"whoami-takes-nothing",
+            Self::LineTooLong => c"line-too-long",
         }
     }
 
@@ -875,15 +908,20 @@ impl KeyRefusal {
 
     /// The refusal's word.
     pub const fn words(self) -> &'static str {
+        utf8(self.c_words())
+    }
+
+    /// [`Self::words`] as a C string, the one spelling of each word.
+    pub const fn c_words(self) -> &'static CStr {
         match self {
-            Self::NoSuchVerb => "no-such-verb",
-            Self::NoSuchRole => "no-such-role",
-            Self::NoSuchMode => "no-such-mode",
-            Self::OfIsNoZid => "of-is-no-zid",
-            Self::AboutIsNoZid => "about-is-no-zid",
-            Self::ResetTakesAGeneration => "reset-takes-a-generation",
-            Self::OnlyResetTakesAGeneration => "only-reset-takes-a-generation",
-            Self::OnlyOpenIsPassive => "only-open-is-passive",
+            Self::NoSuchVerb => c"no-such-verb",
+            Self::NoSuchRole => c"no-such-role",
+            Self::NoSuchMode => c"no-such-mode",
+            Self::OfIsNoZid => c"of-is-no-zid",
+            Self::AboutIsNoZid => c"about-is-no-zid",
+            Self::ResetTakesAGeneration => c"reset-takes-a-generation",
+            Self::OnlyResetTakesAGeneration => c"only-reset-takes-a-generation",
+            Self::OnlyOpenIsPassive => c"only-open-is-passive",
         }
     }
 }

@@ -22,12 +22,9 @@
 //! into the caller's struct, every word in it a static C string this library owns.
 
 use core::ffi::{c_char, CStr};
-use std::collections::BTreeMap;
-use std::ffi::CString;
-use std::sync::OnceLock;
 
 use wz_session_core::lifecycle_wire::{
-    Answer, ControlError, KeyRefusal, RefusedReason, VerbWords, VERB_KEY_MAX_BYTES, VERDICT_WORDS,
+    Answer, VerbWords, VERB_KEY_MAX_BYTES, VERDICT_C_WORDS, VERDICT_WORDS,
 };
 use wz_session_core::text_out::FixedText;
 
@@ -102,23 +99,15 @@ pub struct wz_capi_c_lifecycle_read_t {
     pub zid: [c_char; 33],
 }
 
-/// Every word an answer or a refusal can carry, as a C string this library holds for good: the
-/// verdict words, the refusal sentences, the control channel's error words and the key's refusals.
-/// Derived from the Rust sets, so no word is spelled a second time here.
-fn c_word(word: &str) -> *const c_char {
-    static WORDS: OnceLock<BTreeMap<&'static str, CString>> = OnceLock::new();
-    let words = WORDS.get_or_init(|| {
-        let all = VERDICT_WORDS
-            .into_iter()
-            .chain(RefusedReason::ALL.map(RefusedReason::words))
-            .chain(ControlError::ALL.map(ControlError::words))
-            .chain(KeyRefusal::ALL.map(KeyRefusal::words));
-        all.map(|w| (w, CString::new(w).expect("a word holds no NUL")))
-            .collect()
-    });
-    words
-        .get(word)
-        .map_or(core::ptr::null(), |text| text.as_ptr())
+/// The C string of a verdict word, as `lifecycle_wire` spells it once (`VERDICT_C_WORDS`, in the
+/// order of `VERDICT_WORDS`). Every other word an answer or a refusal carries is handed out by its
+/// own `c_words()`; all of them are static C strings in the library's read-only data, so nothing
+/// is built at run time.
+fn verdict_c_word(word: &str) -> *const c_char {
+    VERDICT_WORDS
+        .iter()
+        .position(|w| *w == word)
+        .map_or(core::ptr::null(), |i| VERDICT_C_WORDS[i].as_ptr())
 }
 
 /// A C string argument as UTF-8, NULL as `default`, or `None` when it is not UTF-8.
@@ -194,7 +183,7 @@ pub unsafe extern "C" fn wz_capi_c_lifecycle_key(
     };
     let mut key: FixedText<VERB_KEY_MAX_BYTES> = FixedText::new();
     if let Err(why) = words.write(&mut key) {
-        say(c_word(why.words()));
+        say(why.c_words().as_ptr());
         return Z_EINVAL;
     }
     let Ok(key) = key.finish() else {
@@ -260,10 +249,10 @@ pub unsafe extern "C" fn wz_capi_c_lifecycle_read(
         None => {}
         Some(Answer::Verdict(verdict)) => {
             read.kind = WZ_CAPI_C_LIFECYCLE_VERDICT;
-            read.verdict = c_word(verdict.verdict);
+            read.verdict = verdict_c_word(verdict.verdict);
             read.reason = verdict
                 .reason
-                .map_or(core::ptr::null(), |r| c_word(r.words()));
+                .map_or(core::ptr::null(), |r| r.c_words().as_ptr());
             if let Some(links) = verdict.links {
                 (read.has_links, read.links) = (true, links);
             }
@@ -286,7 +275,7 @@ pub unsafe extern "C" fn wz_capi_c_lifecycle_read(
         }
         Some(Answer::Error(error)) => {
             read.kind = WZ_CAPI_C_LIFECYCLE_ERROR;
-            read.error = c_word(error.words());
+            read.error = error.c_words().as_ptr();
         }
     }
     // SAFETY: caller contract.
@@ -297,6 +286,8 @@ pub unsafe extern "C" fn wz_capi_c_lifecycle_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
+    use wz_session_core::lifecycle_wire::RefusedReason;
 
     fn key(words: wz_capi_c_lifecycle_words_t) -> Result<String, Option<String>> {
         let mut out = [0 as c_char; WZ_CAPI_C_LIFECYCLE_KEY_MAX];

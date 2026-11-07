@@ -11193,8 +11193,9 @@ layer_c1ch_capi_c_config_surface() {
     # The four instruments of the observation plane are features that are off in a build made as
     # the reference is, and the door set the gates below grade is the library's with them on: a
     # door behind a feature that no lane turned on would be graded by nothing. `identity-make` (the
-    # identity a client makes, off by default for its size) is one more such door.
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make"
+    # identity a client makes, off by default for its size) is one more such door, and so are the
+    # lifecycle doors (`lifecycle-doors`).
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors"
     (cd crates && cargo build -p wz-capi-c --quiet --features "$plane") || return 1
     python3 scripts/lib/capi_c_config_surface.py \
         "$WZ_ARTIFACTS/crates/target/debug/libwz_capi_c.so" || return 1
@@ -24159,8 +24160,9 @@ _runci_build_capi_c_for_oracle() {
     # under wz's own `wz_capi_c_` prefix and no type, so no arm's layout moves and the symbol
     # census, which counts only upstream's four prefixes, does not see them, and the C consumer
     # of the doors (`c_observation_plane_consumer.c`) links the very library the arm selected.
-    # `identity-make` likewise: its C consumer (`c_identity_consumer.c`) links this library.
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make"
+    # `identity-make` and `lifecycle-doors` likewise: their C consumers (`c_identity_consumer.c`,
+    # `c_lifecycle_consumer.c`) link this library.
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors"
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-c $capi_c_args --features "$plane" --quiet)
 }
