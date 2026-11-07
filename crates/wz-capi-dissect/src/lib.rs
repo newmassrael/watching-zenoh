@@ -448,6 +448,8 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // structure, as the `memory` document. One symbol, a read of a handle.
     // 52, for `wz_dissect_selector_term`: the selector a field document's node
     // offers, filtering by, adding or excluding the field it shows.
+    // 53, for `wz_dissect_live_field_values_since`: the typed values of a few
+    // payload field paths for the records after a cursor a selector picks.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -465,7 +467,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 52;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 53;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -4816,6 +4818,97 @@ pub unsafe extern "C" fn wz_dissect_live_fields_since_window(
 ) -> c_int {
     // SAFETY: the caller contract above is the helper's.
     unsafe { fields_since_door(handle, bytes, len, declarations, after_seq, max_rows, out) }
+}
+
+/// (ABI 53) — THE TYPED VALUES OF A FEW PAYLOAD FIELD PATHS, for the records of
+/// the rows after a cursor that a selector picks: the `field_values` document.
+///
+/// # What a consumer was paying for
+///
+/// A consumer that plots one field over time read every row of the field
+/// document and kept one number. Measured over ten thousand pushes of one
+/// schema: a row was 5,094 bytes a push and the two values kept 75, and of a
+/// 168 ms call 109 ms was writing rows with no payload in them. This door writes
+/// the values and nothing else.
+///
+/// # What it takes
+///
+/// * `declarations` -- the text every door that reads payloads takes, schema
+///   files and rules included; a record is written when a rule covers its key.
+/// * `selector` -- which records, in the selector language; empty is every one.
+/// * `paths` -- the payload field paths to keep, one per line, as a decoded
+///   field's `path` writes them (`1`, `4.1`, `$.x`); at most 64.
+/// * `after_seq` -- the cursor, as for [`wz_dissect_live_fields_since`]: the
+///   records of the rows numbered above it are written, and `window.through_seq`
+///   is the cursor to give next.
+///
+/// # What it writes
+///
+/// One entry per RECORD (a row may batch several): `seq` of its row, `record`
+/// its place in the batch, `time_ns`, `keyexpr`, and `state` in the field
+/// document's payload words. A `decoded` record carries `typed`, `schema` and
+/// `values`, the asked paths it holds in wire order, each with `path`, `type`,
+/// `typed_value` and `enum_number` exactly as the field document writes them;
+/// `refused` carries `why` and `encoding_mismatch` the encoding `declared`.
+///
+/// # What a call costs
+///
+/// The walk is kept between calls for the selector: a caller that asks again
+/// from the `through_seq` it was given pays for what arrived since. The handle
+/// keeps the payloads the selector picked past the cursor until a cursor passes
+/// them, so another declaration text or path list reads them without walking
+/// again; another selector or a lower cursor walks from the first message.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null pointer, text that is not UTF-8, or
+/// a path list that names no path, more than 64, or a line with a control
+/// character or edge whitespace. [`WZ_DISSECT_ERR_SELECTOR`] for a selector and
+/// [`WZ_DISSECT_ERR_DECLARATION`] for a declaration text that is refused
+/// (`wz_dissect_selector_diagnose` and `wz_dissect_declarations_diagnose` say
+/// why), and [`WZ_DISSECT_ERR_CANCELLED`] when the progress callback stopped it.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed; `declarations`,
+/// `selector` and `paths` NUL-terminated C strings; `out` a writable pointer to
+/// a `*mut c_char`. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_field_values_since(
+    handle: *mut live::LiveDissection,
+    declarations: *const c_char,
+    selector: *const c_char,
+    paths: *const c_char,
+    after_seq: u64,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null()
+        || declarations.is_null()
+        || selector.is_null()
+        || paths.is_null()
+        || out.is_null()
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (Ok(declarations), Ok(selector), Ok(paths)) = (
+        unsafe { std::ffi::CStr::from_ptr(declarations) }.to_str(),
+        unsafe { std::ffi::CStr::from_ptr(selector) }.to_str(),
+        unsafe { std::ffi::CStr::from_ptr(paths) }.to_str(),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let Ok(filter) = wz_capture::filter::Filter::parse(selector) else {
+        return WZ_DISSECT_ERR_SELECTOR;
+    };
+    // SAFETY: caller contract above.
+    let handle = unsafe { &mut *handle };
+    match handle.field_values_since(declarations, selector, &filter, paths, after_seq) {
+        Ok(doc) => write_string(doc, out),
+        Err(wz_capture::field_values::ValuesError::Declarations(_)) => WZ_DISSECT_ERR_DECLARATION,
+        Err(wz_capture::field_values::ValuesError::Paths(_)) => WZ_DISSECT_ERR_INVALID_ARG,
+        Err(wz_capture::field_values::ValuesError::Cancelled) => WZ_DISSECT_ERR_CANCELLED,
+    }
 }
 
 /// The body both `fields_since` doors share, so a window of `0` cannot differ from
@@ -9368,7 +9461,10 @@ mod tests {
         // `wz_dissect_string_free`; the node object and the selector typed cross
         // as C strings the caller already holds, the verb as an `int`, and no
         // struct is new.
-        assert_eq!(wz_dissect_abi_version(), 52);
+        // 53, for `wz_dissect_live_field_values_since`: one symbol, three C
+        // strings and a cursor in, a `char*` released by `wz_dissect_string_free`
+        // out; no struct is new.
+        assert_eq!(wz_dissect_abi_version(), 53);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -10174,6 +10270,9 @@ mod tests {
             // Read empty, replayed, and after the census and the field walk
             // kept their memories; one key set, three sets of values.
             (rev::MEMORY, memory_documents()),
+            // A record of each state that brings keys: decoded, refused and a
+            // label that vetoed the rule.
+            (rev::FIELD_VALUES, field_values_documents()),
         ];
 
         let mut failures: Vec<String> = Vec::new();
@@ -10434,6 +10533,14 @@ mod tests {
                 rev::MEMORY,
                 memory_documents().into_iter().next().expect("a document"),
             ),
+            // Declares no plane either: the window, the paths and the records.
+            (
+                rev::FIELD_VALUES,
+                field_values_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
             (rev::CENSUS, call_census(&stream).expect("the census door")),
             (
                 rev::FIELDS,
@@ -10603,6 +10710,8 @@ mod tests {
             (rev::HEALTH, health_documents()),
             // Empty, replayed and read: no top-level `null` in any.
             (rev::MEMORY, memory_documents()),
+            // A record of each state that brings keys: no top-level `null`.
+            (rev::FIELD_VALUES, field_values_documents()),
             (
                 rev::CENSUS,
                 vec![call_census(&stream).expect("the census door")],
@@ -11506,6 +11615,113 @@ mod tests {
             encode_one("Sensor", "message Sensor { int32 a = 1 }", "{}"),
             encode_one("Nope", SENSOR, "{}"),
         ]
+    }
+
+    /// THE VALUES DOOR READS A PAYLOAD BY THE SCHEMA THE `.proto` DOOR WROTE, over
+    /// a replayed capture, and writes only the asked paths: the same typed value
+    /// the field document writes for the field, and the cursor moves past it.
+    #[test]
+    fn the_values_door_writes_the_asked_paths_typed_and_moves_with_the_cursor() {
+        let declared = json_string(
+            &from_proto_one("demo/sensor", "Reading", READING),
+            "declarations",
+        );
+        let handle = replayed(&protobuf_capture());
+        let call = |after: u64| call_field_values(handle, &declared, "", "1", after);
+        let doc = call(0);
+        assert!(
+            doc.contains(
+                "\"state\":\"decoded\",\"typed\":true,\"schema\":\"Reading\",\"values\":[\
+                 {\"path\":\"1\",\"type\":\"int32\",\"typed_value\":150,\"enum_number\":null}]}"
+            ),
+            "{doc}"
+        );
+        // Asked again from the cursor it gave, nothing is new.
+        let through = json_count(&doc, "through_seq");
+        let again = call(through as u64);
+        assert!(again.contains("\"records\":[]"), "{again}");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// A replay handle over `pcap`.
+    fn replayed(pcap: &[u8]) -> *mut live::LiveDissection {
+        let mut handle: *mut live::LiveDissection = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_pcap_replay(
+                pcap.as_ptr(),
+                pcap.len(),
+                WZ_DISSECT_LIMITS_NONE,
+                &mut handle,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "replay rc");
+        handle
+    }
+
+    /// `wz_dissect_live_field_values_since` on `handle`, which must answer.
+    fn call_field_values(
+        handle: *mut live::LiveDissection,
+        declarations: &str,
+        selector: &str,
+        paths: &str,
+        after: u64,
+    ) -> String {
+        let (decls, sel, paths) = (
+            CString::new(declarations).expect("no NUL"),
+            CString::new(selector).expect("no NUL"),
+            CString::new(paths).expect("no NUL"),
+        );
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_live_field_values_since(
+                handle,
+                decls.as_ptr(),
+                sel.as_ptr(),
+                paths.as_ptr(),
+                after,
+                &mut out,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "field_values_since rc");
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf-8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        doc
+    }
+
+    /// One values document per record state that brings keys, through the ABI:
+    /// a payload read by its schema, bytes the schema refuses, and a declared
+    /// label its own bytes bear out against the rule.
+    fn field_values_documents() -> Vec<String> {
+        const JSON: u32 = 5;
+        let typed = json_string(
+            &from_proto_one("demo/sensor", "Reading", READING),
+            "declarations",
+        );
+        let cases: [(Vec<u8>, &str, &str); 3] = [
+            (protobuf_capture(), typed.as_str(), "decoded"),
+            (protobuf_capture_of(&[0x08]), typed.as_str(), "refused"),
+            (
+                capture_declaring(JSON, br#"{"a":1}"#),
+                "demo/sensor=protobuf",
+                "encoding_mismatch",
+            ),
+        ];
+        cases
+            .iter()
+            .map(|(pcap, declarations, state)| {
+                let handle = replayed(pcap);
+                let doc = call_field_values(handle, declarations, "", "1", 0);
+                unsafe { wz_dissect_live_close(handle) };
+                assert!(
+                    doc.contains(&format!("\"state\":\"{state}\"")),
+                    "{state}: {doc}"
+                );
+                doc
+            })
+            .collect()
     }
 
     /// A SET OF FIELD VALUES REACHES THE READER'S NAMES THROUGH THE ABI, with no

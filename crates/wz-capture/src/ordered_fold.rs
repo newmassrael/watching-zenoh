@@ -167,6 +167,14 @@ impl<F: OrderedFold> Resumable<F> {
         self.saved.as_ref().map(|saved| &saved.fold)
     }
 
+    /// The fold as it stands, to give up what its owner no longer needs of it
+    /// (the values door's records a cursor has passed). What is taken out must
+    /// be nothing a later message's folding reads.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn fold_mut(&mut self) -> Option<&mut F> {
+        self.saved.as_mut().map(|saved| &mut saved.fold)
+    }
+
     /// Bring the fold up to `dissection`, continuing when it may and starting over
     /// when it may not, and hand it back.
     ///

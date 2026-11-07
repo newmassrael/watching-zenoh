@@ -1309,13 +1309,29 @@ impl PayloadCensus {
         ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,
     ) {
+        self.observe_frame_selecting(frame, filter, ctx, spaces, None);
+    }
+
+    /// [`Self::observe_frame_where`], handing every payload the selector says
+    /// `yes` to to `sink` INSTEAD of tallying it: the walk a plane makes that
+    /// wants the payloads themselves ([`crate::field_values`]). The selector is
+    /// judged, the keyexpr resolved and the payload found by the very lines the
+    /// census uses, so the payloads one selector picks are the census's.
+    pub(crate) fn observe_frame_selecting<'f>(
+        &mut self,
+        frame: &crate::messages::Row<'_>,
+        filter: &crate::filter::Filter,
+        ctx: crate::node::ListContext<'_>,
+        spaces: &mut crate::agg::KeyexprSpaces,
+        sink: Option<PayloadSink<'_, 'f>>,
+    ) {
         use wz_session_core::passive::Carried;
 
         match &frame.carried {
-            Carried::Batch(batch) => self.observe_batch(spaces, frame, batch, filter, ctx),
+            Carried::Batch(batch) => self.observe_batch(spaces, frame, batch, filter, ctx, sink),
             #[cfg(feature = "reassembly")]
             Carried::Reassembled { batch, .. } => {
-                self.observe_batch(spaces, frame, batch, filter, ctx)
+                self.observe_batch(spaces, frame, batch, filter, ctx, sink)
             }
             // Matched by name for the reason R311y614 matched them by name
             // in the throughput plane: a new `Carried` variant must fail to
@@ -1329,13 +1345,14 @@ impl PayloadCensus {
         }
     }
 
-    fn observe_batch(
+    fn observe_batch<'f>(
         &mut self,
         spaces: &mut crate::agg::KeyexprSpaces,
         frame: &crate::messages::Row<'_>,
         batch: &wz_session_core::network_message::BatchParse,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
+        mut sink: Option<PayloadSink<'_, 'f>>,
     ) {
         if batch.halt.is_some() {
             self.gaps.halted_batches += 1;
@@ -1344,9 +1361,14 @@ impl PayloadCensus {
         // R311y641 (§1.1n) — paired with the bytes each record came from, so
         // this plane can say WHERE a record was and not only that it was.
         let envelope = crate::field_path::envelope_for(filter, frame, ctx);
-        for (message, span) in batch.records() {
+        for (record, (message, span)) in batch.records().enumerate() {
             let at = crate::field_path::RecordAt::new(span, envelope.as_ref());
-            self.observe_message(spaces, frame, message, at, filter, ctx);
+            let seen = Seen {
+                at,
+                record,
+                sink: sink.as_deref_mut(),
+            };
+            self.observe_message(spaces, frame, message, seen, filter, ctx);
         }
     }
 
@@ -1355,11 +1377,12 @@ impl PayloadCensus {
         spaces: &mut crate::agg::KeyexprSpaces,
         frame: &crate::messages::Row<'_>,
         message: &wz_session_core::network_message::NetworkMessage,
-        at: crate::field_path::RecordAt<'_>,
+        seen: Seen<'_, '_, '_>,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
     ) {
         use wz_session_core::network_message::NetworkMessage;
+        let Seen { at, record, sink } = seen;
         let span = at.span;
 
         let direction = frame.direction;
@@ -1450,6 +1473,20 @@ impl PayloadCensus {
             ),
             None => Encoding::Absent,
         };
+        // A walk that wants the payloads takes them here, judged and resolved by
+        // the lines above, and the census tally below is not this walk's.
+        if let Some(sink) = sink {
+            sink(SelectedPayload {
+                row: RowKey::of(ctx.list(), frame),
+                record,
+                keyexpr: keyexpr.as_deref(),
+                declared: encoding,
+                bytes,
+                elsewhere: shm,
+                observed_at_ns: frame.observed_at_ns,
+            });
+            return;
+        }
         // R311y622 (§1.1o) — the marker is read BEFORE the bytes are, because
         // the bytes are not the data. `inspect` would judge a descriptor
         // against the declaration and manufacture a finding against a publisher
@@ -1521,6 +1558,48 @@ impl PayloadCensus {
 /// descriptor slot's length as a byte total. One function, one answer.
 #[cfg(feature = "network-codecs")]
 use crate::agg::carries_shm_marker;
+
+/// One payload a selector said `yes` to, as the payload plane found it: what
+/// [`PayloadCensus::observe_frame_selecting`] hands its sink.
+///
+/// Built wherever the payload plane is, and READ only by the values door
+/// (`field_values`), which the `dissect` feature builds: in a build without it
+/// no sink is ever handed one, so its fields are read by nothing there.
+#[cfg(feature = "network-codecs")]
+#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+pub(crate) struct SelectedPayload<'a> {
+    /// The row that carried it.
+    pub(crate) row: RowKey,
+    /// Its place among the records of that row's batch, from 0.
+    pub(crate) record: usize,
+    /// The resolved keyexpr, or `None` when the id named no binding.
+    pub(crate) keyexpr: Option<&'a str>,
+    /// The encoding the sample declared.
+    pub(crate) declared: Encoding<'a>,
+    /// The payload's bytes; a descriptor's when `elsewhere`.
+    pub(crate) bytes: &'a [u8],
+    /// The payload slot holds a shared-memory descriptor, not the data.
+    pub(crate) elsewhere: bool,
+    /// The capture's instant for the row, where it has one.
+    pub(crate) observed_at_ns: Option<u64>,
+}
+
+/// What [`PayloadCensus::observe_message`] is told about the record beside the
+/// message itself: where it sits, its place in the batch, and the sink of a walk
+/// that takes payloads. One value so the walk's parameters stay within bound.
+#[cfg(feature = "network-codecs")]
+struct Seen<'r, 's, 'f> {
+    at: crate::field_path::RecordAt<'r>,
+    record: usize,
+    sink: Option<PayloadSink<'s, 'f>>,
+}
+
+/// Where a walk that takes payloads puts them: a borrow for the call of a
+/// closure that may itself borrow for longer. Two lifetimes, because a `&mut`
+/// holds its object's lifetime fixed and a reborrow for one record must not
+/// demand the closure live only as long.
+#[cfg(feature = "network-codecs")]
+pub(crate) type PayloadSink<'s, 'f> = &'s mut (dyn FnMut(SelectedPayload<'_>) + 'f);
 
 /// The declared encoding and the bytes a record carries, with its keyexpr.
 ///
@@ -1719,10 +1798,32 @@ impl crate::ordered_fold::OrderedFold for PayloadFold {
         message: Option<&[u8]>,
         grouping: &crate::node::SessionGrouping,
     ) {
+        self.feed_selecting(flow, list, packet, frame, message, grouping, None);
+    }
+}
+
+#[cfg(feature = "network-codecs")]
+impl PayloadFold {
+    /// [`crate::ordered_fold::OrderedFold::feed`], handing the payloads the
+    /// selector picks to `sink` instead of tallying them (see
+    /// [`PayloadCensus::observe_frame_selecting`]): the walk a plane that wants
+    /// the payloads makes, through the same placement as the census's.
+    // Eight: the fold's own seven and the sink.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn feed_selecting<'f>(
+        &mut self,
+        flow: &crate::link::FlowKey,
+        list: usize,
+        packet: usize,
+        frame: &crate::messages::Row<'_>,
+        message: Option<&[u8]>,
+        grouping: &crate::node::SessionGrouping,
+        sink: Option<PayloadSink<'_, 'f>>,
+    ) {
         self.spaces.enter_flow(grouping.owners(list));
         // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
         self.spaces.at_packet(packet);
-        self.census.observe_frame_where(
+        self.census.observe_frame_selecting(
             frame,
             &self.filter,
             // Placed, so the selector's row terms read this frame's flow and
@@ -1734,6 +1835,7 @@ impl crate::ordered_fold::OrderedFold for PayloadFold {
                 .placed(*flow, Some(packet))
                 .holding(message),
             &mut self.spaces,
+            sink,
         );
     }
 }

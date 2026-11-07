@@ -1653,6 +1653,43 @@ static int check_follow_door(void) {
         CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
               "null out fields_since_window rc=%d", rc);
     }
+    /* (ABI 53) -- the values door: each pointer refused when null, a path list
+     * that names nothing and a selector that does not parse refused by their own
+     * codes, and a good call answers the document with its revision. */
+    {
+        char *doc = NULL;
+        rc = wz_dissect_live_field_values_since(NULL, "", "", "1", 0, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+              "null handle field_values_since rc=%d", rc);
+        rc = wz_dissect_live_field_values_since(h, NULL, "", "1", 0, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+              "null declarations field_values_since rc=%d", rc);
+        rc = wz_dissect_live_field_values_since(h, "", NULL, "1", 0, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+              "null selector field_values_since rc=%d", rc);
+        rc = wz_dissect_live_field_values_since(h, "", "", NULL, 0, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+              "null paths field_values_since rc=%d", rc);
+        rc = wz_dissect_live_field_values_since(h, "", "", "1", 0, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out field_values_since rc=%d", rc);
+        rc = wz_dissect_live_field_values_since(h, "", "", "", 0, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+              "empty path list field_values_since rc=%d", rc);
+        rc = wz_dissect_live_field_values_since(h, "", "key ==", "1", 0, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_SELECTOR && doc == NULL,
+              "bad selector field_values_since rc=%d", rc);
+        rc = wz_dissect_live_field_values_since(h, "demo/**=nosuch", "", "1", 0, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_DECLARATION && doc == NULL,
+              "bad declarations field_values_since rc=%d", rc);
+        rc = wz_dissect_live_field_values_since(h, "demo/**=protobuf", "", "1", 0, &doc);
+        CHECK(rc == WZ_DISSECT_OK && doc != NULL, "field_values_since rc=%d", rc);
+        CHECK(strncmp(doc,
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":1},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":1},")) ==
+                  0,
+              "the values document opens with its revision: %s", doc);
+        wz_dissect_string_free(doc);
+    }
     wz_dissect_live_close(h);
     return 0;
 }

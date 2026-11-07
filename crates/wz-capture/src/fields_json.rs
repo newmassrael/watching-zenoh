@@ -9873,7 +9873,14 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 82] = [
+        let live: [(&str, &str, Vec<&'static str>); 83] = [
+            // What reading a record's payload came to, on the values document:
+            // the walk over its emitter's own outcomes.
+            (
+                rev::FIELD_VALUES,
+                "state",
+                crate::field_values::state_names(),
+            ),
             // On what grounds a session parameter's value is known.
             (rev::FIELDS, "basis", BasisWord::names()),
             // The session's per-frame verdicts, each held to the
@@ -11049,7 +11056,10 @@ mod tests {
         let describe_docs = crate::proto_describe_tests::documents_for_the_carries_gate();
         let since_docs = crate::selection_json::tests::since_documents_for_the_gates();
         let field_list = crate::filter::selector_fields_json();
-        let docs: [(&str, Vec<&String>); 17] = [
+        // The values document, one per record state.
+        let values_docs = crate::field_values_tests::documents_for_the_gates();
+        let docs: [(&str, Vec<&String>); 18] = [
+            (rev::FIELD_VALUES, values_docs.iter().collect()),
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,

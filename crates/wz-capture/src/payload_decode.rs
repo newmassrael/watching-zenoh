@@ -1815,7 +1815,7 @@ impl Claim {
 /// bytes can say about a label, not a gap in the check.
 fn judge_claim(
     format: &dyn PayloadFormat,
-    node: &Field,
+    declared: Encoding<'_>,
     bytes: &[u8],
     // Round 2026 (item 289) — the run, so the SECOND SCAN below is counted at
     // the one place that performs one. Threaded in rather than returned,
@@ -1828,7 +1828,6 @@ fn judge_claim(
     let Some(accepted) = format.encodings() else {
         return Claim::Agrees(false);
     };
-    let declared = declared_encoding(node);
     // `false` again, and for the same reason from a reader's side: the record
     // carried no encoding, or carried an id this build's table does not have.
     let Encoding::Known { id, name, .. } = declared else {
@@ -2056,6 +2055,51 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     let FieldValue::Bytes(bytes) = &payload.value else {
         return PayloadDecoding::NoPayload;
     };
+    decode_payload_parts(
+        PayloadParts {
+            keyexpr,
+            bytes,
+            declared: declared_encoding(node),
+            base: payload.span.start,
+            publisher: at.publisher,
+        },
+        map,
+    )
+}
+
+/// One payload as the RECORD PLANE holds it, without the walked tree: what
+/// [`decode_payload_parts`] reads. The tree walk finds these in a message; a
+/// plane that already resolved the keyexpr and holds the bytes hands them over
+/// as they are, so the two read one payload through one function.
+pub struct PayloadParts<'p> {
+    /// The resolved key expression the rules are matched against.
+    pub keyexpr: String,
+    /// The payload's bytes.
+    pub bytes: &'p [u8],
+    /// The encoding the sample declared, [`Encoding::Absent`] when none.
+    pub declared: Encoding<'p>,
+    /// Where the payload starts in the coordinate space the fields' spans are
+    /// to be in: the message's, for a row of the field document; 0 for spans
+    /// relative to the payload.
+    pub base: usize,
+    /// Who published it, for a misbinding the publisher is blamed for.
+    pub publisher: Option<&'p str>,
+}
+
+/// Apply the mapping to one payload given as its parts: the rule that covers
+/// the key, the claim of its declared encoding, the decode, and the declared
+/// names, exactly as [`decode_payload`] does once it has found them in a tree.
+pub fn decode_payload_parts(parts: PayloadParts<'_>, map: &Declarations<'_>) -> PayloadDecoding {
+    let PayloadParts {
+        keyexpr,
+        bytes,
+        declared,
+        base,
+        publisher,
+    } = parts;
+    if map.is_empty() {
+        return PayloadDecoding::NoRules;
+    }
     // The rule that won comes out of the comparison that picked the format, so
     // what the row reports and what decoded it cannot be two different rules.
     let Some((rule, format)) = map.rule_for_keyexpr(&keyexpr) else {
@@ -2079,7 +2123,7 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     // under the three of them. Derived from the judgement already made rather
     // than asked again below, which would be a second spelling of it.
     let mut under = RefusedUnder::Unclaimed;
-    let despite_encoding = match judge_claim(format, node, bytes, map) {
+    let despite_encoding = match judge_claim(format, declared, bytes, map) {
         Claim::Agrees(corroborated) => {
             if corroborated {
                 under = RefusedUnder::Corroborated;
@@ -2092,7 +2136,7 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
                 format.name(),
                 &declared,
                 Misbound::Rule,
-                at.publisher,
+                publisher,
                 &rule,
             );
             return PayloadDecoding::EncodingMismatch {
@@ -2109,7 +2153,7 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
                 format.name(),
                 &declared,
                 Misbound::Publisher,
-                at.publisher,
+                publisher,
                 &rule,
             );
             // Round 2031 (item 300) — a refusal AFTER this is the arm where
@@ -2131,7 +2175,6 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
             // listing is MESSAGE-relative (R311y677). Rebasing here is the only
             // place that knows the payload's own offset, and leaving the two
             // spaces mixed in one listing is the defect R311y677 measured.
-            let base = payload.span.start;
             for f in &mut fields {
                 f.start += base;
                 f.end += base;

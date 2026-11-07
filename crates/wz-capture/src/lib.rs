@@ -242,6 +242,15 @@ pub mod selected_packets;
 /// coordinates claiming to answer a question it cannot ask.
 #[cfg(all(feature = "dissect", feature = "network-codecs"))]
 pub mod selection_json;
+
+/// The typed values of a few payload field paths, for the records after a
+/// cursor a selector picks: the narrow document a plotting consumer reads in
+/// place of the field document. Gated as [`selection_json`] is: its walk is
+/// the payload plane's and its reading is the field layer's.
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
+pub mod field_values;
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod field_values_tests;
 // The capture read as SESSIONS, one row per zid pair, and the document that
 // renders them. Each is documented by its own `//!` text and carries no outer
 // `///` here, for the reason the transport build modules give.

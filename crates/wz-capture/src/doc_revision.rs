@@ -3992,6 +3992,24 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTION_SINCE_R1_CARRIES,
     },
+    // THE TYPED VALUES OF A FEW PAYLOAD FIELDS, for the records after a cursor.
+    //
+    // A document of its own because it is the answer of a door of its own
+    // (`wz_dissect_live_field_values_since`): a plot keeps one or two numbers
+    // of a row of the field document, measured at a 67.5th of its bytes. One
+    // entry per RECORD a selector picks and a rule covers (`seq` of its row,
+    // `record` its place in the batch, `time_ns`, `keyexpr`, `state`), and for
+    // a `decoded` record the asked paths it holds, each with the field
+    // document's `type`, `typed_value` and `enum_number`.
+    DocumentShape {
+        document: FIELD_VALUES,
+        revision: 1,
+        keys: FIELD_VALUES_R1_KEYS,
+        retiring: &[],
+        families: FIELD_VALUES_R1_FAMILIES,
+        planes: &[],
+        carries: FIELD_VALUES_R1_CARRIES,
+    },
     // THE SAME MOVE ON THE CENSUS: a `zid` prefix is read against the capture
     // and an ambiguous one is reported.
     //
@@ -4185,6 +4203,84 @@ pub const HEALTH: &str = "health";
 /// What a live handle holds in memory that follows its row count, by structure
 /// (`wz_dissect_live_memory`).
 pub const MEMORY: &str = "memory";
+/// The typed values of a few payload field paths, for the records after a
+/// cursor a selector picks (`wz_dissect_live_field_values_since`).
+pub const FIELD_VALUES: &str = "field_values";
+
+/// The values document's key set at revision 1, over every state a record
+/// takes: the envelope, the window, the asked paths, and per record its row,
+/// time, key and state with what that state brings.
+pub const FIELD_VALUES_R1_KEYS: &[&str] = &[
+    "after_seq",
+    "declared",
+    "document",
+    "enum_number",
+    "keyexpr",
+    "name",
+    "path",
+    "paths",
+    "record",
+    "records",
+    "revision",
+    "schema",
+    "seq",
+    "state",
+    "through_seq",
+    "time_ns",
+    "type",
+    "typed",
+    "typed_value",
+    "values",
+    "why",
+    "window",
+];
+
+/// What a record's `state` says at values-document revision 1: the field
+/// document's payload states a record a rule covers can be in.
+pub const FIELD_VALUES_STATE_R1: &[&str] = &[
+    "decoded",
+    "encoding_mismatch",
+    "keyexpr_unresolved",
+    "not_on_the_wire",
+    "refused",
+];
+
+/// The values document's value family at revision 1.
+pub const FIELD_VALUES_R1_FAMILIES: &[ValueFamily] = &[ValueFamily {
+    key: "state",
+    values: FIELD_VALUES_STATE_R1,
+}];
+
+/// What a record's `state` brings at revision 1: `decoded` its `typed`,
+/// `schema` and `values`, `refused` its `why`, `encoding_mismatch` the
+/// encoding the sample `declared`, and the other two nothing.
+pub const FIELD_VALUES_R1_CARRIES: &[KeyCarries] = &[KeyCarries {
+    key: "state",
+    shape: CarriesShape::Discriminant(&[
+        WordCarries {
+            word: "decoded",
+            shapes: &[&[
+                "keyexpr", "record", "schema", "seq", "time_ns", "typed", "values",
+            ]],
+        },
+        WordCarries {
+            word: "encoding_mismatch",
+            shapes: &[&["declared", "keyexpr", "record", "seq", "time_ns"]],
+        },
+        WordCarries {
+            word: "keyexpr_unresolved",
+            shapes: &[&["keyexpr", "record", "seq", "time_ns"]],
+        },
+        WordCarries {
+            word: "not_on_the_wire",
+            shapes: &[&["keyexpr", "record", "seq", "time_ns"]],
+        },
+        WordCarries {
+            word: "refused",
+            shapes: &[&["keyexpr", "record", "seq", "time_ns", "why"]],
+        },
+    ]),
+}];
 
 /// The memory document's key set at revision 1: the envelope, the byte figures,
 /// and the groups that name the structure each is held in (`lists`, `streams`,
@@ -23534,6 +23630,8 @@ mod tests {
             (HEALTH, 5),
             // What a live handle holds in memory, by structure.
             (MEMORY, 1),
+            // The typed values of a few payload field paths.
+            (FIELD_VALUES, 1),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");

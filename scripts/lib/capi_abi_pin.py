@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 52
+EXPECTED_VERSION = 53
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -389,6 +389,11 @@ EXPECTED_SYMBOLS = {
     # more integer in; the window's last number is `window.through_seq`, the cursor
     # for the next window. `0` is no limit.
     "wz_dissect_live_fields_since_window",
+    # (ABI 53) -- the typed values of a few payload field paths for the records
+    # after a cursor a selector picks: the `field_values` document. Three strings
+    # and a cursor in, one string out, released by `wz_dissect_string_free`; the
+    # memory rule does not move.
+    "wz_dissect_live_field_values_since",
     # (ABI 42) -- the callback a long call asks how it is going and that can stop it.
     # One symbol: a function pointer and a `void *` the CALLER owns go in, nothing
     # comes out, and a null pointer clears the hook. A stopped call answers

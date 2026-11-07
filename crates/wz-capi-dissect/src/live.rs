@@ -428,6 +428,9 @@ pub struct LiveDissection {
     /// The digests of the rows [`Self::fields_since`] wrote, and the state of the
     /// capture it wrote them in: what lets it say which rows moved.
     fields_memory: wz_capture::fields_json::FieldsMemory,
+    /// The payloads [`Self::field_values_since`] holds for the selector it was
+    /// last asked under, past the cursor it was last asked at.
+    values_memory: wz_capture::field_values::ValuesMemory,
     /// The callback long calls ask how they are going, if the caller set one.
     progress: Option<ProgressHook>,
     lost: u64,
@@ -594,6 +597,7 @@ impl LiveDissection {
             selection_said: wz_capture::selection_json::SelectionMemories::default(),
             census_memory: std::sync::Mutex::new(wz_capture::CensusMemory::new()),
             fields_memory: wz_capture::fields_json::FieldsMemory::new(),
+            values_memory: wz_capture::field_values::ValuesMemory::new(),
             progress: None,
             lost: 0,
             cursor: CaptureCursor::new(),
@@ -1324,6 +1328,55 @@ impl LiveDissection {
     /// again. What a test reads instead of a clock.
     pub fn fields_work(&self) -> wz_capture::fields_json::FieldsStats {
         self.fields_memory.stats()
+    }
+
+    /// THE TYPED VALUES OF A FEW PAYLOAD FIELD PATHS, for the records of the
+    /// rows numbered after `after_seq` that `filter` picks and a rule of
+    /// `declarations` covers: [`wz_capture::field_values`]'s document.
+    ///
+    /// The rows are numbered as every document of this handle numbers them, so
+    /// the `seq` a record carries is the row's in the field document. The walk
+    /// is kept between calls for the selector (`selector` is its text), so a
+    /// caller that asks again from the `through_seq` it was given pays for what
+    /// arrived since.
+    ///
+    /// `&mut`, for [`Self::fields_where`]'s reason: the ids are settled first by
+    /// the reconciliation a drain performs, handing out no record.
+    pub fn field_values_since(
+        &mut self,
+        declarations: &str,
+        selector: &str,
+        filter: &wz_capture::filter::Filter,
+        paths: &str,
+        after_seq: u64,
+    ) -> Result<String, wz_capture::field_values::ValuesError> {
+        self.drain(&mut []);
+        let ids = HandleIds::of(self);
+        let hook = self.progress;
+        let ask = |done: u64, total: u64| asked(hook, done, total);
+        let progress = hook.map(|_| wz_capture::Progress::new(&ask));
+        // The highest number the handle has issued: the cursor to give next.
+        let through_seq = self.next_seq - 1;
+        wz_capture::field_values::field_values_since(
+            &self.dissection,
+            &ids,
+            wz_capture::field_values::ValuesAsk {
+                declarations,
+                selector,
+                filter,
+                paths,
+                after_seq,
+                through_seq,
+            },
+            &mut self.values_memory,
+            progress.as_ref(),
+        )
+    }
+
+    /// What the values door's memory has done: messages folded and walks begun
+    /// again. What a test reads instead of a clock.
+    pub fn values_work(&self) -> wz_capture::FoldStats {
+        self.values_memory.stats()
     }
 
     /// THE SELECTOR'S VERDICT OVER THE ROWS OF THE FIELD DOCUMENT, and

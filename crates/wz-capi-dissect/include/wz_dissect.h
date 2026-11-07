@@ -1746,7 +1746,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 52
+#define WZ_DISSECT_ABI_REVISION 53
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -6588,6 +6588,66 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
                                         const char *declarations,
                                         uint64_t after_seq, uint64_t max_rows,
                                         char **out);
+
+/* (ABI 53) -- THE TYPED VALUES OF A FEW PAYLOAD FIELD PATHS, for the records of
+ * the rows after a cursor that a selector picks: the `field_values` document.
+ *
+ * WHAT IT IS FOR. A consumer that plots one field over time read every row of
+ * the field document and kept one number of it. Measured over ten thousand
+ * pushes of one schema, a row was 5,094 bytes a push and the two values kept 75;
+ * of a 168 ms call, 109 ms went to writing rows with no payload in them. This door
+ * writes the values and nothing else.
+ *
+ *     char *doc = NULL; uint64_t cursor = 0;
+ *     wz_dissect_live_field_values_since(h, decls, "key == demo/pose", "1\n2",
+ *                                        cursor, &doc);
+ *     ... read window.through_seq into cursor, then wz_dissect_string_free(doc)
+ *
+ * WHAT IT TAKES. `declarations` is the text every door that reads payloads
+ * takes, schema files and rules included: a record is written when a rule
+ * covers its key. `selector` picks the records; empty is every one. `paths` is
+ * the payload field paths to keep, one per line, as a decoded field's `path`
+ * writes them (`1`, `4.1`, `$.x`), at most 64. `after_seq` is the cursor, as
+ * for wz_dissect_live_fields_since.
+ *
+ *     {"document":{"name":"field_values","revision":1},
+ *      "window":{"after_seq":0,"through_seq":2},"paths":["1"],
+ *      "records":[{"seq":1,"record":0,"time_ns":1000000,"keyexpr":"demo/pose",
+ *                  "state":"decoded","typed":true,"schema":"pkg.Pose",
+ *                  "values":[{"path":"1","type":"sint32","typed_value":-3,
+ *                             "enum_number":null}]}]}
+ *
+ * ONE ENTRY PER RECORD, and a row may batch several: `seq` is the row's number,
+ * the one every document of the handle gives it, and `record` the record's place
+ * in that row's batch, from 0. `time_ns` is the capture's instant for the row,
+ * or null. `state` is the field document's payload word for the record:
+ * `decoded` carries `typed`, `schema` and `values` (the asked paths it holds, in
+ * wire order, a repeated field once per element; each with `path`, `type`,
+ * `typed_value` and `enum_number` as the field document writes them), `refused`
+ * carries `why`, `encoding_mismatch` the encoding the sample `declared`, and
+ * `not_on_the_wire` and `keyexpr_unresolved` nothing more. A record no rule
+ * covers is not written.
+ *
+ * WHAT A CALL COSTS. The walk is kept between calls for the selector, so a caller
+ * that asks again from the `through_seq` it was given pays for what arrived
+ * since. The handle keeps the payloads the selector picked past the cursor until
+ * a cursor passes them, so another declaration text or path list reads them
+ * without walking again; another selector or a lower cursor walks from the first
+ * message.
+ *
+ * WZ_DISSECT_ERR_INVALID_ARG for a null pointer, text that is not UTF-8, or a
+ * path list that names no path, more than 64, or a line with a control character
+ * or edge whitespace. WZ_DISSECT_ERR_SELECTOR and WZ_DISSECT_ERR_DECLARATION for a
+ * refused selector or declaration text, and WZ_DISSECT_ERR_CANCELLED when the
+ * progress callback stopped it. `h` is not const, for
+ * wz_dissect_live_fields_since's reason.
+ *
+ * @values field_values state
+ * @carries field_values state discriminant */
+int wz_dissect_live_field_values_since(wz_dissect_live *h,
+                                       const char *declarations,
+                                       const char *selector, const char *paths,
+                                       uint64_t after_seq, char **out);
 
 /* (ABI 42) -- THE CALLBACK A LONG CALL ASKS HOW IT IS GOING, and that can stop it.
  *

@@ -942,6 +942,19 @@ ONLY_CAPI = {
         "cursor to continue from.",
         (),
     ),
+    # The typed values of a few payload field paths after a cursor. Filed in the
+    # round that added the symbol.
+    "the typed values of a few payload field paths for the records AFTER a cursor": (
+        "wz_dissect_live_field_values_since",
+        "DELIBERATE, for the reasons the field document's cursor rows give. It is a "
+        "narrow reading of the payloads the field document decodes, for a consumer "
+        "that LINKS this library and redraws a plot of one field as a capture "
+        "grows: the cursor and the walk kept between calls are what it is for. The "
+        "command line prints each decoded field once, with its type "
+        "(`--payload-format`), so the values are already on its listing and there "
+        "is no earlier answer for a later one to be relative to.",
+        (),
+    ),
     # The callback a long call asks how it is going. Filed in the round that added
     # the symbol.
     "a callback that a long call of an OPEN handle reports progress to and can be stopped by": (
