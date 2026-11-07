@@ -59,6 +59,11 @@ pub struct SocketConfig<'a> {
     pub bind: Option<&'a str>,
     /// The `multicast-loopback` policy.
     pub loopback: Loopback,
+    /// The `multicast-link-requires-iface` policy: a multicast LINK (the joined socket of
+    /// [`RxBind::Wildcard`] and the send half of `bind_sender(.., link = true)`) is refused when
+    /// the locator did not resolve to an interface. Scouting sockets are not links and ignore it.
+    /// `false` is upstream's behaviour, an unpinned link on its chosen interface.
+    pub link_requires_iface: bool,
 }
 
 impl SocketConfig<'_> {
@@ -230,6 +235,31 @@ impl Plan {
             },
             other => other,
         }
+    }
+
+    /// Whether the locator resolved to an interface. An `#iface=` this build cannot honour, or one
+    /// it could not settle, resolves to none and leaves the plan unpinned like a locator that has
+    /// no key, which is why this reads the plan and not the key.
+    fn interface_is_chosen(&self) -> bool {
+        match self {
+            Self::V4 { iface, .. } => iface.is_some(),
+            Self::V6 { iface, .. } => iface.is_some(),
+        }
+    }
+
+    /// The `multicast-link-requires-iface` rule for a link: with `cfg` stating it, a plan with no
+    /// interface is refused. It is called on the plan [`Self::resolve`] made and before
+    /// [`Self::with_link_default_iface`] fills one in, since the default is the choice nobody
+    /// made, and before any socket exists, so a refusal leaves no membership behind.
+    fn require_chosen_interface(&self, cfg: &SocketConfig<'_>) -> io::Result<()> {
+        if cfg.link_requires_iface && !self.interface_is_chosen() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "wz: a multicast link needs an interface its locator chose (`#iface=`), and \
+                 this one has none, so the multicast-link-requires-iface policy refuses it",
+            ));
+        }
+        Ok(())
     }
 
     fn domain(&self) -> Domain {
@@ -530,11 +560,16 @@ pub fn bind_joined(
     let plan = Plan::resolve(group, cfg, JoinsRead::Yes)?;
     // R3335 -- a multicast LINK (the wildcard-bound socket) with no `#iface=` joins and sends on
     // upstream's chosen interface rather than leaving it to the kernel. A scouting socket does
-    // not: upstream joins those per interface (see `RxBind::skips_a_refused_v4_join`).
+    // not: upstream joins those per interface (see `RxBind::skips_a_refused_v4_join`). A build
+    // whose `multicast-link-requires-iface` policy is on refuses that link here instead, ahead of
+    // the default, which is a choice nobody made.
     let plan = match rx_bind {
-        RxBind::Wildcard => plan.with_link_default_iface(
-            crate::link_interfaces::unicast_addresses_of_multicast_interfaces(),
-        ),
+        RxBind::Wildcard => {
+            plan.require_chosen_interface(cfg)?;
+            plan.with_link_default_iface(
+                crate::link_interfaces::unicast_addresses_of_multicast_interfaces(),
+            )
+        }
         RxBind::Group => plan,
     };
 
@@ -590,6 +625,9 @@ pub fn bind_sender(
     link: bool,
 ) -> io::Result<Bound> {
     let plan = Plan::resolve(group, cfg, JoinsRead::No)?;
+    if link {
+        plan.require_chosen_interface(cfg)?;
+    }
     let plan = if link {
         plan.with_link_default_iface(
             crate::link_interfaces::unicast_addresses_of_multicast_interfaces(),

@@ -269,3 +269,117 @@ fn a_join_of_the_wrong_family_is_refused() {
     .expect_err("an IPv6 group in an IPv4 locator is a config error");
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
 }
+
+/// A plan names an interface only when the locator resolved to one, in either family. This is
+/// what the `multicast-link-requires-iface` rule reads, so a key the build cannot honour (which
+/// resolves to none) is an unchosen interface like a missing key.
+#[test]
+fn a_plan_has_a_chosen_interface_only_when_one_was_resolved() {
+    assert!(!plan(None).interface_is_chosen());
+    assert!(plan(Some(Ipv4Addr::new(203, 0, 113, 9))).interface_is_chosen());
+    let six = |iface| Plan::V6 {
+        group: "ff02::1".parse::<Ipv6Addr>().unwrap(),
+        iface,
+        joins: Vec::new(),
+    };
+    assert!(!six(None).interface_is_chosen());
+    assert!(six(Some(2)).interface_is_chosen());
+}
+
+/// The rule, at both values of the policy and both ways a plan can be: it refuses only an
+/// unchosen interface with the policy on, and what it refuses is invalid input.
+#[test]
+fn the_rule_refuses_an_unchosen_interface_only_when_the_policy_is_on() {
+    let on = SocketConfig {
+        link_requires_iface: true,
+        ..Default::default()
+    };
+    let off = SocketConfig::default();
+    assert!(
+        !off.link_requires_iface,
+        "upstream's behaviour is the default"
+    );
+    let err = plan(None)
+        .require_chosen_interface(&on)
+        .expect_err("a link with no interface is refused when the policy asks");
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+    plan(Some(Ipv4Addr::new(203, 0, 113, 9)))
+        .require_chosen_interface(&on)
+        .expect("a chosen interface is never refused");
+    plan(None)
+        .require_chosen_interface(&off)
+        .expect("with the policy off an unpinned link is upstream's");
+}
+
+/// On the sockets: with the policy on a link's two halves are refused when the locator chose no
+/// interface, scouting sockets are not links and are not refused, and with the policy off the same
+/// link opens as it always did. A link that chose an interface opens in both arms, so the refusal
+/// is the missing choice and not the policy refusing every link.
+#[test]
+fn a_link_with_no_interface_is_refused_when_the_policy_asks_and_scouting_is_not() {
+    let on = SocketConfig {
+        link_requires_iface: true,
+        ..Default::default()
+    };
+    let group = IpAddr::V4(GROUP);
+
+    let err = bind_joined(group, 0, &on, RxBind::Wildcard)
+        .expect_err("the receiving half of a link with no interface is refused");
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+    let err = bind_sender(group, 0, &on, true)
+        .expect_err("the send half of a link with no interface is refused");
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+
+    bind_joined(group, 0, &on, RxBind::Group).expect("a scouting socket is not a link");
+    bind_sender(group, 0, &on, false).expect("a plain sender is not a link");
+
+    bind_joined(group, 0, &SocketConfig::default(), RxBind::Wildcard)
+        .expect("with the policy off the link opens on upstream's interface");
+    bind_sender(group, 0, &SocketConfig::default(), true)
+        .expect("with the policy off the send half opens on upstream's interface");
+}
+
+/// The other half of the refusal: a link whose locator chose an interface opens with the policy
+/// on. The interface is an address of the host's own, read live, so the case runs wherever the
+/// host has a non-loopback IPv4 address that can carry multicast.
+#[test]
+#[cfg(all(target_os = "linux", feature = "locator-iface"))]
+fn a_link_that_chose_an_interface_opens_with_the_policy_on() {
+    let Some(own) =
+        crate::link_interfaces::unicast_addresses_of_multicast_interfaces().and_then(|ips| {
+            ips.into_iter().find_map(|ip| match ip {
+                IpAddr::V4(a) if !a.is_loopback() => Some(a),
+                _ => None,
+            })
+        })
+    else {
+        eprintln!(
+            "no non-loopback IPv4 interface on this host: the chosen-interface case is not run"
+        );
+        return;
+    };
+    let named = own.to_string();
+    let on = SocketConfig {
+        iface: Some(&named),
+        link_requires_iface: true,
+        ..Default::default()
+    };
+    let joined = bind_joined(IpAddr::V4(GROUP), 0, &on, RxBind::Wildcard)
+        .expect("a link that named its interface is not refused");
+    assert_eq!(
+        joined
+            .socket
+            .multicast_if_v4()
+            .expect("read IP_MULTICAST_IF"),
+        own
+    );
+    let sender = bind_sender(IpAddr::V4(GROUP), 0, &on, true)
+        .expect("the send half of a link that named its interface is not refused");
+    assert_eq!(
+        sender
+            .socket
+            .multicast_if_v4()
+            .expect("read IP_MULTICAST_IF"),
+        own
+    );
+}

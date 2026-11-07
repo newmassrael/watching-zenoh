@@ -273,6 +273,12 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "off",
     ),
     (
+        "multicast-link-requires-iface",
+        "WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE",
+        &["off", "on"],
+        "off",
+    ),
+    (
         "entity-timestamp-opt-in",
         "WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN",
         &["off", "on"],

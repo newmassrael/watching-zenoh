@@ -116,6 +116,15 @@ original reproduced by naming it. Three things follow from it:
   stream) are not paced, and no Zephyr image, lwIP session or cooperative engine reads the
   policy, so none of their trees has its symbol. The tokio timer's resolution is one
   millisecond, so a gap is rounded up to it. A seal (the link closing) ends a wait at once.
+- **Refusing a multicast link that names no interface** (`multicast-link-requires-iface`,
+  off by default): upstream opens such a link on the first interface that can carry
+  multicast, or on the kernel's choice when the host has none, so it may sit on an
+  interface nobody chose. On, `wz-host-net` refuses it with an invalid-input error from the
+  resolved plan, before the default interface is filled and before any socket exists. A link
+  whose `iface` key this build cannot honour (a build without `locator-iface`) is refused
+  the same way, because it too has no chosen interface. Scouting is not a link and is not
+  refused. Only the tokio engine reads the policy; no Zephyr image, lwIP session or
+  cooperative engine does, so none of their trees has its symbol.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and

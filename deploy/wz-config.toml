@@ -2457,6 +2457,23 @@ rounded up to it. Only the tokio engine reads this policy.
 '''
 
 [[policy]]
+id = "multicast-link-requires-iface"
+kind = "bool"
+kconfig = "WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE"
+default = "off"
+upstream = "Opens a multicast link whose locator names no interface on the first interface that can carry multicast, or on the kernel's choice when the host has none, so the link may sit on an interface nobody chose."
+since = 2
+help = '''
+Whether a multicast link may be opened without an interface the locator
+chose. Off, a link whose locator has no iface key is opened on the first
+interface that can carry multicast. On, it is refused before any socket
+exists, and so is a link whose iface key this build cannot honour, so a node
+never joins a group or sends to it on an interface nobody named. The refusal
+is an invalid-input error from the link's open. Scouting is not a link and is
+not refused. Only the tokio engine reads this policy.
+'''
+
+[[policy]]
 id = "entity-timestamp-opt-in"
 kind = "bool"
 kconfig = "WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"

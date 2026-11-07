@@ -91,6 +91,21 @@ config WZ_POLICY_DATAGRAM_FRAGMENT_PACING
 	  Upstream: Writes the fragments of a large message to a datagram socket back to
 	  back, as fast as the socket takes them, however small the receiver's buffer.
 
+config WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE
+	bool "multicast-link-requires-iface"
+	default n
+	help
+	  Whether a multicast link may be opened without an interface the locator
+	  chose. Off, a link whose locator has no iface key is opened on the first
+	  interface that can carry multicast. On, it is refused before any socket
+	  exists, and so is a link whose iface key this build cannot honour, so a node
+	  never joins a group or sends to it on an interface nobody named. The refusal
+	  is an invalid-input error from the link's open. Scouting is not a link and is
+	  not refused. Only the tokio engine reads this policy.
+	  Upstream: Opens a multicast link whose locator names no interface on the first
+	  interface that can carry multicast, or on the kernel's choice when the host
+	  has none, so the link may sit on an interface nobody chose.
+
 config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
 	bool "entity-timestamp-opt-in"
 	default n

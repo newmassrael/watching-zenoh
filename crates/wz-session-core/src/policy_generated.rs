@@ -435,6 +435,11 @@ pub struct SessionPolicy {
     /// datagram socket back to back, as fast as the socket takes them, however small the
     /// receiver's buffer.
     pub datagram_fragment_pacing: bool,
+    /// `multicast-link-requires-iface`. Upstream: Opens a multicast link whose locator
+    /// names no interface on the first interface that can carry multicast, or on the
+    /// kernel's choice when the host has none, so the link may sit on an interface nobody
+    /// chose.
+    pub multicast_link_requires_iface: bool,
     /// `entity-timestamp-opt-in`. Upstream: Hands every received sample's timestamp to the
     /// subscriber and every reply's to the querier, and lets any publisher attach the
     /// timestamp it is given.
@@ -486,6 +491,8 @@ impl SessionPolicy {
         let declaration_sync_pacing = policy_bool(option_env!("WZ_POLICY_DECLARATION_SYNC_PACING"));
         let datagram_fragment_pacing =
             policy_bool(option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING"));
+        let multicast_link_requires_iface =
+            policy_bool(option_env!("WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE"));
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
         let reply_auto_timestamp = policy_bool(option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP"));
         let subscriber_overload = SubscriberOverload::stated();
@@ -502,6 +509,7 @@ impl SessionPolicy {
             tx_expiry_keeps_session,
             declaration_sync_pacing,
             datagram_fragment_pacing,
+            multicast_link_requires_iface,
             entity_timestamp_opt_in,
             reply_auto_timestamp,
             subscriber_overload,

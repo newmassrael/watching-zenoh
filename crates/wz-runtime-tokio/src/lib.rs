@@ -4411,6 +4411,10 @@ impl McastSocketConfig<'_> {
                 MulticastLoopback::On => wz_host_net::multicast::Loopback::On,
                 MulticastLoopback::Off => wz_host_net::multicast::Loopback::Off,
             },
+            // The build's policy, read here and not carried by a caller's config: every link of
+            // this runtime is opened through this conversion, so no caller can leave it out.
+            link_requires_iface: wz_session_core::policy::SessionPolicy::from_build()
+                .multicast_link_requires_iface,
         }
     }
 }
@@ -4523,6 +4527,60 @@ mod udp_multicast_config_tests {
         assert_ne!(bound.port(), 0);
         assert_eq!(peer.port(), bound.port());
         assert_eq!(peer.ip(), std::net::IpAddr::from(GROUP));
+    }
+
+    /// The build's `multicast-link-requires-iface` policy reaches the link this runtime opens: a
+    /// link whose config chose no interface is refused as invalid input in the build that states
+    /// the policy and opens as it always did in the build that does not. Each build runs the arm
+    /// that is its own, and the two arms are the pair of tests the policy owes.
+    #[tokio::test]
+    async fn a_link_with_no_interface_is_refused_or_opened_as_the_build_says() {
+        let requires =
+            wz_session_core::policy::SessionPolicy::from_build().multicast_link_requires_iface;
+        let opened = UdpDriver::bind_multicast_link(GROUP, 0, McastSocketConfig::default()).await;
+        if requires {
+            let err = opened
+                .err()
+                .expect("a link with no interface is refused when the build states the policy");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        } else {
+            opened.expect("a link with no interface opens when the build does not state it");
+        }
+    }
+
+    /// A link whose config chose an interface opens in both builds, so the refusal above is the
+    /// missing choice and not the policy refusing every link. The interface is an address of the
+    /// host's own, read live.
+    #[tokio::test]
+    #[cfg(all(target_os = "linux", feature = "locator-iface"))]
+    async fn a_link_that_chose_an_interface_opens_in_either_build() {
+        let Some(own) = crate::link_interfaces::unicast_addresses_of_multicast_interfaces()
+            .and_then(|ips| {
+                ips.into_iter().find_map(|ip| match ip {
+                    std::net::IpAddr::V4(a) if !a.is_loopback() => Some(a),
+                    _ => None,
+                })
+            })
+        else {
+            eprintln!("no non-loopback IPv4 interface on this host: the case is not run");
+            return;
+        };
+        let named = own.to_string();
+        let link = UdpDriver::bind_multicast_link(
+            GROUP,
+            0,
+            McastSocketConfig {
+                iface: Some(&named),
+                ..McastSocketConfig::default()
+            },
+        )
+        .await
+        .expect("a link that named its interface is opened");
+        let send = link.send_socket.as_ref().expect("a link has a send half");
+        let egress = socket2::SockRef::from(&**send)
+            .multicast_if_v4()
+            .expect("read IP_MULTICAST_IF");
+        assert_eq!(egress, own);
     }
 
     /// The same for the other half of a LINK: its send socket (upstream's
