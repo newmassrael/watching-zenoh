@@ -24286,10 +24286,10 @@ layer_c1cc_api_compat_c() {
         -I crates/wz-capi-c/include \
         -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
         crates/wz-capi-c/tests/c_identity_consumer.c \
-        -L crates/target/debug -lwz_capi_c -o "$c_id_bin" 2>&1)" || {
+        -L "$WZ_ARTIFACTS"/crates/target/debug -lwz_capi_c -o "$c_id_bin" 2>&1)" || {
         echo "  C1cc FAIL: the identity C consumer did not compile or link"
         echo "$c_id_out"; return 1; }
-    c_id_out="$(LD_LIBRARY_PATH=crates/target/debug "$c_id_bin" 2>&1)" || {
+    c_id_out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS"/crates/target/debug "$c_id_bin" 2>&1)" || {
         echo "  C1cc FAIL: the identity C consumer failed"
         echo "$c_id_out"; rm -rf "$(dirname "$c_id_bin")"; return 1; }
     rm -rf "$(dirname "$c_id_bin")"

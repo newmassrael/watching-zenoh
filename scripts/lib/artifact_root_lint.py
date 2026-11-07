@@ -75,6 +75,11 @@ EXEMPT: list[tuple[str, str | None, str]] = [
         "builds a fake SCE workspace in a temporary directory, whose target/ is the fixture",
     ),
     (
+        "scripts/lib/artifact_root_lint.py",
+        None,
+        "this lint's own documentation and selftest fixtures spell what it catches",
+    ),
+    (
         "scripts/run-ci.sh",
         "wz_packet_socket-[a-f0-9]+",
         "parses cargo's own output for the test executable's name by its suffix, which is the "
