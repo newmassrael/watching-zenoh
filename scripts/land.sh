@@ -40,7 +40,6 @@
 # ## Usage
 #
 #   bash scripts/land.sh                          # code commits only
-#   bash scripts/land.sh --ack-red <run-id>       # WZ_ACK_RED for this push only
 #   bash scripts/land.sh -- --decision-file d --changes-file c \
 #       --verification-file v --carry-file k --impact <id>[,<id>...]
 #   bash scripts/land.sh                          # a round committed as a descriptor
@@ -50,14 +49,18 @@
 #   bash scripts/land.sh --status                 # who holds the lock
 #
 # The arguments after `--` are `scripts/append-round.sh`'s own, without
-# `--entry-id`: the number is this script's to take. When a commit of the batch
-# already names the round (an acknowledgement row does), `--round N` makes the
-# number a precondition: the script files nothing and exits 5 when the next
-# number is not N, so the text is renumbered before anything is published.
+# `--entry-id`: the number is this script's to take.
+#
+# Acknowledging a red hosted run is a row in docs/hosted-red-acks.md in a commit of the
+# batch (the previous-run gate reads it from the range being pushed), not an option of
+# this script: `--ack-red` and the environment variable it set are gone, because a
+# verdict that depends on the pusher's environment cannot be reproduced by an
+# integrator that pushes for the author. The row's first column is the author's own
+# label and carries no round number, which is also why `--round` is gone: nothing a
+# commit holds names the round it will take.
 #
 # Exit codes: 0 landed; 1 the hook or a step refused; 2 usage or a dirty tree;
-# 3 the lock was not obtained in time; 4 the rebase conflicted (aborted);
-# 5 the next round is not the one `--round` named.
+# 3 the lock was not obtained in time; 4 the rebase conflicted (aborted).
 
 set -euo pipefail
 
@@ -69,8 +72,6 @@ lock="$common_dir/wz-push.lock"
 owner="$lock.owner"
 log="$(git rev-parse --path-format=absolute --git-dir)/wz-land.log"
 
-ack_red=""
-want_round=""
 ledger_args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -82,15 +83,9 @@ while [[ $# -gt 0 ]]; do
         fi
         exit 0
         ;;
-    --ack-red)
-        [[ $# -ge 2 ]] || { echo "land: --ack-red needs a run id" >&2; exit 2; }
-        ack_red="$2"
-        shift 2
-        ;;
-    --round)
-        [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { echo "land: --round needs a number" >&2; exit 2; }
-        want_round="$2"
-        shift 2
+    --ack-red | --round)
+        echo "land: $1 is gone (see the header of scripts/land.sh): acknowledge a red run with a row in docs/hosted-red-acks.md in a commit of this push" >&2
+        exit 2
         ;;
     --)
         shift
@@ -108,10 +103,6 @@ pending_descriptors=(docs/rounds/pending/*.toml)
 shopt -u nullglob
 if [[ ${#ledger_args[@]} -gt 0 && ${#pending_descriptors[@]} -gt 0 ]]; then
     echo "land: the tree holds a round descriptor (docs/rounds/pending), so ledger arguments after -- would file a second round" >&2
-    exit 2
-fi
-if [[ -n "$want_round" && ${#ledger_args[@]} -eq 0 && ${#pending_descriptors[@]} -eq 0 ]]; then
-    echo "land: --round names the ledger round, so ledger arguments or a descriptor must exist" >&2
     exit 2
 fi
 for a in "${ledger_args[@]+"${ledger_args[@]}"}"; do
@@ -164,10 +155,6 @@ while :; do
         last="$(last_round)"
         [[ -n "$last" ]] || { echo "land: the store lists no ledger round" >&2; exit 1; }
         round=$((last + 1))
-        if [[ -n "$want_round" && "$round" != "$want_round" ]]; then
-            echo "land: the next round is $round, not $want_round; renumber the batch" >&2
-            exit 5
-        fi
         # What the tree already differs from the index by is not the append's: a submodule whose
         # checkout sits at another commit than the one recorded, or a file another session is
         # editing in this tree, shows in `git diff` before the append writes anything. Rounds
@@ -204,7 +191,7 @@ while :; do
     fi
 
     rc=0
-    WZ_LAND_TOKEN="$token" WZ_ACK_RED="${ack_red:-${WZ_ACK_RED:-}}" \
+    WZ_LAND_TOKEN="$token" \
         git push origin HEAD:main 2>&1 | tee "$log" || rc=$?
     if [[ $rc -eq 0 ]]; then
         break

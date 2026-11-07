@@ -393,7 +393,11 @@ if [[ -n "$remote_sha" && "$remote_sha" != "$zero_sha" ]]; then
 elif git rev-parse --verify --quiet origin/main >/dev/null; then
     prev_sha="$(git rev-parse origin/main)"
 fi
-if ! wz_previous_run_gate "$prev_sha" 'pre-push'; then
+ack_range=""
+if [[ -n "$diff_base" ]]; then
+    ack_range="$diff_base..$local_sha"
+fi
+if ! wz_previous_run_gate "$prev_sha" 'pre-push' "$ack_range"; then
     echo "pre-push: [gate 2c] the previous push's hosted verdict refuses this one." >&2
     echo "pre-push: bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1

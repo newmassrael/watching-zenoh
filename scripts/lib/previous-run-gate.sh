@@ -20,11 +20,14 @@
 # ## Why an acknowledgement rather than a refusal
 #
 # A gate that simply refused while the previous run is red would make the FIX
-# unpushable, which is the one push that must always work. `WZ_ACK_RED=<run id>`
-# is the escape, and its shape is the point: the id can only be supplied by
-# someone who looked, it is specific to THAT run, and it cannot be left in the
-# environment to cover the next red silently. The gate does the reading — it
-# prints the failed jobs and steps — and then requires the reader to say so.
+# unpushable, which is the one push that must always work. A row in
+# `docs/hosted-red-acks.md` that the pushed range adds, naming the run, is the
+# escape, and its shape is the point: the id can only be supplied by someone who
+# looked, it is specific to THAT run, and a row of an earlier push cannot cover
+# the next red silently. The gate does the reading — it prints the failed jobs
+# and steps — and then requires the reader to say so. The saying is in the commit
+# and not in the pusher's environment so that whatever pushes for the author, a
+# queue integrator included, reaches the same verdict (`hosted_red_ack.py`).
 #
 # ## What it does NOT do
 #
@@ -111,6 +114,8 @@ _wz_grade_earlier() {
 #
 # $1 — the commit sha whose run to grade (the tip being replaced).
 # $2 — caller name, for the messages.
+# $3 — the range being pushed (`<base>..<tip>`), where an acknowledgement row is
+#      read from. Empty means no range is known and nothing can acknowledge a red.
 #
 # Returns 0 to proceed, 1 to refuse. A verdict it cannot obtain is announced as
 # NOT RUN and returns 0 — the same trade gate 0 already makes for an unbounded
@@ -120,6 +125,7 @@ _wz_grade_earlier() {
 wz_previous_run_gate() {
     local sha="$1"
     local context="$2"
+    local range="${3:-}"
 
     if [[ -z "$sha" ]]; then
         echo "$context: no previous commit to grade (new ref); hosted-verdict gate did NOT run." >&2
@@ -317,32 +323,26 @@ else:
     rid="$(printf '%s' "$rest" | cut -f2)"
     conclusion="$(printf '%s' "$rest" | cut -f3)"
 
-    # R2639b — `WZ_ACK_RED` takes a COMMA-SEPARATED LIST, and a single id parses
-    # exactly as before. MEASURED while landing R2639: the fallback grades the
-    # newest FINISHED run, a hook run takes tens of minutes, and a deep queue
-    # drains during it — so the id the gate printed was stale by the time the
-    # acknowledged push reached the gate, and the push was refused naming a
-    # NEWER red of the same shape. A moving anchor cannot be named in advance,
-    # so the escape has to admit every run the pusher actually read. It is still
-    # per-run: each id is written out, none of them covers a run nobody looked at.
-    if [[ ",${WZ_ACK_RED:-}," == *",$rid,"* ]]; then
-        echo "$context: previous run $rid is $conclusion — ACKNOWLEDGED via WZ_ACK_RED."
+    # The acknowledgement is a ROW in docs/hosted-red-acks.md that the range being
+    # pushed adds, naming this run (scripts/lib/hosted_red_ack.py states the form).
+    # It was an environment variable on the pushing process (`WZ_ACK_RED`) until
+    # the push queue: a verdict that depends on the pusher's environment cannot be
+    # reproduced by an integrator that runs this hook on a cherry-picked commit
+    # and pushes for the author. The row is in the commit, so any process that
+    # runs the hook over the commit reaches the same verdict; it is also what the
+    # file always asked for (a row written BEFORE the push, not after it).
+    #
+    # Per push and per run, as the variable was: only a row ADDED in the range
+    # counts, so a row from an earlier push covers nothing now, and each id is
+    # matched whole. A row may name several runs, because the fallback above grades
+    # the newest FINISHED run, a hook run takes tens of minutes and a deep queue
+    # drains during it: the id this gate printed can be stale by the time the push
+    # reaches it (measured while landing R2639), so the pusher names every run they
+    # actually read in the row.
+    if [[ -n "$range" ]] \
+        && python3 scripts/lib/hosted_red_ack.py --range "$range" --run "$rid"; then
+        echo "$context: previous run $rid is $conclusion — ACKNOWLEDGED by a row this push adds."
         echo "          Pay it off as its own round; this push proceeds."
-        # R2502 (open-debt item 695, done-when 3) — the acknowledgement used to
-        # end here, so the fact that a push published over a red lived exactly
-        # as long as the terminal scrollback. That is why the same run was
-        # acknowledged twice (R2496, R2497) with nothing accumulating. This
-        # PRINTS a pointer rather than writing the row itself: the hook runs
-        # after the commit, so a file written here would leave the pushed tree
-        # dirty, and the row belongs in the round's own commit anyway.
-        # ⚠ Deliberately not a refusal. The gate's own rationale above is that
-        # the fix must always be pushable; gating the escape on a committed row
-        # would put friction on the one push that must always work.
-        echo "          RECORD IT: add a row to docs/hosted-red-acks.md naming"
-        echo "          run $rid, the debt item that owns the red, and — when it"
-        echo "          is paid — the round that paid it. An empty \`paid\` column"
-        echo "          is an outstanding acknowledgement, which is the number"
-        echo "          that file exists to make countable."
         return 0
     fi
 
@@ -374,8 +374,11 @@ for j in jobs:
     echo "          so an unread red survives until someone happens to look. Three" >&2
     echo "          consecutive rounds proved that a human read will not." >&2
     echo "" >&2
-    echo "          Read it, then push again with:" >&2
-    echo "            bash scripts/land.sh --ack-red $rid" >&2
-    echo "          (the id is per-run on purpose — it cannot cover the next red)." >&2
+    echo "          Read it, then add a row to docs/hosted-red-acks.md in a commit of" >&2
+    echo "          this push: the run id in backticks in the second column, the" >&2
+    echo "          debt item that owns the red in the note, and a label of your" >&2
+    echo "          own in the first (no round number). Then push again." >&2
+    echo "          (the row is per-run and per-push on purpose — a row from an" >&2
+    echo "          earlier push cannot cover the next red)." >&2
     return 1
 }

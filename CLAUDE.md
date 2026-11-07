@@ -74,7 +74,10 @@ One-time per clone: `git config core.hooksPath .githooks`. Requires
   holds the clone's push lock, rebases, files the ledger round with the next
   number (append-round arguments after `--`, no `--entry-id`) and pushes
   through the hooks; pre-push gate 0p refuses a push that does not hold the
-  lock. `--ack-red <run>` sets `WZ_ACK_RED` for that push.
+  lock. A round may instead be a descriptor committed under
+  `docs/rounds/pending/` (`scripts/file-round.sh`). Acknowledging a red hosted
+  run is a row in `docs/hosted-red-acks.md` in a commit of the push, not an
+  option: `--ack-red` and `WZ_ACK_RED` are gone.
 - **pre-push** — publication, SSOT and the few checks that refuse often; the
   rest belongs to hosted CI (owner, 2026-09-23 and 2026-10-27). Deferral is
   printed and is not a local pass. Verify the change's focused behavior while

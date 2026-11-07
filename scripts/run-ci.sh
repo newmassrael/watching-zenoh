@@ -4138,6 +4138,15 @@ layer_c0i_impact_ref_gate() {
         echo "  Layer C0i FAIL: file-round --check ACCEPTED a descriptor that is not a file" >&2
         return 1
     fi
+    # THE ACKNOWLEDGEMENT OF A RED RUN is a row the pushed range adds
+    # (`scripts/lib/hosted_red_ack.py`, read by the previous-run gate). Its selftest
+    # holds both directions in a throwaway repository: a row of this push
+    # acknowledges its run, and a row of an earlier push, a run inside a longer id, a
+    # run named outside the `run` cell and a removed row acknowledge nothing.
+    if ! python3 -I scripts/lib/hosted_red_ack.py --selftest >/dev/null; then
+        echo "  Layer C0i FAIL: scripts/lib/hosted_red_ack.py --selftest failed" >&2
+        return 1
+    fi
 
     echo "  impact-ref gate: OK (accepts a real section id, refuses Round 1811's" \
         "own '5.4-session' and an absent --impact; the round descriptor reader" \

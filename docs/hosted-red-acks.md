@@ -1,12 +1,24 @@
 # Hosted-red acknowledgements
 
-Every time a push proceeded over a **red** hosted run via `WZ_ACK_RED`, it is
-recorded here. One row per acknowledgement.
+Every time a push proceeds over a **red** hosted run, a row here says so. One row
+per acknowledgement.
+
+**Since the push queue (2026-11-07) the row IS the acknowledgement.**
+`scripts/lib/previous-run-gate.sh` proceeds over a red run only when the range
+being pushed adds a row whose `run` cell holds that run's id in backticks
+(`scripts/lib/hosted_red_ack.py`). The environment variable `WZ_ACK_RED` and
+`land.sh --ack-red` are gone: a verdict that depends on the pusher's environment
+cannot be reproduced by an integrator that runs the hook on a cherry-picked
+commit and pushes for the author. The first column is a label of the author's
+own (a slug, a debt item) and carries no round number, because a commit cannot
+know the number of the round it will be filed as; rows written before that date
+carry the round in it, and the gate reads neither.
 
 ## Why this file exists
 
 `scripts/lib/previous-run-gate.sh` reads the previous push's hosted verdict and,
-when it is red, requires `WZ_ACK_RED=<run id>` to proceed. That escape is
+when it is red, requires an acknowledgement to proceed (until 2026-11-07 an
+environment variable, `WZ_ACK_RED=<run id>`, now a row of this file). That escape is
 deliberate — the gate's own docstring gives the reason: *"A gate that simply
 refused while the previous run is red would make the FIX unpushable, which is
 the one push that must always work."*
@@ -25,8 +37,10 @@ row should name the debt item that owns it.
 ## How to add a row
 
 Add the row in the same commit as the work being pushed, before the push that
-uses the ack. Keep the columns exact — `run` is the hosted run id the gate
-printed, `commit` is the tip being replaced (the sha the run graded), and
+uses the ack: the gate reads it from the range being pushed, so a row of an
+earlier push covers nothing now. Keep the columns exact — `label` is yours,
+`run` is the hosted run id the gate printed in backticks (a row may name several,
+`` `1`,`2` ``), `commit` is the tip being replaced (the sha the run graded), and
 `debt` is the register item that owns the red.
 
 ⚠ **R2641 broke that ordering and the row above is the evidence**: the push went
@@ -38,7 +52,7 @@ its own: the follow-up push needs an ack too, so the repair is TWO rows in one
 commit — the one that was missed, and the one the next push will use — which is
 why the ordering rule says *before*.
 
-| round | run | commit | failing steps | debt | paid |
+| label | run | commit | failing steps | debt | paid |
 |---|---|---|---|---|---|
 | R4323 | `42087308161` | `0d824e8d5c` | **CANCELLED, not failed**; read for this push and written before it. The Platform run graded `0d824e8d5c` (round 4322: an SCE pin move, nine cost budgets and a C ABI test). Five of its six jobs passed. The sixth, `leg (macos-latest)`, ran no step, and its annotation reads "The job was not acquired by Runner of type hosted even after multiple attempts" (GitHub's macOS arm64 capacity notice). It graded nothing, so this push is not published over an unpaid verdict. The CI run of the same tip (`42087308054`) was read job by job, and round 4323 repays its two causes that were not yet owned (C1bnl memlock, Layer Q frt figure) | — | n/a (runner capacity) |
 | R4235 | `41884918361` | `82d5bf1e71` | **FAILED, read job by job (annotations and the jobs' own logs), written before the push.** Thirteen jobs red. MINE, paid in this push: the reduced-configuration docs (Layer C1bzr, six shards and the settle) named unresolved links in `wz-link-lwip` `tcp`, `wz-session-lwip` `stream` and `wz-runtime-coop` `udp_link` (a doc link to `connect` or `listen`, which `static-link-storage` replaces, to `LwipTcpStack` and `IpStack`, which `session-slot` brings, and to `LinkOpenError`, not in scope there), and the `//!` of `tcp` resolved in the parent scope because the `pub mod` carried `///`; the links are code spans now and the `pub mod` carries `//`, and `cargo doc` with the broken-link lints denied passes for the three crates with their features on. NOT MINE, not paid here: `wz-capture` `soundness` links (`Proven`, `RowAt`, `hold_document`, `hold_records`, two private items) and `wz-session-core` `passive_messages.rs` line 2213 (`MessageList::whole_units`, private), both in the same C1bzr shards; Layer A3 `storage-mgr-multi-storage-host` (COMPLETE with no test naming its gated code); Layer C0 lane-reach `only_zenohd` (run by no lane); Layer C1 and C1bn `bounded::census::no_test_runs_a_child_with_a_bare_output`; Layer C1cc `z_leak_pub_sub_test` and `z_leak_queryable_get_test` (valgrind absent on the hosted runner with `WZ_C1CC_REQUIRE` set); Layer C1cs text budgets of `pico-*-coop`, `pico-default` and `capic-default` over by 293 to 30,141 bytes, not attributed (many rounds since the budgets moved, and this push adds no code the capability-cost images link: the `tcp` feature is off in them) | none | |

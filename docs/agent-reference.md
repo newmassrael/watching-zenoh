@@ -54,8 +54,13 @@ git config core.hooksPath .githooks
   push: it rebases HEAD onto `origin/main`, files the ledger round with the
   next number when append-round arguments follow `--` (without `--entry-id`),
   and pushes `HEAD:main` through the hooks. Gate 0p refuses a push to `main`
-  that does not hold the lock. `--ack-red <run>` sets `WZ_ACK_RED` for that one
-  push; `--status` names the holder; a second session waits for the lock.
+  that does not hold the lock. A red previous run is acknowledged by a row in
+  `docs/hosted-red-acks.md` that the pushed range adds, naming the run
+  (`scripts/lib/hosted_red_ack.py`); `--ack-red` and `WZ_ACK_RED` are gone, since
+  a verdict that depends on the pusher's environment cannot be reproduced by a
+  queue integrator. A round can be a descriptor under `docs/rounds/pending/`,
+  filed by `scripts/file-round.sh`. `--status` names the holder; a second
+  session waits for the lock.
 
   Mandatory gates remain: the push lock (0p), confidential vocabulary, home
   paths and identities (0/0b/0c), schema and tool pins (1), workspace SSOT
