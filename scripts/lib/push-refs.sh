@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# What a ref of a push IS, so the pre-push hook can grade each kind by what it holds.
+# R4399 (no register item) -- what a ref of a push IS, so the pre-push hook can grade
+# each kind by what it holds.
 #
 # The hook used to read one kind of push: a branch, with the last ref of the push as
 # its range. A queue integrator (`bx --land`, bx RFC 0024) pushes more kinds, and a
