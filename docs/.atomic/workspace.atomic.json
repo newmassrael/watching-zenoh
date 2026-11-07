@@ -315040,6 +315040,42 @@
         "Carries of the node's C door that remain: group and advanced below zenohd as a router node with three or more members, and the zenoh-ext group interop; the engine port's methods of the node that no test takes (queryable, token, matching, face watch, shm publish, its own liveliness subscription); a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node; a control that fails when the router's ledger of gone faces is removed. The scratch worktree and branch size-measure may be removed with bx-wt."
       ]
     },
+    "Round 4377": {
+      "decision_summary": "The `internal` arm of the Z8 suite is taken in its three pieces, smallest first, and this round carries the first two. `KeyExpr::dummy` and `is_dummy` were already in the crate, so what the keyexpr file lacked was only the feature in the build that runs it; and the close that runs in the background (`CloseBuilder::in_background`, `BackgroundCloseBuilder`, `NolocalJoinHandle`, re-exported at `internal::builders::close` as upstream does, under `unstable` together with `internal`) is upstream's code, which the crate had left out because no arm of the surface gate reaches it. The harness now runs `keyexpr` and `atexit` with `internal`, as it runs `regions`, and the expected table rises with them: keyexpr 15 to 16, atexit 3 to 4. The third piece, `Runtime` as a started node that several sessions share, is a design of its own and is not begun here: a session would hold a shared handle to the node in place of owning it, answer for its own closing by a flag of its own (the crate asks the engine in 32 places today), and let go of only its own entities when it closes, with the node closed by the runtime that owns it.",
+      "changes_bullets": [
+        "crates/wz-zenoh/src/api/builders/close.rs: `CloseBuilder::in_background`, `BackgroundCloseBuilder` and `NolocalJoinHandle` (upstream's, gated `unstable` with `internal`); the header no longer says they are left out. crates/wz-zenoh/src/lib.rs: `internal::builders::close` re-exports the two types.",
+        "scripts/lib/z8_upstream_suite.py: `FILE_FEATURES` gives `keyexpr` and `atexit` the `internal` feature. docs/z8-expected.tsv: keyexpr 16, atexit 4."
+      ],
+      "verification_bullets": [
+        "On a build host, `z8_upstream_suite.py measure keyexpr atexit` with the new table: keyexpr ran=16 passed=16, atexit ran=4 passed=4 ignored=4 (the fourth is the new background close test, which runs a session close in a process of its own at exit). Before, with `internal` given by hand: atexit did not compile (`internal::builders` and `in_background` missing), keyexpr 16 of 16, callback_drop_on_undeclare 14 of 14, session did not compile (`zenoh::session::init`).",
+        "rustfmt --check of the two touched sources, `z8_expectation_gate.py --selftest` and `--names`, `family_notice_gate.py --check`: pass.",
+        "Not run: the Z8 hosted lane, the surface gate (the new items are behind `internal` and hidden from the docs, as upstream's)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Open: `Runtime` as a started node several sessions share (`zenoh::internal::runtime::{Runtime, RuntimeBuilder}`, `zenoh::session::init`), which `session` and the helper crate of the suite need under `internal`; the design is in this round's decision.",
+        "Open: the other leftovers of the Z8 list (lane margin gate, Windows, gossip test flake, client hat)."
+      ],
+      "publishable_decision_summary": "The `internal` arm of the Z8 suite is taken in its three pieces, smallest first, and this round carries the first two. `KeyExpr::dummy` and `is_dummy` were already in the crate, so what the keyexpr file lacked was only the feature in the build that runs it; and the close that runs in the background (`CloseBuilder::in_background`, `BackgroundCloseBuilder`, `NolocalJoinHandle`, re-exported at `internal::builders::close` as upstream does, under `unstable` together with `internal`) is upstream's code, which the crate had left out because no arm of the surface gate reaches it. The harness now runs `keyexpr` and `atexit` with `internal`, as it runs `regions`, and the expected table rises with them: keyexpr 15 to 16, atexit 3 to 4. The third piece, `Runtime` as a started node that several sessions share, is a design of its own and is not begun here: a session would hold a shared handle to the node in place of owning it, answer for its own closing by a flag of its own (the crate asks the engine in 32 places today), and let go of only its own entities when it closes, with the node closed by the runtime that owns it.",
+      "publishable_changes_bullets": [
+        "crates/wz-zenoh/src/api/builders/close.rs: `CloseBuilder::in_background`, `BackgroundCloseBuilder` and `NolocalJoinHandle` (upstream's, gated `unstable` with `internal`); the header no longer says they are left out. crates/wz-zenoh/src/lib.rs: `internal::builders::close` re-exports the two types.",
+        "scripts/lib/z8_upstream_suite.py: `FILE_FEATURES` gives `keyexpr` and `atexit` the `internal` feature. docs/z8-expected.tsv: keyexpr 16, atexit 4."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, `z8_upstream_suite.py measure keyexpr atexit` with the new table: keyexpr ran=16 passed=16, atexit ran=4 passed=4 ignored=4 (the fourth is the new background close test, which runs a session close in a process of its own at exit). Before, with `internal` given by hand: atexit did not compile (`internal::builders` and `in_background` missing), keyexpr 16 of 16, callback_drop_on_undeclare 14 of 14, session did not compile (`zenoh::session::init`).",
+        "rustfmt --check of the two touched sources, `z8_expectation_gate.py --selftest` and `--names`, `family_notice_gate.py --check`: pass.",
+        "Not run: the Z8 hosted lane, the surface gate (the new items are behind `internal` and hidden from the docs, as upstream's)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: `Runtime` as a started node several sessions share (`zenoh::internal::runtime::{Runtime, RuntimeBuilder}`, `zenoh::session::init`), which `session` and the helper crate of the suite need under `internal`; the design is in this round's decision.",
+        "Open: the other leftovers of the Z8 list (lane margin gate, Windows, gossip test flake, client hat)."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
