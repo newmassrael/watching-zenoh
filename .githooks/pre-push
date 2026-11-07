@@ -38,7 +38,11 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-# ─── R224a guard — empty-ref / delete-only short-circuit ────────────
+# ─── gate 0r — the pushed refs, read by kind; empty / delete-only exits (R224a) ──
+# grades: pushed-range
+# It reads the refs being pushed and sorts them by kind into the ranges the gates
+# below grade (`push_shas`, the queue refs). It refuses only when the library that
+# tells a ref's kind is missing: without it a queue ref would be graded as the branch.
 # Git protocol: pre-push receives one whitespace-separated tuple per ref on
 # stdin as `<local_ref> <local_sha> <remote_ref> <remote_sha>`. A
 # local_sha of 40*"0" is a delete-ref (no new commit to test); empty stdin
@@ -53,7 +57,7 @@ pushes_main=0         # a non-delete ref lands on main: gate 0p's subject
 queue_pushes=()       # "<kind> <remote sha> <local sha>" of each queue ref (push-refs.sh)
 # shellcheck disable=SC1091  # constant path, resolved at run time
 if ! source scripts/lib/push-refs.sh; then
-    echo "pre-push: scripts/lib/push-refs.sh missing or unreadable." >&2
+    echo "pre-push: [gate 0r] scripts/lib/push-refs.sh missing or unreadable." >&2
     exit 1
 fi
 while read -r _local_ref l_sha remote_ref r_sha; do
@@ -81,7 +85,7 @@ if [[ $has_work -eq 0 ]]; then
     exit 0
 fi
 
-# ─── the queue's refs — the PUBLIC gates, and nothing else (bx RFC 0024, 12) ──
+# ─── gate 0q — the queue's refs: the PUBLIC gates, and nothing else (bx RFC 0024, 12) ──
 # grades: pushed-range
 # An item a session submits and the queue's log are published to origin like any
 # commit, so what makes a publication irreversible applies to them in full: the
@@ -100,7 +104,7 @@ if [[ ${#queue_pushes[@]} -gt 0 ]]; then
     # shellcheck disable=SC1091  # constant paths, resolved at run time
     if ! source scripts/lib/nda-scan.sh || ! source scripts/lib/home-path-scan.sh \
         || ! source scripts/lib/ident-gate.sh; then
-        echo "pre-push: [queue refs] a public gate's library is missing or unreadable." >&2
+        echo "pre-push: [gate 0q]a public gate's library is missing or unreadable." >&2
         exit 1
     fi
     queue_trunk=""
@@ -110,25 +114,25 @@ if [[ ${#queue_pushes[@]} -gt 0 ]]; then
     for queue_push in "${queue_pushes[@]}"; do
         read -r q_kind q_remote q_tip <<<"$queue_push"
         if ! q_range="$(wz_queue_push_range "$q_kind" "$q_remote" "$q_tip" "$zero_sha" "$queue_trunk")"; then
-            echo "pre-push: [queue refs] no range for a $q_kind push (no origin/main);" >&2
+            echo "pre-push: [gate 0q]no range for a $q_kind push (no origin/main);" >&2
             echo "          what it publishes cannot be graded, so it is refused." >&2
             exit 1
         fi
         if ! wz_nda_scan "$q_range"; then
-            echo "pre-push: [queue refs] confidential-vocabulary gate FAILED on $q_kind $q_range." >&2
+            echo "pre-push: [gate 0q]confidential-vocabulary gate FAILED on $q_kind $q_range." >&2
             exit 1
         fi
         if ! wz_home_path_range 'pre-push' "$q_range"; then
-            echo "pre-push: [queue refs] $q_kind $q_range adds a line naming a home directory." >&2
+            echo "pre-push: [gate 0q]$q_kind $q_range adds a line naming a home directory." >&2
             echo "          Origin is public and a push does not un-publish. For the queue's" >&2
             echo "          log this means bx recorded the submitting worktree's path." >&2
             exit 1
         fi
         if ! wz_ident_gate_range 'pre-push' "$q_range"; then
-            echo "pre-push: [queue refs] an identity that must not be public is in $q_range." >&2
+            echo "pre-push: [gate 0q]an identity that must not be public is in $q_range." >&2
             exit 1
         fi
-        echo "pre-push: [queue refs] $q_kind $q_range: the public gates passed."
+        echo "pre-push: [gate 0q]$q_kind $q_range: the public gates passed."
     done
     if [[ ${#push_shas[@]} -eq 0 ]]; then
         echo "pre-push: only queue refs are pushed; the repository's gates judge the candidate, not the item."
