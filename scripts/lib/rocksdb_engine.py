@@ -18,6 +18,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 
@@ -26,6 +27,10 @@ CODECS = ("SNAPPY", "LZ4", "ZLIB", "ZSTD", "BZ2")
 
 
 def run(*args: str, **kwargs):
+    # A child's output goes to stderr: this script's stdout is the environment it exports, one
+    # `NAME=value` per line, which a caller outside CI reads to run a lane against this engine.
+    # With cmake's progress on the same stream, that caller exported every build line as well.
+    kwargs.setdefault("stdout", sys.stderr)
     return subprocess.run(args, check=True, **kwargs)
 
 
