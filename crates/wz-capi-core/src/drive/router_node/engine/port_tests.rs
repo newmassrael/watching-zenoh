@@ -81,21 +81,27 @@ fn plan(whatami: WhatAmI, mode: &str, connect: Vec<String>, listen: Vec<String>)
 
 /// A router node on loopback, listening on a port it chooses.
 fn open_node() -> Arc<RouterState> {
+    open_node_as(NodeRole::Router, Vec::new())
+}
+
+/// A node of `role` on loopback, listening on a port it chooses and dialling `connect`.
+fn open_node_as(role: NodeRole, connect: Vec<String>) -> Arc<RouterState> {
+    let (whatami, mode) = match role {
+        NodeRole::Router => (WhatAmI::Router, "router"),
+        NodeRole::Peer => (WhatAmI::Peer, "peer"),
+        NodeRole::Client => (WhatAmI::Client, "client"),
+    };
     let plan = plan(
-        WhatAmI::Router,
-        "router",
-        Vec::new(),
+        whatami,
+        mode,
+        connect,
         vec![format!(
             "tcp/127.0.0.1:{}",
             wz_runtime_tokio_test_support::free_port()
         )],
     );
     let arguments = plan.into_arguments(abi_choices());
-    Arc::new(
-        arguments
-            .run_node(NodeRole::Router)
-            .expect("the node opens"),
-    )
+    Arc::new(arguments.run_node(role).expect("the node opens"))
 }
 
 /// A session of the registry, a client that dials `connect`: the other end of the link, as a C
@@ -488,4 +494,47 @@ fn a_face_watch_through_the_port_is_told_of_a_link_coming_and_going() {
         "a watch that was removed was told"
     );
     again.close();
+}
+
+/// A node that dials a node: a router and a peer node each dial a router node, and each holds
+/// the other as a face with the other's role. This is the link two nodes of a mesh make, which
+/// the registry client of the tests above is not.
+#[test]
+fn a_node_that_dials_a_node_holds_it_as_a_face() {
+    // (the dialling node's role, its wire form as the router node reads it)
+    for (role, wire) in [(NodeRole::Router, 0u8), (NodeRole::Peer, 1u8)] {
+        let router = open_node();
+        let locator = router
+            .listen_locators()
+            .first()
+            .expect("the router listens")
+            .clone();
+        let dialler = open_node_as(role, vec![locator]);
+        let (engine, other) = (router.as_engine(), dialler.as_engine());
+        let dialler_zid = other.zid();
+        assert!(
+            eventually(|| !engine.face_snapshots().is_empty() && !other.face_snapshots().is_empty()),
+            "a {role:?} node's link to a router node did not come up: the router holds {} \
+             face(s), the dialling node holds {}",
+            engine.face_snapshots().len(),
+            other.face_snapshots().len()
+        );
+        assert_eq!(
+            engine.peer_identities(),
+            vec![(dialler_zid.to_vec(), wire)],
+            "the router node holds the {role:?} node as a face of its role"
+        );
+        assert_eq!(
+            other.peer_identities(),
+            vec![(engine.zid().to_vec(), 0)],
+            "the {role:?} node holds the router node as a router"
+        );
+        assert!(other.has_router_peer());
+        dialler.close();
+        assert!(
+            eventually(|| engine.face_snapshots().is_empty()),
+            "the router node kept the face of a {role:?} node that closed"
+        );
+        router.close();
+    }
 }
