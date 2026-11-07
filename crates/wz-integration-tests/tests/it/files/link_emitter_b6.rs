@@ -59,9 +59,10 @@ use std::process::Command;
 
 use wz_integration_tests::bounded::BoundedOutput as _;
 
+/// A product of the SCE workspace, so it is where `build-sce.sh` put it under
+/// the artifact root rule, as `wz_codegen_build::locate_sce_codegen` finds it.
 fn sce_codegen_bin() -> PathBuf {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-    PathBuf::from(manifest).join("../../vendor/sce/target/release/sce-codegen")
+    wz_codegen_build::artifact_dir(&sce_workspace()).join("target/release/sce-codegen")
 }
 
 fn sce_workspace() -> PathBuf {

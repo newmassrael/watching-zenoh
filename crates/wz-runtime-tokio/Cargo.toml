@@ -2461,6 +2461,10 @@ wz-session-core-test-support = { path = "../wz-session-core-test-support" }
 # (see [features]) so an isolated subset pulls neither the wz-codecs
 # codec nor the corresponding impl.
 wz-codecs-test-support = { path = "../wz-codecs-test-support" }
+# `built_fixture` reads the example cdylibs where the artifact root rule
+# (`scripts/lib/artifact-root.sh`) puts the workspace's products, through the
+# rule's one Rust reading. Dev-only and std-only; nothing in the runtime reads it.
+wz-codegen-build = { path = "../wz-codegen-build" }
 # Stage 5 (R311it) — the no_std SSOT for the synthetic session handshake
 # wire bytes the session-FSM drive tests feed through parse_inbound. These
 # craft_*_wire helpers + transport constants used to be copy-pasted across

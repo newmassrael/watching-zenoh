@@ -62,7 +62,7 @@ use std::time::{Duration, Instant};
 
 use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
-    project_root, read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
+    artifact, read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
     ChildGuard, PortReservation,
 };
 
@@ -87,7 +87,7 @@ const LEGACY_MOUNT: &str = "demo/legacy/**";
 
 /// One of the workspace's cdylibs, by cargo's own output naming.
 fn cdylib(stem: &str) -> PathBuf {
-    let mut p = project_root().join("crates").join("target").join("debug");
+    let mut p = artifact("crates/target/debug");
     p.push(if cfg!(target_os = "macos") {
         format!("lib{stem}.dylib")
     } else {

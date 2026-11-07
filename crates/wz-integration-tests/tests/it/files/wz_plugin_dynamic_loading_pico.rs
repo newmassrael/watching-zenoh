@@ -68,19 +68,17 @@ use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
-    assert_demo_binary_newer_than_sources, project_root, read_captured, wait_for_substring,
+    artifact, assert_demo_binary_newer_than_sources, read_captured, wait_for_substring,
     wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
 
 /// The example plugin `.so` the demo is asked to load.
 fn example_plugin_so() -> PathBuf {
-    project_root()
-        .join("crates/target/debug")
-        .join(if cfg!(target_os = "macos") {
-            "libwz_plugin_example.dylib"
-        } else {
-            "libwz_plugin_example.so"
-        })
+    artifact("crates/target/debug").join(if cfg!(target_os = "macos") {
+        "libwz_plugin_example.dylib"
+    } else {
+        "libwz_plugin_example.so"
+    })
 }
 
 /// Spawn the storage host with `--plugin <path>` for each entry, returning it

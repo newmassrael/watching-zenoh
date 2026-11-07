@@ -433,6 +433,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "
 # `crates/Cargo.lock` via wz-integration-tests, which stages its configs the
 # same way for the same reason.
 tempfile = "3"
+# The `*_zenohd_interop` tests find the zenohd oracle where the artifact root rule
+# (`scripts/lib/artifact-root.sh`) puts it, through the rule's one Rust reading.
+# Dev-only, std-only, and already in `crates/Cargo.lock`.
+wz-codegen-build = { path = "../wz-codegen-build" }
 
 # `scouting_ttl` reads the IP TTL of a Scout off a receiver joined to the group, which is
 # `IP_RECVTTL` and `recvmsg`: no std spelling, and the test is Linux only. The optional `libc`

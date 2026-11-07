@@ -42,9 +42,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use wz_integration_tests::common::{
-    assert_demo_binary_newer_than_sources, project_root, ChildGuard,
-};
+use wz_integration_tests::common::{artifact, assert_demo_binary_newer_than_sources, ChildGuard};
 
 /// The offered load, in messages per second, held constant across rows.
 const OFFERED_PER_S: u64 = 8_000;
@@ -65,7 +63,7 @@ const USER_HZ: f64 = 100.0;
 /// The release build of the demo. A measurement of a debug build is a number about something else,
 /// so unlike the fixtures that only need a working demo this one does not fall back to `target/debug`.
 fn release_demo_binary() -> PathBuf {
-    let demo = project_root().join("crates/target/release/wz-ap-demo");
+    let demo = artifact("crates/target/release/wz-ap-demo");
     assert!(
         demo.is_file(),
         "{} not found; build it with `cargo build --release -p wz-ap-demo --no-default-features \

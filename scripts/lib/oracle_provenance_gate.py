@@ -55,11 +55,20 @@ either. So the gate asks both, and each population is DERIVED:
    call on that variable. Resolving through the variable is what makes this a
    structural read rather than a keyword sweep: `install-mbedtls.sh` mentions
    its prefix in five places and assigns it in one.
-2. CONSUMER coverage. Every `project_root().join("target/<root>…")` site in the
-   resolver crate must REACH the provenance assertion -- directly, or by
-   delegating to a resolver that does. A root can be perfectly stamped and still
-   be read by a fixture that joins the path itself, which is exactly what two
-   sites in `pico_abi_option_layout.rs` did before this round.
+2. CONSUMER coverage. Every `artifact("target/<root>…")` site in the resolver
+   crate must REACH the provenance assertion -- directly, or by delegating to a
+   resolver that does. A root can be perfectly stamped and still be read by a
+   fixture that joins the path itself, which is exactly what two sites in
+   `pico_abi_option_layout.rs` did before this round.
+
+   `artifact` is the harness's reading of the artifact root rule
+   (`scripts/lib/artifact-root.sh`): an oracle is a product, and with
+   `WZ_ARTIFACT_ROOT` set it is under that root rather than in the checkout. A
+   site that still spells `project_root().join("target/<root>…")` is therefore
+   counted as a route AND refused (CHECKOUT): it reads a directory no
+   provisioner writes once a root is set. For the same reason a provisioner
+   owns a root only through `$WZ_ARTIFACTS/target/<root>`; a `$ROOT/target`
+   assignment is a write into the checkout and owns nothing.
 
    This question is asked of STAMPED roots only, and the reason is the
    mechanisms' own nature rather than an exemption. `oracle_pin_gate.py` reads
@@ -121,18 +130,26 @@ PROVISIONER_DIR = pathlib.Path("scripts")
 PIN_GATE = pathlib.Path("scripts/lib/oracle_pin_gate.py")
 STAMP_LIB = pathlib.Path("scripts/lib/vendored-oracle.sh")
 
-# `project_root().join("target/zenoh-pico-cli")` and
-# `project_root().join("target/zenohd/zenohd")` — the root is the FIRST segment
-# after `target/`, because that is the granularity a provisioner owns and a
-# stamp records.
-RESOLVED_ROOT_RE = re.compile(r'project_root\(\)\s*\.\s*join\(\s*"target/([A-Za-z0-9._-]+)')
+# `artifact("target/zenoh-pico-cli")` and `artifact("target/zenohd")` — the root
+# is the FIRST segment after `target/`, because that is the granularity a
+# provisioner owns and a stamp records. The `project_root().join(` spelling is
+# still READ (group `checkout`) so that a site reverting to it is a refused
+# route rather than one this reader no longer sees. `\b` keeps a longer name
+# ending in `artifact` (`some_artifact(`) out.
+RESOLVED_ROOT_RE = re.compile(
+    r'(?:\bartifact|(?P<checkout>project_root\(\)\s*\.\s*join))'
+    r'\(\s*"target/(?P<root>[A-Za-z0-9._-]+)'
+)
 
-# `PREFIX="${WZ_MBEDTLS_PREFIX:-$ROOT/target/mbedtls}"` and
-# `INSTALL_DIR="$ROOT/target/zenoh-pico-cli"` — an ASSIGNMENT, so a mention of
-# the path in a comment cannot make a script look like the owner.
+# `PREFIX="${WZ_MBEDTLS_PREFIX:-$WZ_ARTIFACTS/target/mbedtls}"` and
+# `INSTALL_DIR="$WZ_ARTIFACTS/target/zenoh-pico-cli"` — an ASSIGNMENT, so a
+# mention of the path in a comment cannot make a script look like the owner.
+# Only the `WZ_ARTIFACTS` prefix (`wz_artifact_root_init`) owns a root: a
+# `$ROOT/target/…` product is written into the checkout, which the artifact
+# root rule forbids, so it must not count as the stamped owner.
 SHELL_ASSIGN_RE = re.compile(
     r'^\s*([A-Za-z_][A-Za-z0-9_]*)="(?:\$\{[A-Za-z_][A-Za-z0-9_]*:-)?'
-    r'\$(?:ROOT|\{ROOT\})/target/([A-Za-z0-9._-]+)\}?"',
+    r'\$(?:WZ_ARTIFACTS|\{WZ_ARTIFACTS\})/target/([A-Za-z0-9._-]+)\}?"',
     re.M,
 )
 
@@ -233,6 +250,9 @@ class Route(typing.NamedTuple):
     root: str
     holder: str
     reaches: bool
+    # Spelled through `project_root()`: the checkout, where no product is once
+    # a root is set.
+    checkout: bool
 
 
 def resolved_routes(root: pathlib.Path) -> list["Route"]:
@@ -262,9 +282,10 @@ def resolved_routes(root: pathlib.Path) -> list["Route"]:
                     Route(
                         file=str(path.relative_to(root)),
                         line=index + 1,
-                        root=m.group(1),
+                        root=m.group("root"),
                         holder=holder,
                         reaches=reaches,
+                        checkout=m.group("checkout") is not None,
                     )
                 )
     return routes
@@ -360,10 +381,24 @@ def run(root: pathlib.Path) -> int:
             f"`{ASSERT_FNS[0]}` here."
         )
 
+    # (3) WHERE a route looks, for every root whatever its mechanism: a
+    # provisioner writes under the artifact root, so a route that reads the
+    # checkout reads nothing once WZ_ARTIFACT_ROOT is set.
+    in_checkout = [r for r in routes if r.checkout]
+    for r in in_checkout:
+        fail.append(
+            f"  oracle-provenance-gate: CHECKOUT   {r.file}:{r.line} -- `{r.holder}` "
+            f"reads target/{r.root} through project_root().\n"
+            f"    An oracle is a product, and with WZ_ARTIFACT_ROOT set the provisioner "
+            f"installs it under that root (scripts/lib/artifact-root.sh); this route "
+            f"would read a checkout directory nobody wrote.\n"
+            f"    Fix: resolve it with `artifact(\"target/{r.root}…\")`."
+        )
+
     print(
         f"  oracle-provenance-gate: {len(roots)} resolved root(s) over {len(routes)} route(s); "
         f"{len(pinned & set(roots))} pin-gated, {len(set(stamped) & set(roots))} stamped, "
-        f"{len(uncovered)} unchecked route(s)"
+        f"{len(uncovered)} unchecked route(s), {len(in_checkout)} read from the checkout"
     )
     # PRINTED, never silent: these routes were not required to reach a
     # resolver-time assertion because their root's mechanism is a lane step.
@@ -393,7 +428,14 @@ def selftest() -> int:
     """
     failures: list[str] = []
 
-    def build(tmp: pathlib.Path, *, stamp_it: bool, route_checks: bool) -> pathlib.Path:
+    def build(
+        tmp: pathlib.Path,
+        *,
+        stamp_it: bool,
+        route_checks: bool,
+        install_prefix: str = "$WZ_ARTIFACTS",
+        resolve: str = "artifact(",
+    ) -> pathlib.Path:
         (tmp / "scripts/lib").mkdir(parents=True)
         (tmp / RESOLVER_TESTS).mkdir(parents=True)
         (tmp / "crates/wz-integration-tests/src").mkdir(parents=True)
@@ -406,9 +448,9 @@ def selftest() -> int:
         # different verdicts that a fixture carrying only the subject would
         # merge. It names a root the resolver layer never resolves, so it never
         # enters the coverage report itself.
-        provisioner = 'ROOT=x\nDECOY_DIR="$ROOT/target/decoy"\n'
+        provisioner = 'ROOT=x\nDECOY_DIR="$WZ_ARTIFACTS/target/decoy"\n'
         provisioner += 'vendored_oracle_stamp_root "$DECOY_DIR" "$tok"\n'
-        provisioner += 'INSTALL_DIR="$ROOT/target/zenoh-pico-cli"\n'
+        provisioner += f'INSTALL_DIR="{install_prefix}/target/zenoh-pico-cli"\n'
         if stamp_it:
             provisioner += 'vendored_oracle_stamp_root "$INSTALL_DIR" "$tok"\n'
         else:
@@ -421,21 +463,24 @@ def selftest() -> int:
         check = "        assert_oracle_provenance(&root, None, \"x\");\n" if route_checks else ""
         (tmp / RESOLVER_LIB).write_text(
             "pub fn cli() -> PathBuf {\n"
-            '        let root = project_root().join("target/zenoh-pico-cli");\n'
+            f'        let root = {resolve}"target/zenoh-pico-cli");\n'
             f"{check}"
             "        root\n"
             "}\n"
         )
         (tmp / RESOLVER_TESTS / "probe.rs").write_text(
             "fn direct() -> PathBuf {\n"
-            '    project_root().join("target/zenoh-pico-cli/x")\n'
+            f'    {resolve}"target/zenoh-pico-cli/x")\n'
             "}\n"
         )
         return tmp
 
-    def verdict(**kw: bool) -> int:
+    def verdict(*, clean_tests: bool = False, **kw: typing.Any) -> int:
         with tempfile.TemporaryDirectory() as d:
-            return run(build(pathlib.Path(d), **kw))
+            tmp = build(pathlib.Path(d), **kw)
+            if clean_tests:
+                (tmp / RESOLVER_TESTS / "probe.rs").write_text("fn direct() -> u8 { 0 }\n")
+            return run(tmp)
 
     # Unstamped root -> UNJUDGED. The pre-R2326 state of every pico root.
     if verdict(stamp_it=False, route_checks=True) == 0:
@@ -446,14 +491,25 @@ def selftest() -> int:
     # Stamped root, resolver does not check, so BOTH sites are unchecked routes.
     if verdict(stamp_it=True, route_checks=False) == 0:
         failures.append("a resolver that never asserts was reported as covered")
+    # The stamp call names the variable, but the variable installs into the
+    # checkout: no owner, so the root is UNJUDGED.
+    if verdict(stamp_it=True, route_checks=True, clean_tests=True, install_prefix="$ROOT") == 0:
+        failures.append("a provisioner installing into the checkout was taken as the owner")
+    # A resolver that checks, but reads the checkout instead of the root -> CHECKOUT.
+    if (
+        verdict(stamp_it=True, route_checks=True, clean_tests=True, resolve="project_root().join(")
+        == 0
+    ):
+        failures.append("a resolver reading the oracle from the checkout was reported as covered")
 
-    # And a shape that must PASS, so the checks above are not passing for the
-    # wrong reason: a stamped root whose only routes reach the assertion.
-    with tempfile.TemporaryDirectory() as d:
-        tmp = build(pathlib.Path(d), stamp_it=True, route_checks=True)
-        (tmp / RESOLVER_TESTS / "probe.rs").write_text("fn direct() -> u8 { 0 }\n")
-        if run(tmp) != 0:
-            failures.append("a fully covered fixture was reported as failing")
+    # And shapes that must PASS, so the checks above are not passing for the
+    # wrong reason: a stamped root whose only routes reach the assertion, with
+    # the owner spelled either way the shell spells the root.
+    for prefix in ("$WZ_ARTIFACTS", "${WZ_ARTIFACTS}"):
+        if verdict(stamp_it=True, route_checks=True, clean_tests=True, install_prefix=prefix) != 0:
+            failures.append(
+                f"a fully covered fixture owned through {prefix} was reported as failing"
+            )
 
     # Both population-zero refusals, which are the two ways this reader can
     # lose its subject. They exit rather than return, so they are the shape a
@@ -483,7 +539,7 @@ def selftest() -> int:
         return 1
     print(
         "  oracle-provenance-gate: selftest passed "
-        "(3 defect shapes, 2 population-zero refusals, 1 clean)"
+        "(5 defect shapes, 2 population-zero refusals, 2 clean)"
     )
     return 0
 

@@ -108,7 +108,7 @@ pub mod common {
         fn acquire() -> Option<Self> {
             use std::os::unix::io::AsRawFd;
 
-            let path = project_root().join("crates/target/.wz-port-reservation.lock");
+            let path = artifact("crates/target/.wz-port-reservation.lock");
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
@@ -382,6 +382,20 @@ pub mod common {
             .expect("project root resolves from CARGO_MANIFEST_DIR")
     }
 
+    /// Where the build product of the tree path `rel` (relative to the
+    /// checkout) is: under `WZ_ARTIFACT_ROOT` when that is set, the layout
+    /// mirroring the tree, and in the checkout otherwise. Every oracle,
+    /// cdylib, binary and build directory a fixture reads is resolved
+    /// through this; a SOURCE path (a vendored header, a script, a
+    /// declaration) stays on [`project_root`].
+    ///
+    /// `scripts/lib/artifact-root.sh` states the rule, and this delegates to
+    /// `wz_codegen_build::artifact` rather than reading it a second time, so
+    /// the harness cannot look somewhere the lanes did not write.
+    pub fn artifact(rel: impl AsRef<Path>) -> PathBuf {
+        wz_codegen_build::artifact(rel)
+    }
+
     /// Locate the freshly-built `wz-ap-demo` binary. Cargo emits it at
     /// `crates/target/<profile>/wz-ap-demo`; the test profile is
     /// usually debug, but release is checked as a fallback so a
@@ -401,12 +415,11 @@ pub mod common {
     /// only need the path (usage strings, argv rejection) and staleness cannot
     /// mislead those.
     pub fn wz_ap_demo_binary() -> PathBuf {
-        let crates_dir = project_root().join("crates");
         // The host's own name for an executable: `wz-ap-demo.exe` on Windows.
         let name = format!("wz-ap-demo{}", std::env::consts::EXE_SUFFIX);
         let candidates = [
-            crates_dir.join("target/debug").join(&name),
-            crates_dir.join("target/release").join(&name),
+            artifact("crates/target/debug").join(&name),
+            artifact("crates/target/release").join(&name),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -739,10 +752,9 @@ pub mod common {
     /// missing binary is a CI-prep error surfaced as a panic, not a
     /// graceful SKIP.
     pub fn wz_e2e_pubsub_binary() -> PathBuf {
-        let crates_dir = project_root().join("crates");
         let candidates = [
-            crates_dir.join("target/debug/wz-e2e-pubsub"),
-            crates_dir.join("target/release/wz-e2e-pubsub"),
+            artifact("crates/target/debug/wz-e2e-pubsub"),
+            artifact("crates/target/release/wz-e2e-pubsub"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -762,10 +774,9 @@ pub mod common {
     /// missing binary is a CI-prep error surfaced as a panic, not a
     /// graceful SKIP.
     pub fn wz_e2e_queryable_binary() -> PathBuf {
-        let crates_dir = project_root().join("crates");
         let candidates = [
-            crates_dir.join("target/debug/wz-e2e-queryable"),
-            crates_dir.join("target/release/wz-e2e-queryable"),
+            artifact("crates/target/debug/wz-e2e-queryable"),
+            artifact("crates/target/release/wz-e2e-queryable"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -789,10 +800,9 @@ pub mod common {
     /// ResponseFinal are types it does not have), which is the whole reason
     /// it exists — see its `Cargo.toml`.
     pub fn wz_e2e_silent_peer_binary() -> PathBuf {
-        let crates_dir = project_root().join("crates");
         let candidates = [
-            crates_dir.join("target/debug/wz-e2e-silent-peer"),
-            crates_dir.join("target/release/wz-e2e-silent-peer"),
+            artifact("crates/target/debug/wz-e2e-silent-peer"),
+            artifact("crates/target/release/wz-e2e-silent-peer"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -815,10 +825,9 @@ pub mod common {
     /// a missing binary is a CI-prep error surfaced as a panic, not a
     /// graceful SKIP.
     pub fn wz_e2e_admin_probe_binary() -> PathBuf {
-        let crates_dir = project_root().join("crates");
         let candidates = [
-            crates_dir.join("target/debug/wz-e2e-admin-probe"),
-            crates_dir.join("target/release/wz-e2e-admin-probe"),
+            artifact("crates/target/debug/wz-e2e-admin-probe"),
+            artifact("crates/target/release/wz-e2e-admin-probe"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -839,10 +848,9 @@ pub mod common {
     /// drives it, so a missing binary is a CI-prep error surfaced as a
     /// panic, not a graceful SKIP.
     pub fn wz_e2e_zget_binary() -> PathBuf {
-        let crates_dir = project_root().join("crates");
         let candidates = [
-            crates_dir.join("target/debug/wz-e2e-zget"),
-            crates_dir.join("target/release/wz-e2e-zget"),
+            artifact("crates/target/debug/wz-e2e-zget"),
+            artifact("crates/target/release/wz-e2e-zget"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -862,10 +870,9 @@ pub mod common {
     /// pinned subset before the e2e test drives it, so a missing binary
     /// is a CI-prep error surfaced as a panic, not a graceful SKIP.
     pub fn wz_e2e_liveliness_binary() -> PathBuf {
-        let crates_dir = project_root().join("crates");
         let candidates = [
-            crates_dir.join("target/debug/wz-e2e-liveliness"),
-            crates_dir.join("target/release/wz-e2e-liveliness"),
+            artifact("crates/target/debug/wz-e2e-liveliness"),
+            artifact("crates/target/release/wz-e2e-liveliness"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -884,10 +891,9 @@ pub mod common {
     /// debug/release lookup shape; the Layer E2 lane builds it under its
     /// pinned subset before the e2e test drives it.
     pub fn wz_e2e_liveliness_token_binary() -> PathBuf {
-        let crates_dir = project_root().join("crates");
         let candidates = [
-            crates_dir.join("target/debug/wz-e2e-liveliness-token"),
-            crates_dir.join("target/release/wz-e2e-liveliness-token"),
+            artifact("crates/target/debug/wz-e2e-liveliness-token"),
+            artifact("crates/target/release/wz-e2e-liveliness-token"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -908,10 +914,9 @@ pub mod common {
     /// it, so a missing binary is a CI-prep error surfaced as a panic,
     /// not a graceful SKIP.
     pub fn wz_e2e_declare_observer_binary() -> PathBuf {
-        let crates_dir = project_root().join("crates");
         let candidates = [
-            crates_dir.join("target/debug/wz-e2e-declare-observer"),
-            crates_dir.join("target/release/wz-e2e-declare-observer"),
+            artifact("crates/target/debug/wz-e2e-declare-observer"),
+            artifact("crates/target/release/wz-e2e-declare-observer"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -951,14 +956,14 @@ pub mod common {
     /// only the library they link differs, which is what makes one file the witness of both.
     pub fn wz_capi_pico_cdylib() -> PathBuf {
         let crates_dir = project_root().join("crates");
-        let target = if pico_engine_is_coop() {
+        let target = artifact("crates").join(if pico_engine_is_coop() {
             PICO_COOP_TARGET_DIR
         } else {
             "target"
-        };
+        });
         let candidates = [
-            crates_dir.join(target).join("debug/libwz_capi_pico.so"),
-            crates_dir.join(target).join("release/libwz_capi_pico.so"),
+            target.join("debug/libwz_capi_pico.so"),
+            target.join("release/libwz_capi_pico.so"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -969,11 +974,13 @@ pub mod common {
         panic!(
             "libwz_capi_pico.so not found in {candidates:?}; run `cargo build -p wz-capi-pico` \
              (for `WZ_PICO_ENGINE=coop`, with the features of Layer E's cooperative leg and \
-             `--target-dir {PICO_COOP_TARGET_DIR}`) first"
+             `--target-dir {}`) first",
+            artifact("crates").join(PICO_COOP_TARGET_DIR).display()
         );
     }
 
     /// The target directory, under `crates/`, the cooperative engine's `wz-capi-pico` lands in.
+    /// A tree path: read it through [`artifact`], which moves it under the artifact root.
     pub const PICO_COOP_TARGET_DIR: &str = "target/wz-capi-pico-coop";
 
     /// Whether `WZ_PICO_ENGINE` names the cooperative engine. Unset or `tokio` is the tokio
@@ -1046,7 +1053,7 @@ pub mod common {
 
         /// The target directory, under `crates/`, wz's build of this arm lands in: the tokio
         /// engine's, or with `WZ_PICO_ENGINE=coop` the cooperative engine's, a directory of its
-        /// own because each build is `libwz_capi_pico.so`.
+        /// own because each build is `libwz_capi_pico.so`. A tree path, read through [`artifact`].
         pub fn wz_target_dir(self) -> String {
             let tokio = match self {
                 Self::MultiThreaded => "target",
@@ -1076,18 +1083,14 @@ pub mod common {
                 | Self::McastDeclarations
                 | Self::RawEth
                 | Self::Integration => {
-                    let root = project_root();
-                    let generated = root.join(format!(
-                        "target/zenoh-pico-build{}/zenohpico/include",
-                        self.cmake_suffix()
-                    ));
+                    let generated = zenoh_pico_generated_include_dir(self.cmake_suffix());
                     assert!(
                         generated.is_dir(),
                         "the {self:?} zenoh-pico config.h dir is missing at {}; run \
                          scripts/build-zenoh-pico-cli.sh first",
                         generated.display()
                     );
-                    let vendored = root.join("vendor/zenoh-pico/include");
+                    let vendored = project_root().join("vendor/zenoh-pico/include");
                     // The local arm keeps the reference arm's TLS and so reaches Mbed
                     // TLS headers; upstream's default has TLS off, and its third slot
                     // repeats the vendored headers rather than naming a directory the
@@ -1111,7 +1114,7 @@ pub mod common {
                 return wz_capi_pico_cdylib();
             }
             let crates_dir = project_root().join("crates");
-            let target = crates_dir.join(self.wz_target_dir());
+            let target = artifact("crates").join(self.wz_target_dir());
             let candidates = [
                 target.join("debug/libwz_capi_pico.so"),
                 target.join("release/libwz_capi_pico.so"),
@@ -1125,16 +1128,16 @@ pub mod common {
             panic!(
                 "wz's {self:?} libwz_capi_pico.so is not in {candidates:?}; from \
                  crates/, run `cargo build -p wz-capi-pico $(python3 \
-                 ../scripts/lib/wz_config.py --features pico{} \
-                 ../target/zenoh-pico-build{}/zenohpico/include/zenoh-pico/config.h) \
-                 --target-dir {}`",
+                 ../scripts/lib/wz_config.py --features pico{} {}) --target-dir {}`",
                 if pico_engine_is_coop() {
                     " --engine coop"
                 } else {
                     ""
                 },
-                self.cmake_suffix(),
-                self.wz_target_dir()
+                zenoh_pico_generated_include_dir(self.cmake_suffix())
+                    .join("zenoh-pico/config.h")
+                    .display(),
+                target.display()
             );
         }
     }
@@ -1208,8 +1211,8 @@ pub mod common {
     pub fn wz_capi_c_cdylib() -> PathBuf {
         let crates_dir = project_root().join("crates");
         let candidates = [
-            crates_dir.join("target/debug/libwz_capi_c.so"),
-            crates_dir.join("target/release/libwz_capi_c.so"),
+            artifact("crates/target/debug/libwz_capi_c.so"),
+            artifact("crates/target/release/libwz_capi_c.so"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -1233,7 +1236,7 @@ pub mod common {
     /// is the one the debug resolver has.
     pub fn wz_capi_c_release_cdylib() -> PathBuf {
         let crates_dir = project_root().join("crates");
-        let release = crates_dir.join("target/release/libwz_capi_c.so");
+        let release = artifact("crates/target/release/libwz_capi_c.so");
         assert!(
             release.is_file(),
             "{release:?} not found; run `cargo build --release -p wz-capi-c` first"
@@ -1249,8 +1252,8 @@ pub mod common {
     pub fn wz_capi_c_staticlib() -> PathBuf {
         let crates_dir = project_root().join("crates");
         let candidates = [
-            crates_dir.join("target/debug/libwz_capi_c.a"),
-            crates_dir.join("target/release/libwz_capi_c.a"),
+            artifact("crates/target/debug/libwz_capi_c.a"),
+            artifact("crates/target/release/libwz_capi_c.a"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -1577,6 +1580,14 @@ pub mod common {
         );
     }
 
+    /// The CMake-generated include directory of the pico header arm whose build
+    /// directory `scripts/build-zenoh-pico-cli.sh` names `target/zenoh-pico-build`
+    /// followed by `suffix` (`""` for the reference arm, `"-st"`, `"-mcdecl"`, ...).
+    /// A product, so it is read where [`artifact`] puts it.
+    fn zenoh_pico_generated_include_dir(suffix: &str) -> PathBuf {
+        artifact(format!("target/zenoh-pico-build{suffix}/zenohpico/include"))
+    }
+
     /// The include directories that let a C compiler build a real zenoh-pico
     /// program against the REAL zenoh-pico headers: the vendored source tree
     /// plus the CMake-GENERATED `zenoh-pico/config.h`.
@@ -1599,9 +1610,8 @@ pub mod common {
     /// discipline as [`zenoh_pico_cli_binary`]; a missing header set must not
     /// degrade into a green run.
     pub fn zenoh_pico_include_dirs() -> [PathBuf; 3] {
-        let root = project_root();
-        let vendored = root.join("vendor/zenoh-pico/include");
-        let generated = root.join("target/zenoh-pico-build/zenohpico/include");
+        let vendored = project_root().join("vendor/zenoh-pico/include");
+        let generated = zenoh_pico_generated_include_dir("");
         assert!(
             vendored.is_dir(),
             "vendored zenoh-pico headers missing at {}; run \
@@ -1648,7 +1658,7 @@ pub mod common {
     pub fn mbedtls_prefix() -> PathBuf {
         let prefix = std::env::var("WZ_MBEDTLS_PREFIX")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| project_root().join("target/mbedtls"));
+            .unwrap_or_else(|_| artifact("target/mbedtls"));
         assert_oracle_provenance(
             &prefix,
             mbedtls_pinned_token().as_deref(),
@@ -1707,9 +1717,8 @@ pub mod common {
     /// inside the channel macros, `z_open_options_t`) moved between the arms too.
     /// `scripts/build-zenoh-pico-cli.sh` generates this tree.
     pub fn zenoh_pico_include_dirs_single_threaded() -> [PathBuf; 3] {
-        let root = project_root();
-        let vendored = root.join("vendor/zenoh-pico/include");
-        let generated = root.join("target/zenoh-pico-build-st/zenohpico/include");
+        let vendored = project_root().join("vendor/zenoh-pico/include");
+        let generated = zenoh_pico_generated_include_dir("-st");
         assert!(
             vendored.is_dir(),
             "vendored zenoh-pico headers missing at {}; run \
@@ -1950,7 +1959,7 @@ pub mod common {
     /// leg of wz's build with `multicast-declarations` is held to. Checked fresh as
     /// [`zenoh_pico_cli_binary`] is.
     pub fn zenoh_pico_mcdecl_cli_binary(name: &str) -> PathBuf {
-        let root = project_root().join("target/zenoh-pico-cli-mcdecl");
+        let root = artifact("target/zenoh-pico-cli-mcdecl");
         let path = root.join(name);
         assert!(
             path.is_file(),
@@ -1966,7 +1975,7 @@ pub mod common {
     /// wz's build with `raweth-transport` is held to. Checked fresh as
     /// [`zenoh_pico_cli_binary`] is.
     pub fn zenoh_pico_reth_cli_binary(name: &str) -> PathBuf {
-        let root = project_root().join("target/zenoh-pico-cli-reth");
+        let root = artifact("target/zenoh-pico-cli-reth");
         let path = root.join(name);
         assert!(
             path.is_file(),
@@ -1980,7 +1989,7 @@ pub mod common {
     /// Open-debt item 913 — the MULTICAST-DECLARATIONS arm's `libzenohpico` directory
     /// (`target/zenoh-pico-build-mcdecl/lib`), checked fresh.
     pub fn zenoh_pico_mcdecl_library_dir() -> PathBuf {
-        let root = project_root().join("target/zenoh-pico-build-mcdecl");
+        let root = artifact("target/zenoh-pico-build-mcdecl");
         let dir = root.join("lib");
         assert!(
             dir.is_dir(),
@@ -1995,7 +2004,7 @@ pub mod common {
     /// checked fresh: the library upstream's `tests/z_api_*_test.c` are built against in its own
     /// integration workflow, the control for a red of wz's build of the same arm.
     pub fn zenoh_pico_integration_library_dir() -> PathBuf {
-        let root = project_root().join("target/zenoh-pico-build-integration");
+        let root = artifact("target/zenoh-pico-build-integration");
         let dir = root.join("lib");
         assert!(
             dir.is_dir(),
@@ -2018,7 +2027,7 @@ pub mod common {
     /// `CMakeLists.txt`, so it goes stale with the submodule exactly as the
     /// binaries do.
     pub fn zenoh_pico_build_root() -> PathBuf {
-        let root = project_root().join("target/zenoh-pico-build");
+        let root = artifact("target/zenoh-pico-build");
         assert_zenoh_pico_oracle_fresh(&root);
         root
     }
@@ -2143,7 +2152,7 @@ pub mod common {
     /// function is private, and a public item linking a private one resolves
     /// only under `--document-private-items` and reds `-D warnings` otherwise.
     pub fn zenoh_pico_cli_binary(name: &str) -> PathBuf {
-        let root = project_root().join("target/zenoh-pico-cli");
+        let root = artifact("target/zenoh-pico-cli");
         let path = root.join(name);
         assert!(
             path.is_file(),
@@ -2184,9 +2193,7 @@ pub mod common {
         // a workspace rather than independent projects. The binary name keeps the
         // `wz-oracle-` prefix so a shared target dir cannot collide with anything
         // upstream's own builds put there.
-        let path = project_root()
-            .join("oracles/target/release")
-            .join(format!("wz-oracle-{name}"));
+        let path = artifact("oracles/target/release").join(format!("wz-oracle-{name}"));
         assert!(
             path.is_file(),
             "wz oracle `{name}` missing at {}; build it with \
@@ -2208,9 +2215,8 @@ pub mod common {
         }
         // `zenohd.exe` on Windows, where `build-zenohd.sh` does not yet install; a
         // host that built the router another way names it with `WZ_ZENOHD_BIN`.
-        let path = project_root()
-            .join("target/zenohd")
-            .join(format!("zenohd{}", std::env::consts::EXE_SUFFIX));
+        let path =
+            artifact("target/zenohd").join(format!("zenohd{}", std::env::consts::EXE_SUFFIX));
         assert!(
             path.is_file(),
             "zenohd binary missing at {}; set WZ_ZENOHD_BIN or run scripts/build-zenohd.sh first",
@@ -2236,7 +2242,7 @@ pub mod common {
     pub fn zenoh_ext_example_binary(name: &str) -> PathBuf {
         let dir = match std::env::var("WZ_ZENOH_EXT_EXAMPLES_DIR") {
             Ok(d) => PathBuf::from(d),
-            Err(_) => project_root().join("target/zenohd"),
+            Err(_) => artifact("target/zenohd"),
         };
         let path = dir.join(name);
         assert!(
@@ -2278,7 +2284,7 @@ pub mod common {
     pub fn zenoh_core_example_binary(name: &str) -> PathBuf {
         let dir = match std::env::var("WZ_ZENOH_CORE_EXAMPLES_DIR") {
             Ok(d) => PathBuf::from(d),
-            Err(_) => project_root().join("target/zenohd"),
+            Err(_) => artifact("target/zenohd"),
         };
         let path = dir.join(format!("zenoh_{name}"));
         assert!(
@@ -2303,7 +2309,7 @@ pub mod common {
         if let Ok(p) = std::env::var("WZ_ZENOHD_UNIXPIPE_BIN") {
             return PathBuf::from(p);
         }
-        let path = project_root().join("target/zenohd-unixpipe/zenohd");
+        let path = artifact("target/zenohd-unixpipe/zenohd");
         assert!(
             path.is_file(),
             "unixpipe-enabled zenohd missing at {}; set WZ_ZENOHD_UNIXPIPE_BIN or run \
@@ -2336,7 +2342,7 @@ pub mod common {
         if let Ok(p) = std::env::var("WZ_ZENOHD_SHM_BIN") {
             return shm_oracle_or_refusal(PathBuf::from(p));
         }
-        shm_oracle_or_refusal(project_root().join("target/zenohd-shm/zenohd"))
+        shm_oracle_or_refusal(artifact("target/zenohd-shm/zenohd"))
     }
 
     /// Open-debt item 901 -- what an ABSENT shared-memory oracle means.
@@ -2385,7 +2391,7 @@ pub mod common {
     pub fn zenoh_shm_example_binary(name: &str) -> Option<PathBuf> {
         let dir = match std::env::var("WZ_ZENOH_SHM_EXAMPLES_DIR") {
             Ok(dir) => PathBuf::from(dir),
-            Err(_) => project_root().join("target/zenohd-shm"),
+            Err(_) => artifact("target/zenohd-shm"),
         };
         shm_oracle_or_refusal(dir.join(name))
     }
@@ -2405,7 +2411,7 @@ pub mod common {
         if let Ok(p) = std::env::var("WZ_ZENOHD_VSOCK_BIN") {
             return PathBuf::from(p);
         }
-        let path = project_root().join("target/zenohd-vsock/zenohd");
+        let path = artifact("target/zenohd-vsock/zenohd");
         assert!(
             path.is_file(),
             "vsock-enabled zenohd missing at {}; set WZ_ZENOHD_VSOCK_BIN or run \
@@ -2430,7 +2436,7 @@ pub mod common {
         if let Ok(p) = std::env::var("WZ_STORAGE_MANAGER_SO") {
             return PathBuf::from(p);
         }
-        let path = project_root().join("target/zenohd/libzenoh_plugin_storage_manager.so");
+        let path = artifact("target/zenohd/libzenoh_plugin_storage_manager.so");
         assert!(
             path.is_file(),
             "storage-manager plugin missing at {}; set WZ_STORAGE_MANAGER_SO or run scripts/build-zenohd.sh first",
@@ -2454,7 +2460,7 @@ pub mod common {
         if let Ok(p) = std::env::var("WZ_REST_PLUGIN_SO") {
             return PathBuf::from(p);
         }
-        let path = project_root().join("target/zenohd/libzenoh_plugin_rest.so");
+        let path = artifact("target/zenohd/libzenoh_plugin_rest.so");
         assert!(
             path.is_file(),
             "REST plugin missing at {}; set WZ_REST_PLUGIN_SO or run scripts/build-zenohd.sh first",

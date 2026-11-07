@@ -91,9 +91,7 @@ use std::time::{Duration, Instant};
 
 use sce_rust_mesh::conformance::{self, Disruptable, Harness};
 use sce_rust_mesh::inbox::{ClientError, ZenohClient};
-use wz_integration_tests::common::{
-    assert_demo_binary_newer_than_sources, project_root, ChildGuard,
-};
+use wz_integration_tests::common::{artifact, assert_demo_binary_newer_than_sources, ChildGuard};
 use wz_mesh_client::WzClient;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -118,7 +116,7 @@ const QUIET: Duration = Duration::from_secs(4);
 fn demo_binary() -> PathBuf {
     let demo = std::env::var_os("WZ_AP_DEMO_BIN")
         .map(PathBuf::from)
-        .unwrap_or_else(|| project_root().join("crates/target/debug/wz-ap-demo"));
+        .unwrap_or_else(|| artifact("crates/target/debug/wz-ap-demo"));
     assert!(
         demo.is_file(),
         "{} not found; build it as the header of this file says, or name it in WZ_AP_DEMO_BIN",

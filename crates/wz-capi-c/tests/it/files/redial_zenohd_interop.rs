@@ -72,8 +72,7 @@ fn zenohd_binary() -> PathBuf {
     if let Ok(p) = std::env::var("WZ_ZENOHD_BIN") {
         return PathBuf::from(p);
     }
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/zenohd/zenohd")
+    let path = wz_codegen_build::artifact("target/zenohd/zenohd")
         .canonicalize()
         .expect("target/zenohd/zenohd is missing; run scripts/build-zenohd.sh");
     assert!(path.is_file(), "{} is not a file", path.display());

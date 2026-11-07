@@ -52,12 +52,11 @@ pub(crate) fn verdict(present: bool, required: bool) -> Verdict {
 
 /// `target/debug/lib<stem>.so` (`.dylib` on macOS) of the workspace this crate
 /// belongs to -- where `cargo build -p <member>` puts a cdylib with no profile
-/// or target-dir override, which is how every lane here builds it.
+/// or target-dir override, which is how every lane here builds it. Under
+/// `WZ_ARTIFACT_ROOT` that directory is the mirrored one below the root
+/// (`scripts/lib/artifact-root.sh`), so it is asked of the rule's Rust reading.
 pub(crate) fn cdylib(stem: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop();
-    p.push("target");
-    p.push("debug");
+    let mut p = wz_codegen_build::artifact("crates/target/debug");
     p.push(format!(
         "lib{stem}.{}",
         if cfg!(target_os = "macos") {
@@ -120,6 +119,10 @@ mod tests {
                 && (name.ends_with(".so") || name.ends_with(".dylib")),
             "got {name}"
         );
-        assert!(p.starts_with(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap()));
+        assert_eq!(
+            p.parent(),
+            Some(wz_codegen_build::artifact("crates/target/debug").as_path()),
+            "the fixture is read from the workspace's debug directory, where the rule puts it"
+        );
     }
 }
