@@ -1109,6 +1109,10 @@ round_fed_gates=(
     "gate_test_pin_lint.py"
     "lane_reach_gate.py --check"
     "python_floor_lint.py"
+    # R4398 -- a product path spelled past the artifact root (scripts/lib/artifact-root.sh).
+    # Round-fed by the tracked scripts, gates and crate sources it reads. MEASURED: 0.68s,
+    # a text read of 2166 files, no build.
+    "artifact_root_lint.py"
     "store_reader_lane_lint.py"
     # R2578 -- the tracked corpus, which the first cut of the population rule
     # did not name. Ordered cheapest-first inside this group so a form error
