@@ -315124,6 +315124,44 @@
         "C1 get-timeout one-off on pc2 stays unattributed."
       ]
     },
+    "Round 4379": {
+      "decision_summary": "The four session-close-ingress rows of docs/reason-review-pins.md moved in round 4378 were written with round id R4377, the number expected before landing; another session filed 4377 first. The re-read that justifies each row was round 4378's, so the rows name it. The gate checks only the id's form, so it could not catch this.",
+      "changes_bullets": [
+        "docs/reason-review-pins.md: the round column of the four session-close-ingress rows for crates/wz-runtime-coop/src/session_drive.rs, crates/wz-runtime-tokio/src/accept_loop.rs, crates/wz-runtime-tokio/src/session_open.rs and crates/wz-session-lwip/src/session_drive.rs reads R4378."
+      ],
+      "verification_bullets": [
+        "reason_review_pin_gate.py --check: OK after the change.",
+        "The blobs in the rows are unchanged; only the round column moved."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "bx-63 runs `bx-provision pc2|pc3 --apply` scoped to wz once this is on main; then send a Qz lane to pc2 or pc3.",
+        "Read the hosted CI run of this push per job, and run 42330475550 (a2b17e62e1), which was still pending.",
+        "Read the first scheduled upstream-watch run.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: rerun the full `bx --checks ci` set to read the 180.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ],
+      "publishable_decision_summary": "The four session-close-ingress rows of docs/reason-review-pins.md moved in round 4378 were written with round id R4377, the number expected before landing; another session filed 4377 first. The re-read that justifies each row was round 4378's, so the rows name it. The gate checks only the id's form, so it could not catch this.",
+      "publishable_changes_bullets": [
+        "docs/reason-review-pins.md: the round column of the four session-close-ingress rows for crates/wz-runtime-coop/src/session_drive.rs, crates/wz-runtime-tokio/src/accept_loop.rs, crates/wz-runtime-tokio/src/session_open.rs and crates/wz-session-lwip/src/session_drive.rs reads R4378."
+      ],
+      "publishable_verification_bullets": [
+        "reason_review_pin_gate.py --check: OK after the change.",
+        "The blobs in the rows are unchanged; only the round column moved."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "bx-63 runs `bx-provision pc2|pc3 --apply` scoped to wz once this is on main; then send a Qz lane to pc2 or pc3.",
+        "Read the hosted CI run of this push per job, and run 42330475550 (a2b17e62e1), which was still pending.",
+        "Read the first scheduled upstream-watch run.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: rerun the full `bx --checks ci` set to read the 180.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
