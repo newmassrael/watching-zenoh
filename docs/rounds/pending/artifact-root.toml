@@ -28,7 +28,7 @@ Formatting of five merged lwip and acceptor test modules that cargo fmt --check 
 The pre-push hook runs artifact_root_lint.py (round_fed_gate_reach: it is round-fed; 0.68 s, no build). The four new gate scripts open with their provenance citation.
 armed_oracle_census.py reads a nested-lane arming (a flag prefixed on bash scripts/run-ci.sh --layer L): accepted only when a ci.yml env block arms the same flag, the flag has no machine-oracle row, and run-ci.sh registers layer L; three selftest refusals and the shape in the clean control. Ero's WZ_PICO_REQUIRE arming is the one instance.
 previous-run-gate.sh names the retired acknowledgement variable as plain text: the prose-name gate was red on main since the acknowledgement moved to a row.
-push-refs.sh (round 4399) opens with its provenance citation: gate-provenance was red on main from that round.
+push-refs.sh (round 4399) opens with its provenance citation: gate-provenance was red on main from that round. The two pre-push sections that round gave an exit 1 without a gate header are gate 0r (the pushed refs read by kind) and gate 0q (the queue refs' public gates), each grading pushed-range with its refusals marked: hook-gate-boundary was red on main from the same round.
 '''
 
 verification = '''
