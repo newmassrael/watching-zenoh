@@ -121,6 +121,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 import oracle_store  # noqa: E402
 import upstream_release_distance as urd  # noqa: E402
+from artifact_root import artifact  # noqa: E402
 
 WORKSPACE_MANIFEST = ROOT / "crates" / "Cargo.toml"
 
@@ -389,7 +390,7 @@ def upstream_anchors() -> list[tuple[str, Path]]:
     # zenohd elsewhere, the denominator must follow the binary, not stay here.
     zenohd_bin = os.environ.get("WZ_ZENOHD_BIN")
     install_dirs = [Path(zenohd_bin).parent] if zenohd_bin else []
-    install_dirs.append(ROOT / "target" / "zenohd")
+    install_dirs.append(artifact("target/zenohd"))
     for d in install_dirs:
         out.append(("metadata", d / "zenoh-cargo-metadata.json"))
     # Source A2: the shallow clone build-zenohd.sh makes on a runner with no
@@ -397,7 +398,7 @@ def upstream_anchors() -> list[tuple[str, Path]]:
     out.append(
         (
             "manifest",
-            ROOT / "target" / "zenohd-build" / "zenoh-src" / "zenoh" / "Cargo.toml",
+            artifact("target/zenohd-build/zenoh-src/zenoh/Cargo.toml"),
         )
     )
     # R3978 -- the same clone where build-zenohd.sh makes it, in the machine's

@@ -534,6 +534,11 @@ def selftest() -> int:
     if profile_of(pathlib.Path("crates/target/release/libwz_capi_c.so")) != "release":
         print("selftest: the profile reader misread a target path", file=sys.stderr)
         return 1
+    # Under WZ_ARTIFACT_ROOT the artifact is the mirrored path below the root.
+    if profile_of(pathlib.Path("/srv/wz/crates/target/debug/libwz_capi_c.so")) != "debug":
+        print("selftest: the profile reader misread a path under an artifact root",
+              file=sys.stderr)
+        return 1
     for bad in ["libwz_capi_c.so", "crates/target/libwz_capi_c.so", "/tmp/x/lib.so"]:
         try:
             profile_of(pathlib.Path(bad))

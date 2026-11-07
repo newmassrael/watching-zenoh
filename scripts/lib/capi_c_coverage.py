@@ -40,10 +40,12 @@ import subprocess
 import sys
 import tempfile
 
-REPO = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
 CDYLIB_CANDIDATES = [
-    REPO / "crates/target/debug/libwz_capi_c.so",
-    REPO / "crates/target/release/libwz_capi_c.so",
+    artifact("crates/target/debug/libwz_capi_c.so"),
+    artifact("crates/target/release/libwz_capi_c.so"),
 ]
 
 

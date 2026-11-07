@@ -101,9 +101,14 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
 REPO = pathlib.Path(__file__).resolve().parents[2]
 CRATES = REPO / "crates"
-DOCS = CRATES / "target/doc/wz_capture"
+# The rustdoc and the two artifacts are products: under WZ_ARTIFACT_ROOT when
+# it is set (scripts/lib/artifact-root.sh), where the cargo `build()` runs puts them.
+DOCS = artifact("crates/target/doc/wz_capture")
 
 # The root of the closure. Everything else is derived from it.
 ROOT = "Dissection"
@@ -112,8 +117,8 @@ ROOT = "Dissection"
 # names as the surfaces a product can reach: the command line and the C ABI a
 # framework links. A missing artifact is a FAIL, never a skip.
 SHIPPED = (
-    ("wz-analyze", CRATES / "target/debug/wz-analyze"),
-    ("wz-capi-dissect", CRATES / "target/debug/libwz_capi_dissect.so"),
+    ("wz-analyze", artifact("crates/target/debug/wz-analyze")),
+    ("wz-capi-dissect", artifact("crates/target/debug/libwz_capi_dissect.so")),
 )
 
 # MEASURED at R2128, against freshly built artifacts. This is a RATCHET, not an

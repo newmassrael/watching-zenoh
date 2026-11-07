@@ -76,6 +76,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "crates"
 
@@ -1500,7 +1503,10 @@ def main() -> int:
             print(f"  - {f}", file=sys.stderr)
         return 1
 
-    target_dir = str(WORKSPACE / "target")
+    # The workspace's own target directory as the artifact root rule places it:
+    # the probe crate shares its dependency builds, and under WZ_ARTIFACT_ROOT
+    # a directory inside the checkout may not be written.
+    target_dir = str(artifact("crates/target"))
     probed = 0
     for pkg in sorted(AXIS):
         optional, enabled = optional_by_pkg[pkg], default_by_pkg[pkg]

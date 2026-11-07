@@ -158,14 +158,18 @@ import subprocess
 import sys
 import textwrap
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DECL = ROOT / "deploy" / "wz-config.toml"
+DECL =ROOT / "deploy" / "wz-config.toml"
 KCONFIG_ROOT = ROOT / "deploy" / "Kconfig"
 KCONFIG_AXES = ROOT / "deploy" / "Kconfig.axes"
 KCONFIG_CAPS = ROOT / "deploy" / "Kconfig.capabilities"
 CONFIGS = ROOT / "configs"
 PROFILES = CONFIGS / "profiles"
-KCONFIG_VENV = ROOT / "target" / "kconfig-venv"
+# A product of scripts/provision-kconfiglib.sh, so it is where the artifact root rule puts it.
+KCONFIG_VENV = artifact("target/kconfig-venv")
 # A job that provisions kconfiglib arms this; where it is set, an absent interpreter is a FAIL
 # in every command that needs one, never a SKIP.
 KCONFIG_REQUIRED = os.environ.get("WZ_KCONFIG_REQUIRE") == "1"

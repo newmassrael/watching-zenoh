@@ -49,6 +49,9 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
 EXPECTED_VERSION = 53
 
@@ -492,7 +495,9 @@ EXPECTED_SYMBOLS = {
     "wz_dissect_transport_message_in",
 }
 
-CDYLIB = pathlib.Path("crates/target/release/libwz_capi_dissect.so")
+# A product, so it is where the artifact root rule puts it; the header below is
+# source and stays relative to the checkout.
+CDYLIB = artifact("crates/target/release/libwz_capi_dissect.so")
 
 # R2775 (open debt 804) — the header this revision is published in. Until this
 # round it published NO revision: the number existed only in the running

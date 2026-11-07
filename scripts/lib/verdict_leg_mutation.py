@@ -79,6 +79,9 @@ import time
 import typing
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LINT = Path(__file__).resolve().parent / "verdict_reason_lint.py"
 
@@ -94,7 +97,9 @@ LINT = Path(__file__).resolve().parent / "verdict_reason_lint.py"
 # Two guards spelling different names means one of them is vacuous, and the
 # vacuous one is where the better sentence had been left.
 SOURCE = Path("crates/wz-capture/src/report.rs")
-BACKUP_DIR = Path("crates/target/verdict-mutation")
+# A product, like the build directory below: under WZ_ARTIFACT_ROOT when it is
+# set (scripts/lib/artifact-root.sh), so both are absolute paths.
+BACKUP_DIR = artifact("crates/target/verdict-mutation")
 BACKUP_SUFFIX = ".pristine"
 
 
@@ -116,7 +121,7 @@ def backup_name(rel: str) -> str:
 
 # A build directory of this sweep's own, so twenty-three recompiles do not
 # evict the tree's ordinary one.
-TARGET_DIR = Path("crates/target/verdict-mutation/target")
+TARGET_DIR = artifact("crates/target/verdict-mutation/target")
 
 
 # R2268 (open-debt item 609) — WHAT A LEFTOVER BACKUP MEANS, decided rather
@@ -1456,7 +1461,7 @@ def run_suite(packages: list[str]) -> tuple[str, str]:
     reading cargo's prose, and so each phase has a clock of its own.
     """
     env = sweep_env(dict(os.environ))
-    env["CARGO_TARGET_DIR"] = str(REPO_ROOT / TARGET_DIR)
+    env["CARGO_TARGET_DIR"] = str(TARGET_DIR)
     # Round 3140 -- INCREMENTAL, on purpose and against the workflow's
     # `CARGO_INCREMENTAL=0`. That setting is right for a job that compiles each
     # crate once from a fresh checkout and wrong for this one, which recompiles
@@ -1754,7 +1759,7 @@ def main() -> int:
     pristine_of = {
         rel: (REPO_ROOT / rel).read_text(encoding="utf-8") for rel in touched
     }
-    backup_dir = REPO_ROOT / BACKUP_DIR
+    backup_dir = BACKUP_DIR
     backup_of = {rel: backup_dir / backup_name(str(rel)) for rel in touched}
     # R2268 (item 609) — a leftover backup is CLASSIFIED, not assumed. See
     # `preflight`: the working tree, the backup and HEAD decide between debris

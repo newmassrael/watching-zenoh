@@ -100,10 +100,13 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 import upstream_feature_census as census  # noqa: E402
+from artifact_root import artifact  # noqa: E402
 
 PIN_FILE = ROOT / "scripts" / "rustdoc-json.pin"
 SURFACE_DIR = ROOT / "deploy" / "upstream-api"
-TARGET_DIR = ROOT / "target" / "rust-api-surface"
+# rustdoc's output is a product: under WZ_ARTIFACT_ROOT when it is set, so the
+# explicit --target-dir below never names a directory inside the checkout.
+TARGET_DIR = artifact("target/rust-api-surface")
 
 # The arms of `zenoh`, by name and the features each passes. `internal` and `plugins` are not
 # arms: they widen visibility for zenoh's own crates (the census excludes `internal` on that

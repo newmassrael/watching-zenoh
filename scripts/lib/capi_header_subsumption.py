@@ -65,9 +65,14 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HEADER = ROOT / "crates" / "wz-capi-dissect" / "include" / "wz_dissect.h"
-CDYLIB = ROOT / "crates" / "target" / "release" / "libwz_capi_dissect.so"
+# A product, read where the artifact root rule puts it (outside the checkout
+# when WZ_ARTIFACT_ROOT is set), so it is never named relative to ROOT.
+CDYLIB = artifact("crates/target/release/libwz_capi_dissect.so")
 
 # The one spelling. A form rather than a sentence, so a reader writes the prose
 # and the gate reads the fact out of it.
@@ -129,7 +134,7 @@ def main() -> int:
         # A gate that cannot read its input must not report green. The lane
         # builds this artifact immediately before calling here.
         print(
-            f"capi-header-subsumption: FAIL -- {CDYLIB.relative_to(ROOT)} is "
+            f"capi-header-subsumption: FAIL -- {CDYLIB} is "
             f"absent. The lane must build the release cdylib before this gate "
             f"runs; a door set read from nothing is not a door set.",
             file=sys.stderr,

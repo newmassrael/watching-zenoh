@@ -41,11 +41,15 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TABLE = ROOT / "deploy" / "zephyr-boards.json"
 ZEPHYR_BASE = pathlib.Path(os.environ.get("WZ_ZEPHYR_BASE", pathlib.Path.home() / "zephyrproject" / "zephyr"))
 ZEPHYR_VENV = pathlib.Path(os.environ.get("WZ_ZEPHYR_VENV", pathlib.Path.home() / "zephyrproject" / ".venv"))
-BUILD_ROOT = ROOT / "target" / "zephyr-cargo-lines"
+# The west build directories are products, so under the artifact root when one is set.
+BUILD_ROOT = artifact("target/zephyr-cargo-lines")
 RUST_APP_CALL = "wz_zephyr_rust_app("
 
 

@@ -257,6 +257,7 @@ from typing import Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import admin_node_stream_steps as stream_steps  # noqa: E402  (a sibling: the stream steps and their model)
 import stream_fault  # noqa: E402  (a sibling: the fault-injecting proxy)
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 ROOT = Path(__file__).resolve().parents[2]
 GRAMMAR = ROOT / "deploy" / "zephyr-admin-node" / "HARDWARE_VERDICT.md"
@@ -2142,7 +2143,7 @@ def board_plan(args: argparse.Namespace) -> Plan:
 
 
 def _default_zenohd() -> str:
-    return os.environ.get("WZ_ZENOHD_BIN") or str(ROOT / "target" / "zenohd" / "zenohd")
+    return os.environ.get("WZ_ZENOHD_BIN") or str(artifact("target/zenohd/zenohd"))
 
 
 def _refuse(text: str) -> int:

@@ -117,6 +117,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import rust_comments  # noqa: E402  -- after the path insert that finds it
+from artifact_root import artifact  # noqa: E402  -- where the oracle is installed
 import tempfile
 import time
 
@@ -124,9 +125,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = REPO_ROOT / "crates" / "wz-runtime-tokio" / "src" / "zenoh_config.rs"
 # R2080 — the same override the test harness reads (`zenohd_binary()`), so the
 # lane and this script cannot end up asking two different binaries.
-ZENOHD = pathlib.Path(
-    os.environ.get("WZ_ZENOHD_BIN") or REPO_ROOT / "target" / "zenohd" / "zenohd"
-)
+ZENOHD = pathlib.Path(os.environ.get("WZ_ZENOHD_BIN") or artifact("target/zenohd/zenohd"))
 
 MODE_TABLE_MARKER = "expected one of `router`, `peer`, `client`"
 STARTED_MARKER = "Zenoh can be reached at"

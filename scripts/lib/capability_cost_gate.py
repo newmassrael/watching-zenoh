@@ -76,15 +76,17 @@ from dataclasses import dataclass, field
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import wz_config  # noqa: E402  (the one declaration, and its resolver)
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CRATES = ROOT / "crates"
 PICO_SOURCE = ROOT / "vendor" / "zenoh-pico"
 # The reference builds, one directory per (pin, switches, toolchain), so a run that asks for the
-# same build again reads it instead of building it.
-PICO_BUILDS = CRATES / "target" / "pico-reference"
+# same build again reads it instead of building it. Products, so under the artifact root when one
+# is set (scripts/lib/artifact-root.sh), like the cargo target directory below.
+PICO_BUILDS = artifact("crates/target/pico-reference")
 # A case's library is under the directory of the cargo profile it was built with.
-TARGET = CRATES / "target"
+TARGET = artifact("crates/target")
 
 PICO_BASE = "engine-tokio,serial-drive-own-thread,rx-busy-poll"
 

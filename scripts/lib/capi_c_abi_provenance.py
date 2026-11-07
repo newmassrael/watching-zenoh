@@ -58,6 +58,9 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
 # `get_opaque_type_data!(<rust type expr>, <c name>);`, possibly across lines.
 UPSTREAM_DECL = re.compile(
     r"get_opaque_type_data!\(\s*(.+?)\s*,\s*(\w+)\s*\)\s*;", re.S
@@ -486,8 +489,10 @@ def main() -> int:
     root = pathlib.Path(__file__).resolve().parents[2]
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--opaque-types", type=pathlib.Path)
+    # The tables are a product of check-capi-c-opaque-arms.sh, so they are read
+    # where the artifact root rule puts them; the crate source stays in the tree.
     ap.add_argument("--tables", type=pathlib.Path,
-                    default=root / "target/zenoh-c-opaque")
+                    default=artifact("target/zenoh-c-opaque"))
     ap.add_argument("--crate-src", type=pathlib.Path,
                     default=root / "crates/wz-capi-c/src")
     ap.add_argument("--selftest", action="store_true",

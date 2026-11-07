@@ -111,11 +111,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 # same constants out of the same file. Importing is side-effect free -- that
 # module does its work under `if __name__ == "__main__"`.
 import deepenable_audit  # noqa: E402  -- after the path insert that finds it
+from artifact_root import artifact  # noqa: E402  -- where the oracle is installed
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-ZENOHD = pathlib.Path(
-    os.environ.get("WZ_ZENOHD_BIN") or REPO_ROOT / "target" / "zenohd" / "zenohd"
-)
+ZENOHD = pathlib.Path(os.environ.get("WZ_ZENOHD_BIN") or artifact("target/zenohd/zenohd"))
 
 # The same override `deepenable_audit` and the test harness read, so this cannot
 # end up interrogating a different binary than the layer around it tests.

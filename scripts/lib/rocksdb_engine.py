@@ -22,6 +22,9 @@ import sys
 import tarfile
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
 ROOT = Path(__file__).resolve().parents[2]
 CODECS = ("SNAPPY", "LZ4", "ZLIB", "ZSTD", "BZ2")
 
@@ -178,7 +181,7 @@ def main() -> None:
     if args.key:
         print(key)
         return
-    out = ROOT / "target/rocksdb-engine" / key
+    out = artifact("target/rocksdb-engine") / key
     if not valid(out, expected):
         if args.verify:
             raise ValueError("engine cache absent, stale or corrupt")

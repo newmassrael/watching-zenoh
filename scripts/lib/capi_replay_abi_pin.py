@@ -62,6 +62,9 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+
 # The pinned triple. Edit each half deliberately -- see the module doc.
 EXPECTED_VERSION = 1
 
@@ -85,7 +88,9 @@ EXPECTED_SYMBOLS = {
 # the door promises: a consumer reads these positionally.
 EXPECTED_LAYOUT = (16, 8, 0, 8, 12)
 
-CDYLIB = pathlib.Path("crates/target/release/libwz_capi_replay.so")
+# A product, so it is where the artifact root rule puts it; the header below is
+# source and stays relative to the checkout.
+CDYLIB = artifact("crates/target/release/libwz_capi_replay.so")
 HEADER = pathlib.Path("crates/wz-capi-replay/include/wz_replay.h")
 
 

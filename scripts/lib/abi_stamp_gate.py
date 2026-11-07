@@ -299,6 +299,10 @@ def selftest() -> int:
            any("release" in f for f in profile_findings("capi-c", {"debug": a})))
     expect("the profile reader misread a target path",
            profile_of(pathlib.Path("crates/target/release/libwz_capi_c.so")) == "release")
+    # Under WZ_ARTIFACT_ROOT the artifact is the mirrored path below the root,
+    # a root whose own name may carry a `target` component.
+    expect("the profile reader misread a target path under an artifact root",
+           profile_of(pathlib.Path("/srv/target/wz/crates/target/debug/libwz_capi_c.so")) == "debug")
     for bad in ["libwz_capi_c.so", "crates/target/libwz_capi_c.so", "/tmp/x/lib.so"]:
         try:
             profile_of(pathlib.Path(bad))

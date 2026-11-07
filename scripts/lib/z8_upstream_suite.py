@@ -44,6 +44,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 
 import upstream_feature_census as ufc  # noqa: E402
+from artifact_root import artifact  # noqa: E402
 
 TAG = ufc.UPSTREAM_VERSION
 REMOTE = "https://github.com/eclipse-zenoh/zenoh"
@@ -645,8 +646,8 @@ def main() -> int:
         return selftest()
     if not args.command:
         ap.error("a command, or --selftest")
-    src = pathlib.Path(os.environ.get("Z8_UPSTREAM_SRC", ROOT / "target" / "z8-upstream"))
-    out = pathlib.Path(os.environ.get("Z8_OUT", ROOT / "target" / "z8-suite"))
+    src = pathlib.Path(os.environ.get("Z8_UPSTREAM_SRC", artifact("target/z8-upstream")))
+    out = pathlib.Path(os.environ.get("Z8_OUT", artifact("target/z8-suite")))
     found = generate(src, out)
     if args.command == "generate":
         print("\n".join(found))
