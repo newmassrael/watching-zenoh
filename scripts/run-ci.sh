@@ -2040,6 +2040,16 @@ layer_c0_test_discipline() {
     # for a bare name) that the first draft of this lint got wrong.
     python3 scripts/lib/root_relative_exclusion_lint.py --selftest || return 1
     python3 scripts/lib/root_relative_exclusion_lint.py || return 1
+    # A PRODUCT PATH IS NAMED THROUGH THE ARTIFACT ROOT (scripts/lib/artifact-root.sh).
+    # A consumer mounts the checkout read-only and points WZ_ARTIFACT_ROOT
+    # outside it; one script or test that still spells `$ROOT/target/...` writes
+    # into that mount or reads a directory nobody wrote, and neither shows while
+    # the root is unset, which is how every other lane runs. Layer Ero measures
+    # the rule on one lane; this reads every tracked script, gate and crate for the
+    # spellings that bypass it.
+    python3 scripts/lib/artifact_root.py --selftest || return 1
+    python3 scripts/lib/artifact_root_lint.py --selftest >/dev/null || return 1
+    python3 scripts/lib/artifact_root_lint.py || return 1
     # R2343 (no register item) — WHO CAN ATTACH A MULTICAST EGRESS GROUP. This
     # holds a WITHDRAWAL, not a rule: `router-multicast-faces` carried a residual
     # saying its egress core is gated on the broad `transport-multicast` feature
@@ -17102,6 +17112,58 @@ layer_ewire_pico_wire_dissection() {
     echo "  Ewire: the census resolved an id to the path zenoh-pico declared"
 }
 
+# Layer Ero — Layer Ewire, and the oracle build it needs, in a READ-ONLY checkout.
+#
+# A consumer mounts this checkout read-only (its files are shared between
+# worktrees as hard links) and points WZ_ARTIFACT_ROOT outside it
+# (scripts/lib/artifact-root.sh). Whether that works is not a question a lint can
+# settle: `artifact_root_lint.py` reads spellings, and a write can be spelled in
+# ways it does not know (a tool's default, a helper's cwd). So this lane MEASURES
+# it: the checkout and every `target*` link out of it are mounted read-only
+# (scripts/lib/read-only-tree.sh), the root is the only writable place, and inside
+# that `scripts/build-zenoh-pico-cli.sh` builds the oracle and `run-ci.sh --layer
+# Ewire` runs with WZ_PICO_REQUIRE=1. A write into the checkout fails with EROFS,
+# a skip fails by the REQUIRE flag, and a product read from the checkout instead of
+# the root is caught by the last check here (the oracle must exist under the root
+# and only there is it fresh).
+#
+# The root persists per checkout (`WZ_RO_TREE_ROOT`, else the machine's cache
+# directory) so the second run is incremental; it is a cache, never the checkout.
+# Ewire was chosen because it is the consumer's own lane, it builds an oracle with
+# CMake and runs cargo and a test binary, which are the three ways a lane writes.
+layer_ero_read_only_tree() {
+    # shellcheck source=scripts/lib/read-only-tree.sh
+    source scripts/lib/read-only-tree.sh
+    local mode
+    ro_tree_probe "$repo_root"
+    mode=$?
+    if (( mode == 2 )); then
+        if [[ -n "${WZ_RO_TREE_REQUIRE:-}" ]]; then
+            echo "  Ero FAIL — required (WZ_RO_TREE_REQUIRE set) but $RO_TREE_WHY" >&2
+            return 1
+        fi
+        echo "Layer Ero SKIP ($RO_TREE_WHY; set WZ_RO_TREE_REQUIRE=1 to make it a FAIL)"
+        return 0
+    fi
+    local key ro_artifacts
+    key="$(printf '%s' "$repo_root" | sha256sum | cut -c1-12)"
+    ro_artifacts="${WZ_RO_TREE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/watching-zenoh/ro-tree/$key}"
+    echo "  Ero: checkout $repo_root read-only ($([[ $mode == 0 ]] && echo bwrap || echo sudo))," \
+        "artifact root $ro_artifacts"
+    # The inner run must not inherit an outer location that names the checkout.
+    ro_tree_exec "$repo_root" "$ro_artifacts" \
+        env -u RUNCI_LOG_DIR -u RUNCI_LOG_FILE -u CARGO_TARGET_DIR -u WZ_ARTIFACT_SHIM_TARGET_DIR \
+        bash -c 'bash scripts/build-zenoh-pico-cli.sh \
+            && WZ_PICO_REQUIRE=1 bash scripts/run-ci.sh --layer Ewire' \
+        || return 1
+    if [[ ! -x "$ro_artifacts/target/zenoh-pico-cli/z_put" ]]; then
+        echo "  Ero FAIL — the pico oracle is not under the artifact root" \
+            "($ro_artifacts/target/zenoh-pico-cli)" >&2
+        return 1
+    fi
+    echo "  Ero: the oracle built and Layer Ewire passed with nothing written into the checkout"
+}
+
 # R311y760 (carry N65) — the same witness against the OTHER reference
 # implementation. Ewire closed "every analyzer witness is self-authored" for
 # zenoh-pico and explicitly did NOT close it for stock zenoh: the two are
@@ -26515,6 +26577,7 @@ run_layer C1cd layer_c1cd_api_compat_c_attachment || overall=1
 run_layer C1by layer_c1by_replay_engine || overall=1
 run_layer Epico layer_epico_library_oracles || overall=1
 run_layer Ewire layer_ewire_pico_wire_dissection || overall=1
+run_layer Ero layer_ero_read_only_tree || overall=1
 run_layer Ewirez layer_ewirez_zenohd_wire_dissection || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1

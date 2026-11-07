@@ -120,9 +120,8 @@ pub fn artifact(rel: impl AsRef<Path>) -> PathBuf {
 /// [`artifact_dir`] puts that workspace's products (`build-sce.sh` builds it
 /// there under the same rule); the provenance is still read from the source.
 pub fn locate_sce_codegen(sce_workspace: &Path) -> PathBuf {
-    let bin = artifact_dir(sce_workspace)
-        .join("target/release")
-        .join(format!("sce-codegen{}", std::env::consts::EXE_SUFFIX));
+    let release = artifact_dir(sce_workspace).join("target/release");
+    let bin = release.join(format!("sce-codegen{}", std::env::consts::EXE_SUFFIX));
     if !bin.exists() {
         panic!(
             "sce-codegen binary not found at {}\n\

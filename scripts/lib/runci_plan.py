@@ -158,6 +158,9 @@ LANE = re.compile(r"^bash scripts/run-ci\.sh --layer ([A-Za-z0-9]+)$")
 # failed it.
 SANDBOX = "scripts/lib/netns-sandbox.sh"
 SANDBOX_CAPABILITY = "userns-netns"
+# The read-only checkout a lane runs another lane in (`scripts/lib/read-only-tree.sh`): a bwrap
+# user namespace, or sudo's mount namespace on a hosted runner.
+RO_TREE_SANDBOX = "scripts/lib/read-only-tree.sh"
 
 # Programs a lane fails without because its HOSTED JOB arms it, so no arming in run-ci.sh says so
 # and the census cannot (see the docstring). Each entry quotes the lane's failure sentence.
@@ -268,7 +271,11 @@ def lane_asks(text: str, commands: dict[str, list[str]],
             progs, pkgs = census.requirements(flag)
             needs.update(progs)
             packages.update(pkgs)
-        caps = [SANDBOX_CAPABILITY] if SANDBOX in body else []
+        # The read-only checkout of Layer Ero (`RO_TREE_SANDBOX`) is a bwrap user namespace on
+        # a machine without sudo, a subset of what the netns sandbox capability tests, so a
+        # machine that passes that test can mount it.
+        sandboxed = SANDBOX in body or RO_TREE_SANDBOX in body
+        caps = [SANDBOX_CAPABILITY] if sandboxed else []
         out[lane] = Asks(sorted(needs), sorted(packages), caps)
     return out
 
