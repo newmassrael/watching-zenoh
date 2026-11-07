@@ -325,7 +325,7 @@ else:
 
     # The acknowledgement is a ROW in docs/hosted-red-acks.md that the range being
     # pushed adds, naming this run (scripts/lib/hosted_red_ack.py states the form).
-    # It was an environment variable on the pushing process (`WZ_ACK_RED`) until
+    # It was an environment variable on the pushing process (WZ_ACK_RED) until
     # the push queue: a verdict that depends on the pusher's environment cannot be
     # reproduced by an integrator that runs this hook on a cherry-picked commit
     # and pushes for the author. The row is in the commit, so any process that
