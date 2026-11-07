@@ -1601,7 +1601,10 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// eighteen new symbols and the code `WZ_CAPI_C_E_FULL`. Each set is a feature that is off in a
 /// build made as the reference is, so a library without it exports none of its doors and the
 /// number says which header the library was built against, not which doors it has.
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 8;
+///
+/// It moves to 9 for the conformance digest of the build (`crate::conformance`,
+/// `wz_capi_c_conformance_digest`, decision C15), one new symbol present in every build.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 9;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;

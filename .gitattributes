@@ -8,6 +8,14 @@
 # Declaring the kind rather than the one file is what covers the next golden.
 *.golden text eol=lf
 
+# A Python source a Rust test embeds and reads line by line is the same kind of
+# bytes. `wz-session-core`'s lifecycle vocabulary test `include_str!`s
+# `scripts/lib/wz_node.py` and looks for lines ending in "\n"; on the Windows
+# checkout the file arrived with CRLF and hosted `portability (windows-latest)`
+# failed on run 42281344423 while every Linux lane passed. Every tracked .py is
+# LF in the index already, so this declares what is there and moves no byte.
+*.py text eol=lf
+
 # R3012 — a tracked capture is compared byte for byte by an `include_bytes!`
 # oracle, and a pcap is not text. Git's own detection keeps it binary today
 # because a pcap header holds NUL bytes; this makes that a declaration rather

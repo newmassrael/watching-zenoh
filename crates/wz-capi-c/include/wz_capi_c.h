@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 8
+#define WZ_CAPI_C_ABI_REVISION 9
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */

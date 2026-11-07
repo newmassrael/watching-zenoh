@@ -12144,8 +12144,10 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu --features client-slot --lib slot_replay::tests --quiet || return 1
     # The querier (`slot_querier`, which is `query-get`'s): a reply into the cell of its query after
     # the subscriptions', cut at the size it keeps, an error counted and kept nowhere, a delete, the
-    # end of a query as one final or one timeout, and the watch that says the counts.
-    _runci_guarded_test "C1m mcu querier" 9 \
+    # end of a query as one final or one timeout, the watch that says the counts, and the keys a
+    # node's queriers end with what it learns when it runs (`LaunchedKeys`): 10 = what that
+    # command PRINTED.
+    _runci_guarded_test "C1m mcu querier" 10 \
         cargo test -p wz-session-mcu --features client-slot,query-get --lib slot_querier::tests --quiet || return 1
     # R3167 moved EVERY wz-session-lwip leg below by FIVE, and the legs that turn
     # on `codec-push` by SIX: the driver's lend tests (the datagram equals the
