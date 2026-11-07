@@ -6770,8 +6770,9 @@ layer_c1ay_cargo_test_router_hat() {
     # Item 751 step 7d -- the flag reaches a PEER at the binary: a run mode with no partition
     # refuses it by name, and `--peer` is not refused by that rule but by the value's own parse.
     # 2, read off the command's total.
+    wz_test_args wz-ap-demo peer_gateway_south_binary
     _runci_guarded_test "C1AY peer_gateway_south_binary 2" 2 \
-        cargo test -p wz-ap-demo --features routing-peer,zenoh-config --test peer_gateway_south_binary --quiet || return 1
+        cargo test -p wz-ap-demo --features routing-peer,zenoh-config "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R311y842 — the stock-zenoh config -> argv expansion, for the same reason
     # the parser above states: it returns Result rather than exiting, precisely
     # so the accept/reject SET can be tested, and an exiting expander could not
@@ -6939,8 +6940,9 @@ layer_c1ay_cargo_test_router_hat() {
     # and so does the refusal of a widening with no set to widen. The count is
     # pinned rather than loose for the reason it was pinned at 2: a test that
     # stops being compiled leaves a green run behind it.
+    wz_test_args wz-ap-demo check_topology_binary
     _runci_guarded_test "C1AY check_topology_binary 4" 4 \
-        cargo test -p wz-ap-demo --features zenoh-config --test check_topology_binary --quiet || return 1
+        cargo test -p wz-ap-demo --features zenoh-config "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # `--check-sessions`: the verdict `--sessions` would give on a document, for
     # this build, with nothing started. The same argv -> exit status seam as the
     # topology check above, and its own test target for the same reason. Four
@@ -6948,8 +6950,9 @@ layer_c1ay_cargo_test_router_hat() {
     # 3, stands alone) and a fifth, the document's device requirement answered as
     # the check (`device_requires_answers_an_accepted_document_and_refuses_as_the_check`),
     # pinned so a test that stops being compiled leaves no green run behind it.
+    wz_test_args wz-ap-demo check_sessions_binary
     _runci_guarded_test "C1AY check_sessions_binary 5" 5 \
-        cargo test -p wz-ap-demo --test check_sessions_binary --quiet || return 1
+        cargo test -p wz-ap-demo "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # The `driver` key of a `--sessions` session: roles that run on the session the
     # document names, over a real loopback link (a listener holding a subscriber and
     # a queryable, a client that publishes, puts, deletes and asks), a refused
@@ -6961,27 +6964,32 @@ layer_c1ay_cargo_test_router_hat() {
     # listener (a stream at a decimal rate with a made payload, a replay of hex and text samples
     # with mutations, each counted at the length sent), and `--driver-vocabulary` is the role table.
     # A seventh: a Poisson stream and a stream of bursts reach the listener in full.
+    wz_test_args wz-ap-demo sessions_driver_binary
     _runci_guarded_test "C1AY sessions_driver_binary 7" 7 \
-        cargo test -p wz-ap-demo --test sessions_driver_binary --quiet || return 1
+        cargo test -p wz-ap-demo "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # The other driver roles, one target per family, each over real `--sessions`
     # processes and each with its count pinned: liveliness (a token seen to appear
     # and go, its history, a liveliness get), and the declared querier, the
     # forwarder and the pulled subscriber. Both are in the default build.
+    wz_test_args wz-ap-demo sessions_driver_liveliness_binary
     _runci_guarded_test "C1AY sessions_driver_liveliness_binary 3" 3 \
-        cargo test -p wz-ap-demo --test sessions_driver_liveliness_binary --quiet || return 1
+        cargo test -p wz-ap-demo "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # The querier's fourth case is the closed loop (`think_ms`): each question after the last
     # one's final.
+    wz_test_args wz-ap-demo sessions_driver_query_binary
     _runci_guarded_test "C1AY sessions_driver_query_binary 4" 4 \
-        cargo test -p wz-ap-demo --test sessions_driver_query_binary --quiet || return 1
+        cargo test -p wz-ap-demo "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # The roles behind a build feature: the advanced publisher and subscriber
     # (`advanced`) and the group member and viewer (`group`). Each target is
     # `#![cfg(.. feature ..)]`, so a build that lost the feature would compile an
     # empty target and `cargo test` would exit 0 having run nothing: the count is
     # what says the tests are still there.
+    wz_test_args wz-ap-demo sessions_driver_advanced_binary
     _runci_guarded_test "C1AY sessions_driver_advanced_binary 2" 2 \
-        cargo test -p wz-ap-demo --features advanced --test sessions_driver_advanced_binary --quiet || return 1
+        cargo test -p wz-ap-demo --features advanced "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    wz_test_args wz-ap-demo sessions_driver_group_binary
     _runci_guarded_test "C1AY sessions_driver_group_binary 2" 2 \
-        cargo test -p wz-ap-demo --features group --test sessions_driver_group_binary --quiet || return 1
+        cargo test -p wz-ap-demo --features group "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R2087 (open-debt item 506) — the same argv -> exit status seam, for the qos
     # x lowlatency exclusivity that wiring `--qos` into `initiator_offer` made
     # this binary responsible for. Run at the feature set where BOTH modes are
@@ -6990,9 +6998,10 @@ layer_c1ay_cargo_test_router_hat() {
     # fired there would prove nothing about the deployment that can actually
     # negotiate both. The DEFAULT-feature build is covered too, by `pre-push`
     # over the changed crate.
+    wz_test_args wz-ap-demo exclusive_transport_modes_binary
     _runci_guarded_test "C1AY exclusive_transport_modes_binary 2" 2 \
         cargo test -p wz-ap-demo --features transport-qos,transport-lowlatency \
-        --test exclusive_transport_modes_binary --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R2096 (open-debt item 516) — the INVERSE of the arm above: every capability
     # an operator configures on an AGGREGATING mesh peer (`--max-links > 1`) must
     # be ACCEPTED, and the `--max-links 1` control sits in the same test.
@@ -7010,10 +7019,11 @@ layer_c1ay_cargo_test_router_hat() {
     # `session-extcompression` / `session-extshm` are the four capabilities the
     # ARMS table asks about — a flag whose atom is absent is dropped correctly
     # and would prove nothing.
+    wz_test_args wz-ap-demo mesh_offer_multilink_binary
     _runci_guarded_test "C1AY mesh_offer_multilink_binary 1" 1 \
         cargo test -p wz-ap-demo \
         --features transport-multilink,routing-peer,transport-lowlatency,transport-qos,session-extcompression,session-extshm \
-        --test mesh_offer_multilink_binary --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R2099 (open-debt item 512) — `listen/endpoints` is a LIST and the node binds
     # every member of it. The unit half lives in `stock_config_tests` above (the
     # argv carries both); this is the half no unit test can reach — the run-mode
@@ -7028,10 +7038,11 @@ layer_c1ay_cargo_test_router_hat() {
     # `zenoh-config` for `--config`, and BOTH binding run-modes because the two
     # hosts (`run_peer_until` / `run_router_hat_until`) wrote their own bind and
     # a fix to one would leave the other exactly as item 512 found it.
+    wz_test_args wz-ap-demo config_listen_endpoints_binary
     _runci_guarded_test "C1AY config_listen_endpoints_binary 2" 2 \
         cargo test -p wz-ap-demo \
         --features zenoh-config,routing-peer,router-hat-router,scouting-responder \
-        --test config_listen_endpoints_binary --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R2158 (unregistered open-debt item 230) — the CLIENT `--reconnect`
     # supervisor's re-dial schedule comes from `connect/retry`, and its default
     # when the document omits the section stays pico's constant.
@@ -7050,9 +7061,10 @@ layer_c1ay_cargo_test_router_hat() {
     # arms compile without it too and run under `pre-push`'s changed-crate
     # tests; the two `--config` arms are what this lane adds. 4 rather than 2
     # for that reason.
+    wz_test_args wz-ap-demo reconnect_retry_schedule_binary
     _runci_guarded_test "C1AY reconnect_retry_schedule_binary 4" 4 \
         cargo test -p wz-ap-demo --features zenoh-config \
-        --test reconnect_retry_schedule_binary --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R2159 (unregistered open-debt item 229) — the connection-retry LIFECYCLE:
     # a node told to give up finitely GIVES UP, and a node told nothing keeps
     # running.
@@ -7081,9 +7093,10 @@ layer_c1ay_cargo_test_router_hat() {
     # the seven arms cannot see the defect it guards — that one failed only
     # under a race, which is why the count and not the suite is what says the
     # rule is still present.
+    wz_test_args wz-ap-demo startup_phase_lifecycle_binary
     _runci_guarded_test "C1AY startup_phase_lifecycle_binary 8" 8 \
         cargo test -p wz-ap-demo --features zenoh-config,routing-peer \
-        --test startup_phase_lifecycle_binary --quiet || return 1
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \
@@ -19795,9 +19808,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # legs below it running a demo with no `zenoh-config` (`--config requires the
     # zenoh-config feature`, exit 2), a red only a host with zenohd can show. One
     # target with one ignored test, the count pinned as for the legs above.
+    wz_test_args wz-ap-demo sessions_driver_scout_binary
     _runci_guarded_test "M sessions scout role" 1 \
         cargo test -p wz-ap-demo --features scouting-active,scouting-responder \
-        --test sessions_driver_scout_binary -- --ignored || return 1
+        "${WZ_TEST_ARGS[@]}" -- --ignored || return 1
 }
 
 # ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────

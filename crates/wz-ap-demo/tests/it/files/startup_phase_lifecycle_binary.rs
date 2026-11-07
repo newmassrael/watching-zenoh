@@ -79,7 +79,7 @@ const LIVENESS_WATCH: Duration = Duration::from_millis(2500);
 /// two would then disagree silently, and the disagreement is exactly what these
 /// arms exist to detect.
 fn give_up_code() -> i32 {
-    const SOURCE: &str = include_str!("../src/runner.rs");
+    const SOURCE: &str = include_str!("../../../src/runner.rs");
     const NEEDLE: &str = "pub(crate) const STARTUP_PHASE_EXIT_CODE: u8 = ";
     let tail = SOURCE
         .split_once(NEEDLE)
