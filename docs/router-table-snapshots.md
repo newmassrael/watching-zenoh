@@ -403,7 +403,7 @@ cost and the rows told 1.32 % of a core moved with the host's load as they did i
 nothing of the index; the faces down under 32 hogs (94 and 45, against 14 and 19 after the index
 alone at lower load) are that load's.
 
-### 6.5 The queryables' and the tokens' stores (this round)
+### 6.5 The queryables' and the tokens' stores (round 4361)
 
 Section 6.4 left the broker hat's queryables and tokens held per face in hash maps. The phase 6
 instrument now also times a queryable, an interest in queryables and a token for each admitted
@@ -455,17 +455,121 @@ is not attributed.
 Layer Z8 passes on the tree after both, and the store's model tests
 (`crates/wz-runtime-tokio/src/client_store.rs`) hold its index to a scan of every face.
 
+### 6.6 The face table (this round)
+
+Section 6.5 left one cost of a declaration that grows with the faces under B: the face map's
+spine, copied by every write. The map is now a `PersistentMap` like the stores, so a write copies
+the path to one face: with that change alone, the copy of the tables at 2,048 faces, 7 to 9 us,
+and its release, 7 us, read 0, and under B a registration went from 15 to 1 us and an interest
+from 19 to 3 or 4. Under A the same reading found a token slower than before, 10 to 11 us become
+14 to 15: iterating a trie costs more than iterating a hash map, and the token's write was
+iterating every face. `fan_out_tier_qos`, which every control flood goes through and every Put a
+client sends that the router re-forwards into a mesh, tried every face the router held and kept
+those of one tier, and `gateway_faces` and the regions' admin text did the same for the north
+tier. A message's cost followed the faces the router held and not the faces it reached, against
+the contract of section 5.
+
+The faces are now a `FaceTable` (`crates/wz-runtime-tokio/src/router_forward/face_table.rs`): the
+map by id, and for each tier the persistent set of its faces' ids, written together by `insert`
+and `remove`, the only writers of the sets. A fan-out into a tier walks that tier's set. Two tests
+hold it: a Put from a client visits the same faces whether the router holds 64 clients or 1,024,
+and after faces of every tier come and go, each tier's set is exactly the faces the map holds in
+it.
+
+On pc2, the phase 6 instrument, p50 at 1,792 to 2,048 faces already up, three runs interleaved,
+the tree before (the hash map, each fan-out walking every face) and after, each built with each
+value:
+
+| Value | Write | Before | After |
+|---|---|---|---|
+| snapshot | register | 14 to 43 us | 2 us |
+| snapshot | subscribe | 22 to 68 us | 9 to 11 us |
+| snapshot | interest | 17 to 52 us | 3 to 4 us |
+| snapshot | queryable | 22 to 70 us | 10 to 11 us |
+| snapshot | token | 28 to 79 us | 9 to 10 us |
+| rwlock | token | 10 to 11 us | 3 to 8 us |
+
+The second run before was noisy, hence the wide ranges before.
+
+**The read side.** A third instrument, `the_puts_routed_measured_against_the_faces_up`, routes
+Puts from eight client faces to four subscribers for a window, then brings 256 idle client faces
+up, and again, to 2,048, and last takes every idle face down and routes one window more. Its first
+readings fell from about 1.5 million Puts a second with no idle face to 0.5 million at 2,048, in
+both trees and under both values. Under callgrind the instructions per Put did not grow (19,442
+and 17,479 Puts a second under the tool at 0 and 2,048 faces), so no walk was left. The window
+after every idle face had left read where the last band did, 0.49 to 0.59 million: the fall was
+the sequence of windows, not the faces. The subscribers' links were recorders that keep every
+frame, some 18 million in one window. With links that count the frames and keep none, three runs
+of each value:
+
+| Value | Idle faces 0 | 256 to 2,048 | After all left |
+|---|---|---|---|
+| rwlock | 2,238,693 to 2,411,245 | 1,813,329 to 2,482,373 | 2,345,254 to 2,542,642 |
+| snapshot | 2,026,448 to 2,429,332 | 2,231,435 to 2,526,024 | 2,297,564 to 2,534,777 |
+
+A run of each under `perf stat` read the same (1.88 to 2.38 million and 2.40 to 2.60 million) at
+1.08 to 1.29 instructions per cycle, 0.28 to 0.40 % of cache references missed and 1,700 page
+faults in 30 s. The faces up do not move a Put's cost under either value.
+
+**What the persistent face map costs a message.** Every Put looks its faces up by id, the face it
+came from and each face it goes to, and a lookup in the trie walks a level per five bits of hash
+where the hash map probed one group. The same instrument on the tree before (the hash map) and
+after, over the counting links, three runs interleaved, the mean of every window:
+
+| Value | Before | After |
+|---|---|---|
+| rwlock | 2,654,330 | 2,453,396 |
+| snapshot | 2,442,243 | 2,551,446 |
+
+The same lookups read 8 % slower under A and 4 % faster under B, so the difference between two
+builds is mostly where the linker put the code, not what it does. Two runs of each under
+`perf stat` count what moves less with the layout, the process's instructions over the Puts it
+routed (the spinning of contended locks included): 35,537 to 36,304 instructions per Put
+before and 36,737 to 37,382 after, 3 % more under both values, and 28,840 to 31,573 cycles per
+Put before against 30,101 to 31,308 after, within each other's spread. `perf record` puts the
+trie's lookup at 2.4 % of the cycles after, where the hash map's was inlined into its callers.
+A persistent face map costs a message about 3 % more instructions and no time a run can tell
+from its own spread; what it buys is the write under B, which no longer copies a pointer per
+face.
+
+**The phase 0 instrument over the counting links.** Every instrument of this note now counts. The
+readings of sections 6.1 to 6.3 were taken over the recorder, and the phase 0 instrument routes
+its window with no writer before its window with one, so its two figures were also two windows
+in sequence. Over the counting links the windows no longer drift (the window after every idle
+face left reads as the first), so the order no longer biases them. On the tree after, four runs
+of each value alternating, on pc2 at a host load of 31 to 38:
+
+| | rwlock | snapshot |
+|---|---|---|
+| Puts routed a second, no writer | 2,205,581; 2,347,121; 2,417,163; 2,358,707 | 2,420,152; 2,420,070; 2,493,340; 2,272,535 |
+| Puts routed a second, with the writer | 2,152,892; 2,329,346; 1,970,961; 2,279,049 | 2,066,945; 2,128,950; 1,951,140; 1,804,886 |
+| Declarations in the window, p50, p99 | 284 to 290, 10,037 to 10,054 us, 10,351 to 13,212 us | 183,282 to 206,338, 12 to 13 us, 19 to 24 us |
+| Face transitions, p50 | 10,026 to 10,084 us | 8 to 10 us |
+
+A declaration under B, 516 to 566 us at the median in section 6.2, is now 12 to 13 us: the stores
+of sections 6.3 to 6.5 and the face table leave a write only the paths it changes. With no writer
+the two values route 2.3 and 2.4 million Puts a second, the difference within either's spread.
+With the writer B's readers route 17 % fewer than with none, and 9 % fewer than A's with the
+writer, while B's writer completes about 670 times A's writes, each a new version the readers load
+and each retiring the routes it touches; A's readers lose 6 % to a writer that gets in a hundred
+times a second.
+
 ## 7. What is not decided, and what could make this wrong
 
 - **The graph's copy.** `LinkstateNetwork` holds one shortest-path tree per node, O(N squared) for N nodes
   of a mesh. A write that changes the topology copies it under B; a declaration does not. Whether topology
   writes are frequent enough on a large mesh for this to matter is a phase 5 reading.
-- **The face map's copy.** Every write under B copies the face map's spine (one pointer per face): 10 us
-  at 2,048 faces, measured in phase 6. After section 6.5 it is the last cost of a declaration that
-  grows with the faces: a registration, a subscription, an interest, a queryable and a token under B
-  each cost 7 to 15 us more at 2,048 faces than at 256. It stays a hash map because every message
-  reads it; a persistent face map would make the write logarithmic and every message's lookup a trie
-  walk, and which a router should pay is a measurement of both against the message rate, not yet made.
+- **A message's lookups of its faces.** The face map is persistent since section 6.6, so a write
+  under B copies one face's path, and every message pays for it in its lookups: about 3 % more
+  instructions per Put, no time a run tells from its spread. A route names its faces by id and
+  each message looks each one up; a route that held its faces' state would take the lookups off
+  the message, but a route outlives the version it was computed from, so it would read a face's
+  facts as they were, and what may be read stale is not yet stated. Not done until a reading asks
+  for it.
+- **The readers under a busy writer.** With a writer declaring without pause, B's readers route
+  17 % fewer Puts than with none and 9 % fewer than A's (section 6.6): each of the writer's
+  versions is loaded by every reader and retires the routes it touches. Which of the two the
+  readers pay is not separated.
 - **The tick.** Under B the tick that finds nothing dirty need not publish; whether to split it into a read
   that decides and a write that acts is decided in phase 4 by what it writes (queries and interests timed
   out, egress swept: the last is per-face runtime and needs no version).
