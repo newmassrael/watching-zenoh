@@ -2803,3 +2803,27 @@ image = "zephyr-admin-node"
 when = ["WZ_NET_BACKEND_ZEPHYR_SOCKETS", "WZ_ROLE_PEER", "WZ_FIXED_MEMORY"]
 features = ["fixed-admin"]
 defaults = "off"
+
+# The policies the Zephyr node reads. A policy is a field of the build's session policy, and a build
+# gives it a value only where the code that reads it is in the image and is run by it, so the image
+# names the policies it reads and a policy it does not name has no symbol in its Kconfig tree: a
+# deployer who asks for one gets Zephyr's refusal of an undefined symbol, not a setting that changes
+# nothing. What each row rests on is the call path from the image's own sources, not the crates it
+# links: the session factory of every profile builds its transmit queue from the build's policy
+# (`TxQueueConf::default()`), which is where the two transmit policies are read, and the declaration
+# replay is paced only by the client node of the slot profile (`SlotClientNode::new`). The other ten
+# policies are read by code this image does not run: the tokio runtime, the C ABIs (the node states
+# its own sequence-number resolution), the node clock and event log (not linked), the supervisor and
+# the router, or are an assertion of the build and no run-time read.
+[[policy_image]]
+policy = "tx-no-progress-deadline"
+image = "zephyr-admin-node"
+
+[[policy_image]]
+policy = "tx-expiry-keeps-session"
+image = "zephyr-admin-node"
+
+[[policy_image]]
+policy = "declaration-sync-pacing"
+image = "zephyr-admin-node"
+requires = "WZ_ROLE_CLIENT && WZ_FIXED_MEMORY"

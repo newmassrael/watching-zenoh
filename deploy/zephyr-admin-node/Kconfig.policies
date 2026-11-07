@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit image-policies:zephyr-admin-node.
+# Do not edit: `wz_config.py --check` fails when this file is stale.
+
+menu "wz policies"
+
+comment "Each policy is behaviour beyond upstream; the default of every one is upstream's."
+comment "Only the policies this image's code reads are here."
+
+config WZ_POLICY_TX_NO_PROGRESS_DEADLINE
+	bool "tx-no-progress-deadline"
+	default n
+	help
+	  Whether a blocking message gets a second bound beside its total wait: the
+	  wait with no progress. Off, only the total wait bounds it. On, it is also
+	  given up when TX_NO_PROGRESS_WINDOW_US passes with no fragment out, and the
+	  total wait still ends it, whichever comes first. A fragment out is progress
+	  and starts the window again, and the total wait is never made longer.
+	  Upstream: Gives a blocking message one wait_before_close for the whole of it,
+	  however many fragments go out: its deadline has no cap to extend by, so a
+	  fragment out leaves the deadline where it is.
+
+config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
+	bool "tx-expiry-keeps-session"
+	default n
+	help
+	  What happens when a blocking message finds no room within its deadline. Off,
+	  the session is closed as unresponsive and the send reports success. On, the
+	  message is dropped, the send reports that the transport was not available,
+	  and the session stays open: a slow link costs the message and not the
+	  session. A link that stays blocked is closed after TX_EXPIRY_CLOSE_AFTER such
+	  messages in a row, when that limit is not 0. A multicast group never closes
+	  either way.
+	  Upstream: Closes the session as unresponsive when a blocking message found no
+	  room in its deadline, and tells the sender nothing.
+
+config WZ_POLICY_DECLARATION_SYNC_PACING
+	bool "declaration-sync-pacing"
+	default n
+	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY
+	help
+	  How a node tells a peer its declarations again after a reconnect. Off, all of
+	  them are sent at once. On, they are sent in turns of
+	  DECLARATION_SYNC_BURST_MESSAGES with DECLARATION_SYNC_INTERVAL_MS between
+	  turns, and the session is served during the waits, so a node with many
+	  declarations does not hand its peer a burst or stop answering while it sends
+	  them. A declaration made while the replay runs is sent in its turn, after
+	  everything it depends on; the retraction of one the peer was never told of
+	  sends nothing.
+	  Upstream: Replays every declaration it holds to a new peer in one call, as
+	  soon as the session is open again.
+
+endmenu

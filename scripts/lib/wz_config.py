@@ -30,7 +30,10 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --emit image-kconfig:IMAGE    print the axes of a declared image as Kconfig choices
                                   (<dir>/Kconfig.axes)
     --emit image-cmake:IMAGE      print the CMake that maps those choices to the image crate's
-                                  features (<dir>/wz_axes.cmake)
+                                  features (<dir>/wz_axes.cmake), and the policies the image reads
+                                  to the cargo environment that states them
+    --emit image-policies:IMAGE   print the policies an image reads as Kconfig (<dir>/Kconfig.policies,
+                                  written only while the declaration names one for the image)
     --write                       write every one of them
     --features ABI CONFIG         turn a Kconfig result (or a pico config.h) into the cargo arguments
     --features pico --engine coop CONFIG
@@ -286,6 +289,7 @@ def decl_of(data: dict) -> dict:
         "order": [c["id"] for c in data["capability"]],
         "limits": list(data["limit"]),
         "policies": list(data.get("policy", [])),
+        "policy_images": list(data.get("policy_image", [])),
         "images": [i["id"] for i in data.get("image", [])],
         "image_dirs": {i["id"]: i["dir"] for i in data.get("image", [])},
         "axes": list(data.get("axis", [])),
@@ -325,6 +329,7 @@ def validate_decl(data: dict) -> list[str]:
     out += validate_limits(data["limit"])
     out += validate_policies(data.get("policy", []), data["catalog_version"])
     out += validate_images(data)
+    out += validate_policy_images(data)
     out += validate_switches(data)
     symbols = [c["kconfig"] for c in data["capability"]] + [l["kconfig"] for l in data["limit"]]
     for pol in data.get("policy", []):
@@ -432,6 +437,59 @@ def validate_images(data: dict) -> list[str]:
             out.append(f"a cargo rule of {image!r} when {when} adds nothing")
         if rule.get("defaults", "off") != "off":
             out.append(f"a cargo rule of {image!r} says defaults = {rule.get('defaults')!r}; only \"off\" is a value")
+    return out
+
+
+POLICY_IMAGE_KEYS = {"policy", "image", "requires"}
+REQUIRES_RE = re.compile(r"(\s*(!|&&|\|\||\(|\)|[A-Z][A-Z0-9_]*))+\s*")
+SYMBOL_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+
+
+def validate_policy_images(data: dict) -> list[str]:
+    """Which policies an image reads (`[[policy_image]]`), and when.
+
+    A policy is a field of the session policy of a build, and an image's build gives it a value
+    only if the code that reads it is in the image and is run by it. That is a fact about the
+    image, so the image names it: a policy no row names is not in the image's Kconfig tree, and a
+    deployer who asks for it gets Zephyr's own refusal of an undefined symbol, where a symbol that
+    changed nothing would be taken for a setting. `requires` is a Kconfig expression over the
+    options of the image's axes and the global axes, as a cargo rule's `when` is, and holds the
+    policy to the profiles that run its code.
+    """
+    out: list[str] = []
+    rows = data.get("policy_image", [])
+    for row in rows:
+        unknown = set(row) - POLICY_IMAGE_KEYS
+        if unknown:
+            out.append(f"a policy_image has keys this reader does not know: {sorted(unknown)}")
+    policies = {p.get("id") for p in data.get("policy", [])}
+    images = {i.get("id") for i in data.get("image", [])}
+    axes = {a.get("id"): a for a in data.get("axis", [])}
+    seen: set[tuple] = set()
+    for row in rows:
+        policy, image = row.get("policy"), row.get("image")
+        if policy not in policies:
+            out.append(f"a policy_image names policy {policy!r}, which is not declared")
+        if image not in images:
+            out.append(f"a policy_image names image {image!r}, which is not declared")
+            continue
+        if (policy, image) in seen:
+            out.append(f"policy {policy!r} is named twice for image {image!r}")
+        seen.add((policy, image))
+        requires = row.get("requires")
+        if requires is None:
+            continue
+        if not isinstance(requires, str) or REQUIRES_RE.fullmatch(requires) is None:
+            out.append(f"policy {policy!r} of {image!r}: `requires` is not a Kconfig expression "
+                       f"over option symbols ({requires!r})")
+            continue
+        own = {o["kconfig"] for o in data.get("axis_option", [])
+               if o.get("axis") in axes
+               and ("image" not in axes[o["axis"]] or axes[o["axis"]].get("image") == image)}
+        for symbol in SYMBOL_RE.findall(requires):
+            if symbol not in own:
+                out.append(f"policy {policy!r} of {image!r} requires {symbol}, which is no option "
+                           f"of the image's axes or of a global axis")
     return out
 
 
@@ -1774,9 +1832,28 @@ def emit_rust_feature_bits(decl: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def policy_kconfig(pol: dict, requires: str | None = None) -> list[str]:
+    """One policy as Kconfig, followed by a blank line. A bool policy is a `bool` symbol that
+    defaults to `n`; a choice is a Kconfig `choice` with one option per value, the default being
+    upstream's. Each help ends with what upstream does. With `requires` the symbol (the choice,
+    for a choice) `depends on` it, so a profile that does not run the policy's code has no symbol
+    to set."""
+    help_text = pol["help"].strip().splitlines() + textwrap.wrap(
+        f"Upstream: {pol['upstream'].strip()}", width=78)
+    depends = [f"\tdepends on {requires}"] if requires else []
+    if pol["kind"] == "bool":
+        out = [f"config {pol['kconfig']}", f'\tbool "{pol["id"]}"', "\tdefault n"] + depends + ["\thelp"]
+        return out + help_lines("\n".join(help_text)) + [""]
+    default = f"{pol['kconfig']}_{snake(pol['default']).upper()}"
+    out = [f"choice {pol['kconfig']}", f'\tprompt "{pol["id"]}"', f"\tdefault {default}"] + depends + ["\thelp"]
+    out += help_lines("\n".join(help_text))
+    for value in pol["choices"]:
+        out += ["", f"config {pol['kconfig']}_{snake(value).upper()}", f'\tbool "{value}"']
+    return out + ["", "endchoice", ""]
+
+
 def emit_kconfig_policies(decl: dict) -> str:
-    """A bool policy is a `bool` symbol that defaults to `n`; a choice is a Kconfig `choice` with
-    one option per value, the default being upstream's. Each help ends with what upstream does."""
+    """Every policy of the declaration, for the host tree."""
     out = generated_header("#", "kconfig-policies") + [
         "",
         'menu "wz policies"',
@@ -1785,19 +1862,31 @@ def emit_kconfig_policies(decl: dict) -> str:
         "",
     ]
     for pol in decl["policies"]:
-        help_text = pol["help"].strip().splitlines() + textwrap.wrap(
-            f"Upstream: {pol['upstream'].strip()}", width=78)
-        if pol["kind"] == "bool":
-            out += [f"config {pol['kconfig']}", f'\tbool "{pol["id"]}"', "\tdefault n", "\thelp"]
-            out += help_lines("\n".join(help_text))
-            out.append("")
-            continue
-        default = f"{pol['kconfig']}_{snake(pol['default']).upper()}"
-        out += [f"choice {pol['kconfig']}", f'\tprompt "{pol["id"]}"', f"\tdefault {default}", "\thelp"]
-        out += help_lines("\n".join(help_text))
-        for value in pol["choices"]:
-            out += ["", f"config {pol['kconfig']}_{snake(value).upper()}", f'\tbool "{value}"']
-        out += ["", "endchoice", ""]
+        out += policy_kconfig(pol)
+    out.append("endmenu")
+    return "\n".join(out) + "\n"
+
+
+def image_policy_rows(decl: dict, image: str) -> list[tuple[dict, str | None]]:
+    """The policies `image` reads, in the declaration's order, each with the expression that holds
+    it to the profiles that run its code (`[[policy_image]]`)."""
+    rows = {r["policy"]: r.get("requires") for r in decl.get("policy_images", []) if r["image"] == image}
+    return [(pol, rows[pol["id"]]) for pol in decl.get("policies", []) if pol["id"] in rows]
+
+
+def emit_image_policies(decl: dict, image: str) -> str:
+    """The policies of `image` as Kconfig: only those its build reads (`[[policy_image]]`), each
+    depending on what holds it to the profiles that run its code."""
+    out = generated_header("#", f"image-policies:{image}") + [
+        "",
+        'menu "wz policies"',
+        "",
+        'comment "Each policy is behaviour beyond upstream; the default of every one is upstream\'s."',
+        'comment "Only the policies this image\'s code reads are here."',
+        "",
+    ]
+    for pol, requires in image_policy_rows(decl, image):
+        out += policy_kconfig(pol, requires)
     out.append("endmenu")
     return "\n".join(out) + "\n"
 
@@ -1961,7 +2050,32 @@ def emit_image_cmake(decl: dict, image: str) -> str:
         if rule.get("defaults") == "off":
             out.append("  set(wz_axes_no_default_features NO_DEFAULT_FEATURES)")
         out.append("endif()")
+    out += policy_env_cmake(decl, image)
     return "\n".join(out) + "\n"
+
+
+def policy_env_cmake(decl: dict, image: str) -> list[str]:
+    """`wz_axes_policy_env`: the `WZ_POLICY_<NAME>=<value>` of every policy of `image` whose
+    Kconfig value is not upstream's, for the image's CMake to hand to `wz_zephyr_rust_app` as
+    cargo environment, where `SessionPolicy` reads it. A value that is upstream's states nothing,
+    as `resolved_policy_env` leaves it out, so an image that sets no policy builds as it did.
+    A symbol the build's Kconfig does not have (its `depends on` does not hold) is not set in
+    CMake, so its condition is false."""
+    rows = image_policy_rows(decl, image)
+    if not rows:
+        return []
+    out = ["", 'set(wz_axes_policy_env "")']
+    for pol, _ in rows:
+        if pol["kind"] == "bool":
+            out += [f"if(CONFIG_{pol['kconfig']})",
+                    f"  list(APPEND wz_axes_policy_env {pol['kconfig']}=on)", "endif()"]
+            continue
+        for value in pol["choices"]:
+            if value != pol["default"]:
+                symbol = f"{pol['kconfig']}_{snake(value).upper()}"
+                out += [f"if(CONFIG_{symbol})",
+                        f"  list(APPEND wz_axes_policy_env {pol['kconfig']}={value})", "endif()"]
+    return out
 
 
 def defconfig_path(original: str) -> pathlib.Path:
@@ -2026,21 +2140,32 @@ def generated_files(decl: dict) -> dict[str, tuple[pathlib.Path, str]]:
         base = ROOT / decl["image_dirs"][image]
         out[f"image-kconfig:{image}"] = (base / "Kconfig.axes", emit_image_kconfig(decl, image))
         out[f"image-cmake:{image}"] = (base / "wz_axes.cmake", emit_image_cmake(decl, image))
+        if image_policy_rows(decl, image):
+            out[f"image-policies:{image}"] = (base / "Kconfig.policies", emit_image_policies(decl, image))
     return out
 
 
 RSOURCE_RE = re.compile(r'^\s*rsource\s+"([^"]+)"', re.MULTILINE)
 
 
-def check_image_sources(image: str, text: str) -> list[str]:
+def check_image_sources(image: str, text: str, has_policies: bool = False) -> list[str]:
     """An image's Kconfig that sources the global axes sources the capabilities too: an option of a
     global axis selects capability symbols, and Zephyr refuses a select of a symbol the tree does
-    not define."""
+    not define. An image that reads policies sources its own `Kconfig.policies` and never the host
+    tree's `../Kconfig.policies`, which names every policy and so offers the ones the image's code
+    does not read."""
     sourced = set(RSOURCE_RE.findall(text))
+    out = []
     if "../Kconfig.axes" in sourced and "../Kconfig.capabilities" not in sourced:
-        return [f"{image}: its Kconfig sources ../Kconfig.axes but not ../Kconfig.capabilities, "
-                "whose symbols the global axes select"]
-    return []
+        out.append(f"{image}: its Kconfig sources ../Kconfig.axes but not ../Kconfig.capabilities, "
+                   "whose symbols the global axes select")
+    if "../Kconfig.policies" in sourced:
+        out.append(f"{image}: its Kconfig sources ../Kconfig.policies, which names every policy; "
+                   "an image's policies are its own Kconfig.policies (`[[policy_image]]`)")
+    if has_policies and "Kconfig.policies" not in sourced:
+        out.append(f"{image}: it reads policies (`[[policy_image]]`) but its Kconfig does not source "
+                   "its own Kconfig.policies")
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -2649,7 +2774,12 @@ def cmd_check() -> int:
     for image in decl["images"]:
         kconfig = ROOT / decl["image_dirs"][image] / "Kconfig"
         if kconfig.is_file():
-            findings += check_image_sources(image, kconfig.read_text(encoding="utf-8"))
+            findings += check_image_sources(image, kconfig.read_text(encoding="utf-8"),
+                                            bool(image_policy_rows(decl, image)))
+        own_policies = ROOT / decl["image_dirs"][image] / "Kconfig.policies"
+        if f"image-policies:{image}" not in files and own_policies.exists():
+            findings.append(f"{own_policies.relative_to(ROOT)} exists, but the declaration names no "
+                            f"policy for image {image}: remove it")
     findings += check_caps_rs(decl, CAPS_RS.read_text(encoding="utf-8"))
     findings += check_open_facilities_rs(decl, OPEN_FACILITIES_RS.read_text(encoding="utf-8"))
     for abi, path in MANIFESTS.items():
@@ -3689,6 +3819,71 @@ def cmd_selftest() -> int:
            and check_image_sources(
                "img", 'rsource "../Kconfig.capabilities"\nrsource "../Kconfig.axes"\n') == []
            and check_image_sources("img", 'rsource "Kconfig.axes"\n') == [])
+
+    # The policies an image reads: its own Kconfig, the environment that states them, and the
+    # refusal of a row that names what the image does not have.
+    image_policy = (with_global + POLICY_SAMPLE + """
+[[policy_image]]
+policy = "eager-flush"
+image = "img"
+
+[[policy_image]]
+policy = "wire-mode"
+image = "img"
+requires = "WZ_MODE_P && !WZ_SIDE_R"
+""")
+    expect("a sample image that reads policies validates",
+           validate_decl(read_decl_toml(image_policy)) == [])
+    ipdecl = decl_of(read_decl_toml(image_policy))
+    ikconfig = emit_image_policies(ipdecl, "img")
+    expect("an image's policies are Kconfig, each depending on what holds it to its profile",
+           "config WZ_POLICY_EAGER_FLUSH\n\tbool \"eager-flush\"\n\tdefault n\n\thelp\n" in ikconfig
+           and "choice WZ_POLICY_WIRE_MODE\n\tprompt \"wire-mode\"\n\tdefault WZ_POLICY_WIRE_MODE_OS_DEFAULT\n"
+               "\tdepends on WZ_MODE_P && !WZ_SIDE_R\n\thelp\n" in ikconfig)
+    expect("a policy no row names is not in the image's Kconfig",
+           "WZ_POLICY_WIRE_MODE" not in emit_image_policies(
+               decl_of(read_decl_toml(image_policy.replace(
+                   '[[policy_image]]\npolicy = "wire-mode"\nimage = "img"\nrequires = "WZ_MODE_P && !WZ_SIDE_R"\n',
+                   ""))), "img"))
+    icmake = emit_image_cmake(ipdecl, "img")
+    expect("a bool policy is stated as on, a choice by each value that is not upstream's, and upstream's is not stated",
+           "set(wz_axes_policy_env \"\")\n" in icmake
+           and "if(CONFIG_WZ_POLICY_EAGER_FLUSH)\n"
+               "  list(APPEND wz_axes_policy_env WZ_POLICY_EAGER_FLUSH=on)\nendif()\n" in icmake
+           and "if(CONFIG_WZ_POLICY_WIRE_MODE_ON)\n  list(APPEND wz_axes_policy_env WZ_POLICY_WIRE_MODE=on)\n" in icmake
+           and "if(CONFIG_WZ_POLICY_WIRE_MODE_OFF)\n  list(APPEND wz_axes_policy_env WZ_POLICY_WIRE_MODE=off)\n" in icmake
+           and "CONFIG_WZ_POLICY_WIRE_MODE_OS_DEFAULT" not in icmake)
+    expect("an image that reads no policy has no policy environment and no policy Kconfig",
+           "wz_axes_policy_env" not in emit_image_cmake(gdecl, "img")
+           and "image-policies:img" not in generated_files(gdecl))
+    expect("an image that reads policies has its Kconfig.policies among the derived files",
+           "image-policies:img" in generated_files(ipdecl))
+
+    def policy_image_refused(old: str, new: str, words: str) -> bool:
+        return any(words in p for p in validate_decl(read_decl_toml(image_policy.replace(old, new))))
+
+    expect("a row naming a policy that is not declared is refused",
+           policy_image_refused('policy = "eager-flush"\nimage = "img"', 'policy = "other"\nimage = "img"',
+                                "which is not declared"))
+    expect("a row naming an image that is not declared is refused",
+           policy_image_refused('policy = "eager-flush"\nimage = "img"', 'policy = "eager-flush"\nimage = "nope"',
+                                "image 'nope'"))
+    expect("a policy named twice for one image is refused",
+           any("named twice" in p for p in validate_decl(read_decl_toml(
+               image_policy + '\n[[policy_image]]\npolicy = "eager-flush"\nimage = "img"\n'))))
+    expect("a requires naming a symbol that is no option of the image or a global axis is refused",
+           policy_image_refused('requires = "WZ_MODE_P && !WZ_SIDE_R"', 'requires = "WZ_NOPE"', "no option"))
+    expect("a requires that is not an expression is refused",
+           policy_image_refused('requires = "WZ_MODE_P && !WZ_SIDE_R"', 'requires = "WZ_MODE_P and"',
+                                "not a Kconfig expression"))
+    expect("a key a policy_image does not have is refused",
+           policy_image_refused('policy = "eager-flush"\nimage = "img"',
+                                'policy = "eager-flush"\nimage = "img"\nnote = "x"', "does not know"))
+    expect("an image's Kconfig must source its own policies and never the host's",
+           check_image_sources("img", 'rsource "Kconfig.policies"\n', True) == []
+           and any("does not source its own" in f for f in check_image_sources("img", "", True))
+           and any("names every policy" in f for f in check_image_sources(
+               "img", 'rsource "../Kconfig.policies"\nrsource "Kconfig.policies"\n', True)))
 
     # The reader must refuse what it does not read, and must agree with `tomllib` on the
     # shipped file wherever the interpreter has one (3.11+; the hosted floor does not, which is

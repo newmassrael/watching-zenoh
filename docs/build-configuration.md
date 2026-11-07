@@ -63,6 +63,25 @@ original reproduced by naming it. Three things follow from it:
   heap is `client-node`, on statics `fixed-client`), and they stay so: cargo cannot
   express "this option and that one" with one feature per option (C3), so a
   conjunction is a `[[cargo_rule]]` whose `when` names both options.
+- **The MCU images' policies**: a policy is read by `SessionPolicy::from_build()` from the
+  build's `WZ_POLICY_<NAME>`, and a build gives it a value only where the code that reads
+  it is in the image and is run by it. The image names the policies it reads
+  (`[[policy_image]]`, with an optional `requires` over the options of its axes and the
+  global axes that holds a policy to the profiles that run its code). The generator
+  writes the image's own `Kconfig.policies` (only those policies, each `depends on` its
+  `requires`) and, in `wz_axes.cmake`, `wz_axes_policy_env`: `WZ_POLICY_<NAME>=<value>`
+  for each policy whose value is not upstream's, which the image's CMake adds to the
+  cargo environment. An image does not source the host tree's `../Kconfig.policies`
+  (`--check` holds that). The Zephyr admin node reads three of the fourteen policies,
+  from the call path of its own sources: `tx-no-progress-deadline` and
+  `tx-expiry-keeps-session` in every profile (its session factory builds the transmit
+  queue from the build's policy), and `declaration-sync-pacing` in the fixed-memory
+  client only. The other policies are read by code it does not run (the tokio runtime,
+  the C ABIs, the node clock and event log, the supervisor, the router), so a policy
+  this image does not name is an undefined symbol in its tree and Zephyr stops the
+  configuration; a policy it names outside its profile is Zephyr's own warning that the
+  assignment was not honoured, which Zephyr does not make an error. With no policy
+  stated every image of the board table builds with the cargo line it had before.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and

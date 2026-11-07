@@ -380,6 +380,6 @@ wz_zephyr_rust_app(
   LIB      wz_zephyr_admin_node
   FEATURES ${backend_feature}
   ${no_default_features}
-  CARGO_ENV ${backend_env}
+  CARGO_ENV ${backend_env} ${wz_axes_policy_env}
   UNDEFINED ${backend_undefined}
 )

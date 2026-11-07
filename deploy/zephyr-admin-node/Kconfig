@@ -15,6 +15,11 @@ rsource "../Kconfig.axes"
 rsource "../Kconfig.capabilities"
 rsource "Kconfig.axes"
 
+# The policies this image's code reads (`[[policy_image]]` in deploy/wz-config.toml), and no
+# others: a policy the node does not run has no symbol here. The host tree's ../Kconfig.policies
+# names every policy and is not sourced.
+rsource "Kconfig.policies"
+
 # What this image is, along the role axis. It is a client or a peer: a router is not a node this
 # image makes. The peer is the admin node, which is a peer that hosts the admin space a zenoh host
 # reconfigures it through, so the peer role carries that capability here.
