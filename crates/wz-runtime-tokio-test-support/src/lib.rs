@@ -1539,6 +1539,28 @@ mod port_tests {
     /// probe process, and in none beside the tests that start no process.
     static SPAWN_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// What a child test process printed after `marker`, wherever on the line the
+    /// marker stands.
+    ///
+    /// Not at the start of the line: the child inherits `RUST_TEST_THREADS`, and
+    /// with one test thread libtest writes `test <name> ... ` BEFORE it runs the
+    /// test, so the test's own first line follows that text. A reader that asked
+    /// for the marker at the start missed it in every run on a host given one
+    /// test thread: the probe test failed, and the holder test waited for a line
+    /// that had already come while its holder waited to be killed.
+    fn after_marker<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+        line.split_once(marker).map(|(_, rest)| rest)
+    }
+
+    #[test]
+    fn a_marker_is_found_after_the_harness_text_of_one_test_thread() {
+        let name = "port_tests::a_number_held_by_another_process_is_not_handed_out";
+        let line = format!("test {name} ... CLAIMED 40000");
+        assert_eq!(after_marker(&line, "CLAIMED "), Some("40000"));
+        assert_eq!(after_marker("CLAIMED 40000", "CLAIMED "), Some("40000"));
+        assert_eq!(after_marker("running 1 test", "CLAIMED "), None);
+    }
+
     /// R2778 — the discriminator for `refusing_port`, moved here with the
     /// helper from `wz-integration-tests`, where it guarded that crate's local
     /// copy (R311y383): the socket RESERVES the port (a concurrent bind to it
@@ -1673,7 +1695,7 @@ mod port_tests {
             .lines()
             .map_while(Result::ok);
         let held: u16 = lines
-            .find_map(|line| line.strip_prefix("CLAIMED ")?.parse().ok())
+            .find_map(|line| after_marker(&line, "CLAIMED ")?.parse().ok())
             .expect("the holder prints the number it holds");
         assert!(
             !claim_in(&dir, held),
@@ -1882,10 +1904,11 @@ mod port_tests {
         drop(gate);
         let output = child.wait_with_output().expect("run the probe process");
         let text = String::from_utf8_lossy(&output.stdout);
-        let line = text
+        let result = text
             .lines()
-            .find(|line| line.starts_with("PROBE "))
+            .find_map(|line| after_marker(line, "PROBE "))
             .unwrap_or_else(|| panic!("the probe process printed no result: {text}"));
+        let line = format!("PROBE {result}");
         std::println!("{line}");
         assert!(
             line.contains(" hits=0 "),
