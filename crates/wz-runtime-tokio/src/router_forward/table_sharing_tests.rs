@@ -10,9 +10,10 @@
 //! tables, and fails instead of printing a number.
 
 use super::*;
-use crate::runtime_impl::TokioRuntime;
-use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::runtime_impl::{TokioRuntime, TokioTime};
+use crate::session_glue::{new_session_actions, BoxedLinkDriver, LinkSendOutcome};
+use crate::Reliability;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use wz_runtime_core::runtime::Runtime;
 
 /// The publishers' threads, each a face forwarding Puts without pause.
@@ -31,9 +32,48 @@ fn zid(b: u8) -> Zid {
     Zid::from_slice(&[b, b, b, b])
 }
 
-/// A client face whose remote is `peer`, and what its link was given.
-fn client(peer: Zid) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
-    let (actions, sink) = recording_actions();
+/// A link that counts the frames it is handed and keeps none of them.
+///
+/// The instruments ask a face's link one question, how many frames it was given. A recorder that
+/// keeps each frame's bytes answers it too, but it also allocates and keeps every frame, some 18
+/// million of them in one window at a million and a half Puts a second to four subscribers, each
+/// behind its subscriber's one lock. Over that recorder the Puts routed fell from window to window
+/// and stayed fallen once every idle face had left; over this link they do not fall
+/// (`docs/router-table-snapshots.md`, section 6.6). What the router does with a frame ends where
+/// the link is handed it, so the link here does nothing else.
+#[derive(Default)]
+struct CountingLinkDriver {
+    frames: AtomicUsize,
+}
+
+impl CountingLinkDriver {
+    /// The frames handed over since the last [`reset`](Self::reset).
+    fn frame_count(&self) -> usize {
+        self.frames.load(Ordering::Acquire)
+    }
+
+    fn reset(&self) {
+        self.frames.store(0, Ordering::Release);
+    }
+}
+
+impl BoxedLinkDriver for CountingLinkDriver {
+    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+        self.frames.fetch_add(1, Ordering::AcqRel);
+        LinkSendOutcome::Sent
+    }
+    fn open_blocking(&self) {}
+    fn close_blocking(&self) {}
+}
+
+/// A client face whose remote is `peer`, and the count of what its link was given.
+fn client(peer: Zid) -> (Arc<SessionLinkActions>, Arc<CountingLinkDriver>) {
+    let sink = Arc::new(CountingLinkDriver::default());
+    let actions = new_session_actions(
+        sink.clone(),
+        wz_runtime_tokio_test_support::fixture_session_init_params(),
+        TokioTime::new(),
+    );
     TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
         *s = Some(peer.as_slice().to_vec())
     });
@@ -159,7 +199,7 @@ fn the_faces_and_the_writers_of_the_tables_measured_together() {
 fn routed_while(
     fwd: &Arc<RouterForwarder>,
     publishers: &[FaceId],
-    subscribers: &[Arc<RecordingLinkDriver>],
+    subscribers: &[Arc<CountingLinkDriver>],
     mut meanwhile: impl FnMut(),
 ) -> f64 {
     for sink in subscribers {
