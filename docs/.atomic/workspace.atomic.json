@@ -315780,6 +315780,54 @@
         "src/main.rs of host-slot-node keeps a let_unit_value clippy finding; no lane lints the declared-node bin"
       ]
     },
+    "Round 4396": {
+      "decision_summary": "Two hosted reds of round 4388's push (316a43ec32) repaid. The `C ABI (windows-latest)` job failed `wz-capi-c`'s header test, which looked for its define followed by \"\\n\" in a CRLF checkout; the test now reads the define off its line, as the replay header's test does. The nightly `Fuzz` run's `text` target timed out (over 10 s) in `keyexpr_relate` on two patterns with many `**`: the intersection and inclusion of two chunk sequences were a descent that tried each `**` both ways and asked the same pair of suffixes again on every path, exponential in the number of `**`, a cost the patterns themselves set. A table over every suffix pair was polynomial but filled all |a| x |b| cells and doubled the time of the shapes a router asks once a message (pc2, 49 to 110 ns a call); the descent kept, with a memory of the suffix pairs a `**` refuted, is polynomial and keeps the early exit, at about 6 ns a call over ten router shapes against the descent without memory, in one process on pc2 (45 against 39 to 40 ns).",
+      "changes_bullets": [
+        "crates/wz-capi-c/src/lifecycle.rs: the header test reads `WZ_CAPI_C_LIFECYCLE_KEY_MAX` off its `#define` line, once, so a CRLF checkout reads the same number.",
+        "crates/wz-session-core/src/keyexpr_match.rs: `intersect_chunks` and `includes_chunks` run as methods of `Descent` with `Refuted`, a bit per suffix pair that a `**` refuted, written only at `**` and cleared on the first write; the literal steps are a loop; on the fixed backing the bits are inline (two keys of `MAX_KEYEXPR_CHUNKS` chunks), longer sequences handed in directly are no-match.",
+        "crates/wz-session-core/src/keyexpr_match.rs tests: the descent without memory kept as the oracle, compared over every pair of sequences of up to three chunks of seven kinds; fifteen `**/x` pairs on both sides answered; an ignored instrument times the per-message matchers over ten router shapes and the two descents in one process.",
+        "scripts/lib/fuzz_seeds.py: the `text` target's literal seed of the timeout's shape (door 3, `(**/x/)x24 y` against `(**/x/)x24 z`).",
+        "scripts/run-ci.sh: Layer C1o's counts 12/23/23 to 14/25/25 (two tests in every arm)."
+      ],
+      "verification_bullets": [
+        "Hosted, read at the round's start: run 42361316402 (Platform) failed `C ABI (windows-latest)` in `wz-capi-c` `lifecycle::tests::the_headers_key_buffer_is_the_librarys` (191 passed, 1 failed); run 42363827508 (Fuzz) failed `fuzz text` with a libFuzzer timeout after 12 s in a recursion, its input door 3 (`keyexpr_relate`) with many `**` on both sides.",
+        "pc2: `cargo test -p wz-capi-c --lib lifecycle` 4 passed; `cargo test -p wz-session-core` 883 lib passed with 1 ignored, the integration tests passed; `keyexpr_match` under no-alloc with wildcards 25, heapless with wildcards 25, no wildcard 14, includes without `**` 15; `wz-capture --lib` 1301 passed; `wz-runtime-tokio --lib` 648 passed; clippy -D warnings over wz-session-core in four feature sets and wz-capi-c.",
+        "pc2: Layer C1o's three commands give 14, 25, 25 passed; the pins moved to them.",
+        "pc2, the instrument over ten router shapes in one process, blocks alternating: the descent with memory 45.1 to 45.5 ns a call, without 38.7 to 40.2 ns, three runs. A table over every suffix pair, measured before and dropped: 98 to 119 ns a call against 49 to 51 ns for the descent without memory, in separate builds.",
+        "Static gates before the push: reason_review_pin_gate, prose_named_identifier_gate --check, upstream_citation_anchor_gate, each rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "`matches_chunks` (a pattern against a literal key) keeps its single-frame backtrack; whether the descent with memory should answer that question too, so one algorithm serves every keyexpr relation, is not measured.",
+        "The router's per-message cost of a wildcard declaration rises by about 6 ns a call against the descent without memory; not read in the router Puts instrument."
+      ],
+      "publishable_decision_summary": "Two hosted reds of round 4388's push (316a43ec32) repaid. The `C ABI (windows-latest)` job failed `wz-capi-c`'s header test, which looked for its define followed by \"\\n\" in a CRLF checkout; the test now reads the define off its line, as the replay header's test does. The nightly `Fuzz` run's `text` target timed out (over 10 s) in `keyexpr_relate` on two patterns with many `**`: the intersection and inclusion of two chunk sequences were a descent that tried each `**` both ways and asked the same pair of suffixes again on every path, exponential in the number of `**`, a cost the patterns themselves set. A table over every suffix pair was polynomial but filled all |a| x |b| cells and doubled the time of the shapes a router asks once a message (pc2, 49 to 110 ns a call); the descent kept, with a memory of the suffix pairs a `**` refuted, is polynomial and keeps the early exit, at about 6 ns a call over ten router shapes against the descent without memory, in one process on pc2 (45 against 39 to 40 ns).",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/src/lifecycle.rs: the header test reads `WZ_CAPI_C_LIFECYCLE_KEY_MAX` off its `#define` line, once, so a CRLF checkout reads the same number.",
+        "crates/wz-session-core/src/keyexpr_match.rs: `intersect_chunks` and `includes_chunks` run as methods of `Descent` with `Refuted`, a bit per suffix pair that a `**` refuted, written only at `**` and cleared on the first write; the literal steps are a loop; on the fixed backing the bits are inline (two keys of `MAX_KEYEXPR_CHUNKS` chunks), longer sequences handed in directly are no-match.",
+        "crates/wz-session-core/src/keyexpr_match.rs tests: the descent without memory kept as the oracle, compared over every pair of sequences of up to three chunks of seven kinds; fifteen `**/x` pairs on both sides answered; an ignored instrument times the per-message matchers over ten router shapes and the two descents in one process.",
+        "scripts/lib/fuzz_seeds.py: the `text` target's literal seed of the timeout's shape (door 3, `(**/x/)x24 y` against `(**/x/)x24 z`).",
+        "scripts/run-ci.sh: Layer C1o's counts 12/23/23 to 14/25/25 (two tests in every arm)."
+      ],
+      "publishable_verification_bullets": [
+        "Hosted, read at the round's start: run 42361316402 (Platform) failed `C ABI (windows-latest)` in `wz-capi-c` `lifecycle::tests::the_headers_key_buffer_is_the_librarys` (191 passed, 1 failed); run 42363827508 (Fuzz) failed `fuzz text` with a libFuzzer timeout after 12 s in a recursion, its input door 3 (`keyexpr_relate`) with many `**` on both sides.",
+        "pc2: `cargo test -p wz-capi-c --lib lifecycle` 4 passed; `cargo test -p wz-session-core` 883 lib passed with 1 ignored, the integration tests passed; `keyexpr_match` under no-alloc with wildcards 25, heapless with wildcards 25, no wildcard 14, includes without `**` 15; `wz-capture --lib` 1301 passed; `wz-runtime-tokio --lib` 648 passed; clippy -D warnings over wz-session-core in four feature sets and wz-capi-c.",
+        "pc2: Layer C1o's three commands give 14, 25, 25 passed; the pins moved to them.",
+        "pc2, the instrument over ten router shapes in one process, blocks alternating: the descent with memory 45.1 to 45.5 ns a call, without 38.7 to 40.2 ns, three runs. A table over every suffix pair, measured before and dropped: 98 to 119 ns a call against 49 to 51 ns for the descent without memory, in separate builds.",
+        "Static gates before the push: reason_review_pin_gate, prose_named_identifier_gate --check, upstream_citation_anchor_gate, each rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "`matches_chunks` (a pattern against a literal key) keeps its single-frame backtrack; whether the descent with memory should answer that question too, so one algorithm serves every keyexpr relation, is not measured.",
+        "The router's per-message cost of a wildcard declaration rises by about 6 ns a call against the descent without memory; not read in the router Puts instrument."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
