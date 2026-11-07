@@ -315162,6 +315162,46 @@
         "C1 get-timeout one-off on pc2 stays unattributed."
       ]
     },
+    "Round 4380": {
+      "decision_summary": "The first tool-store install of zephyr-sdk on a build machine failed: \"No such file or directory: .../prefix/setup.sh\". west sdk install moves the extracted SDK to --install-dir with shutil.move, which puts it INSIDE a directory that exists, and bx's tool store makes {prefix} before the install runs; round 4378's test used a prefix that did not exist yet. The SDK is not moved up afterwards, because setup.sh -h installs the host tools with a Yocto installer that binds them to the directory it runs in (bx's store rule is the same: built in place). provision-zephyr.sh removes an empty SDK_DIR before the install, so west creates it at the final path, and refuses one that holds anything. bx-63 confirmed the store refers to its prefix only by path.",
+      "changes_bullets": [
+        "scripts/provision-zephyr.sh `provision_sdk`: before `west sdk install`, an existing empty SDK_DIR is removed (`rmdir`), and a non-empty one stops the install with \"holds something that is not SDK <version>; not installing into it\"."
+      ],
+      "verification_bullets": [
+        "`--sdk` for real with ZEPHYR_SDK_DIR an existing empty directory, as bx's {prefix} is: `+ rmdir`, then \"Move: .../zephyr-sdk-1.0.1 to <SDK_DIR>\", and setup.sh, cmake, gnu and hosttools sit at the prefix itself. The check after reports the SDK whole, rc 0. The host tools' dtc runs from the prefix (DTC v1.7.0+). The test registry entry and trees were removed.",
+        "shellcheck 0.11.0 is clean.",
+        "Not run here: the non-empty refusal branch, and the store install on pc2 and pc3, which bx-63 reruns."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "bx-63 runs `bx-provision pc2|pc3 --apply` scoped to wz once this is on main; then send a Qz lane to pc2 or pc3.",
+        "Read the hosted CI run of this push per job, and run 42330475550 (a2b17e62e1), which was still pending.",
+        "Read the first scheduled upstream-watch run.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: rerun the full `bx --checks ci` set to read the 180.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ],
+      "publishable_decision_summary": "The first tool-store install of zephyr-sdk on a build machine failed: \"No such file or directory: .../prefix/setup.sh\". west sdk install moves the extracted SDK to --install-dir with shutil.move, which puts it INSIDE a directory that exists, and bx's tool store makes {prefix} before the install runs; round 4378's test used a prefix that did not exist yet. The SDK is not moved up afterwards, because setup.sh -h installs the host tools with a Yocto installer that binds them to the directory it runs in (bx's store rule is the same: built in place). provision-zephyr.sh removes an empty SDK_DIR before the install, so west creates it at the final path, and refuses one that holds anything. bx-63 confirmed the store refers to its prefix only by path.",
+      "publishable_changes_bullets": [
+        "scripts/provision-zephyr.sh `provision_sdk`: before `west sdk install`, an existing empty SDK_DIR is removed (`rmdir`), and a non-empty one stops the install with \"holds something that is not SDK <version>; not installing into it\"."
+      ],
+      "publishable_verification_bullets": [
+        "`--sdk` for real with ZEPHYR_SDK_DIR an existing empty directory, as bx's {prefix} is: `+ rmdir`, then \"Move: .../zephyr-sdk-1.0.1 to <SDK_DIR>\", and setup.sh, cmake, gnu and hosttools sit at the prefix itself. The check after reports the SDK whole, rc 0. The host tools' dtc runs from the prefix (DTC v1.7.0+). The test registry entry and trees were removed.",
+        "shellcheck 0.11.0 is clean.",
+        "Not run here: the non-empty refusal branch, and the store install on pc2 and pc3, which bx-63 reruns."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "bx-63 runs `bx-provision pc2|pc3 --apply` scoped to wz once this is on main; then send a Qz lane to pc2 or pc3.",
+        "Read the hosted CI run of this push per job, and run 42330475550 (a2b17e62e1), which was still pending.",
+        "Read the first scheduled upstream-watch run.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: rerun the full `bx --checks ci` set to read the 180.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
