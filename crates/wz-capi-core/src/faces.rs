@@ -658,6 +658,84 @@ enum Admission {
     Replace(u64),
 }
 
+/// What a connectivity listener has been told is up, so that each transport or link is reported
+/// up once and down once, whichever way the listener learns of it.
+///
+/// A listener learns of a transport twice when its history is asked for: the engine tells it of
+/// the faces from the moment the watch is made, and the history lists the faces that are open
+/// when it looks. A face that comes up between the two is in both. Counted as two, it makes an
+/// observer that waits for `n` transports stop at `n - 1` (upstream's regions test, scenario 7,
+/// waits for three peers of a router and was let through with two, which started its
+/// publications before the third peer was linked). Upstream makes the watch and the listing one
+/// step; the engines here take them as two, so the listener keeps the state that makes the order
+/// between them not matter: a face already told up is not told up again, and a down is told
+/// only for a face told up.
+pub struct FaceLedger<K>(StdMutex<Vec<K>>);
+
+impl<K: PartialEq + Clone> FaceLedger<K> {
+    /// A ledger that has been told of nothing.
+    pub fn new() -> Self {
+        Self(StdMutex::new(Vec::new()))
+    }
+
+    /// Whether `key` is newly up, and so is to be told.
+    pub fn up(&self, key: &K) -> bool {
+        let mut told = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if told.contains(key) {
+            return false;
+        }
+        told.push(key.clone());
+        true
+    }
+
+    /// Whether `key` was told up and is now down, and so is to be told.
+    pub fn down(&self, key: &K) -> bool {
+        let mut told = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match told.iter().position(|held| held == key) {
+            Some(at) => {
+                told.swap_remove(at);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+impl<K: PartialEq + Clone> Default for FaceLedger<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod face_ledger_tests {
+    use super::FaceLedger;
+
+    /// A face that is in the history and is also told live is reported once. This test fails
+    /// (the observer counts the face twice) when a listener reports without the ledger.
+    #[test]
+    fn a_face_told_by_the_history_and_by_the_watch_is_reported_once() {
+        let told = FaceLedger::new();
+        assert!(told.up(&7), "the history lists the face: reported");
+        assert!(!told.up(&7), "the watch tells of the same face: not again");
+        assert!(told.down(&7), "it goes down: reported");
+        assert!(!told.down(&7), "a second down is not");
+        assert!(told.up(&7), "it comes up again: reported again");
+    }
+
+    #[test]
+    fn a_down_for_a_face_never_told_up_is_not_reported() {
+        let told = FaceLedger::<u8>::new();
+        assert!(!told.down(&1));
+    }
+}
+
 /// What the first half of `SharedSession::face_up` leaves for the second: the faces the gossip
 /// told of the new link.
 struct LinkAnnounced {

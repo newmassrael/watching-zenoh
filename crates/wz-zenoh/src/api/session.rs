@@ -4009,22 +4009,33 @@ impl SessionInner {
             _notifier: notifier,
         });
         let told = delivery.clone();
+        let ledger = Arc::new(wz_capi_core::faces::FaceLedger::<Transport>::new());
+        let kept = ledger.clone();
         let id = self.watch_faces_for(
             &self.transport_listeners,
             Arc::new(move |kind, face| {
-                told.callback.call(TransportEvent {
-                    kind,
-                    transport: face.transport.clone(),
-                })
+                let reported = if kind == SampleKind::Put {
+                    kept.up(&face.transport)
+                } else {
+                    kept.down(&face.transport)
+                };
+                if reported {
+                    told.callback.call(TransportEvent {
+                        kind,
+                        transport: face.transport.clone(),
+                    })
+                }
             }),
         )?;
         tracing::trace!("declare_transport_events_listener_inner() => {id}");
         if history {
             for face in self.engine.faces() {
-                delivery.callback.call(TransportEvent {
-                    kind: SampleKind::Put,
-                    transport: face.transport,
-                });
+                if ledger.up(&face.transport) {
+                    delivery.callback.call(TransportEvent {
+                        kind: SampleKind::Put,
+                        transport: face.transport,
+                    });
+                }
             }
         }
         Ok(id)
@@ -4047,6 +4058,8 @@ impl SessionInner {
         });
         let told = delivery.clone();
         let filter = transport.clone();
+        let ledger = Arc::new(wz_capi_core::faces::FaceLedger::<Link>::new());
+        let kept = ledger.clone();
         let id = self.watch_faces_for(
             &self.link_listeners,
             Arc::new(move |kind, face| {
@@ -4054,20 +4067,29 @@ impl SessionInner {
                     return;
                 }
                 for link in &face.links {
-                    told.callback.call(LinkEvent {
-                        kind,
-                        link: link.clone(),
-                    });
+                    let reported = if kind == SampleKind::Put {
+                        kept.up(link)
+                    } else {
+                        kept.down(link)
+                    };
+                    if reported {
+                        told.callback.call(LinkEvent {
+                            kind,
+                            link: link.clone(),
+                        });
+                    }
                 }
             }),
         )?;
         tracing::trace!("declare_link_events_listener_inner() => {id}");
         if history {
             for link in self.links(transport.as_ref()) {
-                delivery.callback.call(LinkEvent {
-                    kind: SampleKind::Put,
-                    link,
-                });
+                if ledger.up(&link) {
+                    delivery.callback.call(LinkEvent {
+                        kind: SampleKind::Put,
+                        link,
+                    });
+                }
             }
         }
         Ok(id)
