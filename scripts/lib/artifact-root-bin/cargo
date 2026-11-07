@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The `cargo` that `wz_artifact_root_init` (scripts/lib/artifact-root.sh) puts
+# first on PATH when WZ_ARTIFACT_ROOT is set. It gives every cargo workspace of
+# this checkout its MIRRORED target directory under the root -- the workspace at
+# <checkout>/<ws> builds into $WZ_ARTIFACT_ROOT/<ws>/target, which is the
+# directory a reader of `<ws>/target/...` looks in under the same rule -- and
+# then runs the real cargo with the arguments unchanged.
+#
+# Why a program on PATH and not edits at every call site: the lanes call cargo
+# well over a thousand times, through subshells, `timeout`, `env` and other
+# scripts, and a new lane would have to remember a new spelling. A name on PATH
+# reaches all of them, and every one of them already means "the workspace's own
+# target directory", which is exactly what this keeps.
+#
+# What it leaves alone:
+#   * WZ_ARTIFACT_ROOT unset: nothing happens; the real cargo runs as is.
+#   * A target directory the caller chose (`--target-dir`, CARGO_TARGET_DIR,
+#     CARGO_BUILD_TARGET_DIR) is honored -- unless it is inside the checkout,
+#     which is refused: under a root nothing may be written there, and a silent
+#     redirect would leave the caller reading a directory nobody wrote.
+#   * A command with no workspace (`cargo --version`, `cargo install <crate>`
+#     outside any manifest) and a workspace outside the checkout run unchanged,
+#     except that a target directory this shim chose for another workspace is
+#     not inherited by them.
+
+set -uo pipefail
+
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/lib/artifact-root.sh
+source "$self_dir/../artifact-root.sh"
+
+real=""
+IFS=: read -ra _path_dirs <<<"$PATH"
+for d in "${_path_dirs[@]}"; do
+    [[ -n "$d" && -x "$d/cargo" && ! -d "$d/cargo" ]] || continue
+    [[ "$(cd "$d" 2>/dev/null && pwd -P)" == "$self_dir" ]] && continue
+    real="$d/cargo"
+    break
+done
+if [[ -z "$real" ]]; then
+    echo "artifact-root cargo shim: no cargo on PATH besides this shim" >&2
+    exit 127
+fi
+
+if [[ -z "${WZ_ARTIFACT_ROOT:-}" ]]; then
+    exec "$real" "$@"
+fi
+
+# What the caller said, up to `--` (what follows belongs to the test binary).
+toolchain=()
+[[ "${1:-}" == +* ]] && toolchain=("$1")
+manifest=()
+explicit=""
+args=("$@")
+i=0
+while ((i < ${#args[@]})); do
+    a="${args[i]}"
+    case "$a" in
+    --) break ;;
+    --manifest-path) manifest=(--manifest-path "${args[i + 1]:-}"); i=$((i + 1)) ;;
+    --manifest-path=*) manifest=(--manifest-path "${a#--manifest-path=}") ;;
+    --target-dir) explicit="${args[i + 1]:-}"; i=$((i + 1)) ;;
+    --target-dir=*) explicit="${a#--target-dir=}" ;;
+    esac
+    i=$((i + 1))
+done
+
+# A target directory this shim chose is marked, so the next cargo (a nested
+# one, or one a test binary starts) can tell it from the caller's choice.
+if [[ -n "${CARGO_TARGET_DIR:-}" && "${CARGO_TARGET_DIR}" == "${WZ_ARTIFACT_SHIM_TARGET_DIR:-}" ]]; then
+    unset CARGO_TARGET_DIR
+fi
+[[ -n "$explicit" ]] || explicit="${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-}}"
+
+if [[ -n "$explicit" ]]; then
+    where="$(_wz_ar_abs "$explicit")"
+    if _wz_ar_in_checkout "$where" || _wz_ar_in_checkout "$(realpath -m -- "$where")"; then
+        echo "artifact-root cargo shim: the target directory $where is inside the checkout," >&2
+        echo "  and WZ_ARTIFACT_ROOT ($WZ_ARTIFACT_ROOT) is set, so nothing may be written there." >&2
+        echo "  Name it through the root: \"\$WZ_ARTIFACTS/<the same tree path>\" in a script," >&2
+        echo "  wz_artifact_dir <tree path> in scripts/lib/artifact-root.sh." >&2
+        exit 2
+    fi
+    exec "$real" "$@"
+fi
+
+if ! ws_manifest="$("$real" ${toolchain[@]+"${toolchain[@]}"} locate-project --workspace \
+    --message-format plain ${manifest[@]+"${manifest[@]}"} 2>/dev/null)" || [[ -z "$ws_manifest" ]]; then
+    exec "$real" "$@"
+fi
+ws_dir="$(_wz_ar_abs "$(dirname "$ws_manifest")")"
+if ! _wz_ar_in_checkout "$ws_dir"; then
+    exec "$real" "$@"
+fi
+
+target="$(wz_artifact_dir "$ws_dir")/target"
+export CARGO_TARGET_DIR="$target" WZ_ARTIFACT_SHIM_TARGET_DIR="$target"
+exec "$real" "$@"

@@ -27,8 +27,80 @@
 //! The strip transforms are byte-identical to the per-build-script logic
 //! they replace, so regenerated emits are unchanged.
 
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+
+/// The variable that moves every product of this checkout out of it -- the
+/// Rust reading of the rule `scripts/lib/artifact-root.sh` states (and
+/// `scripts/lib/artifact_root.py` reads for Python). Unset or empty: a product
+/// of the tree path `<rel>` is at `<checkout>/<rel>`. Set: it is at
+/// `$WZ_ARTIFACT_ROOT/<rel>`, the layout mirroring the tree.
+pub const ARTIFACT_ROOT_ENV: &str = "WZ_ARTIFACT_ROOT";
+
+/// `path` with `.` and `..` folded away lexically. Symlinks are NOT resolved:
+/// a checkout may hold `crates/target` as a link to a machine cache, and that
+/// path is still a product path of the checkout, to be mirrored.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(c);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The checkout this crate was compiled from (`crates/wz-codegen-build/../..`).
+pub fn checkout_root() -> PathBuf {
+    lexical(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+}
+
+/// [`artifact_dir`] with its inputs explicit: `root` is the variable's value
+/// (`None` or empty = unset), `checkout` the checkout. A `path` outside the
+/// checkout is returned unchanged -- it is not the checkout's to relocate.
+pub fn artifact_dir_in(root: Option<&OsStr>, checkout: &Path, path: &Path) -> PathBuf {
+    let path = lexical(path);
+    let Some(root) = root.filter(|r| !r.is_empty()) else {
+        return path;
+    };
+    let checkout = lexical(checkout);
+    // Either spelling of the checkout: the one cargo handed this crate and
+    // the one a caller reached through `canonicalize`.
+    let mut bases = vec![checkout.clone()];
+    if let Ok(physical) = checkout.canonicalize() {
+        bases.push(physical);
+    }
+    for base in &bases {
+        if let Ok(rel) = path.strip_prefix(base) {
+            return lexical(&Path::new(root).join(rel));
+        }
+    }
+    path
+}
+
+/// Where the product of the checkout path `path` (absolute) lives under the
+/// rule [`ARTIFACT_ROOT_ENV`] states, read from this process's environment.
+/// A build script that calls this through [`locate_sce_codegen`] is told to
+/// rerun when the variable changes.
+pub fn artifact_dir(path: &Path) -> PathBuf {
+    artifact_dir_in(
+        std::env::var_os(ARTIFACT_ROOT_ENV).as_deref(),
+        &checkout_root(),
+        path,
+    )
+}
+
+/// The product location of the tree path `rel` (relative to the checkout).
+pub fn artifact(rel: impl AsRef<Path>) -> PathBuf {
+    artifact_dir(&checkout_root().join(rel))
+}
 
 /// Locate the vendored `sce-codegen` binary under `sce_workspace`
 /// (`<sce_workspace>/target/release/sce-codegen[.exe]`), accounting for the
@@ -43,8 +115,12 @@ use std::process::Command;
 /// hand-copied blocks (R311y17 fixed only this crate's copy; the other three
 /// still hardcoded the suffix-less path and would panic on Windows). Callers
 /// emit their own `cargo:rerun-if-changed` on the returned path.
+///
+/// The binary is a PRODUCT of `sce_workspace`, so it is looked for where
+/// [`artifact_dir`] puts that workspace's products (`build-sce.sh` builds it
+/// there under the same rule); the provenance is still read from the source.
 pub fn locate_sce_codegen(sce_workspace: &Path) -> PathBuf {
-    let bin = sce_workspace
+    let bin = artifact_dir(sce_workspace)
         .join("target/release")
         .join(format!("sce-codegen{}", std::env::consts::EXE_SUFFIX));
     if !bin.exists() {
@@ -62,7 +138,7 @@ pub fn locate_sce_codegen(sce_workspace: &Path) -> PathBuf {
 /// Path of the provenance stamp `scripts/build-sce.sh` writes beside the
 /// binary. Named here rather than inlined because several callers read it.
 pub fn sce_codegen_stamp(sce_workspace: &Path) -> PathBuf {
-    sce_workspace.join("target/release/.sce-codegen.pin")
+    artifact_dir(sce_workspace).join("target/release/.sce-codegen.pin")
 }
 
 /// The one stamp filename every foreign-oracle output root under this tree's
