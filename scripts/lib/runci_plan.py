@@ -165,6 +165,52 @@ SANDBOX_CAPABILITY = "userns-netns"
 # Layer U asked for `gh` until 2026-11-07; it now reads the releases snapshot the tree carries.
 JOB_ARMED_COMMANDS: dict[str, list[str]] = {"C1cc": ["valgrind"]}
 
+# Programs a lane refuses to run without, by ITS OWN sentence: its function asks for the program
+# and fails, or declines, which a unit's `WZ_DECLINED_EXPECT=` makes a failure. Until 2026-11-07
+# they were `bx.toml`'s top-level `packages`, which bx asks of EVERY run of the repository: a
+# python probe on a session's machine was held to qemu, and one of the eight (`qemu-user`) is used
+# by no file of the tree. Read from run-ci.sh on 2026-11-07; each quotes the lane:
+#   0:    "Layer0 FAIL: shellcheck REQUIRED ... but not on PATH", "actionlint REQUIRED ..."
+#   C2m:  "C2m FAIL: arm-none-eabi-gcc is not on PATH (lwip-sys cross cc)"
+#   G:    G.6 cross-compiles lwip-sys's real lwIP source for the ARM lineup with the cross C
+#         compiler cc picks for a thumb target, and dies in its build script without one
+#   Q:    "arm-none-eabi-gcc not on PATH; install gcc-arm-none-eabi", "qemu-system-arm not on PATH"
+#   Qa:   "arm-none-eabi-gcc not on PATH", `_qa_zenohd_prereqs` asks qemu-system-arm
+#   Qz, Qza: `_qz_toolchain ... qemu` -> "qemu-system-arm not on PATH" (Qzb and Qzk build images
+#         and boot none, so they ask the Zephyr SDK of `[tools.zephyr-sdk]` and no qemu)
+#   C1st: `facility_trace.py` refuses a machine without strace or bwrap (`missing_tools`)
+# A program is `needs` (bx runs it), never a package name: the package's NAME differs between
+# releases and machines, and the program is what the lane calls.
+LANE_COMMANDS: dict[str, list[str]] = {
+    "0": ["actionlint", "shellcheck"],
+    "C2m": ["arm-none-eabi-gcc"],
+    "G": ["arm-none-eabi-gcc"],
+    "Q": ["arm-none-eabi-gcc", "qemu-system-arm"],
+    "Qa": ["arm-none-eabi-gcc", "qemu-system-arm"],
+    "Qz": ["qemu-system-arm"],
+    "Qza": ["qemu-system-arm"],
+    "C1st": ["bwrap", "strace"],
+}
+
+# Packages a lane refuses to run without that are no program: `python3-venv`, the venv the pinned
+# Kconfig interpreter is installed into (`scripts/provision-kconfiglib.sh`), which E, C1st and Qz
+# provision for themselves and which Ubuntu's python3 lacks (`ensurepip is not available`,
+# measured on a build machine 2026-10-30).
+LANE_PACKAGES: dict[str, list[str]] = {
+    "C1st": ["python3-venv"],
+    "E": ["python3-venv"],
+    "Qz": ["python3-venv"],
+}
+
+
+def lane_commands() -> dict[str, list[str]]:
+    """The programs each lane asks by name: its hosted job's arming and its own refusals."""
+    out: dict[str, set[str]] = {}
+    for table in (JOB_ARMED_COMMANDS, LANE_COMMANDS):
+        for lane, progs in table.items():
+            out.setdefault(lane, set()).update(progs)
+    return {lane: sorted(progs) for lane, progs in out.items()}
+
 # The workflow keys that tune the hosted runner's cargo and not a lane (see the docstring).
 BUILD_TUNING_PREFIX = "CARGO_"
 
@@ -211,12 +257,13 @@ class Asks:
     capabilities: list[str] = field(default_factory=list)
 
 
-def lane_asks(text: str, commands: dict[str, list[str]]) -> dict[str, Asks]:
-    """What each lane asks of a machine, read from its function and the census."""
+def lane_asks(text: str, commands: dict[str, list[str]],
+              packages_by_lane: dict[str, list[str]] | None = None) -> dict[str, Asks]:
+    """What each lane asks of a machine, read from its function, the census and the two tables."""
     out: dict[str, Asks] = {}
     for lane, body in lane_bodies(text).items():
         needs = set(commands.get(lane, []))
-        packages: set[str] = set()
+        packages: set[str] = set((packages_by_lane or {}).get(lane, []))
         for flag in census.armings(body):
             progs, pkgs = census.requirements(flag)
             needs.update(progs)
@@ -310,11 +357,15 @@ def plan(
     text: str,
     only: list[str] | None,
     hosted: dict[str, Hosted],
-    commands: dict[str, list[str]] = JOB_ARMED_COMMANDS,
+    commands: dict[str, list[str]] | None = None,
+    packages_by_lane: dict[str, list[str]] | None = None,
 ) -> list[dict]:
     """The units. Raises on a lane the workflow does not run: its unit would have nothing to
     say how the hosted job runs it (`unwired_lane_lint.py` holds the same set). Raises too on
-    a `commands` entry for a lane the table no longer has, which would ask nothing of anyone."""
+    a `commands` or `packages_by_lane` entry for a lane the table no longer has, which would ask
+    nothing of anyone. Their defaults are the tables above."""
+    commands = lane_commands() if commands is None else commands
+    packages_by_lane = LANE_PACKAGES if packages_by_lane is None else packages_by_lane
     ids = lanes(text)
     if only is not None:
         unknown = [o for o in only if o not in ids]
@@ -324,10 +375,11 @@ def plan(
     unwired = [i for i in ids if i not in hosted]
     if unwired:
         raise ValueError(f"lane(s) no step of {CI_YML} runs: {', '.join(unwired)}")
-    stale = sorted(set(commands) - set(lanes(text)))
+    stale = sorted((set(commands) | set(packages_by_lane)) - set(lanes(text)))
     if stale:
-        raise ValueError(f"JOB_ARMED_COMMANDS names lane(s) the table no longer has: {', '.join(stale)}")
-    asks = lane_asks(text, commands)
+        raise ValueError(f"a lane requirement table names lane(s) the dispatch table no longer has: "
+                         f"{', '.join(stale)}")
+    asks = lane_asks(text, commands, packages_by_lane)
     return [unit(i, asks[i]) for i in ids]
 
 
@@ -381,33 +433,44 @@ def selftest() -> int:
     }
     hosted = hosted_runs(workflow)
     commands = {"A": ["gh"]}
+    packages = {"A": ["python3-venv"]}
     cases = 0
-    got = [u["name"] for u in plan(table, None, hosted, commands)]
+    got = [u["name"] for u in plan(table, None, hosted, commands, {})]
     assert got == ["A", "C1"], f"the table reads {got}, want ['A', 'C1'] (comment and indented lines are not lanes)"
     cases += 1
-    u = plan(table, ["C1"], hosted, commands)[0]
+    u = plan(table, ["C1"], hosted, commands, {})[0]
     assert u["argv"] == ["python3", "scripts/lib/runci_plan.py", "--layer", "C1"], u
     assert u["exclusive"] == [EXCLUSIVE], u
     cases += 1
-    a_unit, c1_unit = plan(table, None, hosted, commands)
+    a_unit, c1_unit = plan(table, None, hosted, commands, packages)
     assert a_unit == {"name": "A", "argv": ["python3", "scripts/lib/runci_plan.py", "--layer", "A"],
                       "exclusive": [EXCLUSIVE], "needs": ["gh", "protoc"],
-                      "packages": ["libprotobuf-dev"]}, (
-        f"unit A is {a_unit}: its job-armed command, and its arming's oracles from the census "
-        f"(a program by name, a file by its package)"
+                      "packages": ["libprotobuf-dev", "python3-venv"]}, (
+        f"unit A is {a_unit}: its job-armed command, its arming's oracles from the census "
+        f"(a program by name, a file by its package) and the package the lane table gives it"
     )
     assert c1_unit == {"name": "C1", "argv": ["python3", "scripts/lib/runci_plan.py", "--layer", "C1"],
                        "exclusive": [EXCLUSIVE], "capabilities": [SANDBOX_CAPABILITY]}, (
         f"unit C1 is {c1_unit}: its function wraps a witness in the sandbox, and the apt step "
-        f"of its job asks nothing (a job installs for all its lanes)"
+        f"of its job asks nothing (a job installs for all its lanes), nor another lane's package"
     )
     cases += 1
-    try:
-        plan(table, None, hosted, {"Gone": ["gh"]})
-    except ValueError:
-        cases += 1
-    else:
-        raise AssertionError("a runner-image command for a lane the table lacks was planned instead of refused")
+    for stale_commands, stale_packages, what in (
+        ({"Gone": ["gh"]}, {}, "a command"),
+        ({}, {"Gone": ["python3-venv"]}, "a package"),
+    ):
+        try:
+            plan(table, None, hosted, stale_commands, stale_packages)
+        except ValueError:
+            cases += 1
+        else:
+            raise AssertionError(f"{what} for a lane the table lacks was planned instead of refused")
+    merged = lane_commands()
+    assert merged["C1cc"] == ["valgrind"] and merged["Q"] == ["arm-none-eabi-gcc", "qemu-system-arm"], merged
+    assert not any("qemu-user" in p or "qemu-arm" == p for progs in merged.values() for p in progs), (
+        "qemu-user is asked again, though no file of the tree runs a qemu user-mode emulator"
+    )
+    cases += 1
     a = hosted["A"]
     assert a.env == {"WZ_DECLINED_EXPECT": "", "RUST_BACKTRACE": "1", "WZ_PICO_REQUIRE": "1"}, (
         f"lane A carries {a.env}: the workflow's and the job's env, no CARGO_ key"

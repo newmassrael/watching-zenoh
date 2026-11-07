@@ -78,16 +78,19 @@ workspace_dir = "crates"
 # for themselves. Ubuntu's python3 ships without `ensurepip`, so on a machine without the package
 # the venv cannot be made and those lanes failed before they built anything (measured on a build
 # machine on 2026-10-30: `ensurepip is not available`).
-packages = [
-    "shellcheck",
-    "actionlint",
-    "gcc-arm-none-eabi",
-    "qemu-user",
-    "qemu-system-arm",
-    "strace",
-    "bubblewrap",
-    "python3-venv",
-]
+#
+# NO TOP-LEVEL `packages` (2026-11-07). The lists above are what particular LANES refuse to run
+# without, and a top-level `packages` is asked of EVERY run of the repository: from bx b2c5f8e on,
+# that includes a run placed on the machine a session types on, so a python probe there was held
+# to qemu and refused. One of the eight packages listed here before, `qemu-user`, is used by no
+# file of the tree. Each requirement is now declared on the lane that has it, as a unit of
+# `[checks.ci]` carries it (`scripts/lib/runci_plan.py`, `LANE_COMMANDS` and `LANE_PACKAGES`,
+# each with the lane's own failure sentence): Layer 0 asks shellcheck and actionlint; C2m and G
+# the ARM cross C compiler; Q and Qa that and qemu-system-arm; Qz and Qza qemu-system-arm; C1st
+# strace, bwrap and python3-venv; E and Qz python3-venv. A lane run by itself outside the set
+# (`bx -- bash scripts/run-ci.sh --layer Q`) asks nothing and refuses by name where the machine
+# lacks its program; run it as `bx --checks ci -- python3 scripts/lib/runci_plan.py --only Q` to
+# have it placed on a machine that has it.
 
 min_ram_gb = 16
 min_free_gb = 20
