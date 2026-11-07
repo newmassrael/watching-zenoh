@@ -1066,6 +1066,10 @@ round_fed_gates=(
     # deploy/wz-config.toml (the limits a node's budgets name) and every deploy/nodes/*.toml; the
     # selftest holds each refusal and ends by checking the registered declarations. A text read.
     "wz_node.py --selftest"
+    # R4403 -- the store's ledger as one: the main file and every sealed segment it pins by
+    # sha256 (mnemosyne Round 1344). A segment edited by anything but the store's writer is
+    # refused here, before the push publishes a store no reader can open. 0.11s measured.
+    "atomic_ledger.py --check"
     # R4131 -- the fuzz targets' seeds. Round-fed by captures/ and the reproducers pinned to its
     # files (a capture moved or removed leaves a pinned input pointing at nothing): the selftest
     # derives every target's seeds from the tree. A text read; the targets themselves are Layer Fz.

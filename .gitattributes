@@ -21,3 +21,8 @@
 # because a pcap header holds NUL bytes; this makes that a declaration rather
 # than a property of the first sixteen bytes, for the same reason as above.
 *.pcap -text
+
+# A sealed ledger segment is pinned by the sha256 of its bytes in the store's main file
+# (mnemosyne Round 1344), and `load` refuses one whose bytes differ: a checkout that
+# rewrote its line ends would make the whole store unreadable there.
+docs/.atomic/ledger/*.json text eol=lf

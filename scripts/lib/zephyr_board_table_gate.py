@@ -137,6 +137,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The ledger spans the main file and its sealed segments; one reader joins them.
+import atomic_ledger  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 TABLE = "deploy/zephyr-boards.json"
 RUN_CI = "scripts/run-ci.sh"
@@ -283,10 +287,7 @@ def conf_backends(text: str) -> set[str]:
 
 def store_entries(root: Path) -> dict:
     """The changelog entries of the atomic store at `root`, by id; empty if none."""
-    path = root / STORE
-    if not path.is_file():
-        return {}
-    return json.loads(path.read_text()).get("changelog_entries", {})
+    return atomic_ledger.changelog_entries(root)
 
 
 def record_text(root: Path, record: object) -> str | None:

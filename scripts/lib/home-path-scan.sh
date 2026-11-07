@@ -216,7 +216,12 @@ wz_home_path_pending() {
     local have_head=0
     git rev-parse --verify -q HEAD >/dev/null 2>&1 && have_head=1
 
+    # The ledger is one append-only record across the store's main file and the segments it
+    # is sealed into (mnemosyne Round 1344): a commit that moves a line from one to another
+    # adds nothing, so the ledger's staged files are summed and graded as one. A ledger file
+    # the commit does not touch counts the same on both sides and is left out of both sums.
     local scanned=0 added_total=0 report="" f now before
+    local ledger_now=0 ledger_before=0 ledger_files=0
     while IFS= read -r f; do
         [[ -n "$f" ]] || continue
         scanned=$((scanned + 1))
@@ -227,11 +232,19 @@ wz_home_path_pending() {
             before="$(git show "HEAD:$f" 2>/dev/null | grep -acF "$HOME" || true)"
             [[ -n "$before" ]] || before=0
         fi
-        if (( now > before )); then
+        if [[ "$f" == docs/.atomic/workspace.atomic.json || "$f" == docs/.atomic/ledger/*.json ]]; then
+            ledger_now=$((ledger_now + now))
+            ledger_before=$((ledger_before + before))
+            ledger_files=$((ledger_files + 1))
+        elif (( now > before )); then
             added_total=$((added_total + now - before))
             report+="    $f: $before -> $now line(s)"$'\n'
         fi
     done <<<"$staged"
+    if (( ledger_now > ledger_before )); then
+        added_total=$((added_total + ledger_now - ledger_before))
+        report+="    the ledger ($ledger_files staged file(s)): $ledger_before -> $ledger_now line(s)"$'\n'
+    fi
 
     echo "  $label home-paths: $scanned staged file(s) scanned, $added_total added line(s)"
     if (( added_total > 0 )); then
@@ -295,7 +308,10 @@ wz_home_path_scan() {
     # LINES, not occurrences: `grep -c` counts lines and so must this. The two
     # differ here -- 141 occurrences sit on 137 lines -- and a ceiling in the
     # other unit would carry four lines of silent headroom.
-    local ceiling=137
+    # 137 -> 69 when the store moved to mnemosyne schema 49: a publishable field
+    # equal to its audit twin is no longer written, so the second copy of each of
+    # those lines left the file. Measured over the main file and its segments.
+    local ceiling=69
 
     # R2729 — the two preconditions moved to `wz_home_path_term_state` so the
     # three entry points share ONE definition of "is there a term, and is it a
@@ -328,8 +344,10 @@ wz_home_path_scan() {
         [[ -f "$root/$f" ]] || continue
         hits="$(grep -cF "$HOME" "$root/$f" 2>/dev/null || true)"
         [[ -n "$hits" && "$hits" != "0" ]] || continue
-        if [[ "$f" == "$store" ]]; then
-            store_count="$hits"
+        # The ledger is the main file and the segments it is sealed into (mnemosyne
+        # Round 1344): one append-only record across files, under one ceiling.
+        if [[ "$f" == "$store" || "$f" == docs/.atomic/ledger/*.json ]]; then
+            store_count=$((store_count + hits))
         else
             outside=$((outside + hits))
             outside_lines+="    $f:$(grep -nF "$HOME" "$root/$f" | cut -d: -f1 | head -3 | tr '\n' ' ')"$'\n'

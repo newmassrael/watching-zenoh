@@ -71,6 +71,18 @@ from typing import NamedTuple
 
 GITLINK_MODE = "160000"
 
+# The append-only ledger is ONE record across files since mnemosyne Round 1344: the store's
+# main file and the segments its frozen entries are sealed into. A commit that moves a line
+# from the main file into a segment adds nothing, so the ledger's paths are counted together
+# and graded as one, under this name.
+LEDGER_MAIN = "docs/.atomic/workspace.atomic.json"
+LEDGER_SEGMENTS = "docs/.atomic/ledger/"
+LEDGER = "the ledger (docs/.atomic/workspace.atomic.json and docs/.atomic/ledger/*.json)"
+
+
+def is_ledger(path: str) -> bool:
+    return path == LEDGER_MAIN or (path.startswith(LEDGER_SEGMENTS) and path.endswith(".json"))
+
 
 class Finding(NamedTuple):
     commit: str
@@ -179,10 +191,18 @@ def grade_range(repo: Path, term: str, rev_range: str) -> tuple[int, int, list[F
         per_parent: list[dict[str, tuple[int, int]]] = []
         for parent in parents or [None]:
             raised_here: dict[str, tuple[int, int]] = {}
+            # A ledger file the commit leaves alone counts the same on both sides, so the
+            # ledger's change is the sum over the ledger files it changed.
+            ledger = [0, 0]
             for path, old_oid, new_oid in changed_blobs(repo, parent, commit):
                 before, after = counter.count(old_oid), counter.count(new_oid)
-                if after > before:
+                if is_ledger(path):
+                    ledger[0] += before
+                    ledger[1] += after
+                elif after > before:
                     raised_here[path] = (before, after)
+            if ledger[1] > ledger[0]:
+                raised_here[LEDGER] = (ledger[0], ledger[1])
             per_parent.append(raised_here)
         raised = {
             path: (max(r[path][0] for r in per_parent), per_parent[0][path][1])
@@ -347,7 +367,23 @@ def selftest() -> int:
             failures.append(f"an evil merge must be charged for its own addition, got {found}")
 
     with tempfile.TemporaryDirectory() as td:
-        # 8. The command line: a bad range is a FAIL (not an empty green), and an
+        # 8. The sealed ledger: a commit that MOVES ledger lines from the main file into
+        #    a segment adds nothing (the ledger's total is unchanged), and one that also
+        #    appends a line to the ledger is named once, as the ledger.
+        repo = Path(td)
+        _run(repo, "init", "-q", "-b", "main")
+        base = _commit(repo, "base", {LEDGER_MAIN: leak * 3})
+        _commit(repo, "seal", {LEDGER_MAIN: leak, LEDGER_SEGMENTS + "segment-0001.json": leak * 2})
+        rc, found = verdict(repo, base)
+        if rc != 0:
+            failures.append(f"moving ledger lines into a segment must pass, got {found}")
+        grew = _commit(repo, "append", {LEDGER_SEGMENTS + "segment-0002.json": leak})
+        rc, found = verdict(repo, base)
+        if [(f.commit, f.path, f.before, f.after) for f in found] != [(grew, LEDGER, 0, 1)]:
+            failures.append(f"a line added to the ledger must be named as the ledger, got {found}")
+
+    with tempfile.TemporaryDirectory() as td:
+        # 9. The command line: a bad range is a FAIL (not an empty green), and an
         #    empty term is a FAIL; a good range prints its population.
         repo, base = fresh(td)
         _commit(repo, "edit", {"a.txt": "x\n"})
