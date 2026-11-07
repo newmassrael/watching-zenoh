@@ -440,7 +440,15 @@ The questions, their order and their defaults are generated into the helper by
 `--emit rust-conformance-items`, held by `--check`. A tester holding a statement asks
 the library it talks to for its digest: equal digests are the same build. The two
 writers of the canonical JSON, Python and the build script, assert the same digest of
-one fixture, each in its own test, so neither can change the form alone. The crate's
+one fixture, each in its own test, so neither can change the form alone. They are
+also held to each other over the declaration's whole domain:
+`--emit statement-vectors` writes `crates/wz-conformance-build/statement_vectors.json`
+(each capability and layout switch alone, each limit off its default, each policy
+value, seeded random builds, each with Python's digest), and the crate's test
+reproduces every one through `of_build`, the path a build script takes. Layer C1cs
+grades the digest in the libraries it builds. Besides the size cases it makes two
+statement cases: a pico build and a zenoh-c build with the shared-memory arm on, each
+with a limit and a policy stated through the environment. The crate's
 own tests compare the capabilities its build script read with `cfg!(feature)` as
 compiled. Rejected: a statement written by hand per image (it drifts
 from the build the first time a preset moves); one per Cargo feature set (a feature

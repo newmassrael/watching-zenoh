@@ -25,6 +25,9 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --emit rust-feature-bits      print crates/wz-session-core/src/feature_bits_generated.rs
     --emit rust-conformance-items print crates/wz-conformance-build/src/items_generated.rs, the
                                   questions a build script answers for its conformance digest
+    --emit statement-vectors      print crates/wz-conformance-build/statement_vectors.json, builds
+                                  and the statement digest of each, which the build script's test
+                                  must reproduce
     --emit defconfig:ORIGINAL     print configs/<ORIGINAL>_defconfig, an upstream original's own
                                   default build in wz's switches (zenoh, zenoh-c, zenoh-pico)
     --emit image-kconfig:IMAGE    print the axes of a declared image as Kconfig choices
@@ -176,6 +179,9 @@ RUST_FEATURE_BITS = ROOT / "crates" / "wz-session-core" / "src" / "feature_bits_
 # What a build script reads to state its build (decision C15): the questions of a conformance
 # statement and where each answer is found, for `wz-conformance-build`.
 RUST_CONFORMANCE_ITEMS = ROOT / "crates" / "wz-conformance-build" / "src" / "items_generated.rs"
+# Builds and their statement digests, which the build script's test must reproduce: the two
+# writers of the digest held to each other over the declaration's whole domain.
+STATEMENT_VECTORS = ROOT / "crates" / "wz-conformance-build" / "statement_vectors.json"
 CAPS_RS =ROOT / "crates" / "wz-session-core" / "src" / "caps.rs"
 # The configuration-aware derivation's own spelling of the vocabulary and of `[os] always`
 # (docs/target-build-contract.md T9), held to this declaration by `--check`.
@@ -1707,6 +1713,15 @@ def _refuses_word(text: str) -> bool:
     return False
 
 
+def _refuses_env(decl: dict, env: dict[str, str]) -> bool:
+    """Whether `env_statement` refuses `env` (the selftest's probe of the refusal)."""
+    try:
+        env_statement(decl, "pico", [], env, {})
+    except ValueError:
+        return True
+    return False
+
+
 def rust_tuple_rows(rows: list[list[str]]) -> list[str]:
     """Array rows of tuples, each laid out as rustfmt lays it out: on one line when its elements
     fit the call width, else one element a line."""
@@ -1775,12 +1790,109 @@ def emit_rust_conformance_items(decl: dict) -> str:
         "pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[",
     ]
     out += rust_tuple_rows([
-        [rust_word(pol["id"]), rust_word(pol["kconfig"]),
-         rust_word_list(list(pol["choices"]) if pol["kind"] == "choice" else ["off", "on"]),
+        [rust_word(pol["id"]), rust_word(pol["kconfig"]), rust_word_list(policy_values(pol)),
          rust_word(pol["default"])]
         for pol in decl["policies"]])
     out += ["];"]
     return "\n".join(out) + "\n"
+
+
+# Draws per ABI of the vectors' random part. They are seeded by a fixed word, so the file is
+# the same on every machine and `--check` can hold it.
+STATEMENT_VECTOR_RANDOM = 8
+STATEMENT_VECTOR_SEED = "wz-conformance-statement-vectors"
+
+
+def vector_draws(seed: str):
+    """An endless stream of 64-bit draws: SHA-256 of the seed and a counter. It does not use
+    `random`, whose stream a new Python version is free to change, which would make a
+    regenerated file differ for no change of the declaration."""
+    counter = 0
+    while True:
+        yield int.from_bytes(hashlib.sha256(f"{seed}:{counter}".encode()).digest()[:8], "big")
+        counter += 1
+
+
+def statement_vectors(decl: dict) -> list[dict]:
+    """Builds and the digest `env_statement` gives each, for the two writers of a statement's
+    digest to agree on across the declaration's whole domain, not on one fixture (decision C15).
+    Each vector names an ABI, the cargo features on, and the `WZ_LIMIT_*` and `WZ_POLICY_*` the
+    environment states.
+    - Per ABI: nothing stated; every name of the ABI on; every name of every ABI on (the other
+      ABIs' names count for nothing); every limit and policy stated at its default (equal to
+      nothing stated); each capability and layout switch on alone.
+    - Each limit one above its default, and one at the largest value read. Each policy at each
+      value other than upstream's. Reading these does not depend on the ABI, so the ABIs take
+      turns.
+    - Seeded random builds: each name, limit and policy stated with probability one half.
+    """
+    out: list[dict] = []
+
+    def add(case: str, abi: str, features: list[str], env: dict[str, str]) -> None:
+        digest = env_statement(decl, abi, features, env, {})["digest"]
+        out.append({"case": case, "abi": abi, "features": features, "env": env, "digest": digest})
+
+    def names(abi: str) -> list[str]:
+        return arm_switches(decl, abi) + [cid for cid in decl["order"]
+                                          if abi in decl["caps"][cid]["abis"]]
+
+    every = sorted({name for abi in ABIS for name in names(abi)})
+    defaults = {**{lim["kconfig"]: str(lim["default"]) for lim in decl["limits"]},
+                **{pol["kconfig"]: pol["default"] for pol in decl["policies"]}}
+    for abi in ABIS:
+        add("nothing stated", abi, [], {})
+        add("every name of the ABI on", abi, names(abi), {})
+        add("every name of every ABI on", abi, every, {})
+        add("every limit and policy stated at its default", abi, [], defaults)
+        for name in names(abi):
+            add(f"{name} alone", abi, [name], {})
+    for i, lim in enumerate(decl["limits"]):
+        add(f"{lim['id']} one above its default", ABIS[i % len(ABIS)], [],
+            {lim["kconfig"]: str(lim["default"] + 1)})
+    first = decl["limits"][0]
+    add(f"{first['id']} at the largest value read", "pico", [], {first["kconfig"]: str((1 << 64) - 1)})
+    turn = 0
+    for pol in decl["policies"]:
+        for value in policy_values(pol):
+            if value != pol["default"]:
+                add(f"{pol['id']} {value}", ABIS[turn % len(ABIS)], [], {pol["kconfig"]: value})
+                turn += 1
+    draw = vector_draws(STATEMENT_VECTOR_SEED)
+    for abi in ABIS:
+        for n in range(STATEMENT_VECTOR_RANDOM):
+            features = [name for name in names(abi) if next(draw) % 2]
+            env: dict[str, str] = {}
+            for lim in decl["limits"]:
+                if next(draw) % 2:
+                    env[lim["kconfig"]] = str(next(draw) % (1 << 32))
+            for pol in decl["policies"]:
+                if next(draw) % 2:
+                    values = policy_values(pol)
+                    env[pol["kconfig"]] = values[next(draw) % len(values)]
+            add(f"random {n}", abi, features, env)
+    return out
+
+
+def emit_statement_vectors(decl: dict) -> str:
+    """`statement_vectors` as the JSON file the build script's test reads: one vector a line, so
+    a change of the declaration reads as the lines it moves."""
+    head = {
+        "generated": "GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit "
+                     "statement-vectors. Do not edit: `wz_config.py --check` fails when this file "
+                     "is stale.",
+        "about": "Builds of the C ABI crates and the conformance digest wz_config.py states for "
+                 "each (docs/build-configuration.md, decision C15). wz-conformance-build's test "
+                 "computes each from the same features and environment and must give the same.",
+    }
+    lines = ["{"]
+    for key, value in head.items():
+        lines.append(f"  {json.dumps(key)}: {json.dumps(value, ensure_ascii=True)},")
+    lines.append('  "vectors": [')
+    vectors = [json.dumps(v, sort_keys=True, separators=(", ", ": "), ensure_ascii=True)
+               for v in statement_vectors(decl)]
+    lines += [f"    {v}," for v in vectors[:-1]] + [f"    {vectors[-1]}"]
+    lines += ["  ]", "}"]
+    return "\n".join(lines) + "\n"
 
 
 def emit_rust_feature_bits(decl: dict) -> str:
@@ -2130,6 +2242,7 @@ GENERATED = {
     "rust-policies": (RUST_POLICIES, emit_rust_policies),
     "rust-feature-bits": (RUST_FEATURE_BITS, emit_rust_feature_bits),
     "rust-conformance-items": (RUST_CONFORMANCE_ITEMS, emit_rust_conformance_items),
+    "statement-vectors": (STATEMENT_VECTORS, emit_statement_vectors),
 }
 
 
@@ -2549,6 +2662,38 @@ def conformance_statement(decl: dict, abi: str, features: list[str], limits: dic
                      for pol in decl["policies"]],
     }
     return {**body, "derived_from": derived_from, "digest": statement_digest(body)}
+
+
+def policy_values(pol: dict) -> list[str]:
+    """The values a policy may take: its choices, or `off` and `on` for a bool."""
+    return list(pol["choices"]) if pol["kind"] == "choice" else ["off", "on"]
+
+
+def env_statement(decl: dict, abi: str, features: list[str], env: dict[str, str],
+                  derived_from: dict) -> dict:
+    """The conformance statement of a cargo build of `abi` with `features` on, run in an
+    environment that states `env`: each limit by its `WZ_LIMIT_*` there and each policy by its
+    `WZ_POLICY_*`, else the limit's default and upstream's policy. It is the build
+    `wz-conformance-build` states from inside the build script, and it refuses what that refuses:
+    a limit that is not decimal digits or exceeds 64 bits, and a policy value outside its choices.
+    It also refuses a name the declaration does not read. Both sides would ignore such a name, so
+    a case built to state it would state nothing."""
+    limits = {lim["kconfig"]: lim for lim in decl["limits"]}
+    policies = {pol["kconfig"]: pol for pol in decl["policies"]}
+    unknown = sorted(set(env) - limits.keys() - policies.keys())
+    if unknown:
+        raise ValueError(f"{', '.join(unknown)}: not a limit or policy the declaration reads")
+    for name, text in env.items():
+        if name in limits and not (text.isascii() and text.isdigit() and int(text) < 1 << 64):
+            raise ValueError(f"a WZ_LIMIT_* value is not a 64-bit decimal number ({name}={text})")
+        if name in policies and text not in policy_values(policies[name]):
+            raise ValueError(f"a WZ_POLICY_* value is not one of its policy's choices ({name}={text}; "
+                             f"{policy_values(policies[name])})")
+    return conformance_statement(
+        decl, abi, features,
+        {lim["id"]: int(env.get(lim["kconfig"], lim["default"])) for lim in decl["limits"]},
+        {pol["id"]: env.get(pol["kconfig"], pol["default"]) for pol in decl["policies"]},
+        derived_from)
 
 
 def statement_digest(body: dict) -> str:
@@ -3247,6 +3392,43 @@ def cmd_selftest() -> int:
            and all(f'"{pol["kconfig"]}"' in items for pol in decl["policies"]))
     expect("a word that would need escaping is refused, never escaped",
            not _refuses_word("a-cap") and _refuses_word('a"cap') and _refuses_word("a cap"))
+    # The vectors the build script's test reproduces (decision C15): the environment is read as the
+    # build script reads it, and the file reaches every axis of the declaration.
+    lim0, pol0 = decl["limits"][0], decl["policies"][0]
+    other0 = next(v for v in policy_values(pol0) if v != pol0["default"])
+    from_env = env_statement(decl, "pico", arm, {lim0["kconfig"]: str(lim0["default"] + 1),
+                                                pol0["kconfig"]: other0}, {})
+    expect("a build's environment states its limits and policies, and stating a default is "
+           "stating nothing",
+           {x["id"]: x["value"] for x in from_env["limits"]}[lim0["id"]] == lim0["default"] + 1
+           and {p["id"]: p["value"] for p in from_env["policies"]}[pol0["id"]] == other0
+           and env_statement(decl, "pico", arm, {lim0["kconfig"]: str(lim0["default"])},
+                             {})["digest"] == stated["digest"])
+    expect("an environment the build script would refuse is refused: a misspelt name, a limit "
+           "that is not decimal or exceeds 64 bits, a policy outside its choices",
+           all(_refuses_env(decl, env) for env in (
+               {"WZ_LIMIT_NO_SUCH_LIMIT": "1"}, {lim0["kconfig"]: "0x10"}, {lim0["kconfig"]: ""},
+               {lim0["kconfig"]: str(1 << 64)}, {pol0["kconfig"]: "maybe"}))
+           and not _refuses_env(decl, {lim0["kconfig"]: str((1 << 64) - 1)}))
+    vectors = statement_vectors(decl)
+    alone = {(v["abi"], v["features"][0]) for v in vectors
+             if v["case"].endswith(" alone") and len(v["features"]) == 1}
+    stated_env = {(name, value) for v in vectors for name, value in v["env"].items()}
+    expect("the statement vectors reach each capability and layout switch of each ABI, each limit "
+           "off its default and each policy value",
+           all((abi, name) in alone for abi in ABIS
+               for name in arm_switches(decl, abi)
+               + [cid for cid in decl["order"] if abi in caps[cid]["abis"]])
+           and all(any(name == lim["kconfig"] and value != str(lim["default"])
+                       for name, value in stated_env) for lim in decl["limits"])
+           and all((pol["kconfig"], value) in stated_env
+                   for pol in decl["policies"] for value in policy_values(pol)))
+    expect("the statement vectors are the same on every run and every digest is distinct where "
+           "the build differs",
+           emit_statement_vectors(decl) == emit_statement_vectors(decl)
+           and len({v["digest"] for v in vectors if v["case"] != "every limit and policy stated "
+                    "at its default" and not v["case"].startswith("every name of every ABI")})
+           == len(vectors) - 2 * len(ABIS))
     expect("a statement's digest does not count the catalogue's defaults beside the values",
            statement_digest({**stated, "limits": [{**x, "default": 0} for x in stated["limits"]]})
            == stated["digest"])

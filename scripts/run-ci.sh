@@ -11171,7 +11171,10 @@ layer_c1cf_reduced_features() {
 # size, the absence of the planes it leaves out, the presence of the planes it has, and the
 # pinned export count of the default build. Eight release builds and two `capi-small` builds
 # (panics abort) of two cdylibs, run as ONE lane because each case replaces the previous one's
-# artifact in the target directory of its profile.
+# artifact in the target directory of its profile. Each library must also carry the conformance
+# digest of its statement. Two more dev builds in a target directory of their own (the statement
+# cases) state a limit and a policy and turn the zenoh-c shared-memory arm on, which no size case
+# does, and are graded on that digest alone.
 layer_c1cs_capability_cost() {
     python3 scripts/lib/capability_cost_gate.py --check || return 1
 }

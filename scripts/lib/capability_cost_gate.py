@@ -27,6 +27,10 @@ feature set and checks four facts about it:
                  whose configuration is known, so each is also the end-to-end witness that a
                  library states the build it is.
 
+The size cases state no limit or policy and turn no zenoh-c layout arm on. [`STATEMENT_CASES`]
+are the builds that do, graded on fact 5 alone: a limit and a policy stated through the build's
+environment, on each ABI, and the shared-memory arm of the zenoh-c drop-in.
+
 PRESENCE is what makes ABSENCE mean something. A forbidden pattern that no build can match is a
 check that cannot fail (`--selftest` pins the matcher, and the full builds here are the live
 control: every pattern a client build is forbidden is REQUIRED of a build that has the plane).
@@ -812,14 +816,87 @@ def case_abi(case: Case) -> str:
     return {"wz-capi-pico": "pico", "wz-capi-c": "c"}[case.package]
 
 
-def stated_digest(case: Case, features: set[str]) -> str:
-    """The digest the conformance statement gives the case's build: its ABI and features, every
-    limit at its default and every policy at upstream's (a case sets no environment)."""
-    decl = wz_config.load_decl()
-    return wz_config.conformance_statement(
-        decl, case_abi(case), sorted(features),
-        {lim["id"]: lim["default"] for lim in decl["limits"]},
-        {pol["id"]: pol["default"] for pol in decl["policies"]}, {})["digest"]
+def stated_digest(case: Case | StatementCase, features: set[str]) -> str:
+    """The digest the conformance statement gives the case's build: its ABI and features, and the
+    limits and policies its environment states (none for a size case, so every limit is at its
+    default and every policy at upstream's)."""
+    return wz_config.env_statement(wz_config.load_decl(), case_abi(case), sorted(features),
+                                   dict(getattr(case, "env", ())), {})["digest"]
+
+
+# The fifth fact for the builds the size cases do not make: the build script reads limits and
+# policies from the environment and the zenoh-c layout arm from a feature, and every size case
+# builds with none of them stated and no arm on. Without these, that reading is held only by unit
+# tests that hand the reader its answers (`wz-conformance-build`, and the statement vectors both
+# writers reproduce). These cases make real libraries with a non-default limit, a non-default
+# policy and the arm upstream's published zenoh-c archive has. Each must carry the digest its
+# statement gives.
+#
+# They grade the digest and nothing else, so they carry no budget. They build with the dev profile
+# into a target directory of their own. A stated limit or policy changes the fingerprint of every
+# crate that reads it, so building them in the size cases' directory would rebuild the tree there
+# twice for every run.
+STATEMENT_TARGET = TARGET / "conformance-statement"
+
+
+@dataclass(frozen=True)
+class StatementCase:
+    id: str
+    package: str
+    lib: str
+    features: str
+    env: tuple[tuple[str, str], ...]
+    note: str = field(default="", compare=False)
+
+
+STATEMENT_CASES: tuple[StatementCase, ...] = (
+    StatementCase("statement-pico-stated", "wz-capi-pico", "libwz_capi_pico.so",
+                  "engine-coop,link-udp",
+                  (("WZ_LIMIT_MAX_SUBSCRIPTIONS", "32"), ("WZ_POLICY_SN_RESOLUTION", "bits-16")),
+                  note="the pico client on the cooperative engine (pico-client-coop's features) "
+                       "with a limit and a policy stated off their defaults"),
+    StatementCase("statement-capic-shm-arm", "wz-capi-c", "libwz_capi_c.so",
+                  "default,zenoh-c-shared-memory",
+                  (("WZ_LIMIT_MAX_QUERYABLES", "24"), ("WZ_POLICY_MULTICAST_LOOPBACK", "off")),
+                  note="the zenoh-c default with the shared-memory arm on, the arm upstream's "
+                       "published archive is built with, and a limit and a policy stated"),
+)
+
+
+def statement_env(case: StatementCase) -> dict[str, str]:
+    """The environment a statement case builds in: the caller's, with every limit and policy it
+    states removed, and the case's added. Otherwise a value the shell happened to export would
+    build another library than the case names, and the statement would still match it."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("WZ_LIMIT_", "WZ_POLICY_"))}
+    return {**env, **dict(case.env)}
+
+
+def build_statement_case(case: StatementCase) -> tuple[str, ...]:
+    """Build a statement case and return the conformance digests its library carries."""
+    subprocess.run(["cargo", "build", "-p", case.package, "--quiet", "--no-default-features",
+                    "--features", case.features, "--target-dir", str(STATEMENT_TARGET)],
+                   cwd=CRATES, env=statement_env(case), check=True)
+    return digests_in((STATEMENT_TARGET / "debug" / case.lib).read_bytes())
+
+
+def grade_statement(case: StatementCase, got: tuple[str, ...], stated: str,
+                    unstated: str) -> list[str]:
+    """The findings for a statement case; empty when it passes. `unstated` is the digest of the
+    same features with nothing stated. A case equal to it would state nothing the size cases do
+    not, and its pass would hold nothing."""
+    findings: list[str] = []
+    if stated == unstated:
+        findings.append(f"{case.id}: its environment states nothing the defaults do not, so it "
+                        f"holds no reading the size cases do not hold")
+    if got != (stated,):
+        findings.append(
+            f"{case.id}: the library carries the conformance digest(s) {list(got) or 'none'}, and "
+            f"the statement of its features and environment ({', '.join(f'{k}={v}' for k, v in case.env)}) "
+            f"is {stated}. The build script (wz-conformance-build) read another build than the one "
+            f"this case made: a feature, limit or policy it did not see, or a stale build that cargo "
+            f"was not told to redo when the environment moved.")
+    return findings
 
 
 def grade(case: Case, got: Measured, stated: str | None = None) -> list[str]:
@@ -968,7 +1045,7 @@ def report_reference(case: Case, got: Measured) -> None:
 
 
 def cmd_check(measure_only: bool, only: list[str]) -> int:
-    unknown = [i for i in only if i not in {c.id for c in CASES}]
+    unknown = [i for i in only if i not in {c.id for c in CASES} | {c.id for c in STATEMENT_CASES}]
     if unknown:
         print(f"  capability-cost: no such case: {unknown}", file=sys.stderr)
         return 2
@@ -987,9 +1064,28 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
         for finding in grade(case, got, stated):
             print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
             rc = 1
+    statements = 0
+    for case in STATEMENT_CASES:
+        if only and case.id not in only:
+            continue
+        statements += 1
+        features = case_features(case)
+        got = build_statement_case(case)
+        stated = stated_digest(case, features)
+        unstated = wz_config.env_statement(wz_config.load_decl(), case_abi(case), sorted(features),
+                                           {}, {})["digest"]
+        print(f"  capability-cost: {case.id}: conformance digest {', '.join(got) or 'none'} "
+              f"(statement {stated}, with nothing stated {unstated})")
+        if measure_only:
+            continue
+        for finding in grade_statement(case, got, stated, unstated):
+            print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
+            rc = 1
+    sized = sum(1 for c in CASES if not only or c.id in only)
     if rc == 0 and not measure_only:
-        print(f"  capability-cost: {len(only) or len(CASES)} case(s) within budget, absent where absent, "
-              f"present where present, each carrying its statement's digest")
+        print(f"  capability-cost: {sized} case(s) within budget, absent where absent, present "
+              f"where present, each carrying its statement's digest; {statements} build(s) with "
+              f"stated limits, policies or arm carrying theirs")
     return rc
 
 
@@ -1078,6 +1174,35 @@ def cmd_selftest() -> int:
            != stated_digest(by_id["pico-default"], case_features(by_id["pico-default"]))
            and stated_digest(by_id["capic-client"], case_features(by_id["capic-client"]))
            != stated_digest(by_id["pico-client"], case_features(by_id["pico-client"])))
+    # The statement cases: each states something the defaults do not, through names the build
+    # script reads, and the grader tells their pass from each way of failing.
+    expect("case ids are unique across the size and statement cases",
+           len({c.id for c in CASES} | {c.id for c in STATEMENT_CASES})
+           == len(CASES) + len(STATEMENT_CASES))
+    decl = wz_config.load_decl()
+    expect("every statement case states a limit and a policy the declaration reads, off its "
+           "default, and the zenoh-c case turns a layout arm on",
+           all({k for k, _ in s.env} & {x["kconfig"] for x in decl["limits"]}
+               and {k for k, _ in s.env} & {p["kconfig"] for p in decl["policies"]}
+               and stated_digest(s, case_features(s)) != wz_config.env_statement(
+                   decl, case_abi(s), sorted(case_features(s)), {}, {})["digest"]
+               for s in STATEMENT_CASES)
+           and any(case_abi(s) == "c" and set(wz_config.arm_switches(decl, "c")) & case_features(s)
+                   for s in STATEMENT_CASES))
+    s0 = STATEMENT_CASES[0]
+    expect("a statement case passes on its digest alone and fails on another, none, or a case "
+           "that states nothing",
+           grade_statement(s0, (a,), a, b) == [] and len(grade_statement(s0, (b,), a, b)) == 1
+           and len(grade_statement(s0, (), a, b)) == 1
+           and len(grade_statement(s0, (a,), a, a)) == 1)
+    os.environ["WZ_LIMIT_MAX_KEYEXPR_BYTES"] = "999"
+    try:
+        leaked = statement_env(s0)
+    finally:
+        del os.environ["WZ_LIMIT_MAX_KEYEXPR_BYTES"]
+    expect("a statement case builds with its own limits and policies, none of the shell's",
+           "WZ_LIMIT_MAX_KEYEXPR_BYTES" not in leaked
+           and all(leaked[k] == v for k, v in s0.env))
     expect("every case's profile is one crates/Cargo.toml defines",
            {c.profile for c in CASES} <= {"release"} | set(
                re.findall(r"^\[profile\.([\w-]+)\]", (CRATES / "Cargo.toml").read_text(), re.M)))

@@ -29,5 +29,9 @@ path = "src/lib.rs"
 [dependencies]
 sha2 = "0.10"
 
+[dev-dependencies]
+# Reads `statement_vectors.json`, the builds `wz_config.py` states, which the tests reproduce.
+serde_json = "1"
+
 [lints]
 workspace = true

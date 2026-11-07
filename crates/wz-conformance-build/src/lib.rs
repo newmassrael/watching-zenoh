@@ -41,6 +41,12 @@
 //! need it is refused rather than escaped differently from the other side. The fixture test below
 //! and the selftest arm of `wz_config.py` assert the same digest of the same fixture, so the two
 //! writers of this form cannot drift apart unseen.
+//!
+//! The fixture holds the form; `statement_vectors.json` holds the reading. It lists builds over the
+//! declaration's whole domain: each capability and layout switch alone, each limit off its
+//! default, each policy value, and seeded random mixes. Each comes with the digest `wz_config.py`
+//! states for it (`--emit statement-vectors`, held by `--check`). The test reproduces each through
+//! [`of_build`], from the same features and environment a build script would see.
 
 use std::env;
 use std::fmt::Write as _;
@@ -339,6 +345,71 @@ mod tests {
         assert_eq!(
             fixture().digest(),
             "sha256:f503a3f077f1fd6a8b6fd97ae6281ba9bb81e628f2680ce70ab248a31fd51387"
+        );
+    }
+
+    /// Every build `wz_config.py --emit statement-vectors` states has, read the way a build script
+    /// reads it, the digest the statement gives it. The test also requires that every name a
+    /// vector states is one `of_build` asked for. A name nobody reads would let a vector state
+    /// nothing and pass.
+    #[test]
+    fn every_statement_vector_has_the_digest_wz_config_states_for_it() {
+        use std::cell::RefCell;
+
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../statement_vectors.json"))
+                .expect("statement_vectors.json is JSON");
+        let vectors = doc["vectors"].as_array().expect("the file lists vectors");
+        assert!(!vectors.is_empty(), "the file lists no vector");
+        let mut wrong = Vec::new();
+        for v in vectors {
+            let case = v["case"].as_str().expect("a vector names its case");
+            let abi = ["core", "pico", "c"]
+                .into_iter()
+                .find(|abi| v["abi"] == *abi)
+                .unwrap_or_else(|| panic!("{case}: an ABI the declaration does not name"));
+            let features: Vec<&str> = v["features"]
+                .as_array()
+                .expect("a vector lists its features")
+                .iter()
+                .map(|f| f.as_str().expect("a feature is a word"))
+                .collect();
+            let env = v["env"]
+                .as_object()
+                .expect("a vector states its environment");
+            let asked = RefCell::new(Vec::new());
+            let statement = of_build(
+                abi,
+                |id| features.contains(&id),
+                |name| {
+                    asked.borrow_mut().push(name.to_owned());
+                    env.get(name)
+                        .map(|value| value.as_str().expect("a value is text").to_owned())
+                },
+            );
+            let unread: Vec<&String> = env
+                .keys()
+                .filter(|name| !asked.borrow().contains(*name))
+                .collect();
+            assert!(
+                unread.is_empty(),
+                "{abi} {case}: the build script reads no {unread:?}"
+            );
+            let want = v["digest"].as_str().expect("a vector has a digest");
+            if statement.digest() != want {
+                wrong.push(format!(
+                    "{abi} {case}: {} where wz_config.py states {want}; read as {}",
+                    statement.digest(),
+                    statement.canonical_json()
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} of {} vectors differ:\n{}",
+            wrong.len(),
+            vectors.len(),
+            wrong.join("\n")
         );
     }
 
