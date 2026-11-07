@@ -315306,6 +315306,52 @@
         "Open: the other leftovers of the Z8 list (lane margin gate, Windows, gossip test flake, client hat)."
       ]
     },
+    "Round 4384": {
+      "decision_summary": "The first Qz against the Zephyr bx now keeps in its tool store failed on a build machine: \"snippets-rom-start.ld:4:38: fatal error: ../../../.local/share/bx/tools/<key>/prefix/zephyr/arch/arm/core/vector_table.ld: No such file or directory\". Zephyr's zephyr_linker_sources writes each snippet as RELATIVE_PATH from ${ZEPHYR_BASE}/include, the link ~/zephyrproject/zephyr, to the file's real store path (west zephyr-export registered the store path), and the preprocessor resolves that .. from the link's real directory. A workspace made by hand is no link, which is why it never showed. The lanes now hand Zephyr the physical path: _qz_toolchain resolves _QZ_BASE with pwd -P, and kit-lane.sh does the same for ZEPHYR_HOME. bx-63 takes the SDK entry's .pyc writes to bx as a store immutability fix.",
+      "changes_bullets": [
+        "scripts/run-ci.sh `_qz_toolchain`: once ZEPHYR_BASE is known to exist, `_QZ_BASE` is its physical path (`cd ... && pwd -P`). That covers Qz, Qza, Qzb and Qzk, and the ZEPHYR_HOME handed to kit-lane.sh.",
+        "scripts/kit-lane.sh: an existing ZEPHYR_HOME is resolved to its physical path before use."
+      ],
+      "verification_bullets": [
+        "Before, `bx --host pc2 -- python3 scripts/lib/runci_plan.py --layer Qz` against the tool-store Zephyr: exit 1, \"Qz build deploy/zephyr-app (west) FAIL\" with the vector_table.ld sentence.",
+        "After, the same command: exit 0 under WZ_QZ_REQUIRE=1. Builds OK and boots PASS for zephyr-app, zephyr-tls-loopback, zephyr-admin-loopback and zephyr-admin-node on mps2/an385, \"Layer Qz pass (53s)\".",
+        "shellcheck 0.11.0: kit-lane.sh is clean. run-ci.sh has only its existing SC1091 notes, none on the changed lines. 138 pre-push static gates pass.",
+        "Not run here: Qza, Qzb and Qzk, and the kit lane on the board."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Send Qza, Qzb and Qzk to pc2 or pc3 now that their Zephyr is kept by bx.",
+        "bx-63 proposes to bx's owner that a finished tool-store entry be read-only (a Qz run wrote gdb .pyc into the SDK entry); nothing on wz's side.",
+        "Read the hosted CI run of this push per job, and run 42330475550 (a2b17e62e1), which was still pending.",
+        "Read the first scheduled upstream-watch run.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: rerun the full `bx --checks ci` set to read the 180.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ],
+      "publishable_decision_summary": "The first Qz against the Zephyr bx now keeps in its tool store failed on a build machine: \"snippets-rom-start.ld:4:38: fatal error: ../../../.local/share/bx/tools/<key>/prefix/zephyr/arch/arm/core/vector_table.ld: No such file or directory\". Zephyr's zephyr_linker_sources writes each snippet as RELATIVE_PATH from ${ZEPHYR_BASE}/include, the link ~/zephyrproject/zephyr, to the file's real store path (west zephyr-export registered the store path), and the preprocessor resolves that .. from the link's real directory. A workspace made by hand is no link, which is why it never showed. The lanes now hand Zephyr the physical path: _qz_toolchain resolves _QZ_BASE with pwd -P, and kit-lane.sh does the same for ZEPHYR_HOME. bx-63 takes the SDK entry's .pyc writes to bx as a store immutability fix.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh `_qz_toolchain`: once ZEPHYR_BASE is known to exist, `_QZ_BASE` is its physical path (`cd ... && pwd -P`). That covers Qz, Qza, Qzb and Qzk, and the ZEPHYR_HOME handed to kit-lane.sh.",
+        "scripts/kit-lane.sh: an existing ZEPHYR_HOME is resolved to its physical path before use."
+      ],
+      "publishable_verification_bullets": [
+        "Before, `bx --host pc2 -- python3 scripts/lib/runci_plan.py --layer Qz` against the tool-store Zephyr: exit 1, \"Qz build deploy/zephyr-app (west) FAIL\" with the vector_table.ld sentence.",
+        "After, the same command: exit 0 under WZ_QZ_REQUIRE=1. Builds OK and boots PASS for zephyr-app, zephyr-tls-loopback, zephyr-admin-loopback and zephyr-admin-node on mps2/an385, \"Layer Qz pass (53s)\".",
+        "shellcheck 0.11.0: kit-lane.sh is clean. run-ci.sh has only its existing SC1091 notes, none on the changed lines. 138 pre-push static gates pass.",
+        "Not run here: Qza, Qzb and Qzk, and the kit lane on the board."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Send Qza, Qzb and Qzk to pc2 or pc3 now that their Zephyr is kept by bx.",
+        "bx-63 proposes to bx's owner that a finished tool-store entry be read-only (a Qz run wrote gdb .pyc into the SDK entry); nothing on wz's side.",
+        "Read the hosted CI run of this push per job, and run 42330475550 (a2b17e62e1), which was still pending.",
+        "Read the first scheduled upstream-watch run.",
+        "Stage 3 of docs/verdicts-in-the-fleet.md: rerun the full `bx --checks ci` set to read the 180.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
