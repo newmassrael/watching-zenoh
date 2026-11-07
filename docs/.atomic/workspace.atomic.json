@@ -314722,6 +314722,40 @@
         "Open: an image has a policy row only where a call path was traced, so the ten other policies are read nowhere on the Zephyr node and none can be asked of it, which is the gap to the host and not a switch to turn on; an assignment of a named policy outside its profile is a Zephyr warning and not an error, and one made as a CMake variable on the command line is dropped without the warning; the capabilities already reach the admin node through cargo rules and Kconfig.capabilities, but no image code uses the observation instruments yet, so no rule turns one on; the other Zephyr application (zephyr-app) is no [[image]] and has no policy rows; scripts/lib/zephyr_cargo_lines.py --capture refuses the stack the QEMU admin TLS overlay documents because no row of the board table puts it on a board (the comparison above used the table's ten rows, so that stack was not compared); no firmware was built with a policy on and nothing ran on a board."
       ]
     },
+    "Round 4368": {
+      "decision_summary": "bx.toml no longer asks eight packages of every run of the repository. Each requirement is declared on the run-ci lane that refuses to run without it and is carried by that lane's unit of [checks.ci] (runci_plan.py LANE_COMMANDS as programs, LANE_PACKAGES for python3-venv), so a run on the machine a session types on is no longer held to qemu, which the next bx release asks of a run placed there too. qemu-user, one of the eight, is used by no file of the tree and is dropped.",
+      "changes_bullets": [
+        "bx.toml: the top-level packages list (shellcheck, actionlint, gcc-arm-none-eabi, qemu-user, qemu-system-arm, strace, bubblewrap, python3-venv) removed; the comment says where each requirement went and how to place one lane by its requirements (bx --checks ci -- python3 scripts/lib/runci_plan.py --only Q).",
+        "scripts/lib/runci_plan.py: LANE_COMMANDS (0: actionlint, shellcheck; C2m and G: arm-none-eabi-gcc; Q and Qa: that and qemu-system-arm; Qz and Qza: qemu-system-arm; C1st: bwrap, strace) and LANE_PACKAGES (C1st, E, Qz: python3-venv), each lane's failure sentence quoted from run-ci.sh; lane_commands merges them with JOB_ARMED_COMMANDS; plan refuses an entry of either table for a lane the dispatch table no longer has. M and Z keep only the userns-netns capability (the sandbox's own bwrap test); Qzb and Qzk boot no image and ask no qemu."
+      ],
+      "verification_bullets": [
+        "The mapping read from run-ci.sh: every non-comment line of each lane function and the helpers it calls naming arm-none-eabi-gcc, qemu-system-arm, strace, bwrap, shellcheck, actionlint or provision-kconfiglib; git grep finds qemu-arm / qemu-user nowhere but bx.toml.",
+        "runci_plan.py --selftest: 12 cases pass (new: a lane-table package reaches its unit and no other; a stale command or package entry is refused; qemu-user is asked of no lane); --check: 180 lanes planned; --only on the 14 affected lanes prints the units above.",
+        "bx-fleet decl validate bx.toml: valid; bx --explain-declaration: packages empty, the three tools unchanged."
+      ],
+      "impact_refs": [
+        "watching-zenoh/build-and-verify"
+      ],
+      "carry_forward_bullets": [
+        "bx provision reads the top-level declaration only, so it no longer installs these packages on a new build machine; a unit that lacks one is reported by name as placeable nowhere. Whether provision should read [checks] unit requirements is bx's (told to bx-df)."
+      ],
+      "publishable_decision_summary": "bx.toml no longer asks eight packages of every run of the repository. Each requirement is declared on the run-ci lane that refuses to run without it and is carried by that lane's unit of [checks.ci] (runci_plan.py LANE_COMMANDS as programs, LANE_PACKAGES for python3-venv), so a run on the machine a session types on is no longer held to qemu, which the next bx release asks of a run placed there too. qemu-user, one of the eight, is used by no file of the tree and is dropped.",
+      "publishable_changes_bullets": [
+        "bx.toml: the top-level packages list (shellcheck, actionlint, gcc-arm-none-eabi, qemu-user, qemu-system-arm, strace, bubblewrap, python3-venv) removed; the comment says where each requirement went and how to place one lane by its requirements (bx --checks ci -- python3 scripts/lib/runci_plan.py --only Q).",
+        "scripts/lib/runci_plan.py: LANE_COMMANDS (0: actionlint, shellcheck; C2m and G: arm-none-eabi-gcc; Q and Qa: that and qemu-system-arm; Qz and Qza: qemu-system-arm; C1st: bwrap, strace) and LANE_PACKAGES (C1st, E, Qz: python3-venv), each lane's failure sentence quoted from run-ci.sh; lane_commands merges them with JOB_ARMED_COMMANDS; plan refuses an entry of either table for a lane the dispatch table no longer has. M and Z keep only the userns-netns capability (the sandbox's own bwrap test); Qzb and Qzk boot no image and ask no qemu."
+      ],
+      "publishable_verification_bullets": [
+        "The mapping read from run-ci.sh: every non-comment line of each lane function and the helpers it calls naming arm-none-eabi-gcc, qemu-system-arm, strace, bwrap, shellcheck, actionlint or provision-kconfiglib; git grep finds qemu-arm / qemu-user nowhere but bx.toml.",
+        "runci_plan.py --selftest: 12 cases pass (new: a lane-table package reaches its unit and no other; a stale command or package entry is refused; qemu-user is asked of no lane); --check: 180 lanes planned; --only on the 14 affected lanes prints the units above.",
+        "bx-fleet decl validate bx.toml: valid; bx --explain-declaration: packages empty, the three tools unchanged."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/build-and-verify"
+      ],
+      "publishable_carry_forward_bullets": [
+        "bx provision reads the top-level declaration only, so it no longer installs these packages on a new build machine; a unit that lacks one is reported by name as placeable nowhere. Whether provision should read [checks] unit requirements is bx's (told to bx-df)."
+      ]
+    },
     "Round 44": {
       "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
       "changes_bullets": [
