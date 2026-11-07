@@ -3,6 +3,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 """Is a red hosted run acknowledged by a row THIS push adds?
 
+R4393 (no register item) -- the acknowledgement any pusher, a queue integrator included, reads.
+
 The previous-run gate (`scripts/lib/previous-run-gate.sh`) refuses a push while the
 previous hosted run is red unless someone who looked says so. The saying used to be an
 environment variable on the pushing process (`WZ_ACK_RED=<run id>`). A verdict that

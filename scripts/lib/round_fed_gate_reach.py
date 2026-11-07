@@ -203,6 +203,15 @@ DEFERRED: dict[str, str] = {
         "five-codec flush/reopen probe before exporting the link path, even "
         "on a cache hit."
     ),
+    "round_descriptor.py": (
+        "R4392 -- its subject is a round descriptor (docs/rounds/pending), and "
+        "a descriptor never reaches the hook: land.sh and the queue's "
+        "file-round action read it through this module, refuse one that is "
+        "no round, file it and delete it before anything is pushed, so the "
+        "hook would find nothing to read. `file-round.sh --check` is the "
+        "author's run at commit time, and hosted Layer C0i runs the "
+        "selftest."
+    ),
     "verdict_leg_mutation.py": (
         "565.63s, more than SEVEN TIMES what the hook's whole 62-member block "
         "costs (68.4-74.8s over six runs), and it MUTATES the working tree -- "
@@ -504,6 +513,28 @@ def hook_invocations(hook_src: str) -> set[str]:
     return out
 
 
+HOOK_SOURCE = re.compile(r"^\s*(?:if\s+!\s+)?source\s+\"?(" + LIB_REL + r"/[A-Za-z0-9_.-]+\.sh)\"?")
+
+
+def hook_sourced(hook_src: str) -> list[str]:
+    """The `scripts/lib` shell libraries the hook SOURCES, in order.
+
+    A sourced library is the hook's own text by another file: what it runs, every push runs.
+    Gate 2c sources `previous-run-gate.sh`, which calls `hosted_red_ack.py` on the range being
+    pushed, and a reader of the hook's text alone reported that gate unreached while every push
+    ran it -- the R2686 shape one level over, in shell instead of python. Only a `source` of a
+    constant `scripts/lib/*.sh` path is followed; a commented one is not a source.
+    """
+    out: list[str] = []
+    for line in hook_src.split("\n"):
+        if line.lstrip().startswith("#"):
+            continue
+        m = HOOK_SOURCE.match(line)
+        if m and m.group(1) not in out:
+            out.append(m.group(1))
+    return out
+
+
 def module_invocations(src: str, population: set[str]) -> set[str]:
     """Which population modules THIS module names as a string constant in code.
 
@@ -709,9 +740,14 @@ def run(root: Path) -> int:
         )
         return 1
     population = round_fed(sources, corpus_dirs, corpus_files)
-    invoked, indirect = reachable_from_hook(
-        (root / HOOK_REL).read_text(), sources, population
-    )
+    hook_src = (root / HOOK_REL).read_text()
+    # What the hook sources is read as the hook's own text (`hook_sourced`). A sourced path that
+    # is not there is the hook's own failure to report, not a reach this gate can grade.
+    for rel in hook_sourced(hook_src):
+        path = root / rel
+        if path.is_file():
+            hook_src += "\n" + path.read_text()
+    invoked, indirect = reachable_from_hook(hook_src, sources, population)
     findings, size = findings_from(population, invoked, DEFERRED)
     report(population, invoked, DEFERRED, indirect)
     if findings:
@@ -939,6 +975,22 @@ def selftest() -> int:
         if not ok:
             failed += 1
 
+    source_cases: list[tuple[str, str, list[str]]] = [
+        (
+            "a sourced library is followed, in either spelling",
+            "if ! source scripts/lib/a.sh; then\nsource \"scripts/lib/b.sh\"\n",
+            ["scripts/lib/a.sh", "scripts/lib/b.sh"],
+        ),
+        ("a commented source is not", "# source scripts/lib/a.sh\n", []),
+        ("a source outside scripts/lib is not", "source ~/.bashrc\n", []),
+    ]
+    for name, src, want in source_cases:
+        got = hook_sourced(src)
+        ok = got == want
+        print(f"  [{'ok' if ok else 'FAIL'}] source -- {name}: {got}")
+        if not ok:
+            failed += 1
+
     rule_cases: list[tuple[str, set[str], set[str], dict[str, str], int]] = [
         ("every member runs -> clean", {"a.py"}, {"a.py"}, {}, 0),
         ("a member the hook does not run -> the R2572 shape", {"a.py"}, set(), {}, 1),
@@ -958,7 +1010,7 @@ def selftest() -> int:
 
     # +1 for the starved-directory-set arm, which is not in a case table
     # because its input is the one the tables hold fixed.
-    total = len(closure_cases) + len(hook_cases) + len(rule_cases) + 1
+    total = len(closure_cases) + len(hook_cases) + len(source_cases) + len(rule_cases) + 1
     if failed:
         print(f"round-fed-gate-reach selftest: {failed} of {total} arm(s) FAILED")
         return 1

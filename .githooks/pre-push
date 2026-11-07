@@ -366,7 +366,10 @@ fi
 # run, which stays the authority.)
 
 # ─── gate 2c — the PREVIOUS push's hosted verdict (R311y765) ────────
-# grades: not-a-file
+# grades: pushed-range
+# The verdict it reads is the hosted run's, but what can release a red one is a row of
+# docs/hosted-red-acks.md ADDED in the range being pushed (hosted_red_ack.py), so the files
+# it reads are the pushed range's.
 # Gate 2b above mechanises ONE lane. This is the lane-agnostic half, and it is
 # the one carry N70 actually names: the feature-subset matrix, Layers F / G / Q
 # / Z / B2 and every other hosted-only lane are deliberately not mirrored here
