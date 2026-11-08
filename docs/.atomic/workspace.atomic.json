@@ -12777,6 +12777,25 @@
       "carry_forward_bullets": [
         "Open: the link-restriction feature was refused by the same gate since its Rust door landed, because the pre-push hook defers this gate to the hosted run; nothing local read it until now. Other crates' own extension features would need the same table, and a package other than a family member has no such predicate yet."
       ]
+    },
+    "Round 4440": {
+      "decision_summary": "A consumer claim, forwarded by a peer session: some senders split a message larger than they put in one sample above zenoh, sending each chunk as an ordinary Put on the message's own key behind a small header of their own, so a reader saw several unrelated samples and no message, and the message's own framing (an end-to-end header, a serialized body) could not be read. The header is the deployment's and this repository is public, so nothing about it is hard-coded: a deployment declares a segment profile (fields with width, byte order and fixed marks, an optional CRC with its feeding order, and which fields name the stream, the transfer, the whole's length and the chunk's offset) and binds it to keys with a segment rule that does not compete with the format rules. A payload whose marks hold is a piece; each piece is judged (header values, CRC, its place in its transfer, the ranges still missing, out of order, overlap, transfers it ended) and joined per sender, key and transfer, and the piece that completes a transfer carries the joined message, read by the key's own rule and end-to-end profile. A piece is never judged as a frame.",
+      "changes_bullets": [
+        "wz-capture: segment_profile reads a declared segment profile (refusals carry a JSON pointer) and recognises and places a piece; segment_chain joins pieces per stream and transfer with a verdict per piece, a joined message on the completing piece, and a bound on bytes held for open transfers; e2e_profile shares its CRC parameter reader.",
+        "wz-capture: the declaration dialect reads a segment profile definition and a segment rule (its own list, its own kind); the end-to-end slot ledger carries the joining state under the same frontier and forget; judge_record judges a piece before a frame and the completed message as the frame.",
+        "wz-capture: the field document writes a segment block on a piece's entry and the payload state segment_piece on its row; doc_revision adds fields 59 and declarations_diagnose 4; the integer gate names the block's integers.",
+        "wz-capi-dissect, wz-analyze: the header states the profile, the block, the new state, kind and revisable cells; the C consumer pins fields 59 and diagnose 4; the text rendering names a piece."
+      ],
+      "verification_bullets": [
+        "On build machines: wz-capture with dissect and network-codecs 1708 pass, among them 9 segment-profile tests (byte orders, a damaged piece with its marks still a piece, CRC as the condition without marks, every refusal at its JSON pointer, placement refusals), 12 joining tests (in order, whole, gap and out-of-order filler, first piece not at 0, overlap with first copy kept, a new transfer ending an unjoined one, a wrong CRC moving no state, total disagreement, after closing, streams kept apart by origin, key and suffix, eviction under the bound, recall and forget by row) and 5 document tests over a stream and a datagram link (a resolved key joined and read by its json rule with segment_piece on the piece rows; two streams under one id kept apart by the suffix and joined under the rule for every key; a narrower rule not covering an unresolved reference; a damaged piece and a new transfer; every place and reason reached), and the key-set, family and carries pins over the new documents; wz-capi-dissect 231 pass, among them the issued-row test with two new scenarios (a piece whose key resolves late, in a row and inside a chain); wz-analyze checks; clippy of wz-capture, wz-capi-dissect and wz-analyze is clean; lane C1bo (the C consumer, pinned to fields 59 and declarations_diagnose 4) passes.",
+        "The JSON integer cell gate (43 door calls, the segment block one cell) and the document revision consumer pin (22 agree) pass."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "carry_forward_bullets": [
+        "The consumer is told fields 59, declarations_diagnose 4 and the commit; the header layout it needs lives in its own preset. Open: an end-to-end or body rule needs a resolved key, so a sender with fixed key ids gets the joined message without a decode until a declaration can bind fixed ids to keys; the values door does not yet read joined messages."
+      ]
     }
   },
   "inventory_entries": {
