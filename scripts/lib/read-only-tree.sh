@@ -79,30 +79,39 @@ ro_tree_exec() {
         ;;
     1)
         # The mounts need root; the command does not, and must not: it runs as the
-        # caller again, with the caller's environment, so what it builds is owned
-        # as anything else the caller builds.
+        # caller again, with the caller's WHOLE environment and WZ_ARTIFACT_ROOT on
+        # top, exactly what the bwrap branch above gives it, so what it builds is
+        # owned as anything else the caller builds and a lane sees the same
+        # variables whichever branch the host takes.
         #
-        # sudo removes the dynamic linker's variables even under `-E`, so
-        # LD_LIBRARY_PATH is carried across as an argument, as PATH and HOME are. A
-        # hosted lane builds against the shared RocksDB engine
-        # (scripts/lib/rocksdb_engine.py exports ROCKSDB_LIB_DIR and LD_LIBRARY_PATH);
-        # without the second, a test binary linked to that engine stops at its start
-        # on `librocksdb.so.10: cannot open shared object file` (hosted run of
-        # c91572906a, Layer Ero).
-        sudo -n -E unshare --mount --propagation private -- /bin/bash -c '
+        # sudo rewrites the environment even under `-E`: it removes the dynamic
+        # linker's variables and others (PERL5LIB, PYTHONPATH), sets USER and
+        # LOGNAME to root, adds SUDO_*, and replaces PATH. Carrying a chosen list
+        # across lost each variable the list did not name: LD_LIBRARY_PATH first, so
+        # a test binary linked to the shared RocksDB engine stopped at its start on
+        # `librocksdb.so.10: cannot open shared object file` (hosted run of
+        # c91572906a, Layer Ero), and USER=root after it, which a test that re-runs
+        # itself in a namespace hands to runuser. So the caller's environment goes
+        # across as arguments, every variable, and the command starts from it alone
+        # (`env -i`); NUL-separated, so a value may hold any byte but NUL. The Rust
+        # twin is NetnsPair::test_inside in crates/wz-integration-tests/src/lib.rs.
+        local -a carried=()
+        mapfile -d '' -t carried < <(env -0)
+        sudo -n unshare --mount --propagation private -- /bin/bash -c '
             set -e
-            uid="$1" gid="$2" path="$3" home="$4" root="$5" ldpath="$6" n="$7"
-            shift 7
+            uid="$1" gid="$2" root="$3" n="$4" m="$5"
+            shift 5
             for ((i = 0; i < n; i++)); do
                 mount --bind "$1" "$1"
                 mount -o remount,bind,ro "$1"
                 shift
             done
+            carried=("${@:1:m}")
+            shift "$m"
             exec setpriv --reuid="$uid" --regid="$gid" --init-groups -- \
-                env PATH="$path" HOME="$home" ${ldpath:+"LD_LIBRARY_PATH=$ldpath"} \
-                WZ_ARTIFACT_ROOT="$root" "$@"
-        ' ro-tree "$(id -u)" "$(id -g)" "$PATH" "$HOME" "$root" "${LD_LIBRARY_PATH-}" \
-            "$((1 + ${#linked[@]}))" "$tree" "${linked[@]}" "$@"
+                env -i "${carried[@]}" WZ_ARTIFACT_ROOT="$root" "$@"
+        ' ro-tree "$(id -u)" "$(id -g)" "$root" "$((1 + ${#linked[@]}))" \
+            "${#carried[@]}" "$tree" "${linked[@]}" "${carried[@]}" "$@"
         ;;
     *)
         echo "read-only-tree: $RO_TREE_WHY" >&2
