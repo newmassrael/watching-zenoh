@@ -12288,6 +12288,21 @@
       "carry_forward_bullets": [
         "Open: the integrator service itself (a clone marked wz.land-integrator, an environment file, the unit) is not installed; bx records no installation value in the queue log since bx main 5ea729d, so a submit from a home-directory worktree should no longer be refused by gate 0b2, which has not been tried against a real submit. The server ruleset of RFC 4.12 is not set and is meant to wait a week of use. The old log commits of other repositories' queues are not this repository's."
       ]
+    },
+    "Round 4412": {
+      "decision_summary": "The identity gate that the pre-push hook applies to the queue's refs (gate 0q) now accepts the queue's own identity on the queue's log, and only there. bx writes the log and the lease as commits by one fixed identity that names no person (bx land, bx-land at localhost, bx land/git.rs IDENT), and the repository's identity gate, which exists so that no commit under a stray personal address is published, refused it: the first real log push would have been refused at gate 0q by the gate the previous step added. Found by reading bx's source for what its commits carry, before any integrator ran.\n\nThe exception is narrow on purpose. It is one constant (WZ_QUEUE_IDENT_EMAIL, which names bx's constant so the two change together), it applies to the log and lease kind only, and a commit in the same push by anyone else is still judged by the repository's own rule, author and committer both. A session's item and a commit on the branch keep the ordinary gate: a commit the integrator puts on the branch carries the integrator clone's own identity, as a session's rebase does (bx RFC 0024, 11), so the integrator's clone must be configured with an identity the repository accepts, and the queue identity is not one of them.",
+      "changes_bullets": [
+        "scripts/lib/push-refs.sh: WZ_QUEUE_IDENT_EMAIL and wz_queue_log_identity_gate (every author and committer is the queue's identity or one wz_ident_allowed accepts). .githooks/pre-push: gate 0q uses it for a queue-log push and the ordinary range gate for an item. scripts/run-ci.sh: a Layer C0i arm in a throwaway repository."
+      ],
+      "verification_bullets": [
+        "The real hook, driven with a synthetic push line (nothing pushed), for a new log chain whose one commit is authored and committed by bx-land at localhost with a clean tree: the vocabulary and home-path gates are clean, gate 0q reports the public gates passed, exit 0. Before the change the same gate would have refused that identity. The new Layer C0i arm, run on its own in a throwaway repository (the layer does not go green on this machine): a chain of the queue's identity alone and a range holding an accepted identity both pass the log gate, a range with a stranger's commit is refused by it, and the ordinary range gate refuses the queue's identity, each as its own exit code. shellcheck passes for push-refs.sh and the hook."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the integrator's clone must carry an identity the repository accepts (user.email set, not the queue's), beside wz.land-integrator, which the install has to set; neither is set anywhere yet. bx's constant and this one are two places for one value, held together by the comment and by this arm only if the arm is changed with them."
+      ]
     }
   },
   "inventory_entries": {
