@@ -12727,6 +12727,24 @@
       "carry_forward_bullets": [
         "Carries of the node's C door that remain: the placement of a remote in the south compared with a stock gateway's, which needs a stock node that keeps a south apart as the oracle; a get with a shared-memory value through the port's engine (SessionEngine has no such method; the C door and the node reach it through RouterState). The scratch worktree and branch size-measure may be removed with bx-wt."
       ]
+    },
+    "Round 4437": {
+      "decision_summary": "A consumer claim, forwarded by a peer session: a sender whose key ids are fixed in advance publishes and queries under a numeric id with no declaration on the wire, and names a second resource under one id by writing a suffix after it (the id, and the id followed by /@history for a history query). The field document's carried entry gave an unresolved reference its cause and its id since revision 24 and dropped the suffix, so the two references read as one and a reader lost that the second was a history query. Every carried entry now carries keyexpr_suffix beside keyexpr_id: the suffix the unresolved reference wrote after its id, verbatim and read against nothing, null when it wrote none, on a resolved key (whose keyexpr already ends with it) and where no reference was made.",
+      "changes_bullets": [
+        "wz-capture: UnresolvedRef carries the suffix the WireExpr wrote after its id, taken from the same keyexpr node as the cause and the id; push_keyexpr_miss writes keyexpr_suffix on every carried and above_transport.carried entry, and both cells join the revisable row cells.",
+        "wz-capture: doc_revision adds field document revision 58 (FIELDS_R58_KEYS, revision 57's carries); a fixture builds the reference-before-declaration capture with a reference of the caller's choosing.",
+        "wz-capi-dissect: the header states keyexpr_suffix and lists its cells among the revisable ones; the C consumer pins fields 58."
+      ],
+      "verification_bullets": [
+        "On build machines: wz-capture with dissect and network-codecs 1682 pass, among them the new test (one capture written with its reference carrying a suffix and carrying none: the miss says id 7 and the suffix, or id 7 and null; every entry has the key; no entry that is not a miss carries a suffix) and the two exact-text chain tests that now read the key; wz-capi-dissect 231 and its memory gate 4 pass, among them the issued-row test with two new scenarios (a suffixed reference in a row and inside a completed chain, whose suffix cell moves when the held declaration is decoded); wz-analyze checks; clippy of wz-capture and wz-capi-dissect is clean; lane C1bo (the C consumer, pinned to fields 58) passes.",
+        "The document revision consumer pin (22 agree) and the JSON integer cell gate pass."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "carry_forward_bullets": [
+        "The consumer is told fields 58 and the commit. Its second claim, a sender's own application-level split of a large message into several puts on one key (recognised by content, chained per sender, key and transfer, each piece judged, the joined bytes read by the key's end-to-end and body rules), is the next item: the header layout arrives as a declared profile, because the layout is the deployment's and this repository is public."
+      ]
     }
   },
   "inventory_entries": {
