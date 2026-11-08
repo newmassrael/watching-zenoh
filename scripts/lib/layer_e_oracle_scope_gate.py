@@ -78,12 +78,25 @@ RUN_CI = pathlib.Path("scripts/run-ci.sh")
 #: `wz_dialer_binary` joins: the `dial_a_listener` example of the build under test, which Layer
 #: C1co builds for each engine and names in `WZ_PICO_DIALER_BIN`, for the tests in which it dials
 #: upstream's CLI run as a listener. Its tests carry `wz_dialer` and are skipped by the sweep.
+#:
+#: The three `wz_capi_c_*` resolvers join: they return the zenoh-c ABI library
+#: `cargo build -p wz-capi-c` writes, which this job never builds (the lane
+#: builds `wz-capi-pico` and `wz-ap-demo`, and wz-capi-c is no dependency of the
+#: test crate). Their tests are the lanes' that build that library (C1cc, C1ce,
+#: P). The sweep adopted them, and they stayed quiet on hosted CI only because
+#: they first ask for a zenoh-c oracle a hosted E runner does not have. On a
+#: machine that has the oracle they ran and refused whatever library an earlier
+#: lane had left in the checkout ("OLDER than the wz-capi-c sources it
+#: links"): 56 tests on the 2026-11-08 fleet run.
 UNPROVISIONED_HELPERS = (
     "zenoh_core_example_binary",
     "zenoh_ext_example_binary",
     "wz_zenoh_oracle_binary",
     "wz_held_listener_binary",
     "wz_dialer_binary",
+    "wz_capi_c_cdylib",
+    "wz_capi_c_release_cdylib",
+    "wz_capi_c_staticlib",
 )
 
 #: The sweep line is found by the crate it runs, so a rename of the lane
@@ -141,6 +154,19 @@ def sweep_tokens(root: pathlib.Path) -> list[str]:
     return TOKEN.findall(with_tokens[0].group(0))
 
 
+def test_path(path: pathlib.Path, name: str) -> str:
+    """The name libtest matches a `--skip` token against: the fn's module path.
+
+    A file of a merged target (`tests/<target>/files/<stem>.rs`) is the module
+    `files::<stem>` of that target's binary, so its test is
+    `files::<stem>::<fn>`; a target of its own is its bare fn. Matching a token
+    against the fn alone would call a test selected that the token removes by
+    its module, and the other way round."""
+    if path.parent.name == "files":
+        return "files::%s::%s" % (path.stem, name)
+    return name
+
+
 def scan(root: pathlib.Path):
     """`(selected, offenders)` -- both derived, neither listed."""
     tokens = sweep_tokens(root)
@@ -157,7 +183,7 @@ def scan(root: pathlib.Path):
                 continue
             if "ignore" not in head:
                 continue
-            if any(tok in name for tok in tokens):
+            if any(tok in test_path(path, name) for tok in tokens):
                 continue
             selected.append((name, path.name))
             reasons = IGNORE_REASON.findall(head)
@@ -269,6 +295,32 @@ def selftest() -> int:
             failures += 1
         else:
             print("  selftest ok    the skip list is READ from run-ci.sh, not assumed")
+
+        # A token matches the test's MODULE PATH, as libtest's `--skip` does: a file of a
+        # merged target whose STEM carries the token is skipped though no fn name does, and
+        # the same file under another stem is selected and offends. The zenoh-c family
+        # (`files::zenoh_c_*`, fns like `..._on_wz_and_libzenohc`) is that shape.
+        (tmp / RUN_CI).write_text(SWEEP_LINE, encoding="utf-8")
+        (tmp / TEST_DIR / "case.rs").unlink()
+        merged = tmp / TEST_DIR / "it"
+        (merged / "files").mkdir(parents=True, exist_ok=True)
+        (merged / "main.rs").write_text("mod files;\n", encoding="utf-8")
+        CAPI = "let lib = wz_capi_c_cdylib();\n"
+        body = "#[test]\n" + IGN + "fn opens_identically_on_wz_and_libzenohc() {\n" + CAPI + "}\n"
+        for stem, want, what in (
+            ("zenoh_zget_family", 0, "a module whose stem carries the token is skipped"),
+            ("other_family", 1, "the same file under another stem is selected and offends"),
+        ):
+            for stale in (merged / "files").glob("*.rs"):
+                stale.unlink()
+            (merged / "files" / (stem + ".rs")).write_text(body, encoding="utf-8")
+            _, offenders, _ = scan(tmp)
+            if len(offenders) != want:
+                print("  selftest FAIL  %s: offenders=%d want %d" % (what, len(offenders), want))
+                failures += 1
+            else:
+                print("  selftest ok    %s" % what)
+        shutil.rmtree(merged)
 
         # An invocation narrowed to ONE file is a leg of its own, not a second sweep: its
         # tokens are not the sweep's, and it must not make the sweep ambiguous.

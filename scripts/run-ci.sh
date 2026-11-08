@@ -17703,12 +17703,19 @@ layer_e_ap_demo_round_trip() {
     # zenohd, both of which Layer Z builds and runs it with, and this job builds neither. The other three
     # fns of that file begin with `zenohd` and were kept out by that token; this one does not, so the sweep
     # took it. `layer_e_oracle_scope_gate.py` found it.
+    # `zenoh_c_`, the module prefix of the zenoh-c family (`files::zenoh_c_*`): every test in it
+    # links the `libwz_capi_c.so` that `cargo build -p wz-capi-c` writes, which this job never
+    # builds, and each one's `#[ignore]` names its lane (C1cc, C1ce, M or P). Hosted E kept them
+    # quiet only because they first ask for a zenoh-c oracle its runner does not have; on a
+    # machine that has one, all 56 ran and refused the library an earlier lane had left in the
+    # checkout ("OLDER than the wz-capi-c sources it links", fleet run of 2026-11-08). The gate
+    # names the `wz_capi_c_*` resolvers now, and this token removes exactly those 56.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
         --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget \
         --skip fs_shared_dir --skip sce_b6 --skip from_a_config_file --skip held_listener \
-        --skip wz_dialer --skip netns --skip resets_the_router_it_holds) || return 1
+        --skip wz_dialer --skip netns --skip resets_the_router_it_holds --skip zenoh_c_) || return 1
     # The same upstream C programs against the cooperative engine's library
     # (`docs/capi-pico-on-coop-engine.md`, the open item of step L4): one file, linked to a
     # build of wz-capi-pico of its own whose features are the reference arm's but for the
