@@ -12366,6 +12366,21 @@
         "Open: a margin gate for the Z8 lane, once measured hosted runs exist (every hosted run of the day was cancelled by the account's job cap).",
         "Open: the client hat of the forwarder, and the replay on the accept path without the barrier, both until a traced failure names them; the router race above is not the accept path (the sender dialled)."
       ]
+    },
+    "Round 4416": {
+      "decision_summary": "The landing queue (bx --land) is documented as the other way into main, with what the integrator's clone has to be, and this documentation commit is the first item sent through the queue to the public remote. The queue stays beside scripts/land.sh until it has landed a week of rounds, so a failure of the queue costs a retry by land.sh and no round; the documentation is the smallest real change that exercises the whole path (submit, log push, cherry-pick, the derived ledger round, the pre-push hook as judge, the integrator's atomic push).\n\nThe requirements are written down because the rehearsal found each by a refusal: the clone's directory name is the repository's identity for bx, the six submodules are needed or the workspace validation fails on a stale exclusion, the clone-local vocabulary list is needed or the public gate refuses to report green, the identity gate has to accept the clone's identity, and the integrator marker lifts the lock requirement for every push the marked clone makes, so only the integrator's own clone carries it.",
+      "changes_bullets": [
+        "docs/agent-reference.md: one paragraph on the landing queue and the integrator clone's requirements."
+      ],
+      "verification_bullets": [
+        "The path itself was run against a local remote that is not the public origin (the item landed, its derived commit filed a round and removed the descriptor, and the queue's log tree held no home path). This commit is the first run against the public remote; whether it lands is read from the queue and from origin, and a refusal is paid by landing it with land.sh."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the server ruleset of RFC 4.12 is not set and waits for a week of use; the pinned ledger CLI is installed on one build machine only, so the derive step runs there alone; no other session uses the queue yet."
+      ]
     }
   },
   "inventory_entries": {
