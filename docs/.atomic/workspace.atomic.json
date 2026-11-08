@@ -12449,6 +12449,21 @@
       "carry_forward_bullets": [
         "Open: the mechanism is not reachable from the Rust API builders or the C ABI yet, so peer_target::admit_in_build has no caller; only the tokio peer and client registry reads the target (the router, cooperative and lwIP engines do not); a get addressed to a node whose face is up but whose declaration sync has not finished is asked anyway, where a stricter reading would wait; the replies of an addressed query keep the consolidation the options state, not none. No end-to-end test over real sockets, and the policy-on arm was not built as a whole image."
       ]
+    },
+    "Round 4421": {
+      "decision_summary": "The control that the previous round carried for its advanced test is taken, with no change to the source tree. The claim of that test is that the history of a subscriber on the other client crosses the node, so the control drops, in the node's router, every query that comes from a face other than the node's own, and leaves the node's own queries as they are.",
+      "changes_bullets": [
+        "No file changed. The stub was applied to the router's routing of an inbound query for one build and reverted before this entry was filed."
+      ],
+      "verification_bullets": [
+        "On a build host, wz-capi-c node advanced tests with the stub: the test of a client's publisher fails at the history of the other client's subscriber (0 samples told, 3 expected), after the node's own subscriber was told its three, so the failure isolates the query crossing the node. The existing test of the cache queryable on a node fails as well, since a registry peer's query is one the stub drops. The tests that need no remote query (a put and a delete to a peer, the history of a node's subscriber, the detection of a publisher) pass. The previous round's carry of this control is closed by this entry."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Carries of the node's C door that remain: the zenoh-ext group interop against stock; the shared-memory publication of the node's port, which needs a link that negotiated shared memory; a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
+      ]
     }
   },
   "inventory_entries": {
