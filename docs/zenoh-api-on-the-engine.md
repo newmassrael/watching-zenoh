@@ -1192,7 +1192,23 @@ Each lands whole with its surface lines, tests and faults in one round.
       own and does not close the node, and `Runtime::close` closes the node and so every session
       on it. `session` is 9 of 9 (5 before). The two lists of aggregated keys of upstream's `init`
       builder are not here: nothing in the crate reads them.
-    - **Owed:** Windows, and a margin gate for the lane once it has measured runs.
+    - **Windows (2026-11-08):** the suite, run on the Windows host at the head of the main line
+      (33 files, the tree shipped with the rust backends of the code generator and a disk of
+      46 GB free; a build directory of 26 GB fills a smaller one): 31 files hold their row, with
+      `keyexpr` 16, `atexit` 4 and `session` 8. `session` loses 1 of 9 and `shm` 2 of 10 to a link
+      that cannot open (`LinkFailed`), the failure the first Windows run traced to the group
+      address 224.0.0.1, which the system refuses to join (the same refusal for stock zenoh). `regions` was 125 of 126 once, and 210 of 213 in a run of its scenario 5 queryable
+      test alone; Linux ran that test 250 times and the whole file three times without a loss.
+      The three losses are one cause, read from the kept log of the first: a fifth router
+      dials its five endpoints in turn (upstream dials in turn too), its declaration reaches the
+      fourth before that router has been told of the fifth link, the fourth forwards it down the
+      tree to the fifth as to a child, and the fifth, which also had it from the sender, counts a
+      registration that changes nothing (`return=false`). Upstream's router hat forwards to the
+      children of the source's tree by the same rule (`send_sourced_queryable_to_net_children`
+      in the pin's router hat), so this is the race of that design, held open by the slower
+      scheduling of the host; wz changes nothing for it, and a test that counts registrations
+      is exposed to it at about 1.4% on Windows.
+    - **Owed:** a margin gate for the lane once it has measured runs.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.
