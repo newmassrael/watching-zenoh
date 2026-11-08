@@ -299,6 +299,12 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "off",
     ),
     (
+        "publisher-admission-retry",
+        "WZ_POLICY_PUBLISHER_ADMISSION_RETRY",
+        &["off", "on"],
+        "off",
+    ),
+    (
         "entity-timestamp-opt-in",
         "WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN",
         &["off", "on"],

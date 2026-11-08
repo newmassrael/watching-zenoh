@@ -504,6 +504,11 @@ pub struct SessionPolicy {
     /// `targeted-query`. Upstream: Sends a query to every link whose peers declared a
     /// queryable it matches, and a caller cannot name the peer a query is for.
     pub targeted_query: bool,
+    /// `publisher-admission-retry`. Upstream: Sends a put to every link at once and waits
+    /// on each link for room in its queue; a put that finds none on a link is dropped there
+    /// (or closes the session) and still reports success, and a caller cannot ask for it to
+    /// be tried again.
+    pub publisher_admission_retry: bool,
     /// `entity-timestamp-opt-in`. Upstream: Hands every received sample's timestamp to the
     /// subscriber and every reply's to the querier, and lets any publisher attach the
     /// timestamp it is given.
@@ -560,6 +565,8 @@ impl SessionPolicy {
         let reliable_gap_reconnect = ReliableGapReconnect::stated();
         let entity_link_restriction = policy_bool(option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION"));
         let targeted_query = policy_bool(option_env!("WZ_POLICY_TARGETED_QUERY"));
+        let publisher_admission_retry =
+            policy_bool(option_env!("WZ_POLICY_PUBLISHER_ADMISSION_RETRY"));
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
         let reply_auto_timestamp = policy_bool(option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP"));
         let subscriber_overload = SubscriberOverload::stated();
@@ -580,6 +587,7 @@ impl SessionPolicy {
             reliable_gap_reconnect,
             entity_link_restriction,
             targeted_query,
+            publisher_admission_retry,
             entity_timestamp_opt_in,
             reply_auto_timestamp,
             subscriber_overload,
