@@ -200,7 +200,11 @@ original reproduced by naming it. Three things follow from it:
   was never told the key takes no part. A payload that must be fragmented is atomic for its
   first frame only, a link that writes from a pool may still wait for a slot, and
   shared-memory publishes do not reserve. `atomic_tx::admit_in_build` refuses the statement
-  when the policy is off. Only the tokio registry reads it, and no Rust or C API states it yet;
+  when the policy is off. It is reachable from the Rust API as `.all_links_or_none()` on the
+  builders of a publisher and of a put or a delete, which takes no argument so that the form
+  is only ever stated, behind the non-default crate feature `atomic-publish`; the statement is
+  refused when the policy is off, and by the router engine, which does not read it. Only the
+  tokio registry reads it, and the C API does not state it;
   `BoxedLinkDriver::try_reserve_room` is the seam a wrapper must forward.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
