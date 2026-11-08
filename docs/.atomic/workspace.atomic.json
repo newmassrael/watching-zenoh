@@ -12796,6 +12796,30 @@
       "carry_forward_bullets": [
         "The consumer is told fields 59, declarations_diagnose 4 and the commit; the header layout it needs lives in its own preset. Open: an end-to-end or body rule needs a resolved key, so a sender with fixed key ids gets the joined message without a decode until a declaration can bind fixed ids to keys; the values door does not yet read joined messages."
       ]
+    },
+    "Round 4441": {
+      "decision_summary": "The last finished hosted run (the one before the Z8 budget) was red in four jobs of the documentation and size lanes. One of them, the gate of test discipline, was already repaid by a peer. The other three were read to the end of their logs and paid here. (1) The docs of three modules that carry both an outer and an inner doc (the link restriction, the admission retry, the targeted query) named their types without a path; rustdoc resolves those links in the parent, so every reduced configuration of the session core failed on nine of them, a finding the ledger of that lane did not carry. They now name the types by path, which resolves from either place, so the ledger stays as it was and no line was added. (2) The size lane read two images over their budgets (800 and 1,176 bytes) on that head, and nine on the current one. The growth was taken apart with a symbol diff of the smallest client image between the commit of the reliable-gap policy and the head: of its 12,428 bytes since the hosted reading, 5,224 are the value policies and route memos chosen in the window, and 7,204 are the publish fan-out of the C ABI registry, which made the probe and reserve legs a trait object in every build because the object was made at the call site whether or not a policy asked for the legs. The legs are now made inside the fan-out and only where a build has the admission-retry or the all-faces-or-none policy (`WIRE_LEGS_IN_BUILD`, true in this crate's own tests, which state the options directly). That gave back 4,216 bytes of the client image; the remaining 2,300 are below the fan-out (the writer queue's reserve and its permit are methods of the link driver trait, so every driver has them) and are growth that was chosen. (3) The nine budgets were moved to the reading on the build machine plus the lane's offset over it and 3,500, to the hundred, as the notes of that table state; the offset of the client images was fixed by the same run (1,264), the offsets of the peer, default and C images are the ones the table already gives. The C images were not taken apart symbol by symbol: the next hosted reading corrects an offset that is off.",
+      "changes_bullets": [
+        "crates/wz-session-core: the inner docs of link_restriction, admission_retry and peer_target name their types by path (`crate::link_restriction::LinkRestriction` and the like); no code changes.",
+        "crates/wz-capi-core/src/faces.rs: `WireCalls` (the probe, reserve and reserved calls, generic), `WIRE_LEGS_IN_BUILD`, and `fan_out` making the trait objects of the wire legs only where the const is true; the three callers (publish_all, publish_aliased_all_for, publish_declared_all) pass `WireCalls` where they passed `WireLegs`.",
+        "scripts/lib/capability_cost_gate.py: the budgets of pico-client, pico-client-small, pico-client-udp, pico-peer, pico-default, capic-client-small, capic-router-node, capic-default and capic-default-lean, and the note of the window with the symbol diff."
+      ],
+      "verification_bullets": [
+        "cargo doc of wz-session-core with a reduced feature set, short message format: none of the nine links named in the hosted log is reported any more (the others in the output are the ledger's).",
+        "capability_cost_gate.py --measure of all 21 cases on the build machine at the head before the change: nine over their budgets; pico-client between the reliable-gap commit and the head: 1,860,660 and 1,867,864; after the change 1,863,648. Symbol diffs (nm -C -S, sizes summed by name) of the three builds were read.",
+        "capability_cost_gate.py --measure of all 21 cases after the change: every case under its new budget (pico-client 1,863,648 of 1,868,500).",
+        "capability_cost_gate.py --selftest: 24 of 24 arms.",
+        "clippy -D warnings of wz-capi-core, all targets: clean. cargo test -p wz-capi-core --lib with the filters retry, atomic and publish_all: ran 10, 10 passed.",
+        "Not run: the hosted size lane on the new head (it reads the offsets of the peer, default and C images), and the full reduced-docs lane (the check was the reduced configuration the hosted log names)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the first hosted size lane on this head; an offset taken from the table's notes (peer, default and C images) that is wrong moves that budget by the difference.",
+        "Open: the publish fan-out still links the writer queue's reserve and permit in every build, because they are methods of the link driver trait; a driver trait split by policy would give back about 1,300 bytes of the smallest client image.",
+        "Open: the Z8 job under the 60-minute budget has no hosted reading yet, and the scenario 7 late-peer red is read from the peer lines of the last round when it recurs."
+      ]
     }
   },
   "inventory_entries": {
