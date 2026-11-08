@@ -2565,6 +2565,19 @@ enum DispatchStage {
     /// held is a lane with no room, and is answered `NoRoom` the same way.
     #[cfg(feature = "alloc")]
     Probe,
+    /// A send made under room its sender already holds ([`crate::link::RoomPermit`]): the
+    /// reservation IS the room, so the ask for room is skipped and the frame is never counted as
+    /// a congestion drop for want of it.
+    ///
+    /// It does wait for its conduit's lock, which a probe does not. The room is promised, and a
+    /// promise that failed because another sender was holding the lock would break the
+    /// atomicity the reservation was taken for. The wait is bounded by what the holder of the
+    /// lock does: it is a sender that waits for room, whose own wait ends at its deadline, and it
+    /// cannot be given the promised room, which its question counts as taken. A message that is a
+    /// chain of fragments is sent with the ordinary deadline for the fragments after its first,
+    /// which the reservation does not cover.
+    #[cfg(all(feature = "alloc", feature = "codec-push"))]
+    Reserved,
 }
 
 /// The declaration a session with no allocator sends, as the arguments of the writer of
@@ -9672,6 +9685,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // copy of the message, so needs the heap): neither exists in this build.
         #[cfg(not(any(feature = "alloc", feature = "transport-stats")))]
         let _ = (stage, message_priority);
+        // A send under room its sender already holds: only a Push is sent that way, and only a
+        // build with a heap has a permit to hold.
+        #[cfg(all(feature = "alloc", feature = "codec-push"))]
+        let reserved = stage == DispatchStage::Reserved;
+        #[cfg(not(all(feature = "alloc", feature = "codec-push")))]
+        let reserved = false;
         // R2923 — zenoh's `is_droppable`: a best-effort message, or one whose
         // congestion control is `Drop`
         // (`commons/zenoh-protocol/src/network/mod.rs` @ `!self.is_reliable() || self.congestion_control() == CongestionControl::Drop`).
@@ -9679,7 +9698,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R2952 — observed once, on the caller's pass: a scheduled push is the
         // same message.
         #[cfg(feature = "transport-stats")]
-        if stage == DispatchStage::Fresh {
+        if stage == DispatchStage::Fresh || reserved {
             self.observe_payload(
                 crate::stats_registry::StatsDirection::Tx,
                 message_priority,
@@ -9915,6 +9934,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             PushDeadline::new(droppable, &self.params.tx_queue)
         });
         let congested = || {
+            // The sender holds the room (see `DispatchStage::Reserved`): asking would count its
+            // own promise against the lane and find it full when it is exactly full enough.
+            if reserved {
+                return false;
+            }
             let mut left = deadline.get();
             let answer = self.with_conduit_link(wire_reliability, priority, |link| {
                 link.link_driver().wait_for_room(priority, left.ask())
@@ -11442,6 +11466,87 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         self.send_network_message_qos(msg, reliable, express, priority)
             .map_err(Unsent::Failed)
+    }
+
+    /// Promise one frame of room on the link a message of `reliable` and `priority` leaves on,
+    /// without waiting ([`BoxedLinkDriver::try_reserve_room`]): `Ok(None)` when the lane has no
+    /// room, and [`SendWireError::TransportUnavailable`] when the session cannot send at all (its
+    /// link is down or a congestion close was ordered), which is not a lack of room and which a
+    /// send would meet as well.
+    ///
+    /// The link asked is the one [`Self::send_network_message_reserved`] will pick for the same
+    /// `(reliable, priority)`, so the room promised is the room that send uses; a session that
+    /// aggregates links may pick another one if the set changed in between, and the frame then
+    /// goes out without a promise behind it.
+    #[cfg(feature = "codec-push")]
+    #[cfg(feature = "alloc")]
+    pub fn try_reserve_wire_room(
+        &self,
+        reliable: bool,
+        priority: Priority,
+    ) -> Result<Option<crate::link::RoomPermit>, SendWireError> {
+        if self.congestion_close_ordered() || !self.session_send_available() {
+            return Err(SendWireError::TransportUnavailable);
+        }
+        let priority = self.conduit_priority(priority);
+        let reliability = Reliability::from_reliable_bool(reliable);
+        Ok(self.with_conduit_link(reliability, priority, |link| {
+            link.link_driver().try_reserve_room(priority)
+        }))
+    }
+
+    /// [`Self::send_network_message_qos`] for a message whose sender already holds the room it
+    /// needs: `room`, from [`Self::try_reserve_wire_room`] for this message's `reliable` and
+    /// `priority`. A `Push` is sent without asking the link for room (the permit is the room, see
+    /// `DispatchStage::Reserved`), waits for its conduit's lock where a probe would give up, and is
+    /// never a congestion drop for want of room.
+    ///
+    /// The permit is held until the frame has been handed over, express flush included, and
+    /// dropped then: the lane counts the frame and the promise together for that interval and
+    /// never fewer. A message that a batch absorbs is the conduit's from then on, as it is for any
+    /// send, and the permit is dropped when this call returns; the batch's own frame is what
+    /// reaches the lane later, as the frame of any send that is staged.
+    ///
+    /// Any other message is sent as [`Self::send_network_message_qos`] sends it, which waits for
+    /// room, and the permit is dropped before it.
+    #[cfg(feature = "codec-push")]
+    #[cfg(feature = "alloc")]
+    pub fn send_network_message_reserved(
+        &self,
+        msg: crate::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+        room: crate::link::RoomPermit,
+    ) -> Result<(), SendWireError> {
+        if !matches!(msg, crate::network_message::NetworkMessage::Push(_)) {
+            drop(room);
+            return self.send_network_message_qos(msg, reliable, express, priority);
+        }
+        // The handoff transaction is opened before the message is built and given back when it
+        // drops uncommitted, which is what a message that did not leave is owed.
+        #[cfg(feature = "session-extshm")]
+        let transaction = self.open_shm_tx(&msg, reliable, priority);
+        let crate::network_message::NetworkMessage::Push(push) = msg else {
+            unreachable!("the message was matched as a Push above");
+        };
+        let sent = self
+            .dispatch_push_at(DispatchStage::Reserved, priority, &push, reliable)
+            .map(|_| ());
+        #[cfg(feature = "transport-batching")]
+        if sent.is_ok() && express {
+            self.flush_open_batch();
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        let _ = express;
+        #[cfg(feature = "session-extshm")]
+        if let (Ok(()), Some(transaction)) = (&sent, transaction) {
+            transaction.commit();
+        }
+        // Held to here, and not dropped where it was last read, so that the room stays promised
+        // until the frame and its flush are on the link.
+        drop(room);
+        sent
     }
 
     /// R3110 -- the sender's handoff transaction for `msg`, with every shared-memory slice of it

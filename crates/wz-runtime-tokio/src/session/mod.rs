@@ -847,6 +847,46 @@ pub enum WireProbe {
     NoRoom,
 }
 
+/// The Push of a publish's wire leg once it has been through the egress policy and the routing
+/// namespace, with what the link is handed it with (see `Session::stage_wire_push`).
+#[cfg(all(feature = "transport-unicast", feature = "codec-push"))]
+struct StagedPush {
+    msg: wz_session_core::network_message::NetworkMessage,
+    reliable: bool,
+    express: bool,
+    priority: wz_session_core::qos::Priority,
+}
+
+/// Room on a session's link that `Session::reserve_wire` promised to one publish: while it
+/// lives, the link's queue counts the room as taken, so no other sender is given it, and the
+/// publish can be sent under it without asking for room again (`Session::publish_reserved`).
+/// Dropping it, sent under or not, gives the room back.
+///
+/// It is for the options it was reserved with: a publish sent under it states the same
+/// reliability and priority, as the registry's fan-out does by building both from one value.
+#[must_use = "a reservation that is dropped at once promises nothing: send under it, or do not ask"]
+#[derive(Debug)]
+pub struct WireReservation {
+    permit: wz_session_core::link::RoomPermit,
+}
+
+impl WireReservation {
+    /// Whether the reservation holds room of a link's queue, and not the trivial promise of a link
+    /// with no queue or of a publish that owes the link nothing.
+    pub fn is_held(&self) -> bool {
+        self.permit.is_held()
+    }
+}
+
+/// What `Session::reserve_wire` found on a session's link.
+#[derive(Debug)]
+pub enum WireRoom {
+    /// The link promised room: the publish may be sent under the reservation.
+    Granted(WireReservation),
+    /// The link had no room to promise. Nothing was reserved, counted as a drop or closed.
+    NoRoom,
+}
+
 /// R3069 -- how a chunk publish holds the payload it hands to its LOCAL leg: borrowed from a
 /// caller that goes on holding it, or handed over by one that gave it up. See
 /// [`Session::deliver_shm_local_owned`] for why the second exists.
@@ -5167,30 +5207,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         keyexpr: &str,
         wire: GroupKey<'_>,
         payload: &[u8],
-        mut opts: PublishOptions,
+        opts: PublishOptions,
     ) -> Result<WireProbe, PublishError> {
-        use wz_session_core::network_message::NetworkMessage;
         use wz_session_core::session_actions::Unsent;
 
-        if !opts.allowed_destination.allows_remote() {
-            return Ok(WireProbe::Queued);
-        }
-        self.resolve_publish_timestamp(&mut opts);
-        let reliable = opts.reliable_bool();
-        let meta = opts.push_metadata();
-        let express = meta.is_express();
-        let priority = opts.priority_band();
-        let push = build_publish_push(opts.kind, keyexpr, wire, payload, &meta)?;
-        let Some((msg, express, priority)) = self.egress_stage(
-            NetworkMessage::Push(Box::new(push)),
+        let Some(StagedPush {
+            msg,
             reliable,
             express,
             priority,
-        )?
+        }) = self.stage_wire_push(keyexpr, wire, payload, opts)?
         else {
             return Ok(WireProbe::Queued);
         };
-        let msg = transport::namespace_egress_stage(self.actions(), msg)?;
         match self
             .actions()
             .try_send_network_message_qos(msg, reliable, express, priority)
@@ -5205,6 +5234,191 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 .map(|()| WireProbe::Queued)?),
             Err(Unsent::Failed(e)) => Err(e.into()),
         }
+    }
+
+    /// The part of a publish's wire leg that comes before the link: the Push the options and the
+    /// key name, put through the egress policy and the routing namespace. `None` when nothing is
+    /// owed to the link, because the publish may not go remote or the policy consumed the message,
+    /// as it does for a send that waits. The one place the probing and the reserved publishes build
+    /// what they send, so that neither can send a different frame from the other.
+    #[cfg(feature = "codec-push")]
+    fn stage_wire_push(
+        &self,
+        keyexpr: &str,
+        wire: GroupKey<'_>,
+        payload: &[u8],
+        mut opts: PublishOptions,
+    ) -> Result<Option<StagedPush>, PublishError> {
+        use wz_session_core::network_message::NetworkMessage;
+
+        if !opts.allowed_destination.allows_remote() {
+            return Ok(None);
+        }
+        self.resolve_publish_timestamp(&mut opts);
+        let reliable = opts.reliable_bool();
+        let meta = opts.push_metadata();
+        let express = meta.is_express();
+        let priority = opts.priority_band();
+        let push = build_publish_push(opts.kind, keyexpr, wire, payload, &meta)?;
+        let Some((msg, express, priority)) = self.egress_stage(
+            NetworkMessage::Push(Box::new(push)),
+            reliable,
+            express,
+            priority,
+        )?
+        else {
+            return Ok(None);
+        };
+        let msg = transport::namespace_egress_stage(self.actions(), msg)?;
+        Ok(Some(StagedPush {
+            msg,
+            reliable,
+            express,
+            priority,
+        }))
+    }
+
+    /// Promise this session's link room for one frame of a publish stated as `opts`, without
+    /// waiting and without marking the link's lane congested: [`WireRoom::Granted`] with a
+    /// reservation the publish is then sent under ([`Self::publish_reserved`]), or
+    /// [`WireRoom::NoRoom`] when the lane has none. A publish that may not go remote owes the link
+    /// nothing, and is granted a reservation that holds nothing.
+    ///
+    /// A session that cannot send at all (its link is down, or a congestion close was ordered) is
+    /// [`PublishError::TransportUnavailable`], which is not a lack of room: the caller skips that
+    /// link, as a send to it would be skipped.
+    ///
+    /// The room is the lane of the options' reliability and priority. An egress policy that
+    /// rewrites a message's QoS (`access-qos-overwrite`) can send it on another lane than the one
+    /// promised, which the reservation does not follow.
+    #[cfg(feature = "codec-push")]
+    pub fn reserve_wire(&self, opts: &PublishOptions) -> Result<WireRoom, PublishError> {
+        if !opts.allowed_destination.allows_remote() {
+            return Ok(WireRoom::Granted(WireReservation {
+                permit: wz_session_core::link::RoomPermit::trivial(),
+            }));
+        }
+        match self
+            .actions()
+            .try_reserve_wire_room(opts.reliable_bool(), opts.priority_band())
+        {
+            Ok(Some(permit)) => Ok(WireRoom::Granted(WireReservation { permit })),
+            Ok(None) => Ok(WireRoom::NoRoom),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// [`Self::publish`]'s wire leg, sent under the room `reservation` holds: the frame goes to
+    /// this session's link without the ask for room that [`Self::publish`] makes, since the
+    /// promise is the room, and it is never a congestion drop for want of it. Only the wire leg
+    /// runs, as for [`Self::publish_probe`].
+    ///
+    /// It waits for its conduit's lock, where a probe gives up: a promise that failed because
+    /// another sender held the lock would break what the reservation was taken for. That lock is
+    /// held across a wait for room only by a sender whose own wait ends at its deadline, and the
+    /// promised room is not given to it. A payload too long to be sent whole is sent with the
+    /// ordinary wait between its fragments after the first; the reservation covers one frame.
+    ///
+    /// The same egress policy, routing namespace, timestamp and metadata apply as to
+    /// [`Self::publish`]. The reservation is given back when this returns, sent or refused.
+    #[cfg(feature = "codec-push")]
+    pub fn publish_reserved(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        opts: PublishOptions,
+        reservation: WireReservation,
+    ) -> Result<(), PublishError> {
+        self.reserved_wire(
+            keyexpr,
+            GroupKey::literal(keyexpr),
+            payload,
+            opts,
+            reservation,
+        )
+    }
+
+    /// [`Self::publish_reserved`] on a key the far side holds a declaration for: `mapping_id` and
+    /// the rest of the key, `inline_suffix`, as [`Self::publish_aliased`] names it.
+    ///
+    /// # Panics
+    ///
+    /// When `mapping_id` is 0, which names no declaration.
+    #[cfg(feature = "codec-push")]
+    pub fn publish_aliased_reserved(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        payload: &[u8],
+        opts: PublishOptions,
+        reservation: WireReservation,
+    ) -> Result<(), PublishError> {
+        assert!(
+            mapping_id != 0,
+            "publish_aliased_reserved requires a non-zero mapping id; use publish_reserved for a literal",
+        );
+        self.reserved_wire(
+            "",
+            GroupKey {
+                mapping_id,
+                suffix: inline_suffix,
+            },
+            payload,
+            opts,
+            reservation,
+        )
+    }
+
+    /// [`Self::publish_aliased_reserved`] on an id this session's outbound table must hold, as
+    /// [`Self::publish_aliased_auto`] requires: an id it does not know is
+    /// [`PublishAliasError::UnknownMapping`], nothing is offered to the link and the reservation
+    /// is given back.
+    #[cfg(feature = "codec-push")]
+    pub fn publish_aliased_auto_reserved(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        payload: &[u8],
+        opts: PublishOptions,
+        reservation: WireReservation,
+    ) -> Result<(), PublishAliasError> {
+        if self
+            .actions()
+            .resolve_outbound_mapping(mapping_id)
+            .is_none()
+        {
+            return Err(PublishAliasError::UnknownMapping(mapping_id));
+        }
+        Ok(self.publish_aliased_reserved(mapping_id, inline_suffix, payload, opts, reservation)?)
+    }
+
+    /// The one body of the reserved publishes: build the Push as the waiting and the probing
+    /// publish do, and hand it to the link under the reservation's room.
+    #[cfg(feature = "codec-push")]
+    fn reserved_wire(
+        &self,
+        keyexpr: &str,
+        wire: GroupKey<'_>,
+        payload: &[u8],
+        opts: PublishOptions,
+        reservation: WireReservation,
+    ) -> Result<(), PublishError> {
+        let Some(StagedPush {
+            msg,
+            reliable,
+            express,
+            priority,
+        }) = self.stage_wire_push(keyexpr, wire, payload, opts)?
+        else {
+            return Ok(());
+        };
+        Ok(self.actions().send_network_message_reserved(
+            msg,
+            reliable,
+            express,
+            priority,
+            reservation.permit,
+        )?)
     }
 
     /// Send a plain Put on a key this session declared, to the peer, and nothing else: the
@@ -8907,3 +9121,6 @@ mod shm_reply_tests;
 
 #[cfg(all(test, feature = "transport-unicast", feature = "codec-push"))]
 mod probe_tests;
+
+#[cfg(all(test, feature = "transport-unicast", feature = "codec-push"))]
+mod reserve_tests;
