@@ -346,7 +346,8 @@ pub struct LiveMemory {
     pub dissection: wz_capture::DissectionMemory,
     /// What the census keeps between calls.
     pub census: wz_capture::FoldMemory,
-    /// What the field walk keeps between calls.
+    /// What the field walks keep between calls: the field document's memory and
+    /// the row-facts document's together.
     pub fields: wz_capture::FoldMemory,
     /// The runs that map a message to its number, one per drain mark. The marks
     /// themselves follow the count of lists and are not in the report.
@@ -428,6 +429,12 @@ pub struct LiveDissection {
     /// The digests of the rows [`Self::fields_since`] wrote, and the state of the
     /// capture it wrote them in: what lets it say which rows moved.
     fields_memory: wz_capture::fields_json::FieldsMemory,
+    /// The same for [`Self::row_facts_since`], whose rows leave their trees out:
+    /// a memory per shape, so neither door's walk begins again for the other's.
+    facts_memory: wz_capture::fields_json::FieldsMemory,
+    /// The row-facts document the last call wrote and nobody has taken yet: the
+    /// answer of one call, held only until [`Self::take_row_facts`] copies it out.
+    facts_held: Vec<u8>,
     /// The payloads [`Self::field_values_since`] holds for the selector it was
     /// last asked under, past the cursor it was last asked at.
     values_memory: wz_capture::field_values::ValuesMemory,
@@ -597,6 +604,10 @@ impl LiveDissection {
             selection_said: wz_capture::selection_json::SelectionMemories::default(),
             census_memory: std::sync::Mutex::new(wz_capture::CensusMemory::new()),
             fields_memory: wz_capture::fields_json::FieldsMemory::new(),
+            facts_memory: wz_capture::fields_json::FieldsMemory::with_trees(
+                wz_capture::fields_json::Trees::Left,
+            ),
+            facts_held: Vec::new(),
             values_memory: wz_capture::field_values::ValuesMemory::new(),
             progress: None,
             lost: 0,
@@ -664,7 +675,15 @@ impl LiveDissection {
             dissection: self.dissection.memory(),
             census,
             selection: self.selection_said.memory(),
-            fields: self.fields_memory.memory(),
+            // Both shapes' memories: what the field walks keep between calls.
+            fields: {
+                let (trees, facts) = (self.fields_memory.memory(), self.facts_memory.memory());
+                wz_capture::FoldMemory {
+                    payload_rows: trees.payload_rows + facts.payload_rows,
+                    exchange_rows: trees.exchange_rows + facts.exchange_rows,
+                    row_digests: trees.row_digests + facts.row_digests,
+                }
+            },
             drain: self
                 .marks
                 .values()
@@ -1293,6 +1312,94 @@ impl LiveDissection {
         after_seq: u64,
         max_rows: u64,
     ) -> Option<String> {
+        self.since_window(
+            wz_capture::fields_json::Trees::Written,
+            capture,
+            map,
+            declarations_text,
+            after_seq,
+            max_rows,
+        )
+    }
+
+    /// THE ROW-FACTS DOCUMENT: [`Self::fields_since_windowed`]'s rows with their
+    /// field trees left out, as CBOR, written into the handle until it is taken.
+    ///
+    /// # What it is for
+    ///
+    /// A consumer that lists the rows of a live capture reads what each row says
+    /// about its message and never its tree, and asks for one message's tree when
+    /// that message is picked. Measured on a capture of 64-byte pushes, the trees
+    /// were 74% of a row's bytes and 70% of the call that wrote them; this is the
+    /// same rows, from the same walk and the same writer, without them, in the
+    /// binary form of the same document (RFC 8949's mapping of its JSON).
+    ///
+    /// # Its own memory
+    ///
+    /// The digests a since-document compares are of the rows it writes, and a row
+    /// without its trees is another text, so this door keeps a memory of its own
+    /// beside [`Self::fields_since`]'s. A consumer that steps with this door and
+    /// asks the other for a picked row's tree leaves each walk where it was.
+    ///
+    /// # Where the bytes go
+    ///
+    /// Into the handle, replacing what an earlier call left there, and the length
+    /// is returned. [`Self::take_row_facts`] copies them into the caller's buffer
+    /// and lets them go. `None` when the progress callback stopped the call: no
+    /// document is written and what the handle held is let go too, so a later
+    /// take cannot hand out an answer to an earlier question.
+    ///
+    /// The conversion is of the field writer's own JSON and cannot refuse it; a
+    /// refusal would be a defect of that writer, and it comes back as the
+    /// refusal rather than as a panic across the C boundary.
+    pub fn row_facts_since(
+        &mut self,
+        capture: &[u8],
+        map: Option<&wz_capture::payload::formats::FormatMap<'_>>,
+        declarations_text: &str,
+        after_seq: u64,
+        max_rows: u64,
+    ) -> Option<Result<usize, wz_capture::cbor_of_json::Refused>> {
+        self.facts_held = Vec::new();
+        let text = self.since_window(
+            wz_capture::fields_json::Trees::Left,
+            capture,
+            map,
+            declarations_text,
+            after_seq,
+            max_rows,
+        )?;
+        Some(wz_capture::cbor_of_json::cbor_of_json(&text).map(|bytes| {
+            self.facts_held = bytes;
+            self.facts_held.len()
+        }))
+    }
+
+    /// The row-facts document [`Self::row_facts_since`] left in the handle, if
+    /// `out` holds it: copied there and let go, and its length returned. `out`
+    /// shorter than the document writes nothing and keeps it; the length is
+    /// returned either way, and 0 means the handle holds none (a document is
+    /// never empty).
+    pub fn take_row_facts(&mut self, out: &mut [u8]) -> usize {
+        let len = self.facts_held.len();
+        if len > 0 && out.len() >= len {
+            out[..len].copy_from_slice(&self.facts_held);
+            self.facts_held = Vec::new();
+        }
+        len
+    }
+
+    /// The since-document of `trees`' shape for the numbers after `after_seq`, at
+    /// most `max_rows` of them, from the memory that shape keeps.
+    fn since_window(
+        &mut self,
+        trees: wz_capture::fields_json::Trees,
+        capture: &[u8],
+        map: Option<&wz_capture::payload::formats::FormatMap<'_>>,
+        declarations_text: &str,
+        after_seq: u64,
+        max_rows: u64,
+    ) -> Option<String> {
         self.drain(&mut []);
         let ids = HandleIds::of(self);
         let hook = self.progress;
@@ -1308,6 +1415,10 @@ impl LiveDissection {
         } else {
             issued.min(after_seq.saturating_add(max_rows))
         };
+        let memory = match trees {
+            wz_capture::fields_json::Trees::Written => &mut self.fields_memory,
+            wz_capture::fields_json::Trees::Left => &mut self.facts_memory,
+        };
         wz_capture::fields_json::fields_json_since_remembering_progress(
             &self.dissection,
             capture,
@@ -1318,7 +1429,7 @@ impl LiveDissection {
                 after_seq,
                 through_seq,
             },
-            &mut self.fields_memory,
+            memory,
             progress.as_ref(),
         )
     }
@@ -1328,6 +1439,11 @@ impl LiveDissection {
     /// again. What a test reads instead of a clock.
     pub fn fields_work(&self) -> wz_capture::fields_json::FieldsStats {
         self.fields_memory.stats()
+    }
+
+    /// [`Self::fields_work`] for the row-facts door's memory.
+    pub fn facts_work(&self) -> wz_capture::fields_json::FieldsStats {
+        self.facts_memory.stats()
     }
 
     /// THE TYPED VALUES OF A FEW PAYLOAD FIELD PATHS, for the records of the

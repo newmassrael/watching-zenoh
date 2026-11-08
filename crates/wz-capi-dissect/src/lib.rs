@@ -454,6 +454,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 54, for `wz_dissect_lifecycle_read`: a node's answer about its sessions
     // read into a fixed struct whose words are static strings of this library.
     // The memory rule moves with it: those words are never freed.
+    // 55, for `wz_dissect_live_row_facts_since` and `wz_dissect_live_row_facts_take`:
+    // the rows after a cursor without their field trees, in CBOR, into a buffer
+    // the caller owns. The memory rule does not move.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -471,7 +474,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 54;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 55;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -4973,6 +4976,151 @@ pub unsafe extern "C" fn wz_dissect_live_field_values_since(
         Err(wz_capture::field_values::ValuesError::Paths(_)) => WZ_DISSECT_ERR_INVALID_ARG,
         Err(wz_capture::field_values::ValuesError::Cancelled) => WZ_DISSECT_ERR_CANCELLED,
     }
+}
+
+/// (ABI 55) — THE ROWS AFTER A CURSOR WITHOUT THEIR FIELD TREES, in CBOR: the
+/// `row_facts` document, into a buffer the caller owns.
+///
+/// # What a consumer was paying for
+///
+/// A consumer that lists a live capture's rows asked for the rows after its cursor
+/// at every step and could not keep up at 20,000 small messages a second: a row of
+/// [`wz_dissect_live_fields_since`] was about 3.7 KB and about 17 us to write, and
+/// as long again to parse. Its list reads what each row SAYS about its message —
+/// `carried`, `payload_decode`, `above_transport`, `sn`, `chain`, `first_byte`, `l2`
+/// and the coordinates — and none of the trees, which it asks for one message at a
+/// time. Measured on a capture of 64-byte pushes: the trees were 74% of a row's
+/// bytes and 70% of the call. This door writes the rows without them.
+///
+/// # What it writes
+///
+/// [`wz_dissect_live_fields_since_window`]'s document, from the same walk and the
+/// same writer, with every row's `fields` tree and every completed chain's
+/// `above_transport.fields` trees left out and nothing else changed, under its own
+/// name (`row_facts`) and revision; in CBOR (RFC 8949), the document's JSON mapped
+/// key for key: objects are maps with text keys, strings text, integers integers,
+/// other numbers the shortest float that holds them, and every length definite.
+///
+/// # The buffer, and the memory rule unchanged
+///
+/// Bytes are not a string and this ABI does not allocate what it hands back, so
+/// they go into `out`, `cap` bytes the caller owns. `needed` always receives the
+/// document's length. When `cap` is at least that, `out` holds it and the call is
+/// over. When it is less, nothing is written and the handle keeps the document:
+/// [`wz_dissect_live_row_facts_take`] copies it out into a buffer of `needed`
+/// bytes. Asking again would not do, because this door moves the handle's memory
+/// of what it has written; the take is how a caller sizes after the fact.
+///
+/// # Its own memory
+///
+/// Its rows are another text from the field document's, so the handle keeps a
+/// memory for this door beside that one: a consumer that steps with this door and
+/// asks [`wz_dissect_live_fields_since_window`] for one picked row leaves each walk
+/// where it was.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null pointer where one is not allowed or
+/// text that is not UTF-8, [`WZ_DISSECT_ERR_DECLARATION`] for a declaration text
+/// that is refused, [`WZ_DISSECT_ERR_CANCELLED`] when the progress callback stopped
+/// it, and [`WZ_DISSECT_ERR_DECODE`] if the conversion refused the writer's text,
+/// which is a defect of this library. On every error `needed` is 0 and the handle
+/// holds no document.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed. `bytes` must be valid for
+/// `len` bytes (null only when `len` is 0), `declarations` a NUL-terminated C
+/// string, `out` writable for `cap` bytes (null only when `cap` is 0) and `needed`
+/// a writable `size_t`.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn wz_dissect_live_row_facts_since(
+    handle: *mut live::LiveDissection,
+    bytes: *const u8,
+    len: usize,
+    declarations: *const c_char,
+    after_seq: u64,
+    max_rows: u64,
+    out: *mut u8,
+    cap: usize,
+    needed: *mut usize,
+) -> c_int {
+    if handle.is_null()
+        || (bytes.is_null() && len != 0)
+        || declarations.is_null()
+        || (out.is_null() && cap != 0)
+        || needed.is_null()
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: null-checked above; every error below leaves 0.
+    unsafe { *needed = 0 };
+    // SAFETY: caller contract above.
+    let Ok(text) = unsafe { std::ffi::CStr::from_ptr(declarations) }.to_str() else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let mut map = wz_capture::payload::formats::FormatMap::new();
+    if map.declare_all(text).is_err() {
+        return WZ_DISSECT_ERR_DECLARATION;
+    }
+    let capture: &[u8] = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller contract above; non-null whenever `len` is non-zero.
+        unsafe { core::slice::from_raw_parts(bytes, len) }
+    };
+    // SAFETY: caller contract above.
+    let handle = unsafe { &mut *handle };
+    let written = match handle.row_facts_since(capture, Some(&map), text, after_seq, max_rows) {
+        None => return WZ_DISSECT_ERR_CANCELLED,
+        Some(Err(_)) => return WZ_DISSECT_ERR_DECODE,
+        Some(Ok(written)) => written,
+    };
+    // SAFETY: null-checked above.
+    unsafe { *needed = written };
+    if cap >= written {
+        // SAFETY: `out` is writable for `cap` bytes by the caller contract, and
+        // the handle's buffer is this library's, so the two do not overlap.
+        let into = unsafe { core::slice::from_raw_parts_mut(out, cap) };
+        handle.take_row_facts(into);
+    }
+    WZ_DISSECT_OK
+}
+
+/// (ABI 55) — THE ROW-FACTS DOCUMENT THE HANDLE KEPT, into a buffer the caller
+/// sized from [`wz_dissect_live_row_facts_since`]'s `needed`.
+///
+/// `needed` receives the length of the document the handle holds, or 0 when it
+/// holds none (a document is never empty: the last one was taken, or the last call
+/// failed or fitted). When `cap` is at least that, `out` holds it and the handle
+/// lets it go; when it is less, nothing is written and the handle keeps it. The
+/// next [`wz_dissect_live_row_facts_since`] replaces it, taken or not.
+///
+/// # Safety
+/// `handle` must be a live handle that has not been closed, `out` writable for
+/// `cap` bytes (null only when `cap` is 0) and `needed` a writable `size_t`.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_row_facts_take(
+    handle: *mut live::LiveDissection,
+    out: *mut u8,
+    cap: usize,
+    needed: *mut usize,
+) -> c_int {
+    if handle.is_null() || (out.is_null() && cap != 0) || needed.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let into: &mut [u8] = if cap == 0 {
+        &mut []
+    } else {
+        // SAFETY: caller contract above; non-null whenever `cap` is non-zero.
+        unsafe { core::slice::from_raw_parts_mut(out, cap) }
+    };
+    // SAFETY: caller contract above.
+    let held = unsafe { (*handle).take_row_facts(into) };
+    // SAFETY: null-checked above.
+    unsafe { *needed = held };
+    WZ_DISSECT_OK
 }
 
 /// The body both `fields_since` doors share, so a window of `0` cannot differ from
@@ -9531,7 +9679,10 @@ mod tests {
         // 54, for `wz_dissect_lifecycle_read`: one symbol, bytes in and a
         // 104-byte struct the caller owns written; its words are static strings
         // of the library, which the memory rule now names; nothing retained.
-        assert_eq!(wz_dissect_abi_version(), 54);
+        // 55, for `wz_dissect_live_row_facts_since` and
+        // `wz_dissect_live_row_facts_take`: two symbols, the bytes into a buffer
+        // the caller owns; what does not fit stays in the handle until taken.
+        assert_eq!(wz_dissect_abi_version(), 55);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -10387,11 +10538,22 @@ mod tests {
         // that is the claim item 509 is actually about. Asserted at the
         // boundary rather than trusted from the builder: a revision that never
         // crossed the C ABI is a revision no consumer can read.
+        //
+        // The row-facts document is the third: written by the field writer in
+        // `wz-capture`, its key set pinned there over the field document's whole
+        // pin population, and it crosses here as bytes, read back as its JSON.
         for (name, doc) in [
             (rev::CENSUS, call_census(&stream).expect("the census door")),
             (
                 rev::FIELDS,
                 call_fields(&stream, 0).expect("the fields door"),
+            ),
+            (
+                rev::ROW_FACTS,
+                row_facts_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
             ),
         ] {
             covered.push(name);
@@ -10608,6 +10770,14 @@ mod tests {
                     .next()
                     .expect("a document"),
             ),
+            // The field document's rows without trees: no plane, as that one.
+            (
+                rev::ROW_FACTS,
+                row_facts_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
             (rev::CENSUS, call_census(&stream).expect("the census door")),
             (
                 rev::FIELDS,
@@ -10779,6 +10949,8 @@ mod tests {
             (rev::MEMORY, memory_documents()),
             // A record of each state that brings keys: no top-level `null`.
             (rev::FIELD_VALUES, field_values_documents()),
+            // The field document's top level, read back off the door's bytes.
+            (rev::ROW_FACTS, row_facts_documents()),
             (
                 rev::CENSUS,
                 vec![call_census(&stream).expect("the census door")],
@@ -11761,6 +11933,51 @@ mod tests {
     /// One values document per record state that brings keys, through the ABI:
     /// a payload read by its schema, bytes the schema refuses, and a declared
     /// label its own bytes bear out against the rule.
+    /// The row-facts door's documents, read back from its bytes as the JSON they
+    /// map: the protobuf capture with no declaration and with the declaration that
+    /// decodes it, so a decoded payload's block is in the population.
+    fn row_facts_documents() -> Vec<String> {
+        let typed = json_string(
+            &from_proto_one("demo/sensor", "Reading", READING),
+            "declarations",
+        );
+        ["", typed.as_str()]
+            .iter()
+            .map(|declarations| {
+                let handle = replayed(&protobuf_capture());
+                let text = std::ffi::CString::new(*declarations).expect("no NUL");
+                let mut needed = 0usize;
+                let rc = unsafe {
+                    wz_dissect_live_row_facts_since(
+                        handle,
+                        core::ptr::null(),
+                        0,
+                        text.as_ptr(),
+                        0,
+                        0,
+                        core::ptr::null_mut(),
+                        0,
+                        &mut needed,
+                    )
+                };
+                assert_eq!(rc, WZ_DISSECT_OK, "row_facts_since rc");
+                let mut bytes = vec![0u8; needed];
+                let mut held = 0usize;
+                let rc = unsafe {
+                    wz_dissect_live_row_facts_take(
+                        handle,
+                        bytes.as_mut_ptr(),
+                        bytes.len(),
+                        &mut held,
+                    )
+                };
+                assert_eq!((rc, held), (WZ_DISSECT_OK, needed), "the take");
+                unsafe { wz_dissect_live_close(handle) };
+                wz_capture::cbor_of_json::json_of_cbor(&bytes).expect("the bytes are one item")
+            })
+            .collect()
+    }
+
     fn field_values_documents() -> Vec<String> {
         const JSON: u32 = 5;
         let typed = json_string(
@@ -17031,6 +17248,133 @@ mod tests {
             .to_owned();
         unsafe { wz_dissect_string_free(out) };
         doc
+    }
+
+    /// `wz_dissect_live_row_facts_since` from `after` through a buffer of `cap`
+    /// bytes, and the take when the document did not fit: the bytes, whichever
+    /// way they came.
+    fn live_row_facts(
+        handle: *mut live::LiveDissection,
+        capture: &[u8],
+        after: u64,
+        cap: usize,
+    ) -> Vec<u8> {
+        let declarations = std::ffi::CString::new("").expect("no NUL");
+        let mut buf = vec![0u8; cap];
+        let mut needed = 0usize;
+        let rc = unsafe {
+            wz_dissect_live_row_facts_since(
+                handle,
+                capture.as_ptr(),
+                capture.len(),
+                declarations.as_ptr(),
+                after,
+                0,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut needed,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "row_facts_since rc");
+        assert!(needed > 0, "a document is never empty");
+        if needed > cap {
+            buf = vec![0u8; needed];
+            let mut held = 0usize;
+            let rc = unsafe {
+                wz_dissect_live_row_facts_take(handle, buf.as_mut_ptr(), buf.len(), &mut held)
+            };
+            assert_eq!((rc, held), (WZ_DISSECT_OK, needed), "the take");
+        }
+        buf.truncate(needed);
+        buf
+    }
+
+    /// How many rows a CBOR row-facts document holds: the text string `seq`, as a
+    /// key, once per row and nowhere else.
+    fn cbor_rows(doc: &[u8]) -> usize {
+        doc.windows(4)
+            .filter(|w| *w == [0x63, b's', b'e', b'q'])
+            .count()
+    }
+
+    /// (ABI 55) THE ROW-FACTS DOOR STEPS ON ITS OWN MEMORY. Over a capture that
+    /// grows, each step writes the rows the field document writes for the same
+    /// window, through a buffer that holds them or through the take; and a field
+    /// document asked between two steps changes nothing the row-facts door does.
+    /// The control for that is a handle that only ever asks the row-facts door:
+    /// the same bytes at every step, and the same work done.
+    #[test]
+    fn the_row_facts_door_steps_on_its_own_memory() {
+        let packets = interleaved_packets();
+        let (facts, fields, alone) = (
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens"),
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens"),
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens"),
+        );
+        let half = packets.len() / 2;
+        let mut cursor = 0u64;
+        for (step, upto) in [half, packets.len()].into_iter().enumerate() {
+            let file = pcap_prefix(&packets, upto);
+            for h in [facts, fields, alone] {
+                assert_eq!(
+                    unsafe { wz_dissect_live_follow(h, file.as_ptr(), file.len()) },
+                    WZ_DISSECT_OK
+                );
+            }
+            // The first step through the take, the second into a buffer that holds
+            // it: the two ways the bytes come.
+            let cap = if step == 0 { 8 } else { 1 << 20 };
+            let doc = live_row_facts(facts, &file, cursor, cap);
+            assert_eq!(
+                doc,
+                live_row_facts(alone, &file, cursor, 1 << 20),
+                "step {step}: the field door asked between steps moved the row-facts door"
+            );
+            assert_eq!(doc[0] >> 5, 5, "a CBOR map");
+            assert!(
+                doc.windows(9).any(|w| w == b"row_facts"),
+                "the document names itself"
+            );
+            // A field document of the same window on the SAME handle, between
+            // the steps: the row-facts walk must go on regardless.
+            let same = live_fields_window(facts, &file, cursor, 0);
+            let control = live_fields_window(fields, &file, cursor, 0);
+            assert_eq!(
+                same, control,
+                "the field door is not moved by the facts door"
+            );
+            let rows = control.matches("\"seq\":").count();
+            assert!(rows > 0, "step {step} must have rows to write");
+            assert_eq!(
+                cbor_rows(&doc),
+                rows,
+                "step {step}: the field document's rows"
+            );
+            // A row's tree is the key `fields` before a MAP; a decoded payload's
+            // `fields` is before an array and may stay.
+            assert!(
+                !doc.windows(8)
+                    .any(|w| w[..7] == *b"\x66fields" && w[7] >> 5 == 5),
+                "no row tree"
+            );
+            let through = control
+                .split("\"through_seq\":")
+                .nth(1)
+                .and_then(|rest| rest.split(['}', ',']).next())
+                .and_then(|n| n.parse::<u64>().ok())
+                .expect("the window says where it ends");
+            cursor = through;
+        }
+        let (work, control) = unsafe { ((*facts).facts_work(), (*alone).facts_work()) };
+        assert_eq!(
+            work, control,
+            "the row-facts memory did other work beside the field door"
+        );
+        unsafe {
+            wz_dissect_live_close(facts);
+            wz_dissect_live_close(fields);
+            wz_dissect_live_close(alone);
+        }
     }
 
     /// (ABI 41) A window of `0` is the door that has none, byte for byte, and the

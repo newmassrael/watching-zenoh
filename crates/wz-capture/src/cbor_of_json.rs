@@ -510,6 +510,175 @@ fn float(v: f64, out: &mut Vec<u8>) {
     }
 }
 
+/// The compact JSON text of one CBOR data item of the kinds [`cbor_of_json`]
+/// writes: the other direction of the same mapping.
+///
+/// For a reader of the binary form that wants the text back (a log, a test that
+/// holds a door's bytes to its document), and for this crate's tests, which hold
+/// every conversion to the text it came from. A string is escaped by the field
+/// writer's own escaper and an integer written in decimal, so a document the field
+/// writer wrote reads back byte for byte; a float is written in Rust's shortest
+/// round-trip spelling, which is the number and may not be the spelling it came
+/// from.
+///
+/// # Errors
+///
+/// [`Refused`] for bytes that are not one item of those kinds, whole: a byte
+/// string, a tag, an indefinite length, a simple value other than the three, a
+/// text string that is not UTF-8, a truncated item, nesting past [`MAX_DEPTH`],
+/// or bytes after the item.
+pub fn json_of_cbor(bytes: &[u8]) -> Result<alloc::string::String, Refused> {
+    let mut out = alloc::string::String::new();
+    let mut at = 0;
+    json_item(bytes, &mut at, 0, &mut out)?;
+    if at != bytes.len() {
+        return Err(Refused {
+            at,
+            why: "bytes follow the item",
+        });
+    }
+    Ok(out)
+}
+
+/// The `width` big-endian bytes at `*at`, as a number.
+fn be_bytes(bytes: &[u8], at: &mut usize, width: usize) -> Result<u64, Refused> {
+    let slice = bytes.get(*at..*at + width).ok_or(Refused {
+        at: *at,
+        why: "the bytes end inside an item",
+    })?;
+    *at += width;
+    Ok(slice.iter().fold(0u64, |n, &b| (n << 8) | u64::from(b)))
+}
+
+/// A head's argument; `*at` is at the head.
+fn head_argument(bytes: &[u8], at: &mut usize) -> Result<u64, Refused> {
+    let start = *at;
+    let info = bytes[*at] & 0x1F;
+    *at += 1;
+    match info {
+        0..=23 => Ok(u64::from(info)),
+        24 => be_bytes(bytes, at, 1),
+        25 => be_bytes(bytes, at, 2),
+        26 => be_bytes(bytes, at, 4),
+        27 => be_bytes(bytes, at, 8),
+        _ => Err(Refused {
+            at: start,
+            why: "an indefinite or reserved length",
+        }),
+    }
+}
+
+fn json_item(
+    bytes: &[u8],
+    at: &mut usize,
+    depth: usize,
+    out: &mut alloc::string::String,
+) -> Result<(), Refused> {
+    use core::fmt::Write as _;
+    let start = *at;
+    let refuse = |why| Err(Refused { at: start, why });
+    let Some(&first) = bytes.get(*at) else {
+        return refuse("the bytes end where an item belongs");
+    };
+    match first >> 5 {
+        0 => {
+            let n = head_argument(bytes, at)?;
+            let _ = write!(out, "{n}");
+        }
+        1 => {
+            let n = head_argument(bytes, at)?;
+            let _ = write!(out, "-{}", u128::from(n) + 1);
+        }
+        3 => {
+            let len = head_argument(bytes, at)?;
+            let end = usize::try_from(len)
+                .ok()
+                .and_then(|len| at.checked_add(len))
+                .filter(|&end| end <= bytes.len());
+            let Some(end) = end else {
+                return refuse("the bytes end inside a text string");
+            };
+            let Ok(text) = core::str::from_utf8(&bytes[*at..end]) else {
+                return refuse("a text string that is not UTF-8");
+            };
+            wz_session_core::json::escape_into(text, out);
+            *at = end;
+        }
+        major @ (4 | 5) => {
+            if depth == MAX_DEPTH {
+                return refuse("nested deeper than MAX_DEPTH");
+            }
+            let n = head_argument(bytes, at)?;
+            let (open, close) = if major == 4 { ('[', ']') } else { ('{', '}') };
+            out.push(open);
+            for i in 0..n {
+                if i > 0 {
+                    out.push(',');
+                }
+                if major == 5 {
+                    if bytes.get(*at).map(|b| b >> 5) != Some(3) {
+                        return Err(Refused {
+                            at: *at,
+                            why: "a map key that is not a text string",
+                        });
+                    }
+                    json_item(bytes, at, depth + 1, out)?;
+                    out.push(':');
+                }
+                json_item(bytes, at, depth + 1, out)?;
+            }
+            out.push(close);
+        }
+        7 => {
+            *at += 1;
+            let value = match first & 0x1F {
+                20 => {
+                    out.push_str("false");
+                    return Ok(());
+                }
+                21 => {
+                    out.push_str("true");
+                    return Ok(());
+                }
+                22 => {
+                    out.push_str("null");
+                    return Ok(());
+                }
+                25 => value_of_half(be_bytes(bytes, at, 2)? as u16),
+                26 => f64::from(f32::from_bits(be_bytes(bytes, at, 4)? as u32)),
+                27 => f64::from_bits(be_bytes(bytes, at, 8)?),
+                _ => return refuse("a simple value JSON has no word for"),
+            };
+            if !value.is_finite() {
+                return refuse("a float JSON has no number for");
+            }
+            let _ = write!(out, "{value:?}");
+        }
+        _ => return refuse("a byte string or a tag, which JSON has no form for"),
+    }
+    Ok(())
+}
+
+/// The value of an IEEE 754 half, exactly: a normal half's fields widen into a
+/// single's (the exponent rebiased from 15 to 127, the mantissa shifted up by 13),
+/// and a subnormal one is its mantissa times 2^-24, which a single holds exactly.
+/// Bit arithmetic rather than `powi`, which this `no_std` crate does not have.
+fn value_of_half(bits: u16) -> f64 {
+    let sign = u32::from(bits & 0x8000) << 16;
+    let exponent = u32::from((bits >> 10) & 0x1F);
+    let mantissa = u32::from(bits & 0x3FF);
+    let single = match exponent {
+        0 => {
+            // 2^-24 is the single 0x3380_0000.
+            let magnitude = mantissa as f32 * f32::from_bits(0x3380_0000);
+            f32::from_bits(magnitude.to_bits() | sign)
+        }
+        31 => f32::from_bits(sign | 0x7F80_0000 | (mantissa << 13)),
+        _ => f32::from_bits(sign | ((exponent + 127 - 15) << 23) | (mantissa << 13)),
+    };
+    f64::from(single)
+}
+
 /// The IEEE 754 half that holds `v` exactly, if one does. `v` is finite.
 fn half_of(v: f32) -> Option<u16> {
     let bits = v.to_bits();
@@ -717,5 +886,90 @@ mod tests {
         } else {
             magnitude
         }
+    }
+
+    /// The other direction reads back what this one wrote: every RFC example
+    /// whose JSON spelling is the one the reader writes, the writer's escapes,
+    /// and every finite half against the oracle above.
+    #[test]
+    fn the_text_reads_back_from_the_bytes() {
+        for json in [
+            "0",
+            "23",
+            "24",
+            "1000000000000",
+            "18446744073709551615",
+            "-1",
+            "-1000",
+            "-18446744073709551616",
+            "1.5",
+            "1.1",
+            "-4.1",
+            "100000.0",
+            "1e300",
+            "false",
+            "true",
+            "null",
+            "\"\"",
+            "\"\\\"\\\\\"",
+            "[]",
+            "[1,[2,3],[4,5]]",
+            "{}",
+            "{\"a\":1,\"b\":[2,3]}",
+            "[\"a\",{\"b\":\"c\"}]",
+        ] {
+            let bytes = cbor_of_json(json).expect("one value");
+            let back = json_of_cbor(&bytes).expect("one item");
+            let again = cbor_of_json(&back).expect("one value");
+            assert_eq!(again, bytes, "{json} read back as {back}");
+        }
+        let mut text = String::new();
+        wz_session_core::json::escape_into("q\"b\\n\nr\u{01}é水𐅑", &mut text);
+        assert_eq!(
+            json_of_cbor(&cbor_of_json(&text).expect("one value")),
+            Ok(text)
+        );
+        for bits in 0u16..=u16::MAX {
+            if bits & 0x7C00 == 0x7C00 {
+                continue;
+            }
+            let read =
+                json_of_cbor(&[FLOAT_HALF, (bits >> 8) as u8, bits as u8]).expect("a finite half");
+            assert_eq!(
+                read.parse::<f64>().map(f64::to_bits),
+                Ok(half_value(bits).to_bits()),
+                "{bits:#06x}"
+            );
+        }
+    }
+
+    /// What JSON has no form for, and what is not whole, is refused where it is.
+    #[test]
+    fn bytes_that_are_not_one_item_of_these_kinds_are_refused_where_they_are() {
+        for (bytes, at) in [
+            (&[][..], 0),
+            (&[0x40][..], 0),
+            (&[0xc0, 0x00][..], 0),
+            (&[0x9f, 0xff][..], 0),
+            (&[0xf7][..], 0),
+            (&[0xf9, 0x7c, 0x00][..], 0),
+            (&[0x62, 0xff, 0xfe][..], 0),
+            (&[0x63, b'a'][..], 0),
+            (&[0x19, 0x01][..], 1),
+            (&[0xa1, 0x01, 0x02][..], 1),
+            (&[0x01, 0x02][..], 1),
+        ] {
+            assert_eq!(
+                json_of_cbor(bytes).map_err(|r| r.at),
+                Err(at),
+                "{bytes:02x?}"
+            );
+        }
+        let mut deep = alloc::vec![0x81u8; MAX_DEPTH + 1];
+        deep.push(0x00);
+        assert_eq!(
+            json_of_cbor(&deep).map_err(|r| r.why),
+            Err("nested deeper than MAX_DEPTH")
+        );
     }
 }

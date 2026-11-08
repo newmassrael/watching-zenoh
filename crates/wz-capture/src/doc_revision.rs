@@ -25652,7 +25652,9 @@ mod tests {
         );
         // The two families whose objects held a tree bring it no more.
         let treeless = ["offset_space", "carried_state"];
-        let carries = |shape: &DocumentShape| -> Vec<(&str, Vec<(&str, Vec<Vec<&str>>)>)> {
+        // A family's key, and per word the key sets its object comes with.
+        type Carried<'a> = Vec<(&'a str, Vec<(&'a str, Vec<Vec<&'a str>>)>)>;
+        let carries = |shape: &DocumentShape| -> Carried<'static> {
             shape
                 .carries
                 .iter()

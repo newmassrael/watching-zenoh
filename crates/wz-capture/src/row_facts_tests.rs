@@ -161,6 +161,11 @@ fn holds(d: &Dissection, file: &[u8], declared: Option<&str>, trees_seen: &[&str
     );
 
     let cbor = crate::cbor_of_json::cbor_of_json(&facts).expect("the document is JSON");
+    // Lossless: the bytes read back as the text they were made from.
+    assert_eq!(
+        crate::cbor_of_json::json_of_cbor(&cbor).as_ref(),
+        Ok(&facts)
+    );
     let summary = crate::payload_cbor::scan_cbor(&cbor).expect("the CBOR is well-formed");
     assert_eq!(summary.top_level, crate::payload_cbor::CborKind::Map);
 }

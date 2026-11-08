@@ -1690,6 +1690,72 @@ static int check_follow_door(void) {
               "the values document opens with its revision: %s", doc);
         wz_dissect_string_free(doc);
     }
+    /* (ABI 55) -- the row-facts door: each pointer refused when null, a refused
+     * declaration text leaves `needed` at 0, a short buffer is written nothing
+     * and the handle keeps the document for the take, and the bytes are a CBOR
+     * map that names the document. */
+    {
+        unsigned char small[4] = {0xEE, 0xEE, 0xEE, 0xEE};
+        unsigned char big[4096];
+        size_t needed = 999;
+        rc = wz_dissect_live_row_facts_since(NULL, NULL, 0, "", 0, 0, NULL, 0, &needed);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle row_facts_since rc=%d", rc);
+        rc = wz_dissect_live_row_facts_since(h, NULL, 0, NULL, 0, 0, NULL, 0, &needed);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null declarations row_facts_since rc=%d",
+              rc);
+        rc = wz_dissect_live_row_facts_since(h, NULL, 0, "", 0, 0, NULL, 0, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null needed row_facts_since rc=%d", rc);
+        rc = wz_dissect_live_row_facts_since(h, NULL, 0, "", 0, 0, NULL, 3, &needed);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out with a cap row_facts_since rc=%d",
+              rc);
+        needed = 999;
+        rc = wz_dissect_live_row_facts_since(h, NULL, 0, "demo/**=nosuch", 0, 0, NULL, 0,
+                                             &needed);
+        CHECK(rc == WZ_DISSECT_ERR_DECLARATION && needed == 0,
+              "bad declarations row_facts_since rc=%d needed=%zu", rc, needed);
+        rc = wz_dissect_live_row_facts_since(h, NULL, 0, "", 0, 0, small, sizeof small,
+                                             &needed);
+        CHECK(rc == WZ_DISSECT_OK && needed > sizeof small && needed <= sizeof big,
+              "row_facts_since rc=%d needed=%zu", rc, needed);
+        CHECK(small[0] == 0xEE, "a short buffer was written");
+        {
+            size_t held = 0;
+            rc = wz_dissect_live_row_facts_take(h, small, sizeof small, &held);
+            CHECK(rc == WZ_DISSECT_OK && held == needed && small[0] == 0xEE,
+                  "a short take rc=%d held=%zu", rc, held);
+            rc = wz_dissect_live_row_facts_take(h, big, sizeof big, &held);
+            CHECK(rc == WZ_DISSECT_OK && held == needed, "the take rc=%d held=%zu", rc, held);
+            CHECK((big[0] >> 5) == 5, "the document is a CBOR map: 0x%02x", big[0]);
+            {
+                const char *name = "row_facts";
+                int named = 0;
+                for (size_t i = 0; i + strlen(name) <= held; i++) {
+                    if (memcmp(big + i, name, strlen(name)) == 0) {
+                        named = 1;
+                        break;
+                    }
+                }
+                CHECK(named, "the document names itself row_facts");
+            }
+            rc = wz_dissect_live_row_facts_take(h, big, sizeof big, &held);
+            CHECK(rc == WZ_DISSECT_OK && held == 0, "a second take rc=%d held=%zu", rc, held);
+            rc = wz_dissect_live_row_facts_take(NULL, big, sizeof big, &held);
+            CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle take rc=%d", rc);
+            rc = wz_dissect_live_row_facts_take(h, NULL, 3, &held);
+            CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out take rc=%d", rc);
+            rc = wz_dissect_live_row_facts_take(h, big, sizeof big, NULL);
+            CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null needed take rc=%d", rc);
+        }
+        /* A buffer that holds it: written at once, and nothing left to take. */
+        rc = wz_dissect_live_row_facts_since(h, NULL, 0, "", 0, 0, big, sizeof big, &needed);
+        CHECK(rc == WZ_DISSECT_OK && needed > 0 && (big[0] >> 5) == 5,
+              "row_facts_since into a big buffer rc=%d needed=%zu", rc, needed);
+        {
+            size_t held = 999;
+            rc = wz_dissect_live_row_facts_take(h, NULL, 0, &held);
+            CHECK(rc == WZ_DISSECT_OK && held == 0, "nothing kept rc=%d held=%zu", rc, held);
+        }
+    }
     wz_dissect_live_close(h);
     return 0;
 }

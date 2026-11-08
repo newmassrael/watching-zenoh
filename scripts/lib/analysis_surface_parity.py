@@ -968,6 +968,28 @@ ONLY_CAPI = {
         "is no earlier answer for a later one to be relative to.",
         (),
     ),
+    # The rows after a cursor without their field trees, in CBOR. Filed in the
+    # round that added the symbols.
+    "the rows AFTER a cursor without their field trees, as CBOR into a buffer the caller owns": (
+        "wz_dissect_live_row_facts_since",
+        "DELIBERATE, for the reasons the field document's cursor rows give. It is the "
+        "field document's rows in the shape a consumer that LINKS this library and "
+        "lists a live capture at line rate reads at every step: the trees left out, "
+        "which it asks for one picked message at a time, and binary, which it parses "
+        "without a text pass. The command line prints a capture once, with each "
+        "message's fields on its listing, so there is no step to keep up with and no "
+        "earlier answer for a later one to be relative to.",
+        (),
+    ),
+    "the row-facts document a handle kept because the caller's buffer was short": (
+        "wz_dissect_live_row_facts_take",
+        "DELIBERATE, for the reason `wz_dissect_live_message_bytes` gives: the "
+        "capability is the bytes CROSSING a boundary into a buffer the caller sized, "
+        "and the door that wrote them moves the handle's memory, so asking again is "
+        "not how a caller sizes. The command line holds its documents in its own "
+        "process and has no boundary for them to cross.",
+        (),
+    ),
     # The callback a long call asks how it is going. Filed in the round that added
     # the symbol.
     "a callback that a long call of an OPEN handle reports progress to and can be stopped by": (

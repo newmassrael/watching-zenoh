@@ -1472,7 +1472,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":59,"key":"kind","values":[...],
+ *     {"name":"fields","revision":60,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1853,7 +1853,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 54
+#define WZ_DISSECT_ABI_REVISION 55
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -5404,7 +5404,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":59,"key":"state",
+ *     "value_families":[{"name":"fields","revision":60,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -6863,6 +6863,148 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
                                        const char *declarations,
                                        const char *selector, const char *paths,
                                        uint64_t after_seq, char **out);
+
+/* (ABI 55) -- THE ROWS AFTER A CURSOR WITHOUT THEIR FIELD TREES, in CBOR: the
+ * `row_facts` document, into a buffer YOU own.
+ *
+ * WHAT IT IS FOR. A consumer that lists a live capture's rows asked
+ * wz_dissect_live_fields_since for the rows after its cursor at every step and
+ * could not keep up at 20,000 small messages a second: a row was about 3.7 KB and
+ * about 17 us to write, and as long again to parse. A list reads what each row
+ * SAYS about its message -- `carried`, `payload_decode`, `above_transport`, `sn`,
+ * `chain`, `first_byte`, `l2` and the coordinates -- and none of its tree, which it
+ * asks for when one message is picked. Measured on a capture of 64-byte pushes,
+ * the trees were 74% of a row's bytes and 70% of the call. This door writes the
+ * rows without them.
+ *
+ *     size_t needed = 0;
+ *     rc = wz_dissect_live_row_facts_since(h, NULL, 0, decls, cursor, 0,
+ *                                          buf, buf_cap, &needed);
+ *     if (rc == WZ_DISSECT_OK && needed > buf_cap) {
+ *         grow(&buf, needed);
+ *         rc = wz_dissect_live_row_facts_take(h, buf, needed, &needed);
+ *     }
+ *     ... read `needed` bytes of CBOR; window.through_seq is the next cursor
+ *
+ * WHAT IT WRITES. wz_dissect_live_fields_since_window's document for the same
+ * arguments, from the same walk and the same writer, with every row's `fields`
+ * tree and every completed chain's `above_transport.fields` trees left out and
+ * nothing else changed. It opens {"document":{"name":"row_facts","revision":N}}:
+ * its own name and revision, so a row with no `fields` is never read as one the
+ * walker declined. The two keys only a tree carries, a node's `kind` and
+ * `selector_path`, are not in it; every other key, value and family is the field
+ * document's. The bytes are RFC 8949's mapping of that JSON, key for key: an
+ * object is a map with text keys, a string a text string, `true`, `false` and
+ * `null` the simple values, an integer an integer (the field document's integers
+ * past 2^53 are strings there and stay strings here), any other number the
+ * shortest of half, single and double that holds it, and every length definite.
+ *
+ * THE BUFFER, AND THE MEMORY RULE UNCHANGED. `needed` always receives the
+ * document's length. When `cap` is at least that, `out` holds it and the call is
+ * over. When it is less, NOTHING is written and the handle keeps the document
+ * until wz_dissect_live_row_facts_take copies it out, or the next call of this
+ * door replaces it. Calling this door again with a bigger buffer is NOT the same:
+ * a call moves the handle's memory of what it has written, so a second one answers
+ * a second question. Nothing crosses allocated.
+ *
+ * ITS OWN MEMORY. A row without its trees is another text, so the handle keeps a
+ * memory for this door beside wz_dissect_live_fields_since's: stepping with this
+ * door and asking wz_dissect_live_fields_since_window for one picked row leaves
+ * each walk where it was. `after_seq`, `max_rows`, `window`, `revised` and
+ * `dropped_by_limits` are the field document's, as for that door.
+ *
+ * @bound max_rows work-ceiling -- as for wz_dissect_live_fields_since_window: the
+ * walk and the document stop at the end of a window of sequence numbers, and the
+ * numbers past it are the next window's.
+ *
+ * WZ_DISSECT_ERR_INVALID_ARG for a null pointer where one is not allowed or text
+ * that is not UTF-8, WZ_DISSECT_ERR_DECLARATION for a refused declaration text,
+ * WZ_DISSECT_ERR_CANCELLED when the progress callback stopped it, and
+ * WZ_DISSECT_ERR_DECODE if the conversion refused the writer's text, which is a
+ * defect of this library. On every error `needed` is 0 and the handle holds no
+ * document. `h` is not const, for wz_dissect_live_fields_since's reason.
+ *
+ * @values row_facts announced_version
+ * @values row_facts basis
+ * @values row_facts batch_header
+ * @values row_facts body
+ * @values row_facts carried_state
+ * @values row_facts check
+ * @values row_facts counter_reason
+ * @values row_facts direction
+ * @values row_facts eps_basis
+ * @values row_facts family
+ * @values row_facts keyexpr_cause
+ * @values row_facts link
+ * @values row_facts message
+ * @values row_facts offset_space
+ * @values row_facts outcome
+ * @values row_facts phase
+ * @values row_facts place
+ * @values row_facts priority
+ * @values row_facts q_basis
+ * @values row_facts reason
+ * @values row_facts request_kind
+ * @values row_facts selected
+ * @values row_facts size_verdict
+ * @values row_facts state
+ * @values row_facts strength
+ * @values row_facts under
+ * @values row_facts unjoined
+ * @values row_facts unopened_reason
+ * @values row_facts verdict
+ * @values row_facts wrong
+ * @values row_facts zenoh
+ * @carries row_facts announced_version passenger
+ * @carries row_facts basis passenger
+ * @carries row_facts batch_header passenger
+ * @carries row_facts body passenger
+ * @carries row_facts carried_state discriminant
+ * @carries row_facts check passenger
+ * @carries row_facts counter_reason passenger
+ * @carries row_facts direction passenger
+ * @carries row_facts eps_basis passenger
+ * @carries row_facts family passenger
+ * @carries row_facts keyexpr_cause passenger
+ * @carries row_facts link passenger
+ * @carries row_facts message passenger
+ * @carries row_facts offset_space discriminant
+ * @carries row_facts outcome passenger
+ * @carries row_facts phase passenger
+ * @carries row_facts place passenger
+ * @carries row_facts priority passenger
+ * @carries row_facts q_basis passenger
+ * @carries row_facts reason passenger
+ * @carries row_facts request_kind passenger
+ * @carries row_facts selected passenger
+ * @carries row_facts size_verdict passenger
+ * @carries row_facts state discriminant
+ * @carries row_facts strength passenger
+ * @carries row_facts under passenger
+ * @carries row_facts unjoined passenger
+ * @carries row_facts unopened_reason discriminant
+ * @carries row_facts verdict passenger
+ * @carries row_facts wrong passenger
+ * @carries row_facts zenoh passenger */
+int wz_dissect_live_row_facts_since(wz_dissect_live *h,
+                                    const unsigned char *bytes, size_t len,
+                                    const char *declarations, uint64_t after_seq,
+                                    uint64_t max_rows, unsigned char *out,
+                                    size_t cap, size_t *needed);
+
+/* (ABI 55) -- THE ROW-FACTS DOCUMENT THE HANDLE KEPT, into a buffer you sized from
+ * wz_dissect_live_row_facts_since's `needed`.
+ *
+ * `needed` receives the length of the document the handle holds, or 0 when it
+ * holds none (a document is never empty: the last one was taken, fitted the first
+ * buffer, or its call failed). When `cap` is at least that, `out` holds it and the
+ * handle lets it go; when it is less, nothing is written and the handle keeps it.
+ * The next wz_dissect_live_row_facts_since replaces it, taken or not.
+ *
+ * WZ_DISSECT_ERR_INVALID_ARG for a null `h` or `needed`, or a null `out` with a
+ * non-zero `cap`. */
+int wz_dissect_live_row_facts_take(wz_dissect_live *h, unsigned char *out,
+                                   size_t cap, size_t *needed);
 
 /* (ABI 42) -- THE CALLBACK A LONG CALL ASKS HOW IT IS GOING, and that can stop it.
  *
