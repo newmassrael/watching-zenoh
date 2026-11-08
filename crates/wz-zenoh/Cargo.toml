@@ -56,6 +56,12 @@ doctest = false
 # engine's capabilities onto them (the catalogue of docs/build-configuration.md, C1).
 default = ["engine-tokio", "transport_tcp", "transport_udp"]
 engine-tokio = ["dep:wz-capi-core", "dep:wz-capi-port", "dep:wz-runtime-tokio", "dep:wz-session-core"]
+# A wz-only door, not upstream's: `allowed_links` on the builders of a publisher, a subscriber, a
+# queryable, a get and a querier, with the types it takes (`LinkRestriction`, in `sample`). It
+# limits an entity to some of the session's links, and a build whose `entity-link-restriction`
+# policy is off refuses a set when the entity is built. It is off by default because the surface
+# of this crate holds no item upstream lacks (docs/build-configuration.md, C10).
+link-restriction = ["engine-tokio"]
 # `transport_tcp` is what gives the configuration its default listening endpoints (`tcp/[::]:7447`
 # for a router, `tcp/[::]:0` for a peer), as it does upstream; the engine carries the link always.
 transport_tcp = ["zenoh-config/transport_tcp"]

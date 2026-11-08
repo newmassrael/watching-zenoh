@@ -29,6 +29,7 @@ use zenoh_protocol::{
     network::{declare::ext::QoSType, push},
     zenoh::PushBody,
 };
+use zenoh_result::ZResult;
 
 #[cfg(feature = "unstable")]
 use crate::api::timestamp_stack::TimestampStack;
@@ -77,6 +78,45 @@ impl From<Locality> for PublisherLocalityConf {
             Locality::Any => Self::Any,
         }
     }
+}
+
+/// The links an entity may use, beside its [`Locality`]: what the engine's link slots are
+/// matched against. A build with no engine has no links to tell apart, so it carries none.
+#[cfg(feature = "engine-tokio")]
+pub(crate) type Links = wz_session_core::link_restriction::LinkRestriction;
+
+/// The links an entity may use. A build with no engine has no links to tell apart, so the one
+/// value there is is "any".
+#[cfg(not(feature = "engine-tokio"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Links;
+
+/// What an entity that states no links has: every link.
+#[cfg(feature = "engine-tokio")]
+pub(crate) const ANY_LINKS: Links = Links::Any;
+
+/// What an entity that states no links has: every link.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) const ANY_LINKS: Links = Links;
+
+/// Whether this build lets an entity be limited to `links`: an unrestricted set always, a
+/// restricted one only when the build's `entity-link-restriction` policy is on. The refusal is
+/// the policy's own text, as an error of the call that stated the set.
+#[cfg(feature = "engine-tokio")]
+pub(crate) fn admit_links(links: Links) -> ZResult<()> {
+    if !links.is_restricted() {
+        return Ok(());
+    }
+    links
+        .admit_in_build()
+        .map(|_admitted| ())
+        .map_err(|refusal| zerror!("{refusal}").into())
+}
+
+/// A build with no engine states no set of links, so there is nothing to admit.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn admit_links(_links: Links) -> ZResult<()> {
+    Ok(())
 }
 
 /// Information on the source of a zenoh [`Sample`].

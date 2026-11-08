@@ -295,6 +295,10 @@ pub mod sample {
         },
         sample::{Locality, Sample, SampleFields, SampleKind},
     };
+    // A wz-only door, so it is outside the surface the build holds to upstream's unless the
+    // feature is asked for.
+    #[cfg(feature = "link-restriction")]
+    pub use wz_session_core::link_restriction::{LinkRestriction, LinkRestrictionError, LinkSlot};
 }
 
 /// # Quality of service primitives

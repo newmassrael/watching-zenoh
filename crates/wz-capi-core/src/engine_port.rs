@@ -12,6 +12,8 @@ use wz_capi_port::{
     SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
+#[cfg(feature = "queryable")]
+use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 
@@ -341,23 +343,14 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
     ) -> Option<wz_capi_port::QblId> {
-        // The registry mints a callback per face with the face's own session; the port's
-        // callbacks are minted with that session as a `QueryHolder`, beside the node's closed
-        // latch, which is what a reply on a kept query checks first.
-        let closed = self.closed_latch();
-        Some(SharedSession::declare_queryable_on_wire(
-            self,
+        Some(self.declare_port_queryable_on_links(
             keyexpr,
             wire,
             complete,
             allowed_origin,
+            LinkRestriction::Any,
             retraction,
-            Arc::new(move |face: &wz_runtime_tokio::session::TokioQueryHolder| {
-                sink(Arc::new(FaceHolder {
-                    face: face.clone(),
-                    closed: closed.clone(),
-                }))
-            }),
+            sink,
         ))
     }
 
@@ -524,6 +517,44 @@ impl wz_capi_port::QueryHolder for FaceHolder {
 
     fn session_closed(&self) -> bool {
         self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(feature = "queryable")]
+impl SharedSession {
+    /// The queryable the port declares ([`SessionEngine::declare_queryable_on_wire`]), limited
+    /// to the links of `links` (policy `entity-link-restriction`, see
+    /// [`Self::declare_queryable_on_links`]). The port has no operation that carries a set of
+    /// links, so a caller that holds the registry itself and states one calls this.
+    #[allow(clippy::too_many_arguments)]
+    pub fn declare_port_queryable_on_links(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        complete: bool,
+        allowed_origin: Locality,
+        links: LinkRestriction,
+        retraction: Option<RetractionKey>,
+        sink: wz_capi_port::QueryableSink,
+    ) -> wz_capi_port::QblId {
+        // The registry mints a callback per face with the face's own session; the port's
+        // callbacks are minted with that session as a `QueryHolder`, beside the node's closed
+        // latch, which is what a reply on a kept query checks first.
+        let closed = self.closed_latch();
+        self.declare_queryable_on_links(
+            keyexpr,
+            wire,
+            complete,
+            allowed_origin,
+            links,
+            retraction,
+            Arc::new(move |face: &wz_runtime_tokio::session::TokioQueryHolder| {
+                sink(Arc::new(FaceHolder {
+                    face: face.clone(),
+                    closed: closed.clone(),
+                }))
+            }),
+        )
     }
 }
 

@@ -47,7 +47,7 @@ use crate::api::{
     publisher::Priority,
     querier::Querier,
     query::{QueryConsolidation, Reply, ReplyKeyExpr},
-    sample::{Locality, QoSBuilder},
+    sample::{Links, Locality, QoSBuilder},
     selector::REPLY_KEY_EXPR_ANY_SEL_PARAM,
     session::Session,
 };
@@ -86,6 +86,7 @@ pub struct QuerierBuilder<'a, 'b> {
     pub(crate) consolidation: QueryConsolidation,
     pub(crate) qos: QoSBuilder,
     pub(crate) destination: Locality,
+    pub(crate) links: Links,
     pub(crate) timeout: Duration,
     pub(crate) accept_replies: ReplyKeyExpr,
 }
@@ -155,6 +156,16 @@ impl QuerierBuilder<'_, '_> {
         }
     }
 
+    /// Limits the links the querier's queries are sent on to the ones `links` names.
+    ///
+    /// A build whose `entity-link-restriction` policy is off refuses a restricted set when the
+    /// querier is declared, and a router session refuses it always.
+    #[cfg(feature = "link-restriction")]
+    #[inline]
+    pub fn allowed_links(self, links: Links) -> Self {
+        Self { links, ..self }
+    }
+
     /// Set the query timeout.
     #[inline]
     pub fn timeout(self, timeout: Duration) -> Self {
@@ -183,15 +194,16 @@ impl Wait for QuerierBuilder<'_, '_> {
     fn wait(self) -> <Self as Resolvable>::To {
         let mut key_expr = self.key_expr?;
         key_expr = self.session.declare_keyexpr(key_expr).wait()?;
-        let id = self
-            .session
-            .declare_querier_inner(key_expr.clone(), self.destination)?;
+        let id =
+            self.session
+                .declare_querier_inner(key_expr.clone(), self.destination, self.links)?;
         Ok(Querier {
             session: self.session.downgrade(),
             id,
             key_expr,
             qos: self.qos.into(),
             destination: self.destination,
+            links: self.links,
             undeclare_on_drop: true,
             target: self.target,
             consolidation: self.consolidation,
@@ -519,6 +531,7 @@ where
             self.querier.consolidation,
             self.querier.qos,
             self.querier.destination,
+            self.querier.links,
             self.querier.timeout,
             self.value,
             self.attachment,

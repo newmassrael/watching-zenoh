@@ -26,7 +26,7 @@ use crate::{
     api::{
         handlers::{locked, Callback, DefaultHandler, IntoHandler},
         key_expr::KeyExpr,
-        sample::{Locality, Sample},
+        sample::{Links, Locality, Sample},
         subscriber::{Subscriber, SubscriberInner, SubscriberKind},
     },
     Session,
@@ -63,6 +63,8 @@ pub struct SubscriberBuilder<'a, 'b, Handler, const BACKGROUND: bool = false> {
     pub origin: Locality,
     #[cfg(not(feature = "internal"))]
     pub(crate) origin: Locality,
+
+    pub(crate) links: Links,
 
     #[cfg(feature = "internal")]
     pub handler: Handler,
@@ -148,12 +150,14 @@ impl<'a, 'b> SubscriberBuilder<'a, 'b, DefaultHandler> {
             session,
             key_expr,
             origin,
+            links,
             handler: _,
         } = self;
         SubscriberBuilder {
             session,
             key_expr,
             origin,
+            links,
             handler,
         }
     }
@@ -184,6 +188,7 @@ impl<'a, 'b> SubscriberBuilder<'a, 'b, Callback<Sample>> {
             session: self.session,
             key_expr: self.key_expr,
             origin: self.origin,
+            links: self.links,
             handler: self.handler,
         }
     }
@@ -197,6 +202,18 @@ impl<Handler, const BACKGROUND: bool> SubscriberBuilder<'_, '_, Handler, BACKGRO
     #[inline]
     pub fn allowed_origin(mut self, origin: Locality) -> Self {
         self.origin = origin;
+        self
+    }
+
+    /// Limits the links this [`Subscriber`] is declared to, and so receives from, to the ones
+    /// `links` names.
+    ///
+    /// A build whose `entity-link-restriction` policy is off refuses a restricted set when the
+    /// subscriber is declared, and a router session refuses it always.
+    #[cfg(feature = "link-restriction")]
+    #[inline]
+    pub fn allowed_links(mut self, links: Links) -> Self {
+        self.links = links;
         self
     }
 }
@@ -224,6 +241,7 @@ where
             .declare_subscriber_inner(
                 &key_expr,
                 self.origin,
+                self.links,
                 callback,
                 callback_sync_group.notifier(),
             )
@@ -265,8 +283,13 @@ impl Wait for SubscriberBuilder<'_, '_, Callback<Sample>, true> {
         // A subscriber that runs in the background has no group of its own to be waited on, but its
         // callback counts in the session's: the session's close waits for it.
         let notifier = self.session.callback_group().notifier();
-        self.session
-            .declare_subscriber_inner(&key_expr, self.origin, self.handler, notifier)?;
+        self.session.declare_subscriber_inner(
+            &key_expr,
+            self.origin,
+            self.links,
+            self.handler,
+            notifier,
+        )?;
         Ok(())
     }
 }

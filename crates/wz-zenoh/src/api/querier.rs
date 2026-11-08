@@ -39,7 +39,7 @@ use super::{
     builders::querier::QuerierGetBuilder,
     key_expr::KeyExpr,
     query::QueryConsolidation,
-    sample::{Locality, QoS},
+    sample::{Links, Locality, QoS},
     session::{UndeclarableSealed, WeakSession},
     Id,
 };
@@ -77,6 +77,7 @@ pub struct Querier<'a> {
     pub(crate) key_expr: KeyExpr<'a>,
     pub(crate) qos: QoS,
     pub(crate) destination: Locality,
+    pub(crate) links: Links,
     pub(crate) target: QueryTarget,
     pub(crate) consolidation: QueryConsolidation,
     pub(crate) timeout: Duration,

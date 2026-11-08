@@ -38,7 +38,7 @@ use crate::{
         encoding::Encoding,
         key_expr::KeyExpr,
         publisher::{Priority, Publisher},
-        sample::{Locality, SampleKind},
+        sample::{Links, Locality, SampleKind},
     },
     Session,
 };
@@ -159,6 +159,17 @@ impl<T> PublicationBuilder<PublisherBuilder<'_, '_>, T> {
         self
     }
 
+    /// Limits the links the publication is sent on to the ones `links` names.
+    ///
+    /// A build whose `entity-link-restriction` policy is off refuses a restricted set when the
+    /// publication is made.
+    #[cfg(feature = "link-restriction")]
+    #[inline]
+    pub fn allowed_links(mut self, links: Links) -> Self {
+        self.publisher = self.publisher.allowed_links(links);
+        self
+    }
+
     /// Changes the [`Reliability`](crate::qos::Reliability) to apply when routing the data.
     ///
     /// **NOTE**: Currently `reliability` does not trigger any data retransmission on the wire. It
@@ -262,6 +273,7 @@ impl Wait for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuilderPut
             self.publisher.priority,
             self.publisher.is_express,
             self.publisher.destination,
+            self.publisher.links,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,
@@ -287,6 +299,7 @@ impl Wait for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuilderDel
             self.publisher.priority,
             self.publisher.is_express,
             self.publisher.destination,
+            self.publisher.links,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,
@@ -376,6 +389,7 @@ pub struct PublisherBuilder<'a, 'b> {
     pub destination: Locality,
     #[cfg(not(feature = "internal"))]
     pub(crate) destination: Locality,
+    pub(crate) links: Links,
 }
 
 impl Clone for PublisherBuilder<'_, '_> {
@@ -393,6 +407,7 @@ impl Clone for PublisherBuilder<'_, '_> {
             #[cfg(feature = "unstable")]
             reliability: self.reliability,
             destination: self.destination,
+            links: self.links,
         }
     }
 }
@@ -465,6 +480,17 @@ impl PublisherBuilder<'_, '_> {
         self
     }
 
+    /// Limits the links the data is sent on to the ones `links` names.
+    ///
+    /// A build whose `entity-link-restriction` policy is off refuses a restricted set when the
+    /// publisher is declared, and a router session refuses it always.
+    #[cfg(feature = "link-restriction")]
+    #[inline]
+    pub fn allowed_links(mut self, links: Links) -> Self {
+        self.links = links;
+        self
+    }
+
     /// Changes the [`Reliability`](crate::qos::Reliability) to apply when routing the data.
     ///
     /// **NOTE**: Currently `reliability` does not trigger any data retransmission on the wire. It
@@ -491,7 +517,7 @@ impl Wait for PublisherBuilder<'_, '_> {
         key_expr = self.session.declare_keyexpr(key_expr).wait()?;
         let id = self
             .session
-            .declare_publisher_inner(&key_expr, self.destination)?;
+            .declare_publisher_inner(&key_expr, self.destination, self.links)?;
         Ok(Publisher {
             session: self.session.downgrade(),
             id,
@@ -501,6 +527,7 @@ impl Wait for PublisherBuilder<'_, '_> {
             priority: self.priority,
             is_express: self.is_express,
             destination: self.destination,
+            links: self.links,
             #[cfg(feature = "unstable")]
             reliability: self.reliability,
             undeclare_on_drop: true,
@@ -530,6 +557,7 @@ impl Wait for PublicationBuilder<&Publisher<'_>, PublicationBuilderPut> {
             self.publisher.priority,
             self.publisher.is_express,
             self.publisher.destination,
+            self.publisher.links,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,
@@ -553,6 +581,7 @@ impl Wait for PublicationBuilder<&Publisher<'_>, PublicationBuilderDelete> {
             self.publisher.priority,
             self.publisher.is_express,
             self.publisher.destination,
+            self.publisher.links,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,

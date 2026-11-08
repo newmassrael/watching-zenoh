@@ -28,7 +28,7 @@ use crate::{
         handlers::{locked, Callback, DefaultHandler, IntoHandler},
         key_expr::KeyExpr,
         queryable::{Query, Queryable, QueryableInner},
-        sample::Locality,
+        sample::{Links, Locality},
     },
     Session,
 };
@@ -51,6 +51,7 @@ pub struct QueryableBuilder<'a, 'b, Handler, const BACKGROUND: bool = false> {
     pub(crate) key_expr: ZResult<KeyExpr<'b>>,
     pub(crate) complete: bool,
     pub(crate) origin: Locality,
+    pub(crate) links: Links,
     pub(crate) handler: Handler,
 }
 
@@ -133,6 +134,7 @@ impl<'a, 'b> QueryableBuilder<'a, 'b, DefaultHandler> {
             key_expr,
             complete,
             origin,
+            links,
             handler: _,
         } = self;
         QueryableBuilder {
@@ -140,6 +142,7 @@ impl<'a, 'b> QueryableBuilder<'a, 'b, DefaultHandler> {
             key_expr,
             complete,
             origin,
+            links,
             handler,
         }
     }
@@ -171,6 +174,7 @@ impl<'a, 'b> QueryableBuilder<'a, 'b, Callback<Query>> {
             key_expr: self.key_expr,
             complete: self.complete,
             origin: self.origin,
+            links: self.links,
             handler: self.handler,
         }
     }
@@ -189,6 +193,18 @@ impl<Handler, const BACKGROUND: bool> QueryableBuilder<'_, '_, Handler, BACKGROU
     #[inline]
     pub fn allowed_origin(mut self, origin: Locality) -> Self {
         self.origin = origin;
+        self
+    }
+
+    /// Limits the links this [`Queryable`] is declared to, and so answers queries from, to the
+    /// ones `links` names.
+    ///
+    /// A build whose `entity-link-restriction` policy is off refuses a restricted set when the
+    /// queryable is declared, and a router session refuses it always.
+    #[cfg(feature = "link-restriction")]
+    #[inline]
+    pub fn allowed_links(mut self, links: Links) -> Self {
+        self.links = links;
         self
     }
 }
@@ -217,6 +233,7 @@ where
                 &ke,
                 self.complete,
                 self.origin,
+                self.links,
                 callback,
                 callback_sync_group.notifier(),
             )
@@ -260,6 +277,7 @@ impl Wait for QueryableBuilder<'_, '_, Callback<Query>, true> {
             &ke,
             self.complete,
             self.origin,
+            self.links,
             self.handler,
             notifier,
         )?;

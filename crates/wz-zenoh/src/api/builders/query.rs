@@ -41,7 +41,7 @@ use crate::api::{
     handlers::{locked, Callback, DefaultHandler, IntoHandler},
     publisher::Priority,
     query::{QueryConsolidation, Reply, ReplyKeyExpr},
-    sample::{Locality, QoSBuilder},
+    sample::{Links, Locality, QoSBuilder},
     selector::{Selector, REPLY_KEY_EXPR_ANY_SEL_PARAM},
     session::Session,
 };
@@ -78,6 +78,7 @@ pub struct SessionGetBuilder<'a, 'b, Handler> {
     pub(crate) consolidation: QueryConsolidation,
     pub(crate) qos: QoSBuilder,
     pub(crate) destination: Locality,
+    pub(crate) links: Links,
     pub(crate) timeout: Duration,
     pub(crate) handler: Handler,
     pub(crate) value: Option<(ZBytes, Encoding)>,
@@ -281,6 +282,7 @@ impl<'a, 'b> SessionGetBuilder<'a, 'b, DefaultHandler> {
             consolidation,
             qos,
             destination,
+            links,
             timeout,
             value,
             attachment,
@@ -299,6 +301,7 @@ impl<'a, 'b> SessionGetBuilder<'a, 'b, DefaultHandler> {
             consolidation,
             qos,
             destination,
+            links,
             timeout,
             value,
             attachment,
@@ -365,6 +368,16 @@ impl<Handler> SessionGetBuilder<'_, '_, Handler> {
         }
     }
 
+    /// Limits the links the query is sent on to the ones `links` names.
+    ///
+    /// A build whose `entity-link-restriction` policy is off refuses a restricted set when the
+    /// query is made, and a router session refuses it always.
+    #[cfg(feature = "link-restriction")]
+    #[inline]
+    pub fn allowed_links(self, links: Links) -> Self {
+        Self { links, ..self }
+    }
+
     /// Set the query timeout.
     #[inline]
     pub fn timeout(self, timeout: Duration) -> Self {
@@ -422,6 +435,7 @@ where
             self.consolidation,
             self.qos.into(),
             self.destination,
+            self.links,
             self.timeout,
             self.value,
             self.attachment,

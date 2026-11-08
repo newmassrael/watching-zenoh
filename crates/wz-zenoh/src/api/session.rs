@@ -89,7 +89,7 @@ use crate::api::{
     publisher::Priority,
     query::{ConsolidationMode, QueryConsolidation, Reply, ReplyKeyExpr},
     queryable::Query,
-    sample::{Locality, QoS, Sample, SampleKind},
+    sample::{admit_links, Links, Locality, QoS, Sample, SampleKind, ANY_LINKS},
     selector::Selector,
     subscriber::SubscriberKind,
     Id,
@@ -127,6 +127,8 @@ pub(crate) struct Publication<'a> {
     pub(crate) priority: Priority,
     pub(crate) is_express: bool,
     pub(crate) destination: Locality,
+    /// The links the publication may be sent on.
+    pub(crate) links: Links,
     #[cfg(feature = "unstable")]
     pub(crate) reliability: Reliability,
     pub(crate) timestamp: Option<uhlc::Timestamp>,
@@ -164,6 +166,8 @@ pub(crate) struct Subscription<'a> {
     /// What follows the declared prefix, `None` when the declaration covers the whole key.
     pub(crate) suffix: Option<String>,
     pub(crate) origin: Locality,
+    /// The links the subscription is declared to.
+    pub(crate) links: Links,
     pub(crate) callback: Callback<Sample>,
     /// Held until the callback can be called no more: a wait on its group ends then.
     pub(crate) notifier: Option<SyncGroupNotifier>,
@@ -187,6 +191,9 @@ pub(crate) struct PublisherDeclaration<'a> {
     /// What follows the declared prefix, `None` when the declaration covers the whole key.
     pub(crate) suffix: Option<String>,
     pub(crate) destination: Locality,
+    /// The links the publisher's data may be sent on, which only an engine that reads a set of
+    /// links takes a declaration to refuse.
+    pub(crate) links: Links,
 }
 
 /// What the declaration of a queryable asks of the engine, in the types of this crate: the key as
@@ -202,6 +209,8 @@ pub(crate) struct QueryableDeclaration<'a> {
     pub(crate) suffix: Option<String>,
     pub(crate) complete: bool,
     pub(crate) origin: Locality,
+    /// The links the queryable is declared to.
+    pub(crate) links: Links,
     pub(crate) callback: Callback<Query>,
     /// Held until the callback can be called no more: a wait on its group ends then.
     pub(crate) notifier: Option<SyncGroupNotifier>,
@@ -235,6 +244,8 @@ pub(crate) struct QueryRequest<'a> {
     pub(crate) consolidation: ConsolidationMode,
     pub(crate) qos: QoS,
     pub(crate) destination: Locality,
+    /// The links the query may be sent on.
+    pub(crate) links: Links,
     pub(crate) timeout: Duration,
     pub(crate) value: Option<(ZBytes, Encoding)>,
     pub(crate) attachment: Option<ZBytes>,
@@ -337,6 +348,9 @@ pub(crate) struct QuerierDeclaration<'a> {
     /// What follows the declared prefix, `None` when the declaration covers the whole key.
     pub(crate) suffix: Option<String>,
     pub(crate) destination: Locality,
+    /// The links the querier's queries may be sent on, which only an engine that reads a set of
+    /// links takes a declaration to refuse.
+    pub(crate) links: Links,
 }
 
 /// What a session is run by: the engine that holds its faces, its declarations and its clock.
@@ -455,6 +469,16 @@ impl RouterEngine {
         Id::try_from(id).map_err(|_| {
             zerror!("the router numbered an entity {id}, more than an id holds").into()
         })
+    }
+
+    /// Refuse an entity that is limited to some links: the router forwards by the tables it
+    /// holds and reads no restriction, so taking the entity as it is would make it unrestricted
+    /// without saying so.
+    fn refuse_links(links: Links) -> ZResult<()> {
+        if links.is_restricted() {
+            bail!("the router engine does not read link restrictions");
+        }
+        Ok(())
     }
 }
 
@@ -851,7 +875,10 @@ impl Engine {
     /// every peer, as its destination allows.
     fn publish(&self, publication: &Publication<'_>) -> ZResult<()> {
         match self {
-            Engine::Router(router) => tokio_engine::router_publish(&router.node, publication),
+            Engine::Router(router) => {
+                RouterEngine::refuse_links(publication.links)?;
+                tokio_engine::router_publish(&router.node, publication)
+            }
             Engine::Tokio(state) => {
                 let options = tokio_engine::publish_options(publication);
                 let wire = tokio_engine::wire_key(publication);
@@ -928,12 +955,14 @@ impl Engine {
                 let Subscription {
                     key,
                     origin,
+                    links,
                     callback,
                     notifier,
                     #[cfg(feature = "unstable")]
                     timestamps,
                     ..
                 } = subscription;
+                RouterEngine::refuse_links(links)?;
                 let sink = tokio_engine::subscriber_sink(
                     callback,
                     notifier,
@@ -956,6 +985,7 @@ impl Engine {
                     scope,
                     suffix,
                     origin,
+                    links,
                     callback,
                     notifier,
                     keeps,
@@ -963,10 +993,13 @@ impl Engine {
                     timestamps,
                 } = subscription;
                 let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
-                let id = state.shared.as_engine().declare_subscriber_on_wire(
+                // The registry's own door, not the port's: the port has no operation that takes
+                // a set of links, and for no restriction the two declare the same.
+                let id = state.shared.declare_subscriber_on_links(
                     key.to_owned(),
                     wire,
                     tokio_engine::engine_locality(origin),
+                    links,
                     None,
                     tokio_engine::subscriber_sink(
                         callback,
@@ -1011,6 +1044,7 @@ impl Engine {
             // The admin space lists it, as it lists the publisher of a client, from the interest
             // the node's own face keeps.
             Engine::Router(router) => {
+                RouterEngine::refuse_links(publisher.links)?;
                 let id = router.entity_id()?;
                 router
                     .node
@@ -1018,12 +1052,15 @@ impl Engine {
                     .declare_local_interest(u64::from(id), publisher.key, false);
                 Ok(id)
             }
+            // The interest the declaration sends is for the matching of the key and is asked of
+            // every link: the links a publisher writes to are those of each put it makes.
             Engine::Tokio(state) => {
                 let PublisherDeclaration {
                     key,
                     scope,
                     suffix,
                     destination,
+                    links: _,
                 } = publisher;
                 let wire = tokio_engine::wire_key_of(scope, suffix.clone());
                 let ask = tokio_engine::interest_of(scope, suffix, destination);
@@ -1067,6 +1104,7 @@ impl Engine {
                     key,
                     complete,
                     origin,
+                    links,
                     callback,
                     notifier,
                     zid,
@@ -1075,6 +1113,7 @@ impl Engine {
                     timestamps,
                     ..
                 } = queryable;
+                RouterEngine::refuse_links(links)?;
                 let sink = tokio_engine::queryable_sink(
                     callback,
                     notifier,
@@ -1098,6 +1137,7 @@ impl Engine {
                     suffix,
                     complete,
                     origin,
+                    links,
                     callback,
                     notifier,
                     keeps,
@@ -1107,25 +1147,24 @@ impl Engine {
                     timestamps,
                 } = queryable;
                 let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
-                state
-                    .shared
-                    .as_engine()
-                    .declare_queryable_on_wire(
-                        key.to_owned(),
-                        wire,
-                        complete,
-                        tokio_engine::engine_locality(origin),
-                        None,
-                        tokio_engine::queryable_sink(
-                            callback,
-                            notifier,
-                            zid,
-                            eid,
-                            #[cfg(feature = "unstable")]
-                            timestamps,
-                        ),
-                    )
-                    .ok_or_else(|| zerror!("this engine answers no queries").into())
+                // The registry's own door, not the port's: the port has no operation that takes
+                // a set of links, and for no restriction the two declare the same.
+                Ok(state.shared.declare_port_queryable_on_links(
+                    key.to_owned(),
+                    wire,
+                    complete,
+                    tokio_engine::engine_locality(origin),
+                    links,
+                    None,
+                    tokio_engine::queryable_sink(
+                        callback,
+                        notifier,
+                        zid,
+                        eid,
+                        #[cfg(feature = "unstable")]
+                        timestamps,
+                    ),
+                ))
             }
         }
     }
@@ -1146,7 +1185,10 @@ impl Engine {
     fn query(&self, request: QueryRequest<'_>) -> ZResult<()> {
         match self {
             Engine::Tokio(state) => tokio_engine::ask(state.shared.engine_ref(), request),
-            Engine::Router(router) => tokio_engine::router_ask(&router.node, request),
+            Engine::Router(router) => {
+                RouterEngine::refuse_links(request.links)?;
+                tokio_engine::router_ask(&router.node, request)
+            }
         }
     }
 
@@ -1163,6 +1205,7 @@ impl Engine {
     fn declare_querier(&self, querier: QuerierDeclaration<'_>) -> ZResult<Id> {
         match self {
             Engine::Router(router) => {
+                RouterEngine::refuse_links(querier.links)?;
                 let id = router.entity_id()?;
                 router
                     .node
@@ -1170,12 +1213,15 @@ impl Engine {
                     .declare_local_interest(u64::from(id), querier.key, true);
                 Ok(id)
             }
+            // As for a publisher, the interest is asked of every link and each query carries the
+            // links it goes out on.
             Engine::Tokio(state) => {
                 let QuerierDeclaration {
                     key,
                     scope,
                     suffix,
                     destination,
+                    links: _,
                 } = querier;
                 let wire = tokio_engine::wire_key_of(scope, suffix.clone());
                 let ask = tokio_engine::interest_of(scope, suffix, destination);
@@ -2080,6 +2126,7 @@ mod tokio_engine {
             SampleKind::Delete => PublishOptions::del(),
         }
         .with_locality(engine_locality(publication.destination))
+        .with_links(publication.links)
         // The priority is the protocol's byte; the engine reads it the same way.
         .with_priority(EnginePriority::from_wire(publication.priority as u8))
         .with_congestion_control(match publication.congestion_control {
@@ -2806,6 +2853,7 @@ mod tokio_engine {
             consolidation,
             qos,
             destination,
+            links,
             timeout,
             value,
             attachment,
@@ -2840,6 +2888,7 @@ mod tokio_engine {
         let wire = wire_key_of(scope, suffix);
         let mut options = QueryOptions::get()
             .with_allowed_destination(engine_locality(destination))
+            .with_links(links)
             .with_consolidation(match consolidation {
                 ConsolidationMode::None => EngineConsolidation::None,
                 ConsolidationMode::Monotonic => EngineConsolidation::Monotonic,
@@ -4226,10 +4275,12 @@ impl SessionInner {
         self: &Arc<Self>,
         key_expr: &KeyExpr,
         destination: Locality,
+        links: Links,
     ) -> ZResult<Id> {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
+        admit_links(links)?;
         tracing::trace!("declare_querier({:?})", key_expr);
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
@@ -4239,6 +4290,7 @@ impl SessionInner {
             scope: wire.scope,
             suffix,
             destination,
+            links,
         })?;
         self.queriers().push(QuerierEntry {
             id,
@@ -4279,12 +4331,14 @@ impl SessionInner {
         key_expr: &KeyExpr,
         complete: bool,
         origin: Locality,
+        links: Links,
         callback: Callback<Query>,
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
+        admit_links(links)?;
         tracing::trace!("declare_queryable({:?})", key_expr);
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
@@ -4297,6 +4351,7 @@ impl SessionInner {
             suffix,
             complete,
             origin,
+            links,
             callback,
             notifier,
             // The declaration of the prefix is held by the queryable for as long as the engine
@@ -4337,10 +4392,12 @@ impl SessionInner {
         self: &Arc<Self>,
         key_expr: &KeyExpr,
         destination: Locality,
+        links: Links,
     ) -> ZResult<Id> {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
+        admit_links(links)?;
         tracing::trace!("declare_publisher({:?})", key_expr);
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
@@ -4350,6 +4407,7 @@ impl SessionInner {
             scope: wire.scope,
             suffix,
             destination,
+            links,
         })?;
         self.publishers().push(id);
         // A close that ran between the check and the record has not seen this publisher.
@@ -4373,6 +4431,7 @@ impl SessionInner {
         priority: Priority,
         is_express: bool,
         destination: Locality,
+        links: Links,
         #[cfg(feature = "unstable")] reliability: Reliability,
         timestamp: Option<uhlc::Timestamp>,
         #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
@@ -4382,6 +4441,7 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
+        admit_links(links)?;
         // A publication that asks for its instrumentation starts the stack the nodes it crosses
         // record on, with what this node records at the send, and the one that leaves the node
         // has what it records on routing the message out as well.
@@ -4410,6 +4470,7 @@ impl SessionInner {
             priority,
             is_express,
             destination,
+            links,
             #[cfg(feature = "unstable")]
             reliability,
             timestamp,
@@ -4439,6 +4500,7 @@ impl SessionInner {
         consolidation: QueryConsolidation,
         qos: QoS,
         destination: Locality,
+        links: Links,
         timeout: Duration,
         value: Option<(ZBytes, Encoding)>,
         attachment: Option<ZBytes>,
@@ -4458,6 +4520,7 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
+        admit_links(links)?;
         // A query of a querier counts in the querier's group, which is the session's child. A
         // query of the session's own counts in the session's: a close that waits for callbacks
         // waits for the reply callback of a get as well.
@@ -4513,6 +4576,7 @@ impl SessionInner {
             consolidation,
             qos,
             destination,
+            links,
             timeout,
             value,
             attachment,
@@ -5031,6 +5095,8 @@ impl WeakSession {
             scope: wire.scope,
             suffix,
             origin,
+            // The session's own entities are not limited to some links.
+            links: ANY_LINKS,
             callback,
             notifier,
             keeps: Arc::new(key_expr.clone().into_owned()),
@@ -5057,8 +5123,9 @@ impl WeakSession {
         callback: Callback<Query>,
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
+        // The session's own entities are not limited to some links.
         self.0
-            .declare_queryable_inner(key_expr, complete, origin, callback, notifier)
+            .declare_queryable_inner(key_expr, complete, origin, ANY_LINKS, callback, notifier)
     }
 
     /// Undeclare the transport events listener `id`. A closed session has none, and undeclaring on
@@ -5113,6 +5180,7 @@ impl WeakSession {
         consolidation: QueryConsolidation,
         qos: QoS,
         destination: Locality,
+        links: Links,
         timeout: Duration,
         value: Option<(ZBytes, Encoding)>,
         attachment: Option<ZBytes>,
@@ -5130,6 +5198,7 @@ impl WeakSession {
             consolidation,
             qos,
             destination,
+            links,
             timeout,
             value,
             attachment,
@@ -5157,6 +5226,7 @@ impl WeakSession {
         priority: Priority,
         is_express: bool,
         destination: Locality,
+        links: Links,
         #[cfg(feature = "unstable")] reliability: Reliability,
         timestamp: Option<uhlc::Timestamp>,
         #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
@@ -5172,6 +5242,7 @@ impl WeakSession {
             priority,
             is_express,
             destination,
+            links,
             #[cfg(feature = "unstable")]
             reliability,
             timestamp,
@@ -5507,6 +5578,7 @@ impl Session {
             session: self,
             key_expr: TryIntoKeyExpr::try_into(key_expr).map_err(Into::into),
             origin: Locality::default(),
+            links: ANY_LINKS,
             handler: DefaultHandler::default(),
         }
     }
@@ -5523,6 +5595,7 @@ impl Session {
         &self,
         key_expr: &KeyExpr,
         origin: Locality,
+        links: Links,
         callback: Callback<Sample>,
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
@@ -5530,6 +5603,7 @@ impl Session {
         if self.0.is_closed() {
             return Err(SessionClosedError.into());
         }
+        admit_links(links)?;
         let wire = key_expr.to_wire(&self.anchor());
         let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
         let id = self.0.engine.declare_subscriber(Subscription {
@@ -5537,6 +5611,7 @@ impl Session {
             scope: wire.scope,
             suffix,
             origin,
+            links,
             callback,
             notifier,
             // The declaration of the prefix is held by the subscription for as long as the engine
@@ -5590,6 +5665,7 @@ impl Session {
             key_expr: key_expr.try_into().map_err(Into::into),
             complete: false,
             origin: Locality::default(),
+            links: ANY_LINKS,
             handler: DefaultHandler::default(),
         }
     }
@@ -5601,11 +5677,12 @@ impl Session {
         key_expr: &KeyExpr,
         complete: bool,
         origin: Locality,
+        links: Links,
         callback: Callback<Query>,
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
         self.0
-            .declare_queryable_inner(key_expr, complete, origin, callback, notifier)
+            .declare_queryable_inner(key_expr, complete, origin, links, callback, notifier)
     }
 
     /// Declare the publisher `key_expr` was declared for: the interest in the subscribers matching
@@ -5615,8 +5692,9 @@ impl Session {
         &self,
         key_expr: &KeyExpr,
         destination: Locality,
+        links: Links,
     ) -> ZResult<Id> {
-        self.0.declare_publisher_inner(key_expr, destination)
+        self.0.declare_publisher_inner(key_expr, destination, links)
     }
 
     /// Obtain a [`Liveliness`] struct tied to this Zenoh [`Session`].
@@ -5708,6 +5786,7 @@ impl Session {
             key_expr: key_expr.try_into().map_err(Into::into),
             qos: qos.into(),
             destination: Locality::default(),
+            links: ANY_LINKS,
             target: QueryTarget::default(),
             consolidation: QueryConsolidation::default(),
             timeout: self.queries_default_timeout(),
@@ -5722,8 +5801,9 @@ impl Session {
         &self,
         key_expr: KeyExpr,
         destination: Locality,
+        links: Links,
     ) -> ZResult<Id> {
-        self.0.declare_querier_inner(&key_expr, destination)
+        self.0.declare_querier_inner(&key_expr, destination, links)
     }
 
     /// Create a [`Publisher`](crate::pubsub::Publisher) for the given key expression.
@@ -5762,6 +5842,7 @@ impl Session {
             #[cfg(feature = "unstable")]
             reliability: Reliability::DEFAULT,
             destination: Locality::default(),
+            links: ANY_LINKS,
         }
     }
 
@@ -5891,6 +5972,7 @@ impl Session {
             consolidation: QueryConsolidation::DEFAULT,
             qos: qos.into(),
             destination: Locality::default(),
+            links: ANY_LINKS,
             timeout: self.queries_default_timeout(),
             value: None,
             attachment: None,
@@ -5951,6 +6033,7 @@ impl Session {
         consolidation: QueryConsolidation,
         qos: QoS,
         destination: Locality,
+        links: Links,
         timeout: Duration,
         value: Option<(ZBytes, Encoding)>,
         attachment: Option<ZBytes>,
@@ -5968,6 +6051,7 @@ impl Session {
             consolidation,
             qos,
             destination,
+            links,
             timeout,
             value,
             attachment,
@@ -5994,6 +6078,7 @@ impl Session {
         priority: Priority,
         is_express: bool,
         destination: Locality,
+        links: Links,
         #[cfg(feature = "unstable")] reliability: Reliability,
         timestamp: Option<uhlc::Timestamp>,
         #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
@@ -6009,6 +6094,7 @@ impl Session {
             priority,
             is_express,
             destination,
+            links,
             #[cfg(feature = "unstable")]
             reliability,
             timestamp,
@@ -7040,6 +7126,7 @@ mod tests {
             priority: Priority::Background,
             is_express: true,
             destination: Locality::Remote,
+            links: ANY_LINKS,
             #[cfg(feature = "unstable")]
             reliability: Reliability::BestEffort,
             timestamp: Some(uhlc::Timestamp::new(uhlc::NTP64(0x1234_5678_9abc_def0), id)),
@@ -7119,6 +7206,271 @@ mod tests {
         let options = tokio_engine::publish_options(&stated_publication(SampleKind::Delete));
         assert!(options.encoding.is_none());
         assert_eq!(options.kind, wz_capi_core::runtime::sample::SampleKind::Del);
+    }
+
+    /// Whether this build's `entity-link-restriction` policy lets an entity state a set of links.
+    fn links_policy_on() -> bool {
+        wz_session_core::policy::SessionPolicy::from_build().entity_link_restriction
+    }
+
+    /// A set that names two links.
+    fn some_links() -> Links {
+        Links::only([1, 3]).expect("two slots")
+    }
+
+    /// The answer to a call that stated `some_links()`: taken when the build's policy is on, and
+    /// refused in the policy's own words when it is off.
+    fn assert_policy_decides<T>(what: &str, result: ZResult<T>) {
+        match result {
+            Ok(_) => assert!(
+                links_policy_on(),
+                "{what}: a build without the policy took a set of links"
+            ),
+            Err(error) => {
+                assert!(
+                    !links_policy_on(),
+                    "{what}: refused with the policy on: {error}"
+                );
+                let text = error.to_string();
+                assert!(
+                    text.contains("policy entity-link-restriction is off"),
+                    "{what}: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_publication_asks_the_engine_for_the_links_it_states() {
+        let mut publication = stated_publication(SampleKind::Put);
+        assert_eq!(
+            tokio_engine::publish_options(&publication).links,
+            Links::Any
+        );
+        publication.links = some_links();
+        assert_eq!(
+            tokio_engine::publish_options(&publication).links,
+            some_links()
+        );
+    }
+
+    #[test]
+    fn a_builder_states_no_links_until_it_is_told() {
+        let session = open(peer("a1b2a1")).wait().expect("opens");
+        assert_eq!(session.declare_subscriber("demo/links/a").links, Links::Any);
+        assert_eq!(session.declare_queryable("demo/links/a").links, Links::Any);
+        assert_eq!(session.declare_publisher("demo/links/a").links, Links::Any);
+        assert_eq!(session.declare_querier("demo/links/a").links, Links::Any);
+        assert_eq!(session.get("demo/links/a").links, Links::Any);
+        assert_eq!(session.put("demo/links/a", "v").publisher.links, Links::Any);
+        assert_eq!(session.delete("demo/links/a").publisher.links, Links::Any);
+    }
+
+    #[test]
+    fn an_entity_that_states_no_links_is_not_touched_by_the_policy() {
+        let session = open(peer("a1b2a2")).wait().expect("opens");
+        let _subscriber = session
+            .declare_subscriber("demo/links/b")
+            .wait()
+            .expect("declares");
+        let _queryable = session
+            .declare_queryable("demo/links/b")
+            .wait()
+            .expect("declares");
+        let publisher = session
+            .declare_publisher("demo/links/b")
+            .wait()
+            .expect("declares");
+        let querier = session
+            .declare_querier("demo/links/b")
+            .wait()
+            .expect("declares");
+        publisher.put("v").wait().expect("puts");
+        publisher.delete().wait().expect("deletes");
+        querier.get().wait().expect("asks");
+        session.put("demo/links/b", "v").wait().expect("puts");
+        session.delete("demo/links/b").wait().expect("deletes");
+        session.get("demo/links/b").wait().expect("asks");
+    }
+
+    #[test]
+    fn an_entity_limited_to_some_links_is_declared_only_when_the_policy_is_on() {
+        let session = open(peer("a1b2a3")).wait().expect("opens");
+        let mut subscriber = session.declare_subscriber("demo/links/c");
+        subscriber.links = some_links();
+        assert_policy_decides("subscriber", subscriber.wait());
+        let mut queryable = session.declare_queryable("demo/links/c");
+        queryable.links = some_links();
+        assert_policy_decides("queryable", queryable.wait());
+        let mut publisher = session.declare_publisher("demo/links/c");
+        publisher.links = some_links();
+        assert_policy_decides("publisher", publisher.wait());
+        let mut querier = session.declare_querier("demo/links/c");
+        querier.links = some_links();
+        assert_policy_decides("querier", querier.wait());
+    }
+
+    #[test]
+    fn a_put_a_delete_and_a_get_limited_to_some_links_are_made_only_when_the_policy_is_on() {
+        let session = open(peer("a1b2a4")).wait().expect("opens");
+        let mut put = session.put("demo/links/d", "v");
+        put.publisher.links = some_links();
+        assert_policy_decides("put", put.wait());
+        let mut delete = session.delete("demo/links/d");
+        delete.publisher.links = some_links();
+        assert_policy_decides("delete", delete.wait());
+        let mut get = session.get("demo/links/d");
+        get.links = some_links();
+        assert_policy_decides("get", get.wait());
+    }
+
+    #[test]
+    fn a_publisher_and_a_querier_make_every_operation_with_the_links_they_were_declared_with() {
+        let session = open(peer("a1b2a5")).wait().expect("opens");
+        let mut publisher = session
+            .declare_publisher("demo/links/e")
+            .wait()
+            .expect("declares");
+        publisher.links = some_links();
+        assert_policy_decides("publisher put", publisher.put("v").wait());
+        assert_policy_decides("publisher delete", publisher.delete().wait());
+        let mut querier = session
+            .declare_querier("demo/links/e")
+            .wait()
+            .expect("declares");
+        querier.links = some_links();
+        assert_policy_decides("querier get", querier.get().wait());
+    }
+
+    #[test]
+    fn a_refused_set_of_links_declares_nothing() {
+        let session = open(peer("a1b2a6")).wait().expect("opens");
+        let before = session.0.subscriptions().len();
+        let mut subscriber = session.declare_subscriber("demo/links/f");
+        subscriber.links = some_links();
+        let result = subscriber.wait();
+        assert_eq!(
+            session.0.subscriptions().len(),
+            before + usize::from(result.is_ok()),
+            "the session holds the subscription of a declaration that was taken, and no other"
+        );
+    }
+
+    #[test]
+    fn the_router_engine_refuses_a_set_of_links_it_does_not_read() {
+        assert!(RouterEngine::refuse_links(Links::Any).is_ok());
+        let error = RouterEngine::refuse_links(some_links()).expect_err("refused");
+        assert!(
+            error
+                .to_string()
+                .contains("the router engine does not read link restrictions"),
+            "{error}"
+        );
+        // The engine of a node takes the refusal from the declaration, whatever the policy of
+        // the build says.
+        let session = with_the_node(|| open(peer("a1b2a7")).wait().expect("opens"));
+        assert!(matches!(&*session.0.engine, Engine::Router(_)));
+        let declaration = |links| PublisherDeclaration {
+            key: "demo/links/g",
+            scope: 0,
+            suffix: None,
+            destination: Locality::Any,
+            links,
+        };
+        let error = session
+            .0
+            .engine
+            .declare_publisher(declaration(some_links()))
+            .expect_err("a node reads no set of links");
+        assert!(
+            error
+                .to_string()
+                .contains("the router engine does not read link restrictions"),
+            "{error}"
+        );
+        let id = session
+            .0
+            .engine
+            .declare_publisher(declaration(Links::Any))
+            .expect("a publisher that states no links is declared");
+        session.0.engine.undeclare_publisher(id);
+    }
+
+    #[cfg(feature = "link-restriction")]
+    #[test]
+    fn allowed_links_states_the_set_on_each_builder() {
+        let session = open(peer("a1b2a8")).wait().expect("opens");
+        let links = some_links();
+        assert_eq!(
+            session
+                .declare_subscriber("demo/links/h")
+                .allowed_links(links)
+                .links,
+            links
+        );
+        assert_eq!(
+            session
+                .declare_queryable("demo/links/h")
+                .allowed_links(links)
+                .links,
+            links
+        );
+        assert_eq!(
+            session
+                .declare_publisher("demo/links/h")
+                .allowed_links(links)
+                .links,
+            links
+        );
+        assert_eq!(
+            session
+                .declare_querier("demo/links/h")
+                .allowed_links(links)
+                .links,
+            links
+        );
+        assert_eq!(
+            session.get("demo/links/h").allowed_links(links).links,
+            links
+        );
+        assert_eq!(
+            session
+                .put("demo/links/h", "v")
+                .allowed_links(links)
+                .publisher
+                .links,
+            links
+        );
+        assert_eq!(
+            session
+                .delete("demo/links/h")
+                .allowed_links(links)
+                .publisher
+                .links,
+            links
+        );
+    }
+
+    #[cfg(feature = "link-restriction")]
+    #[test]
+    fn a_set_stated_with_allowed_links_is_refused_by_a_build_without_the_policy() {
+        let session = open(peer("a1b2a9")).wait().expect("opens");
+        let links = some_links();
+        assert_policy_decides(
+            "subscriber",
+            session
+                .declare_subscriber("demo/links/i")
+                .allowed_links(links)
+                .wait(),
+        );
+        assert_policy_decides(
+            "put",
+            session.put("demo/links/i", "v").allowed_links(links).wait(),
+        );
+        assert_policy_decides(
+            "get",
+            session.get("demo/links/i").allowed_links(links).wait(),
+        );
     }
 
     #[test]
