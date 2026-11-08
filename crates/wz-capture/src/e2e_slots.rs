@@ -221,6 +221,14 @@ pub struct SlotLedger {
     /// Per list, how far it has been judged in order.
     #[cfg(feature = "dissect")]
     frontiers: BTreeMap<usize, Frontier>,
+    /// The joining state of the application-level pieces the same walk meets
+    /// ([`crate::segment_chain`]). Held here, beside the counters, because it
+    /// is the same kind of state over the same rows: a fact about the pieces
+    /// before this one, kept by row under the same frontier, carried between
+    /// the calls of a walk that goes on and trimmed with it. Built with the
+    /// field walker, which is what joins pieces.
+    #[cfg(feature = "dissect")]
+    segments: crate::segment_chain::SegmentLedger,
 }
 
 /// How far one list has been judged in the order a walk over the whole capture
@@ -294,6 +302,17 @@ impl SlotLedger {
         for key in gone {
             let _ = self.judged.remove(&key);
         }
+        self.segments.forget_before(list, first_held);
+    }
+
+    /// The joining state of the application-level pieces.
+    pub(crate) fn segments(&self) -> &crate::segment_chain::SegmentLedger {
+        &self.segments
+    }
+
+    /// The joining state of the application-level pieces, to join one.
+    pub(crate) fn segments_mut(&mut self) -> &mut crate::segment_chain::SegmentLedger {
+        &mut self.segments
     }
 }
 

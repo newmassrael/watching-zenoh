@@ -606,7 +606,7 @@ fn check_name(name: &str, path: &str) -> Result<(), DocError> {
     Ok(())
 }
 
-fn read_name(value: &Json5Value, path: &str) -> Result<String, DocError> {
+pub(crate) fn read_name(value: &Json5Value, path: &str) -> Result<String, DocError> {
     let name = read_string(value, path)?;
     check_name(name, path)?;
     Ok(String::from(name))
@@ -761,6 +761,44 @@ fn plain(field: &Field, role: &str, path: &str) -> Result<(), DocError> {
     Ok(())
 }
 
+/// The engine a CRC object describes: its `width`, `poly`, `init`, `refin`,
+/// `refout` and `xorout`, each refused at its own place. Shared by every
+/// profile kind that carries a CRC, so the six parameters are read and
+/// refused one way wherever a deployment writes them; the caller checks the
+/// keys of the object and reads the rest of it (which field, what is covered).
+pub(crate) fn read_crc_engine(entries: &Entries, path: &str) -> Result<Crc, DocError> {
+    let width_path = child(path, "width");
+    let width = read_uint(required(entries, "width", path)?, &width_path)?;
+    if !u8::try_from(width).is_ok_and(|w| SUPPORTED_WIDTHS.contains(&w)) {
+        return Err(DocError::invalid(
+            width_path,
+            format!("a CRC width of {width} bits is not supported (the engine implements 8, 16, 32 and 64)"),
+        ));
+    }
+    let number = |key: &str| -> Result<u64, DocError> {
+        read_uint(required(entries, key, path)?, &child(path, key))
+    };
+    let flag = |key: &str| -> Result<bool, DocError> {
+        read_bool(required(entries, key, path)?, &child(path, key))
+    };
+    let params = CrcParams {
+        width: width as u8,
+        poly: number("poly")?,
+        init: number("init")?,
+        refin: flag("refin")?,
+        refout: flag("refout")?,
+        xorout: number("xorout")?,
+    };
+    Crc::new(params).map_err(|e| match e {
+        CrcParamsError::UnsupportedWidth(_) => {
+            DocError::invalid(child(path, "width"), e.to_string())
+        }
+        CrcParamsError::DoesNotFit { what, .. } => {
+            DocError::invalid(child(path, what), e.to_string())
+        }
+    })
+}
+
 fn read_crc(value: &Json5Value, fields: &[Field]) -> Result<CrcSpec, DocError> {
     let path = "/crc";
     let entries = object(value, path)?;
@@ -777,15 +815,8 @@ fn read_crc(value: &Json5Value, fields: &[Field]) -> Result<CrcSpec, DocError> {
     let field = field_named(fields, field_name, &field_path)?;
     plain(&fields[field], "crc", &field_path)?;
 
-    let width_path = child(path, "width");
-    let width = read_uint(required(entries, "width", path)?, &width_path)?;
-    if !u8::try_from(width).is_ok_and(|w| SUPPORTED_WIDTHS.contains(&w)) {
-        return Err(DocError::invalid(
-            width_path,
-            format!("a CRC width of {width} bits is not supported (the engine implements 8, 16, 32 and 64)"),
-        ));
-    }
-    let width = width as u8;
+    let engine = read_crc_engine(entries, path)?;
+    let width = engine.params().width;
     if usize::from(width) > fields[field].bytes * 8 {
         return Err(DocError::invalid(
             field_path,
@@ -796,29 +827,6 @@ fn read_crc(value: &Json5Value, fields: &[Field]) -> Result<CrcSpec, DocError> {
             ),
         ));
     }
-
-    let number = |key: &str| -> Result<u64, DocError> {
-        read_uint(required(entries, key, path)?, &child(path, key))
-    };
-    let flag = |key: &str| -> Result<bool, DocError> {
-        read_bool(required(entries, key, path)?, &child(path, key))
-    };
-    let params = CrcParams {
-        width,
-        poly: number("poly")?,
-        init: number("init")?,
-        refin: flag("refin")?,
-        refout: flag("refout")?,
-        xorout: number("xorout")?,
-    };
-    let engine = Crc::new(params).map_err(|e| match e {
-        CrcParamsError::UnsupportedWidth(_) => {
-            DocError::invalid(child(path, "width"), e.to_string())
-        }
-        CrcParamsError::DoesNotFit { what, .. } => {
-            DocError::invalid(child(path, what), e.to_string())
-        }
-    })?;
 
     let cover_path = child(path, "cover");
     let items = array(required(entries, "cover", path)?, &cover_path)?;

@@ -208,7 +208,7 @@ fn what_is_refused_names_the_reason() {
     let mismatch = refusal(&format!("#other={}", profile_line("slot-a", 2)));
     assert_eq!(
         mismatch,
-        FormatMapError::E2eProfileNamedElsewhere {
+        FormatMapError::ProfileNamedElsewhere {
             declared: "other".into(),
             described: "slot-a".into(),
         }

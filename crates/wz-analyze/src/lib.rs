@@ -2777,6 +2777,8 @@ fn declaration_flag(kind: wz_capture::payload::formats::DeclarationKind) -> &'st
         // A `.proto` file is typed at the flag of the rule that reads by it,
         // for the definition's reason.
         wz_capture::payload::formats::DeclarationKind::SchemaFile => "--payload-format",
+        // A segment rule is written as a format rule is, at the same flag.
+        wz_capture::payload::formats::DeclarationKind::SegmentRule => "--payload-format",
     }
 }
 
@@ -2794,6 +2796,11 @@ fn declaration_note_kind(kind: wz_capture::payload::formats::DeclarationKind) ->
         // Its own kind as well: a file is unused when no rule READ by the files,
         // which is a different remedy from a format nobody named.
         wz_capture::payload::formats::DeclarationKind::SchemaFile => "payload_schema_file_unused",
+        // Its own kind: a segment rule binds nothing when no payload under its
+        // pattern was a piece, which a matching key alone does not show.
+        wz_capture::payload::formats::DeclarationKind::SegmentRule => {
+            "payload_segment_rule_unbound"
+        }
     }
 }
 
@@ -2813,6 +2820,9 @@ fn declaration_remedy(kind: wz_capture::payload::formats::DeclarationKind) -> &'
         }
         wz_capture::payload::formats::DeclarationKind::SchemaFile => {
             "no rule naming a message of the schema files read a payload, so no file was used"
+        }
+        wz_capture::payload::formats::DeclarationKind::SegmentRule => {
+            "no payload under a key the pattern matched carried this profile's header"
         }
     }
 }
@@ -4787,6 +4797,12 @@ fn payload_block(
         PayloadDecoding::NoRule(keyexpr) => {
             format!("    payload: no --payload-format rule covers `{keyexpr}`\n")
         }
+        PayloadDecoding::SegmentPiece {
+            keyexpr, profile, ..
+        } => format!(
+            "    payload: a piece of a message split by its sender on `{keyexpr}` \
+             (segment profile `{profile}`), read once its pieces are joined\n"
+        ),
         // `rule: _` on the three states that carry one: the rule that won is a
         // field of the machine-readable document (`matched_rule`), where a
         // program joins it to a declaration line by number. This line already

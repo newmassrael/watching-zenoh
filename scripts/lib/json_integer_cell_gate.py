@@ -222,6 +222,17 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             born=34,
         ),
     ),
+    # Field document 59: every integer of a `segment` block, which one writer
+    # sends through the door so the block is one cell rather than twelve.
+    ("crates/wz-capture/src/fields_json.rs", "push_segment_integer"): (
+        Cell(
+            "fields",
+            "a segment block's integers",
+            "every integer of a `segment` block",
+            "every integer of a `segment` block",
+            born=59,
+        ),
+    ),
     ("crates/wz-capture/src/e2e_row.rs", "push_optional"): (
         Cell("fields", "an e2e block's silence_ms", _E2E_BLOCK_HEADER, "`silence_ms`", born=34),
     ),

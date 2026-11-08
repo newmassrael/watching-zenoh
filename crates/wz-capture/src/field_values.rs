@@ -330,10 +330,15 @@ fn read(map: &FormatMap<'_>, paths: &[String], held: &Held) -> Option<Outcome> {
         }
         PayloadDecoding::NotOnTheWire { .. } => Outcome::NotOnTheWire,
         PayloadDecoding::KeyexprUnresolved => Outcome::KeyexprUnresolved,
-        // Not covered by any rule, or no payload to read: not asked about.
-        PayloadDecoding::NoRule(_) | PayloadDecoding::NoRules | PayloadDecoding::NoPayload => {
-            return None
-        }
+        // Not covered by any rule, or no payload to read: not asked about. A
+        // piece of a split message is neither the message nor a refusal of it,
+        // so it has no value to give and is not asked about either; the
+        // message's values are read where it is joined, on the field
+        // document's `segment.joined`, which this door does not yet walk.
+        PayloadDecoding::NoRule(_)
+        | PayloadDecoding::NoRules
+        | PayloadDecoding::NoPayload
+        | PayloadDecoding::SegmentPiece { .. } => return None,
     })
 }
 

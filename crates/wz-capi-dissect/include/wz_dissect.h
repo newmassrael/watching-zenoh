@@ -429,6 +429,83 @@
  * those two references apart. A reader that maps ids to names maps the id and
  * appends this text. Like `keyexpr_id` it can change in an issued row.
  *
+ * AND WHAT A PIECE IS, at field-document revision 59.
+ *
+ * Some senders split a message larger than they put in one sample ABOVE
+ * zenoh: each chunk goes out as an ordinary Put on the message's key, behind a
+ * small header of their own (where the chunk sits, how large the whole is,
+ * which transfer, a check value). A deployment DECLARES that header, because
+ * its marks, widths and byte order are the deployment's and this library
+ * hard-codes none:
+ *
+ *     #split-a={"name":"split-a","segments":{
+ *        "fields":[{"name":"mark","bytes":2,"order":"little","equals":"0x5A5A"},
+ *                  {"name":"origin","bytes":4,"order":"little"}, ...],
+ *        "crc":{"field":"check","width":32,"poly":"0x04C11DB7","init":"0xFFFFFFFF",
+ *               "refin":true,"refout":true,"xorout":"0xFFFFFFFF",
+ *               "cover":["mark","origin", ...,"@chunk"]},
+ *        "stream":["origin"],"transfer":"number","total":"size","offset":"at",
+ *        "total_max":1048576}}
+ *     **=split-a
+ *
+ * (one line each in a real text). `order` is `big` (the default) or `little`;
+ * `equals` is a value a field must hold for a payload to be a piece; `crc`
+ * (optional) is the CRC model and its feeding order, fields as they stand on
+ * the wire and `@chunk` for the bytes after the header; `stream` names the
+ * fields that, with the sender and the key, tell one stream of transfers from
+ * another; `transfer` numbers the messages of a stream; `total` and `offset`
+ * place the chunk; `total_max` bounds what one transfer may make this library
+ * hold (at most 64 MiB). A payload is a piece when it is at least a header long
+ * and every `equals` field holds; the CRC is then a verdict, and a profile with
+ * no `equals` field is recognised by its CRC alone. The rule `**` covers a
+ * reference this capture cannot resolve as well (any other pattern cannot be
+ * tested against an unknown key); the sender is the flow and the direction the
+ * sample travelled, and the key is the resolved key or the id and suffix.
+ *
+ *     `segment`  present on a `carried` entry (and an `above_transport.carried`
+ *                entry) whose payload is a piece; ABSENT on every other entry.
+ *
+ *     "segment":{"profile":"split-a","matched_rule":{"index":0,"pattern":"**"},
+ *                "header":[{"name":"mark","offset":0,"bytes":2,"value":N},...],
+ *                "chunk_bytes":N,"crc_stated":N,"crc_computed":N,"crc_error":false,
+ *                "stream":[{"name":"origin","value":N}],
+ *                "transfer":N,"whole_bytes":N,"chunk_offset":N,
+ *                "unjoined":null,"place":"continuing",
+ *                "missing_ranges":[[from,to],...],"out_of_order":false,
+ *                "overlap":false,
+ *                "ended_transfers":[{"transfer":N,"whole_bytes":N,
+ *                                    "received_bytes":N,"evicted":false}],
+ *                "joined":null}
+ *
+ * `header` is every declared field with its offset, width and value; `stream`,
+ * `transfer`, `whole_bytes` and `chunk_offset` repeat the fields with those
+ * roles. The CRC keys are `null` for a profile with no CRC. `unjoined` is why
+ * the piece joined no transfer (`crc_mismatch`, `empty_total`,
+ * `total_past_max`, `empty_chunk`, `past_total`, `total_disagrees`) and then
+ * `place` is `null`; otherwise `place` is `first` (the first piece of the
+ * transfer this capture saw), `continuing`, `closing` (it completed the
+ * transfer), `whole` (first and complete at once) or `after_closing`. A piece
+ * whose CRC is wrong, or that cannot be placed, moves no state.
+ * `missing_ranges` is what of the whole is still missing below the furthest
+ * byte its transfer received, after this piece; `out_of_order` says it started
+ * behind a piece that arrived first; `overlap` says it overlaps bytes already
+ * received (the first copy wins). `ended_transfers` is the transfers this piece
+ * ended unjoined: its stream's previous one when a new `transfer` number
+ * arrives, and any ended by the bound on bytes held for open transfers
+ * (`evicted`). `joined` is the message, on the `closing` or `whole` piece only:
+ *
+ *     "joined":{"whole_bytes":N,"e2e":{...},"payload_decode":{...}}
+ *
+ * read by the key's own rule (spans relative to the joined message), with its
+ * end-to-end verdict when a profile rule covers the key (`e2e` absent
+ * otherwise, as on an entry). A piece is never judged as an end-to-end frame:
+ * the counter is judged once per joined message. A transfer that never
+ * completes yields no message. `segment` and everything in it can change in an
+ * issued row (see the list of revisable cells).
+ *
+ * @values fields place
+ * @values fields unjoined
+ *
  * ⚠ REVISION 9 ALSO MOVED WHICH REFERENCES RESOLVE AT ALL, under a stationary
  * `keyexpr`, and no `value_families` row can say so. Until it, this document
  * folded a keyexpr id space PER FLOW, while a zenoh session with
@@ -1004,7 +1081,9 @@
  * `context.parameters` (keys that exist from field document 47 and take the
  * rule from their first appearance: the floor and the stated value of an
  * `sn_mask` are rings that can pass the line, and one writer serves both
- * entries); and to
+ * entries); to every integer of a `segment` block (keys that exist from field
+ * document 59 and take the rule from their first appearance: a header field of
+ * a declared segment profile is up to eight bytes wide); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
  * offsets, sizes and millisecond spans this library measures: those count
  * things the host holds, and stay bare numbers. Revisions: fields 23, census
@@ -1393,7 +1472,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":58,"key":"kind","values":[...],
+ *     {"name":"fields","revision":59,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1442,6 +1521,7 @@
  * @carries fields offset_space discriminant
  * @carries fields outcome passenger
  * @carries fields phase passenger
+ * @carries fields place passenger
  * @carries fields priority passenger
  * @carries fields q_basis passenger
  * @carries fields reason passenger
@@ -1451,6 +1531,7 @@
  * @carries fields state discriminant
  * @carries fields strength passenger
  * @carries fields under passenger
+ * @carries fields unjoined passenger
  * @carries fields unopened_reason discriminant
  * @carries fields verdict passenger
  * @carries fields wrong passenger
@@ -3163,8 +3244,9 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * blaming the traffic for their own rule.
  *
  * Every walked row gains `payload_decode`, an object whose `state` is
- * `decoded`, `refused`, `encoding_mismatch`, `no_rule`, `keyexpr_unresolved`,
- * `not_on_the_wire` or `no_payload`. The last three are ANSWERS, not
+ * `decoded`, `refused`, `encoding_mismatch`, `no_rule`, `segment_piece`,
+ * `keyexpr_unresolved`, `not_on_the_wire` or `no_payload`. The last three are
+ * ANSWERS, not
  * omissions: a rule that
  * never fired and a rule that fired and found nothing send you to opposite
  * places, and `keyexpr_unresolved` is the ordinary shape of a capture that
@@ -3180,6 +3262,15 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * `descriptor_bytes`, an integer: the descriptor's own length, which is the
  * one quantity this plane genuinely has. Nothing is claimed about the data --
  * no decode, no corroboration, no refutation -- because it was never seen.
+ *
+ * `segment_piece` is the ninth state, at field-document revision 59: a segment
+ * rule covers the key and its profile recognised the payload as a PIECE of a
+ * message its sender split over several samples. The key's format rule is not
+ * applied, because these bytes are a header and a chunk and not the message it
+ * describes. It carries `keyexpr`, `matched_rule` (the segment rule, its
+ * `index` counting the segment rules) and `profile`. The message is read once
+ * its pieces are joined: on the `carried` entry of the piece that completed
+ * it, under `segment.joined.payload_decode` (see the `segment` block below).
  *
  * It is reported whether or not the reader declared any format. The fact does
  * not depend on the rules, so it is not gated behind them: a consumer that
@@ -3589,6 +3680,17 @@ int wz_dissect_pcap_fields_where_limited(const unsigned char *bytes, size_t len,
  *     `field_name`         <keyexpr>:<path>=<name>
  *     `format_definition`  #<format>=<layout>
  *     `schema_file`        #@<file>="<text>"   (verdict revision 3)
+ *     `segment_rule`       <keyexpr>=<segment profile>   (verdict revision 4)
+ *
+ * A `segment_rule` is written as a format rule is; it is one when the name
+ * after `=` is a SEGMENT PROFILE the text defines (`#name={"name":..,
+ * "segments":{..}}`, read as a `format_definition` line). It carries `pattern`
+ * and `rule_index` too, and its `rule_index` counts the SEGMENT rules, the list
+ * it is tried in, because a segment rule does not compete with the format rules
+ * for a key: it says how a message published on the key may be split into
+ * pieces, and the key's format rule still says what the joined message is. A
+ * segment profile that cannot be read is refused like any definition, and
+ * `message` names the place in its description (a JSON pointer) and why.
  *
  * `pattern` is the key expression AS READ, with the dialect's quoting removed,
  * and is present for the two kinds that have a key. `rule_index` is present for
@@ -5302,7 +5404,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":58,"key":"state",
+ *     "value_families":[{"name":"fields","revision":59,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -6503,6 +6605,10 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *     /above_transport/carried[]/keyexpr_id    the `keyexpr` it was written beside.
  *     /carried[]/keyexpr_suffix                since revision 58: the suffix moves
  *     /above_transport/carried[]/keyexpr_suffix  with the id.
+ *     /carried[]/segment (its whole subtree)   since revision 59: a piece is
+ *     /above_transport/carried[]/segment       covered once its key resolves,
+ *                                              and the joined message is read by
+ *                                              the rule of the resolved key.
  *
  * `/chain/chain_id` IS NOT IN THIS LIST since field-document revision 38: it is
  * counted from the first message the list EVER held (the list keeps the chain

@@ -121,7 +121,7 @@ fn frame_carrying(record: &[u8]) -> Vec<u8> {
 }
 
 /// `M=1` — the id lives in the SENDER's own space.
-fn sender_space(id: u64, suffix: Option<&'static str>) -> Wireexpr<'static> {
+fn sender_space<'a>(id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
     Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
             id,
@@ -147,7 +147,7 @@ fn declare_kexpr(id: u64, suffix: &'static str) -> Vec<u8> {
 }
 
 /// A `Push` under `keyexpr` carrying `payload`.
-fn push(keyexpr: Wireexpr<'static>, payload: &'static [u8]) -> Vec<u8> {
+fn push<'a>(keyexpr: Wireexpr<'a>, payload: &'a [u8]) -> Vec<u8> {
     // The header's `N` flag says the key carries a suffix; the encoder refuses a suffix the
     // header does not announce.
     let named = matches!(
@@ -461,6 +461,19 @@ pub fn multilink_declaration_behind_a_gap_suffixed(
     reference_in_a_chain: bool,
     suffix: Option<&'static str>,
 ) -> Vec<u8> {
+    multilink_declaration_behind_a_gap_carrying(fill, reference_in_a_chain, suffix, &[0u8; 11])
+}
+
+/// [`multilink_declaration_behind_a_gap_suffixed`] with a reference that
+/// carries `payload`, so a payload whose reading depends on the resolved key
+/// (a piece of a split message, joined and read by the key's rule) is one a row
+/// can be graded on.
+pub fn multilink_declaration_behind_a_gap_carrying(
+    fill: GapFill,
+    reference_in_a_chain: bool,
+    suffix: Option<&'static str>,
+    payload: &[u8],
+) -> Vec<u8> {
     const ISN: u32 = 1000;
     const L1: u16 = 43210;
     const L2: u16 = 43211;
@@ -492,7 +505,7 @@ pub fn multilink_declaration_behind_a_gap_suffixed(
     let init_b = stream_unit(&init_wire(ZID_B));
     let keepalive = stream_unit(&[wz_session_core::wire_const::T_MID_KEEP_ALIVE]);
     let declaration = stream_unit(&frame_carrying(&declare_kexpr(ALIAS_ID, ALIAS_LITERAL)));
-    let reference = push(sender_space(ALIAS_ID, suffix), &[0u8; 11]);
+    let reference = push(sender_space(ALIAS_ID, suffix), payload);
 
     let mut packets: Vec<Vec<u8>> = Vec::new();
     // Link 1's opening. A chain needs the whole handshake; a lone frame needs

@@ -2526,9 +2526,13 @@ pub mod formats {
         /// A definition whose value is an end-to-end profile description
         /// (`#name={...}`) that could not be read, with the place in it.
         BadE2eProfile(String, crate::e2e_profile::DocError),
-        /// A profile declared under one name whose description names itself
-        /// another.
-        E2eProfileNamedElsewhere {
+        /// A definition whose value is a segment profile description
+        /// (`#name={"name":..,"segments":{..}}`) that could not be read, with
+        /// the place in it.
+        BadSegmentProfile(String, crate::e2e_profile::DocError),
+        /// A profile, end-to-end or segment, declared under one name whose
+        /// description names itself another.
+        ProfileNamedElsewhere {
             /// The name the `#name=` line gave.
             declared: String,
             /// The name the description gave itself.
@@ -2607,7 +2611,13 @@ pub mod formats {
                         "the end-to-end profile described for `{name}` is not readable: {why}"
                     )
                 }
-                Self::E2eProfileNamedElsewhere {
+                Self::BadSegmentProfile(name, why) => {
+                    write!(
+                        f,
+                        "the segment profile described for `{name}` is not readable: {why}"
+                    )
+                }
+                Self::ProfileNamedElsewhere {
                     declared,
                     described,
                 } => write!(
@@ -2691,6 +2701,42 @@ pub mod formats {
         profile: alloc::rc::Rc<crate::e2e_profile::Profile>,
     }
 
+    /// One segment profile a deployment registered with
+    /// `#name={"name":..,"segments":{..}}` ([`crate::segment_profile`]).
+    struct SegmentProfileDef {
+        /// The name segment rules refer to it by.
+        name: String,
+        /// The description as the line wrote it, so the declaration reads back
+        /// byte for byte as it was typed.
+        text: String,
+        profile: crate::segment_profile::SegmentProfile,
+    }
+
+    /// What [`FormatMap::segment_for`] found: the segment rule that covers a
+    /// key, the handle the run's ledger records, and the profile it names.
+    pub struct SegmentRuleMatch<'m> {
+        /// The handle, for a ledger of what was used.
+        pub id: DeclarationId,
+        /// Which segment rule it was. Its `index` counts the SEGMENT rules, in
+        /// the order they were declared, because they are a list of their own:
+        /// see [`FormatMap::segment_for`].
+        pub rule: MatchedRule,
+        /// The profile the rule names.
+        pub profile: &'m crate::segment_profile::SegmentProfile,
+    }
+
+    /// Which key a payload a segment rule may cover was published on.
+    #[derive(Debug, Clone, Copy)]
+    pub enum SegmentKey<'k> {
+        /// The resolved key expression.
+        Resolved(&'k str),
+        /// A reference the capture cannot resolve. Only a rule whose pattern is
+        /// `**` covers it: that pattern covers every key, so it covers this one
+        /// whatever it turns out to be, and any other pattern cannot be tested
+        /// against a key nobody knows.
+        Unresolved,
+    }
+
     #[derive(Default)]
     pub struct FormatMap<'a> {
         rules: Vec<(String, RuleTarget<'a>)>,
@@ -2717,6 +2763,20 @@ pub mod formats {
         schema_set: Option<alloc::rc::Rc<crate::proto_decode::SchemaSet>>,
         /// The `protobuf@pkg.Msg` rules' formats, one per rule.
         schema_rules: Vec<crate::payload_typed::SchemaProtobuf>,
+        /// The segment profiles this run registered, owned here for the reason
+        /// `described` is.
+        segment_profiles: Vec<SegmentProfileDef>,
+        /// The SEGMENT rules: (pattern, index into `segment_profiles`), in the
+        /// order they were declared.
+        ///
+        /// A list of their own and not entries of `rules`, because a segment
+        /// rule does not compete with a format rule for a key. It describes a
+        /// layer UNDER the key's format: a payload it recognises is a piece of a
+        /// message, and the key's own rule (a format, an end-to-end profile)
+        /// reads the message once the pieces are joined. Were it a format rule,
+        /// first-match-wins would make a key either split or framed, and a
+        /// split message is both.
+        segment_rules: Vec<(String, usize)>,
     }
 
     /// R311y726 — a handle to ONE declaration installed in a [`FormatMap`].
@@ -2766,16 +2826,24 @@ pub mod formats {
         /// format definition: it names a file, not a format, and no rule refers
         /// to it by its name.
         SchemaFile,
+        /// A keyexpr pattern mapped to a SEGMENT profile
+        /// ([`crate::segment_profile`]): written as a format rule is
+        /// (`pattern=name`), and a kind of its own because it does not compete
+        /// with the format rules for a key. It says how a message published on
+        /// the key may be split into pieces; the key's format rule still says
+        /// what the joined message is.
+        SegmentRule,
     }
 
     impl DeclarationKind {
         /// Every kind, so the vocabulary a consumer switches on and a test's
         /// walk of it are one list.
-        pub const ALL: [Self; 4] = [
+        pub const ALL: [Self; 5] = [
             Self::FormatRule,
             Self::FieldName,
             Self::FormatDefinition,
             Self::SchemaFile,
+            Self::SegmentRule,
         ];
 
         /// The word a machine reads for this kind: the `kind` of a line in
@@ -2787,6 +2855,7 @@ pub mod formats {
                 Self::FieldName => "field_name",
                 Self::FormatDefinition => "format_definition",
                 Self::SchemaFile => "schema_file",
+                Self::SegmentRule => "segment_rule",
             }
         }
     }
@@ -2932,6 +3001,8 @@ pub mod formats {
                 schema_files: Vec::new(),
                 schema_set: None,
                 schema_rules: Vec::new(),
+                segment_profiles: Vec::new(),
+                segment_rules: Vec::new(),
             }
         }
 
@@ -3031,7 +3102,88 @@ pub mod formats {
                     }),
                 });
             }
+            // The segment profiles and then the segment rules, after every
+            // range above for the reason each of those follows the one before.
+            let first_profile = self.first_segment_profile_id();
+            for (at, profile) in self.segment_profiles.iter().enumerate() {
+                let name = escape_field(&profile.name);
+                out.push(Declaration {
+                    id: DeclarationId(first_profile + at),
+                    kind: DeclarationKind::FormatDefinition,
+                    text: declaration_text(&DeclarationText::Definition {
+                        name: &name,
+                        layout: &profile.text,
+                    }),
+                });
+            }
+            let first_rule = self.first_segment_rule_id();
+            for (at, (pattern, profile_at)) in self.segment_rules.iter().enumerate() {
+                let (pattern, format) = (
+                    escape_field(pattern),
+                    escape_field(&self.segment_profiles[*profile_at].name),
+                );
+                out.push(Declaration {
+                    id: DeclarationId(first_rule + at),
+                    kind: DeclarationKind::SegmentRule,
+                    text: declaration_text(&DeclarationText::Rule {
+                        pattern: &pattern,
+                        format: &format,
+                    }),
+                });
+            }
             out
+        }
+
+        /// The handle of the first segment profile: after the schema files.
+        fn first_segment_profile_id(&self) -> usize {
+            self.first_schema_file_id() + self.schema_files.len()
+        }
+
+        /// The handle of the first segment rule: after the segment profiles.
+        fn first_segment_rule_id(&self) -> usize {
+            self.first_segment_profile_id() + self.segment_profiles.len()
+        }
+
+        /// Whether any rule covers keys with a segment profile. A caller that
+        /// joins pieces skips the work of finding them when none does.
+        pub fn has_segment_rules(&self) -> bool {
+            !self.segment_rules.is_empty()
+        }
+
+        /// The segment rule that covers `key`: the FIRST, in the order the
+        /// segment rules were declared, whose pattern covers it. Segment rules
+        /// are tried among themselves and never against the format rules (see
+        /// `segment_rules`); an unresolved key is covered only by `**`
+        /// ([`SegmentKey::Unresolved`]).
+        pub fn segment_for(&self, key: SegmentKey<'_>) -> Option<SegmentRuleMatch<'_>> {
+            let at = self
+                .segment_rules
+                .iter()
+                .position(|(pattern, _)| match key {
+                    SegmentKey::Resolved(keyexpr) => {
+                        let chunks: Vec<&str> = pattern.split('/').collect();
+                        wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
+                    }
+                    SegmentKey::Unresolved => pattern == "**",
+                })?;
+            let (pattern, profile_at) = &self.segment_rules[at];
+            Some(SegmentRuleMatch {
+                id: DeclarationId(self.first_segment_rule_id() + at),
+                rule: MatchedRule {
+                    index: at,
+                    pattern: pattern.clone(),
+                },
+                profile: &self.segment_profiles[*profile_at].profile,
+            })
+        }
+
+        /// The handle of the segment profile a segment rule names, for a run's
+        /// ledger of what applied; `None` for a handle that is not a segment
+        /// rule's.
+        pub fn segment_profile_of(&self, rule: DeclarationId) -> Option<DeclarationId> {
+            let at = rule.0.checked_sub(self.first_segment_rule_id())?;
+            let (_, profile_at) = self.segment_rules.get(at)?;
+            Some(DeclarationId(self.first_segment_profile_id() + profile_at))
         }
 
         /// The handle of the first schema file: every other kind's range comes
@@ -3167,6 +3319,7 @@ pub mod formats {
             builtin(name).is_some()
                 || self.described.iter().any(|d| d.name() == name)
                 || self.e2e_profiles.iter().any(|p| p.name == name)
+                || self.segment_profiles.iter().any(|p| p.name == name)
         }
 
         /// R2114 (open-debt item 237) — DEFINE a format from a layout the
@@ -3191,6 +3344,9 @@ pub mod formats {
                 return Err(FormatMapError::FormatNameTaken(name.to_owned()));
             }
             if layout.starts_with(E2E_PROFILE_OPEN) {
+                if crate::segment_profile::SegmentProfile::is_segment_profile(layout) {
+                    return self.define_segment_profile(name, layout);
+                }
                 return self.define_e2e_profile(name, layout);
             }
             let described = crate::payload_described::DescribedFormat::parse(name, layout)
@@ -3217,7 +3373,7 @@ pub mod formats {
             }
             let profile = crate::e2e_profile::Profile::parse(text).map_err(bad)?;
             if profile.name() != name {
-                return Err(FormatMapError::E2eProfileNamedElsewhere {
+                return Err(FormatMapError::ProfileNamedElsewhere {
                     declared: name.to_owned(),
                     described: profile.name().to_owned(),
                 });
@@ -3230,6 +3386,51 @@ pub mod formats {
             Ok(())
         }
 
+        /// Register a segment profile under `name`, on the terms an end-to-end
+        /// profile is registered on: one line, and named as the line names it.
+        /// A description that cannot be read is refused with the place in it,
+        /// so a declaration text that carries a wrong profile is told so rather
+        /// than installed without it.
+        fn define_segment_profile(&mut self, name: &str, text: &str) -> Result<(), FormatMapError> {
+            let bad = |why| FormatMapError::BadSegmentProfile(name.to_owned(), why);
+            if text.contains(['\n', '\r']) {
+                return Err(bad(crate::e2e_profile::DocError::invalid(
+                    "",
+                    "a profile description in a declaration is one line",
+                )));
+            }
+            let profile = crate::segment_profile::SegmentProfile::parse(text).map_err(bad)?;
+            if profile.name() != name {
+                return Err(FormatMapError::ProfileNamedElsewhere {
+                    declared: name.to_owned(),
+                    described: profile.name().to_owned(),
+                });
+            }
+            self.segment_profiles.push(SegmentProfileDef {
+                name: name.to_owned(),
+                text: text.to_owned(),
+                profile,
+            });
+            Ok(())
+        }
+
+        /// Bind every key matching `pattern` to the segment profile at
+        /// `profile_at`, after the pattern checks every rule meets.
+        fn push_segment_rule(
+            &mut self,
+            pattern: &str,
+            profile_at: usize,
+        ) -> Result<(), FormatMapError> {
+            require_keyexpr(pattern)?;
+            self.segment_rules.push((pattern.to_owned(), profile_at));
+            Ok(())
+        }
+
+        /// The position of the segment profile called `name`, if one is.
+        fn segment_profile_named(&self, name: &str) -> Option<usize> {
+            self.segment_profiles.iter().position(|p| p.name == name)
+        }
+
         /// R2114 (open-debt item 237) — every format name a rule may use on
         /// this map: what this build ships, plus what this run described.
         ///
@@ -3239,6 +3440,7 @@ pub mod formats {
             let mut out: Vec<String> = BUILTIN_NAMES.iter().map(|n| (*n).into()).collect();
             out.extend(self.described.iter().map(|d| d.name().into()));
             out.extend(self.e2e_profiles.iter().map(|p| p.name.clone()));
+            out.extend(self.segment_profiles.iter().map(|p| p.name.clone()));
             out
         }
 
@@ -3254,6 +3456,12 @@ pub mod formats {
         /// shipped and described names first, so a described format whose name
         /// happens to hold an `@` still means what it always did.
         pub fn insert_named(&mut self, pattern: &str, format: &str) -> Result<(), FormatMapError> {
+            // A segment profile's name makes the line a SEGMENT rule, which goes
+            // to its own list: see `segment_rules`. The names share one
+            // namespace (`format_name_taken`), so this cannot shadow a format.
+            if let Some(profile_at) = self.segment_profile_named(format) {
+                return self.push_segment_rule(pattern, profile_at);
+            }
             let target = match self.described.iter().position(|d| d.name() == format) {
                 Some(at) => RuleTarget::Described(at),
                 None => match builtin(format) {
@@ -3464,7 +3672,11 @@ pub mod formats {
         /// "declared and never used" ledger exists to report, and skipping the
         /// render would take that finding away at the one moment it is true.
         pub fn is_empty(&self) -> bool {
-            self.rules.is_empty() && self.described.is_empty() && self.e2e_profiles.is_empty()
+            self.rules.is_empty()
+                && self.described.is_empty()
+                && self.e2e_profiles.is_empty()
+                && self.segment_profiles.is_empty()
+                && self.segment_rules.is_empty()
         }
 
         /// The patterns, in the order they are tried.
@@ -3961,6 +4173,17 @@ pub mod formats {
                 DeclarationText::Rule { pattern, format } => {
                     key_is_quoted(pattern)?;
                     let (pattern, format) = (unquote(pattern)?, unquote(format)?);
+                    // A segment rule is written as a format rule is and counted
+                    // among the segment rules, the list it lands in.
+                    if self.segment_profile_named(&format).is_some() {
+                        let index = self.segment_rules.len();
+                        self.insert_named(&pattern, &format)?;
+                        return Ok(DeclaredLine {
+                            kind: DeclarationKind::SegmentRule,
+                            pattern: Some(pattern),
+                            rule_index: Some(index),
+                        });
+                    }
                     // The rule lands at the end, so its position is the count
                     // before it; a refusal leaves the count where it was.
                     let index = self.rules.len();
@@ -4090,7 +4313,8 @@ pub mod formats {
         pub pattern: Option<String>,
         /// A rule's position among the format rules, from 0, in the order they
         /// are tried: the number [`MatchedRule::index`] reports when it wins.
-        /// `Some` for a rule only.
+        /// A segment rule's position is among the SEGMENT rules, the list it is
+        /// tried in. `Some` for a rule only.
         pub rule_index: Option<usize>,
     }
 

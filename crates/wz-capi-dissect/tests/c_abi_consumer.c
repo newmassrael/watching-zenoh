@@ -3678,9 +3678,10 @@ int main(void) {
     CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
     /* Revision 2 names the KIND each line was read as, and a rule its position
      * among the rules: the number a field row's matched_rule.index reports.
-     * Revision 3 adds the kind `schema_file`, which this text has none of. */
+     * Revision 3 adds the kind `schema_file`, which this text has none of.
+     * Revision 4 adds the kind `segment_rule`, which it has none of either. */
     CHECK(strcmp(declared,
-                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":3},"
+                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":4},"
                  "\"ok\":true,\"installed\":1,\"lines\":[{\"line\":0,"
                  "\"kind\":\"format_rule\",\"pattern\":\"demo/temp\","
                  "\"rule_index\":0}]}") == 0,
@@ -4151,8 +4152,12 @@ int main(void) {
      * types its declared .proto files give it. Keys arrive and the `state`
      * shapes move; nothing retires.
      * 58: every `carried` entry's `keyexpr_suffix`, the suffix an unresolved
-     * reference wrote after its id. A key arrives; nothing retires. */
-    revisioned[2].revision = 58;
+     * reference wrote after its id. A key arrives; nothing retires.
+     * 59: a `carried` entry's `segment` block, the verdict on a piece of a
+     * message its sender split (declared by a segment profile), and the
+     * payload state `segment_piece`. Keys arrive and the `state` shapes move;
+     * nothing retires. */
+    revisioned[2].revision = 59;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

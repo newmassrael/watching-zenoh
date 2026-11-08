@@ -72,6 +72,9 @@ pub struct Declarations<'a> {
     /// many of its frames have been, when the walker says which row it is; the
     /// key the ledger keeps a frame's outcome under. See [`Self::at_row`].
     row: core::cell::Cell<Option<(u64, u32)>>,
+    /// The same for the application-level pieces of the row: its own count,
+    /// because a piece is not a frame and the two are kept apart.
+    segment_row: core::cell::Cell<Option<(u64, u32)>>,
     /// R311y875 — the rules that bound the WRONG thing, tallied by the triple
     /// that identifies one misbinding. See [`Self::misbindings`].
     misbound: RefCell<alloc::collections::BTreeMap<MisbindingKey, (usize, MatchedRule)>>,
@@ -128,6 +131,18 @@ pub struct E2eJudged<'a> {
     pub outcome: crate::e2e_slots::Outcome,
 }
 
+/// What [`Declarations::judge_segment`] found for one sample: the segment rule
+/// that covers its key, the profile it names, and the ledger's verdict on the
+/// piece.
+pub struct SegmentJudged<'a> {
+    /// Which segment rule covered the key.
+    pub rule: MatchedRule,
+    /// The profile that recognised the payload as a piece.
+    pub profile: &'a crate::segment_profile::SegmentProfile,
+    /// What the ledger made of the piece.
+    pub verdict: crate::segment_chain::Verdict,
+}
+
 /// R311y875 — what one misbinding IS, as a key: the topic, the rule's decoder,
 /// the publisher's label, and which of the two is wrong.
 ///
@@ -162,6 +177,7 @@ impl<'a> Declarations<'a> {
             e2e: RefCell::new(ledger),
             list: core::cell::Cell::new(0),
             row: core::cell::Cell::new(None),
+            segment_row: core::cell::Cell::new(None),
             misbound: RefCell::new(alloc::collections::BTreeMap::new()),
             refused: RefCell::new(alloc::collections::BTreeMap::new()),
             rescans: RefCell::new((0, 0)),
@@ -175,6 +191,7 @@ impl<'a> Declarations<'a> {
     pub fn enter_list(&self, list: usize) {
         self.list.set(list);
         self.row.set(None);
+        self.segment_row.set(None);
     }
 
     /// The frames judged from now on are those of the row at produced-index
@@ -183,6 +200,7 @@ impl<'a> Declarations<'a> {
     /// what it kept and moves no counter, and a row past it is judged and kept.
     pub(crate) fn at_row(&self, produced: u64) {
         self.row.set(Some((produced, 0)));
+        self.segment_row.set(Some((produced, 0)));
     }
 
     /// How far the list at `list` has been judged in order.
@@ -305,6 +323,89 @@ impl<'a> Declarations<'a> {
         self.map.has_e2e_rules()
     }
 
+    /// Whether any rule binds a key to a segment profile: the question a walker
+    /// asks before it looks for pieces, for the reason [`Self::has_e2e_rules`]
+    /// is asked before it looks for frames.
+    pub fn has_segment_rules(&self) -> bool {
+        self.map.has_segment_rules()
+    }
+
+    /// Whether a walk has state to move on samples it does not write: end-to-end
+    /// counters, or transfers being joined.
+    pub fn has_stateful_rules(&self) -> bool {
+        self.has_e2e_rules() || self.has_segment_rules()
+    }
+
+    /// How many open transfers the bound on held bytes ended in this run.
+    pub fn segments_evicted(&self) -> usize {
+        self.e2e.borrow().segments().evicted()
+    }
+
+    /// Judge ONE sample as a piece under the segment rule that covers its key,
+    /// or say that none does or that the payload is not a piece.
+    ///
+    /// `None` is "no segment rule covers this key, or its profile does not
+    /// recognise the payload": every other payload on a key a segment rule
+    /// covers is an ordinary message. `key` is the resolved key or the id and
+    /// suffix of an unresolved reference (see [`crate::payload::formats::SegmentKey`]
+    /// for which rules cover that), and `from_low` the direction the sample
+    /// travelled, which with the list names the sender.
+    ///
+    /// Joined in the order the caller hands pieces in, exactly as
+    /// [`Self::judge_e2e`] judges frames: a row behind the list's frontier is
+    /// answered from what was kept and joins nothing a second time.
+    pub fn judge_segment(
+        &self,
+        key: crate::segment_chain::KeyRef,
+        payload: &[u8],
+        from_low: Option<bool>,
+    ) -> Option<SegmentJudged<'a>> {
+        let map: &'a FormatMap<'a> = self.map;
+        if !map.has_segment_rules() {
+            return None;
+        }
+        let covering = match &key {
+            crate::segment_chain::KeyRef::Resolved(keyexpr) => {
+                crate::payload::formats::SegmentKey::Resolved(keyexpr)
+            }
+            crate::segment_chain::KeyRef::Unresolved { .. } => {
+                crate::payload::formats::SegmentKey::Unresolved
+            }
+        };
+        let matched = map.segment_for(covering)?;
+        let piece = matched.profile.recognise(payload)?;
+        self.record_applied(matched.id);
+        let list = self.list.get();
+        let at = self.segment_row.get().map(|(produced, ordinal)| {
+            self.segment_row.set(Some((produced, ordinal + 1)));
+            (produced, ordinal)
+        });
+        let mut ledger = self.e2e.borrow_mut();
+        let behind = at.filter(|(produced, _)| *produced < ledger.frontier(list).produced);
+        let kept = behind
+            .and_then(|(produced, ordinal)| ledger.segments().recall(list, produced, ordinal));
+        let verdict = match kept {
+            Some(verdict) => verdict,
+            None => {
+                let verdict =
+                    ledger
+                        .segments_mut()
+                        .receive(matched.profile, &piece, list, from_low, key);
+                if let Some((produced, ordinal)) = at {
+                    ledger
+                        .segments_mut()
+                        .remember(list, produced, ordinal, &verdict);
+                }
+                verdict
+            }
+        };
+        Some(SegmentJudged {
+            rule: matched.rule,
+            profile: matched.profile,
+            verdict,
+        })
+    }
+
     /// Judge ONE sample under the profile rule that governs its key, or say
     /// that none does.
     ///
@@ -400,6 +501,10 @@ impl<'a> Declarations<'a> {
         // that decoded their payload.
         if let Some(definition) = self.map.definition_of(id) {
             self.used.borrow_mut().insert(definition);
+        }
+        // A segment rule's profile, for the same reason.
+        if let Some(profile) = self.map.segment_profile_of(id) {
+            self.used.borrow_mut().insert(profile);
         }
         // And every schema file, when the rule read its payload by them: the
         // files are read together, so a rule that read one applied them all,
@@ -1280,6 +1385,20 @@ pub enum PayloadDecoding {
     /// Nothing about the data. This plane never saw it, so there is no decode,
     /// no corroboration and no refutation to report — only the length of the
     /// descriptor, which is what the capture DOES hold.
+    /// The payload is a PIECE of a message its application split over several
+    /// samples ([`crate::segment_profile`]): a segment rule covers the key and
+    /// its profile recognised the header. The key's format rule is not applied,
+    /// because these bytes are not the message it describes; the message is
+    /// read once its pieces are joined, on the entry of the piece that
+    /// completed it (the field document's `segment.joined`).
+    SegmentPiece {
+        /// The key expression the segment rule was matched against.
+        keyexpr: String,
+        /// Which segment rule covered it. Its index counts the segment rules.
+        rule: MatchedRule,
+        /// The segment profile that recognised the header.
+        profile: String,
+    },
     NotOnTheWire {
         /// The descriptor's own length in bytes, from the walked field's SPAN.
         ///
@@ -1317,6 +1436,7 @@ impl PayloadDecoding {
             Self::Refused { .. } => 5,
             Self::Decoded { .. } => 6,
             Self::NotOnTheWire { .. } => 7,
+            Self::SegmentPiece { .. } => 8,
         }]
     }
 
@@ -1336,7 +1456,7 @@ impl PayloadDecoding {
     /// variant at an EXISTING index gets two variants sharing one word and no
     /// compiler complains. That is a narrower hole than the one it replaces,
     /// and it is a deliberate act rather than an omission.
-    pub const STATES: [&'static str; 8] = [
+    pub const STATES: [&'static str; 9] = [
         "no_rules",
         "no_payload",
         "keyexpr_unresolved",
@@ -1349,6 +1469,8 @@ impl PayloadDecoding {
         // apart, which is the property that doc paragraph claims and this is
         // the first round to exercise it.
         "not_on_the_wire",
+        // Field document 59 — a piece of a message its application split.
+        "segment_piece",
     ];
 
     /// R311y926 (open-debt item 283) — the NEXT variant, so a test can visit
@@ -1408,7 +1530,12 @@ impl PayloadDecoding {
             Self::Decoded { .. } => Self::NotOnTheWire {
                 descriptor_bytes: 0,
             },
-            Self::NotOnTheWire { .. } => return None,
+            Self::NotOnTheWire { .. } => Self::SegmentPiece {
+                keyexpr: String::new(),
+                rule: Self::placeholder_rule(),
+                profile: String::new(),
+            },
+            Self::SegmentPiece { .. } => return None,
         })
     }
 
@@ -2034,6 +2161,37 @@ fn encoding_text(declared: Encoding<'_>) -> Option<String> {
     }
 }
 
+/// Apply the mapping to the MESSAGE a split transfer joined, whose last piece
+/// `record` carried: the key's own rule over `joined`, with spans relative to
+/// the joined message (it is in no other coordinate space), under the encoding
+/// that piece's sample declared.
+///
+/// `KeyexprUnresolved` when the record's key did not resolve: the joined bytes
+/// exist, and no rule can be tested against a key nobody knows.
+pub fn decode_joined(
+    record: &Field,
+    joined: &[u8],
+    map: &Declarations<'_>,
+    at: KeyexprAt<'_>,
+) -> PayloadDecoding {
+    if map.is_empty() {
+        return PayloadDecoding::NoRules;
+    }
+    let Some((node, keyexpr, _)) = message_node(record, at) else {
+        return PayloadDecoding::KeyexprUnresolved;
+    };
+    decode_payload_parts(
+        PayloadParts {
+            keyexpr,
+            bytes: joined,
+            declared: declared_encoding(node),
+            base: 0,
+            publisher: at.publisher,
+        },
+        map,
+    )
+}
+
 /// Apply the mapping to one walked message.
 pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) -> PayloadDecoding {
     // R2170 (open-debt item 546) — ASKED BEFORE THE RULES, and the ORDER is the
@@ -2113,6 +2271,24 @@ pub fn decode_payload_parts(parts: PayloadParts<'_>, map: &Declarations<'_>) -> 
     } = parts;
     if map.is_empty() {
         return PayloadDecoding::NoRules;
+    }
+    // A PIECE is answered before any format rule is tried: its bytes are a
+    // header and a chunk, not the message the key's rule describes, and
+    // reading them as that message would report a refusal (or worse, a
+    // decode) of bytes nobody sent as one. Recognising a piece needs no state,
+    // so this answer is the same wherever the row is read.
+    if let Some(matched) = map
+        .map
+        .segment_for(crate::payload::formats::SegmentKey::Resolved(&keyexpr))
+    {
+        if matched.profile.recognise(bytes).is_some() {
+            map.record_applied(matched.id);
+            return PayloadDecoding::SegmentPiece {
+                keyexpr,
+                rule: matched.rule,
+                profile: String::from(matched.profile.name()),
+            };
+        }
     }
     // The rule that won comes out of the comparison that picked the format, so
     // what the row reports and what decoded it cannot be two different rules.
@@ -2295,6 +2471,23 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             // the rules and got no answer, and "no rule won" is a fact the
             // consumer is owed in the same place it reads the winner from.
             out.push_str(",\"matched_rule\":null}");
+        }
+        // The rule that covered the key is the SEGMENT rule, under the key a
+        // winner is read from, and the profile under its own key: the format
+        // the key's rule names was not applied, so there is no `format`.
+        PayloadDecoding::SegmentPiece {
+            keyexpr,
+            rule,
+            profile,
+        } => {
+            open(out);
+            out.push_str(",\"keyexpr\":");
+            escape_into(keyexpr, out);
+            out.push_str(",\"matched_rule\":");
+            push_matched_rule(rule, out);
+            out.push_str(",\"profile\":");
+            escape_into(profile, out);
+            out.push('}');
         }
         PayloadDecoding::EncodingMismatch {
             keyexpr,
@@ -4178,8 +4371,10 @@ mod tests {
         );
     }
 
-    /// `matched_rule` is carried by the four states that asked the rules, as an
-    /// object in three and as `null` in `no_rule`, and by no other.
+    /// `matched_rule` is carried by the five states that asked the rules, as an
+    /// object in four and as `null` in `no_rule`, and by no other.
+    /// `segment_piece` asked them too: its rule is the segment rule that
+    /// covered the key.
     #[test]
     fn matched_rule_is_carried_by_exactly_the_states_that_asked_the_rules() {
         for state in PayloadDecoding::all() {
@@ -4187,7 +4382,7 @@ mod tests {
             push_decoding(&state, &mut out);
             let asked = matches!(
                 state.state(),
-                "decoded" | "refused" | "encoding_mismatch" | "no_rule"
+                "decoded" | "refused" | "encoding_mismatch" | "no_rule" | "segment_piece"
             );
             assert_eq!(
                 out.contains("\"matched_rule\":"),

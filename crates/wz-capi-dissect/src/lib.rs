@@ -1382,8 +1382,10 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
 /// # Reading the result
 ///
 /// Every walked row gains `payload_decode`, an object whose `state` is one of
-/// `decoded`, `refused`, `encoding_mismatch`, `no_rule`, `keyexpr_unresolved`,
-/// `not_on_the_wire` or `no_payload`. R2170 (open-debt item 546) added
+/// `decoded`, `refused`, `encoding_mismatch`, `no_rule`, `segment_piece`,
+/// `keyexpr_unresolved`, `not_on_the_wire` or `no_payload` (`segment_piece`, from
+/// field document 59, is a payload that is a piece of a message its sender split,
+/// which the key's format is not applied to). R2170 (open-debt item 546) added
 /// `not_on_the_wire`, and it exists because `no_payload` was being returned in
 /// its place — a false statement about a record whose payload slot holds an SHM
 /// descriptor, so the data was shared out of band and this capture never held
@@ -13602,7 +13604,7 @@ mod tests {
     #[test]
     fn the_declaration_diagnostic_names_the_line_and_needs_no_capture() {
         // R2100 (open-debt item 509) — the verdict opens with its own revision.
-        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":3}";
+        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":4}";
         assert_eq!(
             call_declarations_diagnose("demo/**=protobuf\ndemo/**:1=temperature"),
             format!(
@@ -19016,6 +19018,17 @@ mod tests {
         let packets = interleaved_packets();
         let interleaved = pcap_prefix(&packets, packets.len());
         let protobuf = "demo/**=protobuf";
+        // Revision 59 -- a segment profile for the rule that covers `demo/**`,
+        // and a `json` rule that reads the message its pieces join. The
+        // reference is one whole piece of a JSON message.
+        let segments = format!(
+            "#{name}={profile}\ndemo/**={name}\ndemo/**=json",
+            name = wz_capture::segment_profile::synthetic::NAME,
+            profile = wz_capture::segment_profile::synthetic::PROFILE,
+        );
+        let message = br#"{"temp":21}"#;
+        let piece =
+            wz_capture::segment_profile::synthetic::piece(1, 1, message.len() as u32, 0, message);
         #[allow(clippy::type_complexity)]
         let scenarios: Vec<(
             &str,
@@ -19173,6 +19186,55 @@ mod tests {
                     "/above_transport/carried[]/keyexpr",
                     "/above_transport/carried[]/keyexpr_cause",
                     "/above_transport/carried[]/keyexpr_id",
+                ]),
+            ),
+            // Revision 59 -- a piece under a segment rule narrower than every
+            // key is covered once its key resolves: the `segment` block arrives
+            // (with the joined message read by the key's `json` rule), in a row
+            // and inside a chain alike.
+            (
+                "a piece decoded after its declaration",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap_carrying(
+                    wz_capture::fixtures::GapFill::AfterTheReference,
+                    false,
+                    None,
+                    &piece,
+                ),
+                Default::default(),
+                segments.as_str(),
+                cells(&[
+                    "/carried[]/keyexpr",
+                    "/carried[]/keyexpr_cause",
+                    "/carried[]/keyexpr_id",
+                    // The block arrives whole, so the cell is the block itself.
+                    "/carried[]/segment",
+                    // The row's own payload state turns to `segment_piece`, with
+                    // the segment rule and its profile.
+                    "/payload_decode/keyexpr",
+                    "/payload_decode/matched_rule",
+                    "/payload_decode/profile",
+                    "/payload_decode/state",
+                ]),
+            ),
+            (
+                "the same piece inside a completed chain",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap_carrying(
+                    wz_capture::fixtures::GapFill::AfterTheReference,
+                    true,
+                    None,
+                    &piece,
+                ),
+                Default::default(),
+                segments.as_str(),
+                cells(&[
+                    "/above_transport/carried[]/keyexpr",
+                    "/above_transport/carried[]/keyexpr_cause",
+                    "/above_transport/carried[]/keyexpr_id",
+                    "/above_transport/carried[]/payload_decode/keyexpr",
+                    "/above_transport/carried[]/payload_decode/matched_rule",
+                    "/above_transport/carried[]/payload_decode/profile",
+                    "/above_transport/carried[]/payload_decode/state",
+                    "/above_transport/carried[]/segment",
                 ]),
             ),
             // Revision 58 -- a reference that writes a suffix after its id says

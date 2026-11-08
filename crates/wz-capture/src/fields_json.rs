@@ -617,9 +617,10 @@ pub fn fields_json_since_remembering_progress(
         .filter(|saved| saved.grouping == grouping && saved.origin_ms == origin_ms)
         .and_then(|saved| d.capture_order_since_across_trims(Some(&saved.marks)));
     let continues = advance.is_some();
-    // Whether a rule binds a key to an end-to-end profile, which makes the counters of
-    // the frames before a row part of what the walk's result depends on.
-    let judges_e2e = map.is_some_and(|m| m.has_e2e_rules());
+    // Whether a rule binds a key to an end-to-end profile or to a segment profile,
+    // which makes the counters of the frames before a row, or the pieces joined
+    // before it, part of what the walk's result depends on.
+    let judges_e2e = map.is_some_and(|m| m.has_e2e_rules() || m.has_segment_rules());
 
     // WHETHER THE WALK MAY CONTINUE from where the last one stopped. Every
     // condition is one the walk's own result depends on:
@@ -1125,11 +1126,13 @@ pub const REVISABLE_ROW_CELLS: &[&str] = &[
     "/above_transport/carried[]/keyexpr_id",
     "/above_transport/carried[]/keyexpr_suffix",
     "/above_transport/carried[]/payload_decode/**",
+    "/above_transport/carried[]/segment/**",
     "/carried[]/e2e/**",
     "/carried[]/keyexpr",
     "/carried[]/keyexpr_cause",
     "/carried[]/keyexpr_id",
     "/carried[]/keyexpr_suffix",
+    "/carried[]/segment/**",
     // A final's `closes` (on its `carried` entry) names the request the exchange
     // plane paired it with, and the pairing needs the request to still be held: a
     // front trim that takes the request leaves the final held and unpaired, so
@@ -2601,8 +2604,9 @@ fn push_datagram_flow(
             }
             // The counter of a row the cursor passes over still has to move its
             // slot, so a profile rule makes the row worth re-reading. Without
-            // one, the row stays as cheap as it was.
-            if declarations.is_some_and(|d| d.has_e2e_rules()) {
+            // one, the row stays as cheap as it was. A piece it carries has to be
+            // joined for the same reason.
+            if declarations.is_some_and(|d| d.has_stateful_rules()) {
                 if let Some(file) = reread {
                     if let Ok(datagram) = reread_datagram(file, flow, frame.direction, index) {
                         if let Some(message) = datagram_message(frame, &datagram) {
@@ -3102,25 +3106,78 @@ fn judge_record<'d>(
     keyexpr: Option<&Result<String, crate::payload_decode::UnresolvedRef>>,
     declarations: &Declarations<'d>,
     source: E2eSource<'_>,
-) -> Option<crate::payload_decode::E2eJudged<'d>> {
+) -> RecordJudged<'d> {
     use wz_session_core::dissect::{BodyName, FieldValue, MessageName};
+    let none = RecordJudged::default();
     // A run whose rules name no profile judges nothing, and does not pay for
     // looking at a payload to find that out.
-    if !declarations.has_e2e_rules() {
-        return None;
+    if !declarations.has_stateful_rules() {
+        return none;
     }
     if word != MessageName::Push.name() || record.body() != Some(BodyName::Put) {
-        return None;
+        return none;
     }
-    let Some(Ok(keyexpr)) = keyexpr else {
-        return None;
-    };
     let payload =
         crate::payload_decode::subtree_payload_bytes(record).and_then(|f| match &f.value {
             FieldValue::Bytes(bytes) => Some(bytes.as_slice()),
             _ => None,
         });
-    declarations.judge_e2e(keyexpr, payload, source.sender, source.observed_at_ns)
+    // A PIECE first: a payload a segment rule's profile recognises is judged
+    // as a piece and never as a frame, because it is not one (its counter
+    // would be read out of a chunk). The message it completes, when it
+    // completes one, is the frame, judged here at this piece's instant.
+    if let (Some(payload), Some(reference)) = (payload, keyexpr) {
+        let key = match reference {
+            Ok(keyexpr) => crate::segment_chain::KeyRef::Resolved(keyexpr.clone()),
+            Err(miss) => crate::segment_chain::KeyRef::Unresolved {
+                id: miss.id,
+                suffix: miss.suffix.clone(),
+            },
+        };
+        if let Some(segment) = declarations.judge_segment(key, payload, source.from_low) {
+            let joined_e2e = match (&segment.verdict.joined, reference) {
+                (Some(joined), Ok(keyexpr)) => declarations.judge_e2e(
+                    keyexpr,
+                    Some(joined),
+                    source.sender,
+                    source.observed_at_ns,
+                ),
+                _ => None,
+            };
+            return RecordJudged {
+                e2e: None,
+                segment: Some(SegmentEntry {
+                    judged: segment,
+                    joined_e2e,
+                }),
+            };
+        }
+    }
+    let Some(Ok(keyexpr)) = keyexpr else {
+        return none;
+    };
+    RecordJudged {
+        e2e: declarations.judge_e2e(keyexpr, payload, source.sender, source.observed_at_ns),
+        segment: None,
+    }
+}
+
+/// What [`judge_record`] made of one record: the end-to-end verdict of a frame,
+/// or the verdict of a piece of a split message (with the end-to-end verdict of
+/// the message it completed, when it completed one). At most one of the two:
+/// a payload is a piece or a frame.
+#[derive(Default)]
+struct RecordJudged<'d> {
+    e2e: Option<crate::payload_decode::E2eJudged<'d>>,
+    segment: Option<SegmentEntry<'d>>,
+}
+
+/// One piece's verdict as an entry writes it.
+struct SegmentEntry<'d> {
+    judged: crate::payload_decode::SegmentJudged<'d>,
+    /// The end-to-end verdict of the message the piece completed, when a
+    /// profile rule covers its key.
+    joined_e2e: Option<crate::payload_decode::E2eJudged<'d>>,
 }
 
 /// Judge the frames of a row that is NOT written: one a cursor passes over.
@@ -3147,7 +3204,7 @@ fn judge_unwritten_row(row: RowWalk<'_>) {
         // A row that is only judged writes nothing, so it names no request.
         closes: _,
     } = row;
-    let Some(declarations) = declarations.filter(|d| d.has_e2e_rules()) else {
+    let Some(declarations) = declarations.filter(|d| d.has_stateful_rules()) else {
         return;
     };
     let at = KeyexprAt::new(direction, spaces);
@@ -3410,7 +3467,7 @@ fn push_carried(
                      is_record: bool,
                      keyexpr: Option<Result<String, crate::payload_decode::UnresolvedRef>>,
                      payload: Option<crate::payload_decode::PayloadSlot>,
-                     e2e: Option<crate::payload_decode::E2eJudged<'_>>,
+                     judged: RecordJudged<'_>,
                      closed: Option<String>,
                      answered: Option<String>,
                      out: &mut String| {
@@ -3433,7 +3490,8 @@ fn push_carried(
         push_keyexpr_miss(keyexpr.as_ref().and_then(|k| k.as_ref().err()), out);
         push_payload_slot(payload.as_ref(), out);
         push_payload_size(session, is_record.then_some(node), out);
-        push_e2e(e2e.as_ref(), out);
+        push_e2e(judged.e2e.as_ref(), out);
+        push_segment(judged.segment.as_ref(), node, judging.declarations, at, out);
         // On EVERY entry, `null` on one that is not a `ResponseFinal`: the rule
         // `body` states, and the reason `message` stays a passenger in the
         // declared `carries` axis (see `RowCloses`).
@@ -3459,7 +3517,7 @@ fn push_carried(
             false,
             keyexpr,
             None,
-            None,
+            RecordJudged::default(),
             None,
             None,
             out,
@@ -3471,9 +3529,12 @@ fn push_carried(
         // Judged HERE, in the order the entries are written, which is the order
         // the frames were batched in: a slot's counter is walked in the order
         // its frames were sent.
-        let e2e = judging.declarations.and_then(|declarations| {
-            judge_record(record, word, keyexpr.as_ref(), declarations, judging.source)
-        });
+        let judged = judging
+            .declarations
+            .map(|declarations| {
+                judge_record(record, word, keyexpr.as_ref(), declarations, judging.source)
+            })
+            .unwrap_or_default();
         // The pairing is by the record's place in its row, which is `index`: the
         // exchange plane folds a batch's records in the order this list is in.
         let closed = closes
@@ -3488,13 +3549,190 @@ fn push_carried(
             true,
             keyexpr,
             crate::payload_decode::payload_slot(record),
-            e2e,
+            judged,
             closed,
             answered,
             out,
         );
     }
     out.push(']');
+}
+
+/// The `segment` key of one `carried` entry: the verdict on a PIECE of a
+/// message its application split over several samples, or nothing.
+///
+/// # Revision 59 — WHAT A PIECE IS, AND WHAT IT MADE
+///
+/// ABSENT on an entry no segment rule covers and on one whose payload the
+/// rule's profile did not recognise, for the reason `e2e` is absent where no
+/// profile rule covers: every other payload under the pattern is an ordinary
+/// message, and an entry is not made to answer a question nobody asked of it.
+/// Present, in whatever state, on every piece:
+///
+/// ```text
+/// "segment":{"profile":"split-a","matched_rule":{"index":0,"pattern":"**"},
+///            "header":[{"name":"mark","offset":0,"bytes":2,"value":N}, ...],
+///            "chunk_bytes":N,
+///            "crc_stated":N,"crc_computed":N,"crc_error":false,
+///            "stream":[{"name":"origin","value":N}],
+///            "transfer":N,"whole_bytes":N,"chunk_offset":N,
+///            "unjoined":null,"place":"continuing",
+///            "missing_ranges":[[from,to], ...],
+///            "out_of_order":false,"overlap":false,
+///            "ended_transfers":[{"transfer":N,"whole_bytes":N,
+///                                "received_bytes":N,"evicted":false}],
+///            "joined":null}
+/// ```
+///
+/// * `header` is every field of the profile, in wire order, its offset and
+///   width in the payload and its value; `stream`, `transfer`, `whole_bytes`
+///   and `chunk_offset` repeat the values of the fields with those roles, so
+///   a reader does not have to know the profile to read them.
+/// * The three CRC keys are `null` when the profile declares no CRC.
+/// * `unjoined` is why the piece joined no transfer (`crc_mismatch`,
+///   `empty_total`, `total_past_max`, `empty_chunk`, `past_total`,
+///   `total_disagrees`), and `null` when it joined one; `place` is then `null`
+///   and is otherwise `first`, `continuing`, `closing`, `whole` or
+///   `after_closing` ([`crate::segment_chain::Place`]).
+/// * `missing_ranges` is the bytes of the whole still missing below the
+///   furthest byte its transfer has received, after this piece; empty when the
+///   piece joined nothing.
+/// * `ended_transfers` is the transfers this piece ended unjoined: its stream's
+///   previous one, and any the bound on held bytes ended (`evicted`).
+/// * `joined` is `null` except on the piece that completed its transfer
+///   (`closing` or `whole`), where it is the message: its length, its
+///   `payload_decode` under the key's own rule (spans relative to the joined
+///   message), and its `e2e` verdict when a profile rule covers the key, absent
+///   otherwise, exactly as on an entry.
+///
+/// Every integer goes through the shared integer door, because a header field
+/// is up to eight bytes wide.
+fn push_segment(
+    entry: Option<&SegmentEntry<'_>>,
+    record: &wz_session_core::dissect::Field,
+    declarations: Option<&Declarations<'_>>,
+    at: KeyexprAt<'_>,
+    out: &mut String,
+) {
+    let integer = push_segment_integer;
+    let Some(entry) = entry else {
+        return;
+    };
+    let (profile, verdict) = (entry.judged.profile, &entry.judged.verdict);
+    let value_of = |index: usize| verdict.values[index];
+    out.push_str(",\"segment\":{\"profile\":");
+    escape_into(profile.name(), out);
+    out.push_str(",\"matched_rule\":");
+    crate::payload_decode::push_matched_rule(&entry.judged.rule, out);
+    out.push_str(",\"header\":[");
+    for (i, field) in profile.fields().iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"name\":");
+        escape_into(&field.name, out);
+        let _ = write!(
+            out,
+            ",\"offset\":{},\"bytes\":{},\"value\":",
+            field.offset, field.bytes
+        );
+        integer(value_of(i), out);
+        out.push('}');
+    }
+    let _ = write!(out, "],\"chunk_bytes\":{}", verdict.chunk_bytes);
+    match verdict.crc {
+        Some(crc) => {
+            out.push_str(",\"crc_stated\":");
+            integer(crc.stated, out);
+            out.push_str(",\"crc_computed\":");
+            integer(crc.computed, out);
+            out.push_str(",\"crc_error\":");
+            out.push_str(if crc.matches() { "false" } else { "true" });
+        }
+        None => out.push_str(",\"crc_stated\":null,\"crc_computed\":null,\"crc_error\":null"),
+    }
+    out.push_str(",\"stream\":[");
+    for (i, &field) in profile.stream().iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"name\":");
+        escape_into(&profile.fields()[field].name, out);
+        out.push_str(",\"value\":");
+        integer(value_of(field), out);
+        out.push('}');
+    }
+    out.push_str("],\"transfer\":");
+    integer(value_of(profile.transfer()), out);
+    out.push_str(",\"whole_bytes\":");
+    integer(value_of(profile.total()), out);
+    out.push_str(",\"chunk_offset\":");
+    integer(value_of(profile.offset()), out);
+    out.push_str(",\"unjoined\":");
+    match verdict.unjoined {
+        Some(why) => escape_into(why.word(), out),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"place\":");
+    match verdict.place {
+        Some(place) => escape_into(place.word(), out),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"missing_ranges\":[");
+    for (i, (from, to)) in verdict.missing.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        integer(*from, out);
+        out.push(',');
+        integer(*to, out);
+        out.push(']');
+    }
+    let _ = write!(
+        out,
+        "],\"out_of_order\":{},\"overlap\":{},\"ended_transfers\":[",
+        verdict.out_of_order, verdict.overlap
+    );
+    for (i, ended) in verdict.ended.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"transfer\":");
+        integer(ended.transfer, out);
+        out.push_str(",\"whole_bytes\":");
+        integer(ended.total, out);
+        out.push_str(",\"received_bytes\":");
+        integer(ended.received, out);
+        let _ = write!(out, ",\"evicted\":{}}}", ended.evicted);
+    }
+    out.push_str("],\"joined\":");
+    match (&verdict.joined, declarations) {
+        (Some(joined), Some(declarations)) => {
+            let _ = write!(out, "{{\"whole_bytes\":{}", joined.len());
+            push_e2e(entry.joined_e2e.as_ref(), out);
+            out.push_str(",\"payload_decode\":");
+            push_decoding(
+                &crate::payload_decode::decode_joined(record, joined, declarations, at),
+                out,
+            );
+            out.push('}');
+        }
+        // A piece is only ever judged under declarations, so a joined message
+        // without them cannot occur; `null` keeps the block total.
+        _ => out.push_str("null"),
+    }
+    out.push('}');
+}
+
+/// Every integer of a `segment` block, through the shared integer door: the
+/// `value` of each `header` and `stream` entry, `crc_stated`, `crc_computed`,
+/// `transfer`, `whole_bytes`, `chunk_offset`, the bounds of each
+/// `missing_ranges` pair and the `transfer`, `whole_bytes` and `received_bytes`
+/// of each `ended_transfers` entry. One writer, so the block's integers are one
+/// cell of the integer rule rather than twelve that could drift apart.
+fn push_segment_integer(value: u64, out: &mut String) {
+    wz_session_core::json::u64_into(value, out);
 }
 
 /// The `e2e` key of one `carried` entry: the end-to-end verdict, or nothing.
@@ -3983,10 +4221,14 @@ fn push_above_transport(
             // frames a profile protects are the ones large enough to be
             // fragmented, so a chain's records are judged like a batch's, at
             // the instant of the fragment that completed them.
-            let e2e = judging.declarations.and_then(|declarations| {
-                judge_record(record, word, outcome.as_ref(), declarations, judging.source)
-            });
-            push_e2e(e2e.as_ref(), out);
+            let judged = judging
+                .declarations
+                .map(|declarations| {
+                    judge_record(record, word, outcome.as_ref(), declarations, judging.source)
+                })
+                .unwrap_or_default();
+            push_e2e(judged.e2e.as_ref(), out);
+            push_segment(judged.segment.as_ref(), record, declarations, at, out);
             push_payload_block(record, declarations, at, out);
             // On every entry, like the row's own, and from the same pairing: the
             // exchange plane folded this record at this row, at place `i`.
@@ -5595,6 +5837,10 @@ struct E2eSource<'a> {
     sender: Option<&'a [u8]>,
     /// The capture's own instant for the row, in nanoseconds.
     observed_at_ns: Option<u64>,
+    /// The half of the list the row travelled: `true` for the half named
+    /// first. With the list it names the sender of an application's pieces,
+    /// which a zid the capture may never have seen cannot.
+    from_low: Option<bool>,
 }
 
 /// How a row producer asks for a row's sequence number.
@@ -5703,8 +5949,9 @@ impl RowTags<'_> {
         // Under an end-to-end rule a row's verdict depends on the rows before it
         // in its slot: the rows the ledger has judged in order are read back from
         // it (D9), and the walk begins no later than the first row it has not
-        // judged, so every row from there is judged in order.
-        match declarations.filter(|d| d.has_e2e_rules()) {
+        // judged, so every row from there is judged in order. Pieces being
+        // joined are kept under the same frontier.
+        match declarations.filter(|d| d.has_stateful_rules()) {
             None => Some(first),
             Some(d) => {
                 let list = self.numbering?.list?;
@@ -5721,7 +5968,7 @@ impl RowTags<'_> {
     /// The row whose frames the declarations judge from now on, by its
     /// produced-index (D9).
     fn at_row(&self, declarations: Option<&Declarations<'_>>, produced: u64) {
-        if let Some(d) = declarations.filter(|d| d.has_e2e_rules()) {
+        if let Some(d) = declarations.filter(|d| d.has_stateful_rules()) {
             d.at_row(produced);
         }
     }
@@ -5734,7 +5981,7 @@ impl RowTags<'_> {
         frontier: crate::e2e_slots::Frontier,
     ) {
         if let (Some(d), Some(list)) = (
-            declarations.filter(|d| d.has_e2e_rules()),
+            declarations.filter(|d| d.has_stateful_rules()),
             self.numbering.and_then(|n| n.list),
         ) {
             d.e2e_judged_up_to(list, frontier);
@@ -5745,7 +5992,7 @@ impl RowTags<'_> {
     /// than `first_held` (D9).
     fn forget_judged_before(&self, declarations: Option<&Declarations<'_>>, first_held: u64) {
         if let (Some(d), Some(list)) = (
-            declarations.filter(|d| d.has_e2e_rules()),
+            declarations.filter(|d| d.has_stateful_rules()),
             self.numbering.and_then(|n| n.list),
         ) {
             d.e2e_forget_before(list, first_held);
@@ -5776,6 +6023,7 @@ impl RowTags<'_> {
                 .zids
                 .map(|zids| zids[crate::agg::dir_index(direction)].as_slice()),
             observed_at_ns,
+            from_low: Some(crate::agg::dir_index(direction) == 0),
         }
     }
 }
@@ -9874,6 +10122,10 @@ mod tests {
         // brings. Documents that reach each of its arms, for the reason the arms
         // above are rendered from their types: this fixture declares no profile.
         rendered.extend(crate::e2e_row_tests::pin_documents());
+        // Revision 59 — the `segment` block, which only a declared segment
+        // profile brings, over every place and every reason a piece joins
+        // nothing.
+        rendered.extend(crate::segment_row_tests::pin_documents());
 
         let mut seen: Vec<&str> = Vec::new();
         for doc in &rendered {
@@ -9957,7 +10209,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 83] = [
+        let live: [(&str, &str, Vec<&'static str>); 85] = [
             // What reading a record's payload came to, on the values document:
             // the walk over its emitter's own outcomes.
             (
@@ -10061,6 +10313,25 @@ mod tests {
                 crate::e2e_slots::Unopened::ALL
                     .iter()
                     .map(|r| r.word())
+                    .collect(),
+            ),
+            // Revision 59 — where a piece sits in its transfer, and why a piece
+            // joined none. The walks are the ledger's own enums, whose words are
+            // exhaustive matches.
+            (
+                rev::FIELDS,
+                "place",
+                crate::segment_chain::Place::ALL
+                    .iter()
+                    .map(|p| p.word())
+                    .collect(),
+            ),
+            (
+                rev::FIELDS,
+                "unjoined",
+                crate::segment_chain::Unjoined::ALL
+                    .iter()
+                    .map(|u| u.word())
                     .collect(),
             ),
             // R2706 — the session's verdict words. The walk is the successor
@@ -10907,7 +11178,10 @@ mod tests {
 
         // Revision 34 — the documents that carry the end-to-end block, which only
         // a declared profile brings and no capture above declares.
-        let e2e_docs = crate::e2e_row_tests::pin_documents();
+        let mut e2e_docs = crate::e2e_row_tests::pin_documents();
+        // Revision 59 — the documents that carry the `segment` block and the
+        // payload state `segment_piece`.
+        e2e_docs.extend(crate::segment_row_tests::pin_documents());
         // Revision 37 — the documents that carry `closes`, and `request_kind` over
         // two of its words.
         let mut closes_docs = crate::closes_tests::pin_documents();
@@ -11068,6 +11342,12 @@ mod tests {
                  demo/c=protobuf@M"
             ),
             crate::diagnose_json::declarations_diagnose_json("not a declaration"),
+            // Revision 4 — a segment profile and the segment rule that binds it.
+            crate::diagnose_json::declarations_diagnose_json(&alloc::format!(
+                "#{name}={profile}\n**={name}",
+                name = crate::segment_profile::synthetic::NAME,
+                profile = crate::segment_profile::synthetic::PROFILE,
+            )),
         ];
         let mut keyexpr_verdicts: Vec<String> =
             alloc::vec![crate::diagnose_json::keyexpr_diagnose_json("demo/**")];

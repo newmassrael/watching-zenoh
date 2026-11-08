@@ -2545,6 +2545,35 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R57_CARRIES,
     },
+    // Revision 59 ADDS the `segment` block of a carried entry whose payload is a
+    // PIECE of a message its application split over several samples on one key
+    // (a declared segment profile recognised its header), and retires nothing.
+    // The block says what the piece is (its header fields, its CRC), what
+    // transfer it belongs to, where it sits in it (`place`, or why it joined
+    // none under `unjoined`), what of the whole is still missing below the
+    // furthest byte received, whether it came out of order or overlapped, which
+    // transfers it ended unjoined, and on the piece that completed a transfer
+    // the joined message with its own `payload_decode` and `e2e`. The block is
+    // ABSENT on every entry that is not a piece. `payload_decode.state` gains
+    // `segment_piece` for a row whose payload is one: the key's format is not
+    // applied to a piece.
+    //
+    // ⚠ A FRAME MOVES under a stationary `e2e`: a piece is never judged as an
+    // end-to-end frame (its counter would be read out of a chunk), so on a key
+    // both a segment rule and a profile rule cover, the counter is judged once
+    // per joined message, on the piece that completed it, inside `joined`.
+    // `segment` and every key in it can change in an issued row, as `e2e` can.
+    // The integer rule applies to every integer of a `segment` block: a header
+    // field is up to eight bytes wide.
+    DocumentShape {
+        document: FIELDS,
+        revision: 59,
+        keys: FIELDS_R59_KEYS,
+        retiring: &[],
+        families: FIELDS_R59_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R59_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -2862,6 +2891,27 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         families: DECLARATIONS_DIAGNOSE_R3_FAMILIES,
         planes: &[],
         carries: DECLARATIONS_DIAGNOSE_R3_CARRIES,
+    },
+    // A FIFTH KIND OF LINE: A SEGMENT RULE.
+    //
+    // Revision 4 widens `kind` by `segment_rule` and moves no key. The line is
+    // written as a format rule is (`pattern=name`), and it is a segment rule
+    // when `name` is a segment profile the text defines
+    // (`#name={"name":..,"segments":{..}}`, which is a `format_definition`
+    // line). It carries `line`, `pattern` and `rule_index`, and its
+    // `rule_index` counts the SEGMENT rules, the list it is tried in: a segment
+    // rule does not compete with the format rules for a key.
+    //
+    // ⚠ A segment profile definition that cannot be read is refused like any
+    // definition, with `message` naming the place in its description.
+    DocumentShape {
+        document: DECLARATIONS_DIAGNOSE,
+        revision: 4,
+        keys: DECLARATIONS_DIAGNOSE_R2_KEYS,
+        retiring: &[],
+        families: DECLARATIONS_DIAGNOSE_R4_FAMILIES,
+        planes: &[],
+        carries: DECLARATIONS_DIAGNOSE_R4_CARRIES,
     },
     // A SINGLE KEY EXPRESSION, JUDGED, WITHOUT BUILDING A DECLARATION LINE.
     //
@@ -11102,6 +11152,62 @@ pub const DECLARATIONS_DIAGNOSE_R3_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// What a `lines[].kind` says at declaration-verdict revision 4: revision 3's
+/// words and `segment_rule`.
+pub const DECLARATION_KIND_R4: &[&str] = &[
+    "field_name",
+    "format_definition",
+    "format_rule",
+    "schema_file",
+    "segment_rule",
+];
+
+/// The declaration verdict's value families at revision 4.
+pub const DECLARATIONS_DIAGNOSE_R4_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "kind",
+        values: DECLARATION_KIND_R4,
+    },
+    ValueFamily {
+        key: "reason",
+        values: KEYEXPR_FAULT_R1,
+    },
+];
+
+/// What the declaration verdict's words decide at revision 4: revision 3's,
+/// and a `segment_rule` line, which carries what a format rule line carries.
+pub const DECLARATIONS_DIAGNOSE_R4_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(&[
+            WordCarries {
+                word: "field_name",
+                shapes: &[&["line", "pattern"]],
+            },
+            WordCarries {
+                word: "format_definition",
+                shapes: &[&["line"]],
+            },
+            WordCarries {
+                word: "format_rule",
+                shapes: &[&["line", "pattern", "rule_index"]],
+            },
+            WordCarries {
+                word: "schema_file",
+                shapes: &[&["line"]],
+            },
+            WordCarries {
+                word: "segment_rule",
+                shapes: &[&["line", "pattern", "rule_index"]],
+            },
+        ]),
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The key-expression verdict's key set at revision 1, over BOTH branches:
 /// `{ok:true}` and `{ok:false,chunk,offset,reason,message}`.
 pub const KEYEXPR_DIAGNOSE_R1_KEYS: &[&str] = &[
@@ -18474,6 +18580,583 @@ pub const FIELDS_R58_KEYS: &[&str] = &[
     "zid",
 ];
 
+/// The keys the field document carries at revision 59: revision 58's PLUS the
+/// `segment` block of a piece of a message its application split, and the keys
+/// inside it that no earlier block used.
+pub const FIELDS_R59_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "announced_version",
+    "answers",
+    "at_least",
+    "at_most_bytes",
+    "basis",
+    "batch_header",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "check",
+    "checks",
+    "chunk_bytes",
+    "chunk_offset",
+    "close_seen",
+    "closes",
+    "completion_ns",
+    "compression",
+    "conduit",
+    "confirmed",
+    "context",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "crc_stated",
+    "crossed_at_packet",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "ended_transfers",
+    "enum_number",
+    "eps_basis",
+    "evicted",
+    "evidence",
+    "example",
+    "expired_chains",
+    "explained",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "first_reply",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "headed_resyncs",
+    "headed_units",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "joined",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "keyexpr_suffix",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "log2_lr_max_millibits",
+    "log2_lr_millibits",
+    "log2_lr_min_millibits",
+    "log2_lr_no_max_millibits",
+    "log2_lr_no_millibits",
+    "log2_lr_no_min_millibits",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "millibits",
+    "missing",
+    "missing_ranges",
+    "model",
+    "name",
+    "negotiated",
+    "no_at_millibits",
+    "no_millibits",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "out_of_order",
+    "outcome",
+    "overlap",
+    "packet",
+    "parameters",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "payload_size",
+    "phase",
+    "place",
+    "plain_resyncs",
+    "plain_units",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "q_basis",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "received_bytes",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "residual",
+    "revised",
+    "revision",
+    "round_trip_ns",
+    "rst_seen",
+    "samples",
+    "schema",
+    "scout_askers",
+    "scouting",
+    "segment",
+    "selected",
+    "selector_path",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "size_verdict",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stated",
+    "stream",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "strength",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "transfer",
+    "type",
+    "typed",
+    "typed_value",
+    "undecoded",
+    "under",
+    "unit_readings",
+    "units",
+    "unjoined",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "violated",
+    "whole_bytes",
+    "why",
+    "window",
+    "wrong",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+    "zid",
+];
+
+/// `payload_decode.state` at field-document revision 59 — SORTED: revision 2's
+/// words and `segment_piece`, a payload that is a piece of a split message.
+pub const PAYLOAD_STATE_R59: &[&str] = &[
+    "decoded",
+    "encoding_mismatch",
+    "keyexpr_unresolved",
+    "no_payload",
+    "no_rule",
+    "no_rules",
+    "not_on_the_wire",
+    "refused",
+    "segment_piece",
+];
+
+/// `segment.place` at field-document revision 59, sorted.
+pub const SEGMENT_PLACE_R59: &[&str] =
+    &["after_closing", "closing", "continuing", "first", "whole"];
+
+/// `segment.unjoined` at field-document revision 59, sorted.
+pub const SEGMENT_UNJOINED_R59: &[&str] = &[
+    "crc_mismatch",
+    "empty_chunk",
+    "empty_total",
+    "past_total",
+    "total_disagrees",
+    "total_past_max",
+];
+
+/// What a payload block's `state` brings at field-document revision 59:
+/// revision 57's, and `segment_piece`, which names the segment rule and the
+/// profile and no format.
+pub const PAYLOAD_STATE_CARRIES_R59: &[WordCarries] = &[
+    WordCarries {
+        word: "decoded",
+        shapes: &[&[
+            "despite_encoding",
+            "fields",
+            "format",
+            "keyexpr",
+            "matched_rule",
+            "schema",
+            "typed",
+        ]],
+    },
+    WordCarries {
+        word: "encoding_mismatch",
+        shapes: &[&[
+            "declaration_checked",
+            "declared",
+            "format",
+            "keyexpr",
+            "matched_rule",
+        ]],
+    },
+    WordCarries {
+        word: "keyexpr_unresolved",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "no_payload",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "no_rule",
+        shapes: &[&["keyexpr", "matched_rule"]],
+    },
+    WordCarries {
+        word: "no_rules",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "not_on_the_wire",
+        shapes: &[&["descriptor_bytes"]],
+    },
+    WordCarries {
+        word: "refused",
+        shapes: &[&["format", "keyexpr", "matched_rule", "why"]],
+    },
+    WordCarries {
+        word: "segment_piece",
+        shapes: &[&["keyexpr", "matched_rule", "profile"]],
+    },
+];
+
+/// The value families the field document declares at revision 59: revision
+/// 55's with `state` widened by `segment_piece`, PLUS `place` and `unjoined`
+/// of a `segment` block.
+pub const FIELDS_R59_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "basis",
+        values: BASIS_R45,
+    },
+    ValueFamily {
+        key: "batch_header",
+        values: BATCH_HEADER_R44,
+    },
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R50,
+    },
+    ValueFamily {
+        key: "counter_reason",
+        values: COUNTER_REASON_R34,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_EPS_BASIS_R50,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "place",
+        values: SEGMENT_PLACE_R59,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "request_kind",
+        values: REQUEST_KIND_R37,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "size_verdict",
+        values: SIZE_VERDICT_R55,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R59,
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "unjoined",
+        values: SEGMENT_UNJOINED_R59,
+    },
+    ValueFamily {
+        key: "unopened_reason",
+        values: UNOPENED_REASON_R35,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
+/// What each family's word decides at field-document revision 59: revision
+/// 57's, with `state` read from [`PAYLOAD_STATE_CARRIES_R59`], and `place` and
+/// `unjoined` passengers: a `segment` block writes every key beside every
+/// word, `null` where the word gives no value.
+pub const FIELDS_R59_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "announced_version",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "batch_header",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "check",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "eps_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R56),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "place",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "q_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "request_kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "size_verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R59),
+    },
+    KeyCarries {
+        key: "strength",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unjoined",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// What a payload block's `state` brings at field-document revision 57:
 /// revision 28's, with `schema` and `typed` on `decoded`.
 pub const PAYLOAD_STATE_CARRIES_R57: &[WordCarries] = &[
@@ -23711,7 +24394,9 @@ mod tests {
             // and each of its fields `type`, `typed_value` and `enum_number`.
             // To 58 when every `carried` entry gained `keyexpr_suffix`, the
             // suffix an unresolved reference wrote after its id.
-            (FIELDS, 58),
+            // To 59 when a carried entry gained the `segment` block of a piece
+            // of a split message, and the payload state `segment_piece`.
+            (FIELDS, 59),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -23765,7 +24450,8 @@ mod tests {
             // To 2 when the success branch named the kind each line was read
             // as and a refused key named its chunk, byte and reason.
             // To 3 when a line could be a `.proto` file, `schema_file`.
-            (DECLARATIONS_DIAGNOSE, 3),
+            // To 4 when a rule could bind a segment profile, `segment_rule`.
+            (DECLARATIONS_DIAGNOSE, 4),
             // The verdict on one key expression.
             (KEYEXPR_DIAGNOSE, 1),
             // To 2 when the text began to carry the schema files and to name
