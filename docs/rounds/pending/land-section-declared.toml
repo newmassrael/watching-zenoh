@@ -1,0 +1,19 @@
+impact = ["watching-zenoh/local-ci-gates"]
+
+decision = '''
+bx.toml declares the landing queue ([land], bx RFC 0024), the fourth step of moving the push queue to bx. The values are chosen, not defaulted, and each says what the repository wants of the queue. The judge is the repository's own pre-push hook (no checks bundle), run for the landing push's own line, so what the queue accepts is exactly what a push would have been given, and the hook that grades each ref by what it holds (step three) is the one gate rather than a second one beside it. The ledger round is derived: the file-round action files it on the candidate with the number the store gives it there, and the derived commit has a fixed message that states no number, because the store is the one place that knows it. regen-codegen is not derived, since land.sh never regenerated either and each candidate would pay a whole regeneration. The window is 1 (no speculation): the hook is heavy, the cores are shared, and a window above 1 runs several hook runs at once; it is raised when the queue has measured a wait that speculation would remove. The rebase strategy and the remote and branch are the defaults, written out so the declaration says them.
+
+Nothing is switched on by this. No integrator runs for this repository: the lease of the queue is held by none and the queue is empty, and scripts/land.sh stays the way main is pushed until an integrator has landed a week of rounds. A clone marked wz.land-integrator lifts gate 0p's lock requirement for every push it makes, so only the integrator's own clone is marked.
+'''
+
+changes = '''
+bx.toml: a [land] section (remote, ref, derive = file-round, derived = commit, a fixed derive_message, strategy = rebase, window_floor and window_max = 1) and the comment that states each choice.
+'''
+
+verification = '''
+bx-fleet decl validate bx.toml says the declaration is valid, and bx --land-queue, run from this checkout, reads the queue of refs/heads/main on the public remote and reports that no integrator holds the lease and no item is open, which shows bx finds and accepts the [land] section. Not done: no item was submitted, no integrator was started, the derived commit message was not run through the commit hook, and the hook was not run by an integrator over a cherry-picked candidate.
+'''
+
+carry = '''
+Open: the integrator service itself (a clone marked wz.land-integrator, an environment file, the unit) is not installed; bx records no installation value in the queue log since bx main 5ea729d, so a submit from a home-directory worktree should no longer be refused by gate 0b2, which has not been tried against a real submit. The server ruleset of RFC 4.12 is not set and is meant to wait a week of use. The old log commits of other repositories' queues are not this repository's.
+'''

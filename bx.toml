@@ -245,3 +245,34 @@ outputs = ["docs/.atomic/**", "docs/rounds/pending/**"]
 [checks.ci]
 plan = ["python3", "scripts/lib/runci_plan.py"]
 local = "never"
+
+# THE LANDING QUEUE (bx RFC 0024): `bx --land` submits a commit and one integrator per remote branch
+# rebases it onto `main`, files its ledger round, judges it with this repository's own pre-push hook
+# and pushes. It replaces `scripts/land.sh`'s clone-local lock for the pushes of a session; the
+# script stays until the integrator has landed a week of rounds.
+#
+# `checks` is left out: the pre-push hook judges, run for the landing push's own line, so what the
+# queue accepts is exactly what a push would have been given. The hook grades each ref of that
+# push by what it holds (`scripts/lib/push-refs.sh`), and a clone marked `git config
+# wz.land-integrator true` is the integrator's, which is what lets gate 0p admit its push to main.
+# Mark only the integrator's own clone: the marker lifts the lock requirement for every push it
+# makes.
+#
+# `derive = ["file-round"]`: the ledger round is filed on the candidate, with the number the store
+# gives it there, and the derived commit carries the fixed message below. The message states no
+# number because the store is the one place that knows it; nothing here reads a round number from a
+# commit subject. `regen-codegen` is not derived: `scripts/land.sh` never regenerated either, and
+# each candidate would pay a whole regeneration.
+#
+# `window_floor` and `window_max` are 1, so the integrator does not speculate: the hook is heavy
+# and the workstation's cores are shared, and a window above 1 runs several hook runs at once. Raise
+# them when the queue has measured a wait that speculation would remove (`bx --land-queue --stats`).
+[land]
+remote         = "origin"
+ref            = "main"
+derive         = ["file-round"]
+derived        = "commit"
+derive_message = "docs: File the ledger round of the landed item"
+strategy       = "rebase"
+window_floor   = 1
+window_max     = 1
