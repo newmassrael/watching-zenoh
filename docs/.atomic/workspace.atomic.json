@@ -12464,6 +12464,27 @@
       "carry_forward_bullets": [
         "Carries of the node's C door that remain: the zenoh-ext group interop against stock; the shared-memory publication of the node's port, which needs a link that negotiated shared memory; a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
       ]
+    },
+    "Round 4422": {
+      "decision_summary": "A node's lifecycle answer can be read by a process that links no session library. A consumer asks a node's verbs from a participant process and holds the node's control pipe from an observer process, which links the dissection library and, by the consumer's own rule, no library that opens a session; the observer received the answer lines and had no reader for them. The C reading of an answer (one fixed-layout struct, its words static C strings) now lives once in lifecycle_wire beside the reader it fills from, as AnswerReading. wz_capi_c_lifecycle_read hands it out as before, and the dissection library gains wz_dissect_lifecycle_read (ABI 54), the same function into the same struct, spelled wz_dissect_lifecycle_answer in its header. That struct carries pointers to static words, which the dissection header's memory rule had not named, so the rule gains a paragraph: a static word lives as long as the library and is never freed. The whoami zid is now written in the spelling a key and a config id take rather than copied, because the text a key accepts may carry a leading plus, as upstream's does, and a copy of it and 32 digits would fill the field with no NUL.",
+      "changes_bullets": [
+        "lifecycle_wire: AnswerReading (repr C), the READING_ kinds, READING_ZID_BYTES and AnswerReading::of; the zid is respelled from its value; two tests",
+        "wz-capi-c: wz_capi_c_lifecycle_read_t is AnswerReading and the door is one call; the kind constants are lifecycle_wire's; the header names the dissect twin",
+        "wz-capi-dissect: wz_dissect_lifecycle_read and WZ_DISSECT_LIFECYCLE_ kinds, ABI 54, the memory rule's static-word paragraph, the struct and door in wz_dissect.h, layout and reading tests, and a C consumer check",
+        "capi_abi_pin.py pins 54 and the symbol; analysis_surface_parity.py files the door as deliberate"
+      ],
+      "verification_bullets": [
+        "pc2: wz-session-core lifecycle_wire 16 passed (the two AnswerReading tests among them) and clippy all targets clean; wz-capi-c lifecycle 4 passed with lifecycle-doors and identity-make, clippy clean with and without them, and c_lifecycle_consumer ok",
+        "pc2 C1bo: wz-capi-dissect clippy and tests, the release C consumer (the lifecycle check among them), the header as C++, capi_abi_pin at ABI 54 with 68 symbols, header subsumption and bound names pass; the unknown-value policy gate refused the new kind family until it carried its marker, and passes locally with it (newer-build)",
+        "analysis_surface_parity passes with 68 symbols accounted; wz-capi-dissect depends on no session crate, so its cdylib needs no session library"
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The consumer reads control-pipe answers through libwz_dissect at ABI 54; the next item is the participant witness test against a declared node with a commander list",
+        "mnemosyne: a sealed store's validate-workspace reads verification records as UNDECIDABLE (fixed in mnemosyne Round 1345; the pin moves when it lands)"
+      ]
     }
   },
   "inventory_entries": {
