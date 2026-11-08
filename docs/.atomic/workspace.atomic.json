@@ -12595,6 +12595,23 @@
         "The class stays reproducible only on hosted runners until bx RFC 0041 (adopted 2026-11-08: a unit that needs root runs in a disposable microVM) is built; then every lane whose hosted job uses sudo declares that capability, and a gate checks that each lane that invokes sudo declares it.",
         "Hosted verdict of round 4373 (Layer M through test_inside) is still unread: the only completed run after it skipped Layer M, and the runs after were cancelled while queued."
       ]
+    },
+    "Round 4429": {
+      "decision_summary": "The shared-memory publication of a node's port is witnessed over links that negotiated shared memory, which closes that carry of the node's C door; the earlier reading that a router node offers no shared memory was a fact about the tests' open (no offer from the ABI, none enabled in the document), not about the node, which carries its offer into its handshake.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/drive/router_node/engine/port_tests.rs: a module `shared_memory` (session-extshm) opens a router node and a registry client that both offer shared memory (AbiChoices::offer_shm, transport/shared_memory/enabled), beside a client that offers none; the port's has_shm_peer is false with the plain client alone and true once the other is linked, and a chunk published by publish_shm_on_wire_all reaches the client of shared memory as the chunk, the plain client as its bytes, and the node's own subscriber as the chunk. The helpers gain abi_choices_offering and plan_stating; the module docs replace the old note that a router node does not offer shared memory.",
+        "scripts/lib/nondefault-tests-gate.sh: a census leg for the module under router-node, transport-qos and session-extshm, which the existing port_tests row leaves off."
+      ],
+      "verification_bullets": [
+        "On a build machine, wz-capi-core with router-node, transport-qos and session-extshm, the port tests: 6 passed (the five before and the new one); clippy of the crate's lib and tests with those features under -D warnings passed; the crate is formatted. The census leg was not run here (it builds every crate twice); its command is the one that passed.",
+        "Controls, each taken out on its own and reverted before this entry: the node's port publishing the chunk's bytes instead of the chunk failed the test at the client of shared memory (handed the bytes, not the chunk); the port's has_shm_peer answering false failed it at the link of the client that offered shared memory."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Carries of the node's C door that remain: a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
+      ]
     }
   },
   "inventory_entries": {
