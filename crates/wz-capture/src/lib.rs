@@ -94,9 +94,9 @@ pub mod e2e_profile;
 // The declaration that binds a key expression pattern to a profile, and the
 // judgement state a capture keeps per slot. Each is documented by its own `//!`
 // text, for the reason given above.
-/// The field document in CBOR: RFC 8949's mapping of a JSON document, so the
-/// binary door's rows are the one writer's rows. Gated with [`fields_json`],
-/// the only document written this way.
+// The field document in CBOR: RFC 8949's mapping of a JSON document, so the
+// binary door's rows are the one writer's rows. Gated with `fields_json`,
+// the only document written this way. The module documents itself from inside.
 #[cfg(feature = "dissect")]
 pub mod cbor_of_json;
 #[cfg(feature = "dissect")]

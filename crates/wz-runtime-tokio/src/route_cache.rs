@@ -10,12 +10,12 @@
 //! A route is keyed by the SOURCE as well as the keyexpr, because the same
 //! Put forwarded along two sources' spanning trees goes different ways.
 //!
-//! [`RouteCache`](crate::route_cache::RouteCache) is that shape, keyed by keyexpr then source. Three points
+//! [`RouteCache`] is that shape, keyed by keyexpr then source. Three points
 //! where it is wz's own rather than a transcription:
 //!
 //! - FRESHNESS IS READ, NOT BUMPED. Upstream increments `routes_version` at
 //!   each site that changes a route input, a list a new mutation site has to
-//!   remember to join. Here the freshness is a [`RouteInputs`](crate::route_cache::RouteInputs) built from the
+//!   remember to join. Here the freshness is a [`RouteInputs`] built from the
 //!   versions the tables report themselves
 //!   ([`LinkstateNetwork::route_version`](wz_routing_graph::LinkstateNetwork::route_version),
 //!   [`LinkstatepeerInterest::version`](crate::linkstate_interest::LinkstatepeerInterest::version)),

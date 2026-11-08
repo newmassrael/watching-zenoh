@@ -4222,8 +4222,11 @@ int main(void) {
      * 59: a `carried` entry's `segment` block, the verdict on a piece of a
      * message its sender split (declared by a segment profile), and the
      * payload state `segment_piece`. Keys arrive and the `state` shapes move;
-     * nothing retires. */
-    revisioned[2].revision = 59;
+     * nothing retires.
+     * 60: four keys the document already wrote are declared (a datagram
+     * flow's `disagreements` group: `count`, and `named` with an `at` and a
+     * `why`). Nothing written moves. */
+    revisioned[2].revision = 60;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

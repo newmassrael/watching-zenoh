@@ -5472,7 +5472,9 @@ layer_c1t_cargo_test_serial() {
     #
     # R3239 -- lib 21 -> 22 (the write half enqueues the framed wire, which is
     # what the serial queue now carries). READ off what the command PRINTED (22).
-    _runci_guarded_test C1t 22 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
+    # 22 -> 23: the reserve test of the serial queue landed without moving this guard (hosted
+    # run 42505060630 read `23 passed`).
+    _runci_guarded_test C1t 23 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
         || return 1
     # R2725 — 5 -> 7 and 6 -> 8. R2722 split
     # serial_listener_yields_one_link_then_parks into a parks-while-live arm
@@ -11154,8 +11156,10 @@ layer_c1ca_cargo_test_derived_initial_sn() {
 layer_c1cb_cargo_test_init_ack_admission() {
     # 31 -> 34: three tests that landed without moving this guard (hosted run 41411911409
     # expected 31; the build host printed `34 passed`).
+    # 34 -> 37: three tests of the session driver loop that landed without moving this guard
+    # (hosted run 42505060630 read `37 passed`).
     wz_test_args wz-runtime-tokio session_fsm_driver_loop
-    _runci_guarded_test C1cb 34 \
+    _runci_guarded_test C1cb 37 \
         cargo test -p wz-runtime-tokio "${WZ_TEST_ARGS[@]}" --quiet || return 1
 }
 

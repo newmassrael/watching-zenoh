@@ -21,7 +21,7 @@
 //! `publisher-admission-retry`, `multi-route-atomic-tx`, `targeted-query`), off in a build made as
 //! upstream is. A stated value is passed through the model's own `admit_in_build` before anything
 //! is sent or declared: with the policy off the door answers
-//! [`WZ_CAPI_C_E_POLICY_OFF`](crate::result::WZ_CAPI_C_E_POLICY_OFF), and a declaration leaves
+//! [`WZ_CAPI_C_E_POLICY_OFF`], and a declaration leaves
 //! its out-parameter in the gravestone state. A value the policy would take but that no engine
 //! can hold (a retry of zero passes, a target of no bytes, more passes or milliseconds than a
 //! retry carries) is `Z_EINVAL`. Nothing stated is never refused, whatever the policy.

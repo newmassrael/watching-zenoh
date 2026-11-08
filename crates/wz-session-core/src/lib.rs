@@ -366,23 +366,24 @@ pub mod reply_acceptance;
 // Available unconditionally because the type carries no allocations.
 pub mod locality;
 
-/// Which links an entity may use (policy `entity-link-restriction`): the value an entity
-/// declares beside its locality, and the set an engine with several links checks it against.
-/// no_std + no_alloc clean (one machine word); unconditional.
+// Which links an entity may use (policy `entity-link-restriction`): the value an entity
+// declares beside its locality, and the set an engine with several links checks it against.
+// no_std + no_alloc clean (one machine word); unconditional. The module documents itself from
+// inside, so its links resolve against its own items.
 pub mod link_restriction;
 
-/// Addressing a query to one node by its identity (policy `targeted-query`): the value's rules
-/// and the refusal a build without the policy gives. no_std + no_alloc clean; unconditional.
+// Addressing a query to one node by its identity (policy `targeted-query`): the value's rules
+// and the refusal a build without the policy gives. no_std + no_alloc clean; unconditional.
 pub mod peer_target;
 
-/// Offering a publish again when no link had room (policy `publisher-admission-retry`): the
-/// value a publish states and the refusal a build without the policy gives. no_std + no_alloc
-/// clean; unconditional.
+// Offering a publish again when no link had room (policy `publisher-admission-retry`): the
+// value a publish states and the refusal a build without the policy gives. no_std + no_alloc
+// clean; unconditional.
 pub mod admission_retry;
 
-/// Delivering a publish to all of the links it reaches or to none (policy
-/// `multi-route-atomic-tx`): the decision over the links' reservations and the refusal a build
-/// without the policy gives. no_std + no_alloc clean; unconditional.
+// Delivering a publish to all of the links it reaches or to none (policy
+// `multi-route-atomic-tx`): the decision over the links' reservations and the refusal a build
+// without the policy gives. no_std + no_alloc clean; unconditional.
 pub mod atomic_tx;
 
 /// Reliability hint shared by LinkDriver outbound + Sample inbound.

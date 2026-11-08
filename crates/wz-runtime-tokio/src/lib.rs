@@ -107,7 +107,7 @@ macro_rules! route_event {
 }
 
 /// One line of what a PEER tells its faces, written by the face registry of the C ABI core
-/// (`wz-capi-core`), which has no logger of its own: the same observation as [`route_event!`]
+/// (`wz-capi-core`), which has no logger of its own: the same observation as `route_event!`
 /// (target `wz::routing`, a root tracing event where `tracing-spans` is built, a `log` record
 /// elsewhere), so the sender of a declaration reads in the run log of upstream's regions tests
 /// beside the router's lines. A peer keeps no other trace of the declarations it sends, and a
@@ -2486,10 +2486,11 @@ pub(crate) mod keyexpr_index;
 /// it.
 #[cfg(feature = "routing-peer")]
 pub(crate) mod persistent_map;
-/// R2908 — [`route_cache::RouteCache`]: the per-(source, keyexpr) route both
-/// mesh forwarders compute once and reuse until a table it was read from
-/// changes, upstream's `Routes<T>` on the routing `Resource`. Gated on
-/// `routing-peer`, with the tables it caches over.
+// R2908 — `route_cache::RouteCache`: the per-(source, keyexpr) route both
+// mesh forwarders compute once and reuse until a table it was read from
+// changes, upstream's `Routes<T>` on the routing `Resource`. Gated on
+// `routing-peer`, with the tables it caches over. The module documents itself from
+// inside, so its links resolve against its own items.
 #[cfg(feature = "routing-peer")]
 pub mod route_cache;
 
