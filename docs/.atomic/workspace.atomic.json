@@ -12222,6 +12222,27 @@
         "The pico budgets are estimated from the offset of hosted run 42403286547 over hkl001 on the same pico code; the next hosted run that grades C1cs reads them.",
         "`declaration-sync-pacing` is the other policy that waits; whether it changes the shape of its code as fragment pacing did is not measured."
       ]
+    },
+    "Round 4408": {
+      "decision_summary": "The full fleet run of `bx --checks ci` at 2c6bb6945f read 165 of 180 units green. Of its 15 reds, 13 passed again on main once peers' fixes had landed, and C1cs was paid by 8b67aa27bb. Layer E stayed red: 56 tests of the zenoh-c family refused a libwz_capi_c.so older than the wz-capi-c sources. Layer E never builds that library. Its sweep took every ignored test, and these stayed quiet on hosted CI only because a hosted E runner has no zenoh-c oracle. The scope gate did not see them, because its helper list lacked the `wz_capi_c_*` resolvers and it matched skip tokens to fn names, not to the module paths libtest matches.",
+      "changes_bullets": [
+        "scripts/lib/layer_e_oracle_scope_gate.py: `wz_capi_c_cdylib`, `wz_capi_c_release_cdylib` and `wz_capi_c_staticlib` join UNPROVISIONED_HELPERS. A skip token is matched against the test's module path (`files::<stem>::<fn>` for a merged target), as libtest's `--skip` is. Two selftest cases hold it: a stem that carries the token is skipped, and the same file under another stem offends.",
+        "scripts/run-ci.sh Layer E sweep: `--skip zenoh_c_`, with its reason beside the other tokens."
+      ],
+      "verification_bullets": [
+        "Full fleet run `bx --checks ci --timeout 12h` at 2c6bb6945f: 180 units, 165 pass, 15 fail, 26,303 s.",
+        "The 15 rerun on main 89a002ec77: 13 pass, with C1cs and E red. C1cs was over three pico text budgets and was paid by 8b67aa27bb. E failed 56 tests, each with \"libwz_capi_c.so is OLDER than the wz-capi-c sources it links\".",
+        "Scope gate: before the token it names exactly 56 offenders, all `wz_capi_c_cdylib` callers in `zenoh_c_*` files. After it: 141 selected, 0 offenders, which is 197 - 56 with nothing else removed. Its selftest passes 11 of 11 cases.",
+        "After the fix, rebased on 7ee68ad58e: `--only E,C1cs` in the fleet passed both (E on hkl002, where it had failed before; C1cs on hkl001), exit 0."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI runs per job; most CI runs are cancelled before any job runs or are still queued.",
+        "Read the next scheduled upstream-watch run; none appeared at the 11-07 slot.",
+        "C1 get-timeout one-off on pc2 stays unattributed."
+      ]
     }
   },
   "inventory_entries": {
