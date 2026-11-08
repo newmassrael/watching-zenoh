@@ -12838,6 +12838,21 @@
       "carry_forward_bullets": [
         "The consumer is told ABI 55, row_facts 1, fields 60 and the commit. Open: the CBOR is a conversion of the writer's text, 1.9 us a row; a writer that wrote CBOR natively would remove it and is a second writer of every key, so it waits for a measurement that says the consumer's step needs it. The consumer's own costs (its row join, its step's census and health reads) are its own. The held document is not in the memory document, as a returned string is not; it lives from one call to its take or the next call. Found and not touched: wz-capture with dissect and without network-codecs does not build (RowJudgement is gated on network-codecs and named ungated in fields_json), before this round as after it."
       ]
+    },
+    "Round 4443": {
+      "decision_summary": "The hosted runs of the last two heads were red in eight layers; this round pays the ones whose cause is read from the run's own lines. Two were mine: the ABI stamp gate still pinned the C ABI at revision 11 after the switch doors raised it to 12 (the constant's note says to move the pin in the same commit), and two count guards were a test behind (the session driver loop 34 to 37, the serial pipeline 22 to 23, each read off the hosted line). Four documentation findings, which the docs layer and every reduced-configuration shard repeat, were one shape in three crates: a module declared with an outer doc block in its crate root and also carrying its own inner doc is resolved from the crate root, so its links to its own items did not resolve. The four policy modules of the session core (the new ones), the route cache of the runtime and the CBOR document module of the capture crate now carry plain comments at the declaration, as the other modules of those crates already do; one link to a private macro became a code span, and the redundant explicit targets that the now-resolving links exposed were dropped. The C consumer of the dissection ABI expected the fields document at revision 59 while the document is at 60; it expects 60.",
+      "changes_bullets": [
+        "scripts/lib/abi_stamp_gate.py: capi-c pinned at 12. scripts/run-ci.sh: the count of the session driver loop guard 34 to 37 and of the serial pipeline guard 22 to 23. crates/wz-session-core/src/lib.rs, crates/wz-runtime-tokio/src/lib.rs and route_cache.rs, crates/wz-capture/src/lib.rs, crates/wz-capi-c/src/switch_doors.rs: the doc findings above. crates/wz-capi-dissect/tests/c_abi_consumer.c: the fields revision it expects."
+      ],
+      "verification_bullets": [
+        "Run on the build machine: the rustdoc of wz-capi-c, wz-session-core, wz-runtime-tokio and wz-capture with all features printed no finding after the change and printed the five findings of the hosted layer before it (the first attempt with the host named failed in the tree transfer, a network timeout, and was rerun with the placement left to the tool). The two counts and the stamp are read off the hosted lines, not rerun here. The change to the C consumer is not run here; its layer is the hosted one."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Not paid by this round: the capability-cost layer reads the default C image 11,516 bytes over its budget and the lean image 11,604 over, which began with the three commits of the row-facts door (the previous head's run did not have it) and needs a symbol diff against the budget's base before any budget moves; the storage-host plugins-section test over a pico client read an empty answer once at the latest head and passed at the one before it, and has not been reproduced."
+      ]
     }
   },
   "inventory_entries": {
