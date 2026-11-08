@@ -808,6 +808,45 @@ impl<'a> GroupKey<'a> {
     }
 }
 
+/// The Push a publish sends on the wire, as `wire` names its key: the Put or Del of `kind`, by the
+/// literal `keyexpr` (`wire.mapping_id` 0) or by the declaration and the rest of the key. The one
+/// place the four shapes are chosen, for the send that waits for room ([`Session::publish`]) and
+/// the one that does not (`Session::publish_probe`).
+#[cfg(feature = "codec-push")]
+fn build_publish_push(
+    kind: SampleKind,
+    keyexpr: &str,
+    wire: GroupKey<'_>,
+    payload: &[u8],
+    meta: &wz_session_core::metadata::PushMetadata,
+) -> Result<wz_session_core::wire::PushOwned, wz_session_core::send_wire_error::SendWireError> {
+    use wz_session_core::push_build;
+    match (kind, wire.mapping_id) {
+        (SampleKind::Put, 0) => push_build::build_push_literal_with_meta(keyexpr, payload, meta),
+        (SampleKind::Del, 0) => push_build::build_push_del_literal_with_meta(keyexpr, meta),
+        (SampleKind::Put, mapping_id) => {
+            push_build::build_push_aliased_with_meta(mapping_id, wire.suffix, payload, meta)
+        }
+        (SampleKind::Del, mapping_id) => {
+            push_build::build_push_del_aliased_with_meta(mapping_id, wire.suffix, meta)
+        }
+    }
+    .map_err(wz_session_core::send_wire_error::SendWireError::Codec)
+}
+
+/// What a publish that may not wait for room (`Session::publish_probe`) found on a session's
+/// link.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WireProbe {
+    /// The frame is on the link's queue, or nothing was owed to the link: the publish has no
+    /// remote leg, or the session's egress policy consumed the frame, as it does for a send that
+    /// waits.
+    Queued,
+    /// The link had no room. Nothing was sent, counted as a drop or closed, and the frame may be
+    /// offered again.
+    NoRoom,
+}
+
 /// R3069 -- how a chunk publish holds the payload it hands to its LOCAL leg: borrowed from a
 /// caller that goes on holding it, or handed over by one that gave it up. See
 /// [`Session::deliver_shm_local_owned`] for why the second exists.
@@ -1881,10 +1920,6 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // declared codec capacity (`PublishError::ExceedsCapacity`).
         #[cfg(feature = "codec-push")]
         if opts.allowed_destination.allows_remote() {
-            // R311nb — `SendWireError` imported locally from its ungated real
-            // home: the module-level import is `transport-unicast`-gated, absent
-            // in a multicast-only build where this agnostic leg still compiles.
-            use wz_session_core::send_wire_error::SendWireError;
             let reliable = opts.reliable_bool();
             let meta = opts.push_metadata();
             // R311mv (session review) — `express` is the SSOT projection on
@@ -1930,25 +1965,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 // to the owned transport. The builder's `CodecError` maps to
                 // `SendWireError::Codec` -> `ExceedsCapacity` via
                 // `From<SendWireError> for PublishError`.
-                use wz_session_core::push_build;
-                let push = match (opts.kind, wire.mapping_id) {
-                    (SampleKind::Put, 0) => {
-                        push_build::build_push_literal_with_meta(keyexpr, payload, &meta)
-                    }
-                    (SampleKind::Del, 0) => {
-                        push_build::build_push_del_literal_with_meta(keyexpr, &meta)
-                    }
-                    (SampleKind::Put, mapping_id) => push_build::build_push_aliased_with_meta(
-                        mapping_id,
-                        wire.suffix,
-                        payload,
-                        &meta,
-                    ),
-                    (SampleKind::Del, mapping_id) => {
-                        push_build::build_push_del_aliased_with_meta(mapping_id, wire.suffix, &meta)
-                    }
-                }
-                .map_err(SendWireError::Codec)?;
+                let push = build_publish_push(opts.kind, keyexpr, wire, payload, &meta)?;
                 self.send_network_message_qos(
                     wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
                     reliable,
@@ -2165,6 +2182,44 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         express: bool,
         priority: wz_session_core::qos::Priority,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        let Some((msg, express, priority)) = self.egress_stage(msg, reliable, express, priority)?
+        else {
+            return Ok(());
+        };
+        Tp::send_network_message_qos(&self.transport, msg, reliable, express, priority)
+    }
+
+    /// The egress chain's part of a send that originates `msg` here: the message, the express
+    /// flag and the band it goes with, or `None` for a message the chain consumed. The waiting
+    /// send ([`Self::send_network_message_qos`]) and the one that does not wait
+    /// (`Session::publish_probe`) both go through it, so a policy judges a message the same
+    /// whichever of them sends it.
+    #[cfg(any(
+        all(
+            feature = "transport-unicast",
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-declare",
+                feature = "declare-interest"
+            )
+        ),
+        all(feature = "transport-multicast", feature = "codec-push")
+    ))]
+    fn egress_stage(
+        &self,
+        msg: wz_session_core::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: wz_session_core::qos::Priority,
+    ) -> Result<
+        Option<(
+            wz_session_core::network_message::NetworkMessage,
+            bool,
+            wz_session_core::qos::Priority,
+        )>,
+        wz_session_core::send_wire_error::SendWireError,
+    > {
         // §5.16 EGRESS — the local-origin admission point, and the seam whose
         // absence `access-acl`'s residual named. A denied message is CONSUMED,
         // not errored: upstream's egress interceptor returns false at the `Mux`
@@ -2176,13 +2231,15 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         #[cfg(feature = "access-acl")]
         if !self.acl_admits_egress(&msg) {
             self.end_refused_ask(&msg);
-            return Ok(());
+            return Ok(None);
         }
         // The QoS overwrite of the egress chain: the message is sent with the QoS the rules give
         // it, at the band and express flag that QoS names.
         #[cfg(all(feature = "access-acl", feature = "access-qos-overwrite"))]
         let (msg, express, priority) = self.overwritten_egress(msg, reliable, express, priority)?;
-        Tp::send_network_message_qos(&self.transport, msg, reliable, express, priority)
+        #[cfg(not(all(feature = "access-acl", feature = "access-qos-overwrite")))]
+        let _ = reliable;
+        Ok(Some((msg, express, priority)))
     }
 
     /// Whether this session holds an egress policy, so a Put it sends must be judged on the
@@ -5027,6 +5084,127 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             }
         };
         Ok(self.publish_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts)?)
+    }
+
+    /// [`Self::publish`]'s wire leg for a caller that may not wait for room: the frame is offered
+    /// to this session's link once and is either on its queue ([`WireProbe::Queued`]) or not
+    /// ([`WireProbe::NoRoom`]). A frame with no room is not sent, not counted as a congestion drop
+    /// and does not ask the session to close, so the caller owns what becomes of it (see
+    /// [`wz_session_core::admission_retry`]). Only the wire leg runs: the loopback leg is not a
+    /// link and has no queue to lack room in, so the caller delivers to its own subscribers
+    /// itself.
+    ///
+    /// The same egress policy, routing namespace, timestamp and metadata apply as to
+    /// [`Self::publish`]. A payload too long to be sent whole without waiting between its
+    /// fragments is sent as [`Self::publish`] sends it, with the wait, because a send that does
+    /// not wait can never send it, however much room there is.
+    #[cfg(feature = "codec-push")]
+    pub fn publish_probe(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        opts: PublishOptions,
+    ) -> Result<WireProbe, PublishError> {
+        self.probe_wire(keyexpr, GroupKey::literal(keyexpr), payload, opts)
+    }
+
+    /// [`Self::publish_probe`] on a key the far side holds a declaration for: `mapping_id` and
+    /// the rest of the key, `inline_suffix`, as [`Self::publish_aliased`] names it.
+    ///
+    /// # Panics
+    ///
+    /// When `mapping_id` is 0, which names no declaration (the frame builder refuses it as
+    /// [`Self::publish_aliased`]'s does).
+    #[cfg(feature = "codec-push")]
+    pub fn publish_aliased_probe(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        payload: &[u8],
+        opts: PublishOptions,
+    ) -> Result<WireProbe, PublishError> {
+        assert!(
+            mapping_id != 0,
+            "publish_aliased_probe requires a non-zero mapping id; use publish_probe for a literal",
+        );
+        self.probe_wire(
+            "",
+            GroupKey {
+                mapping_id,
+                suffix: inline_suffix,
+            },
+            payload,
+            opts,
+        )
+    }
+
+    /// [`Self::publish_aliased_probe`] on an id this session's outbound table must hold, as
+    /// [`Self::publish_aliased_auto`] requires: an id it does not know is
+    /// [`PublishAliasError::UnknownMapping`] and nothing is offered to the link.
+    #[cfg(feature = "codec-push")]
+    pub fn publish_aliased_auto_probe(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        payload: &[u8],
+        opts: PublishOptions,
+    ) -> Result<WireProbe, PublishAliasError> {
+        if self
+            .actions()
+            .resolve_outbound_mapping(mapping_id)
+            .is_none()
+        {
+            return Err(PublishAliasError::UnknownMapping(mapping_id));
+        }
+        Ok(self.publish_aliased_probe(mapping_id, inline_suffix, payload, opts)?)
+    }
+
+    /// The one body of the probing publishes: build the Push as the waiting publish does, put it
+    /// through the same egress policy and namespace, and offer it to the link without a wait.
+    #[cfg(feature = "codec-push")]
+    fn probe_wire(
+        &self,
+        keyexpr: &str,
+        wire: GroupKey<'_>,
+        payload: &[u8],
+        mut opts: PublishOptions,
+    ) -> Result<WireProbe, PublishError> {
+        use wz_session_core::network_message::NetworkMessage;
+        use wz_session_core::session_actions::Unsent;
+
+        if !opts.allowed_destination.allows_remote() {
+            return Ok(WireProbe::Queued);
+        }
+        self.resolve_publish_timestamp(&mut opts);
+        let reliable = opts.reliable_bool();
+        let meta = opts.push_metadata();
+        let express = meta.is_express();
+        let priority = opts.priority_band();
+        let push = build_publish_push(opts.kind, keyexpr, wire, payload, &meta)?;
+        let Some((msg, express, priority)) = self.egress_stage(
+            NetworkMessage::Push(Box::new(push)),
+            reliable,
+            express,
+            priority,
+        )?
+        else {
+            return Ok(WireProbe::Queued);
+        };
+        let msg = transport::namespace_egress_stage(self.actions(), msg)?;
+        match self
+            .actions()
+            .try_send_network_message_qos(msg, reliable, express, priority)
+        {
+            Ok(()) => Ok(WireProbe::Queued),
+            Err(Unsent::NoRoom(_)) => Ok(WireProbe::NoRoom),
+            // The message is returned whole and already past the policy and the namespace, so it
+            // goes to the floor of the send, which waits, and not through the stages again.
+            Err(Unsent::Chain(msg)) => Ok(self
+                .actions()
+                .send_network_message_qos(msg, reliable, express, priority)
+                .map(|()| WireProbe::Queued)?),
+            Err(Unsent::Failed(e)) => Err(e.into()),
+        }
     }
 
     /// Send a plain Put on a key this session declared, to the peer, and nothing else: the
@@ -8726,3 +8904,6 @@ mod shm_query_value_tests;
     feature = "codec-response-final"
 ))]
 mod shm_reply_tests;
+
+#[cfg(all(test, feature = "transport-unicast", feature = "codec-push"))]
+mod probe_tests;

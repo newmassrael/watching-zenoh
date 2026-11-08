@@ -352,6 +352,43 @@ pub struct Unicast;
 #[cfg(feature = "transport-multicast")]
 pub struct Multicast;
 
+/// The session's routing namespace applied to a message it originates, on the way to its link: the
+/// message as given when the session has none (and in a build without the feature). The one place
+/// both the waiting send and the one that does not wait (`Session::publish_probe`) decorate a
+/// message, so the two cannot send different keys.
+#[cfg(all(
+    feature = "transport-unicast",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-declare",
+        feature = "declare-interest"
+    )
+))]
+pub(super) fn namespace_egress_stage<R: SessionRuntime, T: TimeSource>(
+    payload: &SessionLinkActions<R, T>,
+    msg: wz_session_core::network_message::NetworkMessage,
+) -> Result<wz_session_core::network_message::NetworkMessage, SendWireError> {
+    #[cfg(feature = "routing-namespace")]
+    {
+        let mut msg = msg;
+        R::with_mutex_mut(&payload.namespace_egress, |slot| {
+            if let Some(ns) = slot.as_ref() {
+                wz_session_core::namespace::apply_egress(ns, &mut msg)
+            } else {
+                Ok(())
+            }
+        })
+        .map_err(SendWireError::Codec)?;
+        Ok(msg)
+    }
+    #[cfg(not(feature = "routing-namespace"))]
+    {
+        let _ = payload;
+        Ok(msg)
+    }
+}
+
 #[cfg(feature = "transport-unicast")]
 impl sealed::Sealed for Unicast {}
 #[cfg(feature = "transport-multicast")]
@@ -416,17 +453,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
             // THIS participant's own sends — a relay is never re-namespaced.
             // (Query replies take the separate `send_response` seam; a multicast
             // session is handshake-free and carries no namespace by construction.)
-            #[cfg(feature = "routing-namespace")]
-            let mut msg = msg;
-            #[cfg(feature = "routing-namespace")]
-            R::with_mutex_mut(&payload.namespace_egress, |slot| {
-                if let Some(ns) = slot.as_ref() {
-                    wz_session_core::namespace::apply_egress(ns, &mut msg)
-                } else {
-                    Ok(())
-                }
-            })
-            .map_err(SendWireError::Codec)?;
+            let msg = namespace_egress_stage(payload, msg)?;
             // R311y232 — forward the app band to the SessionLinkActions `_qos`
             // twin; its Push arm selects the per-priority conduit (`dispatch_push`),
             // clamping to DEFAULT on a non-QoS session (`is_qos()` gate).

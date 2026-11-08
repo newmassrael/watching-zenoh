@@ -95,6 +95,7 @@ use wz_runtime_tokio::session::{
     InterestForm, LocalDeliveryDrain, MatchingInterestHold, MatchingListener, MatchingStatus,
     PublishAliasError, PublishError, PublishOptions, QueryAliasError, QueryOptions, Queryable,
     QueryableOptions, RetractionKey, SubscribeOptions, Subscriber, TokioQueryHolder, TokioSession,
+    WireProbe,
 };
 use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
@@ -108,6 +109,7 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 use wz_runtime_tokio::Reliability;
+use wz_session_core::admission_retry::AdmissionRetry;
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
 
 #[cfg(feature = "multicast-transport")]
@@ -231,9 +233,38 @@ enum Leg {
     /// The leg failed for a reason that is the same on every face, such as a payload or
     /// keyexpr the bounded codec cannot carry.
     Refused,
+    /// The face had no room for the frame right now, and the leg did not wait for any: only a
+    /// publish that states an admission retry makes such a leg, and it is neither a delivery
+    /// nor a per-face fault (see [`admission_passes`]).
+    NoRoom,
 }
 
 impl Leg {
+    /// A leg that offered the frame to a face without waiting, classified: a frame on the
+    /// face's queue is a delivery that fired no callback of this session (the leg is the wire
+    /// one), and the rest is classified as [`Self::of_publish`] does.
+    fn of_probe(result: Result<WireProbe, PublishError>) -> Self {
+        match result {
+            Ok(WireProbe::Queued) => Leg::Delivered(0),
+            Ok(WireProbe::NoRoom) => Leg::NoRoom,
+            Err(PublishError::TransportUnavailable) => Leg::Skipped,
+            Err(_) => Leg::Refused,
+        }
+    }
+
+    /// [`Self::of_probe`] for a declared-key leg, whose unknown alias is per-face as in
+    /// [`Self::of_alias`].
+    fn of_probe_alias(result: Result<WireProbe, PublishAliasError>) -> Self {
+        match result {
+            Ok(WireProbe::Queued) => Leg::Delivered(0),
+            Ok(WireProbe::NoRoom) => Leg::NoRoom,
+            Err(PublishAliasError::UnknownMapping(_) | PublishAliasError::TransportUnavailable) => {
+                Leg::Skipped
+            }
+            Err(_) => Leg::Refused,
+        }
+    }
+
     /// A literal-key publish's result, classified.
     fn of_publish(result: Result<usize, PublishError>) -> Self {
         match result {
@@ -254,6 +285,54 @@ impl Leg {
             }
             Err(_) => Leg::Refused,
         }
+    }
+}
+
+/// The passes of an admission retry over `faces` faces, the numbers of which the caller has
+/// already chosen from the faces the publish may use. `offer(face)` offers the frame to one
+/// face without waiting and says how it ended; `wait(ms)` waits between passes. The total of
+/// the deliveries `offer` reported is the answer.
+///
+/// The first pass offers the frame to every face. A pass in which some face took it ends the
+/// publish there: the faces that had no room are skipped, exactly as a congestion drop skips
+/// them, because offering the frame again would send it twice to the face that took it. When no
+/// face took it and some had no room, `wait` is asked for the delay and the next pass offers the
+/// frame to the faces that had no room and to no other: a face that was skipped is not asked
+/// again, and none of the faces asked took the frame, so none gets it twice. After the last pass
+/// the publish ends having delivered to no face, which is `Ok(0)`; `wait` has then been asked
+/// for the delay exactly as many times as passes followed the first.
+///
+/// A face that refuses for a reason every face would meet ends the publish at once, as it does
+/// without a retry.
+fn admission_passes(
+    retry: AdmissionRetry,
+    faces: usize,
+    mut offer: impl FnMut(usize) -> Leg,
+    mut wait: impl FnMut(u16),
+) -> Result<usize, FanoutError> {
+    let mut pending: Vec<usize> = (0..faces).collect();
+    let mut delivered = 0usize;
+    let mut passes_left = retry.attempts;
+    loop {
+        let mut taken = false;
+        let mut no_room = Vec::new();
+        for &face in &pending {
+            match offer(face) {
+                Leg::Delivered(n) => {
+                    delivered += n;
+                    taken = true;
+                }
+                Leg::NoRoom => no_room.push(face),
+                Leg::Skipped => {}
+                Leg::Refused => return Err(FanoutError::ExceedsCapacity),
+            }
+        }
+        if taken || no_room.is_empty() || passes_left == 0 {
+            return Ok(delivered);
+        }
+        passes_left -= 1;
+        wait(retry.delay_ms);
+        pending = no_room;
     }
 }
 
@@ -3253,9 +3332,13 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        self.fan_out(opts, PutKey::Literal(keyexpr), payload, |session, leg| {
-            Leg::of_publish(session.publish(keyexpr, payload, leg))
-        })
+        self.fan_out(
+            opts,
+            PutKey::Literal(keyexpr),
+            payload,
+            |session, leg| Leg::of_publish(session.publish(keyexpr, payload, leg)),
+            |session, leg| Leg::of_probe(session.publish_probe(keyexpr, payload, leg)),
+        )
     }
 
     /// [`Self::publish_all`] for a payload that lives in SHARED MEMORY: each face that
@@ -3279,6 +3362,7 @@ impl SharedSession {
             PutKey::Literal(keyexpr),
             payload,
             |session, leg, payload| Leg::of_publish(session.publish_shm(keyexpr, payload, leg)),
+            None,
             |session, leg, payload| {
                 Leg::Delivered(session.deliver_shm_local_owned(keyexpr, payload, leg))
             },
@@ -3303,6 +3387,7 @@ impl SharedSession {
             |session, leg, payload| {
                 Leg::of_alias(session.publish_shm_aliased_auto(mapping_id, suffix, payload, leg))
             },
+            None,
             |session, leg, payload| {
                 Leg::of_alias(
                     session.deliver_shm_local_aliased_owned(mapping_id, suffix, payload, leg),
@@ -3327,21 +3412,31 @@ impl SharedSession {
     /// R311y555 -- WAKE THE DRAIN. Staging a fire does not make a drive loop iterate;
     /// without the notification the delivery rides the next inbound message or the keepalive
     /// tick, MEASURED at 3.334 s.
-    fn fan_out<F>(
+    ///
+    /// ## `probe` is the wire leg of a publish that states an admission retry
+    ///
+    /// The same call as `send` but offering the frame to the face without waiting for room, so
+    /// that its answer can say `Leg::NoRoom`. It is read only when `opts.admission_retry` is
+    /// set, and only for the wire legs: the local leg is `send`'s whatever the options say.
+    fn fan_out<F, G>(
         &self,
         opts: &PublishOptions,
         key: PutKey<'_>,
         payload: &[u8],
         send: F,
+        probe: G,
     ) -> Result<usize, FanoutError>
     where
         F: Fn(&TokioSession, PublishOptions) -> Leg,
+        G: Fn(&TokioSession, PublishOptions) -> Leg,
     {
+        let probe_leg: &dyn Fn(&TokioSession, PublishOptions) -> Leg = &probe;
         self.fan_out_with(
             opts,
             key,
             payload,
             |session, leg, _| send(session, leg),
+            Some(probe_leg),
             |session, leg, _| send(session, leg),
         )
     }
@@ -3351,12 +3446,18 @@ impl SharedSession {
     /// subscriber's callback now runs inside the put, and what it is handed must be the
     /// buffer the put moved, not a second reference beside the put's own (see
     /// [`wz_runtime_tokio::session::Session::deliver_shm_local_owned`]).
+    ///
+    /// `probe_leg` is a wire leg that offers the frame without the wait for room, for a publish
+    /// that states an admission retry (see [`admission_passes`]); it holds the payload itself,
+    /// which is why it takes none. `None` for a publish that has no such leg (shared memory),
+    /// which then sends as `remote_leg` does whatever its options say.
     fn fan_out_with<P, R, L>(
         &self,
         opts: &PublishOptions,
         key: PutKey<'_>,
         payload: P,
         remote_leg: R,
+        probe_leg: Option<&dyn Fn(&TokioSession, PublishOptions) -> Leg>,
         local_leg: L,
     ) -> Result<usize, FanoutError>
     where
@@ -3389,21 +3490,48 @@ impl SharedSession {
         if opts.allowed_destination.allows_remote() {
             let remote = opts.clone().with_locality(Locality::Remote);
             let literal = key.literal();
-            for (session, slot) in targets.faces.iter().zip(targets.slots.iter()) {
-                // A publisher limited to some links is not written to the others.
-                if !opts.links.allows(*slot) {
-                    continue;
+            // The faces the publish is written to: a publisher limited to some links is not
+            // written to the others, and a peer that has said it wants nothing this key reaches
+            // is not written to either (see `Session::peer_wants_no_put_on`); a put with no
+            // literal key in hand, an alias alone, is written to every face as before.
+            let wanted = |session: &TokioSession, slot: &Option<LinkSlot>| {
+                opts.links.allows(*slot)
+                    && !literal.is_some_and(|key| session.peer_wants_no_put_on(key))
+            };
+            match (opts.admission_retry, probe_leg) {
+                (Some(retry), Some(probe_leg)) => {
+                    let selected: Vec<&TokioSession> = targets
+                        .faces
+                        .iter()
+                        .zip(targets.slots.iter())
+                        .filter(|&(session, slot)| wanted(session, slot))
+                        .map(|(session, _)| session)
+                        .collect();
+                    // A plain blocking sleep on the caller's thread: the publish is a
+                    // synchronous call whose wait for room already blocks that thread, and the
+                    // clock this registry holds (`TimeSource`) can only sleep as a future.
+                    delivered += admission_passes(
+                        retry,
+                        selected.len(),
+                        |face| probe_leg(selected[face], remote.clone()),
+                        |delay_ms| {
+                            std::thread::sleep(std::time::Duration::from_millis(u64::from(
+                                delay_ms,
+                            )))
+                        },
+                    )?;
                 }
-                // A peer that has said it wants nothing this key reaches is not written to (see
-                // `Session::peer_wants_no_put_on`); a put with no literal key in hand, an alias
-                // alone, is written to every face as before.
-                if literal.is_some_and(|key| session.peer_wants_no_put_on(key)) {
-                    continue;
-                }
-                match remote_leg(session, remote.clone(), &payload) {
-                    Leg::Delivered(n) => delivered += n,
-                    Leg::Skipped => {}
-                    Leg::Refused => return Err(FanoutError::ExceedsCapacity),
+                _ => {
+                    for (session, slot) in targets.faces.iter().zip(targets.slots.iter()) {
+                        if !wanted(session, slot) {
+                            continue;
+                        }
+                        match remote_leg(session, remote.clone(), &payload) {
+                            Leg::Delivered(n) => delivered += n,
+                            Leg::Skipped | Leg::NoRoom => {}
+                            Leg::Refused => return Err(FanoutError::ExceedsCapacity),
+                        }
+                    }
                 }
             }
             // A multicast group is a link no slot names, so a limited publisher skips it.
@@ -3425,8 +3553,9 @@ impl SharedSession {
                 }
                 // The plane's link is inert, so the skipped arm is unreachable through
                 // it; kept because the local leg's error handling must not be more
-                // brittle than the wire leg's if the plane ever changes.
-                Leg::Skipped => {}
+                // brittle than the wire leg's if the plane ever changes. The local leg is no
+                // probe, so it has no room to lack.
+                Leg::Skipped | Leg::NoRoom => {}
                 Leg::Refused => return Err(FanoutError::ExceedsCapacity),
             }
         }
@@ -3498,7 +3627,7 @@ impl SharedSession {
                     .map(|()| 0);
                 match Leg::of_publish(sent) {
                     Leg::Delivered(n) => delivered += n,
-                    Leg::Skipped => {}
+                    Leg::Skipped | Leg::NoRoom => {}
                     Leg::Refused => return Err(FanoutError::ExceedsCapacity),
                 }
                 continue;
@@ -3514,7 +3643,7 @@ impl SharedSession {
             };
             match Leg::of_publish(sent) {
                 Leg::Delivered(n) => delivered += n,
-                Leg::Skipped => {}
+                Leg::Skipped | Leg::NoRoom => {}
                 Leg::Refused => return Err(FanoutError::ExceedsCapacity),
             }
         }
@@ -3569,6 +3698,7 @@ impl SharedSession {
                 PutKey::Literal(keyexpr),
                 payload,
                 |session, leg, payload| Leg::of_publish(session.publish_shm(keyexpr, payload, leg)),
+                None,
                 |session, leg, payload| {
                     Leg::of_publish(session.publish_shm(keyexpr, &payload, leg))
                 },
@@ -3589,6 +3719,7 @@ impl SharedSession {
                         session.publish_shm_aliased_auto(mapping_id, suffix, payload, leg),
                     )
                 },
+                None,
                 |session, leg, payload| {
                     Leg::of_alias(
                         session.publish_shm_aliased_auto(mapping_id, suffix, &payload, leg),
@@ -3682,9 +3813,19 @@ impl SharedSession {
             },
             None => PutKey::Alias { mapping_id, suffix },
         };
-        self.fan_out(opts, key, payload, |session, leg| {
-            Leg::of_alias(session.publish_aliased_auto(mapping_id, suffix, payload, leg))
-        })
+        self.fan_out(
+            opts,
+            key,
+            payload,
+            |session, leg| {
+                Leg::of_alias(session.publish_aliased_auto(mapping_id, suffix, payload, leg))
+            },
+            |session, leg| {
+                Leg::of_probe_alias(
+                    session.publish_aliased_auto_probe(mapping_id, suffix, payload, leg),
+                )
+            },
+        )
     }
 
     /// [`Self::publish_aliased_all`] for a caller that holds the literal the alias stands for:
@@ -3708,13 +3849,21 @@ impl SharedSession {
             mapping_id,
             suffix: None,
         };
-        self.fan_out(opts, key, payload, |session, leg| {
-            Leg::of_alias(
-                session
-                    .publish_aliased(mapping_id, None, keyexpr, payload, leg)
-                    .map_err(PublishAliasError::from),
-            )
-        })
+        self.fan_out(
+            opts,
+            key,
+            payload,
+            |session, leg| {
+                Leg::of_alias(
+                    session
+                        .publish_aliased(mapping_id, None, keyexpr, payload, leg)
+                        .map_err(PublishAliasError::from),
+                )
+            },
+            |session, leg| {
+                Leg::of_probe(session.publish_aliased_probe(mapping_id, None, payload, leg))
+            },
+        )
     }
 
     /// Record a C keyexpr declaration in the SSOT and announce it on every live
@@ -7327,6 +7476,294 @@ mod face_up_order_tests {
             ),
             (0, 1),
             "limited to slot 2: only the second link is written to"
+        );
+    }
+
+    /// A publish that states a retry offers the frame to each face that has room, once: the
+    /// first pass queues it everywhere, so no later pass runs and nothing is written twice. The
+    /// same holds on a declared key, aliased or not, with the links a publish is limited to still
+    /// honoured, and an alias no face was told is skipped without a wait.
+    #[tokio::test]
+    async fn a_publish_that_states_a_retry_is_written_once_to_each_face_with_room() {
+        use wz_runtime_tokio_test_support::establish_capability_pair_between;
+        let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let shared =
+            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+        assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
+        assert!(
+            shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
+            "slot 2"
+        );
+        // A long delay: a pass that waited would make this test slow, and none should.
+        let retry = AdmissionRetry::new(3, 5_000).expect("both numbers set");
+        let stated = PublishOptions::put().with_admission_retry(retry);
+        let pushes = |near_before: usize, far_before: usize| {
+            (
+                declares_and_pushes_since(&near, near_before).1,
+                declares_and_pushes_since(&far, far_before).1,
+            )
+        };
+        let started = std::time::Instant::now();
+
+        let (near_before, far_before) = (
+            near.resp_driver.snapshot().sends.len(),
+            far.resp_driver.snapshot().sends.len(),
+        );
+        assert_eq!(
+            shared
+                .publish_all("wz/retry/put", b"x", &stated)
+                .expect("a put that states a retry"),
+            0,
+            "the wire legs fire no callback of this session"
+        );
+        assert_eq!(
+            pushes(near_before, far_before),
+            (1, 1),
+            "one frame per face"
+        );
+
+        let (near_before, far_before) = (
+            near.resp_driver.snapshot().sends.len(),
+            far.resp_driver.snapshot().sends.len(),
+        );
+        let only_far = LinkRestriction::only([2]).expect("one slot");
+        shared
+            .publish_all("wz/retry/put", b"x", &stated.clone().with_links(only_far))
+            .expect("a put that states a retry, limited to slot 2");
+        assert_eq!(
+            pushes(near_before, far_before),
+            (0, 1),
+            "the links a publish is limited to are honoured when it retries"
+        );
+
+        let id = shared
+            .declare_keyexpr("wz/retry/alias".to_owned())
+            .expect("an id is free");
+        let (near_before, far_before) = (
+            near.resp_driver.snapshot().sends.len(),
+            far.resp_driver.snapshot().sends.len(),
+        );
+        shared
+            .publish_declared_all("wz/retry/alias", id, b"x", &stated)
+            .expect("a declared put that states a retry");
+        shared
+            .publish_aliased_all(id, None, b"x", &stated)
+            .expect("an aliased put that states a retry");
+        assert_eq!(
+            pushes(near_before, far_before),
+            (2, 2),
+            "each of the two puts is one frame per face"
+        );
+
+        // An alias nobody declared is skipped on every face, which is not a lack of room.
+        let (near_before, far_before) = (
+            near.resp_driver.snapshot().sends.len(),
+            far.resp_driver.snapshot().sends.len(),
+        );
+        assert_eq!(
+            shared.publish_aliased_all(id + 1000, None, b"x", &stated),
+            Ok(0)
+        );
+        assert_eq!(pushes(near_before, far_before), (0, 0));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(2_500),
+            "no pass waited, since every face took the frame or was skipped"
+        );
+    }
+
+    /// What a probe's answer means to the fan-out: a frame on the queue is a delivery that fired
+    /// no callback, no room is its own outcome and is neither a delivery nor a fault, and the
+    /// rest is classified as the waiting legs are.
+    #[test]
+    fn a_probe_is_classified_as_a_delivery_a_lack_of_room_a_skip_or_a_refusal() {
+        assert!(matches!(
+            Leg::of_probe(Ok(WireProbe::Queued)),
+            Leg::Delivered(0)
+        ));
+        assert!(matches!(Leg::of_probe(Ok(WireProbe::NoRoom)), Leg::NoRoom));
+        assert!(matches!(
+            Leg::of_probe(Err(PublishError::TransportUnavailable)),
+            Leg::Skipped
+        ));
+        assert!(matches!(
+            Leg::of_probe(Err(PublishError::ExceedsCapacity)),
+            Leg::Refused
+        ));
+        assert!(matches!(
+            Leg::of_probe_alias(Ok(WireProbe::Queued)),
+            Leg::Delivered(0)
+        ));
+        assert!(matches!(
+            Leg::of_probe_alias(Ok(WireProbe::NoRoom)),
+            Leg::NoRoom
+        ));
+        assert!(matches!(
+            Leg::of_probe_alias(Err(PublishAliasError::UnknownMapping(9))),
+            Leg::Skipped
+        ));
+        assert!(matches!(
+            Leg::of_probe_alias(Err(PublishAliasError::TransportUnavailable)),
+            Leg::Skipped
+        ));
+        assert!(matches!(
+            Leg::of_probe_alias(Err(PublishAliasError::ExceedsCapacity)),
+            Leg::Refused
+        ));
+    }
+
+    /// What `admission_passes` asked of the faces and of the clock, and what it answered.
+    struct PassRun {
+        answer: Result<usize, FanoutError>,
+        /// The faces offered the frame, in order.
+        offers: Vec<usize>,
+        /// The delays waited, in order.
+        waits: Vec<u16>,
+    }
+
+    /// Runs the passes of `retry` over `faces` faces, where `ending(face, nth)` is how face
+    /// `face` ends its `nth` offer (from 0).
+    fn run_passes(
+        retry: AdmissionRetry,
+        faces: usize,
+        mut ending: impl FnMut(usize, usize) -> Leg,
+    ) -> PassRun {
+        let mut offers = Vec::new();
+        let mut waits = Vec::new();
+        let mut asked = vec![0usize; faces];
+        let answer = admission_passes(
+            retry,
+            faces,
+            |face| {
+                offers.push(face);
+                let nth = asked[face];
+                asked[face] += 1;
+                ending(face, nth)
+            },
+            |delay_ms| waits.push(delay_ms),
+        );
+        PassRun {
+            answer,
+            offers,
+            waits,
+        }
+    }
+
+    #[test]
+    fn a_face_that_took_the_frame_in_the_first_pass_ends_the_publish_without_a_retry() {
+        let retry = AdmissionRetry::new(3, 40).expect("both set");
+        let run = run_passes(retry, 3, |face, _| match face {
+            1 => Leg::Delivered(2),
+            _ => Leg::NoRoom,
+        });
+        assert_eq!(run.answer, Ok(2));
+        assert_eq!(
+            run.offers,
+            vec![0, 1, 2],
+            "every face is offered the frame once, and the ones with no room are not asked again"
+        );
+        assert!(
+            run.waits.is_empty(),
+            "no pass follows, so nothing is waited"
+        );
+    }
+
+    #[test]
+    fn only_the_faces_with_no_room_are_offered_the_frame_again_and_a_taker_ends_it() {
+        let retry = AdmissionRetry::new(3, 40).expect("both set");
+        // Face 0 is down, face 1 has room from its second offer, face 2 never has.
+        let run = run_passes(retry, 3, |face, nth| match (face, nth) {
+            (0, _) => Leg::Skipped,
+            (1, 0) => Leg::NoRoom,
+            (1, _) => Leg::Delivered(1),
+            _ => Leg::NoRoom,
+        });
+        assert_eq!(run.answer, Ok(1));
+        assert_eq!(
+            run.offers,
+            vec![0, 1, 2, 1, 2],
+            "the second pass asks the two that had no room, and the skipped face is not asked"
+        );
+        assert_eq!(
+            run.waits,
+            vec![40],
+            "one delay, before the one further pass"
+        );
+    }
+
+    #[test]
+    fn a_publish_that_never_finds_room_waits_the_delay_once_per_further_pass_and_delivers_nothing()
+    {
+        let retry = AdmissionRetry::new(3, 7).expect("both set");
+        let run = run_passes(retry, 2, |_, _| Leg::NoRoom);
+        assert_eq!(
+            run.answer,
+            Ok(0),
+            "the publish ends as a delivery to no face"
+        );
+        assert_eq!(
+            run.offers,
+            vec![0, 1, 0, 1, 0, 1, 0, 1],
+            "the first pass and three further ones"
+        );
+        assert_eq!(
+            run.waits,
+            vec![7, 7, 7],
+            "the delay is asked for exactly the attempts"
+        );
+        assert_eq!(
+            u32::from(run.waits.iter().sum::<u16>()),
+            retry.max_wait_ms(),
+            "and its total is the retry's own bound"
+        );
+    }
+
+    #[test]
+    fn a_publish_whose_faces_are_all_skipped_or_absent_is_not_retried() {
+        let retry = AdmissionRetry::new(2, 9).expect("both set");
+        let skipped = run_passes(retry, 2, |_, _| Leg::Skipped);
+        assert_eq!(skipped.answer, Ok(0));
+        assert_eq!(skipped.offers, vec![0, 1]);
+        assert!(skipped.waits.is_empty(), "a skip is not a lack of room");
+
+        let none = run_passes(retry, 0, |_, _| Leg::NoRoom);
+        assert_eq!(none.answer, Ok(0));
+        assert!(none.offers.is_empty());
+        assert!(none.waits.is_empty(), "no face, nothing to wait for");
+    }
+
+    #[test]
+    fn a_refusal_every_face_would_meet_ends_the_publish_at_once_whatever_the_pass() {
+        let retry = AdmissionRetry::new(2, 9).expect("both set");
+        let first = run_passes(retry, 3, |face, _| match face {
+            1 => Leg::Refused,
+            _ => Leg::NoRoom,
+        });
+        assert_eq!(first.answer, Err(FanoutError::ExceedsCapacity));
+        assert_eq!(
+            first.offers,
+            vec![0, 1],
+            "the face after the refusal is not asked"
+        );
+        assert!(first.waits.is_empty());
+
+        let later = run_passes(
+            retry,
+            1,
+            |_, nth| {
+                if nth == 0 {
+                    Leg::NoRoom
+                } else {
+                    Leg::Refused
+                }
+            },
+        );
+        assert_eq!(later.answer, Err(FanoutError::ExceedsCapacity));
+        assert_eq!(later.offers, vec![0, 0]);
+        assert_eq!(
+            later.waits,
+            vec![9],
+            "the refusal came after one wait and no more"
         );
     }
 
