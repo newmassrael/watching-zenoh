@@ -34,11 +34,17 @@ population, so the reach gate refuses a hook that does not run it.
    assertion in a file that spawns elsewhere owes nothing (R2277 found the
    file-level rule contradicting the naming arm).
 2. NAMING (R311y455). Layer E sweeps with `-- --ignored` and `--skip <token>`,
-   and libtest matches a skip against the FUNCTION name, not the file name. A
-   fixture whose basename carries a token declares its family excluded, so every
-   `#[ignore]`d test in it must carry a token too (any token: one match excludes
-   it). Non-ignored tests owe nothing, because `--ignored` never enumerates them
-   (R2279 measured exactly one such test).
+   and libtest matches a skip against the test's PATH. A fixture whose basename
+   carries a token declares its family excluded, so every `#[ignore]`d test in
+   it must carry a token in that path too (any token: one match excludes it).
+   Non-ignored tests owe nothing, because `--ignored` never enumerates them
+   (R2279 measured exactly one such test). The path is the fn alone for a target
+   of its own, and `files::<stem>::<fn>` for a file of a merged target, where the
+   file's stem IS a module of the path: `layer_e_oracle_scope_gate.test_path`
+   spells it once for both gates. Before the merge every fixture was a target of
+   its own and the fn was the whole name, so this arm read the fn alone, and
+   when Layer E's sweep gained a token that removes a family by its module
+   (`zenoh_c_`) it counted the 57 tests that token removes as untokened.
 3. OWNERSHIP (R311y838). A test whose `#[ignore]` reason says
    `Layer <X> runs via` with X other than E is asserting Layer E does not run
    it, so it owes a token that makes that true. The reason is read by
@@ -68,6 +74,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import crossimpl_corpus as corpus  # noqa: E402
 import lane_reach_gate  # noqa: E402
+from layer_e_oracle_scope_gate import test_path  # noqa: E402
 
 REPO = corpus.REPO_ROOT
 OWNING_LANE = re.compile(r"Layer\s+([A-Za-z0-9]+)\s+runs via")
@@ -107,7 +114,7 @@ def grade(files, tokens) -> Graded:
             g.token_named += 1
         for t in cf.tests:
             where = "{}:{}: {}".format(_rel(cf.path), t.line, t.name)
-            carries_token = any(tok in t.name for tok in tokens)
+            carries_token = any(tok in test_path(cf.path, t.name) for tok in tokens)
 
             if cf.spawns_external:
                 g.spawn_tests += 1
@@ -166,8 +173,9 @@ def report(g: Graded, tokens) -> int:
                   "checkout where the binary is not built.")
         if g.naming or g.ownership:
             print("    Token fix: rename the test fn so it contains a token (e.g. "
-                  "`fn zenohd_<what_it_asserts>()`). libtest --skip matches the FUNCTION "
-                  "name, not the file name and not the #[ignore] reason.")
+                  "`fn zenohd_<what_it_asserts>()`). libtest --skip matches the test's "
+                  "path: the fn of a target of its own, `files::<stem>::<fn>` of a merged "
+                  "one; never the #[ignore] reason.")
             print("    Layer E's sweep skips {}".format(", ".join(tokens)))
         return 1
     print("  test-discipline: binary-dep {} of {} spawn-class test(s) reach an external "
@@ -209,8 +217,10 @@ def _test(name, *, ignore=False, reason=None, spawns=False, line=1):
     return t
 
 
-def _file(stem, tests, *, spawns=False):
-    cf = corpus.CorpusFile(pathlib.Path("crates/wz-integration-tests/tests/{}.rs".format(stem)))
+def _file(stem, tests, *, spawns=False, merged=False):
+    where = "tests/it/files" if merged else "tests"
+    cf = corpus.CorpusFile(pathlib.Path(
+        "crates/wz-integration-tests/{}/{}.rs".format(where, stem)))
     cf.spawns_external = spawns
     cf.tests = tests
     return cf
@@ -234,6 +244,13 @@ _CASES = [
      [_file("wz_zenohd_storage", [_test("zenohd_storage_leg", ignore=True)])], 0, None),
     ("any token satisfies naming, not only the filename's",
      [_file("wz_zenohd_gossip", [_test("wz_peer_gossips", ignore=True)])], 0, None),
+    ("in a merged target the stem is a module of the path, so its token covers the fn",
+     [_file("wz_zenohd_storage", [_test("a_storage_leg", ignore=True)], merged=True)],
+     0, None),
+    ("a merged file whose stem carries no token still owes a non-E owner one",
+     [_file("neutral_fixture", [_test("a_leg", reason="x; Layer Z runs via --ignored")],
+            merged=True)],
+     1, "ownership"),
     ("a NON-ignored untokened leg in a token-named fixture owes nothing",
      [_file("wz_zenohd_vocab", [_test("a_pure_vocabulary_assertion")])], 0, None),
     ("a non-E owner without a token reds OWNERSHIP",

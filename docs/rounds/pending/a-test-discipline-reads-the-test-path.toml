@@ -1,0 +1,19 @@
+impact = ["watching-zenoh/local-ci-gates"]
+
+decision = '''
+The test-discipline gate reads a test's name as libtest matches a skip against it: its path. Since the integration tests were merged into a few executables, a file of a merged target is the module files::<stem> of its binary, and a skip token in the stem removes every test of the file. The naming and ownership arms still read the fn alone, as when each file was a target of its own, so when Layer E's sweep gained the token zenoh_c_ (15928d71d0), which removes the zenoh-c family by its module and which the scope gate was taught to read that way in the same commit, this gate counted the 57 ignored tests of that family as untokened and refused. It now asks layer_e_oracle_scope_gate.test_path, the one spelling of the path for both gates. No test is renamed and no token is added: the sweep and the hook now agree about which tests a token reaches.
+'''
+
+changes = '''
+- test_discipline_gate: carries_token reads test_path(file, fn); the naming arm's doc and the token-fix hint say the path, with files::<stem>::<fn> for a merged target
+- its selftest gains a merged fixture whose stem carries the token (green) and one whose stem carries none and whose owner is not E (red in ownership)
+'''
+
+verification = '''
+- test_discipline_gate --check: 57 violations on main before, green after (742 of 754 spawn-class tests reach a binary, 580 ignored tests in 197 token-named fixtures, 355 owners); --selftest 14 cases ok
+- layer_e_oracle_scope_gate: 141 ignored tests selected after 21 tokens, none needing a binary the lane does not build
+'''
+
+carry = '''
+- none
+'''
