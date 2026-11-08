@@ -98,7 +98,8 @@ reader of an older version cannot destroy what a reader of a newer one stored. T
 inputs clears the cache; under B an older reader's store would clear a newer reader's entries, a loss of
 work and not of correctness. The memo therefore records the newest inputs it has served and refuses a
 clear from older ones (`RouteInputs` already orders: both members are monotone counters bumped by every
-write).
+write). Section 6.8 replaced that with the form read-copy-update itself takes: each version holds the
+memos of its own inputs, made by its writer before it publishes, and no reader moves one.
 
 The hosted handlers are already shared (`Arc<Hosted<..>>`), and the interceptor caches, the pending-query
 table, the multicast members and the counters already live outside `Tables` with their own locks.
@@ -554,7 +555,7 @@ writer, while B's writer completes about 670 times A's writes, each a new versio
 and each retiring the routes it touches; A's readers lose 6 % to a writer that gets in a hundred
 times a second.
 
-### 6.7 What a busy writer costs the readers (this round)
+### 6.7 What a busy writer costs the readers (round 4400)
 
 Section 6.6 left the readers' loss under a busy writer unseparated between the versions they load
 and what the writes change. The instrument
@@ -604,6 +605,66 @@ a second was not told apart from the hosts' load and is not claimed. A retired v
 holds lives until the next write or grace period: one version's own paths, as many as the readers
 held at the last publish.
 
+### 6.8 The route memos as part of each version (this round)
+
+Section 6.7 left two of the readers' costs under a busy writer where they were: the route caches
+moved their inputs at every version, under a write lock a reader took, and a reader whose version
+was older than the inputs the cache had been brought to computed its route and did not keep it.
+Both come from one shape: one memo shared by every version, whose inputs the first reader of a new
+version moved. That is a cache beside the versions, not part of them. Read-copy-update has no such
+thing: what a version derives from its own data is made by the updater before the version is
+published, and a reader only reads it.
+
+The memos are now part of the versions (`route_cache.rs`, `RouteCache`):
+
+- A memo's inputs are fixed. The writer gives each version the memos of its own inputs when it
+  ends a write (`Tables::bring_route_memos`, called by `TablesWrite::publish` under either value,
+  and on the tables a cell starts with). A hat whose graph and tables did not move keeps the memo it
+  shares with the version before; one whose inputs moved gets a memo of its own. A client leg's new
+  memo starts as the old one less the routes the changed keys reach (the store's change log, which
+  `refresh` read before); a mesh leg's, and one whose log no longer reaches back, starts empty.
+- A reader never moves a memo and finds none of other inputs: a reader of an older version is
+  served from that version's memo. A caller at inputs other than its memo's is a writer reading its
+  own draft (or, under `rwlock`, tables a writer left as it unwound); its route is computed and not
+  kept. `RouteInputs::precedes` and `RouteCache::refresh` are gone: a memo that belongs to one
+  version has no order of versions to keep.
+- The routes are one persistent map (`persistent_map.rs`) keyed by keyexpr and source together, read
+  by a key borrowed from the caller, behind the memo's own reader-writer lock. The persistent map is
+  what lets the new memo start from the old one's routes at the cost of one count, and leaving out
+  a route copy its path alone; a map copied whole would make every write that moves a store cost as
+  much as the routes kept.
+
+Two forms of the routes were measured before this one and dropped, by the per-symbol instructions
+of the readers against the version before this change (no writer):
+
+| Form of the routes | What it cost the readers a Put |
+|---|---|
+| keyexpr to source map, nested, behind an `ArcSwap` | the `ArcSwap` loads 347 instructions more (about 100 a load) |
+| the same behind the lock | two trie walks and two hashes a read: 586 instructions in the maps' lookups, where the functions the hash maps' lookups were inlined into lost 401 |
+| one map by keyexpr and source, behind the lock (kept) | one walk and one hash a read |
+
+The kept form, on pc2, under `snapshot`, perf `instructions:u` and `cycles:u` of the `wz-publisher`
+threads a Put, each window kind in a process of its own, three windows of three seconds each, two
+runs of each tree taken one after the other (host load 14 to 45):
+
+| Window | Instructions a Put, before | after | Cycles a Put, before | after | Routes computed and not kept a window, before | after |
+|---|---|---|---|---|---|---|
+| no writer | 18,423; 18,469 | 18,346; 18,236 | 16,462; 16,032 | 16,039; 16,106 | none | none |
+| declaring (103,000 to 195,000 writes a second) | 18,653; 18,514 | 18,308; 18,302 | 16,953; 16,887 | 16,128; 16,228 | 6,595 to 70,113 | 0 or 1 |
+
+- The readers no longer compute what they cannot keep: under the declaring writer each window
+  computes the one route of its first Put, where the version before computed thousands to tens of
+  thousands of routes a window and kept none.
+- What a busy writer costs the readers over no writer at all fell from 45 to 230 more instructions
+  and 491 to 855 more cycles a Put to between 38 fewer and 66 more instructions and 89 to 122 more
+  cycles, within the runs' spread.
+- With no writer, the readers' instructions a Put are 0.4 to 1.3 % fewer, and their cycles within
+  the spread: the reads are not dearer for being kept per version.
+- What it costs the writer is a memo for each hat whose inputs moved, at each publish, and for a
+  client leg a pass over the routes kept. The declaring writer published as fast as it did before
+  (107,000 to 195,000 writes a second against 103,000 to 139,000), on hosts too loaded for more to
+  be said.
+
 ## 7. What is not decided, and what could make this wrong
 
 - **The graph's copy.** `LinkstateNetwork` holds one shortest-path tree per node, O(N squared) for N nodes
@@ -616,12 +677,15 @@ held at the last publish.
   the message, but a route outlives the version it was computed from, so it would read a face's
   facts as they were, and what may be read stale is not yet stated. Not done until a reading asks
   for it.
-- **The routes of a reader behind the cache.** Under a busy writer a reader whose version is
-  older than the inputs the route cache was brought to computes its route and does not keep it
-  (section 6.7): 1,300 to 30,000 routes in a window of three seconds. A cache that kept the
-  routes of the version before as well would serve them; whether it is worth its memory is not
-  measured. The route caches' move of their inputs at every version (a write lock, about 1 % of
-  the readers' cycles) is the other part section 6.7 names and is not changed.
+- **The memo of a route a writer reads.** A writer that routes through its own draft (a replay,
+  an interest answered while it declares) reads at inputs no memo has yet, and computes its route
+  without keeping it (section 6.8). How often a write does so, and whether the draft should carry a
+  memo of its own while it is written, is not measured.
+- **Which routes a change reaches.** A client leg's new memo leaves out the routes the changed
+  keys reach by trying every route kept against every changed key, the cost `refresh` had on the
+  first reader. On the writer now, it grows with the routes kept times the keys a write changes;
+  the keyexpr index of section 6.4 could find the reached routes instead. Not done until a reading
+  asks for it.
 - **The tick.** Under B the tick that finds nothing dirty need not publish; whether to split it into a read
   that decides and a write that acts is decided in phase 4 by what it writes (queries and interests timed
   out, egress swept: the last is per-face runtime and needs no version).
