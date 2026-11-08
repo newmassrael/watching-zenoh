@@ -1139,7 +1139,10 @@ Each lands whole with its surface lines, tests and faults in one round.
       and a node joins ONE copy of the group over its engine (`NodeGroup`, where the registry
       joins one for each face), into the same aggregate the C program reads, with its beacon and
       watchdog the node's own periodic jobs and a member heard of by its beacon alone asked for its
-      record by a query of the node's own face; and the advanced
+      record by a query of the node's own face (and read by upstream's own group, the pinned
+      `z_view_size` dialing the node as a client: it finds the node by its keep-alive and record
+      and by its announcement, the node drops it on the lease it stated, and a wz client and it
+      meet through the node, `router_node_zenoh_ext_group_interop`); and the advanced
       subscriber is carried: its host is written over the port's engine, and a node is one
       (`RouterState` implements `SessionEngine`, so that the subscriber is hosted on the data
       plane, its liveliness on the node's own face, its history and recovery are queries of

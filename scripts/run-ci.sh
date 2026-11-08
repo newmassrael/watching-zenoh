@@ -21698,6 +21698,26 @@ layer_z_zenohd_interop() {
             WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             || return 1
+        # The group of a node opened through the C ABI (`router-node`) against the same oracle,
+        # which dials the node as a client of its south. The legs above hold the demo's group; the
+        # node's group runs its own transport (its announcement, event subscriber, member queryable
+        # and watchdog are the node's data plane and periodic jobs). Four legs: the oracle finds a
+        # node that joined first by its keep-alive and the record its queryable serves (and fails
+        # with the node in another group); the oracle that joined first hears the node's
+        # announcement, the node's first keep-alive being 45 s away; the node folds the oracle into
+        # its view and drops it on the 3 s lease the oracle stated, the node stating a minute; a wz
+        # client and the oracle, two clients of the node, meet through it (and fail with the wz
+        # client on another node). Built with `router-node` and `group`. In wz-capi-c for the
+        # reason `router_node_zenohd_interop` gives. MEASURED: 4 passed against the 1.10.2 oracle
+        # on a build machine, and each leg fails alone when its path is taken out: the member's
+        # record not served (leg 1), the join not announced (leg 2), the watchdog evicting
+        # nothing (leg 3), a best-matching query not passed to a client face (leg 4).
+        wz_test_args wz-capi-c router_node_zenoh_ext_group_interop
+        _runci_guarded_test Znodegroup 4 env \
+            WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-capi-c \
+            --features router-node,group "${WZ_TEST_ARGS[@]}" -- --ignored --quiet \
+            --test-threads=1 \
+            || return 1
     fi
     # R311y374 — wz WebSocket ACCEPTOR cross-impl (transport-link-ws zenohd->wz):
     # a real zenohd DIALS the wz `--listen ws/...` acceptor over ws (the RFC6455

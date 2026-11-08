@@ -31,6 +31,7 @@ mod parallel_faces_roundtrip;
 mod peer_put_routing;
 mod put_cost;
 mod redial_zenohd_interop;
+mod router_node_zenoh_ext_group_interop;
 mod router_node_zenohd_interop;
 mod scouting_autoconnect;
 mod scouting_open;
