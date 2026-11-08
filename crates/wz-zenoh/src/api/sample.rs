@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use zenoh_config::qos::PublisherLocalityConf;
 #[cfg(feature = "unstable")]
 use zenoh_config::wrappers::EntityGlobalId;
+use zenoh_config::wrappers::ZenohId;
 #[cfg(feature = "unstable")]
 use zenoh_protocol::core::Reliability;
 use zenoh_protocol::{
@@ -116,6 +117,66 @@ pub(crate) fn admit_links(links: Links) -> ZResult<()> {
 /// A build with no engine states no set of links, so there is nothing to admit.
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) fn admit_links(_links: Links) -> ZResult<()> {
+    Ok(())
+}
+
+/// What a publish may state for the case where no link had room: how often it is offered again,
+/// and how long it waits between the offers. A build with no engine has no links to lack room,
+/// so the one value there is is "none".
+#[cfg(feature = "engine-tokio")]
+pub(crate) type Retry = Option<wz_session_core::admission_retry::AdmissionRetry>;
+
+/// What a publish may state for the case where no link had room. A build with no engine has no
+/// links to lack room, so the one value there is is "none".
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) type Retry = Option<std::convert::Infallible>;
+
+/// What a publish that states no retry has: it waits for room, as upstream's does.
+pub(crate) const NO_RETRY: Retry = None;
+
+/// The one node a query is addressed to, by the identity its link's handshake gave it.
+pub(crate) type TargetPeer = Option<ZenohId>;
+
+/// What a query that names no node has: every link that has a matching queryable.
+pub(crate) const NO_PEER: TargetPeer = None;
+
+/// Whether this build lets a publish state `retry`: none always, one only when the build's
+/// `publisher-admission-retry` policy is on and its numbers are ones the policy accepts. The
+/// refusal is the policy's own text, as an error of the call that stated the retry.
+#[cfg(feature = "engine-tokio")]
+pub(crate) fn admit_retry(retry: Retry) -> ZResult<()> {
+    wz_session_core::admission_retry::admit_in_build(retry)
+        .map_err(|refusal| zerror!("{refusal}").into())
+}
+
+/// A build with no engine states no retry, so there is nothing to admit.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn admit_retry(_retry: Retry) -> ZResult<()> {
+    Ok(())
+}
+
+/// The bytes the engine names the node `zid` by: its identity at the size it has.
+#[cfg(feature = "engine-tokio")]
+pub(crate) fn peer_bytes(zid: ZenohId) -> Vec<u8> {
+    let zid = zenoh_protocol::core::ZenohIdProto::from(zid);
+    zid.to_le_bytes()[..zid.size()].to_vec()
+}
+
+/// Whether this build lets a query name `peer`: no node always, one only when the build's
+/// `targeted-query` policy is on. The refusal is the policy's own text, as an error of the call
+/// that named the node.
+#[cfg(feature = "engine-tokio")]
+pub(crate) fn admit_target(peer: TargetPeer) -> ZResult<()> {
+    let Some(zid) = peer else {
+        return Ok(());
+    };
+    wz_session_core::peer_target::admit_in_build(Some(peer_bytes(zid).as_slice()))
+        .map_err(|refusal| zerror!("{refusal}").into())
+}
+
+/// A build with no engine names no node, so there is nothing to admit.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn admit_target(_peer: TargetPeer) -> ZResult<()> {
     Ok(())
 }
 

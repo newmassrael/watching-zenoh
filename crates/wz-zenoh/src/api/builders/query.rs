@@ -41,7 +41,7 @@ use crate::api::{
     handlers::{locked, Callback, DefaultHandler, IntoHandler},
     publisher::Priority,
     query::{QueryConsolidation, Reply, ReplyKeyExpr},
-    sample::{Links, Locality, QoSBuilder},
+    sample::{Links, Locality, QoSBuilder, TargetPeer},
     selector::{Selector, REPLY_KEY_EXPR_ANY_SEL_PARAM},
     session::Session,
 };
@@ -79,6 +79,7 @@ pub struct SessionGetBuilder<'a, 'b, Handler> {
     pub(crate) qos: QoSBuilder,
     pub(crate) destination: Locality,
     pub(crate) links: Links,
+    pub(crate) peer: TargetPeer,
     pub(crate) timeout: Duration,
     pub(crate) handler: Handler,
     pub(crate) value: Option<(ZBytes, Encoding)>,
@@ -283,6 +284,7 @@ impl<'a, 'b> SessionGetBuilder<'a, 'b, DefaultHandler> {
             qos,
             destination,
             links,
+            peer,
             timeout,
             value,
             attachment,
@@ -302,6 +304,7 @@ impl<'a, 'b> SessionGetBuilder<'a, 'b, DefaultHandler> {
             qos,
             destination,
             links,
+            peer,
             timeout,
             value,
             attachment,
@@ -378,6 +381,22 @@ impl<Handler> SessionGetBuilder<'_, '_, Handler> {
         Self { links, ..self }
     }
 
+    /// Addresses the query to the one node `zid` names, instead of to every link whose peers
+    /// declared a matching queryable. This is not the [`target`](Self::target) of the query,
+    /// which says which of the matching queryables answer.
+    ///
+    /// A node with no link is not asked, and the query is not widened to the others. A build
+    /// whose `targeted-query` policy is off refuses a named node when the query is made, and a
+    /// router session refuses it always.
+    #[cfg(feature = "targeted-query")]
+    #[inline]
+    pub fn target_peer(self, zid: zenoh_config::wrappers::ZenohId) -> Self {
+        Self {
+            peer: Some(zid),
+            ..self
+        }
+    }
+
     /// Set the query timeout.
     #[inline]
     pub fn timeout(self, timeout: Duration) -> Self {
@@ -436,6 +455,7 @@ where
             self.qos.into(),
             self.destination,
             self.links,
+            self.peer,
             self.timeout,
             self.value,
             self.attachment,

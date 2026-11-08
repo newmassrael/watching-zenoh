@@ -47,7 +47,7 @@ use crate::api::{
     publisher::Priority,
     querier::Querier,
     query::{QueryConsolidation, Reply, ReplyKeyExpr},
-    sample::{Links, Locality, QoSBuilder},
+    sample::{Links, Locality, QoSBuilder, TargetPeer},
     selector::REPLY_KEY_EXPR_ANY_SEL_PARAM,
     session::Session,
 };
@@ -87,6 +87,7 @@ pub struct QuerierBuilder<'a, 'b> {
     pub(crate) qos: QoSBuilder,
     pub(crate) destination: Locality,
     pub(crate) links: Links,
+    pub(crate) peer: TargetPeer,
     pub(crate) timeout: Duration,
     pub(crate) accept_replies: ReplyKeyExpr,
 }
@@ -166,6 +167,22 @@ impl QuerierBuilder<'_, '_> {
         Self { links, ..self }
     }
 
+    /// Addresses the querier's queries to the one node `zid` names, instead of to every link
+    /// whose peers declared a matching queryable. This is not the [`target`](Self::target) of
+    /// the querier, which says which of the matching queryables answer.
+    ///
+    /// A node with no link is not asked, and a query is not widened to the others. A build
+    /// whose `targeted-query` policy is off refuses a named node when the querier is declared,
+    /// and a router session refuses it always.
+    #[cfg(feature = "targeted-query")]
+    #[inline]
+    pub fn target_peer(self, zid: zenoh_config::wrappers::ZenohId) -> Self {
+        Self {
+            peer: Some(zid),
+            ..self
+        }
+    }
+
     /// Set the query timeout.
     #[inline]
     pub fn timeout(self, timeout: Duration) -> Self {
@@ -194,9 +211,12 @@ impl Wait for QuerierBuilder<'_, '_> {
     fn wait(self) -> <Self as Resolvable>::To {
         let mut key_expr = self.key_expr?;
         key_expr = self.session.declare_keyexpr(key_expr).wait()?;
-        let id =
-            self.session
-                .declare_querier_inner(key_expr.clone(), self.destination, self.links)?;
+        let id = self.session.declare_querier_inner(
+            key_expr.clone(),
+            self.destination,
+            self.links,
+            self.peer,
+        )?;
         Ok(Querier {
             session: self.session.downgrade(),
             id,
@@ -204,6 +224,7 @@ impl Wait for QuerierBuilder<'_, '_> {
             qos: self.qos.into(),
             destination: self.destination,
             links: self.links,
+            peer: self.peer,
             undeclare_on_drop: true,
             target: self.target,
             consolidation: self.consolidation,
@@ -532,6 +553,7 @@ where
             self.querier.qos,
             self.querier.destination,
             self.querier.links,
+            self.querier.peer,
             self.querier.timeout,
             self.value,
             self.attachment,

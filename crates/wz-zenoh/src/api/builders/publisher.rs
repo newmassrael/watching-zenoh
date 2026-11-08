@@ -38,7 +38,7 @@ use crate::{
         encoding::Encoding,
         key_expr::KeyExpr,
         publisher::{Priority, Publisher},
-        sample::{Links, Locality, SampleKind},
+        sample::{Links, Locality, Retry, SampleKind},
     },
     Session,
 };
@@ -170,6 +170,20 @@ impl<T> PublicationBuilder<PublisherBuilder<'_, '_>, T> {
         self
     }
 
+    /// Offers the publication again when no link had room for it, as `retry` says.
+    ///
+    /// A build whose `publisher-admission-retry` policy is off refuses a stated retry when the
+    /// publication is made, and a router session refuses it always.
+    #[cfg(feature = "admission-retry")]
+    #[inline]
+    pub fn admission_retry(
+        mut self,
+        retry: wz_session_core::admission_retry::AdmissionRetry,
+    ) -> Self {
+        self.publisher = self.publisher.admission_retry(retry);
+        self
+    }
+
     /// Changes the [`Reliability`](crate::qos::Reliability) to apply when routing the data.
     ///
     /// **NOTE**: Currently `reliability` does not trigger any data retransmission on the wire. It
@@ -274,6 +288,7 @@ impl Wait for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuilderPut
             self.publisher.is_express,
             self.publisher.destination,
             self.publisher.links,
+            self.publisher.retry,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,
@@ -300,6 +315,7 @@ impl Wait for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuilderDel
             self.publisher.is_express,
             self.publisher.destination,
             self.publisher.links,
+            self.publisher.retry,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,
@@ -390,6 +406,7 @@ pub struct PublisherBuilder<'a, 'b> {
     #[cfg(not(feature = "internal"))]
     pub(crate) destination: Locality,
     pub(crate) links: Links,
+    pub(crate) retry: Retry,
 }
 
 impl Clone for PublisherBuilder<'_, '_> {
@@ -408,6 +425,7 @@ impl Clone for PublisherBuilder<'_, '_> {
             reliability: self.reliability,
             destination: self.destination,
             links: self.links,
+            retry: self.retry,
         }
     }
 }
@@ -491,6 +509,20 @@ impl PublisherBuilder<'_, '_> {
         self
     }
 
+    /// Offers the data again when no link had room for it, as `retry` says.
+    ///
+    /// A build whose `publisher-admission-retry` policy is off refuses a stated retry when the
+    /// publisher is declared, and a router session refuses it always.
+    #[cfg(feature = "admission-retry")]
+    #[inline]
+    pub fn admission_retry(
+        mut self,
+        retry: wz_session_core::admission_retry::AdmissionRetry,
+    ) -> Self {
+        self.retry = Some(retry);
+        self
+    }
+
     /// Changes the [`Reliability`](crate::qos::Reliability) to apply when routing the data.
     ///
     /// **NOTE**: Currently `reliability` does not trigger any data retransmission on the wire. It
@@ -515,9 +547,12 @@ impl Wait for PublisherBuilder<'_, '_> {
         self = self.apply_qos_overwrites();
         let mut key_expr = self.key_expr?;
         key_expr = self.session.declare_keyexpr(key_expr).wait()?;
-        let id = self
-            .session
-            .declare_publisher_inner(&key_expr, self.destination, self.links)?;
+        let id = self.session.declare_publisher_inner(
+            &key_expr,
+            self.destination,
+            self.links,
+            self.retry,
+        )?;
         Ok(Publisher {
             session: self.session.downgrade(),
             id,
@@ -528,6 +563,7 @@ impl Wait for PublisherBuilder<'_, '_> {
             is_express: self.is_express,
             destination: self.destination,
             links: self.links,
+            retry: self.retry,
             #[cfg(feature = "unstable")]
             reliability: self.reliability,
             undeclare_on_drop: true,
@@ -558,6 +594,7 @@ impl Wait for PublicationBuilder<&Publisher<'_>, PublicationBuilderPut> {
             self.publisher.is_express,
             self.publisher.destination,
             self.publisher.links,
+            self.publisher.retry,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,
@@ -582,6 +619,7 @@ impl Wait for PublicationBuilder<&Publisher<'_>, PublicationBuilderDelete> {
             self.publisher.is_express,
             self.publisher.destination,
             self.publisher.links,
+            self.publisher.retry,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,

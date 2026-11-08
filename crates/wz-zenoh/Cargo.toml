@@ -62,6 +62,17 @@ engine-tokio = ["dep:wz-capi-core", "dep:wz-capi-port", "dep:wz-runtime-tokio", 
 # policy is off refuses a set when the entity is built. It is off by default because the surface
 # of this crate holds no item upstream lacks (docs/build-configuration.md, C10).
 link-restriction = ["engine-tokio"]
+# A wz-only door, not upstream's: `target_peer` on the builders of a get and a querier, which
+# addresses the query to the one node whose identity it names. A build whose `targeted-query`
+# policy is off refuses it when the query is made or the querier declared. It is off by default
+# for the reason `link-restriction` is.
+targeted-query = ["engine-tokio"]
+# A wz-only door, not upstream's: `admission_retry` on the builders of a publisher and of a put
+# or a delete, with the types it takes (`AdmissionRetry`, in `sample`). It offers a publish again
+# when no link had room for it, and a build whose `publisher-admission-retry` policy is off
+# refuses it when the publish is made or the publisher declared. It is off by default for the
+# reason `link-restriction` is.
+admission-retry = ["engine-tokio"]
 # `transport_tcp` is what gives the configuration its default listening endpoints (`tcp/[::]:7447`
 # for a router, `tcp/[::]:0` for a peer), as it does upstream; the engine carries the link always.
 transport_tcp = ["zenoh-config/transport_tcp"]

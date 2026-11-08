@@ -89,7 +89,10 @@ use crate::api::{
     publisher::Priority,
     query::{ConsolidationMode, QueryConsolidation, Reply, ReplyKeyExpr},
     queryable::Query,
-    sample::{admit_links, Links, Locality, QoS, Sample, SampleKind, ANY_LINKS},
+    sample::{
+        admit_links, admit_retry, admit_target, Links, Locality, QoS, Retry, Sample, SampleKind,
+        TargetPeer, ANY_LINKS, NO_PEER, NO_RETRY,
+    },
     selector::Selector,
     subscriber::SubscriberKind,
     Id,
@@ -129,6 +132,8 @@ pub(crate) struct Publication<'a> {
     pub(crate) destination: Locality,
     /// The links the publication may be sent on.
     pub(crate) links: Links,
+    /// The retry the publication states for the case where no link had room.
+    pub(crate) retry: Retry,
     #[cfg(feature = "unstable")]
     pub(crate) reliability: Reliability,
     pub(crate) timestamp: Option<uhlc::Timestamp>,
@@ -194,6 +199,9 @@ pub(crate) struct PublisherDeclaration<'a> {
     /// The links the publisher's data may be sent on, which only an engine that reads a set of
     /// links takes a declaration to refuse.
     pub(crate) links: Links,
+    /// The retry the publisher's data states for the case where no link had room, which only an
+    /// engine that reads one takes a declaration to refuse.
+    pub(crate) retry: Retry,
 }
 
 /// What the declaration of a queryable asks of the engine, in the types of this crate: the key as
@@ -246,6 +254,8 @@ pub(crate) struct QueryRequest<'a> {
     pub(crate) destination: Locality,
     /// The links the query may be sent on.
     pub(crate) links: Links,
+    /// The one node the query is addressed to, when it is.
+    pub(crate) peer: TargetPeer,
     pub(crate) timeout: Duration,
     pub(crate) value: Option<(ZBytes, Encoding)>,
     pub(crate) attachment: Option<ZBytes>,
@@ -351,6 +361,9 @@ pub(crate) struct QuerierDeclaration<'a> {
     /// The links the querier's queries may be sent on, which only an engine that reads a set of
     /// links takes a declaration to refuse.
     pub(crate) links: Links,
+    /// The one node the querier's queries are addressed to, which only an engine that reads one
+    /// takes a declaration to refuse.
+    pub(crate) peer: TargetPeer,
 }
 
 /// What a session is run by: the engine that holds its faces, its declarations and its clock.
@@ -477,6 +490,26 @@ impl RouterEngine {
     fn refuse_links(links: Links) -> ZResult<()> {
         if links.is_restricted() {
             bail!("the router engine does not read link restrictions");
+        }
+        Ok(())
+    }
+
+    /// Refuse a publish that states a retry for a link with no room: the router writes to the
+    /// faces by its own tables and has no retry to offer, so taking the publish as it is would
+    /// drop the retry without saying so.
+    fn refuse_retry(retry: Retry) -> ZResult<()> {
+        if retry.is_some() {
+            bail!("the router engine does not read an admission retry");
+        }
+        Ok(())
+    }
+
+    /// Refuse a query that names one node: the router forwards by the tables it holds and has
+    /// no link of a node to send on, so taking the query as it is would widen it to the others
+    /// without saying so.
+    fn refuse_peer(peer: TargetPeer) -> ZResult<()> {
+        if peer.is_some() {
+            bail!("the router engine does not read a query target");
         }
         Ok(())
     }
@@ -877,6 +910,7 @@ impl Engine {
         match self {
             Engine::Router(router) => {
                 RouterEngine::refuse_links(publication.links)?;
+                RouterEngine::refuse_retry(publication.retry)?;
                 tokio_engine::router_publish(&router.node, publication)
             }
             Engine::Tokio(state) => {
@@ -1045,6 +1079,7 @@ impl Engine {
             // the node's own face keeps.
             Engine::Router(router) => {
                 RouterEngine::refuse_links(publisher.links)?;
+                RouterEngine::refuse_retry(publisher.retry)?;
                 let id = router.entity_id()?;
                 router
                     .node
@@ -1061,6 +1096,7 @@ impl Engine {
                     suffix,
                     destination,
                     links: _,
+                    retry: _,
                 } = publisher;
                 let wire = tokio_engine::wire_key_of(scope, suffix.clone());
                 let ask = tokio_engine::interest_of(scope, suffix, destination);
@@ -1187,6 +1223,7 @@ impl Engine {
             Engine::Tokio(state) => tokio_engine::ask(state.shared.engine_ref(), request),
             Engine::Router(router) => {
                 RouterEngine::refuse_links(request.links)?;
+                RouterEngine::refuse_peer(request.peer)?;
                 tokio_engine::router_ask(&router.node, request)
             }
         }
@@ -1206,6 +1243,7 @@ impl Engine {
         match self {
             Engine::Router(router) => {
                 RouterEngine::refuse_links(querier.links)?;
+                RouterEngine::refuse_peer(querier.peer)?;
                 let id = router.entity_id()?;
                 router
                     .node
@@ -1222,6 +1260,7 @@ impl Engine {
                     suffix,
                     destination,
                     links: _,
+                    peer: _,
                 } = querier;
                 let wire = tokio_engine::wire_key_of(scope, suffix.clone());
                 let ask = tokio_engine::interest_of(scope, suffix, destination);
@@ -1728,7 +1767,7 @@ mod tokio_engine {
         matching::{MatchingStatus, MatchingStatusType},
         query::{Reply, ReplyError},
         queryable::{Answer, Query, QueryInner, Replier},
-        sample::{Locality, QoS, Sample, SampleKind},
+        sample::{peer_bytes, Locality, QoS, Sample, SampleKind, TargetPeer},
         Id,
     };
     #[cfg(feature = "unstable")]
@@ -2136,6 +2175,9 @@ mod tokio_engine {
             CongestionControl::BlockFirst => EngineCongestion::BlockFirst,
         })
         .with_express(publication.is_express);
+        if let Some(retry) = publication.retry {
+            options = options.with_admission_retry(retry);
+        }
         #[cfg(feature = "unstable")]
         {
             options = options.with_reliability(match publication.reliability {
@@ -2819,6 +2861,15 @@ mod tokio_engine {
         consolidation: ConsolidationMode,
     }
 
+    /// `options` addressed to the node `peer` names, or as they are when it names none: the
+    /// engine takes the identity as the bytes the node's link handshake gave it.
+    pub(super) fn with_peer(options: QueryOptions, peer: TargetPeer) -> QueryOptions {
+        match peer {
+            Some(zid) => options.with_target_peer(peer_bytes(zid)),
+            None => options,
+        }
+    }
+
     /// Read the query `request` says into what an engine is asked.
     fn asked_of(request: QueryRequest<'_>) -> ZResult<Asked<'_>> {
         let QueryRequest {
@@ -2831,6 +2882,7 @@ mod tokio_engine {
             qos,
             destination,
             links,
+            peer,
             timeout,
             value,
             attachment,
@@ -2881,6 +2933,7 @@ mod tokio_engine {
             QueryTarget::All => options = options.with_target(EngineTarget::All),
             QueryTarget::AllComplete => options = options.with_target(EngineTarget::AllComplete),
         }
+        options = with_peer(options, peer);
         if !parameters.is_empty() {
             options = options.with_parameters(parameters.as_bytes().to_vec());
         }
@@ -4253,11 +4306,13 @@ impl SessionInner {
         key_expr: &KeyExpr,
         destination: Locality,
         links: Links,
+        peer: TargetPeer,
     ) -> ZResult<Id> {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         admit_links(links)?;
+        admit_target(peer)?;
         tracing::trace!("declare_querier({:?})", key_expr);
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
@@ -4268,6 +4323,7 @@ impl SessionInner {
             suffix,
             destination,
             links,
+            peer,
         })?;
         self.queriers().push(QuerierEntry {
             id,
@@ -4370,11 +4426,13 @@ impl SessionInner {
         key_expr: &KeyExpr,
         destination: Locality,
         links: Links,
+        retry: Retry,
     ) -> ZResult<Id> {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         admit_links(links)?;
+        admit_retry(retry)?;
         tracing::trace!("declare_publisher({:?})", key_expr);
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
@@ -4385,6 +4443,7 @@ impl SessionInner {
             suffix,
             destination,
             links,
+            retry,
         })?;
         self.publishers().push(id);
         // A close that ran between the check and the record has not seen this publisher.
@@ -4409,6 +4468,7 @@ impl SessionInner {
         is_express: bool,
         destination: Locality,
         links: Links,
+        retry: Retry,
         #[cfg(feature = "unstable")] reliability: Reliability,
         timestamp: Option<uhlc::Timestamp>,
         #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
@@ -4419,6 +4479,7 @@ impl SessionInner {
             return Err(SessionClosedError.into());
         }
         admit_links(links)?;
+        admit_retry(retry)?;
         // A publication that asks for its instrumentation starts the stack the nodes it crosses
         // record on, with what this node records at the send, and the one that leaves the node
         // has what it records on routing the message out as well.
@@ -4448,6 +4509,7 @@ impl SessionInner {
             is_express,
             destination,
             links,
+            retry,
             #[cfg(feature = "unstable")]
             reliability,
             timestamp,
@@ -4478,6 +4540,7 @@ impl SessionInner {
         qos: QoS,
         destination: Locality,
         links: Links,
+        peer: TargetPeer,
         timeout: Duration,
         value: Option<(ZBytes, Encoding)>,
         attachment: Option<ZBytes>,
@@ -4498,6 +4561,7 @@ impl SessionInner {
             return Err(SessionClosedError.into());
         }
         admit_links(links)?;
+        admit_target(peer)?;
         // A query of a querier counts in the querier's group, which is the session's child. A
         // query of the session's own counts in the session's: a close that waits for callbacks
         // waits for the reply callback of a get as well.
@@ -4554,6 +4618,7 @@ impl SessionInner {
             qos,
             destination,
             links,
+            peer,
             timeout,
             value,
             attachment,
@@ -5158,6 +5223,7 @@ impl WeakSession {
         qos: QoS,
         destination: Locality,
         links: Links,
+        peer: TargetPeer,
         timeout: Duration,
         value: Option<(ZBytes, Encoding)>,
         attachment: Option<ZBytes>,
@@ -5176,6 +5242,7 @@ impl WeakSession {
             qos,
             destination,
             links,
+            peer,
             timeout,
             value,
             attachment,
@@ -5204,6 +5271,7 @@ impl WeakSession {
         is_express: bool,
         destination: Locality,
         links: Links,
+        retry: Retry,
         #[cfg(feature = "unstable")] reliability: Reliability,
         timestamp: Option<uhlc::Timestamp>,
         #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
@@ -5220,6 +5288,7 @@ impl WeakSession {
             is_express,
             destination,
             links,
+            retry,
             #[cfg(feature = "unstable")]
             reliability,
             timestamp,
@@ -5670,8 +5739,10 @@ impl Session {
         key_expr: &KeyExpr,
         destination: Locality,
         links: Links,
+        retry: Retry,
     ) -> ZResult<Id> {
-        self.0.declare_publisher_inner(key_expr, destination, links)
+        self.0
+            .declare_publisher_inner(key_expr, destination, links, retry)
     }
 
     /// Obtain a [`Liveliness`] struct tied to this Zenoh [`Session`].
@@ -5764,6 +5835,7 @@ impl Session {
             qos: qos.into(),
             destination: Locality::default(),
             links: ANY_LINKS,
+            peer: NO_PEER,
             target: QueryTarget::default(),
             consolidation: QueryConsolidation::default(),
             timeout: self.queries_default_timeout(),
@@ -5779,8 +5851,10 @@ impl Session {
         key_expr: KeyExpr,
         destination: Locality,
         links: Links,
+        peer: TargetPeer,
     ) -> ZResult<Id> {
-        self.0.declare_querier_inner(&key_expr, destination, links)
+        self.0
+            .declare_querier_inner(&key_expr, destination, links, peer)
     }
 
     /// Create a [`Publisher`](crate::pubsub::Publisher) for the given key expression.
@@ -5820,6 +5894,7 @@ impl Session {
             reliability: Reliability::DEFAULT,
             destination: Locality::default(),
             links: ANY_LINKS,
+            retry: NO_RETRY,
         }
     }
 
@@ -5950,6 +6025,7 @@ impl Session {
             qos: qos.into(),
             destination: Locality::default(),
             links: ANY_LINKS,
+            peer: NO_PEER,
             timeout: self.queries_default_timeout(),
             value: None,
             attachment: None,
@@ -6011,6 +6087,7 @@ impl Session {
         qos: QoS,
         destination: Locality,
         links: Links,
+        peer: TargetPeer,
         timeout: Duration,
         value: Option<(ZBytes, Encoding)>,
         attachment: Option<ZBytes>,
@@ -6029,6 +6106,7 @@ impl Session {
             qos,
             destination,
             links,
+            peer,
             timeout,
             value,
             attachment,
@@ -6056,6 +6134,7 @@ impl Session {
         is_express: bool,
         destination: Locality,
         links: Links,
+        retry: Retry,
         #[cfg(feature = "unstable")] reliability: Reliability,
         timestamp: Option<uhlc::Timestamp>,
         #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
@@ -6072,6 +6151,7 @@ impl Session {
             is_express,
             destination,
             links,
+            retry,
             #[cfg(feature = "unstable")]
             reliability,
             timestamp,
@@ -7104,6 +7184,7 @@ mod tests {
             is_express: true,
             destination: Locality::Remote,
             links: ANY_LINKS,
+            retry: NO_RETRY,
             #[cfg(feature = "unstable")]
             reliability: Reliability::BestEffort,
             timestamp: Some(uhlc::Timestamp::new(uhlc::NTP64(0x1234_5678_9abc_def0), id)),
@@ -7353,6 +7434,7 @@ mod tests {
             suffix: None,
             destination: Locality::Any,
             links,
+            retry: NO_RETRY,
         };
         let error = session
             .0
@@ -7447,6 +7529,328 @@ mod tests {
         assert_policy_decides(
             "get",
             session.get("demo/links/i").allowed_links(links).wait(),
+        );
+    }
+
+    /// Whether this build's `targeted-query` policy lets a query name a node.
+    fn target_policy_on() -> bool {
+        wz_session_core::policy::SessionPolicy::from_build().targeted_query
+    }
+
+    /// Whether this build's `publisher-admission-retry` policy lets a publish state a retry.
+    fn retry_policy_on() -> bool {
+        wz_session_core::policy::SessionPolicy::from_build().publisher_admission_retry
+    }
+
+    /// A node to address a query to.
+    fn some_peer() -> ZenohId {
+        ZenohId::from_str("c7d1a1").expect("an id")
+    }
+
+    /// A retry the policy accepts.
+    fn some_retry() -> wz_session_core::admission_retry::AdmissionRetry {
+        wz_session_core::admission_retry::AdmissionRetry::new(2, 5).expect("a retry")
+    }
+
+    /// The answer to a call that stated what the policy `policy` governs: taken when the policy
+    /// is `on`, and refused in the policy's own words when it is off.
+    fn assert_word_policy_decides<T>(on: bool, policy: &str, what: &str, result: ZResult<T>) {
+        match result {
+            Ok(_) => assert!(on, "{what}: a build without {policy} took what it states"),
+            Err(error) => {
+                assert!(!on, "{what}: refused with {policy} on: {error}");
+                let text = error.to_string();
+                assert!(
+                    text.contains(&format!("policy {policy} is off")),
+                    "{what}: {text}"
+                );
+            }
+        }
+    }
+
+    /// [`assert_word_policy_decides`] for a call that named `some_peer()`.
+    fn assert_target_decides<T>(what: &str, result: ZResult<T>) {
+        assert_word_policy_decides(target_policy_on(), "targeted-query", what, result);
+    }
+
+    /// [`assert_word_policy_decides`] for a call that stated `some_retry()`.
+    fn assert_retry_decides<T>(what: &str, result: ZResult<T>) {
+        assert_word_policy_decides(retry_policy_on(), "publisher-admission-retry", what, result);
+    }
+
+    #[test]
+    fn a_publication_asks_the_engine_for_the_retry_it_states() {
+        let mut publication = stated_publication(SampleKind::Put);
+        assert_eq!(
+            tokio_engine::publish_options(&publication).admission_retry,
+            None
+        );
+        publication.retry = Some(some_retry());
+        assert_eq!(
+            tokio_engine::publish_options(&publication).admission_retry,
+            Some(some_retry())
+        );
+        publication.kind = SampleKind::Delete;
+        assert_eq!(
+            tokio_engine::publish_options(&publication).admission_retry,
+            Some(some_retry()),
+            "a delete states a retry as a put does"
+        );
+    }
+
+    #[test]
+    fn a_query_asks_the_engine_for_the_node_it_names() {
+        use wz_session_core::query_options::QueryOptions;
+
+        let unaddressed = tokio_engine::with_peer(QueryOptions::get(), NO_PEER);
+        assert_eq!(unaddressed.target_peer, None);
+        let addressed = tokio_engine::with_peer(QueryOptions::get(), Some(some_peer()));
+        let bytes = addressed.target_peer.expect("the node that was named");
+        assert_eq!(bytes.len(), 3, "the identity as many bytes as it has");
+        assert_eq!(ZenohId::try_from(bytes.as_slice()).ok(), Some(some_peer()));
+    }
+
+    #[test]
+    fn a_builder_states_no_peer_and_no_retry_until_it_is_told() {
+        let session = open(peer("c7d1b1")).wait().expect("opens");
+        assert_eq!(session.get("demo/reach/a").peer, None);
+        assert_eq!(session.declare_querier("demo/reach/a").peer, None);
+        assert_eq!(session.declare_publisher("demo/reach/a").retry, None);
+        assert_eq!(session.put("demo/reach/a", "v").publisher.retry, None);
+        assert_eq!(session.delete("demo/reach/a").publisher.retry, None);
+    }
+
+    #[test]
+    fn nothing_stated_is_admitted_whatever_the_policy() {
+        assert!(admit_target(NO_PEER).is_ok());
+        assert!(admit_retry(NO_RETRY).is_ok());
+    }
+
+    #[test]
+    fn a_node_named_is_admitted_only_when_the_policy_is_on() {
+        assert_target_decides("admit_target", admit_target(Some(some_peer())));
+    }
+
+    #[test]
+    fn a_retry_stated_is_admitted_only_when_the_policy_is_on_and_its_numbers_are_a_retry() {
+        assert_retry_decides("admit_retry", admit_retry(Some(some_retry())));
+        // The fields are public, so a retry built by hand can state a zero that `new` refuses.
+        let spin = wz_session_core::admission_retry::AdmissionRetry {
+            attempts: 1,
+            delay_ms: 0,
+        };
+        let error = admit_retry(Some(spin)).expect_err("a retry that waits no time is refused");
+        let text = error.to_string();
+        if retry_policy_on() {
+            assert!(text.contains("at least a millisecond"), "{text}");
+        } else {
+            assert!(
+                text.contains("policy publisher-admission-retry is off"),
+                "the policy is said first: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_query_naming_a_node_is_made_only_when_the_policy_is_on() {
+        let session = open(peer("c7d1b2")).wait().expect("opens");
+        let mut get = session.get("demo/reach/b");
+        get.peer = Some(some_peer());
+        assert_target_decides("get", get.wait());
+        let mut querier = session.declare_querier("demo/reach/b");
+        querier.peer = Some(some_peer());
+        assert_target_decides("querier", querier.wait());
+    }
+
+    #[test]
+    fn a_querier_makes_every_query_with_the_node_it_was_declared_with() {
+        let session = open(peer("c7d1b3")).wait().expect("opens");
+        let mut querier = session
+            .declare_querier("demo/reach/c")
+            .wait()
+            .expect("declares");
+        querier.peer = Some(some_peer());
+        assert_target_decides("querier get", querier.get().wait());
+    }
+
+    #[test]
+    fn a_publish_stating_a_retry_is_made_only_when_the_policy_is_on() {
+        let session = open(peer("c7d1b4")).wait().expect("opens");
+        let mut put = session.put("demo/reach/d", "v");
+        put.publisher.retry = Some(some_retry());
+        assert_retry_decides("put", put.wait());
+        let mut delete = session.delete("demo/reach/d");
+        delete.publisher.retry = Some(some_retry());
+        assert_retry_decides("delete", delete.wait());
+        let mut publisher = session.declare_publisher("demo/reach/d");
+        publisher.retry = Some(some_retry());
+        assert_retry_decides("publisher", publisher.wait());
+    }
+
+    #[test]
+    fn a_publisher_makes_every_operation_with_the_retry_it_was_declared_with() {
+        let session = open(peer("c7d1b5")).wait().expect("opens");
+        let mut publisher = session
+            .declare_publisher("demo/reach/e")
+            .wait()
+            .expect("declares");
+        publisher.retry = Some(some_retry());
+        assert_retry_decides("publisher put", publisher.put("v").wait());
+        assert_retry_decides("publisher delete", publisher.delete().wait());
+    }
+
+    #[test]
+    fn the_router_engine_refuses_a_retry_and_a_node_it_does_not_read() {
+        assert!(RouterEngine::refuse_retry(NO_RETRY).is_ok());
+        let error = RouterEngine::refuse_retry(Some(some_retry())).expect_err("refused");
+        assert!(
+            error
+                .to_string()
+                .contains("the router engine does not read an admission retry"),
+            "{error}"
+        );
+        assert!(RouterEngine::refuse_peer(NO_PEER).is_ok());
+        let error = RouterEngine::refuse_peer(Some(some_peer())).expect_err("refused");
+        assert!(
+            error
+                .to_string()
+                .contains("the router engine does not read a query target"),
+            "{error}"
+        );
+        // The engine of a node takes the refusal from the declaration, whatever the policy of
+        // the build says.
+        let session = with_the_node(|| open(peer("c7d1b6")).wait().expect("opens"));
+        assert!(matches!(&*session.0.engine, Engine::Router(_)));
+        let publisher = |retry| PublisherDeclaration {
+            key: "demo/reach/f",
+            scope: 0,
+            suffix: None,
+            destination: Locality::Any,
+            links: Links::Any,
+            retry,
+        };
+        let error = session
+            .0
+            .engine
+            .declare_publisher(publisher(Some(some_retry())))
+            .expect_err("a node reads no retry");
+        assert!(
+            error
+                .to_string()
+                .contains("the router engine does not read an admission retry"),
+            "{error}"
+        );
+        let id = session
+            .0
+            .engine
+            .declare_publisher(publisher(NO_RETRY))
+            .expect("a publisher that states no retry is declared");
+        session.0.engine.undeclare_publisher(id);
+        let querier = |peer| QuerierDeclaration {
+            key: "demo/reach/f",
+            scope: 0,
+            suffix: None,
+            destination: Locality::Any,
+            links: Links::Any,
+            peer,
+        };
+        let error = session
+            .0
+            .engine
+            .declare_querier(querier(Some(some_peer())))
+            .expect_err("a node reads no query target");
+        assert!(
+            error
+                .to_string()
+                .contains("the router engine does not read a query target"),
+            "{error}"
+        );
+        let id = session
+            .0
+            .engine
+            .declare_querier(querier(NO_PEER))
+            .expect("a querier that names no node is declared");
+        session.0.engine.undeclare_querier(id);
+    }
+
+    #[cfg(feature = "targeted-query")]
+    #[test]
+    fn target_peer_names_the_node_on_each_builder() {
+        let session = open(peer("c7d1b7")).wait().expect("opens");
+        let zid = some_peer();
+        assert_eq!(session.get("demo/reach/g").target_peer(zid).peer, Some(zid));
+        assert_eq!(
+            session
+                .declare_querier("demo/reach/g")
+                .target_peer(zid)
+                .peer,
+            Some(zid)
+        );
+    }
+
+    #[cfg(feature = "targeted-query")]
+    #[test]
+    fn a_node_named_with_target_peer_is_refused_by_a_build_without_the_policy() {
+        let session = open(peer("c7d1b8")).wait().expect("opens");
+        let zid = some_peer();
+        assert_target_decides("get", session.get("demo/reach/h").target_peer(zid).wait());
+        assert_target_decides(
+            "querier",
+            session
+                .declare_querier("demo/reach/h")
+                .target_peer(zid)
+                .wait(),
+        );
+    }
+
+    #[cfg(feature = "admission-retry")]
+    #[test]
+    fn admission_retry_states_the_retry_on_each_builder() {
+        let session = open(peer("c7d1b9")).wait().expect("opens");
+        let retry = some_retry();
+        assert_eq!(
+            session
+                .declare_publisher("demo/reach/i")
+                .admission_retry(retry)
+                .retry,
+            Some(retry)
+        );
+        assert_eq!(
+            session
+                .put("demo/reach/i", "v")
+                .admission_retry(retry)
+                .publisher
+                .retry,
+            Some(retry)
+        );
+        assert_eq!(
+            session
+                .delete("demo/reach/i")
+                .admission_retry(retry)
+                .publisher
+                .retry,
+            Some(retry)
+        );
+    }
+
+    #[cfg(feature = "admission-retry")]
+    #[test]
+    fn a_retry_stated_with_admission_retry_is_refused_by_a_build_without_the_policy() {
+        let session = open(peer("c7d1ba")).wait().expect("opens");
+        let retry = some_retry();
+        assert_retry_decides(
+            "publisher",
+            session
+                .declare_publisher("demo/reach/j")
+                .admission_retry(retry)
+                .wait(),
+        );
+        assert_retry_decides(
+            "put",
+            session
+                .put("demo/reach/j", "v")
+                .admission_retry(retry)
+                .wait(),
         );
     }
 

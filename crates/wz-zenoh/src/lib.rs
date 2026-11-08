@@ -299,6 +299,9 @@ pub mod sample {
     // feature is asked for.
     #[cfg(feature = "link-restriction")]
     pub use wz_session_core::link_restriction::{LinkRestriction, LinkRestrictionError, LinkSlot};
+    // The value `admission_retry` takes and the error of building one.
+    #[cfg(feature = "admission-retry")]
+    pub use wz_session_core::admission_retry::{AdmissionRetry, AdmissionRetryError};
 }
 
 /// # Quality of service primitives
