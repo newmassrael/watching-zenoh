@@ -765,4 +765,165 @@ mod shared_memory {
         plain.close();
         node.close();
     }
+
+    const ASKED: &str = "wz/port/shm/q";
+
+    /// What a queryable was asked with: each query's value, and whether it was handed as a chunk
+    /// of shared memory rather than as bytes.
+    fn answer(engine: &Arc<dyn SessionEngine>) -> (Got, QblId) {
+        let got: Got = Arc::default();
+        let sink = Arc::clone(&got);
+        let id = engine
+            .declare_queryable_on_wire(
+                ASKED.to_owned(),
+                WireKey::literal(),
+                // Not complete, so that a query of best matching is routed to every one.
+                false,
+                Locality::Any,
+                None,
+                Arc::new(move |_holder| {
+                    let sink = Arc::clone(&sink);
+                    Box::new(move |query: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                        let shared = query
+                            .payload_shared()
+                            .and_then(|bytes| bytes.shm_chunk())
+                            .is_some();
+                        sink.lock()
+                            .unwrap()
+                            .push((query.payload().unwrap_or_default().to_vec(), shared));
+                    })
+                }),
+            )
+            .expect("a session has queryables");
+        (got, id)
+    }
+
+    /// A chunk with [`BODY`] in it.
+    fn chunk() -> Arc<ShmBackedPayload> {
+        let mut chunk = ShmBackedPayload::alloc(BODY.len()).expect("a POSIX segment");
+        chunk.write(BODY);
+        Arc::new(chunk)
+    }
+
+    fn first(got: &Got, who: &str) -> (Vec<u8>, bool) {
+        got.lock()
+            .unwrap()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("{who} was handed nothing"))
+    }
+
+    /// `ask` again every 100 ms until each of `got` has been handed something, or [`WAIT`] ends:
+    /// the declarations of the clients reach the node over their links.
+    fn until_each_is_told(got: &[&Got], mut ask: impl FnMut()) {
+        let deadline = Instant::now() + WAIT;
+        let told = |got: &Got| !got.lock().unwrap().is_empty();
+        while !got.iter().all(|got| told(got)) && Instant::now() < deadline {
+            ask();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// A get of the node whose value is a chunk sends the chunk's descriptor to a client that
+    /// negotiated shared memory and its bytes to one that did not, and the node's own queryable
+    /// reads the chunk.
+    #[test]
+    fn a_get_of_the_node_sends_its_chunk_as_a_descriptor_to_a_shm_peer_and_as_bytes_to_another() {
+        let node = open_node_offering_shm();
+        let engine = node.as_engine();
+        let locator = node.listen_locators()[0].clone();
+        let plain = Client::open(vec![locator.clone()]);
+        let shared = client_offering_shm(vec![locator]);
+        assert!(eventually(|| engine.has_shm_peer()));
+
+        let (on_shared, _) = answer(&shared.as_engine());
+        let (on_plain, _) = answer(&plain.as_engine());
+        let (on_node, _) = answer(&engine);
+        let value = chunk();
+        until_each_is_told(&[&on_shared, &on_plain, &on_node], || {
+            node.get_numbered_shm(
+                ASKED,
+                &QueryOptions::default(),
+                value.send_handle(),
+                None,
+                Box::new(|_: &dyn ReplyView| {}),
+                Box::new(|| {}),
+            )
+            .expect("a node asks with a chunk");
+        });
+
+        assert_eq!(
+            first(&on_shared, "the queryable of the client of shared memory"),
+            (BODY.to_vec(), true),
+            "the client that negotiated shared memory was not asked with the chunk"
+        );
+        assert_eq!(
+            first(
+                &on_plain,
+                "the queryable of the client without shared memory"
+            ),
+            (BODY.to_vec(), false),
+            "the client that negotiated no shared memory was not asked with the bytes"
+        );
+        assert_eq!(
+            first(&on_node, "the node's own queryable"),
+            (BODY.to_vec(), true),
+            "the node's own queryable was not asked with the chunk"
+        );
+        shared.close();
+        plain.close();
+        node.close();
+    }
+
+    /// What a client that negotiated shared memory sends the node as a chunk, the value of a get
+    /// and a publication, the node's own queryable and subscriber read as the chunk: the node
+    /// reads a descriptor with the default reader, having been opened over none.
+    #[test]
+    fn a_queryable_and_a_subscriber_of_the_node_read_the_chunks_a_shm_peer_sends() {
+        let node = open_node_offering_shm();
+        let engine = node.as_engine();
+        let shared = client_offering_shm(vec![node.listen_locators()[0].clone()]);
+        assert!(eventually(|| engine.has_shm_peer()));
+        let other = shared.as_engine();
+
+        let (asked, _) = answer(&engine);
+        let (told, _) = subscribe(&engine);
+        let value = chunk();
+        let options = QueryOptions::default();
+        until_each_is_told(&[&asked], || {
+            shared.0.shared.fan_query(
+                Locality::Remote,
+                crate::faces::QueryReach::of(&options),
+                None,
+                |leg| {
+                    leg.query_shm(ASKED, options.clone(), &value, |_| {})
+                        .ok()
+                        .map(|handle| handle.rid())
+                },
+            );
+        });
+        until_each_is_told(&[&told], || {
+            other
+                .publish_shm_on_wire_all(
+                    KEY,
+                    &WireKey::literal(),
+                    value.send_handle(),
+                    &PublishOptions::default(),
+                )
+                .expect("a client publishes a chunk");
+        });
+
+        assert_eq!(
+            first(&asked, "the node's own queryable"),
+            (BODY.to_vec(), true),
+            "the node's own queryable did not read the chunk the client asked with"
+        );
+        assert_eq!(
+            first(&told, "the node's own subscriber"),
+            (BODY.to_vec(), true),
+            "the node's own subscriber did not read the chunk the client published"
+        );
+        shared.close();
+        node.close();
+    }
 }

@@ -3039,7 +3039,10 @@ pub struct HeldRecord {
 /// the tables the route held are let go.
 struct QueryJob {
     handler: Arc<Hosted<HostedQueryHandler>>,
-    request: RequestOwned,
+    /// What the queryable is shown of the query, read while it was routed: a value that went
+    /// through shared memory is read from the chunk the route held, which is let go before the
+    /// job runs.
+    query: wz_session_core::query::RequestQueryView,
     /// The key of the query as the router names it.
     keyexpr: String,
     record: Arc<HeldRecord>,
@@ -3985,17 +3988,12 @@ impl RouterForwarder {
     fn run_query_job(&self, job: QueryJob) {
         let QueryJob {
             handler,
-            request,
+            query: full,
             keyexpr,
             record,
             inbound,
             reliable,
         } = job;
-        let Some(full) = wz_session_core::query::RequestQueryView::of_request(&request, &keyexpr)
-        else {
-            self.release_held(&record);
-            return;
-        };
         let relative = if record.namespaced {
             self.relative_key(&keyexpr)
                 .map(|relative| full.under(relative))
@@ -4016,7 +4014,7 @@ impl RouterForwarder {
         let mut replies = wz_session_core::reply_stage::ReplyStage::new();
         {
             let mut responder = QueryResponder::new(
-                request.rid,
+                full.rid(),
                 view.keyexpr().to_string(),
                 record.accept,
                 view.qos(),
@@ -4052,6 +4050,21 @@ impl RouterForwarder {
         let deliveries = local_publish::DeliveryScope::enter(self);
         self.on_tables().local_get(request);
         deliveries.finish();
+    }
+
+    /// The router's `local_get_shm`, with the deliveries it makes after its tables are let go,
+    /// as [`Self::local_get`]'s.
+    #[cfg(feature = "transport-shm")]
+    pub fn local_get_shm(
+        &self,
+        request: &RequestOwned,
+        value: wz_session_core::extshm::ShmSendHandle,
+        encoding: &wz_session_core::sample::EncodingHint,
+    ) -> Result<(), CodecError> {
+        let deliveries = local_publish::DeliveryScope::enter(self);
+        let result = self.on_tables().local_get_shm(request, value, encoding);
+        deliveries.finish();
+        result
     }
 
     /// The router's `publish`, with the sends it must wait for made after its tables are released.
@@ -10442,26 +10455,34 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         #[cfg(feature = "transport-shm")]
         {
-            use wz_session_core::extshm::ShmRelayHolds;
-            let host = self.host_shm.read().clone()?;
-            let descriptors = wz_session_core::put_payload::shm_descriptors(put);
-            // A payload of one chunk: the buffer a program reads is one range of one page.
-            let [slice] = descriptors.as_slice() else {
-                return None;
-            };
-            let held = self
-                .shm_relay
-                .held(&wz_session_core::extshm::decode_shm_descriptor(slice)?)?;
-            let reservation = held.reserve_for_receiver();
-            let read = host.resolve_shared(&reservation.descriptor());
-            if read.is_some() {
-                // The reader owns the reference now and gives it back with the buffer.
-                reservation.commit();
-            }
-            read
+            self.session_reads_chunk(&wz_session_core::put_payload::shm_descriptors(put))
         }
         #[cfg(not(feature = "transport-shm"))]
         None
+    }
+
+    /// The buffer the node's own session reads a value of shared memory as, the value being the
+    /// chunks `descriptors` name: the chunk the pass of the routed message holds, read through
+    /// the reader of the program that holds the node with a reference of its own. `None` when the
+    /// value is not one chunk, when the chunk is not held here, and when nothing here reads it.
+    #[cfg(feature = "transport-shm")]
+    fn session_reads_chunk(&self, descriptors: &[&[u8]]) -> Option<wz_session_core::link::RxBytes> {
+        use wz_session_core::extshm::ShmRelayHolds;
+        let host = self.host_shm.read().clone()?;
+        // A value of one chunk: the buffer a program reads is one range of one page.
+        let [slice] = descriptors else {
+            return None;
+        };
+        let held = self
+            .shm_relay
+            .held(&wz_session_core::extshm::decode_shm_descriptor(slice)?)?;
+        let reservation = held.reserve_for_receiver();
+        let read = host.resolve_shared(&reservation.descriptor());
+        if read.is_some() {
+            // The reader owns the reference now and gives it back with the buffer.
+            reservation.commit();
+        }
+        read
     }
 
     /// Hand a publication to the subscribers this router hosts: `full` carries its key as the
@@ -10976,6 +10997,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         else {
             return 0;
         };
+        // A value that went through shared memory is not in the Request, which names its chunk:
+        // the session reads the chunk the pass of this Query holds, as it reads a Put's. A value
+        // it cannot read is not shown as no value; the query is not handed to the session, as a
+        // session drops a query whose slice does not resolve.
+        #[cfg(feature = "transport-shm")]
+        let view = match &request.body {
+            wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
+                match wz_session_core::request_build::query_value_shm_parts(query) {
+                    None => view,
+                    Some((encoding, descriptors)) => match self.session_reads_chunk(&descriptors) {
+                        Some(bytes) => view.with_lent_value(encoding, bytes),
+                        None => return 0,
+                    },
+                }
+            }
+            #[allow(unreachable_patterns)]
+            _ => view,
+        };
         // What the queryables of the node's own session are handed: the key without the
         // namespace of the session. A query whose key is not under it is not theirs.
         let relative_view = self
@@ -10992,6 +11031,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameters,
             );
         let mut dispatched = 0;
+        // The whole query, which each job carries: its call shows it under the key it names.
+        let whole = &view;
         for (namespaced, handler) in &matched {
             let view = if *namespaced {
                 match &relative_view {
@@ -10999,7 +11040,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     None => continue,
                 }
             } else {
-                &view
+                whole
             };
             dispatched += 1;
             let qid = self.pending.guard().allocate(LOCAL_FACE, fan, deadline);
@@ -11019,7 +11060,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // is sent by the last branch to end, whichever way this goes.
             let job = Box::new(QueryJob {
                 handler: Arc::clone(handler),
-                request: request.clone(),
+                query: whole.clone(),
                 keyexpr: keyexpr.to_owned(),
                 record,
                 inbound,
@@ -11196,6 +11237,41 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.route_request(LOCAL_FACE, Region::Local, true, request, None);
     }
 
+    /// [`Self::local_get`] for a Query whose value is a chunk of shared memory its owner holds,
+    /// as [`publish_shm_with`](Self::publish_shm_with) is for a Put: `request` is built with no
+    /// value, and the chunk's descriptor is attached here under `encoding`. A face that
+    /// negotiated shared memory is sent the descriptor with a reference of its own, any other
+    /// face the bytes, and a queryable of the node's own session the chunk as its reader reads
+    /// it. The caller may let go of `value` when this returns.
+    #[cfg(feature = "transport-shm")]
+    pub fn local_get_shm(
+        &self,
+        request: &RequestOwned,
+        value: wz_session_core::extshm::ShmSendHandle,
+        encoding: &wz_session_core::sample::EncodingHint,
+    ) -> Result<(), CodecError> {
+        // Only the descriptor is wanted of this reservation: the reference it took goes back
+        // when it drops, and each face is sent a reference of its own.
+        let descriptor = value.reserve_for_receiver().descriptor();
+        let _pass = self.shm_relay.adopt(descriptor, value);
+        let mut request = request.clone();
+        let wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) = &mut request.body
+        else {
+            unreachable!("a query is built as a Query body")
+        };
+        wz_session_core::request_build::attach_query_value_shm(query, encoding, &descriptor)?;
+        #[cfg(feature = "routing-namespace")]
+        if let Some(local) = &self.fwd.local_namespace {
+            if wz_session_core::namespace::apply_egress_request(&local.prefix, &mut request).is_ok()
+            {
+                self.route_request_held(LOCAL_FACE, Region::Local, true, &request, None);
+            }
+            return Ok(());
+        }
+        self.route_request_held(LOCAL_FACE, Region::Local, true, &request, None);
+        Ok(())
+    }
+
     /// Route an inbound `Request` (a Query) through the router's full zenoh
     /// `compute_query_route` (`zenoh/src/net/routing/hat/router/queries.rs`
     /// @ `fn compute_query_route`) + `compute_final_route`
@@ -11244,6 +11320,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         else {
             return;
         };
+        self.route_request_held(inbound, tier, reliable, request, group);
+    }
+
+    /// [`Self::route_request`] once whatever holds the chunks of the Query's value holds them:
+    /// the pass of a Query that arrived on a face, or the one [`Self::local_get_shm`] adopted
+    /// for a value of the node's own session, which no face's negotiation admits.
+    fn route_request_held(
+        &self,
+        inbound: FaceId,
+        tier: Region,
+        reliable: bool,
+        request: &RequestOwned,
+        group: Option<GroupMember>,
+    ) {
         // Resolve the query keyexpr + the inbound face's zid/link in one scoped
         // borrow (released before any send re-borrows `faces`).
         let resolved = {

@@ -1494,32 +1494,34 @@ pub(crate) fn issue_get_on_node(
         Some(params) if !params.is_empty() => opts.with_parameters(params),
         _ => opts,
     };
-    // A value in shared memory goes out as its bytes: the node carries no descriptor yet.
-    let opts = match &value {
-        None => opts,
+    let leg = LegReply {
+        closure,
+        gate,
+        _registration: registration.clone(),
+    };
+    let on_reply = Box::new(move |view: &dyn ReplyView| leg.fire(view));
+    // A value in shared memory goes as the chunk: its descriptor to a face that negotiated shared
+    // memory, its bytes to any other, as a registry's get sends it (`query_leg`).
+    let asked = match &value {
+        None => node.get_numbered(&keyexpr, &opts, None, on_reply, Box::new(|| {})),
         #[cfg(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
         ))]
-        Some(chunk) => opts.with_payload(chunk.bytes().to_vec()),
+        Some(chunk) => node.get_numbered_shm(
+            &keyexpr,
+            &opts,
+            chunk.send_handle(),
+            None,
+            on_reply,
+            Box::new(|| {}),
+        ),
         #[cfg(not(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
         )))]
         Some(never) => match *never {},
     };
-    let leg = LegReply {
-        closure,
-        gate,
-        _registration: registration.clone(),
-    };
-    let asked = node.get_numbered(
-        &keyexpr,
-        &opts,
-        None,
-        Box::new(move |view: &dyn ReplyView| leg.fire(view)),
-        Box::new(|| {}),
-    );
     let Ok(id) = asked else {
         return Z_EINVAL;
     };

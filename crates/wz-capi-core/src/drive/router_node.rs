@@ -220,6 +220,50 @@ impl RouterState {
         on_reply: ReplyHandler,
         on_final: FinalHandler,
     ) -> Result<u64, String> {
+        let (rid, request) = self.hold_query(keyexpr, options, ingress, on_reply, on_final)?;
+        self.forwarder.local_get(&request);
+        Ok(rid)
+    }
+
+    /// [`Self::get_numbered`] for a query whose value is a chunk of shared memory its owner holds:
+    /// a face that negotiated shared memory is sent the chunk's descriptor, any other face its
+    /// bytes, and a queryable of the node's own session the chunk as the node's reader reads it.
+    /// The value is `value` under the encoding `options` name, and not `options`' payload, which
+    /// is not sent.
+    #[cfg(feature = "transport-shm")]
+    pub fn get_numbered_shm(
+        &self,
+        keyexpr: &str,
+        options: &QueryOptions,
+        value: wz_session_core::extshm::ShmSendHandle,
+        ingress: Option<ReplyIngress>,
+        on_reply: ReplyHandler,
+        on_final: FinalHandler,
+    ) -> Result<u64, String> {
+        // The value rides beside the query: a query built with a value of its own would carry
+        // two, which the chain refuses.
+        let mut options = options.clone();
+        options.payload = None;
+        let encoding = options.encoding.take().unwrap_or_default();
+        let (rid, request) = self.hold_query(keyexpr, &options, ingress, on_reply, on_final)?;
+        if let Err(error) = self.forwarder.local_get_shm(&request, value, &encoding) {
+            // Nothing was asked, so nothing will end the query held for it.
+            self.cancel_get(rid);
+            return Err(format!("the query could not be built: {error:?}"));
+        }
+        Ok(rid)
+    }
+
+    /// Build the query `options` describe on `keyexpr` and hold it on the node's own face, which
+    /// is told its replies and its end: the id it was held under and the Request to route.
+    fn hold_query(
+        &self,
+        keyexpr: &str,
+        options: &QueryOptions,
+        ingress: Option<ReplyIngress>,
+        on_reply: ReplyHandler,
+        on_final: FinalHandler,
+    ) -> Result<(u64, wz_session_core::wire::RequestOwned), String> {
         use wz_session_core::request_build::{build_request_query, build_request_query_with_meta};
 
         let rid = self.next_request.fetch_add(1, Ordering::Relaxed);
@@ -241,8 +285,7 @@ impl RouterState {
             on_reply,
             on_final,
         });
-        self.forwarder.local_get(&request);
-        Ok(rid)
+        Ok((rid, request))
     }
 
     /// Publish a chunk of shared memory as the node's own session: see
@@ -541,12 +584,13 @@ pub(crate) fn open_router_blocking(
     policy.install_on(&*forwarder);
     #[cfg(not(feature = "interceptors"))]
     let _ = policy;
-    // The program's own reader of shared memory, for the subscribers of the node's session: a
-    // descriptor is read into the buffer the program works with.
+    // How the node's own session reads a descriptor it is handed (a Put its subscribers are
+    // told, the value of a Query its queryables are asked): the reader the program opened the
+    // node over, read into the buffer the program works with, or the default POSIX reader. Until
+    // a node took the default, one opened over a set of clients or over none, as the C ABI opens
+    // it, told its own session nothing of a descriptor.
     #[cfg(feature = "transport-shm")]
-    if let Some(crate::faces::ShmReader::Host(make)) = &shm_clients {
-        forwarder.set_host_shm_resolver(Arc::from(make()));
-    }
+    forwarder.set_host_shm_resolver(Arc::from(crate::faces::node_shm_resolver(&shm_clients)));
     // A peer dials the nodes its neighbours tell it of, as the policy of its gossip admits
     // (upstream's autoconnect): the forwarder emits an intent for each node it learns of from
     // the topology it is flooded, and the face loop dials it. Without it, a peer reaches only

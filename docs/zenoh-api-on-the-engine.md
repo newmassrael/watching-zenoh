@@ -1039,7 +1039,11 @@ Each lands whole with its surface lines, tests and faults in one round.
       on the stack of an instrumented message, query and reply (`timestamp_instrumentation`
       48 of 48); a subscriber or queryable the node hosts is pushed to the faces that asked for
       it and withdrawn from them; the node's session reads a descriptor into its own buffer and
-      publishes a chunk of shared memory (`shm` 10 of 10); a get of the node's session has a
+      publishes a chunk of shared memory (`shm` 10 of 10), asks with a chunk as the value of a get
+      (its descriptor to a face that negotiated shared memory, its bytes to any other,
+      `RouterState::get_numbered_shm`), and reads a descriptor for its own subscribers and
+      queryables with the reader the program opened it over or the default POSIX reader (a query
+      job carries the view read while the route held the chunk); a get of the node's session has a
       deadline and ends with the `Timeout` reply; a watch is answered after its first verdict;
       and the face thread runs inside a current-thread runtime, which is how the callbacks of
       the top crate know to queue the items they are handed. **A defect the unit tests found in

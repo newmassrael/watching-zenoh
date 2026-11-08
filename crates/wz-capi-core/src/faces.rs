@@ -2109,6 +2109,18 @@ fn shm_resolver_of(
 #[cfg(not(feature = "transport-shm"))]
 fn install_shm_reader(_session: &TokioSession, _clients: &OpenShmClients) {}
 
+/// The reader a router node's own session reads a descriptor with: the one it was opened over,
+/// as each session of a registry reads with its own ([`install_shm_reader`]), and the default
+/// POSIX reader a session is built with when it was opened over none. A node holds no session of
+/// its own to keep a default in, so the default is named here.
+#[cfg(all(feature = "transport-shm", feature = "router-node"))]
+pub(crate) fn node_shm_resolver(
+    clients: &OpenShmClients,
+) -> Box<dyn wz_session_core::extshm::ShmResolver + Send + Sync> {
+    shm_resolver_of(clients)
+        .unwrap_or_else(|| Box::new(wz_runtime_tokio::shm_provider::PosixShmResolver))
+}
+
 impl SharedSession {
     /// `zid` is this session's own 16-byte identity — the same one the faces put
     /// on the wire. The local plane takes it so its loopback samples carry the

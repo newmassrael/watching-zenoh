@@ -306,7 +306,13 @@ pub struct RequestQueryView {
     parameters: Option<Vec<u8>>,
     attachment: Option<Vec<u8>>,
     source_info: Option<crate::sample::SourceInfo>,
-    value: Option<(crate::sample::EncodingHint, Vec<u8>)>,
+    value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
+    /// Whether `value` is the chunk its holder lent ([`RequestQueryView::with_lent_value`]) and
+    /// not a copy of the bytes the Request carried, which is what [`QueryView::payload_shared`]
+    /// answers with.
+    ///
+    /// [`QueryView::payload_shared`]: crate::query_sink::QueryView::payload_shared
+    value_is_lent: bool,
     #[cfg(feature = "pubsub-ts-stack")]
     ts_stack: Option<crate::ts_stack::TsStack>,
 }
@@ -330,7 +336,9 @@ impl RequestQueryView {
             parameters: query_parameters(query).map(<[u8]>::to_vec),
             attachment: extract_query_attachment(query).map(<[u8]>::to_vec),
             source_info: extract_query_source_info(query),
-            value: extract_query_value(query).map(|(encoding, bytes)| (encoding, bytes.to_vec())),
+            value: extract_query_value(query)
+                .map(|(encoding, bytes)| (encoding, crate::link::RxBytes::from(bytes.to_vec()))),
+            value_is_lent: false,
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: crate::ts_stack::read_ts_stack(
                 request.extensions.entries().unwrap_or(&[]).iter(),
@@ -344,6 +352,25 @@ impl RequestQueryView {
         Self {
             keyexpr: alloc::string::String::from(keyexpr),
             ..self.clone()
+        }
+    }
+
+    /// The same query with its value read as `bytes`, under `encoding`. A Request whose value
+    /// went through shared memory carries the chunk's descriptor and not the value, so whoever
+    /// holds the chunk lends what it reads (`request_build::query_value_shm_parts`, a function of
+    /// a build with shared memory, says which chunk and under which encoding), and
+    /// [`QueryView::payload_shared`] answers with it.
+    ///
+    /// [`QueryView::payload_shared`]: crate::query_sink::QueryView::payload_shared
+    pub fn with_lent_value(
+        self,
+        encoding: crate::sample::EncodingHint,
+        bytes: crate::link::RxBytes,
+    ) -> Self {
+        Self {
+            value: Some((encoding, bytes)),
+            value_is_lent: true,
+            ..self
         }
     }
 }
@@ -368,6 +395,12 @@ impl crate::query_sink::QueryView for RequestQueryView {
     }
     fn payload(&self) -> Option<&[u8]> {
         self.value.as_ref().map(|(_, bytes)| bytes.as_slice())
+    }
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        self.value
+            .as_ref()
+            .filter(|_| self.value_is_lent)
+            .map(|(_, bytes)| bytes)
     }
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.value.as_ref().map(|(encoding, _)| encoding)

@@ -414,6 +414,36 @@ pub fn query_value_shm_descriptors(query: &crate::wire::parts::QueryOwned) -> Ve
         .unwrap_or_default()
 }
 
+/// transport-shm -- what a Query whose value went through shared memory says of that value: its
+/// encoding, and the serialized descriptor of each of its shared-memory slices in order. A reader
+/// of the value (a queryable of the session that routed the Query) reads the chunks the
+/// descriptors name and takes the encoding from here. `None` for a Query whose value is bytes, or
+/// that has none, or whose value is slices none of which is a descriptor.
+#[cfg(all(feature = "codec-request", feature = "transport-shm"))]
+pub fn query_value_shm_parts(
+    query: &crate::wire::parts::QueryOwned,
+) -> Option<(crate::sample::EncodingHint, Vec<&[u8]>)> {
+    use crate::wire::parts::QueryExtEntryOwnedVariant;
+    use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
+
+    let (index, slices) = sliced_query_value(query)?;
+    let descriptors = crate::put_payload::shm_descriptors_of(slices);
+    if descriptors.is_empty() {
+        return None;
+    }
+    let entry = crate::held_list::HeldList::entries(&query.extensions)?.get(index)?;
+    let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) = &entry.body else {
+        return None;
+    };
+    let QueryValueZbufAfterShm::AfterShm { encoding, .. } = &value.after_shm else {
+        return None;
+    };
+    Some((
+        crate::sample::EncodingHint::from_codec(encoding),
+        descriptors,
+    ))
+}
+
 /// transport-shm -- re-express the shared-memory slices of a Query's VALUE for ONE peer, in place:
 /// the query twin of [`crate::put_payload::relay_shm_slices`], and upstream's `map_to_partner`
 /// run on the value of a `Request` (`io/zenoh-transport/src/common/shm/interop.rs` @
