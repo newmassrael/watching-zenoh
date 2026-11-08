@@ -389,10 +389,15 @@ fn wz_storage_host_plugins_section_from_a_config_file_serves_via_pico() {
         "the file's storage is hosted as the file declared it\n--- z_get ---\n{out}"
     );
     let data = pico_get_output(&z_get, "boot/**", &addr);
+    // The host's whole log goes into the failure: this read came back empty once on a hosted
+    // run and passed on the head before it, and the log is what says whether the put reached
+    // the first session before the storage was started on it, or the second session was bound
+    // after the query was answered.
+    let host_log = read_captured(&mut h_reader);
     assert_eq!(
         pico_body_at(&data, "boot/a").as_deref(),
         Some("stored-at-boot"),
-        "and it serves: the put the first session carried is read back\n--- z_get ---\n{data}"
+        "and it serves: the put the first session carried is read back\n--- z_get ---\n{data}\n--- host ---\n{host_log}"
     );
 
     let _ = host.child_mut().kill();

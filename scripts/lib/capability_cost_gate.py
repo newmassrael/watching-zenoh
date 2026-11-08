@@ -224,6 +224,21 @@ CASES: tuple[Case, ...] = (
     # note gives the C images) and 3,500, to the hundred. The C images were not taken apart
     # symbol by symbol; the window above is all that grew them, and the next hosted reading
     # corrects an offset that is off.
+    # 2026-11-09, later -- hosted run 42505060630 (`7e94c0a7fd`): the hosted lane read every case
+    # of the window above under its budget at `232aa60694` (`capic-default` 11,162,484), which
+    # fixes the pico offsets; the C offset is +1,012 over `pc2` (11,161,472 there), not the 3,184
+    # the note above reused. At `7e94c0a7fd` `capic-default` reads 11,179,716 (11,516 over) and
+    # `capic-default-lean` 9,602,204 (11,604 over); no other case moved. TAKEN APART on `pc2`
+    # (`size -A` and `nm -S` of both builds, `capic-default`, 11,161,472 -> 11,178,704): every
+    # symbol keeps its size and the code sections are equal; the whole +17,232 that `size`
+    # counts is `.rela.dyn` (718 relative relocations of 24 bytes), and `.data.rel.ro` grew by
+    # 12,000 beside it. Static tables of pointers, which fits the diff of the round: the
+    # document history of `wz-capture` (`doc_revision.rs`, +1,106 lines: revision 60 and the key
+    # sets the row-facts document is held to), which the frame writer of the `e2e-sender`
+    # feature reaches. A pointer table in a shared object costs its data and a relocation for
+    # each pointer. The table that holds them was not named by a symbol (they are anonymous
+    # constants). Chosen growth of the row-facts round, not a leak; the budget is the hosted
+    # reading and 3,500, to the hundred.
     Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_868_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST, COOP_ENGINE),
@@ -782,7 +797,7 @@ CASES: tuple[Case, ...] = (
     # `capic-default-lean`'s +14,156, split in its note), the face table +8,792
     # (`capic-router-node`'s note of this day). Chosen growth; the budget is that reading, 3,600
     # and 3,500, to the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_168_200,
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_183_300,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST),
          exports=837,
@@ -842,7 +857,7 @@ CASES: tuple[Case, ...] = (
          "group,gossip,transport_tls,transport_quic,transport_quic_datagram,transport_ws,"
          "transport_unixsock-stream,transport_multilink,auth_pubkey,e2e-sender,"
          "transport_compression,auth_usrpwd,interceptors,multicast-transport",
-         9_590_600,
+         9_605_800,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),
