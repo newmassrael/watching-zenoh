@@ -155,6 +155,27 @@ pub(crate) fn admit_retry(_retry: Retry) -> ZResult<()> {
     Ok(())
 }
 
+/// Whether a publish states that it reaches every link it may use or none.
+pub(crate) type Atomic = bool;
+
+/// What a publish that states nothing has: each link on its own terms, as upstream's does.
+pub(crate) const NOT_ATOMIC: Atomic = false;
+
+/// Whether this build lets a publish state the all-or-none form: unstated always, stated only
+/// when the build's `multi-route-atomic-tx` policy is on. The refusal is the policy's own text,
+/// as an error of the call that stated it.
+#[cfg(feature = "engine-tokio")]
+pub(crate) fn admit_atomic(atomic: Atomic) -> ZResult<()> {
+    wz_session_core::atomic_tx::admit_in_build(atomic)
+        .map_err(|refusal| zerror!("{refusal}").into())
+}
+
+/// A build with no engine has no links to reach, so nothing is stated and nothing to admit.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn admit_atomic(_atomic: Atomic) -> ZResult<()> {
+    Ok(())
+}
+
 /// The bytes the engine names the node `zid` by: its identity at the size it has.
 #[cfg(feature = "engine-tokio")]
 pub(crate) fn peer_bytes(zid: ZenohId) -> Vec<u8> {

@@ -54,7 +54,7 @@ use crate::api::{
     handlers::DefaultHandler,
     key_expr::KeyExpr,
     matching::{MatchingStatus, MatchingStatusType},
-    sample::{Links, Locality, Retry, Sample, SampleFields},
+    sample::{Atomic, Links, Locality, Retry, Sample, SampleFields},
     session::{UndeclarableSealed, WeakSession},
     Id,
 };
@@ -108,6 +108,7 @@ pub struct Publisher<'a> {
     pub(crate) destination: Locality,
     pub(crate) links: Links,
     pub(crate) retry: Retry,
+    pub(crate) atomic: Atomic,
     #[cfg(feature = "unstable")]
     pub(crate) reliability: Reliability,
     pub(crate) undeclare_on_drop: bool,
@@ -497,6 +498,7 @@ impl Sink<Sample> for Publisher<'_> {
             self.destination,
             self.links,
             self.retry,
+            self.atomic,
             #[cfg(feature = "unstable")]
             self.reliability,
             None,

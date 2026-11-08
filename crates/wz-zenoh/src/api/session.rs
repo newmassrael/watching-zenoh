@@ -90,8 +90,8 @@ use crate::api::{
     query::{ConsolidationMode, QueryConsolidation, Reply, ReplyKeyExpr},
     queryable::Query,
     sample::{
-        admit_links, admit_retry, admit_target, Links, Locality, QoS, Retry, Sample, SampleKind,
-        TargetPeer, ANY_LINKS, NO_PEER, NO_RETRY,
+        admit_atomic, admit_links, admit_retry, admit_target, Atomic, Links, Locality, QoS, Retry,
+        Sample, SampleKind, TargetPeer, ANY_LINKS, NOT_ATOMIC, NO_PEER, NO_RETRY,
     },
     selector::Selector,
     subscriber::SubscriberKind,
@@ -134,6 +134,8 @@ pub(crate) struct Publication<'a> {
     pub(crate) links: Links,
     /// The retry the publication states for the case where no link had room.
     pub(crate) retry: Retry,
+    /// Whether the publication states that it reaches every link it may use or none.
+    pub(crate) atomic: Atomic,
     #[cfg(feature = "unstable")]
     pub(crate) reliability: Reliability,
     pub(crate) timestamp: Option<uhlc::Timestamp>,
@@ -202,6 +204,9 @@ pub(crate) struct PublisherDeclaration<'a> {
     /// The retry the publisher's data states for the case where no link had room, which only an
     /// engine that reads one takes a declaration to refuse.
     pub(crate) retry: Retry,
+    /// Whether the publisher's data states that it reaches every link it may use or none, which
+    /// only an engine that reads the statement takes a declaration to accept.
+    pub(crate) atomic: Atomic,
 }
 
 /// What the declaration of a queryable asks of the engine, in the types of this crate: the key as
@@ -500,6 +505,16 @@ impl RouterEngine {
     fn refuse_retry(retry: Retry) -> ZResult<()> {
         if retry.is_some() {
             bail!("the router engine does not read an admission retry");
+        }
+        Ok(())
+    }
+
+    /// Refuse a publish that states all of its links or none: the router writes to the faces
+    /// by its own tables and reserves room on none of them, so taking the publish as it is
+    /// would send it to each on its own terms without saying so.
+    fn refuse_atomic(atomic: Atomic) -> ZResult<()> {
+        if atomic {
+            bail!("the router engine does not read an all-or-none publish");
         }
         Ok(())
     }
@@ -911,6 +926,7 @@ impl Engine {
             Engine::Router(router) => {
                 RouterEngine::refuse_links(publication.links)?;
                 RouterEngine::refuse_retry(publication.retry)?;
+                RouterEngine::refuse_atomic(publication.atomic)?;
                 tokio_engine::router_publish(&router.node, publication)
             }
             Engine::Tokio(state) => {
@@ -1080,6 +1096,7 @@ impl Engine {
             Engine::Router(router) => {
                 RouterEngine::refuse_links(publisher.links)?;
                 RouterEngine::refuse_retry(publisher.retry)?;
+                RouterEngine::refuse_atomic(publisher.atomic)?;
                 let id = router.entity_id()?;
                 router
                     .node
@@ -1097,6 +1114,7 @@ impl Engine {
                     destination,
                     links: _,
                     retry: _,
+                    atomic: _,
                 } = publisher;
                 let wire = tokio_engine::wire_key_of(scope, suffix.clone());
                 let ask = tokio_engine::interest_of(scope, suffix, destination);
@@ -2177,6 +2195,9 @@ mod tokio_engine {
         .with_express(publication.is_express);
         if let Some(retry) = publication.retry {
             options = options.with_admission_retry(retry);
+        }
+        if publication.atomic {
+            options = options.with_atomic_tx();
         }
         #[cfg(feature = "unstable")]
         {
@@ -4427,12 +4448,14 @@ impl SessionInner {
         destination: Locality,
         links: Links,
         retry: Retry,
+        atomic: Atomic,
     ) -> ZResult<Id> {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
         admit_links(links)?;
         admit_retry(retry)?;
+        admit_atomic(atomic)?;
         tracing::trace!("declare_publisher({:?})", key_expr);
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
@@ -4444,6 +4467,7 @@ impl SessionInner {
             destination,
             links,
             retry,
+            atomic,
         })?;
         self.publishers().push(id);
         // A close that ran between the check and the record has not seen this publisher.
@@ -4469,6 +4493,7 @@ impl SessionInner {
         destination: Locality,
         links: Links,
         retry: Retry,
+        atomic: Atomic,
         #[cfg(feature = "unstable")] reliability: Reliability,
         timestamp: Option<uhlc::Timestamp>,
         #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
@@ -4480,6 +4505,7 @@ impl SessionInner {
         }
         admit_links(links)?;
         admit_retry(retry)?;
+        admit_atomic(atomic)?;
         // A publication that asks for its instrumentation starts the stack the nodes it crosses
         // record on, with what this node records at the send, and the one that leaves the node
         // has what it records on routing the message out as well.
@@ -4510,6 +4536,7 @@ impl SessionInner {
             destination,
             links,
             retry,
+            atomic,
             #[cfg(feature = "unstable")]
             reliability,
             timestamp,
@@ -5272,6 +5299,7 @@ impl WeakSession {
         destination: Locality,
         links: Links,
         retry: Retry,
+        atomic: Atomic,
         #[cfg(feature = "unstable")] reliability: Reliability,
         timestamp: Option<uhlc::Timestamp>,
         #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
@@ -5289,6 +5317,7 @@ impl WeakSession {
             destination,
             links,
             retry,
+            atomic,
             #[cfg(feature = "unstable")]
             reliability,
             timestamp,
@@ -5740,9 +5769,10 @@ impl Session {
         destination: Locality,
         links: Links,
         retry: Retry,
+        atomic: Atomic,
     ) -> ZResult<Id> {
         self.0
-            .declare_publisher_inner(key_expr, destination, links, retry)
+            .declare_publisher_inner(key_expr, destination, links, retry, atomic)
     }
 
     /// Obtain a [`Liveliness`] struct tied to this Zenoh [`Session`].
@@ -5895,6 +5925,7 @@ impl Session {
             destination: Locality::default(),
             links: ANY_LINKS,
             retry: NO_RETRY,
+            atomic: NOT_ATOMIC,
         }
     }
 
@@ -6135,6 +6166,7 @@ impl Session {
         destination: Locality,
         links: Links,
         retry: Retry,
+        atomic: Atomic,
         #[cfg(feature = "unstable")] reliability: Reliability,
         timestamp: Option<uhlc::Timestamp>,
         #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
@@ -6152,6 +6184,7 @@ impl Session {
             destination,
             links,
             retry,
+            atomic,
             #[cfg(feature = "unstable")]
             reliability,
             timestamp,
@@ -7185,6 +7218,7 @@ mod tests {
             destination: Locality::Remote,
             links: ANY_LINKS,
             retry: NO_RETRY,
+            atomic: NOT_ATOMIC,
             #[cfg(feature = "unstable")]
             reliability: Reliability::BestEffort,
             timestamp: Some(uhlc::Timestamp::new(uhlc::NTP64(0x1234_5678_9abc_def0), id)),
@@ -7435,6 +7469,7 @@ mod tests {
             destination: Locality::Any,
             links,
             retry: NO_RETRY,
+            atomic: NOT_ATOMIC,
         };
         let error = session
             .0
@@ -7542,6 +7577,11 @@ mod tests {
         wz_session_core::policy::SessionPolicy::from_build().publisher_admission_retry
     }
 
+    /// Whether this build's `multi-route-atomic-tx` policy lets a publish state all-or-none.
+    fn atomic_policy_on() -> bool {
+        wz_session_core::policy::SessionPolicy::from_build().multi_route_atomic_tx
+    }
+
     /// A node to address a query to.
     fn some_peer() -> ZenohId {
         ZenohId::from_str("c7d1a1").expect("an id")
@@ -7576,6 +7616,44 @@ mod tests {
     /// [`assert_word_policy_decides`] for a call that stated `some_retry()`.
     fn assert_retry_decides<T>(what: &str, result: ZResult<T>) {
         assert_word_policy_decides(retry_policy_on(), "publisher-admission-retry", what, result);
+    }
+
+    /// [`assert_word_policy_decides`] for a call that stated all-or-none.
+    fn assert_atomic_decides<T>(what: &str, result: ZResult<T>) {
+        assert_word_policy_decides(atomic_policy_on(), "multi-route-atomic-tx", what, result);
+    }
+
+    #[test]
+    fn a_publication_asks_the_engine_for_the_all_or_none_form_it_states() {
+        let mut publication = stated_publication(SampleKind::Put);
+        assert!(!tokio_engine::publish_options(&publication).atomic_tx);
+        publication.atomic = true;
+        assert!(tokio_engine::publish_options(&publication).atomic_tx);
+        publication.kind = SampleKind::Delete;
+        assert!(
+            tokio_engine::publish_options(&publication).atomic_tx,
+            "a delete states all-or-none as a put does"
+        );
+    }
+
+    #[test]
+    fn a_publication_stating_a_retry_and_all_or_none_passes_both_to_the_engine() {
+        let mut publication = stated_publication(SampleKind::Put);
+        publication.retry = Some(some_retry());
+        publication.atomic = true;
+        let options = tokio_engine::publish_options(&publication);
+        assert_eq!(options.admission_retry, Some(some_retry()));
+        assert!(options.atomic_tx);
+        // Each is read on its own: stating one does not state the other.
+        publication.atomic = false;
+        let options = tokio_engine::publish_options(&publication);
+        assert_eq!(options.admission_retry, Some(some_retry()));
+        assert!(!options.atomic_tx);
+        publication.atomic = true;
+        publication.retry = NO_RETRY;
+        let options = tokio_engine::publish_options(&publication);
+        assert_eq!(options.admission_retry, None);
+        assert!(options.atomic_tx);
     }
 
     #[test]
@@ -7621,9 +7699,112 @@ mod tests {
     }
 
     #[test]
+    fn a_builder_states_no_all_or_none_until_it_is_told() {
+        let session = open(peer("c7d1c1")).wait().expect("opens");
+        assert!(!session.declare_publisher("demo/reach/a2").atomic);
+        assert!(!session.put("demo/reach/a2", "v").publisher.atomic);
+        assert!(!session.delete("demo/reach/a2").publisher.atomic);
+    }
+
+    #[test]
     fn nothing_stated_is_admitted_whatever_the_policy() {
         assert!(admit_target(NO_PEER).is_ok());
         assert!(admit_retry(NO_RETRY).is_ok());
+        assert!(admit_atomic(NOT_ATOMIC).is_ok());
+    }
+
+    #[test]
+    fn all_or_none_stated_is_admitted_only_when_the_policy_is_on() {
+        assert_atomic_decides("admit_atomic", admit_atomic(true));
+    }
+
+    #[test]
+    fn a_publish_stating_all_or_none_is_made_only_when_the_policy_is_on() {
+        let session = open(peer("c7d1c2")).wait().expect("opens");
+        let mut put = session.put("demo/reach/k", "v");
+        put.publisher.atomic = true;
+        assert_atomic_decides("put", put.wait());
+        let mut delete = session.delete("demo/reach/k");
+        delete.publisher.atomic = true;
+        assert_atomic_decides("delete", delete.wait());
+        let mut publisher = session.declare_publisher("demo/reach/k");
+        publisher.atomic = true;
+        assert_atomic_decides("publisher", publisher.wait());
+    }
+
+    #[test]
+    fn a_publisher_makes_every_operation_with_the_all_or_none_it_was_declared_with() {
+        let session = open(peer("c7d1c3")).wait().expect("opens");
+        let mut publisher = session
+            .declare_publisher("demo/reach/l")
+            .wait()
+            .expect("declares");
+        publisher.atomic = true;
+        assert_atomic_decides("publisher put", publisher.put("v").wait());
+        assert_atomic_decides("publisher delete", publisher.delete().wait());
+    }
+
+    #[test]
+    fn a_publish_stating_a_retry_and_all_or_none_names_the_policy_that_is_off() {
+        let session = open(peer("c7d1c4")).wait().expect("opens");
+        let mut put = session.put("demo/reach/m", "v");
+        put.publisher.retry = Some(some_retry());
+        put.publisher.atomic = true;
+        let both_on = retry_policy_on() && atomic_policy_on();
+        match put.wait() {
+            Ok(()) => assert!(both_on, "a build without a policy took what it states"),
+            Err(error) => {
+                assert!(!both_on, "refused with both policies on: {error}");
+                let text = error.to_string();
+                assert!(
+                    text.contains("policy publisher-admission-retry is off")
+                        || text.contains("policy multi-route-atomic-tx is off"),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_router_engine_refuses_an_all_or_none_publish_it_does_not_read() {
+        assert!(RouterEngine::refuse_atomic(NOT_ATOMIC).is_ok());
+        let error = RouterEngine::refuse_atomic(true).expect_err("refused");
+        assert!(
+            error
+                .to_string()
+                .contains("the router engine does not read an all-or-none publish"),
+            "{error}"
+        );
+        // The engine of a node takes the refusal from the declaration, whatever the policy of
+        // the build says.
+        let session = with_the_node(|| open(peer("c7d1c5")).wait().expect("opens"));
+        assert!(matches!(&*session.0.engine, Engine::Router(_)));
+        let publisher = |atomic| PublisherDeclaration {
+            key: "demo/reach/n",
+            scope: 0,
+            suffix: None,
+            destination: Locality::Any,
+            links: Links::Any,
+            retry: NO_RETRY,
+            atomic,
+        };
+        let error = session
+            .0
+            .engine
+            .declare_publisher(publisher(true))
+            .expect_err("a node reads no all-or-none");
+        assert!(
+            error
+                .to_string()
+                .contains("the router engine does not read an all-or-none publish"),
+            "{error}"
+        );
+        let id = session
+            .0
+            .engine
+            .declare_publisher(publisher(NOT_ATOMIC))
+            .expect("a publisher that states nothing is declared");
+        session.0.engine.undeclare_publisher(id);
     }
 
     #[test]
@@ -7728,6 +7909,7 @@ mod tests {
             destination: Locality::Any,
             links: Links::Any,
             retry,
+            atomic: NOT_ATOMIC,
         };
         let error = session
             .0
@@ -7852,6 +8034,72 @@ mod tests {
                 .admission_retry(retry)
                 .wait(),
         );
+    }
+
+    #[cfg(feature = "atomic-publish")]
+    #[test]
+    fn all_links_or_none_states_it_on_each_builder() {
+        let session = open(peer("c7d1c6")).wait().expect("opens");
+        assert!(
+            session
+                .declare_publisher("demo/reach/o")
+                .all_links_or_none()
+                .atomic
+        );
+        assert!(
+            session
+                .put("demo/reach/o", "v")
+                .all_links_or_none()
+                .publisher
+                .atomic
+        );
+        assert!(
+            session
+                .delete("demo/reach/o")
+                .all_links_or_none()
+                .publisher
+                .atomic
+        );
+    }
+
+    #[cfg(feature = "atomic-publish")]
+    #[test]
+    fn all_or_none_stated_with_all_links_or_none_is_refused_by_a_build_without_the_policy() {
+        let session = open(peer("c7d1c7")).wait().expect("opens");
+        assert_atomic_decides(
+            "publisher",
+            session
+                .declare_publisher("demo/reach/p")
+                .all_links_or_none()
+                .wait(),
+        );
+        assert_atomic_decides(
+            "put",
+            session.put("demo/reach/p", "v").all_links_or_none().wait(),
+        );
+        assert_atomic_decides(
+            "delete",
+            session.delete("demo/reach/p").all_links_or_none().wait(),
+        );
+    }
+
+    #[cfg(all(feature = "atomic-publish", feature = "admission-retry"))]
+    #[test]
+    fn a_publisher_states_a_retry_and_all_or_none_together() {
+        let session = open(peer("c7d1c8")).wait().expect("opens");
+        let retry = some_retry();
+        let publisher = session
+            .declare_publisher("demo/reach/q")
+            .admission_retry(retry)
+            .all_links_or_none();
+        assert_eq!(publisher.retry, Some(retry));
+        assert!(publisher.atomic);
+        let put = session
+            .put("demo/reach/q", "v")
+            .admission_retry(retry)
+            .all_links_or_none();
+        assert_eq!(put.publisher.retry, Some(retry));
+        assert!(put.publisher.atomic);
     }
 
     #[test]

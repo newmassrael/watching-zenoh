@@ -73,6 +73,11 @@ targeted-query = ["engine-tokio"]
 # refuses it when the publish is made or the publisher declared. It is off by default for the
 # reason `link-restriction` is.
 admission-retry = ["engine-tokio"]
+# A wz-only door, not upstream's: `all_links_or_none` on the builders of a publisher and of a put
+# or a delete. It states that the publish reaches every link it may use or none, and a build whose
+# `multi-route-atomic-tx` policy is off refuses it when the publish is made or the publisher
+# declared. It is off by default for the reason `link-restriction` is.
+atomic-publish = ["engine-tokio"]
 # `transport_tcp` is what gives the configuration its default listening endpoints (`tcp/[::]:7447`
 # for a router, `tcp/[::]:0` for a peer), as it does upstream; the engine carries the link always.
 transport_tcp = ["zenoh-config/transport_tcp"]

@@ -38,7 +38,7 @@ use crate::{
         encoding::Encoding,
         key_expr::KeyExpr,
         publisher::{Priority, Publisher},
-        sample::{Links, Locality, Retry, SampleKind},
+        sample::{Atomic, Links, Locality, Retry, SampleKind},
     },
     Session,
 };
@@ -184,6 +184,18 @@ impl<T> PublicationBuilder<PublisherBuilder<'_, '_>, T> {
         self
     }
 
+    /// States that the publication reaches every link it may use or none of them: a link with
+    /// no room ends the publication before any link was sent it.
+    ///
+    /// A build whose `multi-route-atomic-tx` policy is off refuses the statement when the
+    /// publication is made, and a router session refuses it always.
+    #[cfg(feature = "atomic-publish")]
+    #[inline]
+    pub fn all_links_or_none(mut self) -> Self {
+        self.publisher = self.publisher.all_links_or_none();
+        self
+    }
+
     /// Changes the [`Reliability`](crate::qos::Reliability) to apply when routing the data.
     ///
     /// **NOTE**: Currently `reliability` does not trigger any data retransmission on the wire. It
@@ -289,6 +301,7 @@ impl Wait for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuilderPut
             self.publisher.destination,
             self.publisher.links,
             self.publisher.retry,
+            self.publisher.atomic,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,
@@ -316,6 +329,7 @@ impl Wait for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuilderDel
             self.publisher.destination,
             self.publisher.links,
             self.publisher.retry,
+            self.publisher.atomic,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,
@@ -407,6 +421,7 @@ pub struct PublisherBuilder<'a, 'b> {
     pub(crate) destination: Locality,
     pub(crate) links: Links,
     pub(crate) retry: Retry,
+    pub(crate) atomic: Atomic,
 }
 
 impl Clone for PublisherBuilder<'_, '_> {
@@ -426,6 +441,7 @@ impl Clone for PublisherBuilder<'_, '_> {
             destination: self.destination,
             links: self.links,
             retry: self.retry,
+            atomic: self.atomic,
         }
     }
 }
@@ -523,6 +539,18 @@ impl PublisherBuilder<'_, '_> {
         self
     }
 
+    /// States that the data reaches every link it may use or none of them: a link with no room
+    /// ends the publication before any link was sent it.
+    ///
+    /// A build whose `multi-route-atomic-tx` policy is off refuses the statement when the
+    /// publisher is declared, and a router session refuses it always.
+    #[cfg(feature = "atomic-publish")]
+    #[inline]
+    pub fn all_links_or_none(mut self) -> Self {
+        self.atomic = true;
+        self
+    }
+
     /// Changes the [`Reliability`](crate::qos::Reliability) to apply when routing the data.
     ///
     /// **NOTE**: Currently `reliability` does not trigger any data retransmission on the wire. It
@@ -552,6 +580,7 @@ impl Wait for PublisherBuilder<'_, '_> {
             self.destination,
             self.links,
             self.retry,
+            self.atomic,
         )?;
         Ok(Publisher {
             session: self.session.downgrade(),
@@ -564,6 +593,7 @@ impl Wait for PublisherBuilder<'_, '_> {
             destination: self.destination,
             links: self.links,
             retry: self.retry,
+            atomic: self.atomic,
             #[cfg(feature = "unstable")]
             reliability: self.reliability,
             undeclare_on_drop: true,
@@ -595,6 +625,7 @@ impl Wait for PublicationBuilder<&Publisher<'_>, PublicationBuilderPut> {
             self.publisher.destination,
             self.publisher.links,
             self.publisher.retry,
+            self.publisher.atomic,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,
@@ -620,6 +651,7 @@ impl Wait for PublicationBuilder<&Publisher<'_>, PublicationBuilderDelete> {
             self.publisher.destination,
             self.publisher.links,
             self.publisher.retry,
+            self.publisher.atomic,
             #[cfg(feature = "unstable")]
             self.publisher.reliability,
             self.timestamp,

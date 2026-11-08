@@ -42,7 +42,7 @@ use crate::{
         key_expr::KeyExpr,
         publisher::Priority,
         queryable::Query,
-        sample::{Locality, Sample, SampleKind, ANY_LINKS, NO_RETRY},
+        sample::{Locality, Sample, SampleKind, ANY_LINKS, NOT_ATOMIC, NO_RETRY},
         session::{SessionClosedError, WeakSession},
     },
 };
@@ -170,6 +170,7 @@ fn publish(session: &WeakSession, key_expr: OwnedKeyExpr, kind: SampleKind, payl
         // The session's own events are not limited to some links.
         ANY_LINKS,
         NO_RETRY,
+        NOT_ATOMIC,
         Reliability::default(),
         None,
         None,
