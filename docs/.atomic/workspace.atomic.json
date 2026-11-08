@@ -12631,6 +12631,23 @@
       "carry_forward_bullets": [
         "Carries of the node's C door that remain: a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
       ]
+    },
+    "Round 4431": {
+      "decision_summary": "A remote in the south of a node opened through the C ABI is read against stock: the pinned zenoh's z_pub, a stock peer the node dials and places in a subregion of its south by its zid, has its put carried to a wz peer in another subregion and is told that it matches, which closes that carry of the node's C door. The placement itself is not compared with a stock gateway's; the file says so.",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/it/files/router_node_zenohd_interop.rs: a seventh leg (ignored, Layer Z). A stock z_pub listens as a peer with gossip off, a wz peer listens with a subscriber, and a peer node that accepts no session dials both and keeps a south of two subregions (the stock peer by its zid, any other peer by its role). The stock put reaches the wz subscriber, and the stock publisher's matching listener prints that it matches. The control in the leg is the node dialing the wz peer alone, where nothing arrives in three seconds of puts. The module docs move the remote in the south from what is not claimed to what is, and say the placement is not compared with a stock gateway's.",
+        "scripts/run-ci.sh: the Layer Z count of the file is 7, and its comment names the leg."
+      ],
+      "verification_bullets": [
+        "On a build machine, wz-capi-c with router-node, advanced and group, files::router_node_zenohd_interop --ignored against the pinned 1.10.2 zenohd and z_pub: 7 passed (the six before and the new one); clippy of the crate's tests with those features under -D warnings; the crate is formatted; the count guard lint and the barrier needle gate passed here.",
+        "Control, taken out and reverted before this entry: the router not bridging a push across meshes (route_push's cross-mesh block) failed the leg at the arrival, while the stock publisher still printed that it matches, so the arrival and the matching are read off two paths, the push and the declaration."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Carries of the node's C door that remain: the value of a shm get arriving as bytes on a node; the placement of a remote in the south compared with a stock gateway's, which needs a stock node that keeps a south apart as the oracle. The scratch worktree and branch size-measure may be removed with bx-wt."
+      ]
     }
   },
   "inventory_entries": {
