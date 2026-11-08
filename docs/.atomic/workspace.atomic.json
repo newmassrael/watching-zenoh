@@ -12708,6 +12708,25 @@
       "carry_forward_bullets": [
         "Open: the registry's plain lane itself still ignores slots, which is correct only while no options that reach it carry a limit; a caller that built its own plain parameters without plain_put_params would bypass the check. The C ABI does not state a link set, so this guards the door that is to be added."
       ]
+    },
+    "Round 4436": {
+      "decision_summary": "The value of a get that is a chunk of shared memory is carried by a node as the chunk, which closes that carry of the node's C door, and the same seam had two more defects that this round repays: a queryable of the node's own session was asked a query whose value went through shared memory with no value at all, and a node opened over a set of clients or over none (as the C ABI opens it) read no descriptor for its own session, so its subscribers were told nothing of a Put that came as a chunk.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: local_get_shm (the tables' and the forwarder's) adopts the chunk into the relay, attaches its descriptor as the Query's value and routes it; route_request is split so a Query whose chunks the caller holds skips the inbound face's negotiation (route_request_held); the dispatch to the node's own queryables reads a shared-memory value from the chunk the route holds (session_reads_chunk, shared with the Put's payload_for_session) and drops a query it cannot read; a query job carries the view read while it was routed (QueryJob.query) instead of rereading the Request after the route has let go of its chunks.",
+        "crates/wz-session-core/src/query.rs, request_build.rs: RequestQueryView holds its value as RxBytes and takes a lent value (with_lent_value), which payload_shared answers with; query_value_shm_parts reads a Query's shared-memory value as its encoding and descriptors.",
+        "crates/wz-capi-core/src/drive/router_node.rs, faces.rs: RouterState::get_numbered_shm asks with a chunk (hold_query shared with get_numbered); a node installs the reader it was opened over, or the default POSIX reader, for its own session (node_shm_resolver), where only a host reader was installed before. crates/wz-capi-c/src/get.rs: a node's get with a chunk goes through get_numbered_shm instead of copying the bytes.",
+        "crates/wz-capi-core/src/drive/router_node/engine/port_tests.rs: two tests in shared_memory, a node's get with a chunk asking a client of shared memory with the chunk, a plain client with the bytes and the node's own queryable with the chunk; and a client of shared memory's get and publication read by the node's own queryable and subscriber as the chunk."
+      ],
+      "verification_bullets": [
+        "On a build machine: wz-capi-core with router-node, transport-qos and session-extshm, the port tests, 9 passed (the seven before and the two new ones); wz-runtime-tokio with the router node's features and session-extshm, the router_forward lib tests, 409 passed and 4 ignored; wz-session-core with transport-shm, the query lib tests, 23 passed. Clippy under -D warnings: wz-capi-core (lib and tests with those features), wz-runtime-tokio (lib and tests with those features), wz-session-core (lib and tests with transport-shm), wz-capi-c with zenoh-c-shared-memory on all targets. The four crates are formatted.",
+        "The first run of the two new tests failed with the node's own queryable asked with no value ([] and not shared memory), the query job rereading the Request after the route had let go of its chunks; carrying the view read during the route made both pass. Controls, each taken out on its own and reverted before this entry: the node installing a reader for a host reader alone, as before, failed both tests at the node's own queryable (handed nothing); the node's get sending the chunk's bytes failed the first at the client of shared memory (handed the bytes, not the chunk)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Carries of the node's C door that remain: the placement of a remote in the south compared with a stock gateway's, which needs a stock node that keeps a south apart as the oracle; a get with a shared-memory value through the port's engine (SessionEngine has no such method; the C door and the node reach it through RouterState). The scratch worktree and branch size-measure may be removed with bx-wt."
+      ]
     }
   },
   "inventory_entries": {
