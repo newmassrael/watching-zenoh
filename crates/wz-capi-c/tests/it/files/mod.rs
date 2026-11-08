@@ -38,5 +38,6 @@ mod scouting_open;
 mod scouting_ttl;
 mod session_roles;
 mod source_info_roundtrip;
+mod switch_doors;
 mod timestamp_roundtrip;
 mod transport_events_roundtrip;

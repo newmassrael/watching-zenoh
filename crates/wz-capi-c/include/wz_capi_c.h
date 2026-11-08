@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 11
+#define WZ_CAPI_C_ABI_REVISION 12
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -1164,6 +1164,123 @@ typedef struct wz_capi_c_identity_t {
 z_result_t wz_capi_c_identity_make(const char *certificate,
                                    const char *private_key,
                                    wz_capi_c_identity_t *out);
+
+/* ------------------------------------------------------------------ *
+ * THE STATEMENTS OF A CALL BEYOND THE ZENOH-C OPTIONS (revision 12), in
+ * builds with the `switch-doors` feature, which is OFF by default.
+ *
+ * Four things a call can state that zenoh-c has no field for:
+ *
+ *   - the links an entity may use (a subscriber, a queryable, a
+ *     publisher, a put, a get): `link_mask`, one bit per link slot;
+ *     slot 0 is the link the session dialled and listener n is slot
+ *     n + 1. No bit set is no restriction: every link, as zenoh-c does;
+ *   - a retry for a publish that found no link with room: `attempts`
+ *     further passes, `delay_ms` apart (255 and 65535 at most);
+ *   - an all-or-none publish: it reaches every link it may use or none;
+ *   - the one node a get or a querier is addressed to: `target`.
+ *
+ * They are not fields of the z_* option structs, whose layout is
+ * upstream's, so each is made through a door that takes what its z_*
+ * twin takes and one more argument, a pointer to the statements. NULL
+ * and a struct filled by its _default function state nothing, and a
+ * call that states nothing is the call the z_* function makes.
+ *
+ * EACH STATEMENT IS A POLICY OF THE SESSION MODEL, OFF IN A BUILD MADE
+ * AS UPSTREAM IS (entity-link-restriction, publisher-admission-retry,
+ * multi-route-atomic-tx, targeted-query). A stated value is refused
+ * before anything is sent or declared while its policy is off, with
+ * WZ_CAPI_C_E_POLICY_OFF; the same call is taken by a build whose
+ * policy is on. Z_EINVAL says the value itself is wrong whatever the
+ * build: a retry of no pass, no delay, more than 255 passes or 65535
+ * ms, or a target of no byte. A refused declaration leaves its
+ * out-parameter in the gravestone state; a closure, a payload and the
+ * owned fields of the options are consumed on a refusal as on a
+ * success, which is what the z_* twins do on every path.
+ *
+ * A session that is a node (the `router-node` role) writes to its
+ * faces by its own tables and reads none of these statements: a call
+ * stating one there answers Z_EUNAVAILABLE, the code every operation a
+ * node does not carry answers, and sends or declares nothing.
+ * ------------------------------------------------------------------ */
+
+/* A call stated something this build's policy does not allow. Nothing
+ * was sent or declared. Outside zenoh-c's Z_E* range, as
+ * WZ_CAPI_C_E_VALUE_TOO_LARGE is. */
+#define WZ_CAPI_C_E_POLICY_OFF (-102)
+
+/* What a subscriber or a queryable declaration states. */
+typedef struct wz_capi_c_entity_ext_t {
+  uint64_t link_mask;
+} wz_capi_c_entity_ext_t;
+
+/* What a put, a delete or a publisher declaration states. `attempts` zero
+ * states no retry; `all_or_none` non-zero states the all-or-none form. */
+typedef struct wz_capi_c_publish_ext_t {
+  uint64_t link_mask;
+  uint32_t attempts;
+  uint32_t delay_ms;
+  uint8_t all_or_none;
+} wz_capi_c_publish_ext_t;
+
+/* What a get or a querier declaration states. `has_target` non-zero
+ * addresses the query to the node whose identity `target` holds, as
+ * z_info_zid reports it for a session; `target` is read only then. */
+typedef struct wz_capi_c_query_ext_t {
+  uint64_t link_mask;
+  uint8_t has_target;
+  z_id_t target;
+} wz_capi_c_query_ext_t;
+
+/* Write the statement of nothing: no link restriction, no retry, no
+ * all-or-none form, no target. NULL is no write. */
+void wz_capi_c_entity_ext_default(wz_capi_c_entity_ext_t *this_);
+void wz_capi_c_publish_ext_default(wz_capi_c_publish_ext_t *this_);
+void wz_capi_c_query_ext_default(wz_capi_c_query_ext_t *this_);
+
+/* z_put, z_delete and z_declare_publisher with a statement (`ext`, NULL
+ * for none). Every put and delete on a declared publisher is made as the
+ * declaration stated. */
+z_result_t wz_capi_c_put_ext(const z_loaned_session_t *session,
+                             const z_loaned_keyexpr_t *key_expr,
+                             z_moved_bytes_t *payload, z_put_options_t *options,
+                             const wz_capi_c_publish_ext_t *ext);
+z_result_t wz_capi_c_delete_ext(const z_loaned_session_t *session,
+                                const z_loaned_keyexpr_t *key_expr,
+                                z_delete_options_t *options,
+                                const wz_capi_c_publish_ext_t *ext);
+z_result_t wz_capi_c_declare_publisher_ext(const z_loaned_session_t *session,
+                                           z_owned_publisher_t *publisher,
+                                           const z_loaned_keyexpr_t *key_expr,
+                                           z_publisher_options_t *options,
+                                           const wz_capi_c_publish_ext_t *ext);
+
+/* z_get and z_declare_querier with a statement (`ext`, NULL for none).
+ * Every get on a declared querier is asked as the declaration stated. */
+z_result_t wz_capi_c_get_ext(const z_loaned_session_t *session,
+                             const z_loaned_keyexpr_t *key_expr,
+                             const char *parameters,
+                             z_moved_closure_reply_t *callback,
+                             z_get_options_t *options,
+                             const wz_capi_c_query_ext_t *ext);
+z_result_t wz_capi_c_declare_querier_ext(const z_loaned_session_t *session,
+                                         z_owned_querier_t *querier,
+                                         const z_loaned_keyexpr_t *key_expr,
+                                         z_querier_options_t *options,
+                                         const wz_capi_c_query_ext_t *ext);
+
+/* z_declare_subscriber and z_declare_queryable limited to the links `ext`
+ * names (NULL for no limit): the entity is declared to the nodes behind
+ * those links only, and a link that comes up later is declared to only if
+ * its slot is named. */
+z_result_t wz_capi_c_declare_subscriber_ext(
+    const z_loaned_session_t *session, z_owned_subscriber_t *subscriber,
+    const z_loaned_keyexpr_t *key_expr, z_moved_closure_sample_t *callback,
+    z_subscriber_options_t *options, const wz_capi_c_entity_ext_t *ext);
+z_result_t wz_capi_c_declare_queryable_ext(
+    const z_loaned_session_t *session, z_owned_queryable_t *queryable,
+    const z_loaned_keyexpr_t *key_expr, z_moved_closure_query_t *callback,
+    z_queryable_options_t *options, const wz_capi_c_entity_ext_t *ext);
 
 #ifdef __cplusplus
 }

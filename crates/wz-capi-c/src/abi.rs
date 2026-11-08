@@ -1613,7 +1613,12 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// It moves to 11 for the identity a client presents over TLS, made on the computer it runs on
 /// (`crate::identity`, `wz_capi_c_identity_make`), one new symbol and the struct it fills, in a
 /// build with `identity-make` (off by default, as the observation plane's features are) on unix.
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 11;
+///
+/// It moves to 12 for the statements a call makes beyond the zenoh-c options
+/// (`crate::switch_doors`): seven `wz_capi_c_*_ext` doors, three `_default` functions and the three
+/// statement structs, ten new symbols, and the code `WZ_CAPI_C_E_POLICY_OFF`, in a build with
+/// `switch-doors` (off by default, as the features above are).
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 12;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;

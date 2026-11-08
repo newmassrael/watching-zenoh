@@ -11242,8 +11242,8 @@ layer_c1ch_capi_c_config_surface() {
     # the reference is, and the door set the gates below grade is the library's with them on: a
     # door behind a feature that no lane turned on would be graded by nothing. `identity-make` (the
     # identity a client makes, off by default for its size) is one more such door, and so are the
-    # lifecycle doors (`lifecycle-doors`).
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors"
+    # lifecycle doors (`lifecycle-doors`) and the statement doors (`switch-doors`).
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors"
     (cd crates && cargo build -p wz-capi-c --quiet --features "$plane") || return 1
     python3 scripts/lib/capi_c_config_surface.py \
         "$WZ_ARTIFACTS/crates/target/debug/libwz_capi_c.so" || return 1
@@ -24249,9 +24249,10 @@ _runci_build_capi_c_for_oracle() {
     # under wz's own `wz_capi_c_` prefix and no type, so no arm's layout moves and the symbol
     # census, which counts only upstream's four prefixes, does not see them, and the C consumer
     # of the doors (`c_observation_plane_consumer.c`) links the very library the arm selected.
-    # `identity-make` and `lifecycle-doors` likewise: their C consumers (`c_identity_consumer.c`,
-    # `c_lifecycle_consumer.c`) link this library.
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors"
+    # `identity-make`, `lifecycle-doors` and `switch-doors` likewise: their C consumers
+    # (`c_identity_consumer.c`, `c_lifecycle_consumer.c`, `c_switch_doors_consumer.c`) link this
+    # library.
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors"
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-c $capi_c_args --features "$plane" --quiet)
 }
@@ -24391,6 +24392,27 @@ layer_c1cc_api_compat_c() {
     grep -q '^c_identity_consumer: ok$' <<<"$c_id_out" || {
         echo "  C1cc FAIL: the identity C consumer printed no verdict"
         echo "$c_id_out"; return 1; }
+    # The statements of a call beyond the zenoh-c options, made from C the same way: the three
+    # structs' layout written out in the consumer, each `_default` function, and each of the seven
+    # doors called with nothing stated (answering what its z_* twin answers for the same handles)
+    # and with a statement (refused by the build's policy, or past it when the build states the
+    # policy on).
+    local c_sw_bin c_sw_out
+    c_sw_bin="$(mktemp -d)/c_switch_doors_consumer"
+    c_sw_out="$("${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -I crates/wz-capi-c/include \
+        -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
+        crates/wz-capi-c/tests/c_switch_doors_consumer.c \
+        -L "$WZ_ARTIFACTS"/crates/target/debug -lwz_capi_c -o "$c_sw_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the switch doors C consumer did not compile or link"
+        echo "$c_sw_out"; return 1; }
+    c_sw_out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS"/crates/target/debug "$c_sw_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the switch doors C consumer failed"
+        echo "$c_sw_out"; rm -rf "$(dirname "$c_sw_bin")"; return 1; }
+    rm -rf "$(dirname "$c_sw_bin")"
+    grep -q '^switch_doors: ok$' <<<"$c_sw_out" || {
+        echo "  C1cc FAIL: the switch doors C consumer printed no verdict"
+        echo "$c_sw_out"; return 1; }
     # R2278 (open-debt item 612) — RE-DERIVE which build upstream publishes,
     # now that this lane has established an oracle is present. `--require`
     # rather than the bare form on purpose: past this point the checkout and

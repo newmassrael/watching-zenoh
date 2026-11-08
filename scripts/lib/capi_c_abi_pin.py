@@ -139,10 +139,23 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # in `wz_capi_c.h` can change on its own -- and still has to be a deliberate
 # edit here, because a revision that moves for a reason nobody wrote down is a
 # revision nobody can reason about.
-EXPECTED_REVISION = 11
+EXPECTED_REVISION = 12
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",
+    # Revision 12 — the statements of a call beyond the zenoh-c options: the links an entity may
+    # use, a publish's retry and all-or-none form, a query's target node (`switch-doors`, off by
+    # default and on in the lane's build). The three `_default` functions, then the seven doors.
+    "wz_capi_c_entity_ext_default",
+    "wz_capi_c_publish_ext_default",
+    "wz_capi_c_query_ext_default",
+    "wz_capi_c_put_ext",
+    "wz_capi_c_delete_ext",
+    "wz_capi_c_declare_publisher_ext",
+    "wz_capi_c_get_ext",
+    "wz_capi_c_declare_querier_ext",
+    "wz_capi_c_declare_subscriber_ext",
+    "wz_capi_c_declare_queryable_ext",
     # Revision 11 — the identity a client presents over TLS, made on the computer it runs on
     # (`identity-make`, off by default and on in the lane's build, as the observation plane is).
     "wz_capi_c_identity_make",
