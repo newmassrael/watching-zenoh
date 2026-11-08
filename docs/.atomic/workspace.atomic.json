@@ -12318,6 +12318,35 @@
       "carry_forward_bullets": [
         "Open: only hkl002 holds the pinned build today, so file-round runs there alone until the owner has more machines provisioned; a pin bump in mnemosyne.toml moves the required version at once and leaves every machine without the new build until it is installed there. The same tool is a requirement of nothing else, so the other actions and checks place as before."
       ]
+    },
+    "Round 4414": {
+      "decision_summary": "The two costs a busy writer still put on the snapshot tables' readers after round 4400 (docs/router-table-snapshots.md, section 6.7) came from one shape: one route memo shared by every version of the tables, whose inputs the first reader of a new version moved, under a write lock, and which a reader of an older version could not use once moved, so it computed routes it did not keep. A memo beside the versions is not read-copy-update's form, in which what a version derives from its own data is made by the updater before the version is published. The memos are now part of the versions (section 6.8): their inputs are fixed, the writer gives each version the memos of its own inputs when it ends a write (a hat whose inputs did not move keeps the memo it shares with the version before; a client leg's new memo is the old one less the routes the store's change log says were reached), and a reader is served from its own version's memo and moves none. The routes are one persistent map keyed by keyexpr and source together behind the memo's lock: an `ArcSwap` in place of the lock (347 instructions a Put more) and the nested map of keyexprs to sources (586 instructions in two lookups) were measured and dropped. Measured against the version before, two runs of each on pc2: under the declaring writer the readers compute 0 or 1 route a window against 6,595 to 70,113, their instructions a Put are 1.1 to 1.9 % fewer and their cycles 3.9 to 4.9 % fewer; with no writer, instructions 0.4 to 1.3 % fewer and cycles within the spread. The writer published as fast as before.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/route_cache.rs: a memo's inputs are fixed; `bring_to` and `bring_to_retiring` give a version the memo of its inputs (the one it shares, or a new one, a client leg's carrying the routes no changed key reaches); a caller at other inputs computes and keeps nothing; routes are one persistent map by keyexpr and source, read by a borrowed key behind the memo's lock; `refresh` and `RouteInputs::precedes` are gone; the computes witness is shared by a memo and its successors.",
+        "crates/wz-runtime-tokio/src/linkstate_forward.rs: the inputs of a mesh leg and a client leg each read in one place; `bring_mesh_routes` and `bring_client_routes` for the writer; the readers no longer refresh.",
+        "crates/wz-runtime-tokio/src/router_forward.rs and router_forward/tables_cell.rs: `Tables::bring_route_memos` over every hat, called by `TablesWrite::publish` under both values and on the tables a cell starts with.",
+        "crates/wz-runtime-tokio/src/persistent_map.rs: `len` read in every build (the route cache reads it).",
+        "crates/wz-runtime-tokio/src/router_forward/table_sharing_pair_tests.rs: a reader of an older version is served its version's routes after a reader of the newer one routed.",
+        "scripts/run-ci.sh: Layer C1AY's nine `router_forward` counts +1 (310, 315, 338, 318, 321, 368, 310, 312, 323); Layer C1X 14 to 12 and 18 to 16.",
+        "docs/router-table-snapshots.md: section 6.8, section 3 (c) pointed at it, section 6.7 titled with its round, section 7's bullets on a writer reading its draft and on finding the reached routes; docs/router-data-plane-scaling.md names `bring_to_retiring`."
+      ],
+      "verification_bullets": [
+        "pc2, the busy-writer instrument under `snapshot`, perf instructions:u and cycles:u of the `wz-publisher` threads, one window kind to a process, two runs of each tree one after the other: before this change, no writer 18,423 and 18,469 instructions and 16,462 and 16,032 cycles a Put, declaring 18,653 and 18,514, 16,953 and 16,887, with 6,595 to 70,113 routes computed and not kept a window; after it, no writer 18,346 and 18,236, 16,039 and 16,106, declaring 18,308 and 18,302, 16,128 and 16,228, with 0 or 1; the declaring writer 103,000 to 139,000 writes a second before and 107,000 to 195,000 after; host load 14 to 45.",
+        "pc2, per-symbol instructions of the readers with no writer against the version before: the memo's routes behind an `ArcSwap`, 347 more a Put in its loads; the nested map behind the lock, 586 in the maps' lookups where the functions holding the hash maps' lookups lost 401; both forms dropped.",
+        "pc2, control: the new pair test against the version before this change (its route cache, forwarders and cell put back) failed at \"the older version's reader was served from its version's memo\", 2 computes for 1.",
+        "pc2: every Layer C1AY `router_forward` arm printed 310, 315, 338, 318, 321, 368, 310, 312, 323 passed and the frozen scenes 2; Layer C1X printed 12 and 16; `router_forward` with `routing-token-tables` printed 368 under WZ_POLICY_ROUTING_TABLE_SHARING=snapshot.",
+        "pc2: cargo fmt --check; clippy -D warnings over wz-runtime-tokio with routing-routes (all targets, and without default features), with routing-routes and routing-router-hat, and with routing-router-hat and routing-token-tables.",
+        "Static gates before the push: reason_review_pin_gate, prose_named_identifier_gate --check, upstream_citation_anchor_gate, each rc 0.",
+        "Hosted, round 4400 (b17a73759e): Platform success, CI cancelled (replaced while queued); run 42403286547's reds were paid by the rounds after it."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "A writer that routes through its own draft computes at inputs no memo has and keeps nothing; how often a write does so is not measured (section 7).",
+        "A client leg's new memo finds the reached routes by trying every route kept against every changed key, on the writer; the keyexpr index could find them instead (section 7).",
+        "A route holding its faces' state (section 7) stays open from round 4388."
+      ]
     }
   },
   "inventory_entries": {
