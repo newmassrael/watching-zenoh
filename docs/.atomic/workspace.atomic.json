@@ -12347,6 +12347,25 @@
         "A client leg's new memo finds the reached routes by trying every route kept against every changed key, on the writer; the keyexpr index could find them instead (section 7).",
         "A route holding its faces' state (section 7) stays open from round 4388."
       ]
+    },
+    "Round 4415": {
+      "decision_summary": "The Windows item of the Z8 list is measured and closed, and the two flakes that stood beside it are decided. The suite was run on the Windows host at the head of the main line: 31 of 33 files hold their row, among them the files of the `internal` arm (`keyexpr` 16, `atexit` 4, `session` 8). `session` and `shm` lose 3 tests to a session that cannot be opened on a link (`LinkFailed`), the same failure the earlier Windows run traced to the group address 224.0.0.1 that the system refuses to join, as it does for stock zenoh. `regions` lost the queryable test of its scenario 5 (a fourth registration at one router) once in 126 and three times in 213 repeats of that test alone; Linux ran it 250 times and the whole file three times without a loss, and ran the gossip test 200 times alone and three times inside the file without a loss. The kept log of a Windows loss reads as one cause: a router dialling five endpoints in turn has its declaration forwarded by the fourth down the source's tree to the fifth before the fourth has heard of the fifth link, and the fifth, which also had it from the sender, counts a registration that changes nothing. Upstream dials in turn and its router hat forwards to the children of the source's tree by the same rule, so the race belongs to the design and the pace of the host. The decision is to change nothing in the engine for it: a rule that held a forward back until the links were known would depart from the pin's behaviour to hide a timing, and the gossip test has no loss to explain.",
+      "changes_bullets": [
+        "docs/zenoh-api-on-the-engine.md: the Windows run of the suite, its two kinds of loss and the reading of the router race; the Owed line now names the margin gate alone."
+      ],
+      "verification_bullets": [
+        "Windows host, `z8_upstream_suite.py measure` of all 33 files with `Z8_SKIP_LINK_LOCAL`: 31 pass or hold their row (adminspace 6, atexit 4, keyexpr 16, liveliness 46, matching 24, routing 8, session 8 of 9, shm 8 of 10, regions 125 of 126); the first attempt read `no-compile` for every file because the shipped tree lacked the code generator's rust backends, and the second stopped on a full disk, 26 GB of it the build directory.",
+        "Windows, the scenario 5 queryable test alone: 60 of 60, then 210 of 213 with the whole log kept; the loss at a router is a second registration of `test` from the same face (`return=false`), sent by the fourth router while the fifth link was not yet in its view.",
+        "Linux build host: the same test 250 of 250, the gossip test 200 of 200, the whole `regions` file three times 378 of 378.",
+        "Not run: the Z8 hosted lane; Windows rows are not in `docs/z8-expected.tsv`, which grades the Linux lane."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Open: a margin gate for the Z8 lane, once measured hosted runs exist (every hosted run of the day was cancelled by the account's job cap).",
+        "Open: the client hat of the forwarder, and the replay on the accept path without the barrier, both until a traced failure names them; the router race above is not the accept path (the sender dialled)."
+      ]
     }
   },
   "inventory_entries": {
