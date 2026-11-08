@@ -255,9 +255,30 @@ impl<'t, 'p> Reader<'t, 'p> {
         }
     }
 
+    /// Where the run of plain string bytes from `from` ends: the first quote,
+    /// backslash or control byte, or the end of the text.
+    fn run_end(&self, from: usize) -> usize {
+        self.text[from..]
+            .iter()
+            .position(|&b| b == b'"' || b == b'\\' || b < 0x20)
+            .map_or(self.text.len(), |p| from + p)
+    }
+
     /// A string, unescaped into a text string.
     fn string(&mut self) -> Result<(), Refused> {
         self.at += 1;
+        // Most strings hold no escape: they are copied as they stand, with the
+        // length their run already gave.
+        let start = self.at;
+        let end = self.run_end(start);
+        if self.text.get(end) == Some(&b'"') {
+            self.at = end + 1;
+            if let Pass::Write { out, .. } = &mut self.pass {
+                head(MAJOR_TEXT, (end - start) as u64, out);
+                out.extend_from_slice(&self.text[start..end]);
+            }
+            return Ok(());
+        }
         let writing = matches!(self.pass, Pass::Write { .. });
         let mut scratch = match &mut self.pass {
             Pass::Write { scratch, .. } => core::mem::take(scratch),
@@ -283,12 +304,7 @@ impl<'t, 'p> Reader<'t, 'p> {
             // The run of bytes up to the next quote, escape or control byte is
             // copied as it stands: the text is UTF-8 already.
             let start = self.at;
-            while let Some(b) = self.peek() {
-                if b == b'"' || b == b'\\' || b < 0x20 {
-                    break;
-                }
-                self.at += 1;
-            }
+            self.at = self.run_end(start);
             if writing {
                 into.extend_from_slice(&self.text[start..self.at]);
             }
@@ -410,7 +426,18 @@ impl<'t, 'p> Reader<'t, 'p> {
         let spelled = core::str::from_utf8(&self.text[start..self.at]).unwrap_or("");
         let digits = spelled.strip_prefix('-').unwrap_or(spelled);
         if integral {
-            if let Ok(magnitude) = digits.parse::<u64>() {
+            // Nineteen digits always fit a u64 (10^19 - 1 < 2^64), which is every
+            // integer the field document writes as a number; longer ones parse.
+            let magnitude = if digits.len() <= 19 {
+                Some(
+                    digits
+                        .bytes()
+                        .fold(0u64, |n, d| n * 10 + u64::from(d - b'0')),
+                )
+            } else {
+                digits.parse::<u64>().ok()
+            };
+            if let Some(magnitude) = magnitude {
                 match (negative, magnitude) {
                     (false, n) => head(MAJOR_UNSIGNED, n, out),
                     // `-0` is the integer 0; CBOR's negative head holds -1 - n.

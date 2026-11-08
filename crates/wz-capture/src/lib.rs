@@ -267,6 +267,10 @@ pub mod selection_json;
 pub mod field_values;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod field_values_tests;
+// The row-facts document against the field document it is cut from, and the
+// cut the field document's gates take a row-facts population from.
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod row_facts_tests;
 // The capture read as SESSIONS, one row per zid pair, and the document that
 // renders them. Each is documented by its own `//!` text and carries no outer
 // `///` here, for the reason the transport build modules give.

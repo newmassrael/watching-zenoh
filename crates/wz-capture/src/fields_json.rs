@@ -1102,9 +1102,9 @@ pub struct Since {
 /// message's tree when that message is picked.
 ///
 /// [`Trees::Left`] writes every key of the row but those two, from the same walk and
-/// by the same writer; nothing else about the row changes. A document written so
-/// says it at the top, `"trees":false`, so it cannot be read as a document whose rows
-/// were declined.
+/// by the same writer; nothing else about the row changes. A document written so is
+/// the `row_facts` document and says so in its envelope, so its rows cannot be read
+/// as field-document rows the walker declined.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Trees {
     /// Every key, the trees included: every document but the row-facts door's.
@@ -1807,7 +1807,16 @@ fn fields_json_selected(
     // R2100 (open-debt item 509) — the document's own revision, first key. See
     // `doc_revision`; the census document opens the same way.
     let mut out = String::from("{");
-    crate::doc_revision::envelope_into(crate::doc_revision::FIELDS, &mut out);
+    // A document whose rows leave their trees out is a document of its own, with
+    // its own name and revision: the name is what tells a reader which shape it
+    // holds, so a row with no `fields` is not read as one the walker declined.
+    crate::doc_revision::envelope_into(
+        match trees {
+            Trees::Written => crate::doc_revision::FIELDS,
+            Trees::Left => crate::doc_revision::ROW_FACTS,
+        },
+        &mut out,
+    );
     // Which rows were asked for, written by the since-door ALONE, on the
     // precedent `list_id` set: a key only one door writes is still in the key
     // set, and the revision says so.
@@ -1820,12 +1829,6 @@ fn fields_json_selected(
             out,
             ",\"window\":{{\"after_seq\":{after_seq},\"through_seq\":{through_seq}}}"
         );
-    }
-    // Written by the row-facts door alone, on the precedent `window` sets: a reader
-    // that finds no `fields` on a row is told here that none was written, and not
-    // left to read it as a row the walker declined.
-    if trees == Trees::Left {
-        out.push_str(",\"trees\":false");
     }
     out.push_str(",\"stream_flows\":[");
     // Re-read ONCE, ahead of both flow tables: a stream row now
@@ -10026,6 +10029,20 @@ mod tests {
         }
     }
 
+    /// A field document whose datagram flow names a frame in `disagreements`:
+    /// three frames dissected, and the container they came from cut after the
+    /// first, so the second read finds no packet for the others.
+    fn named_disagreement_document() -> String {
+        let (d, _) = crate::datagram_tests::wide_sn_dissection_with_file(&[1, 2, 3]);
+        let (_, cut) = crate::datagram_tests::wide_sn_dissection_with_file(&[1]);
+        let doc = fields_json(&d, &cut, None, None);
+        assert!(
+            doc.contains("\"named\":[{\"at\":"),
+            "the fixture must name a frame its second read did not walk: {doc}"
+        );
+        doc
+    }
+
     /// R2175 (open-debt item 552) — THE PAYLOAD PLANE OF THIS DOCUMENT,
     /// RENDERED FROM ITS OWN TYPES RATHER THAN FROM WHATEVER A CAPTURE REACHED.
     ///
@@ -10211,6 +10228,10 @@ mod tests {
         // profile brings, over every place and every reason a piece joins
         // nothing.
         rendered.extend(crate::segment_row_tests::pin_documents());
+        // Revision 60 — a datagram flow's `disagreements` group with a frame
+        // named in it: the dissection of three frames, and a container cut after
+        // the first, so the second read of the later ones finds no packet.
+        rendered.push(named_disagreement_document());
 
         let mut seen: Vec<&str> = Vec::new();
         for doc in &rendered {
@@ -10227,6 +10248,26 @@ mod tests {
             "the field document's key set moved once the payload plane is counted; \
              if that is deliberate, APPEND a revision to \
              `doc_revision::DOCUMENT_HISTORY` carrying the new set"
+        );
+
+        // The row-facts document over the same population, as its door writes
+        // each state: the field document's keys without the ones only a tree
+        // carries, which is the set its revision lists.
+        let facts: Vec<String> = rendered
+            .iter()
+            .map(|doc| crate::row_facts_tests::as_row_facts(doc))
+            .collect();
+        let mut seen_facts: Vec<&str> = facts.iter().flat_map(|doc| rev::key_set(doc)).collect();
+        seen_facts.sort_unstable();
+        seen_facts.dedup();
+        let expected_facts: Vec<&str> = rev::newest(rev::ROW_FACTS)
+            .expect("the row-facts document has a revision")
+            .keys
+            .to_vec();
+        assert_eq!(
+            seen_facts, expected_facts,
+            "the row-facts document's key set is not the one its rows write; \
+             APPEND a revision to `doc_revision::DOCUMENT_HISTORY` carrying the new set"
         );
     }
 
@@ -10787,7 +10828,17 @@ mod tests {
         // rather than counted afterwards, so the closing comparison cannot
         // disagree with the loop that fed it.
         let mut names_checked: Vec<(&str, &str)> = Vec::new();
-        for (document, key, words) in live {
+        // The row-facts document writes the field document's rows, so every
+        // field family but those only a tree carries is a row-facts family held
+        // to the same walk.
+        let row_facts: Vec<(&str, &str, Vec<&'static str>)> = live
+            .iter()
+            .filter(|(document, key, _)| {
+                *document == rev::FIELDS && !rev::ROW_FACTS_TREE_ONLY_FAMILIES.contains(key)
+            })
+            .map(|(_, key, words)| (rev::ROW_FACTS, *key, words.clone()))
+            .collect();
+        for (document, key, words) in live.into_iter().chain(row_facts) {
             names_checked.push((document, key));
             // A walk that came back empty would make the comparison below
             // trivially true, which is this workspace's most expensive
@@ -11507,8 +11558,15 @@ mod tests {
         let field_list = crate::filter::selector_fields_json();
         // The values document, one per record state.
         let values_docs = crate::field_values_tests::documents_for_the_gates();
-        let docs: [(&str, Vec<&String>); 18] = [
+        // The row-facts document over the same population: every field
+        // document above as the row-facts door writes it for that state.
+        let facts_docs: Vec<String> = fields_docs
+            .iter()
+            .map(|doc| crate::row_facts_tests::as_row_facts(doc))
+            .collect();
+        let docs: [(&str, Vec<&String>); 19] = [
             (rev::FIELD_VALUES, values_docs.iter().collect()),
+            (rev::ROW_FACTS, facts_docs.iter().collect()),
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,

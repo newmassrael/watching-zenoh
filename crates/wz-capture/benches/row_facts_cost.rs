@@ -157,7 +157,10 @@ fn measure(pushes: usize) {
     assert_eq!(facts.matches("\"seq\":").count() as u64, rows);
     assert!(with_trees.contains(",\"fields\":{"), "the rows carry trees");
     assert!(!facts.contains(",\"fields\":{"), "no row carries a tree");
-    assert!(facts.contains(",\"trees\":false"), "the document says so");
+    assert!(
+        facts.starts_with("{\"document\":{\"name\":\"row_facts\""),
+        "the document names its shape"
+    );
 
     // The capture read as it grew, in steps: each step's dissection is of the
     // prefix the step ends at, as a live handle's would be after its pushes.
@@ -211,6 +214,19 @@ fn measure(pushes: usize) {
         100.0 * (trees_us as f64 - facts_us as f64) / trees_us as f64,
         100.0 * cbor.len() as f64 / facts.len() as f64
     );
+    // The last row as written, so what a treeless row still holds is read and
+    // not inferred.
+    // A row opens with its direction and the space its anchor is in; a conduit
+    // object has a direction too, and no `offset_space` after it.
+    let opened = facts
+        .rfind(",\"offset_space\":")
+        .and_then(|space| facts[..space].rfind("{\"direction\":"));
+    if let Some(at) = opened {
+        let end = facts[at..]
+            .find("],\"shown\":")
+            .map_or(facts.len(), |e| at + e);
+        println!("  last treeless row: {}", &facts[at..end]);
+    }
 }
 
 fn main() {

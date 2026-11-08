@@ -2574,6 +2574,21 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R59_CARRIES,
     },
+    // Revision 60 DECLARES four keys the document already wrote: a datagram
+    // flow's `disagreements` group (`count`, and `named` with an `at` and a `why`
+    // per frame its second read did not walk) has been on every datagram flow
+    // since the field layer's first round and was in no key set. Found when the
+    // row-facts document, which writes the same flows, was held to its key set.
+    // Nothing written moves.
+    DocumentShape {
+        document: FIELDS,
+        revision: 60,
+        keys: FIELDS_R60_KEYS,
+        retiring: &[],
+        families: FIELDS_R59_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R59_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -4076,6 +4091,26 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELD_VALUES_R1_CARRIES,
     },
+    // THE FIELD DOCUMENT'S ROWS WITHOUT THEIR TREES, in CBOR.
+    //
+    // A document of its own because it is the answer of a door of its own
+    // (`wz_dissect_live_row_facts_since`) and has a shape of its own: a row's
+    // `fields` and a completed chain's `above_transport.fields` are not written,
+    // and a reader that finds no `fields` must not read it as a declined row.
+    // Every other key, value and family is the field document's at revision 60,
+    // written by the same writer, less what only a tree carries (a node's `kind`
+    // and `selector_path`); measured on small pushes, the trees were 74% of a
+    // row's bytes and 70% of the call. The bytes are RFC 8949's mapping of that
+    // JSON, key for key.
+    DocumentShape {
+        document: ROW_FACTS,
+        revision: 1,
+        keys: ROW_FACTS_R1_KEYS,
+        retiring: &[],
+        families: ROW_FACTS_R1_FAMILIES,
+        planes: &[],
+        carries: ROW_FACTS_R1_CARRIES,
+    },
     // THE SAME MOVE ON THE CENSUS: a `zid` prefix is read against the capture
     // and an ambiguous one is reported.
     //
@@ -4272,6 +4307,753 @@ pub const MEMORY: &str = "memory";
 /// The typed values of a few payload field paths, for the records after a
 /// cursor a selector picks (`wz_dissect_live_field_values_since`).
 pub const FIELD_VALUES: &str = "field_values";
+/// The rows of the field document after a cursor with their field trees left
+/// out, in CBOR (`wz_dissect_live_row_facts_since`).
+pub const ROW_FACTS: &str = "row_facts";
+
+/// The keys of the field document that only a field TREE writes, and so the
+/// row-facts document never does: a tree node's value `kind` and its
+/// `selector_path`. Measured over the field document's pin population, every
+/// other key of it is written outside a tree as well.
+pub const ROW_FACTS_TREE_ONLY_KEYS: &[&str] = &["kind", "selector_path"];
+
+/// The value families of the field document that only a field tree carries: a
+/// tree node's `kind`.
+pub const ROW_FACTS_TREE_ONLY_FAMILIES: &[&str] = &["kind"];
+
+/// The row-facts document's key set at revision 1: the field document's at
+/// revision 60 without [`ROW_FACTS_TREE_ONLY_KEYS`].
+///
+/// Its rows ARE the field document's rows, written by the same writer with the
+/// two trees left out (`fields_json::Trees::Left`), so every key it writes is a
+/// key of that document. `the_row_facts_document_moves_with_the_field_document`
+/// holds this set to the field document's newest less the tree-only keys, so a
+/// key added to a row there cannot arrive here under this revision, and the pin
+/// over the field document's population holds it to what the rows write.
+pub const ROW_FACTS_R1_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "announced_version",
+    "answers",
+    "at",
+    "at_least",
+    "at_most_bytes",
+    "basis",
+    "batch_header",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "check",
+    "checks",
+    "chunk_bytes",
+    "chunk_offset",
+    "close_seen",
+    "closes",
+    "completion_ns",
+    "compression",
+    "conduit",
+    "confirmed",
+    "context",
+    "count",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "crc_stated",
+    "crossed_at_packet",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "disagreements",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "ended_transfers",
+    "enum_number",
+    "eps_basis",
+    "evicted",
+    "evidence",
+    "example",
+    "expired_chains",
+    "explained",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "first_reply",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "headed_resyncs",
+    "headed_units",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "joined",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "keyexpr_suffix",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "log2_lr_max_millibits",
+    "log2_lr_millibits",
+    "log2_lr_min_millibits",
+    "log2_lr_no_max_millibits",
+    "log2_lr_no_millibits",
+    "log2_lr_no_min_millibits",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "millibits",
+    "missing",
+    "missing_ranges",
+    "model",
+    "name",
+    "named",
+    "negotiated",
+    "no_at_millibits",
+    "no_millibits",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "out_of_order",
+    "outcome",
+    "overlap",
+    "packet",
+    "parameters",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "payload_size",
+    "phase",
+    "place",
+    "plain_resyncs",
+    "plain_units",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "q_basis",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "received_bytes",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "residual",
+    "revised",
+    "revision",
+    "round_trip_ns",
+    "rst_seen",
+    "samples",
+    "schema",
+    "scout_askers",
+    "scouting",
+    "segment",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "size_verdict",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stated",
+    "stream",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "strength",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "transfer",
+    "type",
+    "typed",
+    "typed_value",
+    "undecoded",
+    "under",
+    "unit_readings",
+    "units",
+    "unjoined",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "violated",
+    "whole_bytes",
+    "why",
+    "window",
+    "wrong",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+    "zid",
+];
+
+/// The row-facts document's value families at revision 1: the field document's
+/// at revision 59 without [`ROW_FACTS_TREE_ONLY_FAMILIES`], each over the same
+/// words.
+pub const ROW_FACTS_R1_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "basis",
+        values: BASIS_R45,
+    },
+    ValueFamily {
+        key: "batch_header",
+        values: BATCH_HEADER_R44,
+    },
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R50,
+    },
+    ValueFamily {
+        key: "counter_reason",
+        values: COUNTER_REASON_R34,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_EPS_BASIS_R50,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "place",
+        values: SEGMENT_PLACE_R59,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "request_kind",
+        values: REQUEST_KIND_R37,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "size_verdict",
+        values: SIZE_VERDICT_R55,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R59,
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "unjoined",
+        values: SEGMENT_UNJOINED_R59,
+    },
+    ValueFamily {
+        key: "unopened_reason",
+        values: UNOPENED_REASON_R35,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
+/// `offset_space` at row-facts revision 1: the field document's shapes at
+/// revision 19 without the row's `fields` tree.
+pub const ROW_FACTS_OFFSET_SPACE_CARRIES_R1: &[WordCarries] = &[
+    WordCarries {
+        word: "packet",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "payload_decode",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "packet",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "payload_decode",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "packet",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "packet",
+                "sn",
+            ],
+        ],
+    },
+    WordCarries {
+        word: "stream_byte",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "payload_decode",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "payload_decode",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "sn",
+            ],
+        ],
+    },
+];
+
+/// `carried_state` at row-facts revision 1: the field document's shapes at
+/// revision 12 without a completed chain's `fields` trees.
+pub const ROW_FACTS_CARRIED_STATE_CARRIES_R1: &[WordCarries] = &[
+    WordCarries {
+        word: "batch",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "fragment",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "fragment_without_resolution",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "nothing",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "reassembled",
+        shapes: &[&["carried"]],
+    },
+    WordCarries {
+        word: "undecompressible",
+        shapes: &[&[]],
+    },
+];
+
+/// The row-facts document's carries at revision 1: the field document's at
+/// revision 59 without the tree-only `kind`, and with the two families whose
+/// objects held a tree read without it.
+pub const ROW_FACTS_R1_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "announced_version",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "batch_header",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(ROW_FACTS_CARRIED_STATE_CARRIES_R1),
+    },
+    KeyCarries {
+        key: "check",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "eps_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(ROW_FACTS_OFFSET_SPACE_CARRIES_R1),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "place",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "q_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "request_kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "size_verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R59),
+    },
+    KeyCarries {
+        key: "strength",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unjoined",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
 
 /// The values document's key set at revision 1, over every state a record
 /// takes: the envelope, the window, the asked paths, and per record its row,
@@ -18888,6 +19670,236 @@ pub const PAYLOAD_STATE_CARRIES_R59: &[WordCarries] = &[
     },
 ];
 
+/// The keys the field document carries at revision 60: revision 59's PLUS the
+/// four of a datagram flow's `disagreements` group (the group, its `count` and
+/// `named`, and the `at` of each named frame beside a `why` already listed),
+/// which the document has written since the field layer's first round and no key
+/// set listed. Nothing written changed.
+pub const FIELDS_R60_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "announced_version",
+    "answers",
+    "at",
+    "at_least",
+    "at_most_bytes",
+    "basis",
+    "batch_header",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "check",
+    "checks",
+    "chunk_bytes",
+    "chunk_offset",
+    "close_seen",
+    "closes",
+    "completion_ns",
+    "compression",
+    "conduit",
+    "confirmed",
+    "context",
+    "count",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "crc_stated",
+    "crossed_at_packet",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "disagreements",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "ended_transfers",
+    "enum_number",
+    "eps_basis",
+    "evicted",
+    "evidence",
+    "example",
+    "expired_chains",
+    "explained",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "first_reply",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "headed_resyncs",
+    "headed_units",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "joined",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "keyexpr_suffix",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "log2_lr_max_millibits",
+    "log2_lr_millibits",
+    "log2_lr_min_millibits",
+    "log2_lr_no_max_millibits",
+    "log2_lr_no_millibits",
+    "log2_lr_no_min_millibits",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "millibits",
+    "missing",
+    "missing_ranges",
+    "model",
+    "name",
+    "named",
+    "negotiated",
+    "no_at_millibits",
+    "no_millibits",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "out_of_order",
+    "outcome",
+    "overlap",
+    "packet",
+    "parameters",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "payload_size",
+    "phase",
+    "place",
+    "plain_resyncs",
+    "plain_units",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "q_basis",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "received_bytes",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "residual",
+    "revised",
+    "revision",
+    "round_trip_ns",
+    "rst_seen",
+    "samples",
+    "schema",
+    "scout_askers",
+    "scouting",
+    "segment",
+    "selected",
+    "selector_path",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "size_verdict",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stated",
+    "stream",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "strength",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "transfer",
+    "type",
+    "typed",
+    "typed_value",
+    "undecoded",
+    "under",
+    "unit_readings",
+    "units",
+    "unjoined",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "violated",
+    "whole_bytes",
+    "why",
+    "window",
+    "wrong",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+    "zid",
+];
+
 /// The value families the field document declares at revision 59: revision
 /// 55's with `state` widened by `segment_piece`, PLUS `place` and `unjoined`
 /// of a `segment` block.
@@ -24396,7 +25408,9 @@ mod tests {
             // suffix an unresolved reference wrote after its id.
             // To 59 when a carried entry gained the `segment` block of a piece
             // of a split message, and the payload state `segment_piece`.
-            (FIELDS, 59),
+            // To 60 when the key set declared a datagram flow's `disagreements`
+            // group, written since the field layer's first round.
+            (FIELDS, 60),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -24544,6 +25558,8 @@ mod tests {
             (MEMORY, 1),
             // The typed values of a few payload field paths.
             (FIELD_VALUES, 1),
+            // The field document's rows without their trees.
+            (ROW_FACTS, 1),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");
@@ -24586,6 +25602,92 @@ mod tests {
         // quietly claims a shape.
         assert_eq!(revision("no-such-document"), None);
         assert!(envelope("no-such-document").contains("\"revision\":0"));
+    }
+
+    /// The row-facts document writes the field document's rows, so its newest
+    /// revision carries the field document's newest key set, value families and
+    /// carries, less what only a tree writes: the tree-only keys and families,
+    /// and the `fields` a row's `offset_space` and a chain's `carried_state` bring
+    /// beside them. A row key, a word or a shape added there without a row-facts
+    /// revision would reach the row-facts reader under a number that does not
+    /// say so: this fails until both move.
+    #[test]
+    fn the_row_facts_document_moves_with_the_field_document() {
+        let fields = newest(FIELDS).expect("the field document has a revision");
+        let facts = newest(ROW_FACTS).expect("the row-facts document has a revision");
+        let keys: Vec<&str> = fields
+            .keys
+            .iter()
+            .copied()
+            .filter(|k| !ROW_FACTS_TREE_ONLY_KEYS.contains(k))
+            .collect();
+        assert_eq!(
+            facts.keys,
+            keys.as_slice(),
+            "the field document's keys moved (revision {}) and row_facts's did not \
+             (revision {}): give row_facts a revision with the new set",
+            fields.revision,
+            facts.revision
+        );
+        // By content: a `const` slice has no single address to compare.
+        let families = |shape: &DocumentShape| -> Vec<(&str, Vec<&str>)> {
+            shape
+                .families
+                .iter()
+                .filter(|f| !ROW_FACTS_TREE_ONLY_FAMILIES.contains(&f.key))
+                .map(|f| (f.key, f.values.to_vec()))
+                .collect()
+        };
+        assert_eq!(
+            families(facts),
+            families(fields),
+            "row_facts's value families are not the field document's newest"
+        );
+        assert!(
+            facts
+                .families
+                .iter()
+                .all(|f| !ROW_FACTS_TREE_ONLY_FAMILIES.contains(&f.key)),
+            "row_facts declares a family only a tree carries"
+        );
+        // The two families whose objects held a tree bring it no more.
+        let treeless = ["offset_space", "carried_state"];
+        let carries = |shape: &DocumentShape| -> Vec<(&str, Vec<(&str, Vec<Vec<&str>>)>)> {
+            shape
+                .carries
+                .iter()
+                .filter(|c| !ROW_FACTS_TREE_ONLY_FAMILIES.contains(&c.key))
+                .map(|c| {
+                    let words = match c.shape {
+                        CarriesShape::Passenger => Vec::new(),
+                        CarriesShape::Discriminant(words) => words
+                            .iter()
+                            .map(|w| {
+                                let shapes = w
+                                    .shapes
+                                    .iter()
+                                    .map(|s| {
+                                        s.iter()
+                                            .copied()
+                                            .filter(|k| {
+                                                !(treeless.contains(&c.key) && *k == "fields")
+                                            })
+                                            .collect()
+                                    })
+                                    .collect();
+                                (w.word, shapes)
+                            })
+                            .collect(),
+                    };
+                    (c.key, words)
+                })
+                .collect()
+        };
+        assert_eq!(
+            carries(facts),
+            carries(fields),
+            "row_facts's carries are not the field document's newest"
+        );
     }
 
     /// THE RULE: a key cannot leave unannounced, and CAN leave once announced.
