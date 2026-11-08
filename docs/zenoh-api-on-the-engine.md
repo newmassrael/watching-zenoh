@@ -1208,7 +1208,10 @@ Each lands whole with its surface lines, tests and faults in one round.
       in the pin's router hat), so this is the race of that design, held open by the slower
       scheduling of the host; wz changes nothing for it, and a test that counts registrations
       is exposed to it at about 1.4% on Windows.
-    - **Owed:** a margin gate for the lane once it has measured runs.
+    - **The budget of the lane (2026-11-08):** four hosted runs with a verdict took 34 to 36.5
+      minutes (three green; the fourth lost one test of `regions`, a registration that a late peer
+      of the scenario 7 group did not count, and ran to the end), so the job's ceiling is 60 minutes and it carries the margin gate of the
+      other jobs (alarm at 90%, floor at 20%). It was 150 minutes with no gate.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

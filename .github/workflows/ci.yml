@@ -2198,14 +2198,22 @@ jobs:
   # minute each, plus the compile of each file); cold on a hosted runner it is longer, and the
   # first run is the measurement.
   #
-  # NO BUDGET GATE YET, on the precedent of `pico-client-only` and `e2e-router-scale`: a margin
-  # gate's floor and alarm are derived from measured runs and this job has none.
-  # `timeout-minutes` is a ceiling until then.
+  # THE BUDGET, from measured runs (2026-11-08). Four hosted runs finished with a verdict, three
+  # green and one red on a test of `regions` (the job ran to the end either way), and the job
+  # took 2,091 s, 2,187 s, 2,130 s and about 2,060 s of wall-clock: 34 to 36.5 minutes, whole
+  # file of `regions` included (the cold first run is among them). The ceiling was 150 minutes,
+  # a number nobody had measured, and a ceiling that far off cancels nothing before a person
+  # would have noticed a run that doubled. It is 60 minutes now: the slowest run uses 61% of it,
+  # between the floor and the 90% alarm of `job-budget-margin.sh`, and a run that doubles trips
+  # the alarm. The two numbers are one fact (`job_budget_binding.py`), so move that and move this.
   z8-upstream:
     name: upstream's tests against the patched graph (Layer Z8)
     runs-on: ubuntu-22.04
-    timeout-minutes: 150
+    timeout-minutes: 60
     steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
         with:
@@ -2268,6 +2276,10 @@ jobs:
           path: target/z8-suite/report
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Budget margin — this job's own clock
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 3600 90 20 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
   # R2165 — the PASSIVE-DISSECTION job, peeled off `feature-gates` when that
