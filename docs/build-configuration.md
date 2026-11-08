@@ -186,6 +186,22 @@ original reproduced by naming it. Three things follow from it:
   non-default crate feature `admission-retry`; a stated retry is refused when the policy is
   off, and by the router engine, which does not read it. Only the tokio registry reads it, and
   the C API does not state it.
+- **Delivering a publish to all of its links or to none** (`multi-route-atomic-tx`, off by
+  default): a publish waits for room on each face on its own terms, so one put can reach some
+  faces and be dropped at another. A publish that states `PublishOptions::atomic_tx` instead
+  reserves room on every face first (`Session::reserve_wire`, which asks the link's outbound
+  queue once, without waiting and without marking it congested) and sends only when every
+  face promised it, each frame under its own reservation (`Session::publish_reserved`), which
+  the send does not ask room for again; the queue counts the promise as taken until it is
+  dropped, so no other sender is given that room in between. If a face has no room nothing is
+  sent to any face, to a multicast group or to a subscriber of the session, no sequence number
+  is spent, the reservations are given back and the publish ends delivering to nobody; stated
+  together with an admission retry it reserves again after the delay. A face that is down or
+  was never told the key takes no part. A payload that must be fragmented is atomic for its
+  first frame only, a link that writes from a pool may still wait for a slot, and
+  shared-memory publishes do not reserve. `atomic_tx::admit_in_build` refuses the statement
+  when the policy is off. Only the tokio registry reads it, and no Rust or C API states it yet;
+  `BoxedLinkDriver::try_reserve_room` is the seam a wrapper must forward.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and
