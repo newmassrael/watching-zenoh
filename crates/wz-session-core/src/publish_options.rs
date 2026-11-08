@@ -492,7 +492,8 @@ impl PublishOptions {
     /// these options and reading them again per message.
     ///
     /// `None` when the options are not a plain Put (a Del, a timestamp, an encoding, a source, an
-    /// attachment, a retry for a link with no room, a reservation on every link), which then take
+    /// attachment, a retry for a link with no room, a reservation on every link, a limit to some
+    /// links), which then take
     /// the general publish. The answer holds the same facts the general publish derives from the options
     /// (`reliable_bool`, the express flag, `priority_band`), by the same code.
     ///
@@ -507,8 +508,13 @@ impl PublishOptions {
         #[cfg(feature = "codec-push")]
         {
             // The plain lane sends each frame with a wait for room and knows neither a retry nor
-            // a reservation.
-            if self.kind != SampleKind::Put || self.admission_retry.is_some() || self.atomic_tx {
+            // a reservation, and it writes to every face without reading which link a face is, so
+            // a publish limited to some links would reach the others.
+            if self.kind != SampleKind::Put
+                || self.admission_retry.is_some()
+                || self.atomic_tx
+                || self.links.is_restricted()
+            {
                 return None;
             }
             let meta = self.push_metadata();
@@ -787,5 +793,24 @@ mod plain_put_tests {
         assert!(stated.clone().atomic_tx, "it survives a clone");
         assert_eq!(stated.kind, SampleKind::Put);
         assert_eq!(stated.admission_retry, None, "it states nothing else");
+    }
+
+    #[test]
+    fn a_publish_limited_to_some_links_leaves_the_plain_lane() {
+        // The plain lane writes to every face and reads no slot, so a limit it took would be
+        // ignored. Any (the default) keeps the lane, and a set of every slot does not: a set is
+        // a statement, whatever it contains.
+        let limited = PublishOptions::put()
+            .with_links(LinkRestriction::only([0u8, 2]).expect("two slots in range"));
+        assert!(limited.links.is_restricted());
+        assert!(limited.plain_put_params().is_none());
+        let everything = PublishOptions::put()
+            .with_links(LinkRestriction::only(0u8..64).expect("every slot is in range"));
+        assert!(everything.plain_put_params().is_none());
+        assert_eq!(
+            PublishOptions::put().plain_put_params().is_some(),
+            SENDS_PLAIN_PUTS,
+            "an unlimited publish keeps the plain lane the build gives it",
+        );
     }
 }
