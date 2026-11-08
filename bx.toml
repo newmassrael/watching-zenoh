@@ -175,6 +175,25 @@ install_inputs = ["scripts/install-shellcheck.sh", ".github/workflows/ci.yml"]
 prefix_file = "shellcheck"
 needed_by = ["--layer 0"]
 
+# THE PINNED LEDGER CLI the `file-round` action runs on a build machine. `mnemosyne.toml` pins one
+# revision (`pin`) and a build that is not it hands over to `~/.local/mn/<pin>/bin/mnemosyne-cli`
+# or refuses; a fleet machine has no such directory until the pin is installed there, and the
+# integrator's derive step ran on one that had none (a rehearsal of the landing queue, 2026-11-08:
+# `file-round` exited 1 on `pins Mnemosyne ee93427..., and this build is 183a17a5`). Declared here
+# the pin is read from `mnemosyne.toml`, the one place it is written, a machine that lacks it
+# does not receive a run that needs it, and `bx-provision <alias> --apply` builds it.
+#
+# `needed_by` is the action's own name, so no other run is steered by it; `check` is the first
+# eight characters the CLI prints for its revision (`mnemosyne-cli 0.1.0 (ee934276)`).
+[tools.mnemosyne-cli]
+version_file    = "mnemosyne.toml"
+version_pattern = 'pin = "([0-9a-f]{40})"'
+path            = "~/.local/mn/{version}/bin/mnemosyne-cli"
+check           = "{version:8}"
+install         = "CARGO_HOME={scratch}/cargo cargo install --git https://github.com/newmassrael/mnemosyne --rev {version} --bin mnemosyne-cli --locked --root {prefix} mnemosyne-cli"
+prefix_file     = "bin/mnemosyne-cli"
+needed_by       = ["file-round"]
+
 [commands]
 # NOT `cargo test --workspace`: this tree refuses a whole-workspace build on
 # purpose (`sce-rust-runtime` raises a `compile_error!`), so the workspace form
