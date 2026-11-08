@@ -76,6 +76,34 @@ wz_queue_push_range() {
     fi
 }
 
+# The identity bx gives the queue's own commits, the log's and the lease's (bx
+# `land/git.rs` IDENT). It is no person's address, so publishing it leaks nothing, and a
+# commit the integrator puts on the branch keeps the clone's own identity instead, which
+# the ordinary identity gate judges. Changing bx's constant means changing this one.
+WZ_QUEUE_IDENT_EMAIL='bx-land@localhost'
+
+# The identity gate for what a push adds to the queue's log: every author and committer is
+# either an identity the repository accepts or the queue's own. Needs `ident-gate.sh`
+# sourced. $1 the hook's label   $2 the `<base>..<tip>` range. rc 1 on a refusal.
+wz_queue_log_identity_gate() {
+    local hook="$1" range="$2" log sha author committer email bad=0
+    if ! log="$(git log --format='%H %ae %ce' "$range" --)"; then
+        echo "${hook}: \`git log ${range}\` failed; cannot determine which" >&2
+        echo "  identities this push would publish." >&2
+        return 1
+    fi
+    while read -r sha author committer; do
+        [ -n "$sha" ] || continue
+        for email in "$author" "$committer"; do
+            if [ "$email" != "$WZ_QUEUE_IDENT_EMAIL" ] && ! wz_ident_allowed "$email"; then
+                wz_ident_refuse "$hook" "this push would publish queue records by" "$email"
+                bad=1
+            fi
+        done
+    done <<<"$log"
+    return "$bad"
+}
+
 # A parentless commit with the empty tree, on stdout: the base that makes "everything the
 # chain holds" a `<base>..<tip>` range. Its id is fixed (identity and dates are pinned), so
 # it is the same object on every machine; it is written to the object store and reachable

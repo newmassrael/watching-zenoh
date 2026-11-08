@@ -4229,6 +4229,46 @@ layer_c0i_impact_ref_gate() {
         echo "  Layer C0i FAIL: an item with no branch to bound it was given a range" >&2
         return 1
     fi
+    # The queue's own records are written by bx's fixed identity, which the log's identity
+    # gate accepts beside the repository's own; a stranger is refused whoever else is there,
+    # and the queue's identity is not accepted by the ordinary gate (it is for the log only).
+    local ident_root ident_tmp ident_ok=0
+    ident_root="$PWD"
+    ident_tmp="$(mktemp -d)"
+    (
+        set -e
+        # shellcheck disable=SC1091  # constant paths, resolved at run time
+        source "$ident_root/scripts/lib/ident-gate.sh"
+        # shellcheck disable=SC1091
+        source "$ident_root/scripts/lib/push-refs.sh"
+        cd "$ident_tmp"
+        git init -q .
+        commit_as() {
+            GIT_AUTHOR_NAME=x GIT_AUTHOR_EMAIL="$1" GIT_COMMITTER_NAME=x GIT_COMMITTER_EMAIL="$1" \
+                git commit -q --allow-empty -m "$2"
+        }
+        commit_as "$WZ_QUEUE_IDENT_EMAIL" base
+        queue_only="$(git rev-parse HEAD)"
+        commit_as "${WZ_ALLOWED_IDENT_EMAILS[0]}" own
+        both="$(git rev-parse HEAD)"
+        commit_as stranger@example.com stranger
+        stranger="$(git rev-parse HEAD)"
+        wz_queue_log_identity_gate selftest "$queue_only" >/dev/null 2>&1
+        wz_queue_log_identity_gate selftest "$queue_only..$both" >/dev/null 2>&1
+        # A refusal must be a failure of the subshell: `set -e` ignores a negated command.
+        if wz_queue_log_identity_gate selftest "$both..$stranger" >/dev/null 2>&1; then
+            exit 1
+        fi
+        if wz_ident_gate_range selftest "$queue_only" >/dev/null 2>&1; then
+            exit 1
+        fi
+    ) || ident_ok=$?
+    rm -rf "$ident_tmp"
+    if [[ "$ident_ok" -ne 0 ]]; then
+        echo "  Layer C0i FAIL: the queue log's identity gate does not accept exactly" \
+            "the queue's identity and the repository's own" >&2
+        return 1
+    fi
 
     echo "  impact-ref gate: OK (accepts a real section id, refuses Round 1811's" \
         "own '5.4-session' and an absent --impact; the round descriptor reader" \
