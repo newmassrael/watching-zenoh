@@ -520,6 +520,19 @@ ONLY_CAPI = {
         "would be a convenience and not a missing capability.",
         (),
     ),
+    # A node's lifecycle answer read without a session library. Filed in the
+    # round that added the symbol.
+    "a node's answer about its sessions, read by a process that links no session": (
+        "wz_dissect_lifecycle_read",
+        "DELIBERATE. A consumer that asks a node's lifecycle verbs from one "
+        "process and receives the answers in an observer process that links this "
+        "library and no session library must read them with the reader the "
+        "participant's library uses (`wz_capi_c_lifecycle_read`), into the same "
+        "struct, rather than keep a second reader of the node's spelling. The "
+        "command line reads captures and is handed no control-pipe line, so "
+        "there is nothing on it for this to be parity with.",
+        (),
+    ),
     "the declaration rule that covers a key": (
         "wz_dissect_declarations_match",
         "DELIBERATE. The door exists because a consumer that LINKS this library "

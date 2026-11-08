@@ -17,7 +17,7 @@
 //! that walk the sessions a host lists, the per-peer reset record, and the status
 //! document whose machines are a list.
 
-use core::ffi::CStr;
+use core::ffi::{c_char, CStr};
 
 use crate::credential_identity::{zid_from_key_text, CREDENTIAL_ZID_BYTES};
 use crate::text_out::TextOut;
@@ -844,6 +844,132 @@ impl<'a> Answer<'a> {
     }
 }
 
+/// [`AnswerReading::kind`]: the bytes are no document a node writes (empty, another document, or
+/// cut short).
+pub const READING_UNREADABLE: i32 = 0;
+/// [`AnswerReading::kind`]: a verb's verdict on a peer, in band or on the control channel.
+pub const READING_VERDICT: i32 = 1;
+/// [`AnswerReading::kind`]: the control channel's answer to `whoami`, the node's zid.
+pub const READING_WHOAMI: i32 = 2;
+/// [`AnswerReading::kind`]: the control channel's answer to a line that is no command.
+pub const READING_ERROR: i32 = 3;
+
+/// The bytes [`AnswerReading::zid`] holds: the longest zid a key spells (two hex digits a byte)
+/// and its NUL.
+pub const READING_ZID_BYTES: usize = 2 * CREDENTIAL_ZID_BYTES + 1;
+
+/// An [`Answer`] as a C library hands it to its caller: one fixed-layout struct, every word in it
+/// a static C string of this module's ([`VERDICT_C_WORDS`], [`RefusedReason::c_words`],
+/// [`ControlError::c_words`]), and a `has_` flag beside each number that says whether the answer
+/// carried it.
+///
+/// Defined here, beside the reader, so that every library that reads an answer for a C caller
+/// hands out this struct and these branches: the library a participant links
+/// (`wz_capi_c_lifecycle_read`) and the one an observer links without a session
+/// (`wz_dissect_lifecycle_read`). Each library's header spells the struct under its own name;
+/// both are this layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AnswerReading {
+    /// What the bytes were read as: one of the `READING_` kinds.
+    pub kind: i32,
+    /// The verdict word, on a verdict.
+    pub verdict: *const c_char,
+    /// The refusal's sentence, on `refused`: the words of the vocabulary's `verdicts.reasons`.
+    pub reason: *const c_char,
+    /// The error word, on an error.
+    pub error: *const c_char,
+    /// Whether `links` is given.
+    pub has_links: bool,
+    /// The links a `closing` or `resetting` call ordered closed.
+    pub links: u32,
+    /// Whether `generation` is given.
+    pub has_generation: bool,
+    /// The latest generation taken for the peer, on `duplicate`.
+    pub generation: u64,
+    /// Whether `open` and `closing` are given.
+    pub has_held: bool,
+    /// The node's open links to the peer, on `status`.
+    pub open: u32,
+    /// The node's links to the peer a close was ordered for, on `status`.
+    pub closing: u32,
+    /// Whether `intent` is given.
+    pub has_intent: bool,
+    /// Whether a machine holds the peer in the node's intent, on `status`.
+    pub intent: bool,
+    /// The node's zid on `whoami`, NUL-terminated; empty otherwise.
+    pub zid: [c_char; READING_ZID_BYTES],
+}
+
+impl AnswerReading {
+    /// Read `bytes` ([`Answer::read`]) into the C reading. Every member the kind does not carry is
+    /// NULL, 0 or false; bytes that are no answer are [`READING_UNREADABLE`], which is a reading
+    /// and not an error.
+    pub fn of(bytes: &[u8]) -> Self {
+        let mut read = Self {
+            kind: READING_UNREADABLE,
+            verdict: core::ptr::null(),
+            reason: core::ptr::null(),
+            error: core::ptr::null(),
+            has_links: false,
+            links: 0,
+            has_generation: false,
+            generation: 0,
+            has_held: false,
+            open: 0,
+            closing: 0,
+            has_intent: false,
+            intent: false,
+            zid: [0; READING_ZID_BYTES],
+        };
+        match Answer::read(bytes) {
+            None => {}
+            Some(Answer::Verdict(verdict)) => {
+                read.kind = READING_VERDICT;
+                read.verdict = VERDICT_WORDS
+                    .iter()
+                    .position(|w| *w == verdict.verdict)
+                    .map_or(core::ptr::null(), |i| VERDICT_C_WORDS[i].as_ptr());
+                read.reason = verdict
+                    .reason
+                    .map_or(core::ptr::null(), |r| r.c_words().as_ptr());
+                if let Some(links) = verdict.links {
+                    (read.has_links, read.links) = (true, links);
+                }
+                if let Some(generation) = verdict.generation {
+                    (read.has_generation, read.generation) = (true, generation);
+                }
+                if let Some(held) = verdict.held {
+                    (read.has_held, read.open, read.closing) = (true, held.open, held.closing);
+                }
+                if let Some(intent) = verdict.intent {
+                    (read.has_intent, read.intent) = (true, intent);
+                }
+            }
+            Some(Answer::Whoami(zid)) => {
+                read.kind = READING_WHOAMI;
+                // Written again in the one spelling a key and a config's `id` take (lower-case
+                // hex, no leading zero) rather than copied: the text a key accepts may carry a
+                // leading `+`, as upstream's does, and a copy of `+` and 32 digits would fill the
+                // field to its last byte with no NUL. The spelling is at most 32 digits.
+                if let Some(id) = zid_from_key_text(zid) {
+                    let id = u128::from_le_bytes(id);
+                    let digits = (128 - id.leading_zeros()).div_ceil(4) as usize;
+                    for (i, slot) in read.zid[..digits].iter_mut().enumerate() {
+                        let nibble = (id >> (4 * (digits - 1 - i))) & 0xf;
+                        *slot = b"0123456789abcdef"[nibble as usize] as c_char;
+                    }
+                }
+            }
+            Some(Answer::Error(error)) => {
+                read.kind = READING_ERROR;
+                read.error = error.c_words().as_ptr();
+            }
+        }
+        read
+    }
+}
+
 /// The roles a lifecycle key may name the node it asks as: zenoh's three.
 pub const WHATAMI_WORDS: [&str; 3] = ["client", "peer", "router"];
 
@@ -1628,5 +1754,75 @@ mod tests {
         for reason in RefusedReason::ALL {
             assert!(!reason.words().contains(['"', '\\']));
         }
+    }
+
+    /// The C string a reading's pointer or zid field holds, as text.
+    fn c_text(ptr: *const c_char) -> &'static str {
+        assert!(!ptr.is_null());
+        // SAFETY: every pointer a reading carries is one of this module's static C strings.
+        unsafe { CStr::from_ptr(ptr) }.to_str().expect("utf-8")
+    }
+
+    #[test]
+    fn the_c_reading_carries_the_answers_members_and_static_words() {
+        let closing = AnswerReading::of(br#"{"verdict":"closing","links":2}"#);
+        assert_eq!(closing.kind, READING_VERDICT);
+        assert_eq!(c_text(closing.verdict), "closing");
+        assert!(closing.has_links && closing.links == 2);
+        assert!(closing.reason.is_null() && closing.error.is_null() && !closing.has_held);
+
+        for reason in RefusedReason::ALL {
+            let mut text: FixedText<256> = FixedText::new();
+            text.push_str("{\"verdict\":\"refused\",\"reason\":\"");
+            text.push_str(reason.words());
+            text.push_str("\"}");
+            let refused = AnswerReading::of(text.finish().expect("fits").as_bytes());
+            assert_eq!(c_text(refused.verdict), "refused");
+            assert_eq!(c_text(refused.reason), reason.words());
+        }
+        for word in VERDICT_WORDS {
+            assert_eq!(
+                VERDICT_WORDS.iter().filter(|w| **w == word).count(),
+                1,
+                "each verdict word has one C spelling to point at"
+            );
+        }
+
+        let error = AnswerReading::of(br#"{"error":"line-too-long"}"#);
+        assert_eq!(error.kind, READING_ERROR);
+        assert_eq!(c_text(error.error), "line-too-long");
+        assert!(error.verdict.is_null());
+
+        for unreadable in [
+            &b""[..],
+            br#"{"reason":"x","verdict":"refused"}"#,
+            br#"{"verdict":"closing"}"#,
+            br#"{"zid":"0a"}"#,
+        ] {
+            let read = AnswerReading::of(unreadable);
+            assert_eq!(read.kind, READING_UNREADABLE, "{unreadable:?}");
+            assert!(read.verdict.is_null() && read.reason.is_null() && read.error.is_null());
+            assert_eq!(read.zid, [0; READING_ZID_BYTES]);
+        }
+    }
+
+    /// The zid is written in the spelling a key and a config's `id` take, so it always ends in a
+    /// NUL, also for the longest text a key accepts: a leading `+` and 32 digits.
+    #[test]
+    fn the_c_reading_spells_a_whoami_zid_once_and_always_ends_it() {
+        let whoami = AnswerReading::of(br#"{"zid":"a1b2"}"#);
+        assert_eq!(whoami.kind, READING_WHOAMI);
+        assert_eq!(c_text(whoami.zid.as_ptr()), "a1b2");
+
+        let longest = AnswerReading::of(br#"{"zid":"+ffffffffffffffffffffffffffffffff"}"#);
+        assert_eq!(longest.kind, READING_WHOAMI);
+        assert_eq!(
+            c_text(longest.zid.as_ptr()),
+            "ffffffffffffffffffffffffffffffff"
+        );
+        assert_eq!(longest.zid[READING_ZID_BYTES - 1], 0);
+
+        let one = AnswerReading::of(br#"{"zid":"1"}"#);
+        assert_eq!(c_text(one.zid.as_ptr()), "1");
     }
 }

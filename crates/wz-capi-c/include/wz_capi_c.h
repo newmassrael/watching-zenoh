@@ -1086,7 +1086,11 @@ typedef int32_t wz_capi_c_lifecycle_kind_t;
  * says whether the number beside it was in the answer: `links` on closing and
  * resetting, `generation` on duplicate, `open` and `closing` (the node's links
  * to the peer) and `intent` on status. `zid` is the node's zid on whoami,
- * NUL-terminated, and empty otherwise. */
+ * NUL-terminated, in the spelling a key and a config's `id` take (lower-case
+ * hex, no leading zero, no `+`), and empty otherwise. The same struct, member
+ * for member, is wz_dissect_lifecycle_answer in wz_dissect.h, filled by
+ * wz_dissect_lifecycle_read: one reading, for a process that links no
+ * session library. */
 typedef struct wz_capi_c_lifecycle_read_t {
   wz_capi_c_lifecycle_kind_t kind;
   const char *verdict;

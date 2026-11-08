@@ -24,7 +24,8 @@
 use core::ffi::{c_char, CStr};
 
 use wz_session_core::lifecycle_wire::{
-    Answer, VerbWords, VERB_KEY_MAX_BYTES, VERDICT_C_WORDS, VERDICT_WORDS,
+    AnswerReading, VerbWords, READING_ERROR, READING_UNREADABLE, READING_VERDICT, READING_WHOAMI,
+    VERB_KEY_MAX_BYTES,
 };
 use wz_session_core::text_out::FixedText;
 
@@ -56,59 +57,19 @@ pub struct wz_capi_c_lifecycle_words_t {
 /// What an answer was read as.
 pub type wz_capi_c_lifecycle_kind_t = i32;
 /// The bytes are no document a node writes: empty, another document, or cut short.
-pub const WZ_CAPI_C_LIFECYCLE_UNREADABLE: wz_capi_c_lifecycle_kind_t = 0;
+pub const WZ_CAPI_C_LIFECYCLE_UNREADABLE: wz_capi_c_lifecycle_kind_t = READING_UNREADABLE;
 /// A verb's verdict on a peer, in band or on the control channel.
-pub const WZ_CAPI_C_LIFECYCLE_VERDICT: wz_capi_c_lifecycle_kind_t = 1;
+pub const WZ_CAPI_C_LIFECYCLE_VERDICT: wz_capi_c_lifecycle_kind_t = READING_VERDICT;
 /// The control channel's answer to `whoami`: the node's zid.
-pub const WZ_CAPI_C_LIFECYCLE_WHOAMI: wz_capi_c_lifecycle_kind_t = 2;
+pub const WZ_CAPI_C_LIFECYCLE_WHOAMI: wz_capi_c_lifecycle_kind_t = READING_WHOAMI;
 /// The control channel's answer to a line that is no command.
-pub const WZ_CAPI_C_LIFECYCLE_ERROR: wz_capi_c_lifecycle_kind_t = 3;
+pub const WZ_CAPI_C_LIFECYCLE_ERROR: wz_capi_c_lifecycle_kind_t = READING_ERROR;
 
-/// An answer read back. Every `const char *` is a static string this library owns, or NULL where
-/// the kind does not carry it; a `has_` flag says whether the number beside it was in the answer.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct wz_capi_c_lifecycle_read_t {
-    /// What the bytes were read as.
-    pub kind: wz_capi_c_lifecycle_kind_t,
-    /// The verdict word, on a verdict.
-    pub verdict: *const c_char,
-    /// The refusal's sentence, on `refused`: the words of the vocabulary's `verdicts.reasons`.
-    pub reason: *const c_char,
-    /// The error word, on an error.
-    pub error: *const c_char,
-    /// Whether `links` is given.
-    pub has_links: bool,
-    /// The links a `closing` or `resetting` call ordered closed.
-    pub links: u32,
-    /// Whether `generation` is given.
-    pub has_generation: bool,
-    /// The latest generation taken for the peer, on `duplicate`.
-    pub generation: u64,
-    /// Whether `open` and `closing` are given.
-    pub has_held: bool,
-    /// The node's open links to the peer, on `status`.
-    pub open: u32,
-    /// The node's links to the peer a close was ordered for, on `status`.
-    pub closing: u32,
-    /// Whether `intent` is given.
-    pub has_intent: bool,
-    /// Whether a machine holds the peer in the node's intent, on `status`.
-    pub intent: bool,
-    /// The node's zid on `whoami`, NUL-terminated; empty otherwise.
-    pub zid: [c_char; 33],
-}
-
-/// The C string of a verdict word, as `lifecycle_wire` spells it once (`VERDICT_C_WORDS`, in the
-/// order of `VERDICT_WORDS`). Every other word an answer or a refusal carries is handed out by its
-/// own `c_words()`; all of them are static C strings in the library's read-only data, so nothing
-/// is built at run time.
-fn verdict_c_word(word: &str) -> *const c_char {
-    VERDICT_WORDS
-        .iter()
-        .position(|w| *w == word)
-        .map_or(core::ptr::null(), |i| VERDICT_C_WORDS[i].as_ptr())
-}
+/// An answer read back: `lifecycle_wire::AnswerReading`, the one C reading of an answer, which
+/// `wz_dissect_lifecycle_read` hands out too. Every `const char *` is a static string this
+/// library owns, or NULL where the kind does not carry it; a `has_` flag says whether the number
+/// beside it was in the answer.
+pub type wz_capi_c_lifecycle_read_t = AnswerReading;
 
 /// A C string argument as UTF-8, NULL as `default`, or `None` when it is not UTF-8.
 ///
@@ -229,57 +190,8 @@ pub unsafe extern "C" fn wz_capi_c_lifecycle_read(
         // SAFETY: caller contract.
         unsafe { core::slice::from_raw_parts(bytes, len) }
     };
-    let mut read = wz_capi_c_lifecycle_read_t {
-        kind: WZ_CAPI_C_LIFECYCLE_UNREADABLE,
-        verdict: core::ptr::null(),
-        reason: core::ptr::null(),
-        error: core::ptr::null(),
-        has_links: false,
-        links: 0,
-        has_generation: false,
-        generation: 0,
-        has_held: false,
-        open: 0,
-        closing: 0,
-        has_intent: false,
-        intent: false,
-        zid: [0; 33],
-    };
-    match Answer::read(bytes) {
-        None => {}
-        Some(Answer::Verdict(verdict)) => {
-            read.kind = WZ_CAPI_C_LIFECYCLE_VERDICT;
-            read.verdict = verdict_c_word(verdict.verdict);
-            read.reason = verdict
-                .reason
-                .map_or(core::ptr::null(), |r| r.c_words().as_ptr());
-            if let Some(links) = verdict.links {
-                (read.has_links, read.links) = (true, links);
-            }
-            if let Some(generation) = verdict.generation {
-                (read.has_generation, read.generation) = (true, generation);
-            }
-            if let Some(held) = verdict.held {
-                (read.has_held, read.open, read.closing) = (true, held.open, held.closing);
-            }
-            if let Some(intent) = verdict.intent {
-                (read.has_intent, read.intent) = (true, intent);
-            }
-        }
-        Some(Answer::Whoami(zid)) => {
-            read.kind = WZ_CAPI_C_LIFECYCLE_WHOAMI;
-            // A zid read here is at most 32 lower-case hex digits.
-            for (slot, byte) in read.zid.iter_mut().zip(zid.bytes()) {
-                *slot = byte as c_char;
-            }
-        }
-        Some(Answer::Error(error)) => {
-            read.kind = WZ_CAPI_C_LIFECYCLE_ERROR;
-            read.error = error.c_words().as_ptr();
-        }
-    }
     // SAFETY: caller contract.
-    unsafe { *out = read };
+    unsafe { *out = AnswerReading::of(bytes) };
     Z_OK
 }
 

@@ -1826,6 +1826,75 @@ static int check_proto_door(void) {
     return 0;
 }
 
+/* (ABI 54) -- A NODE'S LIFECYCLE ANSWER, read the way an observer that holds a
+ * node's control pipe reads the line it answered with: the struct's layout as
+ * the header spells it, a refusal's sentence and a status's members, a whoami
+ * zid, an error word, the node's members in another order, and the argument
+ * errors. The words are static: nothing here is freed. */
+static int check_lifecycle_door(void) {
+    wz_dissect_lifecycle_answer a;
+    int rc;
+
+    CHECK(offsetof(wz_dissect_lifecycle_answer, verdict) == sizeof(void *),
+          "verdict offset");
+    CHECK(offsetof(wz_dissect_lifecycle_answer, generation) == 48 ||
+              sizeof(void *) != 8,
+          "generation offset");
+    CHECK(offsetof(wz_dissect_lifecycle_answer, zid) == 70 ||
+              sizeof(void *) != 8,
+          "zid offset");
+    CHECK(sizeof(a.zid) == 33, "zid size");
+    CHECK(sizeof(wz_dissect_lifecycle_answer) == 104 || sizeof(void *) != 8,
+          "struct size");
+
+    static const char reason[] = "the last chunk of the key is not a zid";
+    static const char refused[] = "{\"verdict\":\"refused\",\"reason\":"
+                                  "\"the last chunk of the key is not a zid\"}";
+    rc = wz_dissect_lifecycle_read((const uint8_t *)refused, strlen(refused), &a);
+    CHECK(rc == WZ_DISSECT_OK && a.kind == WZ_DISSECT_LIFECYCLE_VERDICT,
+          "refused rc=%d kind=%d", rc, (int)a.kind);
+    CHECK(strcmp(a.verdict, "refused") == 0 && strcmp(a.reason, reason) == 0 &&
+              a.error == NULL,
+          "a refusal carries its sentence byte for byte: %s", a.reason);
+
+    static const char status[] = "{\"verdict\":\"status\",\"links\":{\"open\":1,"
+                                 "\"closing\":0},\"intent\":true,\"machines\":[]}";
+    rc = wz_dissect_lifecycle_read((const uint8_t *)status, strlen(status), &a);
+    CHECK(rc == WZ_DISSECT_OK && a.kind == WZ_DISSECT_LIFECYCLE_VERDICT,
+          "status rc=%d kind=%d", rc, (int)a.kind);
+    CHECK(strcmp(a.verdict, "status") == 0 && a.has_held && a.open == 1 &&
+              a.closing == 0 && a.has_intent && a.intent && !a.has_links,
+          "status members");
+
+    static const char whoami[] = "{\"zid\":\"a1b2\"}";
+    rc = wz_dissect_lifecycle_read((const uint8_t *)whoami, strlen(whoami), &a);
+    CHECK(rc == WZ_DISSECT_OK && a.kind == WZ_DISSECT_LIFECYCLE_WHOAMI &&
+              strcmp(a.zid, "a1b2") == 0,
+          "whoami kind=%d zid=%s", (int)a.kind, a.zid);
+
+    static const char error[] = "{\"error\":\"unknown-command\"}";
+    rc = wz_dissect_lifecycle_read((const uint8_t *)error, strlen(error), &a);
+    CHECK(rc == WZ_DISSECT_OK && a.kind == WZ_DISSECT_LIFECYCLE_ERROR &&
+              strcmp(a.error, "unknown-command") == 0 && a.verdict == NULL,
+          "error kind=%d", (int)a.kind);
+
+    static const char reordered[] = "{\"links\":2,\"verdict\":\"closing\"}";
+    rc = wz_dissect_lifecycle_read((const uint8_t *)reordered, strlen(reordered),
+                                   &a);
+    CHECK(rc == WZ_DISSECT_OK && a.kind == WZ_DISSECT_LIFECYCLE_UNREADABLE &&
+              a.verdict == NULL && !a.has_links,
+          "another order is unreadable, kind=%d", (int)a.kind);
+    rc = wz_dissect_lifecycle_read(NULL, 0, &a);
+    CHECK(rc == WZ_DISSECT_OK && a.kind == WZ_DISSECT_LIFECYCLE_UNREADABLE,
+          "no bytes is unreadable, rc=%d", rc);
+
+    rc = wz_dissect_lifecycle_read(NULL, 3, &a);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null bytes rc=%d", rc);
+    rc = wz_dissect_lifecycle_read((const uint8_t *)error, strlen(error), NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
+    return 0;
+}
+
 /* (ABI 34) -- THE THREE DOORS OF A WRITE, driven from C the way a consumer that
  * builds a value and checks a key before sending it will: two key expressions
  * related, the declaration rule that covers a key, and a root message described
@@ -4649,6 +4718,12 @@ int main(void) {
     /* (ABI 34) -- and the three doors that let a consumer build and check a write
      * without reading a .proto or judging a key expression itself. */
     if (check_relate_match_describe_doors() != 0) {
+        return 1;
+    }
+
+    /* (ABI 54) -- and a node's lifecycle answer read with no session library
+     * linked, into the struct the participant's library fills. */
+    if (check_lifecycle_door() != 0) {
         return 1;
     }
 

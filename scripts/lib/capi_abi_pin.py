@@ -53,7 +53,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 53
+EXPECTED_VERSION = 54
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -342,6 +342,12 @@ EXPECTED_SYMBOLS = {
     "wz_dissect_keyexpr_relate",
     "wz_dissect_declarations_match",
     "wz_dissect_proto_describe",
+    # (ABI 54) -- a node's lifecycle answer (a verb's reply, a control-pipe line)
+    # read into the fixed struct the participant's library fills, for a process
+    # that links no session library. One symbol. The memory rule moves, by the
+    # header's ABI 54 paragraph: the struct goes into memory the CALLER owns and
+    # its words point at static strings of this library, never freed.
+    "wz_dissect_lifecycle_read",
     # (ABI 35) -- the NODE NAMES of a selector resolved to the zids a caller's
     # table gives them. A `node` term names a node the way the application's own
     # list does, and a record carries only the zid its sender announced; this is

@@ -35,6 +35,18 @@
  * wz_dissect_live_drain hands records, so the three clauses above stand word
  * for word. Nothing new crosses this boundary allocated.
  *
+ * ABI 54 NAMES A SECOND KIND OF POINTER, and this paragraph is that revision.
+ * wz_dissect_lifecycle_read fills a fixed-layout struct in memory YOU own, as
+ * the record doors do, and three of its members are `const char *`: a node's
+ * verdict word, a refusal's sentence, a control error word. Each points at a
+ * STATIC WORD of this library, spelled once in its read-only data: valid for
+ * as long as the library is loaded, never freed, never written. Nothing is
+ * allocated for it and nothing is retained between calls, so the first clause
+ * stands for every char* a door RETURNS; this is a pointer a record CARRIES.
+ * The lifetime that refused a borrowed view into a handle (valid "until the
+ * next push", which nothing on your side can check) is not this one: a static
+ * word lives exactly as long as the functions you call to get it.
+ *
  * WHY IT COULD NOT STAY: a live tap is a dissection kept alive between
  * packets. A door that could not keep one would re-read the whole link on
  * every call, which is not a tap, it is a file read repeated. Widening the
@@ -1619,6 +1631,7 @@
 #ifndef WZ_DISSECT_H
 #define WZ_DISSECT_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -1746,7 +1759,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 53
+#define WZ_DISSECT_ABI_REVISION 54
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -3695,6 +3708,87 @@ int wz_dissect_keyexpr_diagnose(const char *keyexpr, char **out);
  * @carries keyexpr_relate reason passenger
  * @carries keyexpr_relate which passenger */
 int wz_dissect_keyexpr_relate(const char *a, const char *b, char **out);
+
+/* What a lifecycle answer was read as (wz_dissect_lifecycle_answer.kind).
+ *
+ * A kind this header does not list means the library is NEWER than your
+ * header: the node wrote a document this build reads and yours does not name.
+ * Bytes this library cannot read are WZ_DISSECT_LIFECYCLE_UNREADABLE, never
+ * another number, so show an unlisted kind as "an answer this build does not
+ * name", not as unreadable.
+ *
+ * WZ_DISSECT_LIFECYCLE_UNREADABLE: no document a node writes (empty, another
+ * document, cut short).
+ *
+ * @unknown LIFECYCLE newer-build */
+#define WZ_DISSECT_LIFECYCLE_UNREADABLE 0
+/* A verb's verdict on a peer, in band or on the control channel. */
+#define WZ_DISSECT_LIFECYCLE_VERDICT 1
+/* The control channel's answer to `whoami`. */
+#define WZ_DISSECT_LIFECYCLE_WHOAMI 2
+/* The control channel's answer to a line that is no command. */
+#define WZ_DISSECT_LIFECYCLE_ERROR 3
+
+/* A node's answer about its sessions, read back. 104 bytes on a 64-bit
+ * target, 8-aligned: member for member the struct wz_capi_c.h names
+ * wz_capi_c_lifecycle_read_t, because both libraries fill it with the one
+ * reader. `the_lifecycle_answer_layout_is_pinned` in the Rust crate and an
+ * offsetof block in tests/c_abi_consumer.c hold the layout.
+ *
+ * Every `const char *` is a STATIC WORD (the memory rule's ABI 54 paragraph),
+ * or NULL where the kind does not carry it: `verdict` the verdict word
+ * (opening, closing, resetting, already_closed, not_found, duplicate, status,
+ * refused), `reason` a refusal's sentence, byte for byte the vocabulary's
+ * `verdicts.reasons`, `error` the control channel's error word. A `has_` flag
+ * says whether the number beside it was in the answer: `links` on closing and
+ * resetting, `generation` on duplicate, `open` and `closing` (the node's links
+ * to the peer) and `intent` on status. `zid` is the node's zid on whoami,
+ * NUL-terminated, in the spelling a key and a config's `id` take (lower-case
+ * hex, no leading zero, no `+`), and empty otherwise. */
+typedef struct wz_dissect_lifecycle_answer {
+  int32_t kind;
+  const char *verdict;
+  const char *reason;
+  const char *error;
+  bool has_links;
+  uint32_t links;
+  bool has_generation;
+  uint64_t generation;
+  bool has_held;
+  uint32_t open;
+  uint32_t closing;
+  bool has_intent;
+  bool intent;
+  char zid[33];
+} wz_dissect_lifecycle_answer;
+
+/* (ABI 54) -- A NODE'S ANSWER ABOUT ITS SESSIONS, read by a process that links
+ * no session library.
+ *
+ * WHAT IT IS FOR. A consumer asks a node's lifecycle verbs from one process
+ * and watches the answers in another: the line a node's control pipe answers
+ * with arrives where the pipe's far end is held, and that process is an
+ * observer. The library a participant links reads the same answer
+ * (wz_capi_c_lifecycle_read); this is that reading, by the same function into
+ * the same struct, for the half that only reads.
+ *
+ *     wz_dissect_lifecycle_answer a;
+ *     wz_dissect_lifecycle_read(line, line_len, &a);
+ *     if (a.kind == WZ_DISSECT_LIFECYCLE_VERDICT) ... a.verdict, a.reason
+ *
+ * WHAT IT TAKES. The bytes of a verb's reply in band, or one line the node's
+ * control channel answered with, its line end cut. Only the node's own
+ * spelling is read: its members in the order the node writes them (`verdict`
+ * first), with no white space, so the same members in another order read as
+ * WZ_DISSECT_LIFECYCLE_UNREADABLE.
+ *
+ * ANSWERS. WZ_DISSECT_OK with `*out` filled from scratch, every member the
+ * kind does not carry NULL, 0 or false; an answer that is no document a node
+ * writes is WZ_DISSECT_LIFECYCLE_UNREADABLE, which is a reading and still
+ * WZ_DISSECT_OK. WZ_DISSECT_ERR_INVALID_ARG for a null `out`, or a null
+ * `bytes` with a non-zero `len`. No session, no allocation, nothing retained. */
+int wz_dissect_lifecycle_read(const uint8_t *bytes, size_t len,
+                              wz_dissect_lifecycle_answer *out);
 
 /* One file of the schema wz_dissect_declarations_from_proto reads. 24 bytes on
  * a 64-bit target, 8-aligned, and like wz_dissect_record it is raw memory a

@@ -72,6 +72,7 @@ use std::ffi::CString;
 
 use wz_capture::Dissection;
 use wz_session_core::dissect::{dissect_message, dissect_transport_message, to_json};
+use wz_session_core::lifecycle_wire;
 
 pub mod live;
 
@@ -450,6 +451,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // offers, filtering by, adding or excluding the field it shows.
     // 53, for `wz_dissect_live_field_values_since`: the typed values of a few
     // payload field paths for the records after a cursor a selector picks.
+    // 54, for `wz_dissect_lifecycle_read`: a node's answer about its sessions
+    // read into a fixed struct whose words are static strings of this library.
+    // The memory rule moves with it: those words are never freed.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -467,7 +471,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 53;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 54;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2122,6 +2126,64 @@ pub unsafe extern "C" fn wz_dissect_keyexpr_relate(
         return WZ_DISSECT_ERR_INVALID_ARG;
     };
     write_string(wz_capture::diagnose_json::keyexpr_relate_json(a, b), out)
+}
+
+/// [`WzDissectLifecycleAnswer::kind`]: the bytes are no document a node writes.
+pub const WZ_DISSECT_LIFECYCLE_UNREADABLE: i32 = lifecycle_wire::READING_UNREADABLE;
+/// [`WzDissectLifecycleAnswer::kind`]: a verb's verdict on a peer.
+pub const WZ_DISSECT_LIFECYCLE_VERDICT: i32 = lifecycle_wire::READING_VERDICT;
+/// [`WzDissectLifecycleAnswer::kind`]: the control channel's answer to `whoami`.
+pub const WZ_DISSECT_LIFECYCLE_WHOAMI: i32 = lifecycle_wire::READING_WHOAMI;
+/// [`WzDissectLifecycleAnswer::kind`]: the control channel's answer to a line that is no command.
+pub const WZ_DISSECT_LIFECYCLE_ERROR: i32 = lifecycle_wire::READING_ERROR;
+
+/// `wz_dissect_lifecycle_answer`: the one C reading of a node's lifecycle answer, defined beside
+/// its reader in `wz_session_core::lifecycle_wire` and handed out by `wz_capi_c_lifecycle_read`
+/// too, so both libraries give a caller the same struct and the same branches.
+pub type WzDissectLifecycleAnswer = lifecycle_wire::AnswerReading;
+
+/// (ABI 54) A NODE'S ANSWER ABOUT ITS SESSIONS, READ BY A PROCESS THAT LINKS NO SESSION.
+///
+/// # Why this is a door here
+///
+/// A consumer asks a node's lifecycle verbs from one process and watches the answers in another:
+/// the line a node's control pipe answered with reaches the process that holds the pipe's far
+/// end, and that process is an observer, which links this library and no library that opens a
+/// session. The participant's library already reads an answer (`wz_capi_c_lifecycle_read`); this
+/// is the same reading, by the same function over the same struct, for the half that only reads.
+/// It is bytes in and a description out, which is what this library is.
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`], with `*out` filled from scratch: `kind` says what the bytes were, and every
+/// member the kind does not carry is NULL, 0 or false. Bytes that are no document a node writes
+/// (empty, another document, the node's members in another order) read as
+/// [`WZ_DISSECT_LIFECYCLE_UNREADABLE`], which is a reading and not an error.
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null `out`, or a null `bytes` with a non-zero `len`.
+///
+/// Every `const char *` in the reading is a static word of this library, valid while the
+/// library is loaded and never freed: the memory rule's named exception for this door.
+///
+/// # Safety
+/// `bytes` is readable for `len` bytes (or null with `len` 0), and `out` is writable.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_lifecycle_read(
+    bytes: *const u8,
+    len: usize,
+    out: *mut WzDissectLifecycleAnswer,
+) -> c_int {
+    if out.is_null() || (bytes.is_null() && len != 0) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let bytes: &[u8] = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller contract above.
+        unsafe { core::slice::from_raw_parts(bytes, len) }
+    };
+    // SAFETY: caller contract above.
+    unsafe { *out = lifecycle_wire::AnswerReading::of(bytes) };
+    WZ_DISSECT_OK
 }
 
 /// (ABI 34) WHICH FORMAT RULE OF A DECLARATION TEXT COVERS A KEY, by the decoder's
@@ -9464,7 +9526,10 @@ mod tests {
         // 53, for `wz_dissect_live_field_values_since`: one symbol, three C
         // strings and a cursor in, a `char*` released by `wz_dissect_string_free`
         // out; no struct is new.
-        assert_eq!(wz_dissect_abi_version(), 53);
+        // 54, for `wz_dissect_lifecycle_read`: one symbol, bytes in and a
+        // 104-byte struct the caller owns written; its words are static strings
+        // of the library, which the memory rule now names; nothing retained.
+        assert_eq!(wz_dissect_abi_version(), 54);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -12018,6 +12083,78 @@ mod tests {
             core::mem::offset_of!(WzDissectProtoFile, text_len),
             2 * word
         );
+    }
+
+    /// The lifecycle answer's layout, as `wz_dissect.h` and the offsetof block of
+    /// tests/c_abi_consumer.c spell it (a 64-bit target).
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn the_lifecycle_answer_layout_is_pinned() {
+        use core::mem::offset_of;
+        type A = WzDissectLifecycleAnswer;
+        assert_eq!(core::mem::size_of::<A>(), 104, "size");
+        assert_eq!(core::mem::align_of::<A>(), 8, "alignment");
+        assert_eq!(offset_of!(A, verdict), 8);
+        assert_eq!(offset_of!(A, error), 24);
+        assert_eq!(offset_of!(A, generation), 48);
+        assert_eq!(offset_of!(A, intent), 69);
+        assert_eq!(offset_of!(A, zid), 70);
+    }
+
+    fn lifecycle_read(bytes: &[u8]) -> WzDissectLifecycleAnswer {
+        let mut out = core::mem::MaybeUninit::<WzDissectLifecycleAnswer>::uninit();
+        let rc =
+            unsafe { wz_dissect_lifecycle_read(bytes.as_ptr(), bytes.len(), out.as_mut_ptr()) };
+        assert_eq!(rc, WZ_DISSECT_OK);
+        unsafe { out.assume_init() }
+    }
+
+    fn static_word(ptr: *const c_char) -> &'static str {
+        assert!(!ptr.is_null());
+        unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_str()
+            .expect("utf-8")
+    }
+
+    /// The door reads what the participant's door reads: every refusal's sentence byte for
+    /// byte, the status members, a whoami zid, an error word, and the node's members in
+    /// another order as unreadable.
+    #[test]
+    fn the_lifecycle_door_reads_every_answer_a_node_writes() {
+        use wz_session_core::lifecycle_wire::RefusedReason;
+        for reason in RefusedReason::ALL {
+            let doc = format!(
+                "{{\"verdict\":\"refused\",\"reason\":\"{}\"}}",
+                reason.words()
+            );
+            let refused = lifecycle_read(doc.as_bytes());
+            assert_eq!(refused.kind, WZ_DISSECT_LIFECYCLE_VERDICT);
+            assert_eq!(static_word(refused.verdict), "refused");
+            assert_eq!(static_word(refused.reason), reason.words());
+        }
+        let status = lifecycle_read(
+            br#"{"verdict":"status","links":{"open":1,"closing":0},"intent":true,"machines":[]}"#,
+        );
+        assert!(status.has_held && status.open == 1 && status.closing == 0);
+        assert!(status.has_intent && status.intent);
+
+        let whoami = lifecycle_read(br#"{"zid":"a1b2"}"#);
+        assert_eq!(whoami.kind, WZ_DISSECT_LIFECYCLE_WHOAMI);
+        assert_eq!(static_word(whoami.zid.as_ptr()), "a1b2");
+
+        let error = lifecycle_read(br#"{"error":"unknown-command"}"#);
+        assert_eq!(error.kind, WZ_DISSECT_LIFECYCLE_ERROR);
+        assert_eq!(static_word(error.error), "unknown-command");
+
+        let reordered = lifecycle_read(br#"{"links":2,"verdict":"closing"}"#);
+        assert_eq!(reordered.kind, WZ_DISSECT_LIFECYCLE_UNREADABLE);
+        assert_eq!(lifecycle_read(b"").kind, WZ_DISSECT_LIFECYCLE_UNREADABLE);
+
+        let rc = unsafe { wz_dissect_lifecycle_read(core::ptr::null(), 0, core::ptr::null_mut()) };
+        assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
+        let mut out = core::mem::MaybeUninit::<WzDissectLifecycleAnswer>::uninit();
+        let rc = unsafe { wz_dissect_lifecycle_read(core::ptr::null(), 3, out.as_mut_ptr()) };
+        assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
     }
 
     /// The profile every protected-frame door test below uses: synthetic, small
