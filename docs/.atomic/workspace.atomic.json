@@ -12853,6 +12853,27 @@
       "carry_forward_bullets": [
         "Not paid by this round: the capability-cost layer reads the default C image 11,516 bytes over its budget and the lean image 11,604 over, which began with the three commits of the row-facts door (the previous head's run did not have it) and needs a symbol diff against the budget's base before any budget moves; the storage-host plugins-section test over a pico client read an empty answer once at the latest head and passed at the one before it, and has not been reproduced."
       ]
+    },
+    "Round 4444": {
+      "decision_summary": "The hosted run of the row-facts head was red in two jobs that the peer's repayment named as not paid: the size lane (the default and lean C images, 11,516 and 11,604 bytes over) and Layer E6h (the storage host's plugins-section test over a pico client read an empty answer once). The size lane was read before a budget moved: the same build on the build machine at the previous head and at this one was taken apart with `nm -S` (every symbol keeps its size, the multiset of names and sizes is equal) and `size -A` (the code sections are equal; `.rela.dyn` grew 17,232 bytes, 718 relative relocations, and `.data.rel.ro` 12,000), which is the whole 17,232 bytes `size` counts. Static pointer tables, which fits the round (the document history of the capture crate gained revision 60 and the key sets of the row-facts document, and the frame writer of the sender feature reaches it); not a leak, so the two budgets move to the hosted reading and 3,500, to the hundred. The same reading fixed the offset of the C images over the build machine at +1,012; the +3,184 the table's older note gives was reused unmeasured in the last round and left the default image about 2,200 bytes more room than the rule states. E6h is not reproduced and the commits between the head that passed and the one that failed touched none of the runtime, session core, demo and storage crates, so nothing is changed in the product; the test now prints the host's whole log with its failure, which is the line that says whether the put reached the first session before the storage started on it or the second session was bound after the query was answered.",
+      "changes_bullets": [
+        "scripts/lib/capability_cost_gate.py: the budgets of capic-default (11,183,300) and capic-default-lean (9,605,800), and a note of the window with the section diff and the measured offset of the C images.",
+        "crates/wz-integration-tests: the storage host plugins-section pico test puts the host's whole log into the failure of its last assertion."
+      ],
+      "verification_bullets": [
+        "Hosted size lane at the previous head: every case under its budget (capic-default 11,162,484); at the row-facts head: capic-default 11,179,716 and lean 9,602,204 over, nothing else moved. Both heads of capic-default built on the build machine (11,161,472 and 11,178,704, so the offset is +1,012), nm -S of both: 15,728 symbols, the same names and sizes; size -A of both: the whole difference in `.rela.dyn` and `.data.rel.ro`.",
+        "capability_cost_gate.py --selftest: 24 of 24 arms. Both new budgets sit above the hosted readings (by 3,584 and 3,596).",
+        "cargo fmt --check and clippy -D warnings of wz-integration-tests, all test targets: clean.",
+        "Not run: the hosted size lane on the new head; the pico storage test itself (it is a binary-dependent e2e that Layer E6h runs, and it did not fail when the peer ran it); the symbol of the table that grew (the constants are anonymous, so the diff names the sections and the commit, not the table)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the next hosted run of this head: the size lane (the two C budgets), and Layer E6h; if the storage-host read is empty again, the failure now carries the host's log and says which of the two orders it was.",
+        "Open: the C images grow by a relocation for every pointer of a static table in a shared object (24 bytes each); a table of offsets into one string block would not pay them, and is worth doing when the document history grows again.",
+        "Open: the writer queue reserve and permit remain linked through the link driver trait (about 1,300 bytes of the smallest client image); the Z8 job under the 60-minute budget has no hosted reading yet."
+      ]
     }
   },
   "inventory_entries": {
