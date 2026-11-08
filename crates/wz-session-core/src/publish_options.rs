@@ -26,6 +26,7 @@
 
 use alloc::vec::Vec;
 
+use crate::link_restriction::LinkRestriction;
 use crate::locality::Locality;
 use crate::metadata::PushMetadata;
 #[cfg(feature = "pubsub-qos")]
@@ -56,6 +57,11 @@ pub struct PublishOptions {
     /// `_z_write`). `Any` routes to both wire and loopback branches; `Remote` to wire only;
     /// `SessionLocal` to loopback only. Default: `Any`.
     pub allowed_destination: Locality,
+    /// The links the publish may be sent on (policy `entity-link-restriction`). `Any` (the
+    /// default, and upstream's behaviour) sends on every link that wants the key; a restricted
+    /// set sends only on the links of its slots. An engine with one link per node applies it
+    /// per face; the loopback leg is not a link and is not restricted by it.
+    pub links: LinkRestriction,
     /// Link-layer reliability hint propagated to (a) the wire frame's reliable-flag (zenoh-pico
     /// `FLAG_T_FRAME_R`) and (b) the loopback `Sample.reliability` field.
     pub reliability: Reliability,
@@ -158,6 +164,12 @@ impl PublishOptions {
     /// Pin the publisher-side locality predicate.
     pub fn with_locality(mut self, locality: Locality) -> Self {
         self.allowed_destination = locality;
+        self
+    }
+
+    /// Limit the publish to the links of `links`.
+    pub fn with_links(mut self, links: LinkRestriction) -> Self {
+        self.links = links;
         self
     }
 

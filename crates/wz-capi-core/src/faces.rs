@@ -108,6 +108,7 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 use wz_runtime_tokio::Reliability;
+use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
 
 #[cfg(feature = "multicast-transport")]
 mod multicast;
@@ -347,6 +348,8 @@ impl LegBytes for wz_session_core::extshm::ShmSendHandle {
 /// The faces and the groups one fan-out sends to; see [`SharedSession`]'s `fan_targets`.
 struct FanTargets {
     faces: Arc<Vec<TokioSession>>,
+    /// The link slot of each of `faces`, in the same order ([`link_slot_of_face`]).
+    slots: Arc<Vec<Option<LinkSlot>>>,
     #[cfg(feature = "multicast-transport")]
     groups: Arc<Vec<multicast::McastLeg>>,
 }
@@ -354,7 +357,8 @@ struct FanTargets {
 /// The faces and the groups one get's wire legs go to, each face with its re-arm signal;
 /// see [`SharedSession`]'s `query_targets`.
 struct QueryTargets {
-    faces: Vec<(TokioSession, Arc<Notify>)>,
+    /// Each face's session, its re-arm signal and its link slot.
+    faces: Vec<(TokioSession, Arc<Notify>, Option<LinkSlot>)>,
     #[cfg(feature = "multicast-transport")]
     groups: Arc<Vec<multicast::McastLeg>>,
 }
@@ -806,6 +810,10 @@ struct SubEntry {
     /// declaration mean one thing on the face that was up at declare time and
     /// another on every face after it.
     allowed_origin: Locality,
+    /// The links the subscription is declared to (policy `entity-link-restriction`), kept in
+    /// the SSOT for the same reason as `allowed_origin`: a face that comes up later is replayed
+    /// the subscription only if its slot is named.
+    links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
     /// The key the retraction names beside the id, when the declaring ABI's
@@ -830,6 +838,8 @@ struct QblEntry {
     /// R311y554 — the C caller's `allowed_origin`; kept for the same reason
     /// [`SubEntry::allowed_origin`] is.
     allowed_origin: Locality,
+    /// The links the queryable is declared to; see [`SubEntry::links`].
+    links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
     /// The key the retraction names beside the id — see
@@ -1318,6 +1328,9 @@ struct Inner {
     /// [`Self::refresh_face_set`] at each of the three places `faces` changes, under the lock
     /// that changes it, so a reader sees the faces as of a whole step and never a half one.
     face_set: Arc<Vec<TokioSession>>,
+    /// The link slot of each session of [`Self::face_set`], in the same order, rebuilt with it:
+    /// what a restricted entity's fan-out checks without taking the face table apart.
+    face_slots: Arc<Vec<Option<LinkSlot>>>,
     /// The two counters ([`TokioSession::remote_declaration_epochs`]) of each session of
     /// [`Self::face_set`], in the same order, and the number of times that set has been
     /// rebuilt. Together they say whether anything a write filter's answer depends on has
@@ -1463,6 +1476,7 @@ impl Inner {
                 .map(|face| face.session.clone())
                 .collect(),
         );
+        self.face_slots = Arc::new(self.faces.keys().map(|id| link_slot_of_face(*id)).collect());
         #[cfg(target_has_atomic = "64")]
         {
             self.face_epochs = Arc::new(
@@ -1479,6 +1493,7 @@ impl Inner {
     fn fan_targets(&self) -> FanTargets {
         FanTargets {
             faces: self.face_set.clone(),
+            slots: self.face_slots.clone(),
             #[cfg(feature = "multicast-transport")]
             groups: self.mcast_set.clone(),
         }
@@ -1553,6 +1568,19 @@ impl Inner {
     /// them.
     fn declaration_targets(&mut self) -> impl Iterator<Item = &mut FaceEntry> {
         self.faces.values_mut().chain(self.local_face.iter_mut())
+    }
+
+    /// [`Self::declaration_targets`] for an entity limited to some links: the faces whose slot
+    /// the restriction names, and the local plane, which is not a link and is always reached.
+    fn declaration_targets_on(
+        &mut self,
+        links: LinkRestriction,
+    ) -> impl Iterator<Item = &mut FaceEntry> {
+        self.faces
+            .iter_mut()
+            .filter(move |(id, _)| links.allows(link_slot_of_face(**id)))
+            .map(|(_, face)| face)
+            .chain(self.local_face.iter_mut())
     }
 }
 
@@ -2553,7 +2581,8 @@ impl SharedSession {
         }
         let mut subs = BTreeMap::new();
         for entry in &guard.subs {
-            if held.subs.contains_key(&entry.id) {
+            // A subscription limited to some links is not replayed onto a link it does not name.
+            if held.subs.contains_key(&entry.id) || !entry.links.allows(link_slot_of_face(id)) {
                 continue;
             }
             if let Some(sub) = declare_subscriber_on(
@@ -2570,7 +2599,7 @@ impl SharedSession {
         }
         let mut qbls = BTreeMap::new();
         for entry in &guard.qbls {
-            if held.qbls.contains_key(&entry.id) {
+            if held.qbls.contains_key(&entry.id) || !entry.links.allows(link_slot_of_face(id)) {
                 continue;
             }
             if let Some(qbl) = declare_queryable_on(
@@ -3312,7 +3341,11 @@ impl SharedSession {
         if opts.allowed_destination.allows_remote() {
             let remote = opts.clone().with_locality(Locality::Remote);
             let literal = key.literal();
-            for session in targets.faces.iter() {
+            for (session, slot) in targets.faces.iter().zip(targets.slots.iter()) {
+                // A publisher limited to some links is not written to the others.
+                if !opts.links.allows(*slot) {
+                    continue;
+                }
                 // A peer that has said it wants nothing this key reaches is not written to (see
                 // `Session::peer_wants_no_put_on`); a put with no literal key in hand, an alias
                 // alone, is written to every face as before.
@@ -3325,7 +3358,10 @@ impl SharedSession {
                     Leg::Refused => return Err(FanoutError::ExceedsCapacity),
                 }
             }
-            delivered += self.group_fan(&targets, &remote, key, &payload)?;
+            // A multicast group is a link no slot names, so a limited publisher skips it.
+            if !opts.links.is_restricted() {
+                delivered += self.group_fan(&targets, &remote, key, &payload)?;
+            }
         }
         if opts.allowed_destination.allows_local() {
             let local = opts.clone().with_locality(Locality::SessionLocal);
@@ -4437,6 +4473,7 @@ impl SharedSession {
     pub fn fan_query(
         &self,
         destination: Locality,
+        links: LinkRestriction,
         fan: Option<&CancellableFan>,
         mut issue: impl FnMut(QueryLeg<'_>) -> Option<u64>,
     ) {
@@ -4449,14 +4486,19 @@ impl SharedSession {
         };
         if destination.allows_remote() {
             let targets = self.query_targets();
-            for (session, revised) in targets.faces {
+            for (session, revised, slot) in targets.faces {
+                // A query limited to some links is not asked on the others.
+                if !links.allows(slot) {
+                    continue;
+                }
                 if !issue_recorded(QueryLeg::Face(&session)) {
                     return;
                 }
                 revised.notify_one();
             }
+            // A multicast group is a link no slot names, so a limited query skips it.
             #[cfg(feature = "multicast-transport")]
-            for group in targets.groups.iter() {
+            for group in targets.groups.iter().filter(|_| !links.is_restricted()) {
                 if !issue_recorded(QueryLeg::Group(&group.session)) {
                     return;
                 }
@@ -4477,7 +4519,17 @@ impl SharedSession {
     fn query_targets(&self) -> QueryTargets {
         let guard = self.lock();
         QueryTargets {
-            faces: Self::faces_with_wake(&guard),
+            faces: guard
+                .faces
+                .iter()
+                .map(|(id, face)| {
+                    (
+                        face.session.clone(),
+                        face.revised.clone(),
+                        link_slot_of_face(*id),
+                    )
+                })
+                .collect(),
             #[cfg(feature = "multicast-transport")]
             groups: guard.mcast_set.clone(),
         }
@@ -4574,6 +4626,31 @@ impl SharedSession {
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> SubId {
+        self.declare_subscriber_on_links(
+            keyexpr,
+            wire,
+            allowed_origin,
+            LinkRestriction::Any,
+            retraction,
+            sink,
+        )
+    }
+
+    /// [`Self::declare_subscriber_on_wire`] for a subscriber limited to the links of `links`
+    /// (policy `entity-link-restriction`): it is declared to the nodes behind those links
+    /// only, so it hears nothing that arrives over the others, and a link that comes up later
+    /// is declared to only if its slot is named. The local plane is not a link and always
+    /// holds it. A multicast group is a link no slot names, so a limited subscriber does not
+    /// join one.
+    pub fn declare_subscriber_on_links(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        allowed_origin: Locality,
+        links: LinkRestriction,
+        retraction: Option<RetractionKey>,
+        sink: SubscriberSink,
+    ) -> SubId {
         let mut guard = self.lock();
         let id = guard.take_entity_id();
 
@@ -4585,7 +4662,7 @@ impl SharedSession {
         //
         // R2580 — and it is in the walk rather than in a second block after it.
         // The second block is what the other six planes did not have.
-        for face in guard.declaration_targets() {
+        for face in guard.declaration_targets_on(links) {
             if let Some(sub) = declare_subscriber_on(
                 &face.session,
                 &keyexpr,
@@ -4605,13 +4682,16 @@ impl SharedSession {
             id,
             keyexpr,
             allowed_origin,
+            links,
             wire,
             retraction,
             sink,
         };
         // Open-debt item 913 — and on every group the session joined, by the literal.
         #[cfg(feature = "multicast-transport")]
-        Self::subscribe_on_groups(&mut guard, &entry);
+        if !links.is_restricted() {
+            Self::subscribe_on_groups(&mut guard, &entry);
+        }
         guard.subs.push(entry);
         drop(guard);
         // A subscriber the session's own traffic reaches is a match for every listener
@@ -5421,6 +5501,30 @@ impl SharedSession {
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
     ) -> QblId {
+        self.declare_queryable_on_links(
+            keyexpr,
+            wire,
+            complete,
+            allowed_origin,
+            LinkRestriction::Any,
+            retraction,
+            sink,
+        )
+    }
+
+    /// [`Self::declare_queryable_on_wire`] for a queryable limited to the links of `links`
+    /// (policy `entity-link-restriction`); see [`Self::declare_subscriber_on_links`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn declare_queryable_on_links(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        complete: bool,
+        allowed_origin: Locality,
+        links: LinkRestriction,
+        retraction: Option<RetractionKey>,
+        sink: QueryableSink,
+    ) -> QblId {
         let mut guard = self.lock();
         let id = guard.take_entity_id();
 
@@ -5429,7 +5533,7 @@ impl SharedSession {
         // OWN session for the reason it always did: an escaped query owes its
         // deferred replies and its `ResponseFinal` to the session the query
         // arrived on, and for a local query that session is the plane's.
-        for face in guard.declaration_targets() {
+        for face in guard.declaration_targets_on(links) {
             let callback = sink(&TokioQueryHolder::Unicast(face.session.clone()));
             if let Some(qbl) = declare_queryable_on(
                 &face.session,
@@ -5448,6 +5552,7 @@ impl SharedSession {
             keyexpr,
             complete,
             allowed_origin,
+            links,
             wire,
             retraction,
             sink,
@@ -5455,7 +5560,9 @@ impl SharedSession {
         // Open-debt item 913 — and on every group the session joined: a member's query
         // reaches it, and its replies leave on the group.
         #[cfg(all(feature = "multicast-transport", feature = "queryable"))]
-        Self::answer_on_groups(&mut guard, &entry);
+        if !links.is_restricted() {
+            Self::answer_on_groups(&mut guard, &entry);
+        }
         guard.qbls.push(entry);
         drop(guard);
         // A queryable the session's own gets reach is a match for every listener that
@@ -5576,8 +5683,20 @@ pub struct CApiForwarder {
 /// R3076 -- how far apart the face ids of two listeners of one session are. An accept loop's own
 /// ids are small and it counts them upward; `1 << 40` of room is more faces than a listener will
 /// ever accept, and 2^22 listeners fit below [`DIAL_FACE_ID`].
-#[cfg(feature = "peer")]
 const LISTENER_FACE_STRIDE: u64 = 1 << 40;
+
+/// The link slot of the face `id` (policy `entity-link-restriction`): the dialling role is slot
+/// 0 and the listener bound `n`th is slot `n + 1`, so the faces one listener accepts share a
+/// slot and a restriction that names it names all of them, the ones that come up later
+/// included. `None` for a face the numbering cannot place: a listener past the slots a
+/// restriction can name ([`wz_session_core::link_restriction::LINK_SLOTS`]).
+fn link_slot_of_face(id: u64) -> Option<LinkSlot> {
+    if id == DIAL_FACE_ID {
+        return LinkSlot::new(0);
+    }
+    let listener = id / LISTENER_FACE_STRIDE;
+    u8::try_from(listener + 1).ok().and_then(LinkSlot::new)
+}
 
 #[cfg(feature = "peer")]
 impl CApiForwarder {
@@ -5906,7 +6025,7 @@ mod matching_aggregate_tests {
             (Locality::Remote, vec![]),
         ] {
             let mut legs = Vec::new();
-            shared.fan_query(destination, None, |leg| {
+            shared.fan_query(destination, LinkRestriction::Any, None, |leg| {
                 legs.push(leg.locality());
                 None
             });
@@ -7039,6 +7158,192 @@ mod face_up_order_tests {
         assert!(
             topology.is_some() && declaration.is_some() && topology < declaration,
             "released: the topology and then the declaration: {released:?}"
+        );
+    }
+
+    /// The network messages a link was sent after its `before`-th send, as `(declarations,
+    /// pushes)`.
+    fn declares_and_pushes_since(
+        pair: &wz_runtime_tokio_test_support::EstablishedPair,
+        before: usize,
+    ) -> (usize, usize) {
+        let (mut declares, mut pushes) = (0, 0);
+        for (bytes, _) in pair.resp_driver.snapshot().sends.iter().skip(before) {
+            let Ok(InboundFrame::Frame { payload, .. }) = pair.init_actions.handle_inbound(bytes)
+            else {
+                continue;
+            };
+            for message in parse_frame_payload(&payload).expect("the frame decodes") {
+                match message {
+                    NetworkMessage::Declare(_) => declares += 1,
+                    NetworkMessage::Push(_) => pushes += 1,
+                    _ => {}
+                }
+            }
+        }
+        (declares, pushes)
+    }
+
+    /// Two links of one session, each from a listener of its own (slots 1 and 2), and the
+    /// dialling role's slot, which the numbering puts at 0.
+    #[test]
+    fn a_link_slot_is_the_listener_or_the_dialling_role() {
+        let slot = |id| link_slot_of_face(id).map(LinkSlot::get);
+        assert_eq!(slot(DIAL_FACE_ID), Some(0));
+        assert_eq!(slot(0), Some(1), "the first listener's first face");
+        assert_eq!(slot(7), Some(1), "any face of the first listener");
+        assert_eq!(slot(LISTENER_FACE_STRIDE + 3), Some(2));
+        assert_eq!(slot(62 * LISTENER_FACE_STRIDE), Some(63));
+        assert_eq!(
+            slot(63 * LISTENER_FACE_STRIDE),
+            None,
+            "past the slots a restriction names"
+        );
+    }
+
+    /// A publish limited to the links of one slot is written to that link and to no other,
+    /// and an unrestricted publish is written to both: the same two links, the same key, only
+    /// the restriction differs.
+    #[tokio::test]
+    async fn a_publish_limited_to_one_link_is_written_to_that_link_only() {
+        use wz_runtime_tokio_test_support::establish_capability_pair_between;
+        let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let shared =
+            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+        assert!(
+            shared.face_up(1, &near.resp_actions, false),
+            "listener 0: slot 1"
+        );
+        assert!(
+            shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
+            "listener 1: slot 2"
+        );
+
+        let near_before = near.resp_driver.snapshot().sends.len();
+        let far_before = far.resp_driver.snapshot().sends.len();
+        shared
+            .publish_all("wz/link/put", b"x", &PublishOptions::put())
+            .expect("an unrestricted put");
+        assert_eq!(
+            (
+                declares_and_pushes_since(&near, near_before).1,
+                declares_and_pushes_since(&far, far_before).1
+            ),
+            (1, 1),
+            "no restriction: both links are written to"
+        );
+
+        let near_before = near.resp_driver.snapshot().sends.len();
+        let far_before = far.resp_driver.snapshot().sends.len();
+        let only_far = LinkRestriction::only([2]).expect("one slot");
+        shared
+            .publish_all(
+                "wz/link/put",
+                b"x",
+                &PublishOptions::put().with_links(only_far),
+            )
+            .expect("a put limited to slot 2");
+        assert_eq!(
+            (
+                declares_and_pushes_since(&near, near_before).1,
+                declares_and_pushes_since(&far, far_before).1
+            ),
+            (0, 1),
+            "limited to slot 2: only the second link is written to"
+        );
+    }
+
+    /// A subscription limited to one slot is declared to the node behind that link and not to
+    /// the other, a face that comes up later is replayed it only if its slot is named, and an
+    /// unrestricted subscription is declared to both.
+    #[tokio::test]
+    async fn a_subscription_limited_to_one_link_is_declared_there_and_replayed_only_there() {
+        use wz_runtime_tokio_test_support::establish_capability_pair_between;
+        let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let late_near = establish_capability_pair_between(0x05, 0x06, false, false, |_| {}).await;
+        let late_far = establish_capability_pair_between(0x07, 0x08, false, false, |_| {}).await;
+        let shared =
+            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+        let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
+
+        assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
+        assert!(
+            shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
+            "slot 2"
+        );
+        let near_before = near.resp_driver.snapshot().sends.len();
+        let far_before = far.resp_driver.snapshot().sends.len();
+        shared.declare_subscriber_on_links(
+            "wz/link/sub".to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            LinkRestriction::only([2]).expect("one slot"),
+            None,
+            sink.clone(),
+        );
+        assert_eq!(
+            (
+                declares_and_pushes_since(&near, near_before).0,
+                declares_and_pushes_since(&far, far_before).0
+            ),
+            (0, 1),
+            "limited to slot 2: declared to the second link only"
+        );
+
+        // A face of listener 0 (slot 1) and one of listener 1 (slot 2) come up afterwards.
+        let late_near_before = late_near.resp_driver.snapshot().sends.len();
+        let late_far_before = late_far.resp_driver.snapshot().sends.len();
+        assert!(shared.face_up(2, &late_near.resp_actions, false));
+        assert!(shared.face_up(LISTENER_FACE_STRIDE + 2, &late_far.resp_actions, false));
+        assert_eq!(
+            (
+                declares_and_pushes_since(&late_near, late_near_before).0,
+                declares_and_pushes_since(&late_far, late_far_before).0
+            ),
+            (0, 1),
+            "the replay onto a face that comes up later honours the same slots"
+        );
+    }
+
+    /// A query limited to one slot is issued on that link and on no other, plus the local
+    /// leg when its destination admits one; an unrestricted query is issued on every link.
+    #[tokio::test]
+    async fn a_query_limited_to_one_link_is_issued_there_only() {
+        use wz_runtime_tokio_test_support::establish_capability_pair_between;
+        let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let shared =
+            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+        assert!(shared.face_up(1, &near.resp_actions, false));
+        assert!(shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false));
+
+        let legs = |links: LinkRestriction| {
+            let mut faces = 0;
+            shared.fan_query(Locality::Remote, links, None, |leg| {
+                if matches!(leg, QueryLeg::Face(_)) {
+                    faces += 1;
+                }
+                None
+            });
+            faces
+        };
+        assert_eq!(legs(LinkRestriction::Any), 2, "no restriction: both links");
+        assert_eq!(
+            legs(LinkRestriction::only([1]).expect("one slot")),
+            1,
+            "limited to slot 1: one link"
+        );
+        assert_eq!(
+            legs(LinkRestriction::only([1, 2]).expect("two slots")),
+            2,
+            "limited to both slots: both links"
+        );
+        assert_eq!(
+            legs(LinkRestriction::only([5]).expect("one slot")),
+            0,
+            "limited to a slot no link has: none"
         );
     }
 }

@@ -130,6 +130,21 @@ original reproduced by naming it. Three things follow from it:
   the same way, because it too has no chosen interface. Scouting is not a link and is not
   refused. Only the tokio engine reads the policy; no Zephyr image, lwIP session or
   cooperative engine does, so none of their trees has its symbol.
+- **Limiting an entity to some links** (`entity-link-restriction`, off by default): locality
+  says whether an entity takes part in this session's traffic, other nodes', or both; a node
+  with several links also has the question of which ones. The value is
+  `wz_session_core::link_restriction::LinkRestriction`, `Any` (upstream) or a non-empty set of
+  slots below 64 (one machine word). The tokio registry derives a slot from the face: the
+  dialling role is slot 0 and the listener bound `n`th is slot `n + 1`, and the faces a
+  listener accepts share its slot. A publish and a query go out only on the named links; a
+  subscriber and a queryable are declared (and replayed to a link that comes up later) only
+  to the named links, so they hear and answer nothing from the others. The local plane is not
+  a link and is always reached; a multicast group has no slot, so a limited entity is not
+  put on one. `LinkRestriction::admit_in_build` refuses a set when the policy is off, which
+  is what an entry point that takes a set from a caller calls. The registry mechanism
+  (`declare_subscriber_on_links`, `declare_queryable_on_links`, the `links` of
+  `PublishOptions` and `QueryOptions`) is not yet reachable from the Rust or C API, and the
+  router, cooperative and lwIP engines do not read it.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and

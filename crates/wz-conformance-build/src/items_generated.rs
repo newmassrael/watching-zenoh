@@ -281,6 +281,12 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "off",
     ),
     (
+        "entity-link-restriction",
+        "WZ_POLICY_ENTITY_LINK_RESTRICTION",
+        &["off", "on"],
+        "off",
+    ),
+    (
         "entity-timestamp-opt-in",
         "WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN",
         &["off", "on"],

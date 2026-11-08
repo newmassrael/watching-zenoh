@@ -106,6 +106,24 @@ config WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE
 	  interface that can carry multicast, or on the kernel's choice when the host
 	  has none, so the link may sit on an interface nobody chose.
 
+config WZ_POLICY_ENTITY_LINK_RESTRICTION
+	bool "entity-link-restriction"
+	default n
+	help
+	  Whether an entity may be declared with a set of links it is limited to. Off, the
+	  call that states a set is refused and every entity uses every link, which is
+	  upstream's behaviour. On, a publisher sends only on the links of its set, a
+	  subscriber and a queryable are declared to the nodes behind those links only
+	  (so they hear and answer nothing that arrives over the others), and a query
+	  goes out on those links only. A link is named by a slot the engine derives:
+	  the dialling role is one and each listener is one, and the faces a listener
+	  accepts share its slot. A set is never empty. A restricted entity does not use
+	  a link that has no slot, and a link that comes up later is used if its slot
+	  is named. Only the tokio engine reads this policy.
+	  Upstream: Lets every entity use every link of the session: a put reaches every
+	  link that wants it, a declaration is made to every link, a query goes to every
+	  link.
+
 config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
 	bool "entity-timestamp-opt-in"
 	default n

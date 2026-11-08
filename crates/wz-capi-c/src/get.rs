@@ -1102,29 +1102,34 @@ pub(crate) fn issue_get(
     // for why a face that finalises early must not be able to complete the get
     // while later faces are still being issued.
     let guard = closure.clone();
-    shared.fan_query(opts.allowed_destination, fan.as_deref(), |query| {
-        let leg = LegReply {
-            closure: closure.clone(),
-            gate: gate.clone(),
-            _registration: registration.clone(),
-        };
-        // Only `on_reply` carries the `Arc`. Completion is signalled by the
-        // pending entry's sink being DROPPED, which covers a real final, a
-        // timeout sweep and a face death alike — whereas a counter
-        // incremented in `on_final` would never be reached by the face-death
-        // path. An issue error (a face mid-teardown) is swallowed, matching
-        // the fan-out publish's best-effort discipline; its clone was already
-        // dropped with the rolled-back sink.
-        query_leg(
-            query,
-            &keyexpr,
-            opts.clone(),
-            &value,
-            move |view: &dyn ReplyView| leg.fire(view),
-        )
-        .ok()
-        .map(|handle| handle.rid())
-    });
+    shared.fan_query(
+        opts.allowed_destination,
+        opts.links,
+        fan.as_deref(),
+        |query| {
+            let leg = LegReply {
+                closure: closure.clone(),
+                gate: gate.clone(),
+                _registration: registration.clone(),
+            };
+            // Only `on_reply` carries the `Arc`. Completion is signalled by the
+            // pending entry's sink being DROPPED, which covers a real final, a
+            // timeout sweep and a face death alike — whereas a counter
+            // incremented in `on_final` would never be reached by the face-death
+            // path. An issue error (a face mid-teardown) is swallowed, matching
+            // the fan-out publish's best-effort discipline; its clone was already
+            // dropped with the rolled-back sink.
+            query_leg(
+                query,
+                &keyexpr,
+                opts.clone(),
+                &value,
+                move |view: &dyn ReplyView| leg.fire(view),
+            )
+            .ok()
+            .map(|handle| handle.rid())
+        },
+    );
     drop(guard);
     // After `guard`, explicitly: locals drop in REVERSE declaration order, so
     // left implicit the registration would go first and a concurrent `cancel`

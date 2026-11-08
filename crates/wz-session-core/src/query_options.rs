@@ -15,6 +15,7 @@
 
 use alloc::vec::Vec;
 
+use crate::link_restriction::LinkRestriction;
 use crate::locality::Locality;
 #[cfg(feature = "query-get")]
 use crate::metadata::QueryMetadata;
@@ -177,6 +178,10 @@ pub struct QueryOptions {
     /// loopback only. Mirrors zenoh-pico's `opt.allowed_destination`
     /// in `z_get_with_parameters_substr`.
     pub allowed_destination: Locality,
+    /// The links the query may go out on (policy `entity-link-restriction`). `Any` (the
+    /// default, and upstream's behaviour) asks every link; a restricted set asks only the
+    /// links of its slots. The loopback leg is not a link and is not restricted by it.
+    pub links: LinkRestriction,
     /// Reply target hint propagated to the peer. `None` (default)
     /// elides the wire byte → zenoh-pico decodes
     /// `Z_QUERY_TARGET_DEFAULT` = `BEST_MATCHING`. `Some(target)`
@@ -340,6 +345,12 @@ impl QueryOptions {
     /// Pin the query-side locality predicate.
     pub fn with_allowed_destination(mut self, locality: Locality) -> Self {
         self.allowed_destination = locality;
+        self
+    }
+
+    /// Limit the query to the links of `links`.
+    pub fn with_links(mut self, links: LinkRestriction) -> Self {
+        self.links = links;
         self
     }
 

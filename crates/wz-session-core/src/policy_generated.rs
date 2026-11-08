@@ -440,6 +440,10 @@ pub struct SessionPolicy {
     /// kernel's choice when the host has none, so the link may sit on an interface nobody
     /// chose.
     pub multicast_link_requires_iface: bool,
+    /// `entity-link-restriction`. Upstream: Lets every entity use every link of the
+    /// session: a put reaches every link that wants it, a declaration is made to every
+    /// link, a query goes to every link.
+    pub entity_link_restriction: bool,
     /// `entity-timestamp-opt-in`. Upstream: Hands every received sample's timestamp to the
     /// subscriber and every reply's to the querier, and lets any publisher attach the
     /// timestamp it is given.
@@ -493,6 +497,7 @@ impl SessionPolicy {
             policy_bool(option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING"));
         let multicast_link_requires_iface =
             policy_bool(option_env!("WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE"));
+        let entity_link_restriction = policy_bool(option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION"));
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
         let reply_auto_timestamp = policy_bool(option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP"));
         let subscriber_overload = SubscriberOverload::stated();
@@ -510,6 +515,7 @@ impl SessionPolicy {
             declaration_sync_pacing,
             datagram_fragment_pacing,
             multicast_link_requires_iface,
+            entity_link_restriction,
             entity_timestamp_opt_in,
             reply_auto_timestamp,
             subscriber_overload,

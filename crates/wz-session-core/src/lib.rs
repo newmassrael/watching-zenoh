@@ -366,6 +366,11 @@ pub mod reply_acceptance;
 // Available unconditionally because the type carries no allocations.
 pub mod locality;
 
+/// Which links an entity may use (policy `entity-link-restriction`): the value an entity
+/// declares beside its locality, and the set an engine with several links checks it against.
+/// no_std + no_alloc clean (one machine word); unconditional.
+pub mod link_restriction;
+
 /// Reliability hint shared by LinkDriver outbound + Sample inbound.
 /// no_std + no_alloc clean (pure enum + helper); unconditional.
 pub mod reliability;

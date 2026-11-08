@@ -518,9 +518,12 @@ impl SharedSession {
         // The replay announces nothing: zenoh tells a group that comes up of no subscriber the
         // session already holds (`zenoh/src/net/routing/gateway.rs` @
         // `tables.data.hats[region].mcast_groups.push(face);`, and no declaration beside it).
+        // A multicast group is a link no slot names, so an entity limited to some links
+        // (policy `entity-link-restriction`) is not put on one.
         let subs = guard
             .subs
             .iter()
+            .filter(|entry| !entry.links.is_restricted())
             .map(|entry| {
                 (
                     entry.id,
@@ -532,6 +535,7 @@ impl SharedSession {
         let qbls = guard
             .qbls
             .iter()
+            .filter(|entry| !entry.links.is_restricted())
             .map(|entry| (entry.id, answer_on(session, entry, GroupDeclarations::None)))
             .collect();
         // The liveliness subscriptions ask the group as they would have had the group been

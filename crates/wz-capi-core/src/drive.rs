@@ -6147,7 +6147,7 @@ mod multicast_face_tests {
                 let ended = Arc::new(Notify::new());
                 let hold = Arc::new(EndsOnDrop(ended.clone()));
                 let mut legs = Vec::new();
-                a.fan_query(Locality::Remote, None, |query| {
+                a.fan_query(Locality::Remote, Default::default(), None, |query| {
                     legs.push(query.locality());
                     let leg = Leg {
                         replies: replies.clone(),
