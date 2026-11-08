@@ -6148,6 +6148,7 @@ mod multicast_face_tests {
                 let hold = Arc::new(EndsOnDrop(ended.clone()));
                 let mut legs = Vec::new();
                 a.fan_query(Locality::Remote, Default::default(), None, |query| {
+                    // The default reach: every link.
                     legs.push(query.locality());
                     let leg = Leg {
                         replies: replies.clone(),

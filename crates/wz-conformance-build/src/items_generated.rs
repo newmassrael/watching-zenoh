@@ -287,6 +287,12 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "off",
     ),
     (
+        "targeted-query",
+        "WZ_POLICY_TARGETED_QUERY",
+        &["off", "on"],
+        "off",
+    ),
+    (
         "entity-timestamp-opt-in",
         "WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN",
         &["off", "on"],

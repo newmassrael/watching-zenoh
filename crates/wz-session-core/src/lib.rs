@@ -371,6 +371,10 @@ pub mod locality;
 /// no_std + no_alloc clean (one machine word); unconditional.
 pub mod link_restriction;
 
+/// Addressing a query to one node by its identity (policy `targeted-query`): the value's rules
+/// and the refusal a build without the policy gives. no_std + no_alloc clean; unconditional.
+pub mod peer_target;
+
 /// Reliability hint shared by LinkDriver outbound + Sample inbound.
 /// no_std + no_alloc clean (pure enum + helper); unconditional.
 pub mod reliability;

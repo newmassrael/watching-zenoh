@@ -1104,7 +1104,7 @@ pub(crate) fn issue_get(
     let guard = closure.clone();
     shared.fan_query(
         opts.allowed_destination,
-        opts.links,
+        wz_capi_core::faces::QueryReach::of(&opts),
         fan.as_deref(),
         |query| {
             let leg = LegReply {

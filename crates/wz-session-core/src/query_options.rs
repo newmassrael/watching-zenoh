@@ -182,6 +182,11 @@ pub struct QueryOptions {
     /// default, and upstream's behaviour) asks every link; a restricted set asks only the
     /// links of its slots. The loopback leg is not a link and is not restricted by it.
     pub links: LinkRestriction,
+    /// The one node the query is addressed to (policy `targeted-query`), by the identity its
+    /// link's handshake gave it. `None` (the default, and upstream's behaviour) asks every link;
+    /// a node goes out on that node's link only, with no session-local leg, and a node with no
+    /// link is not asked and the query is not widened ([`crate::peer_target`]).
+    pub target_peer: Option<Vec<u8>>,
     /// Reply target hint propagated to the peer. `None` (default)
     /// elides the wire byte → zenoh-pico decodes
     /// `Z_QUERY_TARGET_DEFAULT` = `BEST_MATCHING`. `Some(target)`
@@ -351,6 +356,12 @@ impl QueryOptions {
     /// Limit the query to the links of `links`.
     pub fn with_links(mut self, links: LinkRestriction) -> Self {
         self.links = links;
+        self
+    }
+
+    /// Address the query to the one node whose identity is `zid`.
+    pub fn with_target_peer(mut self, zid: impl Into<Vec<u8>>) -> Self {
+        self.target_peer = Some(zid.into());
         self
     }
 

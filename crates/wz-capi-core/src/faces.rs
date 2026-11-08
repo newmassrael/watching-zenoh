@@ -354,11 +354,40 @@ struct FanTargets {
     groups: Arc<Vec<multicast::McastLeg>>,
 }
 
+/// Which of the session's links a get is asked on, beyond its locality: the links its set names
+/// (policy `entity-link-restriction`) and the one node it is addressed to (policy
+/// `targeted-query`). The default asks every link, which is upstream's get.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QueryReach<'a> {
+    /// The links the get may go out on.
+    pub links: LinkRestriction,
+    /// The identity of the one node the get is addressed to, when it is.
+    pub target_peer: Option<&'a [u8]>,
+}
+
+impl<'a> QueryReach<'a> {
+    /// The reach `opts` states.
+    pub fn of(opts: &'a QueryOptions) -> Self {
+        Self {
+            links: opts.links,
+            target_peer: opts.target_peer.as_deref(),
+        }
+    }
+}
+
+/// One face a get's wire leg may go to: its session, its drive loop's re-arm signal, its link
+/// slot and the identity of the node it reaches, which a restricted or addressed get is judged by.
+struct QueryFace {
+    session: TokioSession,
+    revised: Arc<Notify>,
+    slot: Option<LinkSlot>,
+    peer: Option<Vec<u8>>,
+}
+
 /// The faces and the groups one get's wire legs go to, each face with its re-arm signal;
 /// see [`SharedSession`]'s `query_targets`.
 struct QueryTargets {
-    /// Each face's session, its re-arm signal and its link slot.
-    faces: Vec<(TokioSession, Arc<Notify>, Option<LinkSlot>)>,
+    faces: Vec<QueryFace>,
     #[cfg(feature = "multicast-transport")]
     groups: Arc<Vec<multicast::McastLeg>>,
 }
@@ -4492,10 +4521,12 @@ impl SharedSession {
     pub fn fan_query(
         &self,
         destination: Locality,
-        links: LinkRestriction,
+        reach: QueryReach<'_>,
         fan: Option<&CancellableFan>,
         mut issue: impl FnMut(QueryLeg<'_>) -> Option<u64>,
     ) {
+        let links = reach.links;
+        let target = reach.target_peer;
         // `false` when the token cancelled while the fan was running.
         let mut issue_recorded = |leg: QueryLeg<'_>| -> bool {
             match (issue(leg), fan) {
@@ -4505,9 +4536,20 @@ impl SharedSession {
         };
         if destination.allows_remote() {
             let targets = self.query_targets();
-            for (session, revised, slot) in targets.faces {
+            for QueryFace {
+                session,
+                revised,
+                slot,
+                peer,
+            } in targets.faces
+            {
                 // A query limited to some links is not asked on the others.
                 if !links.allows(slot) {
+                    continue;
+                }
+                // A query addressed to a node is asked on that node's link only. A node that
+                // has no link leaves no leg, and the query is not widened to the others.
+                if target.is_some_and(|zid| peer.as_deref() != Some(zid)) {
                     continue;
                 }
                 if !issue_recorded(QueryLeg::Face(&session)) {
@@ -4515,16 +4557,22 @@ impl SharedSession {
                 }
                 revised.notify_one();
             }
-            // A multicast group is a link no slot names, so a limited query skips it.
+            // A multicast group is a link no slot names and no one node's, so a limited or
+            // addressed query skips it.
             #[cfg(feature = "multicast-transport")]
-            for group in targets.groups.iter().filter(|_| !links.is_restricted()) {
+            for group in targets
+                .groups
+                .iter()
+                .filter(|_| !links.is_restricted() && target.is_none())
+            {
                 if !issue_recorded(QueryLeg::Group(&group.session)) {
                     return;
                 }
                 group.revised.notify_one();
             }
         }
-        if destination.allows_local() {
+        // The session's own plane is not the node a query is addressed to.
+        if destination.allows_local() && target.is_none() {
             // The local leg is cancellable like a face's; nothing follows it, so a cancel
             // that raced it has nothing further to stop.
             let _ = issue_recorded(QueryLeg::Local(&self.local));
@@ -4541,12 +4589,11 @@ impl SharedSession {
             faces: guard
                 .faces
                 .iter()
-                .map(|(id, face)| {
-                    (
-                        face.session.clone(),
-                        face.revised.clone(),
-                        link_slot_of_face(*id),
-                    )
+                .map(|(id, face)| QueryFace {
+                    session: face.session.clone(),
+                    revised: face.revised.clone(),
+                    slot: link_slot_of_face(*id),
+                    peer: face.peer_zid.clone(),
                 })
                 .collect(),
             #[cfg(feature = "multicast-transport")]
@@ -6054,7 +6101,7 @@ mod matching_aggregate_tests {
             (Locality::Remote, vec![]),
         ] {
             let mut legs = Vec::new();
-            shared.fan_query(destination, LinkRestriction::Any, None, |leg| {
+            shared.fan_query(destination, QueryReach::default(), None, |leg| {
                 legs.push(leg.locality());
                 None
             });
@@ -7350,7 +7397,11 @@ mod face_up_order_tests {
 
         let legs = |links: LinkRestriction| {
             let mut faces = 0;
-            shared.fan_query(Locality::Remote, links, None, |leg| {
+            let reach = QueryReach {
+                links,
+                target_peer: None,
+            };
+            shared.fan_query(Locality::Remote, reach, None, |leg| {
                 if matches!(leg, QueryLeg::Face(_)) {
                     faces += 1;
                 }
@@ -7374,5 +7425,73 @@ mod face_up_order_tests {
             0,
             "limited to a slot no link has: none"
         );
+    }
+
+    /// A query addressed to a node goes out on that node's link only, with no local leg and
+    /// no widening: the named node's link gets one leg, an unknown node gets none, and the
+    /// same query with no target asks both links and the plane.
+    #[tokio::test]
+    async fn a_query_addressed_to_a_node_is_issued_on_its_link_only() {
+        use wz_runtime_tokio_test_support::establish_capability_pair_between;
+        let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let shared =
+            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+        assert!(shared.face_up(1, &near.resp_actions, false));
+        assert!(shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false));
+        let near_zid = near
+            .resp_actions
+            .peer_zid()
+            .expect("a handshake names the peer");
+        let far_zid = far
+            .resp_actions
+            .peer_zid()
+            .expect("a handshake names the peer");
+        assert_ne!(near_zid, far_zid, "the two links reach two nodes");
+
+        // `(face legs, local legs)` of a get with destination `Any`, which admits both.
+        let legs = |target: Option<&[u8]>| {
+            let (mut faces, mut locals) = (0, 0);
+            let reach = QueryReach {
+                links: LinkRestriction::Any,
+                target_peer: target,
+            };
+            shared.fan_query(Locality::Any, reach, None, |leg| {
+                match leg {
+                    QueryLeg::Face(_) => faces += 1,
+                    QueryLeg::Local(_) => locals += 1,
+                    #[allow(unreachable_patterns)]
+                    _ => {}
+                }
+                None
+            });
+            (faces, locals)
+        };
+        assert_eq!(legs(None), (2, 1), "no target: both links and the plane");
+        assert_eq!(
+            legs(Some(&near_zid)),
+            (1, 0),
+            "addressed to the first node: its link only, no local leg"
+        );
+        assert_eq!(legs(Some(&far_zid)), (1, 0), "addressed to the second node");
+        assert_eq!(
+            legs(Some(&[0xEE; 16])),
+            (0, 0),
+            "a node with no link is not asked and the query is not widened"
+        );
+
+        // The target and a link set both apply: the node's link must be in the set.
+        let mut faces = 0;
+        let reach = QueryReach {
+            links: LinkRestriction::only([2]).expect("one slot"),
+            target_peer: Some(&near_zid),
+        };
+        shared.fan_query(Locality::Remote, reach, None, |leg| {
+            if matches!(leg, QueryLeg::Face(_)) {
+                faces += 1;
+            }
+            None
+        });
+        assert_eq!(faces, 0, "the first node's link is slot 1, outside the set");
     }
 }

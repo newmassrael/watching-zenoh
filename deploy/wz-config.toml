@@ -2520,6 +2520,24 @@ is named. Only the tokio engine reads this policy.
 '''
 
 [[policy]]
+id = "targeted-query"
+kind = "bool"
+kconfig = "WZ_POLICY_TARGETED_QUERY"
+default = "off"
+upstream = "Sends a query to every link whose peers declared a queryable it matches, and a caller cannot name the peer a query is for."
+since = 2
+help = '''
+Whether a query may be addressed to one peer by its node identity. Off, the call
+that names a peer is refused and a query goes out as upstream's does, to every
+link that has a matching queryable. On, a query that names a peer goes out on
+the one link that reaches that node and on no other, and its session-local leg
+and any multicast group are left out; a peer that has no link is not asked and
+the query is never widened to the others, so it ends with no replies from
+anyone. The identity names a node, not a link or a queryable. Only the tokio
+engine reads this policy.
+'''
+
+[[policy]]
 id = "entity-timestamp-opt-in"
 kind = "bool"
 kconfig = "WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"

@@ -488,14 +488,19 @@ impl SessionEngine for SharedSession {
         // never told) drops its callback with its rolled-back pending entry, so it cannot hold
         // the get open; it is not counted.
         let mut issued = 0;
-        self.fan_query(opts.allowed_destination, opts.links, fan, |query_leg| {
-            let rid = query_leg
-                .query_on_wire(keyexpr, wire, opts.clone(), leg())
-                .ok()
-                .map(|handle| handle.rid());
-            issued += usize::from(rid.is_some());
-            rid
-        });
+        self.fan_query(
+            opts.allowed_destination,
+            crate::faces::QueryReach::of(opts),
+            fan,
+            |query_leg| {
+                let rid = query_leg
+                    .query_on_wire(keyexpr, wire, opts.clone(), leg())
+                    .ok()
+                    .map(|handle| handle.rid());
+                issued += usize::from(rid.is_some());
+                rid
+            },
+        );
         Some(issued)
     }
 }

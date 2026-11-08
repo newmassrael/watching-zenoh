@@ -444,6 +444,9 @@ pub struct SessionPolicy {
     /// session: a put reaches every link that wants it, a declaration is made to every
     /// link, a query goes to every link.
     pub entity_link_restriction: bool,
+    /// `targeted-query`. Upstream: Sends a query to every link whose peers declared a
+    /// queryable it matches, and a caller cannot name the peer a query is for.
+    pub targeted_query: bool,
     /// `entity-timestamp-opt-in`. Upstream: Hands every received sample's timestamp to the
     /// subscriber and every reply's to the querier, and lets any publisher attach the
     /// timestamp it is given.
@@ -498,6 +501,7 @@ impl SessionPolicy {
         let multicast_link_requires_iface =
             policy_bool(option_env!("WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE"));
         let entity_link_restriction = policy_bool(option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION"));
+        let targeted_query = policy_bool(option_env!("WZ_POLICY_TARGETED_QUERY"));
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
         let reply_auto_timestamp = policy_bool(option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP"));
         let subscriber_overload = SubscriberOverload::stated();
@@ -516,6 +520,7 @@ impl SessionPolicy {
             datagram_fragment_pacing,
             multicast_link_requires_iface,
             entity_link_restriction,
+            targeted_query,
             entity_timestamp_opt_in,
             reply_auto_timestamp,
             subscriber_overload,

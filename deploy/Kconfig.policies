@@ -124,6 +124,21 @@ config WZ_POLICY_ENTITY_LINK_RESTRICTION
 	  link that wants it, a declaration is made to every link, a query goes to every
 	  link.
 
+config WZ_POLICY_TARGETED_QUERY
+	bool "targeted-query"
+	default n
+	help
+	  Whether a query may be addressed to one peer by its node identity. Off, the call
+	  that names a peer is refused and a query goes out as upstream's does, to every
+	  link that has a matching queryable. On, a query that names a peer goes out on
+	  the one link that reaches that node and on no other, and its session-local leg
+	  and any multicast group are left out; a peer that has no link is not asked and
+	  the query is never widened to the others, so it ends with no replies from
+	  anyone. The identity names a node, not a link or a queryable. Only the tokio
+	  engine reads this policy.
+	  Upstream: Sends a query to every link whose peers declared a queryable it
+	  matches, and a caller cannot name the peer a query is for.
+
 config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
 	bool "entity-timestamp-opt-in"
 	default n

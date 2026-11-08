@@ -145,6 +145,15 @@ original reproduced by naming it. Three things follow from it:
   (`declare_subscriber_on_links`, `declare_queryable_on_links`, the `links` of
   `PublishOptions` and `QueryOptions`) is not yet reachable from the Rust or C API, and the
   router, cooperative and lwIP engines do not read it.
+- **Addressing a query to one node** (`targeted-query`, off by default): upstream sends a
+  query to every link whose peers declared a matching queryable, and a caller cannot name the
+  node it wants. `QueryOptions::target_peer` names it by the identity its link's handshake gave
+  it (1 to 16 bytes, `wz_session_core::peer_target`). The tokio registry
+  (`SharedSession::fan_query`, given a `QueryReach` of the link set and the target) issues the
+  leg on the one face of that node and nowhere else: no session-local leg, no multicast group,
+  and a node with no face leaves no leg, so the query ends with no replies and is not widened
+  to the others. `peer_target::admit_in_build` refuses a target when the policy is off, which is
+  what an entry point that takes one from a caller calls. Only the tokio engine reads it.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and
