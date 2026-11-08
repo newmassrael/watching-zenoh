@@ -126,6 +126,11 @@ ACCOUNTING = (
     # tally beside one of those removals would still pass. This way the gate
     # keeps reading it.
     "*lost +=",
+    # A split message's TRANSFER handed to the verdict that reports it: the
+    # segment chain's `Ended` names the transfer, its whole and what it had
+    # received, and lands in the row's `ended_transfers`. A census of what went,
+    # read by the gate rather than excused by an entry.
+    "ended.push(",
 )
 
 # (crate/file, the exact source line, why it owes nothing). Matched on the
@@ -134,6 +139,15 @@ ACCOUNTING = (
 # `lib.rs` in the population -- a bare file name would let one crate's entry
 # excuse another crate's site.
 ALLOWED = [
+    (
+        "wz-capture/segment_chain.rs",
+        "let _ = self.judged.remove(&key);",
+        "The segment chain lets go of the verdict it kept for each piece of a row "
+        "a ceiling has taken from the front of its list: the row is no longer held, "
+        "so no later document can write it again, and the pieces themselves were "
+        "judged and reported when the row was written. Nothing a call can still ask "
+        "for is lost.",
+    ),
     (
         "wz-capture/field_values.rs",
         "fold.held.retain(|h| {",
