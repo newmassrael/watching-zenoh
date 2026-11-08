@@ -22,6 +22,7 @@
 //! person reading a terminal, and which flag a reader should go fix, are
 //! properties of that surface and stay there.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -1474,12 +1475,24 @@ pub fn subtree_keyexpr(field: &Field, at: KeyexprAt<'_>) -> Option<String> {
 /// the suffix a `WireExpr` may add after it, because the id is what a reader has to
 /// look up and a suffix is not part of that lookup's key. A reader showing an
 /// unresolved reference prints this id where a resolved one prints its keyexpr.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The suffix rides beside the id rather than inside it, as the wire wrote it and
+/// unread: `None` when the `WireExpr` carried none. A sender whose key ids are
+/// fixed in advance (no declaration on the wire) appends a suffix to an id to
+/// name a different resource under it, `<id>/@history` beside `<id>`, and with
+/// the id alone the two references read as one. The suffix is NOT resolved
+/// against anything: a reader that maps ids to names maps the id and appends
+/// this text, the same concatenation a resolved reference has already had done
+/// for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedRef {
     /// Why the tables could not answer.
     pub cause: crate::agg::UnresolvedCause,
     /// The numeric id the message referenced.
     pub id: u64,
+    /// The suffix the `WireExpr` wrote after the id, verbatim, or `None` when it
+    /// wrote none.
+    pub suffix: Option<Box<str>>,
 }
 
 /// R2458 (open-debt item 703) — the same walk, answering WHY when it does not
@@ -1570,6 +1583,7 @@ pub fn subtree_keyexpr_outcome(
                 Err((space, _)) => Some(Err(UnresolvedRef {
                     cause: at.spaces.cause(space),
                     id,
+                    suffix: suffix.filter(|s| !s.is_empty()).map(Box::from),
                 })),
             };
         }

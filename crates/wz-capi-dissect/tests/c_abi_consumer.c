@@ -4149,8 +4149,10 @@ int main(void) {
      * 57: a decoded payload block's `typed` and `schema`, and each of its
      * fields' `type`, `typed_value` and `enum_number`: a payload read by the
      * types its declared .proto files give it. Keys arrive and the `state`
-     * shapes move; nothing retires. */
-    revisioned[2].revision = 57;
+     * shapes move; nothing retires.
+     * 58: every `carried` entry's `keyexpr_suffix`, the suffix an unresolved
+     * reference wrote after its id. A key arrives; nothing retires. */
+    revisioned[2].revision = 58;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

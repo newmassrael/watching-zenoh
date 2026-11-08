@@ -416,6 +416,19 @@
  * of the paragraph on integers below. Like `keyexpr` and `keyexpr_cause` it can
  * change in an issued row (see the list of revisable cells).
  *
+ * AND WHICH SUFFIX, at field-document revision 58.
+ *
+ *     `keyexpr_suffix`  the suffix the reference wrote after its id, or `null`.
+ *
+ * Beside `keyexpr_id`, on the same entries. It is a string exactly when
+ * `keyexpr_cause` is a word AND the reference wrote a suffix; a miss that wrote
+ * none, a key that resolved (its `keyexpr` already ends with the suffix) and a
+ * message that referenced none all write `null`. It is the text as the wire
+ * carried it, read against nothing: a sender whose key ids are fixed in
+ * advance names `<id>` and `<id>/@history` with one id, and this is what keeps
+ * those two references apart. A reader that maps ids to names maps the id and
+ * appends this text. Like `keyexpr_id` it can change in an issued row.
+ *
  * ⚠ REVISION 9 ALSO MOVED WHICH REFERENCES RESOLVE AT ALL, under a stationary
  * `keyexpr`, and no `value_families` row can say so. Until it, this document
  * folded a keyexpr id space PER FLOW, while a zenoh session with
@@ -1380,7 +1393,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":57,"key":"kind","values":[...],
+ *     {"name":"fields","revision":58,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -5289,7 +5302,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":57,"key":"state",
+ *     "value_families":[{"name":"fields","revision":58,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -6488,6 +6501,8 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *                                              keep these across calls as final.
  *     /carried[]/keyexpr_id                    since revision 24: the id moves with
  *     /above_transport/carried[]/keyexpr_id    the `keyexpr` it was written beside.
+ *     /carried[]/keyexpr_suffix                since revision 58: the suffix moves
+ *     /above_transport/carried[]/keyexpr_suffix  with the id.
  *
  * `/chain/chain_id` IS NOT IN THIS LIST since field-document revision 38: it is
  * counted from the first message the list EVER held (the list keeps the chain
@@ -6506,7 +6521,7 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  * as they stand, so after a trim the two read differently in these cells, and only
  * for a row whose inputs the trim took:
  *
- *     /carried[]/keyexpr, keyexpr_cause, keyexpr_id   (and the same under
+ *     /carried[]/keyexpr, keyexpr_cause, keyexpr_id, keyexpr_suffix  (and under
  *     /above_transport/carried[]) and /payload_decode   a reference to a
  *                                              declaration whose message was
  *                                              trimmed: here it still resolves

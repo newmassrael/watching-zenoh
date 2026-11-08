@@ -1123,11 +1123,13 @@ pub const REVISABLE_ROW_CELLS: &[&str] = &[
     "/above_transport/carried[]/keyexpr",
     "/above_transport/carried[]/keyexpr_cause",
     "/above_transport/carried[]/keyexpr_id",
+    "/above_transport/carried[]/keyexpr_suffix",
     "/above_transport/carried[]/payload_decode/**",
     "/carried[]/e2e/**",
     "/carried[]/keyexpr",
     "/carried[]/keyexpr_cause",
     "/carried[]/keyexpr_id",
+    "/carried[]/keyexpr_suffix",
     // A final's `closes` (on its `carried` entry) names the request the exchange
     // plane paired it with, and the pairing needs the request to still be held: a
     // front trim that takes the request leaves the final held and unpaired, so
@@ -3711,12 +3713,13 @@ fn push_body(node: &wz_session_core::dissect::Field, out: &mut String) {
     }
 }
 
-/// The `keyexpr_cause` and `keyexpr_id` keys of one `carried` entry, after its
-/// `keyexpr`.
+/// The `keyexpr_cause`, `keyexpr_id` and `keyexpr_suffix` keys of one `carried`
+/// entry, after its `keyexpr`.
 ///
-/// One body for the two places an entry is written, so the pair cannot drift: a
-/// miss writes its cause word and its id, and anything else, a resolved key or no
-/// reference at all, writes `null` for both. The id is a protocol field's value, so
+/// One body for the two places an entry is written, so the three cannot drift: a
+/// miss writes its cause word, its id and its suffix (`null` when the reference
+/// wrote none), and anything else, a resolved key or no reference at all, writes
+/// `null` for all three. The id is a protocol field's value, so
 /// it takes the shared integer door like every other such value in this document
 /// (a bare number up to 2^53 - 1, a decimal string past it); the wire id is a
 /// 32-bit value in practice, and the door is what makes that a property of the
@@ -3730,6 +3733,15 @@ fn push_keyexpr_miss(miss: Option<&crate::payload_decode::UnresolvedRef>, out: &
     out.push_str(",\"keyexpr_id\":");
     match miss {
         Some(miss) => wz_session_core::json::u64_into(miss.id, out),
+        None => out.push_str("null"),
+    }
+    // Revision 58: the suffix the reference wrote after that id, verbatim, so
+    // `<id>` and `<id>/@history` stay two references. `null` on a miss whose
+    // `WireExpr` wrote none, and on every entry that is not a miss: a resolved
+    // `keyexpr` already has its suffix appended, and no reference has none.
+    out.push_str(",\"keyexpr_suffix\":");
+    match miss.and_then(|miss| miss.suffix.as_deref()) {
+        Some(suffix) => escape_into(suffix, out),
         None => out.push_str("null"),
     }
 }
@@ -7573,6 +7585,78 @@ mod tests {
                 .any(|(k, _, i)| *k == "\"demo/temp\"" && *i == "null"),
             "a resolved entry must write `keyexpr_id` as null"
         );
+    }
+
+    /// Every `(keyexpr_cause, keyexpr_id, keyexpr_suffix)` triple the document
+    /// carries, raw, with `"<absent>"` for a suffix key that is not there.
+    #[cfg(feature = "network-codecs")]
+    fn carried_suffixes(doc: &str) -> Vec<(&str, &str, &str)> {
+        crate::doc_revision::object_scopes(doc)
+            .into_iter()
+            .filter_map(|scope| {
+                let cause = scope.iter().find(|(k, _)| *k == "keyexpr_cause")?.1;
+                let id = scope.iter().find(|(k, _)| *k == "keyexpr_id")?.1;
+                let suffix = scope
+                    .iter()
+                    .find(|(k, _)| *k == "keyexpr_suffix")
+                    .map_or("<absent>", |(_, v)| *v);
+                Some((cause, id, suffix))
+            })
+            .collect()
+    }
+
+    /// AN UNRESOLVED REFERENCE NAMES ITS SUFFIX TOO (revision 58), verbatim.
+    ///
+    /// A sender with fixed key ids names `<id>` and `<id>/@history` with one id,
+    /// and the id alone reads the two as one reference. The same capture is
+    /// written twice, its reference carrying a suffix and carrying none:
+    ///
+    /// * with one, the unresolved entry says `7` AND `"/@history"`;
+    /// * with none, it says `7` and `null`, which is a value and not an absence;
+    /// * in both, every entry has the key, and no entry that is not a miss
+    ///   carries a suffix: a resolved key has its suffix appended already.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn an_unresolved_reference_names_the_suffix_it_wrote_after_its_id() {
+        let (d, file) =
+            crate::agg::tests::multilink_session_declaring_after_the_reference_carrying_with_file(
+                crate::agg::tests::push_for_item_713_with_suffix("/@history"),
+            );
+        let suffixed = fields_json(&d, &file, None, None);
+        let (d, file) =
+            crate::agg::tests::multilink_session_declaring_after_the_reference_with_file();
+        let bare = fields_json(&d, &file, None, None);
+
+        fn misses(doc: &str) -> Vec<(&str, &str, &str)> {
+            carried_suffixes(doc)
+                .into_iter()
+                .filter(|(c, _, _)| *c != "null")
+                .collect()
+        }
+        assert_eq!(
+            misses(&suffixed),
+            vec![("\"no_declaration\"", "7", "\"/@history\"")],
+            "the unresolved reference must name id 7 and its suffix: {suffixed}"
+        );
+        assert_eq!(
+            misses(&bare),
+            vec![("\"no_declaration\"", "7", "null")],
+            "a reference that wrote no suffix says null: {bare}"
+        );
+        for (name, doc) in [("suffixed", &suffixed), ("bare", &bare)] {
+            let all = carried_suffixes(doc);
+            assert!(!all.is_empty(), "{name}: no carried entry at all");
+            for (cause, id, suffix) in &all {
+                assert_ne!(
+                    *suffix, "<absent>",
+                    "{name}: an entry has no `keyexpr_suffix`"
+                );
+                assert!(
+                    *cause != "null" || *suffix == "null",
+                    "{name}: only a miss carries a suffix: {cause} {id} {suffix}"
+                );
+            }
+        }
     }
 
     /// THE PROPERTY THE PER-FLOW RULE PROTECTED, kept in this document: a flow
@@ -12063,7 +12147,7 @@ mod tests {
         // and says the encoding the sample carried (id 0, named explicitly).
         assert!(
             chain.contains(&alloc::format!(
-                "\"keyexpr_cause\":null,\"keyexpr_id\":null,\
+                "\"keyexpr_cause\":null,\"keyexpr_id\":null,\"keyexpr_suffix\":null,\
                  \"payload\":{{\"start\":{start},\"end\":{end},\
                  \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false}},\
                  \"payload_size\":{{\"size_verdict\":\"measured\",\"bytes\":{bytes},\
@@ -12203,6 +12287,7 @@ mod tests {
         assert!(
             doc.contains(&alloc::format!(
                 "\"keyexpr\":null,\"keyexpr_cause\":\"no_session\",\"keyexpr_id\":7,\
+                 \"keyexpr_suffix\":null,\
                  \"payload\":{{\"start\":{start},\"end\":{end},\
                  \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false}},\
                  \"payload_size\":{{\"size_verdict\":\"measured\",\"bytes\":3,\

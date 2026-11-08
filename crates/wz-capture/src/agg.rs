@@ -5937,6 +5937,16 @@ pub(crate) mod tests {
     #[cfg(feature = "dissect")]
     pub(crate) fn multilink_session_declaring_after_the_reference_with_file(
     ) -> (crate::Dissection, Vec<u8>) {
+        multilink_session_declaring_after_the_reference_carrying_with_file(push_for_item_713())
+    }
+
+    /// The same capture with a reference record of the caller's choosing, so a
+    /// reference that writes a suffix after id 7 can be the one left unresolved.
+    /// Gated as its sibling is, for the same only reader.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn multilink_session_declaring_after_the_reference_carrying_with_file(
+        reference: Vec<u8>,
+    ) -> (crate::Dissection, Vec<u8>) {
         let mut rows: Vec<(bool, u16, u16, Vec<u8>, bool)> = Vec::new();
         for link in [(43210u16, 7447u16), (43211u16, 7447u16)] {
             for (from_low, sport, dport, wire) in handshake(link.0, link.1) {
@@ -5944,7 +5954,7 @@ pub(crate) mod tests {
             }
         }
         // A publishes under id 7 on the FIRST link, before anyone has bound it.
-        rows.push((true, 43210, 7447, push_for_item_713(), true));
+        rows.push((true, 43210, 7447, reference, true));
         // A declares id 7 on the SECOND link, AFTER that reference went past.
         rows.push((true, 43211, 7447, declare_kexpr(7, "demo/temp"), true));
         multilink_capture_with_file(&rows)
@@ -5958,6 +5968,14 @@ pub(crate) mod tests {
     /// resolves whatever order the walk takes, which is a test that cannot fail.
     pub(crate) fn push_for_item_713() -> Vec<u8> {
         push(sender_space(7, None), &[0u8; 11])
+    }
+
+    /// The same `Push` naming `id 7` with `suffix` written after the id, the
+    /// shape a sender with fixed key ids uses to name a resource under one.
+    /// `dissect`-gated: its only reader is `crate::fields_json`'s test module.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn push_for_item_713_with_suffix(suffix: &'static str) -> Vec<u8> {
+        push(sender_space(7, Some(suffix)), &[0u8; 11])
     }
 
     /// R2513 — the same capture, plus the pcap FILE it is made of.

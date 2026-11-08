@@ -449,6 +449,18 @@ pub enum GapFill {
 /// [`GapFill::AfterTheReference`], directly after the declaration under
 /// [`GapFill::BeforeTheReference`], and absent under [`GapFill::Never`].
 pub fn multilink_declaration_behind_a_gap(fill: GapFill, reference_in_a_chain: bool) -> Vec<u8> {
+    multilink_declaration_behind_a_gap_suffixed(fill, reference_in_a_chain, None)
+}
+
+/// [`multilink_declaration_behind_a_gap`] with a reference that writes `suffix`
+/// after the id, so the cell that carries an unresolved reference's suffix is
+/// one a row can be graded on: written while the declaration is held, `null`
+/// once it is decoded and the key resolves with the suffix appended.
+pub fn multilink_declaration_behind_a_gap_suffixed(
+    fill: GapFill,
+    reference_in_a_chain: bool,
+    suffix: Option<&'static str>,
+) -> Vec<u8> {
     const ISN: u32 = 1000;
     const L1: u16 = 43210;
     const L2: u16 = 43211;
@@ -480,7 +492,7 @@ pub fn multilink_declaration_behind_a_gap(fill: GapFill, reference_in_a_chain: b
     let init_b = stream_unit(&init_wire(ZID_B));
     let keepalive = stream_unit(&[wz_session_core::wire_const::T_MID_KEEP_ALIVE]);
     let declaration = stream_unit(&frame_carrying(&declare_kexpr(ALIAS_ID, ALIAS_LITERAL)));
-    let reference = push(sender_space(ALIAS_ID, None), &[0u8; 11]);
+    let reference = push(sender_space(ALIAS_ID, suffix), &[0u8; 11]);
 
     let mut packets: Vec<Vec<u8>> = Vec::new();
     // Link 1's opening. A chain needs the whole handshake; a lone frame needs

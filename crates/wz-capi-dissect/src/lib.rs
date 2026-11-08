@@ -19175,6 +19175,41 @@ mod tests {
                     "/above_transport/carried[]/keyexpr_id",
                 ]),
             ),
+            // Revision 58 -- a reference that writes a suffix after its id says
+            // the suffix while it is unresolved and `null` once the key resolves
+            // with the suffix appended, in a row and inside a chain alike.
+            (
+                "a suffixed reference decoded after its declaration",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap_suffixed(
+                    wz_capture::fixtures::GapFill::AfterTheReference,
+                    false,
+                    Some("/history"),
+                ),
+                Default::default(),
+                "",
+                cells(&[
+                    "/carried[]/keyexpr",
+                    "/carried[]/keyexpr_cause",
+                    "/carried[]/keyexpr_id",
+                    "/carried[]/keyexpr_suffix",
+                ]),
+            ),
+            (
+                "the same suffixed reference inside a completed chain",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap_suffixed(
+                    wz_capture::fixtures::GapFill::AfterTheReference,
+                    true,
+                    Some("/history"),
+                ),
+                Default::default(),
+                "",
+                cells(&[
+                    "/above_transport/carried[]/keyexpr",
+                    "/above_transport/carried[]/keyexpr_cause",
+                    "/above_transport/carried[]/keyexpr_id",
+                    "/above_transport/carried[]/keyexpr_suffix",
+                ]),
+            ),
             (
                 "the same inside a completed chain, under a payload declaration",
                 wz_capture::fixtures::multilink_declaration_behind_a_gap(
