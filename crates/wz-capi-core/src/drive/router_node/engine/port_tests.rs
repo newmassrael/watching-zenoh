@@ -349,6 +349,70 @@ fn a_token_and_a_liveliness_subscription_through_the_port_tell_each_other() {
     engine.undeclare_subscriber(router_sub);
 }
 
+/// A liveliness get through the port finds the tokens alive that meet its key, the other node's
+/// and the node's own, in one leg that has ended when the get returns; a token that went is found
+/// no more, and a key nothing meets finds nothing.
+#[cfg(feature = "liveliness-get")]
+#[test]
+fn a_liveliness_get_through_the_port_finds_the_tokens_alive() {
+    let (router, peer) = pair();
+    let (engine, other) = (router.as_engine(), peer.as_engine());
+
+    /// Counts the end of a leg: its callback is let go when the leg ends.
+    struct Ended(Arc<AtomicUsize>);
+    impl Drop for Ended {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    // The keys a get through the port finds, in order, and whether every leg it issued had ended
+    // when the get returned.
+    let alive = |key: &str| -> (Vec<String>, bool) {
+        let keys = Arc::new(Mutex::new(Vec::<String>::new()));
+        let ended = Arc::new(AtomicUsize::new(0));
+        let issued = engine
+            .liveliness_get_on_wire(key, &WireKey::literal(), 0, None, &mut || {
+                let keys = Arc::clone(&keys);
+                let end = Ended(Arc::clone(&ended));
+                Box::new(move |reply: &dyn ReplyView| {
+                    let _ = &end;
+                    if reply.kind() == ReplyKind::Put {
+                        keys.lock().unwrap().push(reply.keyexpr().to_owned());
+                    }
+                })
+            })
+            .expect("a node asks liveliness queries");
+        let mut keys = keys.lock().unwrap().clone();
+        keys.sort();
+        (keys, ended.load(Ordering::SeqCst) == issued)
+    };
+
+    let from_peer = other
+        .declare_liveliness_token_on_wire("wz/port/lg/peer".to_owned(), WireKey::literal(), None)
+        .expect("a client has tokens");
+    let _own = engine
+        .declare_liveliness_token_on_wire("wz/port/lg/router".to_owned(), WireKey::literal(), None)
+        .expect("a node has tokens");
+    let both = vec!["wz/port/lg/peer".to_owned(), "wz/port/lg/router".to_owned()];
+    assert!(
+        eventually(|| alive("wz/port/lg/**").0 == both),
+        "a get through the port did not find the client's token and the node's own: {:?}",
+        alive("wz/port/lg/**").0
+    );
+    assert!(
+        alive("wz/port/lg/**").1,
+        "a leg of the get had not ended when the get returned"
+    );
+    assert_eq!(alive("wz/port/other/**").0, Vec::<String>::new());
+
+    other.undeclare_liveliness_token(from_peer);
+    assert!(
+        eventually(|| alive("wz/port/lg/**").0 == ["wz/port/lg/router"]),
+        "a get through the port still found the token the client retracted: {:?}",
+        alive("wz/port/lg/**").0
+    );
+}
+
 /// The matching listener of the port reads a subscriber of the other node: false with none, true
 /// once one is declared there, false again once it is gone; and the status asked at a moment
 /// says the same.

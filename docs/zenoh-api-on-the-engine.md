@@ -1145,7 +1145,9 @@ Each lands whole with its surface lines, tests and faults in one round.
       meet through the node, `router_node_zenoh_ext_group_interop`); and the advanced
       subscriber is carried: its host is written over the port's engine, and a node is one
       (`RouterState` implements `SessionEngine`, so that the subscriber is hosted on the data
-      plane, its liveliness on the node's own face, its history and recovery are queries of
+      plane, its liveliness on the node's own face (a liveliness get through the port is answered
+      there too, from the tokens of the router's tables and the node's own, in one leg that has
+      ended when the get returns, as the C door's snapshot is), its history and recovery are queries of
       that face and its periodic jobs run on the node's own `PeriodicJob`, the one the
       advanced publisher's heartbeat runs on); and the advanced publisher is carried: the composite is the registry's own
       (`AdvancedPublisherOn`), hosted on a node by `NodePlane`, whose cache queryable is hosted

@@ -1431,9 +1431,9 @@ impl Engine {
     /// Ask which liveliness tokens are alive: the query `request` says.
     fn liveliness_query(&self, request: LivelinessRequest<'_>) -> ZResult<()> {
         match self {
-            Engine::Router(router) => {
-                tokio_engine::router_liveliness_query(router.node.liveliness(), request)
-            }
+            // A router node answers it through its engine as the registry does, so the timeout,
+            // the cancellation token and the notifier of the request are kept the same way.
+            Engine::Router(router) => tokio_engine::ask_liveliness(&router.node, request),
             Engine::Tokio(state) => {
                 tokio_engine::ask_liveliness(state.shared.engine_ref(), request)
             }
@@ -2315,29 +2315,6 @@ mod tokio_engine {
             Locality::SessionLocal => EngineLocality::SessionLocal,
             Locality::Remote => EngineLocality::Remote,
         }
-    }
-
-    /// Answer a liveliness get on a router node: the router holds the tokens of every face it
-    /// serves, so each key alive that the query meets is a reply, at once, and the callback is
-    /// let go, which ends the channel of a handler.
-    pub(super) fn router_liveliness_query(
-        face: &wz_capi_core::drive::LocalLiveliness,
-        request: LivelinessRequest<'_>,
-    ) -> ZResult<()> {
-        let LivelinessRequest { key, callback, .. } = request;
-        for keyexpr in face.alive(key) {
-            let sample = liveliness_sample_of(&LivelinessSample {
-                kind: LivelinessSampleKind::Put,
-                keyexpr: &keyexpr,
-                token_id: 0,
-            })?;
-            callback.call(Reply {
-                result: Ok(sample),
-                #[cfg(feature = "unstable")]
-                replier_id: None,
-            });
-        }
-        Ok(())
     }
 
     /// Put or delete `publication` on a router node, which publishes a payload (a put) with a
@@ -11717,6 +11694,26 @@ mod tests {
             let token = CancellationToken::default();
             token.cancel().wait().expect("cancels");
             let error = reader
+                .liveliness()
+                .get("demo/l/c")
+                .cancellation_token(token)
+                .wait()
+                .expect_err("a cancelled token");
+            assert!(error.to_string().contains("Query was cancelled"));
+        }
+
+        /// The same refusal on a node, whose get is answered through its engine as the registry's
+        /// is: a token that was cancelled before the get refuses it there too.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_cancelled_token_refuses_a_liveliness_get_of_a_node() {
+            use crate::api::cancellation::CancellationToken;
+
+            let (node, _peer) = pair(("a1b2d7", "a1b2d8"));
+            assert!(matches!(&*node.0.engine, Engine::Router(_)), "a node");
+            let token = CancellationToken::default();
+            token.cancel().wait().expect("cancels");
+            let error = node
                 .liveliness()
                 .get("demo/l/c")
                 .cancellation_token(token)

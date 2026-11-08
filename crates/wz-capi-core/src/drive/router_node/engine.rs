@@ -442,6 +442,38 @@ impl SessionEngine for RouterState {
         Some(1)
     }
 
+    #[cfg(feature = "liveliness-get")]
+    fn liveliness_get_on_wire(
+        &self,
+        keyexpr: &str,
+        _wire: &WireKey,
+        _timeout_ms: u32,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Option<usize> {
+        // One leg: the node's own face answers from the tokens the router's tables hold and the
+        // ones the program declared, as the C door's snapshot does (`liveliness_get_on_node` in
+        // wz-capi-c). The snapshot is whole when it is read, so the leg ends here, its callback
+        // let go once each key is told, and no timeout has anything to bound. A token whose cancel
+        // has already started is told nothing.
+        if fan.is_some_and(|fan| !fan.record(|| {})) {
+            return Some(0);
+        }
+        let mut callback = leg();
+        for alive in self.liveliness().alive(keyexpr) {
+            callback(&wz_runtime_tokio::reply_sink::BorrowedReply {
+                rid: 0,
+                keyexpr: &alive,
+                kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,
+                payload: &[],
+                err_encoding: None,
+                attachment: None,
+                put_encoding: None,
+            });
+        }
+        Some(1)
+    }
+
     fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
         // At least a millisecond, so that a job cannot make the node spin.
         let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)?;
