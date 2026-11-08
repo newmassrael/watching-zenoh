@@ -376,6 +376,132 @@ fn an_advanced_subscriber_on_a_node_replays_history_and_hears_what_follows() {
     }
 }
 
+/// A node that keeps a south of clients apart, and two registry clients that dial it: the clients
+/// share no link, so what one asks or puts reaches the other through the node alone.
+unsafe fn node_and_two_clients() -> (z_owned_session_t, z_owned_session_t, z_owned_session_t) {
+    let port_node = free_port();
+    let node = open_with(&[
+        ("scouting/multicast/enabled", "false".to_owned()),
+        ("mode", "\"peer\"".to_owned()),
+        ("listen/endpoints", endpoint(port_node)),
+        (
+            "gateway",
+            r#"{ south: [ { filters: [ { modes: ["client"] } ] } ] }"#.to_owned(),
+        ),
+    ]);
+    let client = || {
+        open_with(&[
+            ("scouting/multicast/enabled", "false".to_owned()),
+            ("mode", "\"client\"".to_owned()),
+            ("connect/endpoints", endpoint(port_node)),
+        ])
+    };
+    let (first, second) = (client(), client());
+    (node, first, second)
+}
+
+/// An advanced subscriber on `session` that asks for the history of `KEY` and counts what it is
+/// told in `seen`.
+unsafe fn declare_history_subscriber(
+    session: &z_owned_session_t,
+    seen: &Arc<AtomicUsize>,
+) -> ze_owned_advanced_subscriber_t {
+    let key = view(KEY);
+    let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+    z_closure_sample(
+        &mut closure,
+        Some(on_sample),
+        None,
+        Arc::as_ptr(seen).cast_mut().cast::<c_void>(),
+    );
+    let mut options: ze_advanced_subscriber_options_t = std::mem::zeroed();
+    ze_advanced_subscriber_options_default(&mut options);
+    options.history.is_enabled = true;
+    options.history.detect_late_publishers = true;
+    let mut subscriber: ze_owned_advanced_subscriber_t = std::mem::zeroed();
+    assert_eq!(
+        ze_declare_advanced_subscriber(
+            z_session_loan(session),
+            &mut subscriber,
+            z_view_keyexpr_loan(&key),
+            (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+            &mut options,
+        ),
+        Z_OK
+    );
+    subscriber
+}
+
+/// A client's advanced publisher put three samples before anyone listened. The history of an
+/// advanced subscriber on the node and of one on the other client is each three samples: the
+/// node's by a query of its own face, the other client's by a query that crosses the node, and the
+/// cache queryable of the first client answers both. What the publisher puts after reaches both.
+#[test]
+fn an_advanced_publisher_of_a_client_serves_the_node_and_the_other_client() {
+    unsafe {
+        let (node, first, second) = node_and_two_clients();
+        let mut publisher = declare_publisher(&first, 8);
+        for n in 0..3 {
+            put(&publisher, &format!("sample {n}"));
+        }
+        // The publisher's queryable is declared to the node over the link: let it arrive before
+        // a subscriber asks for the history.
+        std::thread::sleep(Duration::from_millis(500));
+
+        let (node_seen, second_seen) =
+            (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mut node_subscriber = declare_history_subscriber(&node, &node_seen);
+        let mut second_subscriber = declare_history_subscriber(&second, &second_seen);
+        assert_eq!(
+            wait_for(&node_seen, 3),
+            3,
+            "the node's subscriber is told the cached samples"
+        );
+        assert_eq!(
+            wait_for(&second_seen, 3),
+            3,
+            "the other client's subscriber is told the cached samples through the node"
+        );
+
+        // What the first client puts now reaches both, whose subscriptions the node has learnt.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while (node_seen.load(Ordering::SeqCst) < 4 || second_seen.load(Ordering::SeqCst) < 4)
+            && Instant::now() < deadline
+        {
+            put(&publisher, "live");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            node_seen.load(Ordering::SeqCst) >= 4,
+            "a put after the subscribers never reached the node's"
+        );
+        assert!(
+            second_seen.load(Ordering::SeqCst) >= 4,
+            "a put after the subscribers never crossed the node to the other client"
+        );
+
+        for subscriber in [&mut node_subscriber, &mut second_subscriber] {
+            assert_eq!(
+                ze_undeclare_advanced_subscriber(
+                    (subscriber as *mut ze_owned_advanced_subscriber_t)
+                        .cast::<ze_moved_advanced_subscriber_t>()
+                ),
+                Z_OK
+            );
+        }
+        assert_eq!(
+            ze_undeclare_advanced_publisher(
+                (&mut publisher as *mut ze_owned_advanced_publisher_t)
+                    .cast::<ze_moved_advanced_publisher_t>()
+            ),
+            Z_OK
+        );
+        close_session(second);
+        close_session(first);
+        close_session(node);
+    }
+}
+
 /// The node's advanced subscriber detects a publisher that declares itself on the peer: its
 /// liveliness subscriber, declared on the node's own face, is told the `@adv` token.
 #[test]
