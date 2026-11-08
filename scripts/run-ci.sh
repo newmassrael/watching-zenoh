@@ -21268,9 +21268,13 @@ layer_z_zenohd_interop() {
     # nothing: 0 of 3); the node and the client find each other in a group (it fails with the node's
     # member record not served: "the client never found the node"). 6 passed against zenohd 1.10.2
     # (build machine hkl002). Built with `router-node`, `advanced` and `group`, which the lane
-    # above does not turn on. In this crate for the reason the legs above give.
+    # above does not turn on. In this crate for the reason the legs above give. A seventh leg puts
+    # a stock peer (the pinned zenoh's `z_pub` example, from the same provisioning) in the south of
+    # a peer node that dials it: its put reaches a wz peer in another subregion through the node,
+    # and its own matching listener says it matches (with the node dialing the wz peer alone,
+    # nothing arrives).
     wz_test_args wz-capi-c router_node_zenohd_interop
-    _runci_guarded_test Z 6 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
+    _runci_guarded_test Z 7 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
         --features router-node,advanced,group "${WZ_TEST_ARGS[@]}" -- --ignored \
         --quiet --test-threads=1 \
         || return 1

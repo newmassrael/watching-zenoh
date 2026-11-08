@@ -37,11 +37,20 @@
 //! nothing matches before the client declares anything. The interest is not witnessed where the
 //! peer dials the node directly, which is why this leg sits below a router.
 //!
+//! A last leg holds a remote the node dials and places in its own south. The remote is a stock
+//! peer, the pinned zenoh's `z_pub` example listening with gossip off; a peer node that accepts no
+//! session dials it and a wz peer that listens, and places each in a subregion of its south (the
+//! stock peer by its zid, the wz peer by its role). The stock peer's put reaches the wz peer's
+//! subscriber through the node, and the stock publisher's own matching listener says it matches,
+//! which it learns only from the declaration the node relays. With the node dialing the wz peer
+//! alone, nothing arrives.
+//!
 //! # What is NOT claimed
 //!
-//! A remote the node dials and places in its own south (a node that dials into a subregion) has
-//! no counterpart here: zenohd is a router, which the preset places in the north of a peer, and
-//! putting it in a south needs a zenohd that is itself a gateway to compare the placement with.
+//! The placement is not compared with a stock gateway's: zenohd is a router, which the preset
+//! places in the north of a peer, and a stock node that keeps a south apart would be the oracle of
+//! the placement itself. What the last leg shows is that a stock remote placed in the south is
+//! carried, not that it is placed where a stock gateway would place it.
 //!
 //! # Why this file is in wz-capi-c
 //!
@@ -869,6 +878,164 @@ mod advanced_and_group {
             close_session(node);
             assert!(node_sees, "the node never found the client in the group");
             assert!(client_sees, "the client never found the node in the group");
+        }
+    }
+}
+
+/// A stock peer a node dials and places in a subregion of its south: see the module docs.
+mod a_stock_peer_in_the_south {
+    use super::*;
+
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
+
+    /// The zid the stock peer is given, which the node's first subregion names.
+    const STOCK_ZID: &str = "a1b2c1";
+
+    /// The south of the node: the stock peer by its zid, any other peer by its role.
+    const SOUTH: &str = r#"{ south: [ { filters: [ { zids: ["a1b2c1"] } ] },
+                                       { filters: [ { modes: ["peer"] } ] } ] }"#;
+
+    /// Locate the pinned zenoh's `z_pub` example, built by `scripts/build-zenohd.sh` beside zenohd.
+    fn stock_publisher_binary() -> PathBuf {
+        let dir = match std::env::var("WZ_ZENOH_CORE_EXAMPLES_DIR") {
+            Ok(dir) => PathBuf::from(dir),
+            Err(_) => wz_codegen_build::artifact("target/zenohd"),
+        };
+        let path = dir.join("zenoh_z_pub");
+        assert!(
+            path.is_file(),
+            "zenoh_z_pub is missing at {}; set WZ_ZENOH_CORE_EXAMPLES_DIR or run \
+             scripts/build-zenohd.sh",
+            path.display()
+        );
+        path
+    }
+
+    /// Everything `file` holds, from its start.
+    fn contents(file: &mut File) -> String {
+        let mut text = String::new();
+        file.seek(SeekFrom::Start(0))
+            .expect("rewind the captured output");
+        file.read_to_string(&mut text)
+            .expect("read the captured output");
+        text
+    }
+
+    /// A stock peer listening on `port` that puts on [`KEYEXPR`] every second and prints whether
+    /// its publisher matches, returned once it accepts TCP, with the file its output goes to.
+    fn spawn_stock_publisher(port: u16) -> (ChildGuard, File) {
+        let output = tempfile::tempfile().expect("a file for the stock peer's output");
+        let child = Command::new(stock_publisher_binary())
+            .arg("--mode")
+            .arg("peer")
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{port}"))
+            .arg("--no-multicast-scouting")
+            .arg("--cfg")
+            .arg(format!("id:\"{STOCK_ZID}\""))
+            // Without gossip the stock peer cannot learn of the wz peer from the node and dial it,
+            // so a put that arrives went through the node.
+            .arg("--cfg")
+            .arg("scouting/gossip/enabled:false")
+            .arg("-k")
+            .arg(KEYEXPR)
+            .arg("--add-matching-listener")
+            .env("RUST_LOG", "error")
+            .stdout(Stdio::from(
+                output.try_clone().expect("dup the stock peer's output"),
+            ))
+            .stderr(Stdio::from(
+                output.try_clone().expect("dup the stock peer's output"),
+            ))
+            .spawn()
+            .expect("z_pub spawns");
+        let mut guard = ChildGuard(child);
+        let deadline = Instant::now() + ZENOHD_UP_BUDGET;
+        loop {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return (guard, output);
+            }
+            if let Ok(Some(status)) = guard.0.try_wait() {
+                panic!("z_pub exited before accepting on {port}: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "z_pub did not accept on {port} within {ZENOHD_UP_BUDGET:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// A wz peer listening on `port`, with gossip off for the reason the stock peer has it off.
+    unsafe fn taker(port: u16) -> z_owned_session_t {
+        open(&[
+            ("mode", String::from("\"peer\"")),
+            ("scouting/multicast/enabled", String::from("false")),
+            ("scouting/gossip/enabled", String::from("false")),
+            ("listen/endpoints", endpoints(port)),
+        ])
+    }
+
+    /// A peer node that accepts no session, dials `dial` and keeps [`SOUTH`] apart.
+    unsafe fn gateway(dial: &[u16]) -> z_owned_session_t {
+        let connect = dial
+            .iter()
+            .map(|port| format!("\"tcp/127.0.0.1:{port}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        open(&[
+            ("mode", String::from("\"peer\"")),
+            ("scouting/multicast/enabled", String::from("false")),
+            ("scouting/gossip/enabled", String::from("false")),
+            ("listen/endpoints", String::from("[]")),
+            ("connect/endpoints", format!("[{connect}]")),
+            ("gateway", String::from(SOUTH)),
+        ])
+    }
+
+    #[test]
+    #[ignore = "binary-dep e2e (a stock peer in the south of a node opened through z_open); Layer Z runs via --ignored"]
+    fn a_peer_node_carries_the_put_of_a_stock_peer_it_placed_in_its_south() {
+        let (stock_port, taker_port) = (free_port(), free_port());
+        let (_stock, mut said) = spawn_stock_publisher(stock_port);
+        // SAFETY: fresh sessions closed below; the context is freed after them.
+        unsafe {
+            let taker = taker(taker_port);
+            let (hits, ctx) = count_samples(&taker);
+
+            // The control: the node dials the wz peer alone, and the stock peer, which puts every
+            // second, reaches nothing.
+            let half = gateway(&[taker_port]);
+            std::thread::sleep(ABSENCE_WINDOW);
+            let alone = hits.load(Ordering::SeqCst) == 0;
+            close_session(half);
+            assert!(
+                alone,
+                "a put of the stock peer arrived with the node not dialing it: the harness joins \
+                 the two by some other path, so an arrival below proves nothing"
+            );
+
+            let node = gateway(&[stock_port, taker_port]);
+            let deadline = Instant::now() + DELIVERY_BUDGET;
+            while hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let arrived = hits.load(Ordering::SeqCst) > 0;
+            let output = contents(&mut said);
+            close_session(node);
+            close_session(taker);
+            drop(Box::from_raw(ctx));
+            assert!(
+                arrived,
+                "a put of the stock peer in the node's south never reached the wz peer\n\
+                 --- z_pub ---\n{output}"
+            );
+            assert!(
+                output.contains("Publisher has matching subscribers."),
+                "the stock publisher was never told the wz peer's subscriber matches, which only \
+                 the node relays to it\n--- z_pub ---\n{output}"
+            );
         }
     }
 }
