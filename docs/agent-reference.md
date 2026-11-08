@@ -67,6 +67,19 @@ git config core.hooksPath .githooks
   filed by `scripts/file-round.sh`. `--status` names the holder; a second
   session waits for the lock.
 
+  The same push can go through the bx landing queue (`bx --land`, bx RFC 0024;
+  `[land]` in `bx.toml`): the commit is submitted as `refs/bx-land/main/items/<id>`
+  and one integrator, a systemd user unit `bx-land@<key>.service` over its own
+  clone, cherry-picks it onto `main`, files the descriptor's ledger round
+  (`file-round`, placed on a machine that holds the pinned ledger CLI), judges
+  the result with this repository's pre-push hook and pushes. `land.sh` stays
+  the other way in until the queue has landed a week of rounds. The integrator's
+  clone has to be a directory named `watching-zenoh`, hold the six submodules
+  (`validate-workspace` fails without `vendor/`), read the clone-local term list
+  (`.git/wz-nda-terms.txt`, linked to the main checkout's), carry an identity gate
+  0c accepts, and be marked `git config wz.land-integrator true`; mark no other
+  clone, since the marker lifts the lock requirement for every push it makes.
+
   Mandatory gates remain: the push lock (0p), confidential vocabulary, home
   paths and identities (0/0b/0c), schema and tool pins (1), workspace SSOT
   validation (2), the claim-scoped proof audit (2b), and the previous hosted
