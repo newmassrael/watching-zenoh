@@ -162,6 +162,15 @@ LEGS=(
     # upstream does: off by default, and no leg built it, so the census (Layer C1cn) found them
     # claimed by nothing. The filter is their shared prefix.
     "zenoh-protocol|hook|internal|core::endpoint::empty_"
+    # ── the Rust doors of four default-off policy switches ──
+    #
+    # `link-restriction`, `targeted-query`, `admission-retry` and `atomic-publish` of the
+    # `zenoh` crate are wz's own additions, so no upstream arm grades them
+    # (`WZ_EXTENSION` in `feature_public_surface_census.py` holds each to this table). Their
+    # tests sit in the crate's session test module and run in a build that turns the
+    # features on; the default build compiles them to nothing. The filter is empty, which
+    # runs the whole crate at this feature set and so cannot hide a test added later.
+    "zenoh|hook|link-restriction,targeted-query,admission-retry,atomic-publish|"
     # ── R2678 — session-close-ingress ──
     #
     # This row is REQUIRED for the atom's grade to mean anything, and the

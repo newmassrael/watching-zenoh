@@ -375,8 +375,22 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "is enabled on the crate by `conformance/differential`, which exercises the group under "
         "the token with it, and `plugins` is enabled there too, which exercises the "
         "subscription of the configuration's notifier. Held to `FAMILY_GRADED` below rather "
-        "than to this sentence",
-        frozenset({"internal", "plugins", "shared-memory", "unstable"}),
+        "than to this sentence. `admission-retry`, `atomic-publish`, `link-restriction` and "
+        "`targeted-query` are wz's own additions beyond upstream's surface, each the Rust "
+        "door of a default-off policy switch, and are held to `WZ_EXTENSION` below: no "
+        "upstream arm, and a leg of the non-default tests gate runs the crate with each on",
+        frozenset(
+            {
+                "admission-retry",
+                "atomic-publish",
+                "internal",
+                "link-restriction",
+                "plugins",
+                "shared-memory",
+                "targeted-query",
+                "unstable",
+            }
+        ),
     ),
     "wz-capi-core": (
         "the ABI-neutral session model: a workspace-internal rlib whose only "
@@ -1331,6 +1345,29 @@ FAMILY_GRADED: dict[str, frozenset[str]] = {
     "zenoh": frozenset({"internal", "plugins", "shared-memory", "unstable"}),
 }
 
+# The features of a family member that are wz's OWN additions, the other half of such a row.
+#
+# `FAMILY_GRADED` holds a feature to an arm of UPSTREAM's surface, and upstream has no such
+# arm for a feature wz adds beyond it (wz is a framework that extends past its presets, and a
+# preset's parity is a contract about the presets' surface, not a ceiling on the framework's).
+# Such a feature cannot be graded against an upstream arm, and prose is what this file keeps
+# refusing to be, so the predicate is the narrow true one: the feature is NOT an arm of the
+# member (else it belongs in `FAMILY_GRADED`), and a leg of `nondefault-tests-gate.sh` runs
+# the package with it on, so the tests that exercise what it gates are RUN before a push and
+# not only compiled. Each is a default-off switch of the policy catalogue, stated through
+# the Rust API of the crate; the policy decides what a build does with a statement.
+#
+# A row covered half by `FAMILY_GRADED` and half by this table is covered ENTIRELY: the row is
+# exactly the union, so neither predicate leaves a feature excused by prose.
+WZ_EXTENSION: dict[str, frozenset[str]] = {
+    "zenoh": frozenset(
+        {"admission-retry", "atomic-publish", "link-restriction", "targeted-query"}
+    ),
+}
+
+#: the script whose `LEGS` table names the feature sets the non-default tests are RUN under
+NONDEFAULT_TESTS_GATE = ROOT / "scripts" / "lib" / "nondefault-tests-gate.sh"
+
 #: The manifest of the differential workspace, whose dependency line names the features the wz
 #: crate is exercised with.
 FAMILY_DIFFERENTIAL_MANIFEST = ROOT / "conformance" / "differential" / "Cargo.toml"
@@ -2177,11 +2214,13 @@ def family_graded_findings(
             continue
         _why, row = OFF_AXIS[pkg]
         feats = set(FAMILY_GRADED[pkg])
-        if feats != set(row):
+        # the other part of the row is `WZ_EXTENSION`'s, held by `wz_extension_findings`
+        if feats | set(WZ_EXTENSION.get(pkg, ())) != set(row):
             findings.append(
                 f"`{pkg}`'s `OFF_AXIS` row names {sorted(row)} and `FAMILY_GRADED` holds "
-                f"{sorted(feats)}. A predicate covering PART of a row leaves the rest excused by "
-                f"prose while the row reads as measured"
+                f"{sorted(feats)} (with `WZ_EXTENSION` {sorted(WZ_EXTENSION.get(pkg, ()))}). A "
+                f"predicate covering PART of a row leaves the rest excused by prose while the "
+                f"row reads as measured"
             )
             continue
         member = members.get(pkg)
@@ -2204,6 +2243,74 @@ def family_graded_findings(
                 f"`{pkg}` / `{feat}` is neither a feature of an arm the surface gate holds the wz "
                 f"crate to nor enabled on its dependency line in the differential workspace, so "
                 f"nothing grades what it gates"
+            )
+    return findings
+
+
+def _test_leg_features(text: str) -> dict[str, set[str]]:
+    """package -> every feature some leg of the non-default tests gate turns on for it. A row of
+    the table is `package|scope|features|filter|handoff`, a string literal that may continue
+    over lines with a backslash, with the features separated by commas."""
+    joined = re.sub(r"\\\n\s*", "", text)
+    legs: dict[str, set[str]] = collections.defaultdict(set)
+    for m in re.finditer(r'^\s+"([A-Za-z0-9_-]+)\|([a-z]+)\|([^|"]*)\|', joined, re.M):
+        pkg, _scope, feats = m.groups()
+        legs[pkg].update(f.strip() for f in feats.split(",") if f.strip())
+    return legs
+
+
+def wz_extension_findings(
+    members: dict[str, typing.Any] | None = None, legs_text: str | None = None
+) -> list[str]:
+    """Hold every `WZ_EXTENSION` row to the `OFF_AXIS` row it is half of, to the surface gate's
+    arms (an extension is no arm) and to the legs of the non-default tests gate (a leg runs the
+    package with it on). Both inputs are injectable, as the sibling arms'."""
+    if members is None:
+        import rust_api_surface as ras
+
+        members = {m.package: m for m in ras.MEMBERS}
+    if legs_text is None:
+        try:
+            legs_text = NONDEFAULT_TESTS_GATE.read_text(encoding="utf-8")
+        except OSError as e:
+            return [f"cannot read {NONDEFAULT_TESTS_GATE} ({e}), so `WZ_EXTENSION` is held to no leg"]
+    legs = _test_leg_features(legs_text)
+    findings: list[str] = []
+    for pkg in sorted(WZ_EXTENSION):
+        ext = set(WZ_EXTENSION[pkg])
+        if pkg not in OFF_AXIS:
+            findings.append(
+                f"`{pkg}` names extension features in `WZ_EXTENSION` but has no `OFF_AXIS` row, "
+                f"so the claim excuses nothing and is unread"
+            )
+            continue
+        graded = set(FAMILY_GRADED.get(pkg, ()))
+        row = set(OFF_AXIS[pkg][1])
+        if ext & graded:
+            findings.append(
+                f"`{pkg}` holds {sorted(ext & graded)} in both `FAMILY_GRADED` and "
+                f"`WZ_EXTENSION`, which answer different claims -- one fact, one place"
+            )
+        if graded | ext != row:
+            findings.append(
+                f"`{pkg}`'s `OFF_AXIS` row names {sorted(row)}, which is not the union of "
+                f"`FAMILY_GRADED` {sorted(graded)} and `WZ_EXTENSION` {sorted(ext)}. A predicate "
+                f"covering PART of a row leaves the rest excused by prose"
+            )
+        member = members.get(pkg)
+        arm_features = (
+            {f for _arm, fs in member.arms for f in fs.split(",") if f} if member else set()
+        )
+        for feat in sorted(ext & arm_features):
+            findings.append(
+                f"`{pkg}` / `{feat}` is an arm of upstream's surface, so it is graded against "
+                f"that arm and belongs in `FAMILY_GRADED`, not among wz's own additions"
+            )
+        for feat in sorted(ext - legs.get(pkg, set())):
+            findings.append(
+                f"`{pkg}` / `{feat}` is a wz extension that no leg of "
+                f"`scripts/lib/nondefault-tests-gate.sh` runs the package with, so the tests of "
+                f"what it gates are compiled by no lane and run by none"
             )
     return findings
 
@@ -2738,6 +2845,7 @@ def check() -> int:
     findings.extend(facade_only_findings())
     findings.extend(axis_reachable_findings(sites=sites))
     findings.extend(family_graded_findings())
+    findings.extend(wz_extension_findings())
     findings.extend(test_only_reach_findings())
     findings.extend(test_only_feature_findings())
 
@@ -3131,6 +3239,79 @@ def family_graded_selftest() -> int:
          "a feature the differential workspace does not enable must be reported"),
         (any("has no `OFF_AXIS` row" in f for f in orphan),
          "a `FAMILY_GRADED` entry whose package has no row excuses nothing"),
+    )
+    for ok, why in checks:
+        if not ok:
+            print(f"feature-public-surface: SELFTEST FAIL -- {why}")
+            return 1
+    return 0
+
+
+def wz_extension_selftest() -> int:
+    """Drive `wz_extension_findings` through every way it refuses. The CONTROL is a row that is
+    the union of a graded arm and an extension a leg runs, which must PASS: a predicate that
+    refused it would refuse the shape it is written for."""
+
+    class Fixture(typing.NamedTuple):
+        arms: tuple[tuple[str, str], ...]
+
+    pkg = "demo-family"
+    member = Fixture((("default", ""), ("unstable", "unstable")))
+    legs = '    "demo-family|hook|own-switch,other|"\n    "demo-family|hook|a,\\\n      b|x"\n'
+    saved = (OFF_AXIS.get(pkg), dict(FAMILY_GRADED), dict(WZ_EXTENSION))
+    try:
+        OFF_AXIS[pkg] = ("fixture", frozenset({"unstable", "own-switch"}))
+        FAMILY_GRADED.clear()
+        FAMILY_GRADED[pkg] = frozenset({"unstable"})
+        WZ_EXTENSION.clear()
+        WZ_EXTENSION[pkg] = frozenset({"own-switch"})
+        control = wz_extension_findings({pkg: member}, legs)
+        # a leg continued over lines is read as one row
+        continued = _test_leg_features(legs)[pkg]
+        # an extension no leg runs
+        WZ_EXTENSION[pkg] = frozenset({"own-switch", "unrun"})
+        OFF_AXIS[pkg] = ("fixture", frozenset({"unstable", "own-switch", "unrun"}))
+        unrun = wz_extension_findings({pkg: member}, legs)
+        # an extension that is an arm of upstream's surface
+        WZ_EXTENSION[pkg] = frozenset({"own-switch", "unstable"})
+        FAMILY_GRADED[pkg] = frozenset()
+        OFF_AXIS[pkg] = ("fixture", frozenset({"own-switch", "unstable"}))
+        is_arm = wz_extension_findings({pkg: member}, legs + '    "demo-family|hook|unstable|"\n')
+        # the row is not the union of the two tables
+        WZ_EXTENSION[pkg] = frozenset({"own-switch"})
+        FAMILY_GRADED[pkg] = frozenset({"unstable"})
+        OFF_AXIS[pkg] = ("fixture", frozenset({"unstable", "own-switch", "stray"}))
+        partial = wz_extension_findings({pkg: member}, legs)
+        # the same feature in both tables
+        FAMILY_GRADED[pkg] = frozenset({"unstable", "own-switch"})
+        OFF_AXIS[pkg] = ("fixture", frozenset({"unstable", "own-switch"}))
+        both = wz_extension_findings({pkg: member}, legs)
+        # no row at all
+        del OFF_AXIS[pkg]
+        norow = wz_extension_findings({pkg: member}, legs)
+    finally:
+        OFF_AXIS.pop(pkg, None)
+        FAMILY_GRADED.clear()
+        FAMILY_GRADED.update(saved[1])
+        WZ_EXTENSION.clear()
+        WZ_EXTENSION.update(saved[2])
+        if saved[0] is not None:
+            OFF_AXIS[pkg] = saved[0]
+
+    checks = (
+        (not control, "the CONTROL -- an arm and an extension a leg runs -- must PASS"),
+        (continued == {"own-switch", "other", "a", "b"},
+         "a leg continued over lines with a backslash must be read as one row"),
+        (any("no leg of" in f and "`unrun`" in f for f in unrun),
+         "an extension no leg runs must be reported"),
+        (any("belongs in `FAMILY_GRADED`" in f for f in is_arm),
+         "an extension that is an arm of upstream's surface must be reported"),
+        (any("not the union" in f for f in partial),
+         "a row that is not the union of the two tables must be reported"),
+        (any("one fact, one place" in f for f in both),
+         "a feature in both tables must be reported"),
+        (any("has no `OFF_AXIS` row" in f for f in norow),
+         "an extension whose package has no row excuses nothing"),
     )
     for ok, why in checks:
         if not ok:
@@ -3724,6 +3905,8 @@ def selftest() -> int:
     if facade_only_selftest() != 0:
         return 1
     if family_graded_selftest() != 0:
+        return 1
+    if wz_extension_selftest() != 0:
         return 1
 
     # R2297 — AND THE AXIS-REACH PREDICATE. Its subject is the axis rather than
