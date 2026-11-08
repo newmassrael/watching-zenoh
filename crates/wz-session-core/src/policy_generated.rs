@@ -509,6 +509,10 @@ pub struct SessionPolicy {
     /// (or closes the session) and still reports success, and a caller cannot ask for it to
     /// be tried again.
     pub publisher_admission_retry: bool,
+    /// `multi-route-atomic-tx`. Upstream: Sends a put to each link on its own terms: a link
+    /// whose queue is full drops the frame or waits for room while the other links take it,
+    /// so one put can reach some links and not others.
+    pub multi_route_atomic_tx: bool,
     /// `entity-timestamp-opt-in`. Upstream: Hands every received sample's timestamp to the
     /// subscriber and every reply's to the querier, and lets any publisher attach the
     /// timestamp it is given.
@@ -567,6 +571,7 @@ impl SessionPolicy {
         let targeted_query = policy_bool(option_env!("WZ_POLICY_TARGETED_QUERY"));
         let publisher_admission_retry =
             policy_bool(option_env!("WZ_POLICY_PUBLISHER_ADMISSION_RETRY"));
+        let multi_route_atomic_tx = policy_bool(option_env!("WZ_POLICY_MULTI_ROUTE_ATOMIC_TX"));
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
         let reply_auto_timestamp = policy_bool(option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP"));
         let subscriber_overload = SubscriberOverload::stated();
@@ -588,6 +593,7 @@ impl SessionPolicy {
             entity_link_restriction,
             targeted_query,
             publisher_admission_retry,
+            multi_route_atomic_tx,
             entity_timestamp_opt_in,
             reply_auto_timestamp,
             subscriber_overload,

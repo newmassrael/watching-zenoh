@@ -194,6 +194,27 @@ config WZ_POLICY_PUBLISHER_ADMISSION_RETRY
 	  session) and still reports success, and a caller cannot ask for it to be tried
 	  again.
 
+config WZ_POLICY_MULTI_ROUTE_ATOMIC_TX
+	bool "multi-route-atomic-tx"
+	default n
+	help
+	  Whether a publish may ask to be delivered to all of the links it reaches or to
+	  none. Off, the call that asks is refused and a put goes out as upstream's does,
+	  to each link on its own terms. On, a publish that asks first reserves room in
+	  the outbound queue of every link it may use, without waiting. If every link
+	  promised room, each is sent the frame under its reservation, so none of them
+	  can find the room taken, and the session's own subscribers are then delivered
+	  to. If any link had no room, nothing is sent to any link or to any subscriber of
+	  the session, no sequence number is spent, every reservation is given back and the
+	  publish ends having delivered to nobody; it does not close the session and it
+	  counts no drop. A link that is down or was never told the key takes no part and
+	  does not stop the others. A payload too long to be sent whole is atomic only
+	  for its first frame, and a link whose frames are written in slots of a pool may
+	  still wait for a slot. Only the tokio engine reads this policy.
+	  Upstream: Sends a put to each link on its own terms: a link whose queue is
+	  full drops the frame or waits for room while the other links take it, so one
+	  put can reach some links and not others.
+
 config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
 	bool "entity-timestamp-opt-in"
 	default n

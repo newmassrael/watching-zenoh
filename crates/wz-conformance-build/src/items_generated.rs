@@ -305,6 +305,12 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "off",
     ),
     (
+        "multi-route-atomic-tx",
+        "WZ_POLICY_MULTI_ROUTE_ATOMIC_TX",
+        &["off", "on"],
+        "off",
+    ),
+    (
         "entity-timestamp-opt-in",
         "WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN",
         &["off", "on"],
