@@ -1,0 +1,17 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism"]
+
+decision = '''
+The public-surface census refused four non-default features of the zenoh crate (link-restriction, targeted-query, admission-retry, atomic-publish), which the Rust doors of four default-off policy switches had added without a place in the gate's tables. The crate's row there is held to FAMILY_GRADED, whose predicate is that a feature is an arm of upstream's own surface or is enabled on the differential workspace's dependency line, and these features are neither: wz extends past its presets, so upstream has no arm for them and the differential workspace could not enable a feature upstream lacks. The row is therefore the union of two measured tables. A new table, WZ_EXTENSION, names the features that are wz's own additions, and its predicate is the narrow true one: the feature is not an arm of upstream's surface (else it belongs in FAMILY_GRADED), the row is exactly the union of the two tables so neither leaves a feature excused by prose, and a leg of the non-default tests gate runs the package with the feature on, so the tests of what it gates are run before a push and not only compiled. The leg is one new row of that gate's table, running the crate with the four features on and no filter.
+'''
+
+changes = '''
+scripts/lib/feature_public_surface_census.py: the table WZ_EXTENSION and the reader of the gate's leg table, the function that holds each extension to its OFF_AXIS row, to the surface gate's arms and to a leg, its selftest (a control that must pass and one refusal per way of failing, including a leg continued over lines), the call in the check, and the zenoh row of OFF_AXIS naming the four features with its prose; the comparison of FAMILY_GRADED with a row now allows the extension part. scripts/lib/nondefault-tests-gate.sh: a leg for the zenoh crate with the four features.
+'''
+
+verification = '''
+Run on the build machine pc2 and locally: the census check and its selftest passed after the change and failed before it with four findings, one per feature; the non-default tests gate passed with the new leg, which ran 179 tests of the zenoh crate with the four features on.
+'''
+
+carry = '''
+Open: the link-restriction feature was refused by the same gate since its Rust door landed, because the pre-push hook defers this gate to the hosted run; nothing local read it until now. Other crates' own extension features would need the same table, and a package other than a family member has no such predicate yet.
+'''
