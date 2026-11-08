@@ -12243,6 +12243,21 @@
         "Read the next scheduled upstream-watch run; none appeared at the 11-07 slot.",
         "C1 get-timeout one-off on pc2 stays unattributed."
       ]
+    },
+    "Round 4409": {
+      "decision_summary": "The group and the advanced publisher and subscriber of a node are taken with three members, where every test so far had two. The members are a node and two registry clients that dial it and share no link, so what one hears of the other crosses the node: the announcement, the keep-alive beacon and the record a member's queryable serves for the group, and the history query and the live samples for the advanced pair. A group of three is the case in which the leader can go while two members remain to agree on the next.",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/it/files/node_group.rs: one test, a node and two clients are one group of three and lose their leader together. Every view lists the three ids in order and names the greatest id the leader; when that leader leaves, the node and the other client each see two members and name the next id the leader, and the node is told a lease ran out. crates/wz-capi-c/tests/it/files/node_advanced.rs: one test, an advanced publisher of a client serves the node and the other client. Three samples put before anyone listened are replayed as history to a subscriber on the node and to one on the other client, whose query crosses the node, and a live put reaches both."
+      ],
+      "verification_bullets": [
+        "On a build host, wz-capi-c with its default features: the three node group tests and the four node advanced tests pass with the two new ones among them (8 passed), and clippy of the crate's tests with warnings denied is clean. Control of the group test: with the node's keep-alive beacon removed, the test fails with the first client never seeing all three members, and so does the existing test of a node that joined first. No control was taken for the advanced test. Not taken: zenoh-ext group interop against stock, the leader's departure through a leave event instead of a lease, and the shared-memory publication of the port."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Carries of the node's C door that remain: the zenoh-ext group interop against stock; a control for the advanced test of three members, which has none; the shared-memory publication of the node's port, which needs a link that negotiated shared memory; a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
+      ]
     }
   },
   "inventory_entries": {
