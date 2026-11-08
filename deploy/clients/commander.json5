@@ -1,0 +1,40 @@
+// The configuration of a client that asks a declared node's lifecycle verbs in band, with a key
+// of its own, over a session it opens to the node's `tls` listener.
+//
+// A node decides a verb for the zid the key of the link proved (decision D12 of
+// docs/session-lifecycle-intent.md): a grant in the node's declaration (`[[endpoint]] role =
+// "commander"`, deploy/nodes/slot-commander.toml) names this client's zid, and a query that
+// reaches the node through a router is the router's, not this client's. So the session is a
+// direct one, the client presents its key (mutual TLS) and claims the zid that key names.
+//
+// The words in angle brackets are the client's to fill:
+//
+//   <zid>              the zid its key names, as `wz_capi_c_identity_make` writes it (lower-case
+//                      hex, no leading zero), which is also how `z_id_to_string` prints it;
+//   <listener>         the node's `tls/` listener, as its declaration states it;
+//   <node-certificate> the certificate the node presents (it prints it when it starts, and a
+//                      provisioned node's is its `[identity]` certificate);
+//   <certificate>      the client's certificate and
+//   <private-key>      its private key, the two files `wz_capi_c_identity_make` made or found.
+//
+// The Zcmd lane's witness (crates/wz-capi-c/tests/c_lifecycle_witness.c) opens its session
+// from this file with the words filled, so this is the configuration that test proves.
+{
+  id: "<zid>",
+  mode: "client",
+  connect: { endpoints: ["<listener>"] },
+  scouting: { multicast: { enabled: false } },
+  transport: {
+    link: {
+      tls: {
+        root_ca_certificate: "<node-certificate>",
+        enable_mtls: true,
+        connect_certificate: "<certificate>",
+        connect_private_key: "<private-key>",
+        // The node's certificate names its zid and no host, so the name is not checked; the
+        // key is, by the node's certificate as the root.
+        verify_name_on_connect: false,
+      },
+    },
+  },
+}

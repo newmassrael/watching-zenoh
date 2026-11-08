@@ -21828,9 +21828,19 @@ layer_z_zenohd_interop() {
     # that the node's own executable made on the device (`--make-identity`, which overwrites nothing)
     # command each other by zids `wz_node.py --zid-of` printed before either ran (`slot-subject`).
     # The node's pipe (`control = "pipe"`) answers every command the vocabulary states, and lines
-    # that are none, once each on standard output, with everything else on standard error.
+    # that are none, once each on standard output, with everything else on standard error. And the
+    # witness of a consumer's program: the zid granted `status` is that of a key a C client made with
+    # the library's door, and that client (crates/wz-capi-c/tests/c_lifecycle_witness.c) opens its
+    # session from deploy/clients/commander.json5, makes the verbs' keys and reads the replies with
+    # the library. The library is built with the two doors it calls, both off by default, in a
+    # target directory of its own so the default build the other lanes link is not replaced.
+    local cmd_capi_target="$WZ_ARTIFACTS/crates/target/wz-capi-c-lifecycle"
+    [ "$decl_rc" -eq 0 ] && { (cd crates && cargo build -p wz-capi-c \
+        --features lifecycle-doors,identity-make --target-dir "$cmd_capi_target" --quiet) \
+        || decl_rc=1; }
     wz_test_args wz-integration-tests wz_declared_commander_zenohd_interop
-    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zcmd 5 env WZ_ZENOHD_BIN="$zenohd" \
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zcmd 6 env WZ_ZENOHD_BIN="$zenohd" \
+        WZ_CAPI_C_LIFECYCLE_LIB="$cmd_capi_target/debug/libwz_capi_c.so" \
         cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     rm -rf "$decl_pkg"

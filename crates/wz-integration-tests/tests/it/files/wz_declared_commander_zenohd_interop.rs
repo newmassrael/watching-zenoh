@@ -14,13 +14,22 @@
 //! way a consumer builds one (`wz_package.py --node-file`). The file it runs is therefore the
 //! artifact whose manifest was verified, for exactly the zids it is asked by.
 //!
-//! The askers are upstream's own `z_get` and `zenohd`. Three legs:
+//! The askers are upstream's own `z_get` and `zenohd`, and wz's C library as a consumer links it.
+//! The legs:
 //!
 //! - a node whose key names the zid granted `status` opens a session to the listener with that key
 //!   and asks: the status of a peer is answered, and a `close` is refused by name, so the grant is
 //!   per verb;
 //! - a node whose key names no granted zid asks the same over the same listener: the status is
 //!   refused, so the answer above was the grant and not the channel;
+//! - the WITNESS of a consumer's program: the zid granted `status` is the zid of a key a C client
+//!   made on its first start with the library's door (`wz_capi_c_identity_make`), so every leg
+//!   that presents that key presents one the library made. The client
+//!   (`crates/wz-capi-c/tests/c_lifecycle_witness.c`, linked against the library built with
+//!   `lifecycle-doors` and `identity-make`) opens its session from the canonical configuration
+//!   (`deploy/clients/commander.json5`, its words filled), makes each verb's key from its words
+//!   and reads each reply with the library: its `status` is answered and its `close` refused by
+//!   name, and a client whose key is on no list is refused `status`;
 //! - the router the node dials holds the key of the zid granted `close`, and a client of that router
 //!   CLAIMS the zid granted `status`: its `status` is refused and its `close` is decided (the peer is
 //!   not found), so a query that came through a router is the router's, one hop, whatever the asker
@@ -38,7 +47,9 @@
 //! The locators are fixed in the node, so the legs run one at a time (`--test-threads=1`).
 //!
 //! Requires python3, cargo (the node is built when the first leg runs) and the reference zenohd
-//! and its examples (`scripts/build-zenohd.sh`). Runs on the `--ignored` lane; the file's `zenohd`
+//! and its examples (`scripts/build-zenohd.sh`), and for the witness a C compiler, zenoh-c's
+//! headers (`WZ_ZENOH_C_PREFIX`) and the library built with its doors, named by
+//! `WZ_CAPI_C_LIFECYCLE_LIB`. Runs on the `--ignored` lane; the file's `zenohd`
 //! token keeps Layer E's sweep off it.
 
 use std::fs::File;
@@ -63,6 +74,9 @@ use wz_session_core::credential_identity::zid_from_spki_der;
 
 /// The declaration the node is built from, with the zids the test replaces.
 const DECLARATION: &str = "deploy/nodes/slot-commander.toml";
+/// The configuration a client that commands such a node opens its session from, with the words a
+/// client fills in angle brackets.
+const CANONICAL_CONFIG: &str = "deploy/clients/commander.json5";
 /// The zid the declaration grants `status`, which the test replaces with the zid of the key of a
 /// node that opens a session to the listener.
 const STATUS_ZID: &str = "zid = \"a1\"";
@@ -96,23 +110,155 @@ fn config_id(zid: &[u8; 16]) -> String {
 
 /// The key of one party and the zid it names.
 struct Party {
-    key: KeyNamedIdentity,
+    cert_pem: String,
+    key_pem: String,
     zid: String,
+    /// The files a client made its identity into with the library's door, which it presents as
+    /// they are; `None` for a key the test made.
+    made: Option<(PathBuf, PathBuf)>,
 }
 
 impl Party {
     fn new() -> Self {
-        let key = key_named_identity();
+        let key: KeyNamedIdentity = key_named_identity();
         let zid = config_id(&zid_from_spki_der(&key.spki_der));
-        Self { key, zid }
+        Self {
+            cert_pem: key.cert_pem,
+            key_pem: key.key_pem,
+            zid,
+            made: None,
+        }
     }
+
+    /// The identity a client of the C library makes on its first start
+    /// (`wz_capi_c_identity_make`, through the witness), in `dir`. The zid is the one the door
+    /// printed, held to the one the consumer's tool prints for the same certificate.
+    fn made_by_the_library(dir: &Path) -> Self {
+        let (cert, key) = (dir.join("client.pem"), dir.join("client.key"));
+        let made = witness()
+            .run(&["make", path_text(&cert), path_text(&key)])
+            .unwrap_or_else(|why| panic!("the library made no identity: {why}"));
+        let zid = made
+            .lines()
+            .find_map(|line| line.strip_prefix("zid "))
+            .unwrap_or_else(|| panic!("the witness printed no zid: {made}"))
+            .to_owned();
+        assert_eq!(
+            zid,
+            zid_by_the_tool(&cert),
+            "the zid the library wrote is not the one a peer computes from its certificate"
+        );
+        Self {
+            cert_pem: std::fs::read_to_string(&cert).expect("read the made certificate"),
+            key_pem: std::fs::read_to_string(&key).expect("read the made key"),
+            zid,
+            made: Some((cert, key)),
+        }
+    }
+}
+
+/// A path as the witness and a configuration take it.
+fn path_text(path: &Path) -> &str {
+    path.to_str().expect("a temporary path is UTF-8")
+}
+
+/// The witness: `crates/wz-capi-c/tests/c_lifecycle_witness.c`, compiled against `wz_capi_c.h`
+/// and linked against the library built with the doors it calls, as a consumer's program is.
+struct Witness {
+    binary: PathBuf,
+    libdir: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+/// The library the witness links: `libwz_capi_c.so` built with `lifecycle-doors` and
+/// `identity-make` (both off by default), named by the lane that built it.
+const WITNESS_LIBRARY: &str = "WZ_CAPI_C_LIFECYCLE_LIB";
+
+impl Witness {
+    /// Run the witness with `args`: what it printed on standard output, or why it failed.
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        let output = Command::new(&self.binary)
+            .args(args)
+            .env("LD_LIBRARY_PATH", &self.libdir)
+            .output_bounded()
+            .map_err(|e| format!("run the witness: {e}"))?;
+        let out = String::from_utf8_lossy(&output.stdout).into_owned();
+        if output.status.success() {
+            Ok(out)
+        } else {
+            Err(format!(
+                "{} {args:?}\n{out}{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        }
+    }
+}
+
+/// Compile the witness once.
+fn witness() -> &'static Witness {
+    static WITNESS: OnceLock<Witness> = OnceLock::new();
+    WITNESS.get_or_init(|| {
+        let library = PathBuf::from(std::env::var(WITNESS_LIBRARY).unwrap_or_else(|_| {
+            panic!(
+                "{WITNESS_LIBRARY} names no library: build `cargo build -p wz-capi-c --features \
+                 lifecycle-doors,identity-make` and name the libwz_capi_c.so it wrote"
+            )
+        }));
+        assert!(
+            library.is_file(),
+            "{WITNESS_LIBRARY}: no file at {library:?}"
+        );
+        let libdir = library
+            .parent()
+            .expect("the library's directory")
+            .to_owned();
+        // `wz_capi_c.h` includes zenoh-c's `zenoh.h`: the headers of the pinned zenoh-c, under
+        // the prefix the C lanes name (`WZ_ZENOH_C_PREFIX`, default `~/.local`).
+        let include = std::env::var("WZ_ZENOH_C_PREFIX")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").expect("HOME")).join(".local"))
+            .join("include");
+        assert!(
+            include.join("zenoh.h").is_file(),
+            "no zenoh.h under {include:?} for wz_capi_c.h to include (WZ_ZENOH_C_PREFIX)"
+        );
+        let root = repo_root();
+        let dir = tempfile::tempdir().expect("a directory for the witness");
+        let binary = dir.path().join("c_lifecycle_witness");
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let compiled = Command::new(cc)
+            .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
+            .arg("-I")
+            .arg(root.join("crates/wz-capi-c/include"))
+            .arg("-I")
+            .arg(&include)
+            .arg(root.join("crates/wz-capi-c/tests/c_lifecycle_witness.c"))
+            .arg("-L")
+            .arg(&libdir)
+            .args(["-lwz_capi_c", "-o"])
+            .arg(&binary)
+            .output_bounded()
+            .expect("run the C compiler");
+        assert!(
+            compiled.status.success(),
+            "the witness did not compile against wz_capi_c.h\n{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        Witness {
+            binary,
+            libdir,
+            _dir: dir,
+        }
+    })
 }
 
 /// The node, built once for the keys it is asked by.
 struct Built {
     /// The packaged node.
     node: PathBuf,
-    /// Granted `status`: a node that opens a session to the listener.
+    /// Granted `status`: a client that made its identity with the C library's door and opens a
+    /// session to the listener.
     granted: Party,
     /// Granted nothing.
     stranger: Party,
@@ -134,8 +280,11 @@ fn built() -> &'static Built {
     static BUILT: OnceLock<Built> = OnceLock::new();
     BUILT.get_or_init(|| {
         let root = repo_root();
-        let (granted, stranger, router) = (Party::new(), Party::new(), Party::new());
         let dir = tempfile::tempdir().expect("a directory for the node");
+        let client = dir.path().join("client");
+        std::fs::create_dir(&client).expect("a directory for the client's identity");
+        let granted = Party::made_by_the_library(&client);
+        let (stranger, router) = (Party::new(), Party::new());
         let text = std::fs::read_to_string(root.join(DECLARATION)).expect("read the declaration");
         assert_eq!(
             text.matches(STATUS_ZID).count(),
@@ -277,8 +426,8 @@ impl Drop for Node {
 /// Write `party`'s key and certificate into `dir` and hand back their paths.
 fn key_files(dir: &Path, party: &Party) -> (PathBuf, PathBuf) {
     let (cert, key) = (dir.join("party.pem"), dir.join("party.key"));
-    std::fs::write(&cert, &party.key.cert_pem).expect("write the certificate");
-    std::fs::write(&key, &party.key.key_pem).expect("write the key");
+    std::fs::write(&cert, &party.cert_pem).expect("write the certificate");
+    std::fs::write(&key, &party.key_pem).expect("write the key");
     (cert, key)
 }
 
@@ -390,6 +539,111 @@ fn a_zenoh_zget_granted_nothing_is_refused_status_on_its_own_session() {
     assert!(
         status.contains(STATUS_REFUSED),
         "a zid on no list asked `status` over the same listener and was not refused: {status}"
+    );
+}
+
+/// The canonical configuration of a commanding client (`deploy/clients/commander.json5`), with
+/// its words filled for `party` asking `node`, written into `dir`.
+fn canonical_config(node: &Node, dir: &Path, party: &Party) -> PathBuf {
+    let text = std::fs::read_to_string(repo_root().join(CANONICAL_CONFIG))
+        .expect("read the canonical configuration");
+    let (cert, key) = match &party.made {
+        Some(files) => files.clone(),
+        None => {
+            let files = key_files(dir, party);
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&files.1, std::fs::Permissions::from_mode(0o600))
+                .expect("make the key its owner's alone");
+            files
+        }
+    };
+    let words = [
+        ("<zid>", party.zid.clone()),
+        ("<listener>", LISTENER.to_owned()),
+        (
+            "<node-certificate>",
+            path_text(&node.certificate).to_owned(),
+        ),
+        ("<certificate>", path_text(&cert).to_owned()),
+        ("<private-key>", path_text(&key).to_owned()),
+    ];
+    let mut filled = text;
+    for (word, value) in words {
+        assert_eq!(
+            filled.matches(&format!("\"{word}\"")).count(),
+            1,
+            "{CANONICAL_CONFIG} names {word} once, as a value"
+        );
+        filled = filled.replace(&format!("\"{word}\""), &format!("{value:?}"));
+    }
+    let path = dir.join("commander.json5");
+    std::fs::write(&path, filled).expect("write the filled configuration");
+    path
+}
+
+/// What the witness read the one reply to `verb` about `about` as (`kind=… verdict=… reason=…`),
+/// after holding the key it made to the key the node answers under.
+fn witness_answer(config: &Path, verb: &str, about: &str, node: &mut Node) -> String {
+    let asked = witness()
+        .run(&["ask", path_text(config), verb, &node.zid, about])
+        .unwrap_or_else(|why| {
+            panic!(
+                "the witness could not ask `{verb}`: {why}\n{}",
+                node.console()
+            )
+        });
+    let key = asked.lines().find_map(|line| line.strip_prefix("key "));
+    assert_eq!(
+        key,
+        Some(node.verb_key(verb, about).as_str()),
+        "the library made another key than the one the node answers `{verb}` under\n{asked}"
+    );
+    let replies: Vec<&str> = asked
+        .lines()
+        .filter_map(|line| line.strip_prefix("reply "))
+        .collect();
+    match replies.as_slice() {
+        [one] => (*one).to_owned(),
+        _ => panic!(
+            "`{verb}`: expected one reply, got {replies:?}\n{asked}\n--- node ---\n{}",
+            node.console()
+        ),
+    }
+}
+
+// wz-proves: none -- the client of the leg is the C library and the asked node the fixed-memory profile's, whose in-band verbs no catalog atom names
+#[test]
+#[ignore = "binary-dep e2e (the node is built from deploy/nodes/slot-commander.toml with keys made here, + the C library built with lifecycle-doors and identity-make); runs via --ignored"]
+fn zenohd_lane_a_wz_capi_c_client_with_the_key_it_made_reads_its_grant_and_is_refused_the_rest() {
+    let built = built();
+    let mut node = Node::start();
+    let dir = tempfile::tempdir().expect("a directory for the client's configuration");
+
+    // The client that made its identity with the library's door, granted `status`, opening its
+    // session from the canonical configuration: the verdict is the node's, read by the library.
+    let config = canonical_config(&node, dir.path(), &built.granted);
+    let status = witness_answer(&config, "status", &built.stranger.zid, &mut node);
+    assert!(
+        status.starts_with("kind=1 verdict=status "),
+        "the client granted `status` asked it with its own key and was not answered: {status}\n{}",
+        node.console()
+    );
+    let close = witness_answer(&config, "close", &built.stranger.zid, &mut node);
+    assert_eq!(
+        close,
+        format!("kind=1 verdict=refused reason={CLOSE_REFUSED}"),
+        "the client granted only `status` asked `close` and was not refused by name"
+    );
+
+    // The control: a client whose key names no granted zid, with the same configuration filled
+    // for its key, is refused the same verb.
+    let other = tempfile::tempdir().expect("a directory for the other client");
+    let config = canonical_config(&node, other.path(), &built.stranger);
+    let refused = witness_answer(&config, "status", &built.granted.zid, &mut node);
+    assert_eq!(
+        refused,
+        format!("kind=1 verdict=refused reason={STATUS_REFUSED}"),
+        "a client on no list asked `status` with its own key and was not refused by name"
     );
 }
 
