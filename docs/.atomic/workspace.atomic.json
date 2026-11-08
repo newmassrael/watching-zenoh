@@ -12533,6 +12533,43 @@
       "carry_forward_bullets": [
         "Carries of the node's C door that remain: the shared-memory publication of the node's port, which needs a link that negotiated shared memory; a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
       ]
+    },
+    "Round 4426": {
+      "decision_summary": "The test-discipline gate reads a test's name as libtest matches a skip against it: its path. Since the integration tests were merged into a few executables, a file of a merged target is the module files::<stem> of its binary, and a skip token in the stem removes every test of the file. The naming and ownership arms still read the fn alone, as when each file was a target of its own, so when Layer E's sweep gained the token zenoh_c_ (15928d71d0), which removes the zenoh-c family by its module and which the scope gate was taught to read that way in the same commit, this gate counted the 57 ignored tests of that family as untokened and refused. It now asks layer_e_oracle_scope_gate.test_path, the one spelling of the path for both gates. No test is renamed and no token is added: the sweep and the hook now agree about which tests a token reaches.",
+      "changes_bullets": [
+        "test_discipline_gate: carries_token reads test_path(file, fn); the naming arm's doc and the token-fix hint say the path, with files::<stem>::<fn> for a merged target",
+        "its selftest gains a merged fixture whose stem carries the token (green) and one whose stem carries none and whose owner is not E (red in ownership)"
+      ],
+      "verification_bullets": [
+        "test_discipline_gate --check: 57 violations on main before, green after (742 of 754 spawn-class tests reach a binary, 580 ignored tests in 197 token-named fixtures, 355 owners); --selftest 14 cases ok",
+        "layer_e_oracle_scope_gate: 141 ignored tests selected after 21 tokens, none needing a binary the lane does not build"
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "none"
+      ]
+    },
+    "Round 4427": {
+      "decision_summary": "A client of the C library commanding a declared node is now a witness of the Zcmd lane, and the configuration it opens its session from is a tracked canonical file. The witness is a C program linked against the library built with its two doors: on the first start it makes its identity with wz_capi_c_identity_make, and the zid the declaration grants status is the zid that call wrote, so every leg that presents that key presents one the library made (the stock z_get legs included). It opens its session from deploy/clients/commander.json5 with the words filled, makes each verb's key with wz_capi_c_lifecycle_key and reads each reply with wz_capi_c_lifecycle_read: its status is answered, its close refused by name, and a client whose key is on no list is refused status. Its key is held to the node's, its zid to wz_node.py --zid-of's. The lane builds the library with lifecycle-doors and identity-make in a target directory of its own, so the default build other lanes link is not replaced.",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/c_lifecycle_witness.c: make (identity) and ask (canonical config, key, z_get, read) as a consumer's program",
+        "deploy/clients/commander.json5: the canonical configuration of a commanding client, its words in angle brackets",
+        "wz_declared_commander_zenohd_interop: the granted party is made by the library; canonical_config, witness_answer and the leg zenohd_lane_a_wz_capi_c_client_with_the_key_it_made_reads_its_grant_and_is_refused_the_rest",
+        "run-ci Zcmd builds wz-capi-c with lifecycle-doors,identity-make into crates/target/wz-capi-c-lifecycle, names it in WZ_CAPI_C_LIFECYCLE_LIB and counts 6"
+      ],
+      "verification_bullets": [
+        "pc2: wz-capi-c built with lifecycle-doors,identity-make; clippy wz-integration-tests all targets clean; Zcmd 6 passed (the witness and the five legs, which now present the key the library made)",
+        "the pre-push static bundle: green for this change; two reds on main that are not this round's (reason pins of session-close-ingress, the link-restriction feature row) were measured and are named in the carry"
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Round 4422's carry said the mnemosyne UNDECIDABLE was fixed in its Round 1345; the cause of what was seen is a linked worktree's hook exporting GIT_DIR, fixed in mnemosyne Round 1346 (the pin moves when it lands)",
+        "main is red on two static gates since 2026-11-08 afternoon: reason_review_pin_gate (session-close-ingress cites three files 75459679c1 changed) and feature_public_surface_census (zenoh link-restriction, wz-only, has no row and no lane that turns it on)"
+      ]
     }
   },
   "inventory_entries": {
