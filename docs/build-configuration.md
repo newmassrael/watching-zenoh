@@ -143,8 +143,11 @@ original reproduced by naming it. Three things follow from it:
   put on one. `LinkRestriction::admit_in_build` refuses a set when the policy is off, which
   is what an entry point that takes a set from a caller calls. The registry mechanism
   (`declare_subscriber_on_links`, `declare_queryable_on_links`, the `links` of
-  `PublishOptions` and `QueryOptions`) is not yet reachable from the Rust or C API, and the
-  router, cooperative and lwIP engines do not read it.
+  `PublishOptions` and `QueryOptions`) is reachable from the Rust API as `.allowed_links(..)`
+  on the builders of a publisher, a subscriber, a queryable, a get and a querier, behind the
+  non-default crate feature `link-restriction` (a door upstream does not have stays out of the
+  default surface); a set is refused when the policy is off, and by the router engine, which
+  does not read it. The C API, the cooperative engine and lwIP do not read it.
 - **Addressing a query to one node** (`targeted-query`, off by default): upstream sends a
   query to every link whose peers declared a matching queryable, and a caller cannot name the
   node it wants. `QueryOptions::target_peer` names it by the identity its link's handshake gave
