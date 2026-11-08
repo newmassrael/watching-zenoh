@@ -12515,6 +12515,24 @@
       "carry_forward_bullets": [
         "Open: only the tokio session feeds the peer-final flag, so on another engine until-declarations-synced acts as always; multicast has its own gate and is not covered; a reacting mode can fire on a hole the sender itself leaves in its reliable ring (a lost stop marker of a fragment chain under the lend-only policy, a chain abandoned after its sequence numbers were reserved), which was read from the code and not measured; a peer whose first reliable frame is not at the initial sequence number of its open shows a gap at once; the policy is not stated by any API and no end-to-end test over real sockets was run."
       ]
+    },
+    "Round 4425": {
+      "decision_summary": "The group a node opened through the C ABI holds is read by upstream's own group: the pinned zenoh-ext example z_view_size dials the node as a client of its south, which closes the first carry of the node's C door (the group interop against stock), where every member until this round was wz.",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/it/files/router_node_zenoh_ext_group_interop.rs (new, ignored, Layer Z): four legs against z_view_size. The oracle finds a node that joined first by its keep-alive and the record its member queryable serves, and fails with the node in another group; the oracle that joined first hears the node's announcement, the node stating a lease of a minute so that its first keep-alive falls past the wait; the node folds the oracle into its view and drops it on the 3 s lease the oracle stated; a wz client and the oracle, two clients of the node, meet through it, and fail with the wz client on another node.",
+        "scripts/run-ci.sh: Layer Z runs the file as Znodegroup with a count of 4, beside the demo's group legs and behind the same oracle guard, with WZ_ZENOH_EXT_EXAMPLES_DIR.",
+        "docs/zenoh-api-on-the-engine.md: the node's group names the foreign witness."
+      ],
+      "verification_bullets": [
+        "On a build machine, wz-capi-c with router-node and group, files::router_node_zenoh_ext_group_interop --ignored against the pinned 1.10.2 z_view_size: 4 passed (ran 4), in a slot built from nothing; clippy of wz-capi-c with the same features and --tests under -D warnings passed; the barrier needle, count guard and upstream citation anchor gates passed here.",
+        "Each leg was taken out on its own and reverted before this entry: the member queryable answering nothing failed leg 1 alone (\"upstream's group never found the node that joined first\"); the join not announced failed leg 2 alone; the watchdog evicting nothing failed leg 3 alone (the oracle still in the node's view 12 s after it exited); the router not passing a best-matching query to a client face failed leg 4 alone. A first stub of leg 4 on the client leg of an All query left it green, since upstream's member query is best-matching and the wz client's queryable is complete, which is how the path was located."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Carries of the node's C door that remain: the shared-memory publication of the node's port, which needs a link that negotiated shared memory; a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
+      ]
     }
   },
   "inventory_entries": {
