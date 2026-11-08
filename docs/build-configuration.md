@@ -167,6 +167,17 @@ original reproduced by naming it. Three things follow from it:
   and a node with no face leaves no leg, so the query ends with no replies and is not widened
   to the others. `peer_target::admit_in_build` refuses a target when the policy is off, which is
   what an entry point that takes one from a caller calls. Only the tokio engine reads it.
+- **Retrying a publish that no link had room for** (`publisher-admission-retry`, off by
+  default): a publish waits for room on each face and, when the lane is congested, a droppable
+  message is counted as a drop and the call still succeeds, so a caller cannot tell queued from
+  dropped. A publish that states `PublishOptions::admission_retry` (attempts, delay) instead
+  probes every face without waiting (`try_send_network_message_qos`); if some face took the
+  frame nothing is retried, and if none did and some had no room it waits the delay and offers
+  the frame again to those faces only, up to the attempts, then ends with nothing delivered
+  and no session close. A payload that must be fragmented cannot be probed, so it is sent the
+  waiting way and is never retried. `admission_retry::admit_in_build` refuses a stated retry
+  when the policy is off; shared-memory publishes and the C plain-put lane do not retry. Only
+  the tokio registry reads it, and no Rust or C API states it yet.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and

@@ -220,6 +220,10 @@ type FaceEpochs = Option<(
     Arc<std::sync::atomic::AtomicU64>,
 )>;
 
+/// The call one face's leg of a publish makes without waiting for room: the probing form of a
+/// publish, which says whether the frame was queued or the lane had no room.
+type ProbeLeg<'a> = &'a dyn Fn(&TokioSession, PublishOptions) -> Leg;
+
 /// How ONE leg of a publish fan-out ended, which is all [`SharedSession`]'s fan-out needs
 /// to know about a call that is otherwise a bytes publish, an SHM publish or either of
 /// them on a declared key.
@@ -3430,7 +3434,7 @@ impl SharedSession {
         F: Fn(&TokioSession, PublishOptions) -> Leg,
         G: Fn(&TokioSession, PublishOptions) -> Leg,
     {
-        let probe_leg: &dyn Fn(&TokioSession, PublishOptions) -> Leg = &probe;
+        let probe_leg: ProbeLeg<'_> = &probe;
         self.fan_out_with(
             opts,
             key,
@@ -3457,7 +3461,7 @@ impl SharedSession {
         key: PutKey<'_>,
         payload: P,
         remote_leg: R,
-        probe_leg: Option<&dyn Fn(&TokioSession, PublishOptions) -> Leg>,
+        probe_leg: Option<ProbeLeg<'_>>,
         local_leg: L,
     ) -> Result<usize, FanoutError>
     where
