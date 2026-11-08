@@ -12381,6 +12381,26 @@
       "carry_forward_bullets": [
         "Open: the server ruleset of RFC 4.12 is not set and waits for a week of use; the pinned ledger CLI is installed on one build machine only, so the derive step runs there alone; no other session uses the queue yet."
       ]
+    },
+    "Round 4417": {
+      "decision_summary": "The Z8 lane gets the budget its own runs measured, and the one hosted red among them is read. Four hosted CI runs of the day finished with a verdict (three green, one red) and the lane took 34 to 36.5 minutes in each, the whole file of `regions` included. Its ceiling was 150 minutes with no margin gate, a number nobody had measured; it is 60 minutes now (the slowest run uses 61%) and the job stamps its start and ends with the margin step the other bounded jobs carry (alarm 90%, floor 20%). The red run lost one test of `regions`: the scenario 7 order 4 publisher-and-subscriber test, at its count of registrations, where the late multicast-group peer 74ab9330 counted 3 registrations of the key `test` and the two peers opened before it counted 4. The kept log shows, by the timestamps of the registrations, that the routers did their part (both routers of the group answered that peer's interest and sent their declarations to its face, and the peer registered them) and that the peer's four expected registrations (two routers, two earlier peers) came to three; by elimination the missing one is an earlier peer's own declaration to the late peer, a path on which peers keep no trace, so this is an inference and not yet a reading. This is the class the round that landed the routers' send lines was waiting for, and it names the peer side. The decision is to add the same kind of send lines to the peers, outside the spans the test counts, and read the next red; no behaviour of the engine changes in this round.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: the Z8 job's `timeout-minutes` 150 to 60, a stamp step first and the margin step last (3600 s, alarm 90%, floor 20%); the comment above the job states the four measured runs.",
+        "docs/zenoh-api-on-the-engine.md: the budget of the lane, in the place the owed margin gate stood."
+      ],
+      "verification_bullets": [
+        "job_budget_binding.py: 19 of 36 jobs carry a time-budget gate, each bound to its `timeout-minutes` and a stamp; actionlint on ci.yml clean.",
+        "Hosted CI per-job results read: four finished runs with a Z8 job (job times 2,091 s, 2,187 s, 2,130 s and about 2,060 s); the red one lost scenario 7 order 4 pubsub (125 of 126), read from the kept `z8-suite-report` log, counts per node and source taken from its `register_subscriber` spans and the routers' `wz::routing` lines.",
+        "Not run: the Z8 lane with the new budget (its first run is the check); the other thirteen red jobs of that hosted run are not read in this round."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: the other red jobs of the same hosted run (the cross-impl proof lanes, the isolated-crate lanes, the capability cost lane, the reduced-configuration docs shards and the non-default compile and census lane, 13 in all) are not read yet and are the next round.",
+        "Open: send lines for the peers (declarations a peer sends to a face, interests it answers), outside the spans the regions tests count, so that the next hosted red of the scenario 7 family names the sender or the receiver.",
+        "Open: the client hat of the forwarder and the replay on the accept path without the barrier, until a traced failure names them."
+      ]
     }
   },
   "inventory_entries": {
