@@ -12401,6 +12401,24 @@
         "Open: send lines for the peers (declarations a peer sends to a face, interests it answers), outside the spans the regions tests count, so that the next hosted red of the scenario 7 family names the sender or the receiver.",
         "Open: the client hat of the forwarder and the replay on the accept path without the barrier, until a traced failure names them."
       ]
+    },
+    "Round 4418": {
+      "decision_summary": "The last round left the late-peer red of scenario 7 with a missing registration that no log could assign to a sender or a receiver, because a router writes what it tells its faces and a peer writes nothing. A peer now writes it, on the same target as the router: the faces it admits (with the remote node and whether it dialled), what it replays onto a face when the face is complete (the subscribers it replays, of those it holds, and how many the face already had from a declaration made in the meantime) and the faces a new subscriber is declared to. The lines are root tracing events, as the router's are, because upstream's tests count every event under the span of a registration; the check is the test itself, which passed 75 of 75 runs of the five order 4 tests of scenario 7 with 6,345 new lines in the log. The function is in the runtime crate (`route_trace`) because the registry of the C ABI core, which holds the faces of a peer, carries no logger. No behaviour of the engine changes. The next hosted red of this family is read from these lines: whether the earlier peer declared to the late peer's face (sender) or did not (receiver).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: `route_trace`, the router's observation as a function for a caller without a logger. crates/wz-capi-core/src/faces.rs: three lines of a peer (face admitted, replay onto a face, subscriber declared to faces) and `zid_text`."
+      ],
+      "verification_bullets": [
+        "clippy -D warnings of the packages zenoh and wz-capi-core with `unstable` and `internal`, all targets: clean.",
+        "z8_upstream_suite.py measure of the five scenario 7 order 4 tests of regions, 15 runs each: 75 of 75 passed; the log holds 6,345 lines of the form `peer <zid> admits face`, `replays onto face` and `declares subscriber`.",
+        "Not run: the unit tests of wz-capi-core and the other lanes that build the registry (the change is lines of logging)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the next hosted red of the scenario 7 family from the peer lines (the earlier peer's declare to the late peer's face, and its replay); the kept log of the hosted Z8 job is the `z8-suite-report` artifact.",
+        "Open: the client hat of the forwarder and the replay on the accept path without the barrier, until a traced failure names them."
+      ]
     }
   },
   "inventory_entries": {
