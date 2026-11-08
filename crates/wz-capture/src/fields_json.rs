@@ -256,6 +256,7 @@ pub fn fields_json_where_coordinated_progress(
             closings: None,
             progress,
             walk: None,
+            trees: Trees::Written,
         },
     );
     if crate::progress::cancelled(progress) {
@@ -330,6 +331,7 @@ pub fn fields_json_since_coordinated(
             closings: None,
             progress: None,
             walk: None,
+            trees: Trees::Written,
         },
     )
 }
@@ -390,9 +392,19 @@ pub fn fields_json_since_coordinated(
 /// from zero after changing it. The comparison is of whole rows, so a row whose
 /// bytes a ceiling has since discarded (it reads `declined` when asked again) is
 /// NOT reported: the row the consumer holds stays true.
+///
+/// # One shape per memory
+///
+/// A memory writes its rows in one [`Trees`] shape, fixed when it is made
+/// ([`Self::with_trees`]): the digests it compares are of the rows it writes, and a
+/// row with its trees and the same row without them are two texts. A caller that
+/// asks for both shapes holds two memories, and neither disturbs the other.
 #[derive(Debug, Default)]
 pub struct FieldsMemory {
     key: Option<String>,
+    /// The shape of every row this memory writes. Not emptied with the rest when
+    /// the declaration text changes.
+    trees: Trees,
     /// The node census the session grouping is derived from, kept so that the
     /// grouping is not rebuilt from every message at each call.
     nodes: crate::node::NodeMemory,
@@ -467,6 +479,14 @@ impl FieldsMemory {
     /// A memory that has written nothing.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A memory that has written nothing and writes its rows in `trees`' shape.
+    pub fn with_trees(trees: Trees) -> Self {
+        Self {
+            trees,
+            ..Self::default()
+        }
     }
 
     /// Whether the end-to-end counters this memory holds may be gone on from: it holds
@@ -592,6 +612,7 @@ pub fn fields_json_since_remembering_progress(
         let pairing_work = memory.pairing_work;
         *memory = FieldsMemory {
             key: Some(String::from(key)),
+            trees: memory.trees,
             nodes,
             #[cfg(feature = "network-codecs")]
             pairing,
@@ -862,6 +883,9 @@ pub fn fields_json_since_remembering_progress(
                     closings,
                     progress,
                     walk: None,
+                    // The digests are of the rows this memory writes, so the probe
+                    // writes them in the memory's shape.
+                    trees: memory.trees,
                 },
             );
             // A probe that was stopped holds the digests of some rows only, and
@@ -938,6 +962,7 @@ pub fn fields_json_since_remembering_progress(
                 new_frames,
                 absorbed: absorbed_anew,
             }),
+            trees: memory.trees,
         },
     );
     // A document that was stopped is half built and the walk it advanced is half
@@ -1062,6 +1087,31 @@ pub struct Since {
     /// wants a bounded document passes a smaller one (a handle's `max_rows` is
     /// `after_seq + max_rows`), and asks again from it for the rest.
     pub through_seq: u64,
+}
+
+/// Whether a row writes the FIELD TREES its walks made.
+///
+/// # What a row is without them
+///
+/// A row's `fields` is the tree the field walker made of the message's bytes, and a
+/// completed chain's `above_transport.fields` is the tree of each record the joined
+/// buffer held. They are most of a row (measured on a capture of small pushes: see
+/// `benches/fields_row_cost.rs`), and a consumer that lists rows uses none of them:
+/// the list reads what the row SAYS about the message (`carried`, `payload_decode`,
+/// `above_transport`, `sn`, `chain`, `first_byte`, `l2`), and it asks for one
+/// message's tree when that message is picked.
+///
+/// [`Trees::Left`] writes every key of the row but those two, from the same walk and
+/// by the same writer; nothing else about the row changes. A document written so
+/// says it at the top, `"trees":false`, so it cannot be read as a document whose rows
+/// were declined.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Trees {
+    /// Every key, the trees included: every document but the row-facts door's.
+    #[default]
+    Written,
+    /// Every key but the two trees: the row-facts door's document.
+    Left,
 }
 
 /// The cells of a row that a LATER document may write differently from the one
@@ -1333,6 +1383,9 @@ struct RowAttachments<'a> {
     /// The walker's own state, kept between calls, and whether this call
     /// continues it. Absent for every document that keeps none.
     walk: Option<WalkRun<'a>>,
+    /// Whether the rows write the trees their walks made. Every door but the
+    /// row-facts door writes them.
+    trees: Trees,
 }
 
 /// What names the request a `ResponseFinal` row closed. Without the record plane
@@ -1640,6 +1693,7 @@ fn fields_json_selected(
         closings,
         progress,
         walk,
+        trees,
     } = attach;
     // THE PAIRING a `ResponseFinal` row names its request from. A caller that
     // holds one (a live handle's kept fold) hands it in; a selector's walk made
@@ -1767,6 +1821,12 @@ fn fields_json_selected(
             ",\"window\":{{\"after_seq\":{after_seq},\"through_seq\":{through_seq}}}"
         );
     }
+    // Written by the row-facts door alone, on the precedent `window` sets: a reader
+    // that finds no `fields` on a row is told here that none was written, and not
+    // left to read it as a row the walker declined.
+    if trees == Trees::Left {
+        out.push_str(",\"trees\":false");
+    }
     out.push_str(",\"stream_flows\":[");
     // Re-read ONCE, ahead of both flow tables: a stream row now
     // names the packet holding its first byte and that packet's link
@@ -1842,6 +1902,7 @@ fn fields_json_selected(
                     lists.stream.get(i).copied(),
                     flow.frames.produced() - flow.frames.len() as u64,
                 ),
+                trees,
             },
             run,
             &mut out,
@@ -1895,6 +1956,7 @@ fn fields_json_selected(
                     lists.datagram.get(i).copied(),
                     flow.frames.produced() - flow.frames.len() as u64,
                 ),
+                trees,
             },
             run,
             &mut out,
@@ -2369,6 +2431,7 @@ fn push_stream_flow(
                     carried: Some(&frame.carried),
                     e2e,
                     closes: None,
+                    trees: tags.trees,
                 });
             }
             continue;
@@ -2444,6 +2507,7 @@ fn push_stream_flow(
                     carried: Some(&frame.carried),
                     e2e,
                     closes: RowCloses::of(&tags, tags.requests, &row),
+                    trees: tags.trees,
                 },
                 w,
             ),
@@ -2620,6 +2684,7 @@ fn push_datagram_flow(
                                 carried: Some(&frame.carried),
                                 e2e,
                                 closes: None,
+                                trees: tags.trees,
                             });
                         }
                     }
@@ -2689,6 +2754,7 @@ fn push_datagram_flow(
                 carried: Some(&frame.carried),
                 e2e,
                 closes: RowCloses::of(&tags, tags.requests, &row),
+                trees: tags.trees,
             },
             w,
         );
@@ -2800,6 +2866,7 @@ fn push_datagram_flow(
                 e2e: E2eSource::default(),
                 // And no exchange: scouting is not a request protocol.
                 closes: None,
+                trees: tags.trees,
             },
             out,
         );
@@ -2991,6 +3058,9 @@ struct RowWalk<'a> {
     /// from. `None` for a row that is not being written (it is only judged), a
     /// scouting row, and a document with no pairing for this list.
     closes: Option<RowCloses<'a>>,
+    /// Whether the walk's trees are written ([`Trees`]). A row that is only judged
+    /// writes nothing and ignores it.
+    trees: Trees,
 }
 
 fn push_walk(row: RowWalk<'_>, out: &mut String) {
@@ -3004,6 +3074,7 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
         carried,
         e2e,
         closes,
+        trees,
     } = row;
     let judging = E2eRow {
         declarations,
@@ -3030,8 +3101,10 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
                 let at = KeyexprAt::new(direction, spaces);
                 out.push_str("\"name\":");
                 escape_into(&field.name, out);
-                out.push_str(",\"fields\":");
-                out.push_str(&to_json(&field));
+                if trees == Trees::Written {
+                    out.push_str(",\"fields\":");
+                    out.push_str(&to_json(&field));
+                }
                 let planes = RecordPlanes {
                     closes,
                     session: SessionBatch::of_row(carried, &field, space),
@@ -3061,6 +3134,7 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
         KeyexprAt::new(direction, spaces),
         judging,
         closes,
+        trees,
         out,
     );
 }
@@ -3201,8 +3275,10 @@ fn judge_unwritten_row(row: RowWalk<'_>) {
         declarations,
         carried,
         e2e,
-        // A row that is only judged writes nothing, so it names no request.
+        // A row that is only judged writes nothing, so it names no request and
+        // writes no tree.
         closes: _,
+        trees: _,
     } = row;
     let Some(declarations) = declarations.filter(|d| d.has_stateful_rules()) else {
         return;
@@ -4167,6 +4243,7 @@ fn push_above_transport(
     at: KeyexprAt<'_>,
     judging: E2eRow<'_>,
     closes: Option<RowCloses<'_>>,
+    trees: Trees,
     out: &mut String,
 ) {
     let declarations = judging.declarations;
@@ -4183,14 +4260,17 @@ fn push_above_transport(
         // Walked from offset 0 of the buffer the session parsed, so the two
         // readers' coordinates are the same.
         let session = SessionBatch::joined(batch);
-        out.push_str(",\"fields\":[");
-        for (i, record) in walked.records.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
+        if trees == Trees::Written {
+            out.push_str(",\"fields\":[");
+            for (i, record) in walked.records.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&to_json(record));
             }
-            out.push_str(&to_json(record));
+            out.push(']');
         }
-        out.push_str("],\"carried\":[");
+        out.push_str(",\"carried\":[");
         for (i, record) in walked.records.iter().enumerate() {
             if i > 0 {
                 out.push(',');
@@ -4247,6 +4327,9 @@ fn push_above_transport(
         }
         out.push(']');
     }
+    // Only a completed chain carries trees here.
+    #[cfg(not(feature = "reassembly"))]
+    let _ = trees;
     out.push('}');
 }
 
@@ -5526,6 +5609,8 @@ struct RowTags<'a> {
     /// tables ([`CaptureTables`]), for the finals that close them; `None` for a
     /// list with no request.
     requests: Option<&'a RequestIndex>,
+    /// Whether the rows write their trees ([`Trees`]).
+    trees: Trees,
 }
 
 /// The exchange plane's pairing, and the list it is read for.

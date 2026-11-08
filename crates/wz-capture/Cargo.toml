@@ -197,6 +197,14 @@ name = "fields_row_cost"
 harness = false
 required-features = ["fixtures", "dissect"]
 
+# What a since-document row costs with its field trees and without them, and
+# what the CBOR form of the treeless document adds: the measurement behind the
+# row-facts door. `harness = false` for decode_cost's reason.
+[[bench]]
+name = "row_facts_cost"
+harness = false
+required-features = ["fixtures", "dissect"]
+
 [dependencies]
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
