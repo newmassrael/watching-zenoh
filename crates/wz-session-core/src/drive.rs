@@ -1328,13 +1328,11 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                     // against a stale baseline. The chain-level
                     // ring-consecutive check stays in the
                     // ReassemblyDispatcher (a forward GAP passes here
-                    // and aborts there, exactly pico's two-stage check).
-                    if !actions.admit_rx_frame_sn(priority, reliable, sn) {
-                        return DriverLoopOutcome::RxSnRejected {
-                            priority,
-                            reliable,
-                            sn,
-                        };
+                    // and aborts there, exactly pico's two-stage check),
+                    // unless the `reliable-gap-reconnect` policy ends the
+                    // link on it (`refuse_by_sn`).
+                    if let Some(refused) = refuse_by_sn(actions, engine, priority, reliable, sn) {
+                        return refused;
                     }
                     DriverLoopOutcome::Fragment {
                         reliable,
@@ -1427,7 +1425,9 @@ pub fn dispatch_pending<R: SessionRuntime, T: TimeSource>(
 /// - R311y215 / R2927 — a non-DEFAULT priority on a session that negotiated no
 ///   QoS is link-fatal (see [`crate::link::LostCause::UnknownPriority`]).
 /// - R311ke / R311y215 — the per-(priority, reliable) conduit SN gate (pico
-///   `_z_sn_precedes`): a stale, duplicate or reordered frame is dropped.
+///   `_z_sn_precedes`): a stale, duplicate or reordered frame is dropped, and a forward jump on
+///   the reliable channel ends the link when the `reliable-gap-reconnect` policy says so
+///   (`refuse_by_sn`).
 #[cfg(feature = "codec-frame")]
 fn refuse_frame<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
@@ -1443,14 +1443,60 @@ fn refuse_frame<R: SessionRuntime, T: TimeSource>(
             crate::link::LostCause::UnknownPriority,
         ));
     }
-    if !actions.admit_rx_frame_sn(priority, reliable, sn) {
-        return Some(DriverLoopOutcome::RxSnRejected {
+    refuse_by_sn(actions, engine, priority, reliable, sn)
+}
+
+/// The per-(priority, reliable) conduit SN gate of a `Frame` or `Fragment`: `Some` is the outcome
+/// of a frame that did not pass.
+///
+/// A stale, duplicate or reordered frame is [`DriverLoopOutcome::RxSnRejected`]. A frame that
+/// jumped forward on the RELIABLE channel passes, as upstream's does, unless the
+/// `reliable-gap-reconnect` policy reacts to it ([`crate::sn::reacts_to_gap`]): then the frames
+/// the jump skipped are lost for good on a channel that promises them, so the link ends as lost
+/// (as [`crate::link::LostCause::UnknownPriority`] does) and a supervisor that reopens the
+/// session redoes the declaration sync. The frame that showed the jump is dropped with the link.
+#[cfg(feature = "codec-frame")]
+fn refuse_by_sn<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    priority: crate::qos::Priority,
+    reliable: bool,
+    sn: u64,
+) -> Option<DriverLoopOutcome> {
+    use crate::policy::ReliableGapReconnect as Mode;
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    use crate::sn::RxAdmit;
+    // The mode is a constant of the build, so with it `off` (upstream's) the gap test below folds
+    // away and this is the bool gate alone.
+    let mode = crate::policy::SessionPolicy::from_build().reliable_gap_reconnect;
+    if !reliable || matches!(mode, Mode::Off) {
+        return if actions.admit_rx_frame_sn(priority, reliable, sn) {
+            None
+        } else {
+            Some(DriverLoopOutcome::RxSnRejected {
+                priority,
+                reliable,
+                sn,
+            })
+        };
+    }
+    match actions.admit_rx_frame_sn_judged(priority, reliable, sn) {
+        RxAdmit::Accept => None,
+        RxAdmit::Stale => Some(DriverLoopOutcome::RxSnRejected {
             priority,
             reliable,
             sn,
-        });
+        }),
+        RxAdmit::Gap { .. }
+            if crate::sn::reacts_to_gap(mode, actions.peer_declarations_final_seen()) =>
+        {
+            engine.process_event(E::LinkLost);
+            Some(DriverLoopOutcome::LinkLost(
+                crate::link::LostCause::ReliableGap,
+            ))
+        }
+        RxAdmit::Gap { .. } => None,
     }
-    None
 }
 
 /// Which path [`dispatch_datagram`] took one unit down: the count a profile

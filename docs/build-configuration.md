@@ -130,6 +130,16 @@ original reproduced by naming it. Three things follow from it:
   the same way, because it too has no chosen interface. Scouting is not a link and is not
   refused. Only the tokio engine reads the policy; no Zephyr image, lwIP session or
   cooperative engine does, so none of their trees has its symbol.
+- **Ending the link on a forward gap of the reliable channel** (`reliable-gap-reconnect`,
+  `off` by default): upstream accepts a forward jump of the reliable sequence number without
+  a word, so the frames in between are lost and nothing is repaired. `always` ends the link as
+  lost on every such jump (`LostCause::ReliableGap`), and `until-declarations-synced` only
+  while the peer's initial declarations have not all arrived (its `DeclareFinal` of the
+  initial interest), so the supervisor of a reconnecting session reopens the session and
+  redoes the declaration sync. The frame that showed the jump is dropped; a stale or
+  duplicate frame and the best-effort channels are unchanged. The gate is in the session
+  core, so every engine ends the link, and only the tokio engine reconnects and reports the
+  peer's final (for another engine `until-declarations-synced` acts as `always`).
 - **Limiting an entity to some links** (`entity-link-restriction`, off by default): locality
   says whether an entity takes part in this session's traffic, other nodes', or both; a node
   with several links also has the question of which ones. The value is

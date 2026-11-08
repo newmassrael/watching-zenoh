@@ -184,18 +184,70 @@ impl RxSn {
     /// `false` = stale / duplicate / reordered — the caller drops the
     /// frame without advancing the FSM (pico's silent drop).
     pub fn admit(&mut self, mask: u64, reliable: bool, sn: u64) -> bool {
+        !matches!(self.admit_judged(mask, reliable, sn), RxAdmit::Stale)
+    }
+
+    /// [`Self::admit`] that also says whether the admitted frame jumped
+    /// forward: the baseline moves exactly as `admit` moves it, and the
+    /// verdict names what `admit` folds into `true` or `false`. A forward
+    /// jump of `k > 1` is [`RxAdmit::Gap`] with `k - 1` frames missing; the
+    /// first frame of an unseeded channel has no baseline to jump from and is
+    /// [`RxAdmit::Accept`], and so is a step across the ring seam.
+    pub fn admit_judged(&mut self, mask: u64, reliable: bool, sn: u64) -> RxAdmit {
         let slot = if reliable {
             &mut self.reliable
         } else {
             &mut self.best_effort
         };
         match *slot {
-            Some(last) if !precedes(mask, last, sn) => false,
-            _ => {
+            Some(last) if !precedes(mask, last, sn) => RxAdmit::Stale,
+            Some(last) => {
+                // `precedes` bounds the distance to 1..=half the ring.
+                let distance = sn.wrapping_sub(last) & mask;
                 *slot = Some(sn);
-                true
+                if distance > 1 {
+                    RxAdmit::Gap {
+                        missing: u32::try_from(distance - 1).unwrap_or(u32::MAX),
+                    }
+                } else {
+                    RxAdmit::Accept
+                }
+            }
+            None => {
+                *slot = Some(sn);
+                RxAdmit::Accept
             }
         }
+    }
+}
+
+/// What the RX SN gate made of one inbound frame ([`RxSn::admit_judged`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RxAdmit {
+    /// The frame is the next one on its channel, or the first one seen.
+    Accept,
+    /// The frame is admitted but `missing` frames between the last admitted
+    /// one and this one never arrived (a forward jump on the ring, saturated
+    /// at `u32::MAX`).
+    Gap { missing: u32 },
+    /// A duplicate, a backward step or a jump past half the ring: the frame
+    /// is dropped and the baseline stays.
+    Stale,
+}
+
+/// Whether a forward gap on the reliable channel ends the link under `mode`
+/// (the `reliable-gap-reconnect` policy). `peer_declarations_final` is whether
+/// the peer's initial declarations have all arrived. A pure decision: the
+/// caller has already established that the frame is a reliable-channel gap.
+pub const fn reacts_to_gap(
+    mode: crate::policy::ReliableGapReconnect,
+    peer_declarations_final: bool,
+) -> bool {
+    use crate::policy::ReliableGapReconnect as Mode;
+    match mode {
+        Mode::Off => false,
+        Mode::UntilDeclarationsSynced => !peer_declarations_final,
+        Mode::Always => true,
     }
 }
 
@@ -278,6 +330,18 @@ impl RxConduits {
         sn: u64,
     ) -> bool {
         self.select_mut(priority).admit(mask, reliable, sn)
+    }
+
+    /// [`Self::admit`] with the verdict of [`RxSn::admit_judged`]: the same
+    /// conduit, the same baseline move, and a forward jump named.
+    pub fn admit_judged(
+        &mut self,
+        priority: crate::qos::Priority,
+        mask: u64,
+        reliable: bool,
+        sn: u64,
+    ) -> RxAdmit {
+        self.select_mut(priority).admit_judged(mask, reliable, sn)
     }
 }
 
@@ -671,6 +735,173 @@ mod tests {
         );
         assert!(!rx.admit(mask, true, 7), "then gates duplicates");
         assert!(!rx.admit(mask, true, 7 + 65), "past half-window is stale");
+    }
+
+    /// A forward jump of `k` is a gap of `k - 1` missing frames and moves the
+    /// baseline; equal, backward and past-half-window frames are stale and
+    /// leave it where it was.
+    #[test]
+    fn rx_sn_judged_names_a_forward_gap() {
+        let mask = mask_from_res(0x00); // half = 63
+        let mut rx = RxSn::default();
+        rx.seed(mask, 10);
+        assert_eq!(rx.admit_judged(mask, true, 10), RxAdmit::Accept);
+        assert_eq!(rx.admit_judged(mask, true, 11), RxAdmit::Accept);
+        assert_eq!(
+            rx.admit_judged(mask, true, 14),
+            RxAdmit::Gap { missing: 2 },
+            "11 -> 14 lost 12 and 13"
+        );
+        assert_eq!(
+            rx.admit_judged(mask, true, 14),
+            RxAdmit::Stale,
+            "the baseline moved to the gapped frame"
+        );
+        assert_eq!(rx.admit_judged(mask, true, 13), RxAdmit::Stale);
+        assert_eq!(rx.admit_judged(mask, true, 15), RxAdmit::Accept);
+        assert_eq!(
+            rx.admit_judged(mask, true, 15 + 64),
+            RxAdmit::Stale,
+            "past half the ring is not a jump forward"
+        );
+        assert_eq!(
+            rx.admit_judged(mask, true, 15 + 63),
+            RxAdmit::Gap { missing: 62 },
+            "exactly half the ring is still ahead"
+        );
+    }
+
+    /// A step across the ring seam is a consecutive frame, and a jump across
+    /// it is a gap of the modular distance.
+    #[test]
+    fn rx_sn_judged_reads_the_ring_seam_as_distance() {
+        let mask = mask_from_res(0x00); // ring of 128
+        let mut rx = RxSn::default();
+        rx.seed(mask, 0); // baseline = 127
+        assert_eq!(rx.admit_judged(mask, true, 0), RxAdmit::Accept);
+
+        let mut rx = RxSn::default();
+        rx.seed(mask, 126);
+        assert_eq!(rx.admit_judged(mask, true, 126), RxAdmit::Accept);
+        assert_eq!(rx.admit_judged(mask, true, 127), RxAdmit::Accept);
+        assert_eq!(rx.admit_judged(mask, true, 0), RxAdmit::Accept, "wrap");
+        assert_eq!(rx.admit_judged(mask, true, 1), RxAdmit::Accept);
+
+        let mut rx = RxSn::default();
+        rx.seed(mask, 126);
+        assert_eq!(rx.admit_judged(mask, true, 126), RxAdmit::Accept);
+        assert_eq!(
+            rx.admit_judged(mask, true, 1),
+            RxAdmit::Gap { missing: 2 },
+            "126 -> 1 skips 127 and 0"
+        );
+    }
+
+    /// The first frame of an unseeded channel has nothing to jump from.
+    #[test]
+    fn rx_sn_judged_first_frame_of_an_unseeded_channel_is_no_gap() {
+        let mask = mask_from_res(0x00);
+        let mut rx = RxSn::default();
+        assert_eq!(rx.admit_judged(mask, true, 100), RxAdmit::Accept);
+        assert_eq!(rx.admit_judged(mask, true, 101), RxAdmit::Accept);
+        assert_eq!(
+            rx.admit_judged(mask, true, 105),
+            RxAdmit::Gap { missing: 3 }
+        );
+    }
+
+    /// The channels judge apart: a gap on one leaves the other's baseline
+    /// alone, and the verdict itself does not depend on the channel (the
+    /// caller decides which channel may react).
+    #[test]
+    fn rx_sn_judged_channels_are_independent() {
+        let mask = mask_from_res(0x00);
+        let mut rx = RxSn::default();
+        rx.seed(mask, 0);
+        assert_eq!(rx.admit_judged(mask, true, 0), RxAdmit::Accept);
+        assert_eq!(rx.admit_judged(mask, true, 5), RxAdmit::Gap { missing: 4 });
+        assert_eq!(
+            rx.admit_judged(mask, false, 0),
+            RxAdmit::Accept,
+            "best-effort still sits at the seed"
+        );
+        assert_eq!(rx.admit_judged(mask, false, 3), RxAdmit::Gap { missing: 2 });
+    }
+
+    /// `admit` is `admit_judged` with the verdict folded to a bool: the same
+    /// answers and the same baselines over a walk that hits every verdict.
+    #[test]
+    fn rx_sn_admit_is_the_judged_verdict_folded() {
+        let mask = mask_from_res(0x00);
+        let mut plain = RxSn::default();
+        let mut judged = RxSn::default();
+        plain.seed(mask, 5);
+        judged.seed(mask, 5);
+        for sn in [5u64, 6, 9, 9, 8, 10, 74, 40, 11, 127, 0, 2] {
+            let folded = !matches!(judged.admit_judged(mask, true, sn), RxAdmit::Stale);
+            assert_eq!(plain.admit(mask, true, sn), folded, "sn {sn}");
+            assert_eq!(plain, judged, "baselines after sn {sn}");
+        }
+    }
+
+    /// The conduit wrapper judges on the conduit's own channel.
+    #[test]
+    fn rx_conduits_judged_reads_the_conduit_baseline() {
+        use crate::qos::Priority;
+        let mask = mask_from_res(0x02);
+        let mut rx = RxConduits::default();
+        rx.seed(mask, 1);
+        assert_eq!(
+            rx.admit_judged(Priority::DEFAULT, mask, true, 1),
+            RxAdmit::Accept
+        );
+        assert_eq!(
+            rx.admit_judged(Priority::DEFAULT, mask, true, 4),
+            RxAdmit::Gap { missing: 2 }
+        );
+        assert_eq!(
+            rx.admit_judged(Priority::DEFAULT, mask, true, 4),
+            RxAdmit::Stale
+        );
+        assert_eq!(
+            rx.admit_judged(Priority::DEFAULT, mask, false, 1),
+            RxAdmit::Accept,
+            "the best-effort channel was not moved by the reliable gap"
+        );
+    }
+
+    /// Under QoS each priority judges against its own baseline: a gap on one
+    /// is no gap on another.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn rx_conduits_judged_per_priority() {
+        use crate::qos::Priority;
+        let mask = mask_from_res(0x02);
+        let mut rx = RxConduits::default();
+        rx.seed(mask, 1);
+        assert_eq!(
+            rx.admit_judged(Priority::RealTime, mask, true, 5),
+            RxAdmit::Gap { missing: 4 }
+        );
+        assert_eq!(
+            rx.admit_judged(Priority::Background, mask, true, 1),
+            RxAdmit::Accept,
+            "the low conduit is still at its seed"
+        );
+    }
+
+    /// Every cell of the decision: `off` never reacts, `always` always does,
+    /// and `until-declarations-synced` reacts only while the peer's initial
+    /// declarations have not all arrived.
+    #[test]
+    fn a_reliable_gap_reacts_by_mode_and_peer_final() {
+        use crate::policy::ReliableGapReconnect as Mode;
+        assert!(!reacts_to_gap(Mode::Off, false));
+        assert!(!reacts_to_gap(Mode::Off, true));
+        assert!(reacts_to_gap(Mode::UntilDeclarationsSynced, false));
+        assert!(!reacts_to_gap(Mode::UntilDeclarationsSynced, true));
+        assert!(reacts_to_gap(Mode::Always, false));
+        assert!(reacts_to_gap(Mode::Always, true));
     }
 
     /// `TxSn::mint` returns the advertised `next_*` and advances per

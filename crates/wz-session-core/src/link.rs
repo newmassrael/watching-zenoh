@@ -2172,6 +2172,13 @@ pub enum LostCause {
     /// `let Some((is_last, stl, associated_link)) = zwrite!(self.links).remove_link(&link) else {`).
     /// The session's `link.lost` path is that teardown here.
     UnknownPriority,
+    /// THIS side tore the link down because a Frame or Fragment on the
+    /// reliable channel carried a sequence number that jumped forward, so
+    /// frames the peer sent never arrived. Upstream accepts the jump; the
+    /// `reliable-gap-reconnect` policy ends the link instead, so a supervisor
+    /// that reopens the session also redoes the declaration sync the lost
+    /// frames may have carried.
+    ReliableGap,
 }
 
 #[cfg(test)]

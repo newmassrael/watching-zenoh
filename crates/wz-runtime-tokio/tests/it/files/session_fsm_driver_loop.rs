@@ -259,6 +259,131 @@ async fn r2927_a_default_priority_frame_on_a_non_qos_session_is_delivered() {
     assert_eq!(engine.get_current_state(), S::Established);
 }
 
+/// Feed `frames` to the driver loop one at a time and return what each became.
+async fn deliver_frames(
+    actions: &Arc<SessionLinkActions>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    frames: Vec<Vec<u8>>,
+) -> Vec<DriverLoopOutcome> {
+    let count = frames.len();
+    let mut driver = QueueDriver::with(
+        frames
+            .into_iter()
+            .map(|wire| LinkEvent::Rx(RxFrame::new(wire)))
+            .collect(),
+    );
+    let mut outcomes = Vec::with_capacity(count);
+    for _ in 0..count {
+        outcomes.push(poll_and_dispatch_one(&mut driver, actions, engine).await);
+    }
+    outcomes
+}
+
+// reliable-gap-reconnect: a forward jump of the reliable sequence number is
+// accepted silently in upstream's mode (`off`) and ends the link as lost in the
+// reacting ones, while a consecutive frame passes in every mode. The value is
+// the build's, so this holds in each build of the policy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forward_gap_on_the_reliable_channel_ends_the_link_only_when_the_policy_says_so() {
+    use wz_runtime_tokio::policy::{ReliableGapReconnect as Mode, SessionPolicy};
+    use wz_session_core::qos::Priority;
+    use wz_session_wire_fixtures::craft_frame_wire;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    // A known baseline on the reliable channel, whatever the handshake seeded.
+    assert!(actions.admit_rx_frame_sn(Priority::DEFAULT, true, 100));
+    let outcomes = deliver_frames(
+        &actions,
+        &mut engine,
+        vec![craft_frame_wire(101, true), craft_frame_wire(105, true)],
+    )
+    .await;
+    assert!(
+        matches!(outcomes[0], DriverLoopOutcome::FramePayload { sn: 101, .. }),
+        "the next frame is no gap in any mode; got {:?}",
+        outcomes[0]
+    );
+    match SessionPolicy::from_build().reliable_gap_reconnect {
+        Mode::Off => {
+            assert!(
+                matches!(outcomes[1], DriverLoopOutcome::FramePayload { sn: 105, .. }),
+                "upstream accepts the jump; got {:?}",
+                outcomes[1]
+            );
+            assert_eq!(engine.get_current_state(), S::Established);
+        }
+        Mode::UntilDeclarationsSynced | Mode::Always => {
+            assert!(
+                matches!(
+                    outcomes[1],
+                    DriverLoopOutcome::LinkLost(LostCause::ReliableGap)
+                ),
+                "the peer has not finished its declarations, so the jump ends the link; got {:?}",
+                outcomes[1]
+            );
+            assert_eq!(engine.get_current_state(), S::Closed);
+            assert_eq!(actions.trace_snapshot().send_close_frame_with_reason, 0);
+        }
+    }
+}
+
+// CONTROL for the witness above: the same jump on the best-effort channel is
+// accepted in every mode, since only the reliable channel promises delivery.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forward_gap_on_the_best_effort_channel_never_ends_the_link() {
+    use wz_session_core::qos::Priority;
+    use wz_session_wire_fixtures::craft_frame_wire;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    assert!(actions.admit_rx_frame_sn(Priority::DEFAULT, false, 100));
+    let outcomes = deliver_frames(&actions, &mut engine, vec![craft_frame_wire(105, false)]).await;
+    assert!(
+        matches!(outcomes[0], DriverLoopOutcome::FramePayload { sn: 105, .. }),
+        "a best-effort jump is accepted; got {:?}",
+        outcomes[0]
+    );
+    assert_eq!(engine.get_current_state(), S::Established);
+}
+
+// reliable-gap-reconnect: once the peer's initial declarations have all
+// arrived, `until-declarations-synced` accepts a jump and `always` still ends
+// the link on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forward_gap_after_the_peers_declarations_are_final_follows_the_mode() {
+    use wz_runtime_tokio::policy::{ReliableGapReconnect as Mode, SessionPolicy};
+    use wz_session_core::qos::Priority;
+    use wz_session_wire_fixtures::craft_frame_wire;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    assert!(actions.admit_rx_frame_sn(Priority::DEFAULT, true, 100));
+    actions.note_peer_declarations_final();
+    let outcomes = deliver_frames(&actions, &mut engine, vec![craft_frame_wire(105, true)]).await;
+    match SessionPolicy::from_build().reliable_gap_reconnect {
+        Mode::Off | Mode::UntilDeclarationsSynced => {
+            assert!(
+                matches!(outcomes[0], DriverLoopOutcome::FramePayload { sn: 105, .. }),
+                "the jump is accepted; got {:?}",
+                outcomes[0]
+            );
+            assert_eq!(engine.get_current_state(), S::Established);
+        }
+        Mode::Always => {
+            assert!(
+                matches!(
+                    outcomes[0],
+                    DriverLoopOutcome::LinkLost(LostCause::ReliableGap)
+                ),
+                "every reliable jump ends the link; got {:?}",
+                outcomes[0]
+            );
+            assert_eq!(engine.get_current_state(), S::Closed);
+        }
+    }
+}
+
 // R2927 — and a session that negotiated QoS admits the prioritized frame on
 // its own conduit.
 #[cfg(feature = "transport-qos")]

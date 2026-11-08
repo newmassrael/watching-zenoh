@@ -6009,6 +6009,59 @@ mod reconnect_tx_tests {
         assert!(actions.declarations_synced());
     }
 
+    /// The peer's final of the initial interest is what the `reliable-gap-reconnect` policy waits
+    /// for: another interest's final and a final that names none are not it, and a reopen starts
+    /// the wait again for the next peer.
+    #[test]
+    fn the_peers_initial_final_is_noted_and_a_reopen_forgets_it() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        assert!(!actions.peer_declarations_final_seen());
+        deliver(&actions, &final_outcome(Some(99)));
+        deliver(&actions, &final_outcome(None));
+        assert!(
+            !actions.peer_declarations_final_seen(),
+            "neither final is the initial one"
+        );
+        deliver(
+            &actions,
+            &final_outcome(Some(wz_session_core::extbound::INITIAL_INTEREST_ID)),
+        );
+        assert!(actions.peer_declarations_final_seen());
+        reopened(&actions);
+        assert!(
+            !actions.peer_declarations_final_seen(),
+            "the next peer has sent none of its declarations"
+        );
+    }
+
+    /// The node numbers its own interests from the id the peer's initial final carries, so a final
+    /// that ended a wait the node was in is its interest's answer and not the peer's.
+    #[test]
+    fn a_final_that_answers_the_nodes_own_interest_is_not_the_peers_initial_final() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_interest_liveliness_get(
+                wz_session_core::extbound::INITIAL_INTEREST_ID,
+                0,
+                Some("home/get"),
+            )
+            .expect("liveliness get interest");
+        deliver(
+            &actions,
+            &final_outcome(Some(wz_session_core::extbound::INITIAL_INTEREST_ID)),
+        );
+        assert!(actions.declarations_synced(), "the node's interest ended");
+        assert!(!actions.peer_declarations_final_seen());
+        deliver(
+            &actions,
+            &final_outcome(Some(wz_session_core::extbound::INITIAL_INTEREST_ID)),
+        );
+        assert!(
+            actions.peer_declarations_final_seen(),
+            "a final with no wait left to end is the peer's"
+        );
+    }
+
     /// A peer that never answers is given up on after the timeout: the node is synced without it.
     #[test]
     fn an_interest_the_peer_never_answers_is_given_up_on_at_the_timeout() {

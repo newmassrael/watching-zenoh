@@ -1755,6 +1755,13 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// reaches the application layer. Handshake-scoped: reset by
     /// `reset_for_reopen` and re-seeded by the reopen handshake.
     pub rx_sn: R::Mutex<crate::sn::RxConduits>,
+    /// Whether the peer's `DeclareFinal` of the initial interest has arrived on
+    /// this session: the one fact the RX SN gate needs from the declaration
+    /// plane, which sits after the gate and cannot be asked from it. Read by the
+    /// `reliable-gap-reconnect` policy; set by
+    /// [`SessionLinkActions::note_declare_finals_in`], cleared by
+    /// [`SessionLinkActions::reset_for_reopen`] with the gate itself.
+    peer_declarations_final: core::sync::atomic::AtomicBool,
     /// R311jp — TX batching accumulator (zenoh-pico
     /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
     /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
@@ -3595,6 +3602,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 tx_limits_cache: TxLimitsCache::new(),
                 outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 rx_sn: R::new_mutex(crate::sn::RxConduits::default()),
+                peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
                 outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
@@ -9463,13 +9471,49 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// chain is cleared by the drive helper on rejection, mirroring
     /// pico's dbuf-clear (rx.c:112-113).
     pub fn admit_rx_frame_sn(&self, priority: Priority, reliable: bool, sn: u64) -> bool {
+        !matches!(
+            self.admit_rx_frame_sn_judged(priority, reliable, sn),
+            crate::sn::RxAdmit::Stale
+        )
+    }
+
+    /// [`Self::admit_rx_frame_sn`] with the gate's whole verdict: the same
+    /// conduit and the same baseline move, and a forward jump of the sequence
+    /// number reported as [`crate::sn::RxAdmit::Gap`] instead of folded into a
+    /// pass.
+    pub fn admit_rx_frame_sn_judged(
+        &self,
+        priority: Priority,
+        reliable: bool,
+        sn: u64,
+    ) -> crate::sn::RxAdmit {
         // Sequential mutex scopes: the mask accessor takes
         // `inbound_peer_init_caps`, then `rx_sn` — disjoint, never nested
         // (the non-reentrant MCU critical_section forbids nesting).
         // R311y215 — the SN gate is per-(priority, reliable) conduit; a non-QoS
         // session passes `Priority::DEFAULT` and gates on the single conduit.
         let mask = self.negotiated_sn_mask();
-        R::with_mutex_mut(&self.rx_sn, |s| s.admit(priority, mask, reliable, sn))
+        R::with_mutex_mut(&self.rx_sn, |s| {
+            s.admit_judged(priority, mask, reliable, sn)
+        })
+    }
+
+    /// Record that the peer's `DeclareFinal` of the initial interest arrived,
+    /// which is what the `until-declarations-synced` mode of the
+    /// `reliable-gap-reconnect` policy waits for. Called by
+    /// [`Self::note_declare_finals_in`] for every inbound event; once set it
+    /// stays until [`Self::reset_for_reopen`].
+    pub fn note_peer_declarations_final(&self) {
+        self.peer_declarations_final
+            .store(true, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether the peer's initial declarations have all arrived on this session
+    /// ([`Self::note_peer_declarations_final`]). `false` before, and again after
+    /// a reopen.
+    pub fn peer_declarations_final_seen(&self) -> bool {
+        self.peer_declarations_final
+            .load(core::sync::atomic::Ordering::Acquire)
     }
 
     /// R121e / R311kb — outbound Frame sequence-number mint. Returns
@@ -14947,6 +14991,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R311ke — the RX SN gate is handshake-scoped: the reopen
             // handshake's OpenSyn/OpenAck re-seeds both channels.
             R::with_mutex_mut(&self.rx_sn, |s| *s = crate::sn::RxConduits::default());
+            // The next peer has sent none of its initial declarations yet.
+            self.peer_declarations_final
+                .store(false, core::sync::atomic::Ordering::Release);
             // §5.21 routing-namespace — the per-session INGRESS correlation is
             // handshake-scoped too: on reopen the remote re-handshakes with EMPTY
             // declaration tables + a RESTARTED id space, so a stale blocked-id
@@ -15022,13 +15069,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Every `Declare(DeclFinal)` that carries an interest id and that `event` delivers is the
     /// peer's answer to an interest the node sent: the node stops waiting for each
     /// ([`Self::note_declare_final`]). The inbound dispatch calls this for every event.
-    /// R311g1 — signature-stability: a no-op without `session-reconnect` and `codec-declare`.
+    ///
+    /// The peer's own final of the initial interest is noted too
+    /// ([`Self::note_peer_declarations_final`]): the node did not send that interest, so it ends
+    /// no wait, but it says the peer's declarations have all arrived. The node numbers its own
+    /// interests from the same id, so a final that ended a wait the node was in is its own
+    /// interest's answer and not the peer's.
+    /// R311g1 — signature-stability: a no-op without `codec-declare` and `alloc`, and without
+    /// `session-reconnect` the interest bookkeeping is skipped.
     pub fn note_declare_finals_in(&self, event: crate::driver_loop::IterationEvent<'_, '_>) {
-        #[cfg(all(feature = "session-reconnect", feature = "codec-declare"))]
+        #[cfg(all(feature = "alloc", feature = "codec-declare"))]
         crate::declaration_sync::finals_in_event(event, |interest_id| {
-            let _ = self.note_declare_final(interest_id);
+            #[cfg(feature = "session-reconnect")]
+            let answered_own_interest = self.note_declare_final(interest_id);
+            #[cfg(not(feature = "session-reconnect"))]
+            let answered_own_interest = false;
+            if interest_id == crate::extbound::INITIAL_INTEREST_ID && !answered_own_interest {
+                self.note_peer_declarations_final();
+            }
         });
-        #[cfg(not(all(feature = "session-reconnect", feature = "codec-declare")))]
+        #[cfg(not(all(feature = "alloc", feature = "codec-declare")))]
         let _ = event;
     }
 

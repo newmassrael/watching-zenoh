@@ -2500,6 +2500,31 @@ not refused. Only the tokio engine reads this policy.
 '''
 
 [[policy]]
+id = "reliable-gap-reconnect"
+kind = "choice"
+kconfig = "WZ_POLICY_RELIABLE_GAP_RECONNECT"
+choices = ["off", "until-declarations-synced", "always"]
+default = "off"
+upstream = "Accepts a forward jump of the reliable channel's sequence number without a word: the frames in between are lost, the session stays open and nothing is repaired, so a peer's declaration lost that way is never noticed."
+since = 2
+help = '''
+What a node does when a frame on the reliable channel arrives with a sequence
+number that jumped forward, which means frames were lost on the way. `off`
+accepts the jump, which is upstream's behaviour. `until-declarations-synced`
+treats the jump as a lost link only while the peer has not yet sent the end of
+its initial declarations, so a session whose declaration sync was cut short is
+reopened and the sync is redone, and a jump after that is accepted. `always`
+treats every forward jump on the reliable channel as a lost link. The frame
+that showed the jump is dropped, and the supervisor of a reconnecting session
+opens the session again and redoes the declaration sync. A frame that does not
+advance the number is dropped as before, and the best-effort channels are not
+affected. Only the tokio engine reconnects, so another engine ends the link and
+leaves it to the application, and only the tokio engine reports the end of the
+peer's declarations, so for another engine `until-declarations-synced` is
+`always`.
+'''
+
+[[policy]]
 id = "entity-link-restriction"
 kind = "bool"
 kconfig = "WZ_POLICY_ENTITY_LINK_RESTRICTION"
