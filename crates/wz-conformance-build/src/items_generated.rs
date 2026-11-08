@@ -281,6 +281,12 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "off",
     ),
     (
+        "reliable-gap-reconnect",
+        "WZ_POLICY_RELIABLE_GAP_RECONNECT",
+        &["off", "until-declarations-synced", "always"],
+        "off",
+    ),
+    (
         "entity-link-restriction",
         "WZ_POLICY_ENTITY_LINK_RESTRICTION",
         &["off", "on"],

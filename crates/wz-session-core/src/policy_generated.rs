@@ -53,6 +53,58 @@ impl Default for MulticastLoopback {
     }
 }
 
+/// `reliable-gap-reconnect`: What a node does when a frame on the reliable channel arrives
+/// with a sequence number that jumped forward, which means frames were lost on the way.
+/// `off` accepts the jump, which is upstream's behaviour. `until-declarations-synced`
+/// treats the jump as a lost link only while the peer has not yet sent the end of its
+/// initial declarations, so a session whose declaration sync was cut short is reopened and
+/// the sync is redone, and a jump after that is accepted. `always` treats every forward
+/// jump on the reliable channel as a lost link. The frame that showed the jump is dropped,
+/// and the supervisor of a reconnecting session opens the session again and redoes the
+/// declaration sync. A frame that does not advance the number is dropped as before, and the
+/// best-effort channels are not affected. Only the tokio engine reconnects, so another
+/// engine ends the link and leaves it to the application, and only the tokio engine reports
+/// the end of the peer's declarations, so for another engine `until-declarations-synced` is
+/// `always`.
+/// Upstream: Accepts a forward jump of the reliable channel's sequence number without a
+/// word: the frames in between are lost, the session stays open and nothing is repaired, so
+/// a peer's declaration lost that way is never noticed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReliableGapReconnect {
+    /// `off`.
+    Off,
+    /// `until-declarations-synced`.
+    UntilDeclarationsSynced,
+    /// `always`.
+    Always,
+}
+
+impl ReliableGapReconnect {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::UntilDeclarationsSynced => "until-declarations-synced",
+            Self::Always => "always",
+        }
+    }
+
+    const CHOICES: [&str; 3] = ["off", "until-declarations-synced", "always"];
+    const ALL: [Self; 3] = [Self::Off, Self::UntilDeclarationsSynced, Self::Always];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_RELIABLE_GAP_RECONNECT");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for ReliableGapReconnect {
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// `subscriber-overload`: What a subscriber whose callback runs off the receive path does
 /// when its delivery lane is full and its declaration says nothing. `block` makes the
 /// session wait for room, outside the lock the receive path holds, so the transport's own
@@ -440,6 +492,11 @@ pub struct SessionPolicy {
     /// kernel's choice when the host has none, so the link may sit on an interface nobody
     /// chose.
     pub multicast_link_requires_iface: bool,
+    /// `reliable-gap-reconnect`. Upstream: Accepts a forward jump of the reliable channel's
+    /// sequence number without a word: the frames in between are lost, the session stays
+    /// open and nothing is repaired, so a peer's declaration lost that way is never
+    /// noticed.
+    pub reliable_gap_reconnect: ReliableGapReconnect,
     /// `entity-link-restriction`. Upstream: Lets every entity use every link of the
     /// session: a put reaches every link that wants it, a declaration is made to every
     /// link, a query goes to every link.
@@ -500,6 +557,7 @@ impl SessionPolicy {
             policy_bool(option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING"));
         let multicast_link_requires_iface =
             policy_bool(option_env!("WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE"));
+        let reliable_gap_reconnect = ReliableGapReconnect::stated();
         let entity_link_restriction = policy_bool(option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION"));
         let targeted_query = policy_bool(option_env!("WZ_POLICY_TARGETED_QUERY"));
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
@@ -519,6 +577,7 @@ impl SessionPolicy {
             declaration_sync_pacing,
             datagram_fragment_pacing,
             multicast_link_requires_iface,
+            reliable_gap_reconnect,
             entity_link_restriction,
             targeted_query,
             entity_timestamp_opt_in,
