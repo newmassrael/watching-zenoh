@@ -958,6 +958,10 @@ impl BoxedLinkDriver for StreamWriteDriver {
         self.tx.link_room(priority, wait)
     }
 
+    fn try_reserve_room(&self, priority: Priority) -> Option<wz_session_core::link::RoomPermit> {
+        self.tx.try_reserve_room(priority)
+    }
+
     fn shape_tx_queue(&self, shape: wz_session_core::link::TxQueueShape) {
         self.tx.reshape(shape)
     }
@@ -1374,6 +1378,33 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(lowlatency));
         let driver = StreamWriteDriver::new(tx, flag.clone(), LinkSubject::UNKNOWN, None);
         (driver, rx, flag)
+    }
+
+    /// The driver's reservation is its own queue's: a lane of one batch gives one permit that
+    /// holds room until it drops, refuses the next, and a closed queue gives none. A driver that
+    /// took the trait's default would promise room for a full lane.
+    #[test]
+    fn the_write_driver_reserves_room_on_its_own_queue() {
+        let (tx, mut rx) =
+            crate::writer_queue::outbound_channel_with_capacity([1; Priority::NUM], 4);
+        let driver = StreamWriteDriver::new(
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            LinkSubject::UNKNOWN,
+            None,
+        );
+        let permit = driver
+            .try_reserve_room(Priority::DEFAULT)
+            .expect("the lane has room");
+        assert!(permit.is_held());
+        assert!(
+            driver.try_reserve_room(Priority::DEFAULT).is_none(),
+            "the one batch is promised"
+        );
+        drop(permit);
+        assert!(driver.try_reserve_room(Priority::DEFAULT).is_some());
+        rx.close();
+        assert!(driver.try_reserve_room(Priority::DEFAULT).is_none());
     }
 
     /// Encode `payload` into a slot the driver lends, the way the session does,

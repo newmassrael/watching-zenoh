@@ -1036,6 +1036,13 @@ impl BoxedLinkDriver for UdpWriteDriver {
         self.tx.link_room(priority, wait)
     }
 
+    fn try_reserve_room(
+        &self,
+        priority: wz_session_core::qos::Priority,
+    ) -> Option<wz_session_core::link::RoomPermit> {
+        self.tx.try_reserve_room(priority)
+    }
+
     fn shape_tx_queue(&self, shape: wz_session_core::link::TxQueueShape) {
         self.tx.reshape(shape)
     }
@@ -1361,6 +1368,28 @@ mod tests {
         let local = socket.local_addr().expect("local addr");
         assert!(local.is_ipv4(), "v4 peer -> v4 bind");
         assert_ne!(local.port(), 0, "kernel assigned a concrete port");
+    }
+
+    /// The driver's reservation is its own queue's: a lane of one batch gives one permit that
+    /// holds room until it drops and refuses the next.
+    #[test]
+    fn write_driver_reserves_room_on_its_own_queue() {
+        let (tx, _rx) = crate::writer_queue::outbound_channel_with_capacity(
+            [1; wz_session_core::qos::Priority::NUM],
+            4,
+        );
+        let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
+        let permit = driver
+            .try_reserve_room(wz_session_core::qos::Priority::DEFAULT)
+            .expect("the lane has room");
+        assert!(permit.is_held());
+        assert!(driver
+            .try_reserve_room(wz_session_core::qos::Priority::DEFAULT)
+            .is_none());
+        drop(permit);
+        assert!(driver
+            .try_reserve_room(wz_session_core::qos::Priority::DEFAULT)
+            .is_some());
     }
 
     /// Oversize datagrams are dropped by `send_blocking` rather than enqueued;

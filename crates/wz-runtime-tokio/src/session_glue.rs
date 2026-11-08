@@ -6707,6 +6707,94 @@ mod reconnect_tx_tests {
             [Priority::Background]
         );
     }
+
+    /// A reservation is the live link's, through both swap seams: a link with room gives a permit
+    /// that holds its room until it drops, a link with none gives nothing, and the question is
+    /// asked of whichever link was swapped in last. Without the forward the seam would grant the
+    /// default's trivial permit for a link that is full.
+    #[test]
+    fn both_swap_seams_forward_a_reservation_to_the_live_link() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use wz_session_core::link::{BoxedLinkDriver as _, LinkSendOutcome, RoomPermit};
+        use wz_session_core::qos::Priority;
+        use wz_session_core::reconnect::LocalSwappableLink;
+        use wz_session_core::reliability::Reliability;
+
+        struct Promise(Arc<AtomicUsize>);
+        impl Drop for Promise {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        /// A link that promises room until `full`, and counts the promises given back.
+        struct Queue {
+            full: bool,
+            given_back: Arc<AtomicUsize>,
+            asked: Mutex<Vec<Priority>>,
+        }
+        impl Queue {
+            fn new(full: bool) -> Arc<Self> {
+                Arc::new(Self {
+                    full,
+                    given_back: Arc::new(AtomicUsize::new(0)),
+                    asked: Mutex::new(Vec::new()),
+                })
+            }
+        }
+        impl super::BoxedLinkDriver for Queue {
+            fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+                LinkSendOutcome::Sent
+            }
+            fn try_reserve_room(&self, priority: Priority) -> Option<RoomPermit> {
+                self.asked.lock().expect("asked").push(priority);
+                if self.full {
+                    None
+                } else {
+                    Some(RoomPermit::held(Promise(Arc::clone(&self.given_back))))
+                }
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+
+        let roomy = Queue::new(false);
+        let full = Queue::new(true);
+
+        let shared = SwappableLink::<TokioRuntime>::new(Queue::new(true));
+        let _ = shared.swap(roomy.clone());
+        let permit = shared
+            .try_reserve_room(Priority::RealTime)
+            .expect("the live link has room");
+        assert!(
+            permit.is_held(),
+            "the live link's own permit, not a trivial one"
+        );
+        assert_eq!(
+            roomy.given_back.load(Ordering::SeqCst),
+            0,
+            "held while it lives"
+        );
+        drop(permit);
+        assert_eq!(roomy.given_back.load(Ordering::SeqCst), 1);
+        assert_eq!(*roomy.asked.lock().expect("asked"), [Priority::RealTime]);
+        let _ = shared.swap(full.clone());
+        assert!(shared.try_reserve_room(Priority::Data).is_none());
+        assert_eq!(*full.asked.lock().expect("asked"), [Priority::Data]);
+
+        let local_roomy = Queue::new(false);
+        let local = LocalSwappableLink::<TokioRuntime>::new(Queue::new(true));
+        let _ = local.swap(local_roomy.clone());
+        let permit = local
+            .try_reserve_room(Priority::Background)
+            .expect("the live link has room");
+        assert!(permit.is_held());
+        drop(permit);
+        assert_eq!(local_roomy.given_back.load(Ordering::SeqCst), 1);
+        let _ = local.swap(Queue::new(true));
+        assert!(local.try_reserve_room(Priority::Background).is_none());
+    }
 }
 
 /// R311kj — the wire never carries the internal `batch_size = 0`

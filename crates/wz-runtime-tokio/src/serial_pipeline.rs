@@ -1232,6 +1232,13 @@ impl BoxedLinkDriver for SerialWriteDriver {
         self.tx.link_room(priority, wait)
     }
 
+    fn try_reserve_room(
+        &self,
+        priority: wz_session_core::qos::Priority,
+    ) -> Option<wz_session_core::link::RoomPermit> {
+        self.tx.try_reserve_room(priority)
+    }
+
     fn shape_tx_queue(&self, shape: wz_session_core::link::TxQueueShape) {
         self.tx.reshape(shape)
     }
@@ -1442,6 +1449,28 @@ async fn drain_serial_writes(
 mod tests {
     use super::*;
     use wz_session_core::serial_link::encode_frame;
+
+    /// The write half's reservation is its own queue's: a lane of one batch gives one permit that
+    /// holds room until it drops and refuses the next.
+    #[test]
+    fn the_write_half_reserves_room_on_its_own_queue() {
+        let (tx, _rx) = crate::writer_queue::outbound_channel_with_capacity(
+            [1; wz_session_core::qos::Priority::NUM],
+            4,
+        );
+        let driver = SerialWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
+        let permit = driver
+            .try_reserve_room(wz_session_core::qos::Priority::DEFAULT)
+            .expect("the lane has room");
+        assert!(permit.is_held());
+        assert!(driver
+            .try_reserve_room(wz_session_core::qos::Priority::DEFAULT)
+            .is_none());
+        drop(permit);
+        assert!(driver
+            .try_reserve_room(wz_session_core::qos::Priority::DEFAULT)
+            .is_some());
+    }
 
     /// R3239 — the write half frames the payload as it enqueues it: what the
     /// queue holds is the codec's frame, byte for byte, in a pool slot under

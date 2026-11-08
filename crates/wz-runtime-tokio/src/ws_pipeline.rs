@@ -569,6 +569,13 @@ impl BoxedLinkDriver for WsWriteDriver {
         self.tx.link_room(priority, wait)
     }
 
+    fn try_reserve_room(
+        &self,
+        priority: wz_session_core::qos::Priority,
+    ) -> Option<wz_session_core::link::RoomPermit> {
+        self.tx.try_reserve_room(priority)
+    }
+
     fn shape_tx_queue(&self, shape: wz_session_core::link::TxQueueShape) {
         self.tx.reshape(shape)
     }
@@ -716,4 +723,24 @@ pub async fn ws_writer_task(mut write: OwnedWriteHalf, end: WsEnd, mut queue: Ou
     // Queue finished -> send a WS Close frame so the peer sees a clean close.
     let _ = write.write_all(&close_frame(end)).await;
     let _ = write.flush().await;
+}
+
+#[cfg(test)]
+mod reserve_tests {
+    use super::*;
+
+    /// The write half's reservation is its own queue's: a lane of one batch gives one permit that
+    /// holds room until it drops and refuses the next.
+    #[test]
+    fn the_write_half_reserves_room_on_its_own_queue() {
+        let (tx, _rx) = crate::writer_queue::outbound_channel_with_capacity([1; Priority::NUM], 4);
+        let driver = WsWriteDriver::new(tx, WsEnd::Client, LinkSubject::UNKNOWN, None);
+        let permit = driver
+            .try_reserve_room(Priority::DEFAULT)
+            .expect("the lane has room");
+        assert!(permit.is_held());
+        assert!(driver.try_reserve_room(Priority::DEFAULT).is_none());
+        drop(permit);
+        assert!(driver.try_reserve_room(Priority::DEFAULT).is_some());
+    }
 }

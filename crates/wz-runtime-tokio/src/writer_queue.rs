@@ -1534,6 +1534,23 @@ impl OutboundTx {
         self.reserve_in(&mut st, priority)
     }
 
+    /// [`Self::try_reserve`] as the seam a session reserves through
+    /// (`BoxedLinkDriver::try_reserve_room`, which every write driver over this queue answers
+    /// with): the room is promised until the returned permit drops, a lane with no room and a
+    /// closed queue are both `None`, and the lane is not marked congested by the question.
+    ///
+    /// The frame sent under the permit goes through the queue's ordinary doors while the permit
+    /// is held, and the permit's drop gives the promise back after it: for that interval the lane
+    /// counts the frame and the promise both, which can only make it look fuller than it is.
+    pub fn try_reserve_room(
+        &self,
+        priority: Priority,
+    ) -> Option<wz_session_core::link::RoomPermit> {
+        self.try_reserve(priority)
+            .ok()
+            .map(wz_session_core::link::RoomPermit::held)
+    }
+
     /// [`Self::try_reserve`], and when there is no room, the waker of `cx` is woken when there
     /// may be, which is when the writer takes a frame, a permit is dropped, or the queue closes.
     /// The task then asks again: a wake-up is a reason to ask and not a grant, since another
@@ -4798,6 +4815,108 @@ mod tests {
             "a permit that is dropped unused gives its room back"
         );
         drop(first);
+    }
+
+    /// The reservation a session makes through the seam is the queue's own: a lane of two batches
+    /// gives two permits and then none, the question marks no lane congested (it is a probe, not
+    /// a wait that ran out), a permit that drops gives its room back, and another lane's room is
+    /// its own. A second sender cannot take room that is promised, which is what makes the
+    /// promise worth asking for.
+    #[test]
+    fn a_room_permit_promises_the_lane_until_it_drops_and_a_full_lane_gives_none() {
+        let (tx, _rx) = outbound_channel_with_capacity([2; Priority::NUM], 4);
+        let first = tx
+            .try_reserve_room(Priority::Data)
+            .expect("the first batch fits");
+        assert!(first.is_held(), "a queue's permit holds room");
+        let second = tx
+            .try_reserve_room(Priority::Data)
+            .expect("the second batch fits");
+        assert!(
+            tx.try_reserve_room(Priority::Data).is_none(),
+            "a lane at its bound after two promises refuses a third"
+        );
+        assert!(
+            !tx.is_congested(Priority::Data),
+            "a refused reservation does not mark the lane congested"
+        );
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, droppable(Duration::ZERO)),
+            Room::Congested,
+            "a sender that asks for room the old way cannot take promised room either"
+        );
+        assert!(
+            tx.try_reserve_room(Priority::RealTime).is_some(),
+            "another lane's room is its own"
+        );
+        drop(second);
+        assert!(
+            tx.try_reserve_room(Priority::Data).is_some(),
+            "a permit that drops gives its room back"
+        );
+        drop(first);
+    }
+
+    /// A queue that is closed has nothing left to promise, and a permit given before the close is
+    /// still dropped without trouble.
+    #[test]
+    fn a_closed_queue_gives_no_room_permit() {
+        let (tx, mut rx) = outbound_channel_with_capacity([2; Priority::NUM], 4);
+        let before = tx.try_reserve_room(Priority::Data).expect("open");
+        rx.close();
+        assert!(tx.try_reserve_room(Priority::Data).is_none());
+        assert!(tx.try_reserve_room(Priority::Control).is_none());
+        drop(before);
+    }
+
+    /// The frame sent under a permit is counted beside the promise while the permit is held and
+    /// alone after it drops: the lane reads fuller than it is for the interval, and never
+    /// emptier, so a promised room is never given to anyone else before the frame is on the lane.
+    #[test]
+    fn a_frame_sent_under_a_room_permit_counts_beside_the_promise_and_alone_after_it() {
+        let (tx, mut rx) = outbound_channel_with_capacity([2; Priority::NUM], 4);
+        let permit = tx.try_reserve_room(Priority::Data).expect("room");
+        tx.send(Priority::Data, vec![1u8; 4]).expect("open");
+        assert!(
+            tx.try_reserve_room(Priority::Data).is_none(),
+            "the frame and the promise fill both batches"
+        );
+        drop(permit);
+        let next = tx
+            .try_reserve_room(Priority::Data)
+            .expect("the promise is gone: one batch is the frame's and one is free");
+        assert!(
+            tx.try_reserve_room(Priority::Data).is_none(),
+            "the frame still holds its own batch"
+        );
+        drop(next);
+        assert_eq!(
+            rx.try_recv(),
+            Some(vec![1u8; 4]),
+            "the frame is the writer's"
+        );
+    }
+
+    /// A sender blocked on the lane's condition is woken by the room a dropped permit gives back,
+    /// as it is by a permit of the older door: the release notifies.
+    #[test]
+    fn a_sender_waiting_for_room_is_woken_by_a_room_permit_that_drops() {
+        let (tx, _rx) = outbound_channel_with_capacity([1; Priority::NUM], 4);
+        let held = tx.try_reserve_room(Priority::Data).expect("room");
+        let waiting = tx.clone();
+        let handle = std::thread::spawn(move || {
+            waiting.wait_for_room(Priority::Data, block(Duration::from_secs(10)))
+        });
+        // The waiter has to be in its wait before the room is given back for the wake-up to be
+        // what frees it; a short pause is enough and a late waiter finds the room at once.
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        drop(held);
+        assert_eq!(handle.join().expect("the waiter ends"), Room::Free);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "woken by the release, not by its deadline"
+        );
     }
 
     /// Sending with a permit turns the promise into a frame, exactly once: the lane holds one

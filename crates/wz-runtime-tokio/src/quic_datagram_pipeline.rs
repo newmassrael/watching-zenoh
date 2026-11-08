@@ -226,6 +226,13 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
         self.tx.link_room(priority, wait)
     }
 
+    fn try_reserve_room(
+        &self,
+        priority: wz_session_core::qos::Priority,
+    ) -> Option<wz_session_core::link::RoomPermit> {
+        self.tx.try_reserve_room(priority)
+    }
+
     fn shape_tx_queue(&self, shape: wz_session_core::link::TxQueueShape) {
         self.tx.reshape(shape)
     }
@@ -587,6 +594,29 @@ mod tests {
             at,
             "the frame IS the datagram's storage"
         );
+    }
+
+    /// The driver's reservation is its own queue's: a lane of one batch gives one permit that
+    /// holds room until it drops and refuses the next.
+    #[test]
+    fn write_driver_reserves_room_on_its_own_queue() {
+        let (tx, _rx) = crate::writer_queue::outbound_channel_with_capacity(
+            [1; wz_session_core::qos::Priority::NUM],
+            4,
+        );
+        let driver =
+            QuicDatagramWriteDriver::new(tx, QUIC_DATAGRAM_LINK_MTU, LinkSubject::UNKNOWN, None);
+        let permit = driver
+            .try_reserve_room(wz_session_core::qos::Priority::DEFAULT)
+            .expect("the lane has room");
+        assert!(permit.is_held());
+        assert!(driver
+            .try_reserve_room(wz_session_core::qos::Priority::DEFAULT)
+            .is_none());
+        drop(permit);
+        assert!(driver
+            .try_reserve_room(wz_session_core::qos::Priority::DEFAULT)
+            .is_some());
     }
 
     /// `send_blocking` drops an oversize datagram (one larger than the captured

@@ -482,6 +482,64 @@ impl RoomAnswer {
     }
 }
 
+/// Room on a link's outbound queue that [`BoxedLinkDriver::try_reserve_room`] promised to one
+/// sender: while the permit lives, the queue counts the room as taken, so no other sender is
+/// given it, and the holder may put its frame on the queue without asking again.
+///
+/// Dropping the permit gives the room back, whether or not a frame was sent under it. A frame
+/// sent while the permit is still held is counted by the queue as well, so the lane reads fuller
+/// than it is for as long as the two overlap, and never emptier: the holder drops the permit when
+/// its send returns.
+///
+/// A driver with no queue to fill (the MCU sockets) always has room, and its permit is the
+/// trivial one, which holds nothing. The permit is `Send`, so a registry can reserve on every
+/// link from one thread and send under each reservation from another.
+#[must_use = "a permit that is dropped at once promises nothing: send under it, or do not ask"]
+pub struct RoomPermit {
+    /// What gives the room back when it drops; `None` for a driver that has no queue.
+    #[cfg(feature = "alloc")]
+    held: Option<alloc::boxed::Box<dyn Send>>,
+}
+
+impl RoomPermit {
+    /// The permit of a driver with no queue: it promises nothing, because nothing can be full.
+    pub const fn trivial() -> Self {
+        Self {
+            #[cfg(feature = "alloc")]
+            held: None,
+        }
+    }
+
+    /// A permit that gives its room back by dropping `guard`.
+    #[cfg(feature = "alloc")]
+    pub fn held(guard: impl Send + 'static) -> Self {
+        Self {
+            held: Some(alloc::boxed::Box::new(guard)),
+        }
+    }
+
+    /// Whether the permit holds room of a queue, and not the trivial promise of a driver that
+    /// has none.
+    pub fn is_held(&self) -> bool {
+        #[cfg(feature = "alloc")]
+        {
+            self.held.is_some()
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            false
+        }
+    }
+}
+
+impl core::fmt::Debug for RoomPermit {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RoomPermit")
+            .field("held", &self.is_held())
+            .finish()
+    }
+}
+
 /// R2923 — how a sender asks [`BoxedLinkDriver::wait_for_room`] for room: the
 /// wait it may spend, and whether its message may be dropped.
 ///
@@ -670,6 +728,25 @@ pub trait BoxedLinkDriver {
     fn wait_for_room(&self, priority: crate::qos::Priority, wait: RoomWait) -> RoomAnswer {
         let _ = (priority, wait);
         RoomAnswer::at_once(LinkRoom::Free)
+    }
+
+    /// Promise one frame of room on `priority`'s outbound queue to the caller, if there is some
+    /// now, without waiting and without marking the queue congested: a question, and not the
+    /// give-up of a send that waited its deadline out. `None` is a queue with no room, or one
+    /// that is closed. While the returned permit lives the queue counts that room as taken, so a
+    /// sender that asks [`Self::wait_for_room`] or this method meanwhile is never given it, and
+    /// the holder can send a frame without asking for room again.
+    ///
+    /// This is what lets one publish take room on every link it reaches before it sends on any:
+    /// a question answered `Free` and a send made afterwards are not atomic, since another sender
+    /// can fill the lane in between, and a reservation is.
+    ///
+    /// The default is a driver with no queue to fill (the MCU sockets), which always has room and
+    /// grants the trivial permit. A driver that WRAPS another must forward this, or every session
+    /// behind the wrapper promises room that nothing holds.
+    fn try_reserve_room(&self, priority: crate::qos::Priority) -> Option<RoomPermit> {
+        let _ = priority;
+        Some(RoomPermit::trivial())
     }
 
     /// R2952 (open-debt item 835) — take this link's block-first slot for
@@ -2663,5 +2740,51 @@ mod tests {
         assert!(RxBytes::leased(dyn_home, 0, 4..9).is_none());
         assert_eq!(home.refs[0].load(Ordering::SeqCst), 0);
         assert_eq!(home.homes.load(Ordering::SeqCst), 1);
+    }
+
+    /// A driver that writes inline has no queue to fill, so it asks nothing of a reservation:
+    /// the default grants the trivial permit, for every priority, and that permit holds nothing.
+    #[test]
+    fn a_driver_with_no_queue_grants_a_permit_that_holds_nothing() {
+        struct Inline;
+        impl BoxedLinkDriver for Inline {
+            fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+                LinkSendOutcome::Sent
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+        for priority in [crate::qos::Priority::DEFAULT, crate::qos::Priority::Control] {
+            let permit = Inline
+                .try_reserve_room(priority)
+                .expect("a driver with no queue always has room");
+            assert!(!permit.is_held());
+        }
+        assert!(!RoomPermit::trivial().is_held());
+    }
+
+    /// A permit that holds room gives it back exactly when it drops, and says it holds some.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_held_permit_gives_its_room_back_when_it_drops() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Room(Arc<AtomicUsize>);
+        impl Drop for Room {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let released = Arc::new(AtomicUsize::new(0));
+        let permit = RoomPermit::held(Room(Arc::clone(&released)));
+        assert!(permit.is_held());
+        assert_eq!(released.load(Ordering::SeqCst), 0, "held while it lives");
+        drop(permit);
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            1,
+            "given back once, on drop"
+        );
     }
 }

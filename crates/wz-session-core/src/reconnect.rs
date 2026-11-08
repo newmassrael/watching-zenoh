@@ -655,6 +655,14 @@ where
         R::link_driver(&sink).wait_for_room(priority, wait)
     }
 
+    // The reservation is the live link's, forwarded on a clone like the room wait. A swap while
+    // it is held closes the old link's queue, whose permit then gives back room nothing waits
+    // for, and the frame sent under it goes to the new link, which never promised it.
+    fn try_reserve_room(&self, priority: crate::qos::Priority) -> Option<crate::link::RoomPermit> {
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        R::link_driver(&sink).try_reserve_room(priority)
+    }
+
     // The notice of room, forwarded to the live link as the room wait is. A swap replaces the
     // link and with it the waker: the sender that holds messages is told nothing by the new
     // link until it asks again, and its own recheck covers the interval.
@@ -857,6 +865,12 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
         // `RefCell` borrow conflict.
         let sink = self.inner.borrow().clone();
         R::link_driver(&sink).wait_for_room(priority, wait)
+    }
+
+    // The reservation, forwarded as in the twin.
+    fn try_reserve_room(&self, priority: crate::qos::Priority) -> Option<crate::link::RoomPermit> {
+        let sink = self.inner.borrow().clone();
+        R::link_driver(&sink).try_reserve_room(priority)
     }
 
     // The notice of room, forwarded as in the twin.
