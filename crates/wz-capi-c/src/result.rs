@@ -96,6 +96,14 @@ pub const WZ_CAPI_C_E_VALUE_TOO_LARGE: ZResult = -100;
 /// obtained and is not the same as one that is full and would take the same call again
 /// after room is made. Outside zenoh-c's `Z_E*` range for the same reason.
 pub const WZ_CAPI_C_E_FULL: ZResult = -101;
+/// A call stated something this build's policy does not allow (`wz_capi_c`'s own code, for the
+/// reason the two above are): a link mask, an admission retry, an all-or-none publish or a target
+/// node, named through a `wz_capi_c_*_ext` door while the policy that admits it
+/// (`entity-link-restriction`, `publisher-admission-retry`, `multi-route-atomic-tx`,
+/// `targeted-query`) is off in this build. Nothing was sent or declared. Not `Z_EINVAL`, which
+/// says the value is wrong: the same call is right in a build whose policy is on. Outside
+/// zenoh-c's `Z_E*` range for the same reason as the codes above.
+pub const WZ_CAPI_C_E_POLICY_OFF: ZResult = -102;
 /// An unclassified failure (`Z_EGENERIC` = `INT8_MIN`). zenoh-c spells its
 /// catch-all as the type's minimum rather than as another small negative, so the
 /// value is transcribed rather than chosen.
@@ -121,6 +129,8 @@ mod tests {
             Z_EINVAL_MUTEX,
             Z_EBUSY_MUTEX,
             WZ_CAPI_C_E_VALUE_TOO_LARGE,
+            WZ_CAPI_C_E_FULL,
+            WZ_CAPI_C_E_POLICY_OFF,
             Z_EGENERIC,
         ];
         for (i, a) in errs.iter().enumerate() {

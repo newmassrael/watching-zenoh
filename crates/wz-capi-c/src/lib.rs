@@ -213,9 +213,18 @@ pub mod slice;
 /// the module is.
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 pub mod source_info;
+// What a call states beyond the zenoh-c options (links, retry, all-or-none, a target node), as the
+// carriers the bodies shared by the `z_*` functions and the `switch_doors` doors take. Ungated: the
+// `z_*` functions pass the carrier that states nothing.
+pub(crate) mod statement;
 pub mod string;
 pub mod string_array;
 pub mod sub;
+// The wz-only statements the zenoh-c option structs have no field for, as `wz_capi_c_*_ext` doors:
+// the links an entity may use, a publish's retry and all-or-none form, a query's target node. A
+// wz-own door set upstream has no counterpart of, off by default (`switch-doors`).
+#[cfg(feature = "switch-doors")]
+pub mod switch_doors;
 pub mod sync;
 /// R311y568 — the THREAD family (`z_owned_task_t` and its four operations), the
 /// last of upstream's C-shaped concurrency helpers this crate did not export.

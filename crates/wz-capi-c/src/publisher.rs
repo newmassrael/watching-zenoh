@@ -48,8 +48,11 @@ use crate::abi::{
 use crate::bytes::take_payload;
 use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::{keyexpr_str, KeyexprState};
+#[cfg(feature = "router-node")]
+use crate::result::Z_EUNAVAILABLE;
 use crate::result::{publish_refusal, ZResult, Z_EINVAL, Z_ENULL, Z_OK};
 use crate::session::{session_handle, SessionHandle};
+use crate::statement::PublishStatement;
 
 /// zenoh-c's `z_congestion_control_t` — a plain C enum, so `c_int`-sized.
 pub type z_congestion_control_t = std::ffi::c_int;
@@ -742,12 +745,42 @@ pub unsafe extern "C" fn z_declare_publisher(
     key_expr: *const z_loaned_keyexpr_t,
     options: *mut z_publisher_options_t,
 ) -> ZResult {
+    // SAFETY: the caller's contract, delegated; a publisher that states nothing beyond its options.
+    unsafe {
+        declare_publisher_stated(
+            session,
+            publisher,
+            key_expr,
+            options,
+            Ok(PublishStatement::default()),
+        )
+    }
+}
+
+/// The body of [`z_declare_publisher`], for a publisher that may state more than the options do.
+/// `statement` is what the declaration stated or the code its refusal answers; a refused
+/// declaration leaves the publisher in its gravestone state and declares nothing. Every put and
+/// delete on the publisher starts from what it stated.
+///
+/// # Safety
+/// As [`z_declare_publisher`].
+pub(crate) unsafe fn declare_publisher_stated(
+    session: *const z_loaned_session_t,
+    publisher: *mut z_owned_publisher_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    options: *mut z_publisher_options_t,
+    statement: Result<PublishStatement, ZResult>,
+) -> ZResult {
     guarded(|| {
         if publisher.is_null() {
             return Z_ENULL;
         }
         // The gravestone contract, written before any fallible work.
         unsafe { *publisher = z_owned_publisher_t::null_value() };
+        let statement = match statement {
+            Ok(statement) => statement,
+            Err(refusal) => return refusal,
+        };
 
         // SAFETY: the caller's contract for both handles.
         let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
@@ -775,6 +808,11 @@ pub unsafe extern "C" fn z_declare_publisher(
             SessionHandle::Node(node) => {
                 // SAFETY: the caller's contract for `options`.
                 let base = unsafe { resolve_publisher_options(options) };
+                // The node writes to its faces by its own tables and reads none of what a
+                // statement asks of the links: it does not carry the call, and declares nothing.
+                if statement != PublishStatement::default() {
+                    return Z_EUNAVAILABLE;
+                }
                 // The node holds the declarations of every face it serves, and its router tells
                 // a peer below it a declaration only for an interest it holds: so a publisher
                 // asks for the subscribers of its key, as the Rust API's node does.
@@ -817,8 +855,11 @@ pub unsafe extern "C" fn z_declare_publisher(
         } else {
             None
         };
+        // What the declaration stated is part of the options every put on the handle starts from,
+        // and a statement of links, a retry or all-or-none is what makes `plain_put_params`
+        // answer `None`, so no put on this publisher takes the plain lane past it.
         // SAFETY: the caller's contract for `options`.
-        let base = unsafe { resolve_publisher_options(options) };
+        let base = statement.apply(unsafe { resolve_publisher_options(options) });
         let plain = base.plain_put_params();
         let mut boxed = Box::new(PublisherHandle::Registry(PublisherState {
             shared: state.shared.clone(),

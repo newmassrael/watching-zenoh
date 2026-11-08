@@ -39,11 +39,14 @@ use crate::abi::{
 };
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
+#[cfg(feature = "router-node")]
+use crate::result::Z_EUNAVAILABLE;
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
 use crate::sample::MarshalCache;
 use crate::session::{session_handle, SessionHandle};
 
-use wz_capi_core::faces::{SharedSession, SubId};
+use wz_capi_core::faces::{SharedSession, SubId, WireKey};
+use wz_session_core::link_restriction::LinkRestriction;
 
 /// The Rust-side wrapper a subscription's per-face callbacks share.
 pub(crate) type CClosure = FfiClosure<z_closure_sample_callback_t>;
@@ -378,6 +381,34 @@ pub unsafe extern "C" fn z_declare_subscriber(
     callback: *mut z_moved_closure_sample_t,
     options: *mut z_subscriber_options_t,
 ) -> ZResult {
+    // SAFETY: the caller's contract, delegated; a subscriber limited to no links.
+    unsafe {
+        declare_subscriber_on(
+            session,
+            subscriber,
+            key_expr,
+            callback,
+            options,
+            Ok(LinkRestriction::Any),
+        )
+    }
+}
+
+/// The body of [`z_declare_subscriber`], for a subscriber that may be limited to some links.
+/// `links` is the restriction the declaration stated or the code its refusal answers; the closure
+/// is consumed and the subscriber left in its gravestone state either way, so a refused
+/// declaration runs the C `drop(context)` once and declares nothing.
+///
+/// # Safety
+/// As [`z_declare_subscriber`].
+pub(crate) unsafe fn declare_subscriber_on(
+    session: *const z_loaned_session_t,
+    subscriber: *mut z_owned_subscriber_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut z_subscriber_options_t,
+    links: Result<LinkRestriction, ZResult>,
+) -> ZResult {
     guarded(|| {
         if subscriber.is_null() || callback.is_null() {
             return Z_ENULL;
@@ -394,6 +425,11 @@ pub unsafe extern "C" fn z_declare_subscriber(
         let owned = unsafe { &mut (*callback)._this };
         let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_sample_t::null_value();
+        // A refusal returns with the closure adopted above, which is dropped with the frame.
+        let links = match links {
+            Ok(links) => links,
+            Err(refusal) => return refusal,
+        };
 
         // SAFETY: the caller's contract for both handles.
         let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
@@ -418,15 +454,27 @@ pub unsafe extern "C" fn z_declare_subscriber(
         let closure = Arc::new(cclosure);
         let handle = match held {
             SessionHandle::Registry(state) => {
-                let id = state.shared.declare_subscriber(ke, allowed_origin, {
-                    Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-                });
+                // `declare_subscriber` is this call with no restriction and the literal wire key,
+                // so a subscriber that states no links is declared as it always was.
+                let id = state.shared.declare_subscriber_on_links(
+                    ke,
+                    WireKey::literal(),
+                    allowed_origin,
+                    links,
+                    None,
+                    Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>),
+                );
                 subscriber_state_handle(&state.shared, id, declared)
             }
             // A node hosts the subscription on its data plane, which hands it what its own
             // session publishes and what arrives from its faces, as `allowed_origin` admits.
             #[cfg(feature = "router-node")]
             SessionHandle::Node(node) => {
+                // The data plane of a node reads no restriction of links: it does not carry the
+                // call, and declares nothing.
+                if links.is_restricted() {
+                    return Z_EUNAVAILABLE;
+                }
                 let id = node.forwarder().host_subscriber_from(
                     &ke,
                     allowed_origin,

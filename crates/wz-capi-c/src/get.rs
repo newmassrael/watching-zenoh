@@ -44,9 +44,12 @@ use crate::abi::{
 use crate::bytes::{BytesState, Payload};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
+#[cfg(feature = "router-node")]
+use crate::result::Z_EUNAVAILABLE;
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
 use crate::sample::{sample_kind_of, SampleMarshal};
 use crate::session::{session_handle, SessionHandle};
+use crate::statement::QueryStatement;
 
 use wz_capi_core::faces::SharedSession;
 
@@ -1326,6 +1329,7 @@ pub unsafe extern "C" fn z_get(
             nul_terminated(parameters),
             callback,
             options,
+            Ok(QueryStatement::default()),
         )
     }
 }
@@ -1359,6 +1363,7 @@ pub unsafe extern "C" fn z_get_with_parameters_substr(
             counted_bytes(parameters, parameters_len),
             callback,
             options,
+            Ok(QueryStatement::default()),
         )
     }
 }
@@ -1400,15 +1405,20 @@ pub(crate) unsafe fn counted_bytes(
 /// must be consumed on every path in both — and "consumed on every path" is
 /// exactly the property a second copy loses first.
 ///
+/// `stated` is what the get stated beyond its options (the links it may be asked on, the node it
+/// is addressed to) or the code its refusal answers, read after the closure and the options'
+/// owned fields are consumed, so a refused get consumes them as a sent one does.
+///
 /// # Safety
 /// As [`z_get`], with `params` already read out of whichever selector form the
 /// caller used.
-unsafe fn get_with_selector(
+pub(crate) unsafe fn get_with_selector(
     session: *const z_loaned_session_t,
     key_expr: *const z_loaned_keyexpr_t,
     params: Option<Vec<u8>>,
     callback: *mut z_moved_closure_reply_t,
     options: *mut z_get_options_t,
+    stated: Result<QueryStatement, ZResult>,
 ) -> ZResult {
     guarded(|| {
         if callback.is_null() {
@@ -1425,6 +1435,10 @@ unsafe fn get_with_selector(
         // R2949 — the token too, on the same every-path line.
         // SAFETY: the caller's contract.
         let token = unsafe { take_get_token(options) };
+        let stated = match stated {
+            Ok(stated) => stated,
+            Err(refusal) => return refusal,
+        };
 
         // SAFETY: the caller's contract for both handles.
         let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
@@ -1445,10 +1459,23 @@ unsafe fn get_with_selector(
             SessionHandle::Registry(state) => state,
             #[cfg(feature = "router-node")]
             SessionHandle::Node(node) => {
+                // The node asks by its own tables and reads neither a set of links nor a node to
+                // address: it does not carry the call, and asks nothing.
+                if stated != QueryStatement::default() {
+                    return Z_EUNAVAILABLE;
+                }
                 return issue_get_on_node(node, ke, params, opts, value, closure, token);
             }
         };
-        issue_get(&state.shared, ke, params, opts, value, closure, token)
+        issue_get(
+            &state.shared,
+            ke,
+            params,
+            stated.apply(opts),
+            value,
+            closure,
+            token,
+        )
     })
 }
 

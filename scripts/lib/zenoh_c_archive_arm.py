@@ -281,6 +281,9 @@ CAPABILITY_FEATURES = frozenset({
     # A node's lifecycle verbs from a client (`wz_capi_c_lifecycle_*`): two wz-own doors and the
     # structs they take, no zenoh-c type; off in the default and in every arm.
     "lifecycle-doors",
+    # The statements of a call beyond the zenoh-c options (`wz_capi_c_*_ext`): seven wz-own doors
+    # and the structs they take, no zenoh-c type; off in the default and in every arm.
+    "switch-doors",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"

@@ -36,8 +36,11 @@ use crate::publisher::{
 };
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 use crate::publisher::{z_reliability_t, Z_RELIABILITY_RELIABLE};
+#[cfg(feature = "router-node")]
+use crate::result::Z_EUNAVAILABLE;
 use crate::result::{publish_refusal, ZResult, Z_ENULL, Z_OK};
 use crate::session::{session_handle, SessionHandle};
+use crate::statement::PublishStatement;
 
 /// Options for `z_put` (`zenoh_commons.h:927-970`).
 #[repr(C)]
@@ -309,6 +312,31 @@ pub unsafe extern "C" fn z_put(
     payload: *mut z_moved_bytes_t,
     options: *mut z_put_options_t,
 ) -> ZResult {
+    // SAFETY: the caller's contract, delegated; a put that states nothing beyond its options.
+    unsafe {
+        put_stated(
+            session,
+            key_expr,
+            payload,
+            options,
+            Ok(PublishStatement::default()),
+        )
+    }
+}
+
+/// The body of [`z_put`], for a put that may state more than the options do. `statement` is what
+/// the call stated or the code its refusal answers; it is read after the payload and the options'
+/// owned fields are taken, so a refused put consumes them as a sent one does.
+///
+/// # Safety
+/// As [`z_put`].
+pub(crate) unsafe fn put_stated(
+    session: *const z_loaned_session_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    payload: *mut z_moved_bytes_t,
+    options: *mut z_put_options_t,
+    statement: Result<PublishStatement, ZResult>,
+) -> ZResult {
     guarded(|| {
         // The payload is taken FIRST and unconditionally: zenoh-c specifies it as
         // consumed on return, so leaving it alive on an error path would hand the
@@ -318,6 +346,10 @@ pub unsafe extern "C" fn z_put(
         let payload = unsafe { take_outbound(payload) };
         // SAFETY: the caller's contract for the options struct.
         let publish = unsafe { resolve_put_options(options) };
+        let statement = match statement {
+            Ok(statement) => statement,
+            Err(refusal) => return refusal,
+        };
         let (Some(held), Some(keyexpr), Some(payload)) = (
             // SAFETY: the caller's contract for both handles.
             unsafe { session_handle(session) },
@@ -338,9 +370,16 @@ pub unsafe extern "C" fn z_put(
             // negotiated shared memory.
             #[cfg(feature = "router-node")]
             SessionHandle::Node(node) => {
+                // The node writes to its faces by its own tables and reads none of what a
+                // statement asks of the links, so it answers that it does not carry the call
+                // instead of sending it as if it had not been stated.
+                if statement != PublishStatement::default() {
+                    return Z_EUNAVAILABLE;
+                }
                 return node_publish_payload(node, keyexpr, &payload, &publish);
             }
         };
+        let publish = statement.apply(publish);
         // R311y564 — a keyexpr that carries a DECLARATION publishes aliased, the
         // bandwidth saving `z_declare_keyexpr` exists to enable. Undeclared
         // views take the literal path, which is every keyexpr this crate could
@@ -425,7 +464,28 @@ pub unsafe extern "C" fn z_delete(
     key_expr: *const z_loaned_keyexpr_t,
     options: *mut z_delete_options_t,
 ) -> ZResult {
+    // SAFETY: the caller's contract, delegated; a delete that states nothing beyond its options.
+    unsafe { delete_stated(session, key_expr, options, Ok(PublishStatement::default())) }
+}
+
+/// The body of [`z_delete`], for a delete that may state more than the options do; `statement`
+/// is read as [`put_stated`] reads its own.
+///
+/// # Safety
+/// As [`z_delete`].
+pub(crate) unsafe fn delete_stated(
+    session: *const z_loaned_session_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    options: *mut z_delete_options_t,
+    statement: Result<PublishStatement, ZResult>,
+) -> ZResult {
     guarded(|| {
+        // A delete owns nothing to consume, so the refusal is read first: it does not depend on
+        // the handles.
+        let statement = match statement {
+            Ok(statement) => statement,
+            Err(refusal) => return refusal,
+        };
         // SAFETY: the caller's contract for both handles.
         let (Some(held), Some(keyexpr)) = (unsafe { session_handle(session) }, unsafe {
             keyexpr_str(key_expr)
@@ -444,9 +504,14 @@ pub unsafe extern "C" fn z_delete(
             // A delete takes the route a put to its key would.
             #[cfg(feature = "router-node")]
             SessionHandle::Node(node) => {
-                return node_publish(node.forwarder(), keyexpr, &[], &publish)
+                // As a put: the node reads no statement about links.
+                if statement != PublishStatement::default() {
+                    return Z_EUNAVAILABLE;
+                }
+                return node_publish(node.forwarder(), keyexpr, &[], &publish);
             }
         };
+        let publish = statement.apply(publish);
         // The DEL half of the same aliasing choice — see `z_put`.
         // SAFETY: the caller's contract for the handle.
         let sent = match unsafe { crate::keyexpr::keyexpr_mapping(key_expr) } {

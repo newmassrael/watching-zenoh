@@ -1217,6 +1217,21 @@ implies = []
 help = "A node's lifecycle verbs from a client: the key a verb is asked by and the answer read back (wz_capi_c_lifecycle_key, wz_capi_c_lifecycle_read, wz-own doors over lifecycle_wire)."
 
 [[capability]]
+id = "switch-doors"
+kconfig = "WZ_CAP_SWITCH_DOORS"
+# Off by default: zenoh-c has no such statements, and the doors are for a client that states the
+# links an entity may use, a publish's retry or all-or-none form, or a query's target node. The
+# policies they read (entity-link-restriction, publisher-admission-retry, multi-route-atomic-tx,
+# targeted-query) are off in a build made as upstream is, and a stated value is refused while its
+# policy is off.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh", "zenoh-c"]
+abis = ["core", "c"]
+implies = ["query", "queryable"]
+help = "The statements of a call beyond the zenoh-c options: the links an entity may use, a publish's retry and all-or-none form, a query's target node (the wz_capi_c_*_ext doors, wz-own, refused while the policy that admits the statement is off)."
+
+[[capability]]
 id = "transport_compression"
 kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
 os_needs = []

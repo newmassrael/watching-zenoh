@@ -35,8 +35,11 @@ use crate::matching::{
     z_matching_status_t, z_moved_closure_matching_status_t, z_owned_closure_matching_status_t,
     CMatchClosure, MatchingHold,
 };
+#[cfg(feature = "router-node")]
+use crate::result::Z_EUNAVAILABLE;
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
 use crate::session::{session_handle, SessionHandle};
+use crate::statement::QueryStatement;
 
 use wz_capi_core::faces::SharedSession;
 
@@ -338,6 +341,32 @@ pub unsafe extern "C" fn z_declare_querier(
     key_expr: *const z_loaned_keyexpr_t,
     options: *mut z_querier_options_t,
 ) -> ZResult {
+    // SAFETY: the caller's contract, delegated; a querier that states nothing beyond its options.
+    unsafe {
+        declare_querier_stated(
+            session,
+            querier,
+            key_expr,
+            options,
+            Ok(QueryStatement::default()),
+        )
+    }
+}
+
+/// The body of [`z_declare_querier`], for a querier that may state more than the options do.
+/// `stated` is what the declaration stated or the code its refusal answers; a refused declaration
+/// leaves the querier in its gravestone state and declares nothing. Every get on the querier
+/// starts from what it stated.
+///
+/// # Safety
+/// As [`z_declare_querier`].
+pub(crate) unsafe fn declare_querier_stated(
+    session: *const z_loaned_session_t,
+    querier: *mut z_owned_querier_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    options: *mut z_querier_options_t,
+    stated: Result<QueryStatement, ZResult>,
+) -> ZResult {
     guarded(|| {
         if querier.is_null() {
             return Z_ENULL;
@@ -345,6 +374,10 @@ pub unsafe extern "C" fn z_declare_querier(
         // The gravestone contract, before any fallible work.
         // SAFETY: the caller's contract.
         unsafe { *querier = z_owned_querier_t::null_value() };
+        let stated = match stated {
+            Ok(stated) => stated,
+            Err(refusal) => return refusal,
+        };
 
         // SAFETY: the caller's contract for both handles.
         let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
@@ -373,13 +406,18 @@ pub unsafe extern "C" fn z_declare_querier(
             SessionHandle::Registry(state) => QuerierHandle::Registry(QuerierState {
                 shared: state.shared.clone(),
                 keyexpr: crate::keyexpr::DeclaredKeyexpr::new(ke),
-                base,
+                base: stated.apply(base),
                 matching: Mutex::new(None),
             }),
             // A node asks as its own face: the querier keeps the node and the options its gets
             // start from.
             #[cfg(feature = "router-node")]
             SessionHandle::Node(node) => {
+                // The node asks by its own tables and reads neither a set of links nor a node to
+                // address: it does not carry the call, and declares nothing.
+                if stated != QueryStatement::default() {
+                    return Z_EUNAVAILABLE;
+                }
                 // The node holds the declarations of every face it serves, and its router tells
                 // a peer below it a declaration only for an interest it holds: so a querier asks
                 // for the queryables of its key, as the Rust API's node does.

@@ -318,6 +318,15 @@ config WZ_CAP_LIFECYCLE_DOORS
 	  A node's lifecycle verbs from a client: the key a verb is asked by and the answer read back (wz_capi_c_lifecycle_key, wz_capi_c_lifecycle_read, wz-own doors over lifecycle_wire).
 	  Exported by: c.
 
+config WZ_CAP_SWITCH_DOORS
+	bool "switch-doors"
+	default n
+	select WZ_CAP_QUERY
+	select WZ_CAP_QUERYABLE
+	help
+	  The statements of a call beyond the zenoh-c options: the links an entity may use, a publish's retry and all-or-none form, a query's target node (the wz_capi_c_*_ext doors, wz-own, refused while the policy that admits the statement is off).
+	  Exported by: c.
+
 config WZ_CAP_TRANSPORT_COMPRESSION
 	bool "transport_compression"
 	default y

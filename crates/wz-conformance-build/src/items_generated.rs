@@ -54,6 +54,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("e2e-sender", &["core", "c"]),
     ("identity-make", &["core", "c"]),
     ("lifecycle-doors", &["core", "c"]),
+    ("switch-doors", &["core", "c"]),
     ("transport_compression", &["core", "c"]),
     ("auth_usrpwd", &["core", "c"]),
     ("interceptors", &["core", "c"]),

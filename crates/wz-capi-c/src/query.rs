@@ -50,11 +50,14 @@ use crate::bytes::{BytesState, Outbound, Payload};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::{keyexpr_str, KeyexprState};
 use crate::reply_keyexpr::{parameters_has_anyke, reply_keyexpr_is_covered};
+#[cfg(feature = "router-node")]
+use crate::result::Z_EUNAVAILABLE;
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
 use crate::session::{session_handle, SessionHandle};
 use crate::string::view_string_over;
 
-use wz_capi_core::faces::{QblId, SharedSession};
+use wz_capi_core::faces::{QblId, SharedSession, WireKey};
+use wz_session_core::link_restriction::LinkRestriction;
 
 /// The Rust-side wrapper a queryable's per-face callbacks share.
 pub(crate) type CQueryClosure = FfiClosure<z_closure_query_callback_t>;
@@ -851,6 +854,34 @@ pub unsafe extern "C" fn z_declare_queryable(
     callback: *mut z_moved_closure_query_t,
     options: *mut z_queryable_options_t,
 ) -> ZResult {
+    // SAFETY: the caller's contract, delegated; a queryable limited to no links.
+    unsafe {
+        declare_queryable_on(
+            session,
+            queryable,
+            key_expr,
+            callback,
+            options,
+            Ok(LinkRestriction::Any),
+        )
+    }
+}
+
+/// The body of [`z_declare_queryable`], for a queryable that may be limited to some links.
+/// `links` is the restriction the declaration stated or the code its refusal answers; the closure
+/// is consumed and the queryable left in its gravestone state either way, so a refused
+/// declaration runs the C `drop(context)` once and declares nothing.
+///
+/// # Safety
+/// As [`z_declare_queryable`].
+pub(crate) unsafe fn declare_queryable_on(
+    session: *const z_loaned_session_t,
+    queryable: *mut z_owned_queryable_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_query_t,
+    options: *mut z_queryable_options_t,
+    links: Result<LinkRestriction, ZResult>,
+) -> ZResult {
     guarded(|| {
         if queryable.is_null() || callback.is_null() {
             return Z_ENULL;
@@ -864,6 +895,11 @@ pub unsafe extern "C" fn z_declare_queryable(
         let owned = unsafe { &mut (*callback)._this };
         let cclosure = CQueryClosure::new(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_query_t::null_value();
+        // A refusal returns with the closure adopted above, which is dropped with the frame.
+        let links = match links {
+            Ok(links) => links,
+            Err(refusal) => return refusal,
+        };
 
         // SAFETY: the caller's contract for both handles.
         let (Some(held), Some(ke)) = (unsafe { session_handle(session) }, unsafe {
@@ -889,10 +925,15 @@ pub unsafe extern "C" fn z_declare_queryable(
         )]
         let holder = match held {
             SessionHandle::Registry(state) => {
-                let id = state.shared.declare_queryable(
+                // `declare_queryable` is this call with no restriction and the literal wire key,
+                // so a queryable that states no links is declared as it always was.
+                let id = state.shared.declare_queryable_on_links(
                     ke,
+                    WireKey::literal(),
                     complete,
                     allowed_origin,
+                    links,
+                    None,
                     Arc::new(move |face: &TokioQueryHolder| {
                         Box::new(make_queryable_callback(
                             closure.clone(),
@@ -910,6 +951,11 @@ pub unsafe extern "C" fn z_declare_queryable(
             // through the holder the node mints.
             #[cfg(feature = "router-node")]
             SessionHandle::Node(node) => {
+                // The data plane of a node reads no restriction of links: it does not carry the
+                // call, and declares nothing.
+                if links.is_restricted() {
+                    return Z_EUNAVAILABLE;
+                }
                 let id = node.forwarder().host_queryable_from(
                     &ke,
                     complete,

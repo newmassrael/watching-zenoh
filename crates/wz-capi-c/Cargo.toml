@@ -179,6 +179,17 @@ identity-make = ["transport_tls", "wz-capi-core/identity-make"]
 # verbs from a client. OFF by default: zenoh-c has no such doors, and they cost every build about
 # 19 KB (hosted C1cs); a client that asks a node's verbs turns it on.
 lifecycle-doors = ["wz-capi-core/lifecycle-doors"]
+# The seven `wz_capi_c_*_ext` doors and the three statement structs they take
+# (`src/switch_doors.rs`): the links an entity may use, a publish's retry and all-or-none form, and
+# the node a query is addressed to, stated beside the arguments of `z_put`, `z_delete`,
+# `z_declare_publisher`, `z_get`, `z_declare_querier`, `z_declare_subscriber` and
+# `z_declare_queryable`, whose option structs are upstream's layout and have no field for them. OFF
+# by default: zenoh-c has no such statements. The doors read the build's own policies
+# (`entity-link-restriction`, `publisher-admission-retry`, `multi-route-atomic-tx`,
+# `targeted-query`, each off unless the build states it) and refuse a stated value while its policy
+# is off, so the feature adds the doors and no behaviour. It names the query and queryable
+# capabilities, whose doors it extends.
+switch-doors = ["query", "queryable", "wz-capi-core/switch-doors"]
 # The `quic/` link, over the same certificate material as `tls/`.
 transport_quic = ["wz-runtime-tokio/transport-link-quic", "wz-capi-core/transport_quic"]
 # The `quic-datagram/` link, on the `quic/` link's connection.
