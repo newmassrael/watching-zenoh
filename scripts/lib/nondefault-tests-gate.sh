@@ -402,6 +402,10 @@ transport-link-unixpipe,transport-link-ws|"
     # above leaves `transport-qos` off, so the census of the hosted run of c91572906a named its
     # five tests unclaimed. The filter is the module path, so a test added there is covered.
     "wz-capi-core|hook|router-node,transport-qos|drive::router_node::engine::port_tests::"
+    # The port's shared-memory publication (`port_tests::shared_memory`): a node and two registry
+    # clients, one of which offers shared memory, so the module is compiled only with
+    # `session-extshm` beside the two features above, which the row above leaves off.
+    "wz-capi-core|hook|router-node,transport-qos,session-extshm|drive::router_node::engine::port_tests::shared_memory::"
     # Whether a peer that scouts is a forwarding node (`open_plan::peer_fits_node`): it is one only
     # when it holds a gateway. The test is compiled only with `router-node` and `scout` together,
     # which no leg named, so the census reported it as claimed by nothing. The filter is the module

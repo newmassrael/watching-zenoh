@@ -17,10 +17,13 @@
 //! listener and the face watch not registered. The token and the liveliness subscription were
 //! stubbed together, so that test is shown to need the pair and not either of them alone.
 //!
-//! # Not taken here
+//! # Shared memory
 //!
-//! The shared-memory publication (`publish_shm_on_wire_all`) needs a link that negotiated shared
-//! memory, which a router node does not offer; it is still the carry of the C door's own test.
+//! A node offers shared memory in its handshake as a registry session does, when its ABI offers
+//! it and its document enables it (`AbiChoices::offer_shm`, `transport/shared_memory/enabled`):
+//! the tests above open with neither, which is why their links negotiate none. The test of the
+//! port's shared-memory publication (`publish_shm_on_wire_all`) opens both ends with both, beside
+//! a client that offers none, in a build with `session-extshm`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,6 +57,11 @@ fn eventually(check: impl Fn() -> bool) -> bool {
 
 /// What the zenoh-c ABI decides about an open, as a C program that opens a session gets it.
 fn abi_choices() -> AbiChoices {
+    abi_choices_offering(false)
+}
+
+/// [`abi_choices`], with the handshake offering shared memory when `offer_shm` says so.
+fn abi_choices_offering(offer_shm: bool) -> AbiChoices {
     AbiChoices {
         tx_queue: TxQueueConf::default(),
         start_read_task: true,
@@ -62,15 +70,27 @@ fn abi_choices() -> AbiChoices {
         initial_interest: true,
         face_drive: FaceDrive::PerFace,
         shm_clients: no_shm_clients(),
-        offer_shm: false,
+        offer_shm,
         groups_report_shm: false,
     }
 }
 
 /// The plan of a session of `mode`, with multicast scouting off.
 fn plan(whatami: WhatAmI, mode: &str, connect: Vec<String>, listen: Vec<String>) -> OpenPlan {
+    plan_stating(whatami, mode, connect, listen, "")
+}
+
+/// [`plan`], its document stating `more` (keys written as `, key: value`) after the mode and the
+/// scouting.
+fn plan_stating(
+    whatami: WhatAmI,
+    mode: &str,
+    connect: Vec<String>,
+    listen: Vec<String>,
+    more: &str,
+) -> OpenPlan {
     let document =
-        format!(r#"{{ mode: "{mode}", scouting: {{ multicast: {{ enabled: false }} }} }}"#);
+        format!(r#"{{ mode: "{mode}", scouting: {{ multicast: {{ enabled: false }} }}{more} }}"#);
     OpenPlan::resolve(
         whatami,
         StatedEndpoints { connect, listen },
@@ -536,5 +556,149 @@ fn a_node_that_dials_a_node_holds_it_as_a_face() {
             "the router node kept the face of a {role:?} node that closed"
         );
         router.close();
+    }
+}
+
+/// The port's shared-memory publication, over links that negotiated shared memory.
+#[cfg(feature = "session-extshm")]
+mod shared_memory {
+    use wz_runtime_tokio::shm_provider::ShmBackedPayload;
+    use wz_session_core::sink::SampleView;
+
+    use super::*;
+
+    /// What a document states for a session to offer shared memory.
+    const SHM_ENABLED: &str = ", transport: { shared_memory: { enabled: true } }";
+
+    const KEY: &str = "wz/port/shm";
+    const BODY: &[u8] = b"a chunk the node published";
+
+    /// A router node on loopback that offers shared memory to the sessions it accepts.
+    fn open_node_offering_shm() -> Arc<RouterState> {
+        let plan = plan_stating(
+            WhatAmI::Router,
+            "router",
+            Vec::new(),
+            vec![format!(
+                "tcp/127.0.0.1:{}",
+                wz_runtime_tokio_test_support::free_port()
+            )],
+            SHM_ENABLED,
+        );
+        Arc::new(
+            plan.into_arguments(abi_choices_offering(true))
+                .run_node(NodeRole::Router)
+                .expect("the node opens"),
+        )
+    }
+
+    /// A registry client that dials `connect` and offers shared memory.
+    fn client_offering_shm(connect: Vec<String>) -> Client {
+        let plan = plan_stating(WhatAmI::Client, "client", connect, Vec::new(), SHM_ENABLED);
+        Client(
+            plan.into_arguments(abi_choices_offering(true))
+                .run()
+                .expect("the client opens"),
+        )
+    }
+
+    /// What a subscriber was handed: each payload, and whether it came as a chunk of shared
+    /// memory rather than as bytes.
+    type Got = Arc<Mutex<Vec<(Vec<u8>, bool)>>>;
+
+    fn subscribe(engine: &Arc<dyn SessionEngine>) -> (Got, SubId) {
+        let got: Got = Arc::default();
+        let sink = Arc::clone(&got);
+        let id = engine.declare_subscriber_on_wire(
+            KEY.to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let sink = Arc::clone(&sink);
+                Box::new(move |sample: &dyn SampleView| {
+                    let shared = sample
+                        .payload_shared()
+                        .and_then(|bytes| bytes.shm_chunk())
+                        .is_some();
+                    sink.lock()
+                        .unwrap()
+                        .push((sample.payload().to_vec(), shared));
+                })
+            }),
+        );
+        (got, id)
+    }
+
+    /// A chunk published through the port goes to a client that negotiated shared memory as the
+    /// chunk, to a client that did not as its bytes, and to the node's own subscriber as the
+    /// chunk; and the port says it has a peer of shared memory only once such a client is linked.
+    #[test]
+    fn a_chunk_published_through_the_port_reaches_a_shm_peer_as_the_chunk_and_another_as_bytes() {
+        let node = open_node_offering_shm();
+        let engine = node.as_engine();
+        let locator = node.listen_locators()[0].clone();
+
+        let plain = Client::open(vec![locator.clone()]);
+        assert!(eventually(|| engine.face_snapshots().len() == 1));
+        assert!(
+            !engine.has_shm_peer(),
+            "the port has a peer of shared memory while its one client offered none"
+        );
+        let shared = client_offering_shm(vec![locator]);
+        assert!(
+            eventually(|| engine.has_shm_peer()),
+            "the port has no peer of shared memory with a client that offered it linked"
+        );
+
+        let (on_shared, _) = subscribe(&shared.as_engine());
+        let (on_plain, _) = subscribe(&plain.as_engine());
+        let (on_node, _) = subscribe(&engine);
+
+        let mut chunk = ShmBackedPayload::alloc(BODY.len()).expect("a POSIX segment");
+        chunk.write(BODY);
+        let chunk = Arc::new(chunk);
+        // The clients' subscriptions reach the node over their links; until they have, a
+        // publication has fewer faces to go to, so it is sent again until each has one.
+        let deadline = Instant::now() + WAIT;
+        let told = |got: &Got| !got.lock().unwrap().is_empty();
+        while !(told(&on_shared) && told(&on_plain) && told(&on_node)) && Instant::now() < deadline
+        {
+            engine
+                .publish_shm_on_wire_all(
+                    KEY,
+                    &WireKey::literal(),
+                    chunk.send_handle(),
+                    &PublishOptions::default(),
+                )
+                .expect("a node publishes a chunk");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        let first = |got: &Got, who: &str| {
+            got.lock()
+                .unwrap()
+                .first()
+                .cloned()
+                .unwrap_or_else(|| panic!("{who} was handed nothing"))
+        };
+        assert_eq!(
+            first(&on_shared, "the client of shared memory"),
+            (BODY.to_vec(), true),
+            "the client that negotiated shared memory was not handed the chunk"
+        );
+        assert_eq!(
+            first(&on_plain, "the client without shared memory"),
+            (BODY.to_vec(), false),
+            "the client that negotiated no shared memory was not handed the bytes"
+        );
+        assert_eq!(
+            first(&on_node, "the node's own subscriber"),
+            (BODY.to_vec(), true),
+            "the node's own subscriber was not handed the chunk"
+        );
+        shared.close();
+        plain.close();
+        node.close();
     }
 }
