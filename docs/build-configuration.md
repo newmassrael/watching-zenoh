@@ -157,7 +157,9 @@ original reproduced by naming it. Three things follow from it:
   on the builders of a publisher, a subscriber, a queryable, a get and a querier, behind the
   non-default crate feature `link-restriction` (a door upstream does not have stays out of the
   default surface); a set is refused when the policy is off, and by the router engine, which
-  does not read it. The C API, the cooperative engine and lwIP do not read it.
+  does not read it. The zenoh-c ABI states it through the non-default feature `switch-doors` of
+  its crate (see "Stating the four switches from the C ABI" below). The cooperative engine and
+  lwIP do not read it.
 - **Addressing a query to one node** (`targeted-query`, off by default): upstream sends a
   query to every link whose peers declared a matching queryable, and a caller cannot name the
   node it wants. `QueryOptions::target_peer` names it by the identity its link's handshake gave
@@ -170,7 +172,7 @@ original reproduced by naming it. Three things follow from it:
   `.target_peer(zid)` on the builders of a get and a querier, which take the node's `ZenohId`,
   behind the non-default crate feature `targeted-query`; a named node is refused when the
   policy is off, and by the router engine, which does not read it. Only the tokio engine
-  reads it, and the C API does not state it.
+  reads it; the zenoh-c ABI states it through `switch-doors`.
 - **Retrying a publish that no link had room for** (`publisher-admission-retry`, off by
   default): a publish waits for room on each face and, when the lane is congested, a droppable
   message is counted as a drop and the call still succeeds, so a caller cannot tell queued from
@@ -184,8 +186,8 @@ original reproduced by naming it. Three things follow from it:
   reachable from the Rust API as `.admission_retry(..)` on the builders of a publisher and of a
   put or a delete, taking an `AdmissionRetry` (re-exported with the feature), behind the
   non-default crate feature `admission-retry`; a stated retry is refused when the policy is
-  off, and by the router engine, which does not read it. Only the tokio registry reads it, and
-  the C API does not state it.
+  off, and by the router engine, which does not read it. Only the tokio registry reads it; the
+  zenoh-c ABI states it through `switch-doors`.
 - **Delivering a publish to all of its links or to none** (`multi-route-atomic-tx`, off by
   default): a publish waits for room on each face on its own terms, so one put can reach some
   faces and be dropped at another. A publish that states `PublishOptions::atomic_tx` instead
@@ -204,8 +206,30 @@ original reproduced by naming it. Three things follow from it:
   builders of a publisher and of a put or a delete, which takes no argument so that the form
   is only ever stated, behind the non-default crate feature `atomic-publish`; the statement is
   refused when the policy is off, and by the router engine, which does not read it. Only the
-  tokio registry reads it, and the C API does not state it;
+  tokio registry reads it; the zenoh-c ABI states it through `switch-doors`;
   `BoxedLinkDriver::try_reserve_room` is the seam a wrapper must forward.
+- **Stating the four switches from the C ABI** (the non-default feature `switch-doors` of
+  `wz-capi-c`, a capability that implies `query` and `queryable`): the option structs of the
+  `z_*` functions are upstream's layout and the `z_` symbols are held to the reference
+  library's, so nothing is a field of one and nothing is a new `z_`, `zc_` or `ze_` export.
+  Seven `wz_capi_c_*_ext` doors take what `z_put`, `z_delete`, `z_declare_publisher`, `z_get`,
+  `z_declare_querier`, `z_declare_subscriber` and `z_declare_queryable` take and one more
+  argument, a pointer to a statement struct (`wz_capi_c_entity_ext_t`: `link_mask`;
+  `wz_capi_c_publish_ext_t`: `link_mask`, `attempts`, `delay_ms`, `all_or_none`;
+  `wz_capi_c_query_ext_t`: `link_mask`, `has_target`, `target`), each with a `_default`
+  function that writes the statement of nothing. `link_mask` is one bit per link slot (slot 0
+  the link the session dialled, listener `n` slot `n + 1`), zero for every link. A null
+  pointer and a default struct state nothing, and a call that states nothing is the call the
+  `z_*` function makes, in every build. A stated value is passed through the matching
+  `admit_in_build` before anything is sent or declared: with the policy off the door answers
+  `WZ_CAPI_C_E_POLICY_OFF` (-102), a declaration leaves its out-parameter in the gravestone
+  state, and a closure, a payload and the owned option fields are consumed as on a success. A
+  retry of no pass or no delay, more than 255 passes or 65535 ms, and a target of no byte are
+  `Z_EINVAL` whatever the policy. A session that is a node (`router-node`) reads none of the
+  four, so a call stating one there answers `Z_EUNAVAILABLE`, the code of every operation a
+  node does not carry. Still open: the router, cooperative and lwIP engines do not read them,
+  and liveliness tokens, subscribers and gets, the advanced publisher and subscriber, and the
+  querying subscriber have no statement door.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and
