@@ -12570,6 +12570,31 @@
         "Round 4422's carry said the mnemosyne UNDECIDABLE was fixed in its Round 1345; the cause of what was seen is a linked worktree's hook exporting GIT_DIR, fixed in mnemosyne Round 1346 (the pin moves when it lands)",
         "main is red on two static gates since 2026-11-08 afternoon: reason_review_pin_gate (session-close-ingress cites three files 75459679c1 changed) and feature_public_surface_census (zenoh link-restriction, wz-only, has no row and no lane that turns it on)"
       ]
+    },
+    "Round 4428": {
+      "decision_summary": "A command that scripts/lib/read-only-tree.sh runs in a read-only checkout now sees the caller's whole environment, with WZ_ARTIFACT_ROOT on top, on both of its branches. Before, the bwrap branch (a build machine) passed the environment through, while the sudo branch (a hosted runner) passed what `sudo -E` left plus a chosen list of PATH, HOME and LD_LIBRARY_PATH. So a lane saw different variables depending on which branch its host took, and the difference showed up only on hosted runs. Measured on a fleet host by forcing the sudo branch: the command ran as the caller's uid but saw USER=root and LOGNAME=root, lost PERL5LIB, PYTHONPATH and LD_PRELOAD, and gained SUDO_* and a changed TERM. USER=root matters to a test that re-runs itself in a namespace, because NetnsPair::test_inside hands USER to runuser.\n\nThis is the third instance of one class: a command re-run as the caller through sudo loses part of its environment. Round 4373 fixed it in NetnsPair::test_inside by carrying the whole environment. 79ce50c9b9 fixed this script by adding LD_LIBRARY_PATH to its list. A list can only name the variables someone has already lost, so the sudo branch now does what the Rust twin does. The caller's environment is read NUL-separated, passed across as arguments, and restored with `env -i` after setpriv drops back to the caller's uid. `-E` is no longer needed, because nothing is taken from sudo's environment.\n\nThe same check found reason_review_pin_gate red on main. 75459679c1 (the reliable-gap policy) changed three files that atom session-close-ingress cites, and their rows were not moved. The four claims the reason makes of those files were re-read against the new blobs and still hold, so the three rows move to this round.",
+      "changes_bullets": [
+        "scripts/lib/read-only-tree.sh: the sudo branch of ro_tree_exec carries the caller's whole environment (`env -0` read into an array, passed as arguments, restored with `env -i` after setpriv), replacing the PATH, HOME and LD_LIBRARY_PATH list and `sudo -E`; the comment names the Rust twin NetnsPair::test_inside.",
+        "docs/reason-review-pins.md: the session-close-ingress rows for crates/wz-runtime-tokio/src/session_glue.rs, crates/wz-session-core/src/drive.rs and crates/wz-session-core/src/session_actions.rs move to the blobs 75459679c1 left and to this round."
+      ],
+      "verification_bullets": [
+        "Control on pc2, plain ssh with non-interactive sudo, sudo branch forced by overriding ro_tree_probe, comparing the environment outside with `env` run inside: the origin/main script differs in 12 lines (USER and LOGNAME root, PERL5LIB, PYTHONPATH and LD_PRELOAD gone, SUDO_* and TERM added); the new script differs only in WZ_ARTIFACT_ROOT.",
+        "Same host, new script: a value holding a newline arrives unchanged, the command runs as the caller (id -un), a write into the checkout fails, a write into the artifact root succeeds; the temporary directories were removed.",
+        "Same probe on the bwrap branch (mode 0 on pc2): it differs from the outside only in WZ_ARTIFACT_ROOT plus SHLVL and `_`, which the shell sets itself, so the two branches now give one environment.",
+        "shellcheck -x and bash -n of scripts/lib/read-only-tree.sh: clean.",
+        "reason_review_pin_gate --check: FAIL on the three session-close-ingress rows before, OK after; prose_named_identifier_gate, reason_citation_gate and store_reason_citation_gate --check: rc 0.",
+        "Re-read against the new blobs: drive.rs fn admits_open still defaults to false and the passive open still reads crate::lifecycle_wire::tail_of; session_actions.rs still holds pub struct OutOfBand; session_glue.rs drive_session_until_terminal_with_extra_deadline still calls check_out_of_band and parks on out_of_band.signalled in both arms.",
+        "Not run: Layer Ewire itself, the one caller of ro_tree_exec, under sudo; the fleet has no sudo inside bx, so its next hosted run is the reading."
+      ],
+      "impact_refs": [
+        "watching-zenoh/build-and-verify",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the next hosted Ewire leg (the read-only checkout under sudo) as the reading of this change.",
+        "The class stays reproducible only on hosted runners until bx RFC 0041 (adopted 2026-11-08: a unit that needs root runs in a disposable microVM) is built; then every lane whose hosted job uses sudo declares that capability, and a gate checks that each lane that invokes sudo declares it.",
+        "Hosted verdict of round 4373 (Layer M through test_inside) is still unread: the only completed run after it skipped Layer M, and the runs after were cancelled while queued."
+      ]
     }
   },
   "inventory_entries": {
