@@ -2563,6 +2563,29 @@ engine reads this policy.
 '''
 
 [[policy]]
+id = "publisher-admission-retry"
+kind = "bool"
+kconfig = "WZ_POLICY_PUBLISHER_ADMISSION_RETRY"
+default = "off"
+upstream = "Sends a put to every link at once and waits on each link for room in its queue; a put that finds none on a link is dropped there (or closes the session) and still reports success, and a caller cannot ask for it to be tried again."
+since = 2
+help = '''
+Whether a publish may state a bounded retry for the case where no link took
+it. Off, the call that states a retry is refused and a put goes out as
+upstream's does. On, a publish that states a retry (a number of further passes
+and a delay between them) first offers the frame to every link it may use
+without waiting for room. If at least one link queued it nothing is retried,
+and a link that had no room is skipped as a congestion drop skips it. If no
+link queued it and at least one had no room, the call waits the delay and
+offers the frame again to those links only, up to the stated number of passes.
+A publish that still found no room ends having delivered to no link: it does
+not close the session, and it waits no longer than the passes and delays it
+stated. A payload too long to be offered without waiting is sent as a
+publish that states no retry sends it. The number of passes and the delay are
+never zero. Only the tokio engine reads this policy.
+'''
+
+[[policy]]
 id = "entity-timestamp-opt-in"
 kind = "bool"
 kconfig = "WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"

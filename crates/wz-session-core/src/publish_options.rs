@@ -26,6 +26,7 @@
 
 use alloc::vec::Vec;
 
+use crate::admission_retry::AdmissionRetry;
 use crate::link_restriction::LinkRestriction;
 use crate::locality::Locality;
 use crate::metadata::PushMetadata;
@@ -62,6 +63,12 @@ pub struct PublishOptions {
     /// set sends only on the links of its slots. An engine with one link per node applies it
     /// per face; the loopback leg is not a link and is not restricted by it.
     pub links: LinkRestriction,
+    /// The retry the publish makes when no link had room (policy `publisher-admission-retry`).
+    /// `None` (the default, and upstream's behaviour) waits for room on every link as before; a
+    /// retry offers the frame without waiting and, when no link queued it, again to the links
+    /// that had no room (see [`AdmissionRetry`]). An engine with one link per node applies it
+    /// per face; the loopback leg is not a link and has no queue to lack room in.
+    pub admission_retry: Option<AdmissionRetry>,
     /// Link-layer reliability hint propagated to (a) the wire frame's reliable-flag (zenoh-pico
     /// `FLAG_T_FRAME_R`) and (b) the loopback `Sample.reliability` field.
     pub reliability: Reliability,
@@ -170,6 +177,14 @@ impl PublishOptions {
     /// Limit the publish to the links of `links`.
     pub fn with_links(mut self, links: LinkRestriction) -> Self {
         self.links = links;
+        self
+    }
+
+    /// Make the publish retry as `retry` says when no link had room. A build whose
+    /// `publisher-admission-retry` policy is off refuses it where the engine reads it
+    /// ([`crate::admission_retry::admit_in_build`]).
+    pub fn with_admission_retry(mut self, retry: AdmissionRetry) -> Self {
+        self.admission_retry = Some(retry);
         self
     }
 
@@ -462,9 +477,9 @@ impl PublishOptions {
     /// these options and reading them again per message.
     ///
     /// `None` when the options are not a plain Put (a Del, a timestamp, an encoding, a source, an
-    /// attachment), which then take the general publish. The answer holds the same facts the
-    /// general publish derives from the options (`reliable_bool`, the express flag,
-    /// `priority_band`), by the same code.
+    /// attachment, a retry for a link with no room), which then take the general publish. The
+    /// answer holds the same facts the general publish derives from the options
+    /// (`reliable_bool`, the express flag, `priority_band`), by the same code.
     ///
     /// Also `None` in a build with no Push codec, which sends no Put at all ([`SENDS_PLAIN_PUTS`]).
     /// Nothing else about the build decides it: what can stop a plain Put is a fact about the
@@ -476,7 +491,8 @@ impl PublishOptions {
     pub fn plain_put_params(&self) -> Option<PlainPutParams> {
         #[cfg(feature = "codec-push")]
         {
-            if self.kind != SampleKind::Put {
+            // The plain lane sends each frame with a wait for room and knows no retry.
+            if self.kind != SampleKind::Put || self.admission_retry.is_some() {
                 return None;
             }
             let meta = self.push_metadata();
@@ -726,5 +742,20 @@ mod plain_put_tests {
             SENDS_PLAIN_PUTS
         );
         assert!(PublishOptions::del().plain_put_params().is_none());
+    }
+
+    #[test]
+    fn a_publish_states_no_retry_unless_asked_and_a_retry_leaves_the_plain_lane() {
+        assert_eq!(PublishOptions::put().admission_retry, None);
+        assert_eq!(PublishOptions::del().admission_retry, None);
+        let retry = AdmissionRetry::new(2, 7).expect("both numbers set");
+        let stated = PublishOptions::put().with_admission_retry(retry);
+        assert_eq!(stated.admission_retry, Some(retry));
+        // The plain lane waits for room and has no retry, so a publish that states one takes the
+        // general publish whatever the build says a plain Put gets.
+        assert!(stated.plain_put_params().is_none());
+        // Stating it leaves what else the options say alone, and survives a clone.
+        assert_eq!(stated.clone().admission_retry, Some(retry));
+        assert_eq!(stated.kind, SampleKind::Put);
     }
 }

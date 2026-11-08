@@ -375,6 +375,11 @@ pub mod link_restriction;
 /// and the refusal a build without the policy gives. no_std + no_alloc clean; unconditional.
 pub mod peer_target;
 
+/// Offering a publish again when no link had room (policy `publisher-admission-retry`): the
+/// value a publish states and the refusal a build without the policy gives. no_std + no_alloc
+/// clean; unconditional.
+pub mod admission_retry;
+
 /// Reliability hint shared by LinkDriver outbound + Sample inbound.
 /// no_std + no_alloc clean (pure enum + helper); unconditional.
 pub mod reliability;
