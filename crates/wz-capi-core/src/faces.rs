@@ -245,6 +245,28 @@ struct WireLegs<'a> {
     reserved: ReservedLeg<'a>,
 }
 
+/// The same three calls as a caller hands them to [`SharedSession::fan_out`], before the fan-out
+/// has decided whether this build uses them. They are generic and not `dyn` so that a build that
+/// does not use them never makes the `dyn` of them: turning a closure into `&dyn Fn` keeps its
+/// body in the library through the vtable whether or not anything calls it.
+struct WireCalls<P, Rv, Rd> {
+    probe: P,
+    reserve: Rv,
+    reserved: Rd,
+}
+
+/// Whether this build has a policy under which a publish can state something about its wire
+/// legs: the admission retry or the all-faces-or-none send. A build with neither never reads
+/// `opts.admission_retry` or `opts.atomic_tx` as anything but their defaults (every entry point
+/// that takes one from a caller refuses it first, by `admit_in_build`), so the legs are
+/// unreachable there and are left out of the binary instead of linked and never called. This
+/// crate's own unit tests state a retry or an atomic send on the options directly, past the
+/// entry points, so the legs are there in a test build whatever the policy says.
+const WIRE_LEGS_IN_BUILD: bool = cfg!(test) || {
+    let policy = wz_session_core::policy::SessionPolicy::from_build();
+    policy.publisher_admission_retry || policy.multi_route_atomic_tx
+};
+
 /// What asking one face to reserve room found, with `H` the reservation it gave.
 enum Reserved<H> {
     /// The face promised room, which `H` holds until it is dropped.
@@ -3483,14 +3505,14 @@ impl SharedSession {
             PutKey::Literal(keyexpr),
             payload,
             |session, leg| Leg::of_publish(session.publish(keyexpr, payload, leg)),
-            WireLegs {
-                probe: &|session: &TokioSession, leg: PublishOptions| {
+            WireCalls {
+                probe: |session: &TokioSession, leg: PublishOptions| {
                     Leg::of_probe(session.publish_probe(keyexpr, payload, leg))
                 },
-                reserve: &reserve_on,
-                reserved: &|session: &TokioSession,
-                            leg: PublishOptions,
-                            reservation: WireReservation| {
+                reserve: reserve_on,
+                reserved: |session: &TokioSession,
+                           leg: PublishOptions,
+                           reservation: WireReservation| {
                     Leg::of_probe(
                         session
                             .publish_reserved(keyexpr, payload, leg, reservation)
@@ -3580,23 +3602,36 @@ impl SharedSession {
     /// `opts.admission_retry` is set. `wire.reserve` and `wire.reserved` are the two phases of a
     /// publish that reaches all of its faces or none, read only when `opts.atomic_tx` is set.
     /// They are for the wire legs only: the local leg is `send`'s whatever the options say.
-    fn fan_out<F>(
+    fn fan_out<F, P, Rv, Rd>(
         &self,
         opts: &PublishOptions,
         key: PutKey<'_>,
         payload: &[u8],
         send: F,
-        wire: WireLegs<'_>,
+        wire: WireCalls<P, Rv, Rd>,
     ) -> Result<usize, FanoutError>
     where
         F: Fn(&TokioSession, PublishOptions) -> Leg,
+        P: Fn(&TokioSession, PublishOptions) -> Leg,
+        Rv: Fn(&TokioSession, &PublishOptions) -> Reserved<WireReservation>,
+        Rd: Fn(&TokioSession, PublishOptions, WireReservation) -> Leg,
     {
+        // The `dyn` is made only where the build can use it (see [`WIRE_LEGS_IN_BUILD`]).
+        let legs = if WIRE_LEGS_IN_BUILD {
+            Some(WireLegs {
+                probe: &wire.probe,
+                reserve: &wire.reserve,
+                reserved: &wire.reserved,
+            })
+        } else {
+            None
+        };
         self.fan_out_with(
             opts,
             key,
             payload,
             |session, leg, _| send(session, leg),
-            Some(wire),
+            legs,
             |session, leg, _| send(session, leg),
         )
     }
@@ -3999,15 +4034,15 @@ impl SharedSession {
             |session, leg| {
                 Leg::of_alias(session.publish_aliased_auto(mapping_id, suffix, payload, leg))
             },
-            WireLegs {
-                probe: &|session: &TokioSession, leg: PublishOptions| {
+            WireCalls {
+                probe: |session: &TokioSession, leg: PublishOptions| {
                     Leg::of_probe_alias(
                         session.publish_aliased_auto_probe(mapping_id, suffix, payload, leg),
                     )
                 },
                 // An id the face was never told is not a face that lacks room: it takes no part,
                 // and is found out here and not by the send that follows.
-                reserve: &|session: &TokioSession, leg: &PublishOptions| {
+                reserve: |session: &TokioSession, leg: &PublishOptions| {
                     if session
                         .actions()
                         .resolve_outbound_mapping(mapping_id)
@@ -4018,9 +4053,9 @@ impl SharedSession {
                         reserve_on(session, leg)
                     }
                 },
-                reserved: &|session: &TokioSession,
-                            leg: PublishOptions,
-                            reservation: WireReservation| {
+                reserved: |session: &TokioSession,
+                           leg: PublishOptions,
+                           reservation: WireReservation| {
                     Leg::of_probe_alias(
                         session
                             .publish_aliased_auto_reserved(
@@ -4069,14 +4104,14 @@ impl SharedSession {
                         .map_err(PublishAliasError::from),
                 )
             },
-            WireLegs {
-                probe: &|session: &TokioSession, leg: PublishOptions| {
+            WireCalls {
+                probe: |session: &TokioSession, leg: PublishOptions| {
                     Leg::of_probe(session.publish_aliased_probe(mapping_id, None, payload, leg))
                 },
-                reserve: &reserve_on,
-                reserved: &|session: &TokioSession,
-                            leg: PublishOptions,
-                            reservation: WireReservation| {
+                reserve: reserve_on,
+                reserved: |session: &TokioSession,
+                           leg: PublishOptions,
+                           reservation: WireReservation| {
                     Leg::of_probe(
                         session
                             .publish_aliased_reserved(mapping_id, None, payload, leg, reservation)

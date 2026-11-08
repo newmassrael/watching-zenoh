@@ -202,7 +202,29 @@ CASES: tuple[Case, ...] = (
     # policy are chosen growth. With the lane's offset over hkl001 on the same pico code (that run
     # against hkl001: +1,296, +3,492, +3,596) the hosted readings are 1,917,256, 2,979,357 and
     # 4,413,586, and each budget is that and 3,500, to the hundred.
-    Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_855_900,
+    # 2026-11-09 -- hosted run 42444920480 (`14c0595c31`) read `pico-client` 1,856,700 (800 over)
+    # and `capic-router-node` 6,010,776 (1,176 over); on the build machine (`pc2`) the same
+    # commit reads `pico-client` 1,855,436, so the lane is +1,264 there. Since that head: the
+    # route memos per table version, the link restriction and the targeted query (value
+    # policies, both values linked, C3), the reliable-gap policy (`pico-client` 1,860,660 at its
+    # commit, +5,224 for all of these), and the admission retry with the all-or-none send, which
+    # took the publish fan-out's probe and reserve legs into every build through a `dyn` the
+    # fan-out made whether or not the policy was on (+7,204 more, in `publish_all`,
+    # `publish_aliased_all_for` and the probe path of the session). The legs are now made only
+    # where a policy states them (`WIRE_LEGS_IN_BUILD` in `faces.rs`), which gave back 4,216 of
+    # it (1,867,864 -> 1,863,648). The rest, about 2,300, is below the fan-out: the writer
+    # queue's `try_reserve` and `Permit` (a method of the link driver trait, so every driver
+    # has it), `build_publish_push`, and a few hundred in the publish options' clone, chosen. The
+    # nine cases over their budgets on `pc2` at origin `47ec060afa` plus that change read
+    # `pico-client` 1,863,648, `-small` 1,521,073, `-udp` 1,925,724, `pico-peer` 2,985,089,
+    # `pico-default` 4,418,990, `capic-client-small` 1,971,258, `capic-router-node` 6,047,612,
+    # `capic-default` 11,161,472 and `capic-default-lean` 9,583,884. Each budget is that reading
+    # plus the lane's offset over `pc2` (1,264 for the client images, which the same run fixes;
+    # the 3,500 the older notes give the peer and default images; the 3,184 `capic-default`'s
+    # note gives the C images) and 3,500, to the hundred. The C images were not taken apart
+    # symbol by symbol; the window above is all that grew them, and the next hosted reading
+    # corrects an offset that is off.
+    Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_868_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST, COOP_ENGINE),
          require=(SINGLE_THREADED, TOKIO_ENGINE),
@@ -221,7 +243,7 @@ CASES: tuple[Case, ...] = (
               "1,861,801 on hosted CI on 2026-10-29 (head `017e3c711`), and 1,868,097 on a "
               "build machine on the tree of round 3939, whose readings track the hosted ones "
               "(capic-default's note): the budget is that reading and 3,500, to the hundred"),
-    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_516_000,
+    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_525_900,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST),
          require=(SINGLE_THREADED,), profile="capi-small",
@@ -240,7 +262,7 @@ CASES: tuple[Case, ...] = (
               "queries pending on a face with it (4,173 over 1,520,800): the head under it was "
               "not measured here, so what is that round's and what the earlier rounds' is not "
               "separated, and the budget is that reading and 3,500, rounded up to the hundred"),
-    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_920_800,
+    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_930_600,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
          require=(UDP, SINGLE_THREADED),
@@ -559,7 +581,7 @@ CASES: tuple[Case, ...] = (
     # hosted reading is about 2,950,300 and the budget is that and 3,500, to the hundred.
     # 2026-11-03, the SCE pins -- 2,978,817 on hosted run 41589047498 (2,978,017 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
-    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_982_900,
+    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_992_100,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
          note="peer implies scout and with it the UDP group"),
@@ -573,7 +595,7 @@ CASES: tuple[Case, ...] = (
     # sort and B-tree), the same commit's release latches and advanced miss listeners (the coop
     # note above), and `436683e036`'s open handoff (`handoff::Reporter`) and runtime pool. Chosen
     # growth, so the budget is the hosted reading and 3,500, to the hundred.
-    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_417_100,
+    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_426_000,
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
@@ -596,7 +618,7 @@ CASES: tuple[Case, ...] = (
                  ROUTER_NODE)),
     # 2026-11-03, the SCE pins -- 1,974,779 on hosted run 41589047498 (1,973,891 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
-    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_967_300,
+    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_978_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST,
                  ROUTER_NODE),
          profile="capi-small",
@@ -696,7 +718,7 @@ CASES: tuple[Case, ...] = (
     # "Hold the router's faces by id and by tier"), +9,436. Chosen growth
     # (`docs/router-table-snapshots.md` section 6.6); the budget is that reading, 3,600 and
     # 3,500, to the hundred.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_009_600,
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_054_300,
          # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
          # role and the scouting and UDP link under it, and the multicast transport.
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
@@ -760,7 +782,7 @@ CASES: tuple[Case, ...] = (
     # `capic-default-lean`'s +14,156, split in its note), the face table +8,792
     # (`capic-router-node`'s note of this day). Chosen growth; the budget is that reading, 3,600
     # and 3,500, to the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_105_100,
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_168_200,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST),
          exports=837,
@@ -820,7 +842,7 @@ CASES: tuple[Case, ...] = (
          "group,gossip,transport_tls,transport_quic,transport_quic_datagram,transport_ws,"
          "transport_unixsock-stream,transport_multilink,auth_pubkey,e2e-sender,"
          "transport_compression,auth_usrpwd,interceptors,multicast-transport",
-         9_565_100,
+         9_590_600,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),
