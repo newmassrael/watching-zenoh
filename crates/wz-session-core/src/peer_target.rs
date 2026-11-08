@@ -24,8 +24,8 @@
 //! # The default is no target
 //!
 //! `None` is upstream's query, and it is the only one a build without the policy has. A call
-//! that names a node in such a build is refused by [`admit_in_build`] with a reason, not
-//! ignored.
+//! that names a node in such a build is refused by [`crate::peer_target::admit_in_build`] with
+//! a reason, not ignored.
 
 /// The longest node identity, in bytes. A session identity is 1 to 16 bytes on the wire.
 pub const MAX_PEER_ID_BYTES: usize = 16;

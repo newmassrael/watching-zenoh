@@ -11,23 +11,25 @@
 //! of several peers or a dialled one beside its listeners, has a second question that
 //! locality cannot state: of the links, which ones. An entity may be declared to a node only on
 //! the link that reaches the node's own region, a publisher may be wanted on one link and not
-//! on the others, a queryable may serve the links of one port only. [`LinkRestriction`] is that
-//! answer, and it is a value of the declaration, like locality, so the engines that hold several
-//! links apply it where they already apply locality and nowhere else.
+//! on the others, a queryable may serve the links of one port only.
+//! [`crate::link_restriction::LinkRestriction`] is that answer, and it is a value of the
+//! declaration, like locality, so the engines that hold several links apply it where they
+//! already apply locality and nowhere else.
 //!
 //! # What names a link
 //!
-//! A link is named by a [`LinkSlot`]: a small number the engine derives from how the link came
-//! to be. Each listener of a session is one slot and the dialling role is one slot, so the
-//! faces a listener accepts share its slot, and a restriction naming the slot names all of them
-//! and the ones that arrive later. The numbering is the engine's (it is stated where the
-//! engine derives it), and the restriction only holds the set.
+//! A link is named by a [`crate::link_restriction::LinkSlot`]: a small number the engine
+//! derives from how the link came to be. Each listener of a session is one slot and the
+//! dialling role is one slot, so the faces a listener accepts share its slot, and a restriction
+//! naming the slot names all of them and the ones that arrive later. The numbering is the
+//! engine's (it is stated where the engine derives it), and the restriction only holds the set.
 //!
 //! # The default is no restriction
 //!
-//! [`LinkRestriction::Any`] is what an entity that states nothing has, and it allows every link,
-//! including a link that has no slot: that is upstream's behaviour and the only one a build
-//! without the policy has. A restricted entity ([`LinkRestriction::only`]) allows exactly the
+//! [`crate::link_restriction::LinkRestriction::Any`] is what an entity that states nothing has,
+//! and it allows every link, including a link that has no slot: that is upstream's behaviour
+//! and the only one a build without the policy has. A restricted entity
+//! ([`crate::link_restriction::LinkRestriction::only`]) allows exactly the
 //! slots it names; a link that has no slot (the engine could not number it) is not allowed,
 //! because an unnamed link cannot have been named. The set is never empty: an entity that may
 //! use no link is not a restriction, it is an entity that cannot be reached, and it is refused

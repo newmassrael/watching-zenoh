@@ -9,9 +9,10 @@
 //! A publish sent to several links is offered to each of them, and a link whose queue is full
 //! makes the sender wait for room and then, for a droppable message, drop it and still report
 //! success. The caller cannot tell a frame that was queued from one that was dropped, and cannot
-//! ask for the drop to be avoided. [`AdmissionRetry`] is what a publish states to ask: how many
-//! further passes it may make and how long to wait between them. It is a value of the publish,
-//! like its locality, so an engine applies it where it already fans the publish out.
+//! ask for the drop to be avoided. [`crate::admission_retry::AdmissionRetry`] is what a publish
+//! states to ask: how many further passes it may make and how long to wait between them. It is
+//! a value of the publish, like its locality, so an engine applies it where it already fans the
+//! publish out.
 //!
 //! # What a retry does
 //!
@@ -19,18 +20,18 @@
 //! least one link queued it, nothing is retried: the links that had no room are skipped as a
 //! congestion drop skips them, because offering the frame again would send it twice to the links
 //! that took it. When no link queued it and at least one had no room, the sender waits
-//! [`AdmissionRetry::delay_ms`] and offers the frame again to the links that had no room, up to
-//! [`AdmissionRetry::attempts`] further passes. The publish that still found no room ends having
-//! reached no link, without closing the session; its wait is bounded by
-//! [`AdmissionRetry::max_wait_ms`]. This module holds only the value's rules; the engine that
-//! holds the links applies them.
+//! [`crate::admission_retry::AdmissionRetry::delay_ms`] and offers the frame again to the links
+//! that had no room, up to [`crate::admission_retry::AdmissionRetry::attempts`] further passes.
+//! The publish that still found no room ends having reached no link, without closing the
+//! session; its wait is bounded by [`crate::admission_retry::AdmissionRetry::max_wait_ms`]. This
+//! module holds only the value's rules; the engine that holds the links applies them.
 //!
 //! # The default is no retry
 //!
 //! `None` is a publish that waits for room as upstream's does, and it is the only one a build
 //! without the policy has. A call that states a retry in such a build is refused by
-//! [`admit_in_build`] with a reason, not ignored. A retry with no attempts is no retry and one
-//! with no delay is a spin, so neither can be built.
+//! [`crate::admission_retry::admit_in_build`] with a reason, not ignored. A retry with no
+//! attempts is no retry and one with no delay is a spin, so neither can be built.
 
 /// Why a retry could not be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
