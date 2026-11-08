@@ -69,6 +69,13 @@ pub struct PublishOptions {
     /// that had no room (see [`AdmissionRetry`]). An engine with one link per node applies it
     /// per face; the loopback leg is not a link and has no queue to lack room in.
     pub admission_retry: Option<AdmissionRetry>,
+    /// Whether the publish is delivered to all of the links it reaches or to none (policy
+    /// `multi-route-atomic-tx`). `false` (the default, and upstream's behaviour) sends to each
+    /// link on its own terms; `true` reserves room on every link first and sends only when every
+    /// link has promised some (see [`crate::atomic_tx`]). An engine with one link per node applies
+    /// it per face; the loopback leg is not a link, takes no reservation and is delivered to only
+    /// when every link promised room.
+    pub atomic_tx: bool,
     /// Link-layer reliability hint propagated to (a) the wire frame's reliable-flag (zenoh-pico
     /// `FLAG_T_FRAME_R`) and (b) the loopback `Sample.reliability` field.
     pub reliability: Reliability,
@@ -185,6 +192,14 @@ impl PublishOptions {
     /// ([`crate::admission_retry::admit_in_build`]).
     pub fn with_admission_retry(mut self, retry: AdmissionRetry) -> Self {
         self.admission_retry = Some(retry);
+        self
+    }
+
+    /// Make the publish reach all of its links or none. A build whose `multi-route-atomic-tx`
+    /// policy is off refuses it where the engine reads it
+    /// ([`crate::atomic_tx::admit_in_build`]).
+    pub fn with_atomic_tx(mut self) -> Self {
+        self.atomic_tx = true;
         self
     }
 
@@ -477,8 +492,8 @@ impl PublishOptions {
     /// these options and reading them again per message.
     ///
     /// `None` when the options are not a plain Put (a Del, a timestamp, an encoding, a source, an
-    /// attachment, a retry for a link with no room), which then take the general publish. The
-    /// answer holds the same facts the general publish derives from the options
+    /// attachment, a retry for a link with no room, a reservation on every link), which then take
+    /// the general publish. The answer holds the same facts the general publish derives from the options
     /// (`reliable_bool`, the express flag, `priority_band`), by the same code.
     ///
     /// Also `None` in a build with no Push codec, which sends no Put at all ([`SENDS_PLAIN_PUTS`]).
@@ -491,8 +506,9 @@ impl PublishOptions {
     pub fn plain_put_params(&self) -> Option<PlainPutParams> {
         #[cfg(feature = "codec-push")]
         {
-            // The plain lane sends each frame with a wait for room and knows no retry.
-            if self.kind != SampleKind::Put || self.admission_retry.is_some() {
+            // The plain lane sends each frame with a wait for room and knows neither a retry nor
+            // a reservation.
+            if self.kind != SampleKind::Put || self.admission_retry.is_some() || self.atomic_tx {
                 return None;
             }
             let meta = self.push_metadata();
@@ -757,5 +773,19 @@ mod plain_put_tests {
         // Stating it leaves what else the options say alone, and survives a clone.
         assert_eq!(stated.clone().admission_retry, Some(retry));
         assert_eq!(stated.kind, SampleKind::Put);
+    }
+
+    #[test]
+    fn a_publish_is_not_atomic_unless_asked_and_asking_leaves_the_plain_lane() {
+        assert!(!PublishOptions::put().atomic_tx);
+        assert!(!PublishOptions::del().atomic_tx);
+        let stated = PublishOptions::put().with_atomic_tx();
+        assert!(stated.atomic_tx);
+        // The plain lane sends under no reservation, so the general publish carries the request
+        // whatever the build says a plain Put gets.
+        assert!(stated.plain_put_params().is_none());
+        assert!(stated.clone().atomic_tx, "it survives a clone");
+        assert_eq!(stated.kind, SampleKind::Put);
+        assert_eq!(stated.admission_retry, None, "it states nothing else");
     }
 }

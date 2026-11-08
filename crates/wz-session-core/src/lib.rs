@@ -380,6 +380,11 @@ pub mod peer_target;
 /// clean; unconditional.
 pub mod admission_retry;
 
+/// Delivering a publish to all of the links it reaches or to none (policy
+/// `multi-route-atomic-tx`): the decision over the links' reservations and the refusal a build
+/// without the policy gives. no_std + no_alloc clean; unconditional.
+pub mod atomic_tx;
+
 /// Reliability hint shared by LinkDriver outbound + Sample inbound.
 /// no_std + no_alloc clean (pure enum + helper); unconditional.
 pub mod reliability;
