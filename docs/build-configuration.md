@@ -166,7 +166,11 @@ original reproduced by naming it. Three things follow from it:
   leg on the one face of that node and nowhere else: no session-local leg, no multicast group,
   and a node with no face leaves no leg, so the query ends with no replies and is not widened
   to the others. `peer_target::admit_in_build` refuses a target when the policy is off, which is
-  what an entry point that takes one from a caller calls. Only the tokio engine reads it.
+  what an entry point that takes one from a caller calls. It is reachable from the Rust API as
+  `.target_peer(zid)` on the builders of a get and a querier, which take the node's `ZenohId`,
+  behind the non-default crate feature `targeted-query`; a named node is refused when the
+  policy is off, and by the router engine, which does not read it. Only the tokio engine
+  reads it, and the C API does not state it.
 - **Retrying a publish that no link had room for** (`publisher-admission-retry`, off by
   default): a publish waits for room on each face and, when the lane is congested, a droppable
   message is counted as a drop and the call still succeeds, so a caller cannot tell queued from
@@ -176,8 +180,12 @@ original reproduced by naming it. Three things follow from it:
   the frame again to those faces only, up to the attempts, then ends with nothing delivered
   and no session close. A payload that must be fragmented cannot be probed, so it is sent the
   waiting way and is never retried. `admission_retry::admit_in_build` refuses a stated retry
-  when the policy is off; shared-memory publishes and the C plain-put lane do not retry. Only
-  the tokio registry reads it, and no Rust or C API states it yet.
+  when the policy is off; shared-memory publishes and the C plain-put lane do not retry. It is
+  reachable from the Rust API as `.admission_retry(..)` on the builders of a publisher and of a
+  put or a delete, taking an `AdmissionRetry` (re-exported with the feature), behind the
+  non-default crate feature `admission-retry`; a stated retry is refused when the policy is
+  off, and by the router engine, which does not read it. Only the tokio registry reads it, and
+  the C API does not state it.
 - **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
   generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
   sources first. Its options may `implies` capabilities, which become `select`s, and
