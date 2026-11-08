@@ -106,6 +106,18 @@ macro_rules! route_event {
     }};
 }
 
+/// One line of what a PEER tells its faces, written by the face registry of the C ABI core
+/// (`wz-capi-core`), which has no logger of its own: the same observation as [`route_event!`]
+/// (target `wz::routing`, a root tracing event where `tracing-spans` is built, a `log` record
+/// elsewhere), so the sender of a declaration reads in the run log of upstream's regions tests
+/// beside the router's lines. A peer keeps no other trace of the declarations it sends, and a
+/// registration that a late peer did not count (scenario 7) cannot be assigned to a sender or a
+/// receiver without it. The caller formats lazily (`format_args!`), so a run that does not log at
+/// debug level pays a level check.
+pub fn route_trace(line: core::fmt::Arguments<'_>) {
+    route_event!("{}", line);
+}
+
 /// R311y453 — live NIC-name resolution for the §5.16 `interfaces` subject axis.
 /// Gated on `link-interfaces`, which owns the `libc` dependency the `getifaddrs`
 /// call needs; all three `access-*` knobs pull it.

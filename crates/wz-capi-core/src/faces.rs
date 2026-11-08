@@ -512,6 +512,12 @@ impl QueryLeg<'_> {
     }
 }
 
+/// A zid as zenoh prints it, for the lines a peer writes of what it tells its faces
+/// ([`wz_runtime_tokio::route_trace`]): the text a router's lines and the tests' node names use.
+fn zid_text(zid: &[u8]) -> String {
+    wz_runtime_tokio::zid_hex::zid_to_zenoh_hex(zid)
+}
+
 /// Declare a subscriber on one face in `wire`'s form.
 fn declare_subscriber_on(
     session: &TokioSession,
@@ -2472,6 +2478,11 @@ impl SharedSession {
 
         let peer_zid = actions.peer_zid();
         let mut guard = self.admit_under_lock(id, peer_zid.as_deref(), dialled)?;
+        wz_runtime_tokio::route_trace(format_args!(
+            "peer {} admits face {id}: remote {} dialled={dialled}",
+            zid_text(&self.zid),
+            peer_zid.as_deref().map_or_else(|| "?".into(), zid_text),
+        ));
         // The faces that are told of the new link, which the barrier of
         // [`Self::face_up_after_links_told`] asks.
         #[cfg_attr(
@@ -2597,6 +2608,14 @@ impl SharedSession {
                 subs.insert(entry.id, sub);
             }
         }
+        wz_runtime_tokio::route_trace(format_args!(
+            "peer {} replays onto face {id} (remote {}): {} subscriber(s) of the {} it holds, {} already on the face",
+            zid_text(&self.zid),
+            held.peer_zid.as_deref().map_or_else(|| "?".into(), zid_text),
+            subs.len(),
+            guard.subs.len(),
+            held.subs.len(),
+        ));
         let mut qbls = BTreeMap::new();
         for entry in &guard.qbls {
             if held.qbls.contains_key(&entry.id) || !entry.links.allows(link_slot_of_face(id)) {
@@ -4653,6 +4672,16 @@ impl SharedSession {
     ) -> SubId {
         let mut guard = self.lock();
         let id = guard.take_entity_id();
+        wz_runtime_tokio::route_trace(format_args!(
+            "peer {} declares subscriber key={keyexpr} to faces {:?}",
+            zid_text(&self.zid),
+            guard
+                .faces
+                .keys()
+                .copied()
+                .filter(|face| links.allows(link_slot_of_face(*face)))
+                .collect::<Vec<_>>(),
+        ));
 
         // R311y557 — the LOCAL PLANE is in this walk, which is what makes an
         // in-process put reach this subscriber whether or not a peer exists.
