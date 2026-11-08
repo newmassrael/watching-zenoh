@@ -2459,7 +2459,7 @@ pub mod linkstate_interest;
 
 /// The client faces' declarations on one plane (subscribers, queryables, liveliness tokens), indexed
 /// by key and changed only through methods that record the key they moved, so
-/// [`route_cache::RouteCache::refresh`] can retire a route and not the whole cache.
+/// [`route_cache::RouteCache::bring_to_retiring`] can leave out a route and not the whole cache.
 /// Gated on `routing-router-hat`, with the forwarder that holds it.
 #[cfg(feature = "routing-router-hat")]
 pub(crate) mod client_store;

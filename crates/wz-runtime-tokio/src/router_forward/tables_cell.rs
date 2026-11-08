@@ -118,7 +118,8 @@ struct Pin {
 
 impl TablesCell {
     /// The cell over `tables`, in the form `sharing` names.
-    pub(crate) fn new(tables: Tables, sharing: RoutingTableSharing) -> Self {
+    pub(crate) fn new(mut tables: Tables, sharing: RoutingTableSharing) -> Self {
+        tables.bring_route_memos();
         let form = match sharing {
             RoutingTableSharing::Rwlock => Form::Locked(PlainRwLock::new(tables)),
             RoutingTableSharing::Snapshot => Form::Snapshot(Snapshot {
@@ -390,8 +391,11 @@ struct Draft<'a> {
 impl TablesWrite<'_> {
     /// End the write and make it seen: the guard let go under `rwlock`; under `snapshot` the draft
     /// published with one store, and only then the writers' lock let go, so that the next writer
-    /// copies the version this one published.
-    pub(crate) fn publish(self) {
+    /// copies the version this one published. Under either value the tables are first given the
+    /// route memos of what the write left in them ([`Tables::bring_route_memos`]), while no reader
+    /// can read them yet.
+    pub(crate) fn publish(mut self) {
+        self.bring_route_memos();
         self.published.bump();
         match self.write {
             Write::Locked(guard) => drop(guard),

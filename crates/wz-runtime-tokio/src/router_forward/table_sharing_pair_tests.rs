@@ -279,6 +279,66 @@ fn routing_table_sharing_snapshot_frees_a_retired_version_on_the_writer_not_the_
     );
 }
 
+/// Under `snapshot` a reader of an older version is served the routes of its own version, after a
+/// reader of the newer one has routed (`docs/router-table-snapshots.md`, section 6.8): each version
+/// holds the memo its writer gave it, so the older reader's route is neither computed again nor
+/// taken from the newer version's memo. The write declares a key the route does not reach, and the
+/// newer version's memo carries the route over, so no reader computes it at all after the first.
+/// Turned red by one memo shared by every version whose inputs a reader of the newer version moves:
+/// the older reader then computes a route it cannot keep.
+#[test]
+fn routing_table_sharing_snapshot_serves_a_reader_of_an_older_version_its_versions_routes() {
+    const ROUTED: &str = "demo/data";
+    let fwd = router_with_a_client(RoutingTableSharing::Snapshot);
+    // The subscriber of the routed key is a face of its own: the writer declares on `FaceId(0)`
+    // under the id every declaration here carries, which would replace a declaration of the face.
+    let (subscriber, _subscriber_sink) = client(zid(0xB0));
+    fwd.register(FaceId(2), &subscriber);
+    bring(&fwd, FaceId(2), declare_sub(ROUTED));
+    let (publisher, _publisher_sink) = client(zid(0xA0));
+    fwd.register(FaceId(1), &publisher);
+    let put = |fwd: &RouterForwarder| {
+        let put =
+            wz_session_core::push_build::build_push_literal(ROUTED, b"x").expect("build push");
+        bring(fwd, FaceId(1), NetworkMessage::Push(Box::new(put)));
+    };
+    put(&fwd);
+    assert_eq!(
+        fwd.client_route_computes(),
+        1,
+        "the first Put computes its route"
+    );
+
+    let older = fwd.on_tables();
+    let (returned_tx, returned) = mpsc::channel();
+    let writer = declare_on_another_thread(&fwd, returned_tx);
+    returned
+        .recv_timeout(FINISHES_WITHIN)
+        .expect("the writer returned while this thread held its read");
+    writer.join().expect("the writer finishes");
+    {
+        let fwd = Arc::clone(&fwd);
+        std::thread::spawn(move || put(&fwd))
+            .join()
+            .expect("a reader of the newer version routes");
+    }
+    assert_eq!(
+        fwd.client_route_computes(),
+        1,
+        "the newer version's memo carried the route the write did not reach"
+    );
+    put(&fwd);
+    assert!(
+        !holds(&older.tables, KEY),
+        "this thread still routes by the older version"
+    );
+    assert_eq!(
+        fwd.client_route_computes(),
+        1,
+        "the older version's reader was served from its version's memo"
+    );
+}
+
 /// Under `snapshot` a write that panics is not published: the version the readers load stays the
 /// last whole one. Turned red by a commit point that publishes while the thread unwinds.
 #[test]

@@ -188,10 +188,6 @@ impl<K, V, S> PersistentMap<K, V, S> {
     }
 
     /// How many keys the map holds.
-    ///
-    /// Read by the tests and by the forwarder (`routing-router-hat`); a build of the peer mesh
-    /// alone reads it nowhere, and the dead-code lint of that build is why it is gated.
-    #[cfg(any(test, feature = "routing-router-hat"))]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
@@ -273,8 +269,8 @@ impl<K: Hash + Eq, V, S: BuildHasher> PersistentMap<K, V, S> {
 
     /// The key the map holds equal to `key`, and its value.
     ///
-    /// Read by the tests and by the forwarder's client stores (`routing-router-hat`); gated as
-    /// [`len`](Self::len) is, for the dead-code lint of a build of the peer mesh alone.
+    /// Read by the tests and by the forwarder's client stores (`routing-router-hat`); gated for the
+    /// dead-code lint of a build of the peer mesh alone, which reads it nowhere.
     #[cfg(any(test, feature = "routing-router-hat"))]
     pub(crate) fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
     where

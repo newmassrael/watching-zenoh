@@ -409,15 +409,15 @@ use crate::interceptor::{
     InterceptorChain, InterceptorConfig, InterceptorContext, InterceptorFlow, InterceptorVerdict,
 };
 use crate::linkstate_forward::{
-    absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info,
-    client_query_route, client_route, complete_query_directions, compute_push_forward,
-    compute_self_publish_forward, declare_queryable_wireexpr, declare_subscriber_wireexpr,
-    emit_current_interest_replies, is_tree_forward_target, peer_acl_username, peer_whatami_routing,
-    peer_zid_routing, query_candidates, re_advertise_interest_into, resolve_governed_keyexpr,
-    resolve_source_in, resolve_source_zid_in, select_best_matching, stamped,
-    synthesize_drained_fan_finals, synthesize_expired_query_returns, Cached, ClientQablStore,
-    ClientQueryRoutes, ClientQueryable, ClientRoutes, ClientSubStore, DataRoutes, QueryCandidate,
-    QueryRoutes,
+    absorb_keyexpr_into, all_query_directions, bring_client_routes, bring_mesh_routes,
+    build_declare_queryable_with_info, client_query_route, client_route, complete_query_directions,
+    compute_push_forward, compute_self_publish_forward, declare_queryable_wireexpr,
+    declare_subscriber_wireexpr, emit_current_interest_replies, is_tree_forward_target,
+    peer_acl_username, peer_whatami_routing, peer_zid_routing, query_candidates,
+    re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in, resolve_source_zid_in,
+    select_best_matching, stamped, synthesize_drained_fan_finals, synthesize_expired_query_returns,
+    Cached, ClientQablStore, ClientQueryRoutes, ClientQueryable, ClientRoutes, ClientSubStore,
+    DataRoutes, QueryCandidate, QueryRoutes,
 };
 use crate::persistent_map::PersistentMap;
 #[cfg(feature = "routing-token-tables")]
@@ -595,8 +595,9 @@ fn is_router_hat(region: Region, node_mode: WhatAmI) -> bool {
 /// The graph and the three interest tables are each behind an `Arc`, so that a clone of the
 /// hat shares them and a writer copies only the one it writes, through the `*_mut` accessors
 /// below (`docs/router-table-snapshots.md`, section 3 (a)). The two memos are shared between
-/// clones and never copied: a route is a function of the inputs it is cached against
-/// (section 3 (c)).
+/// versions whose graph and tables they are cached against are the same, and a writer that moved
+/// those gives its version memos of its own before it publishes ([`Self::bring_route_memos`]):
+/// a route is derived data of the version it was computed from (sections 3 (c) and 6.8).
 #[derive(Clone)]
 struct MeshHat {
     /// The region's link-state graph.
@@ -653,6 +654,13 @@ impl MeshHat {
     #[cfg(feature = "routing-token-tables")]
     fn tokens_mut(&mut self) -> &mut LinkstatepeerInterest<()> {
         Arc::make_mut(&mut self.tokens)
+    }
+
+    /// Give the version this hat is part of the memos of its graph and tables
+    /// ([`Tables::bring_route_memos`]).
+    fn bring_route_memos(&mut self) {
+        bring_mesh_routes(&mut self.data_routes, &self.net, &self.subs);
+        bring_mesh_routes(&mut self.query_routes, &self.net, &self.qabls);
     }
 
     /// Every mesh net of a node is seeded as that node's own mode: the pin
@@ -953,6 +961,13 @@ impl BrokerHat {
     /// tables shares them.
     fn subs_mut(&mut self) -> &mut ClientSubs {
         Arc::make_mut(&mut self.subs)
+    }
+
+    /// Give the version this hat is part of the memos of its stores
+    /// ([`Tables::bring_route_memos`]).
+    fn bring_route_memos(&mut self) {
+        bring_client_routes(&mut self.client_routes, &self.subs);
+        bring_client_routes(&mut self.client_query_routes, &self.qabls);
     }
 
     /// The client faces' queryables, for writing (see [`subs_mut`](Self::subs_mut)).
@@ -3244,6 +3259,23 @@ impl Tables {
     /// region's coalescing flag is a writer's, set through [`mesh_mut`](Self::mesh_mut).
     fn plane(&self, tier: Region) -> Option<&LinkstateNetwork> {
         self.mesh_hat(tier).map(|hat| &*hat.net)
+    }
+
+    /// Give these tables the route memos of their own inputs, before any reader can read them
+    /// (`docs/router-table-snapshots.md`, section 6.8): every hat keeps the memo it shares with the
+    /// version before while the graph and tables a memo is cached against are unchanged, and is
+    /// given one of its own where they moved, carrying the routes the move cannot have changed.
+    /// Called by the writer when it ends a write ([`TablesWrite::publish`]) and on the tables a
+    /// cell starts with, so that no reader finds a memo of tables other than the ones it reads and
+    /// none moves one: what is derived from a version is made by its writer, as read-copy-update's
+    /// updater prepares the whole of what it publishes.
+    fn bring_route_memos(&mut self) {
+        for (_, hat) in self.hats.iter_mut() {
+            match hat {
+                Hat::Mesh(hat) => hat.bring_route_memos(),
+                Hat::Broker(hat) => hat.bring_route_memos(),
+            }
+        }
     }
 
     /// The routing facts of face `id`, for writing: copied first if another version of the

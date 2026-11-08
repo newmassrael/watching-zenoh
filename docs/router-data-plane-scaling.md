@@ -123,8 +123,10 @@ I6. Each invariant above is held by a test that can fail for exactly one reason 
 - Landed for the client subscriptions, which are the population that grows: `ClientSubStore` indexes
   them by key (literal keys by hash, keys with a wildcard kept apart), is writable only through methods
   that record the key they moved, and keeps a bounded log of those keys under the version each produced.
-  `RouteCache::refresh` reads that log and retires the routes the changed keys intersect; a topology
-  move, or a reader the log no longer reaches, retires everything as before. The mesh tables
+  `RouteCache::bring_to_retiring` reads that log and leaves the routes the changed keys intersect out
+  of the next version's memo; a topology move, or a memo the log no longer reaches, starts it empty
+  as before. Since `docs/router-table-snapshots.md` section 6.8 the writer does this before it
+  publishes, and no reader does. The mesh tables
   (`LinkstatepeerInterest`) keep the whole-cache invalidation and the linear scan: they hold the
   router-tier and peer-tier faces, a handful, and their routes also depend on the topology graph, so
   per-key retirement there needs the graph's own change record first.

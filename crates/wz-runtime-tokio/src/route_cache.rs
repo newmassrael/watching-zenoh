@@ -10,7 +10,7 @@
 //! A route is keyed by the SOURCE as well as the keyexpr, because the same
 //! Put forwarded along two sources' spanning trees goes different ways.
 //!
-//! [`RouteCache`](crate::route_cache::RouteCache) is that shape, keyed by keyexpr then source. Two points
+//! [`RouteCache`](crate::route_cache::RouteCache) is that shape, keyed by keyexpr then source. Three points
 //! where it is wz's own rather than a transcription:
 //!
 //! - FRESHNESS IS READ, NOT BUMPED. Upstream increments `routes_version` at
@@ -28,13 +28,20 @@
 //!   keeps no entry per key. The caller says whether its expression is a
 //!   declared one (`resource` on
 //!   [`RouteCache::get_or_compute`](crate::route_cache::RouteCache::get_or_compute)).
+//! - A MEMO BELONGS TO ONE VERSION OF THE TABLES. Where the router's tables are published versions
+//!   (`docs/router-table-snapshots.md`, section 6.8), a route is derived data of the version it
+//!   was computed from, and the memo is part of that version: its inputs are fixed when the writer
+//!   brings it to the version it publishes ([`RouteCache::bring_to`]), before any reader can load
+//!   that version, and a reader only adds the routes it computed at those inputs. A reader of an
+//!   older version is served from the older version's memo, and none moves a memo's inputs.
 
-use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use wz_routing_graph::Zid;
 
 use crate::counter::Counter;
+use crate::persistent_map::PersistentMap;
 use crate::sync::PlainRwLock;
 
 /// The versions of the tables a route is read from: what a cached route is
@@ -51,92 +58,134 @@ pub struct RouteInputs {
     pub table: u64,
 }
 
-impl RouteInputs {
-    /// Whether these inputs were read from a version of the tables older than the one `newer` was
-    /// read from: they differ, and neither member is ahead of `newer`'s.
-    ///
-    /// Both members are counters that a write of the tables moves forward and nothing moves back,
-    /// and they live as long as the cache that holds routes against them (the hat that owns both),
-    /// so of two inputs read along one sequence of writes one always precedes the other or they
-    /// are equal. A pair where neither precedes the other (a counter that wrapped) is not ordered,
-    /// and the cache treats it as it treats newer inputs.
-    pub fn precedes(self, newer: RouteInputs) -> bool {
-        self != newer && self.net <= newer.net && self.table <= newer.table
+/// Routes by keyexpr and source together, as upstream keeps one route per resource and source.
+/// Persistent, so that the memo of the next version starts as the memo of this one at the cost of
+/// one count, and leaving out a route copies its path alone. One map rather than a map of keyexprs
+/// to maps of sources: a route read hashes its key once and walks one trie (the two lookups of the
+/// nested form cost the readers 586 instructions a Put, `docs/router-table-snapshots.md` section 6.8).
+type Routes<T, S> = PersistentMap<RouteKey<S>, T>;
+
+/// The key a route is kept under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteKey<S> {
+    keyexpr: String,
+    source: S,
+}
+
+/// A route's key as its two parts, so that a route is read by a key borrowed from the caller's
+/// keyexpr and source, with nothing allocated: [`RouteKey`] owns its parts and a pair of
+/// references borrows them, and both hash and compare by the parts alone.
+trait RouteKeyParts<S> {
+    fn parts(&self) -> (&str, &S);
+}
+
+impl<S> RouteKeyParts<S> for RouteKey<S> {
+    fn parts(&self) -> (&str, &S) {
+        (&self.keyexpr, &self.source)
     }
 }
 
-/// Routes by keyexpr, then by source, all fresh at one [`RouteInputs`].
-#[derive(Debug)]
-struct Fresh<T, S> {
-    inputs: Option<RouteInputs>,
-    routes: HashMap<String, HashMap<S, T>>,
+impl<S> RouteKeyParts<S> for (&str, &S) {
+    fn parts(&self) -> (&str, &S) {
+        (self.0, self.1)
+    }
 }
 
-/// A per-(keyexpr, source) route cache; see the module docs.
+impl<'a, S: 'a> std::borrow::Borrow<dyn RouteKeyParts<S> + 'a> for RouteKey<S> {
+    fn borrow(&self) -> &(dyn RouteKeyParts<S> + 'a) {
+        self
+    }
+}
+
+impl<S: Hash> Hash for dyn RouteKeyParts<S> + '_ {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let (keyexpr, source) = self.parts();
+        keyexpr.hash(state);
+        source.hash(state);
+    }
+}
+
+impl<S: PartialEq> PartialEq for dyn RouteKeyParts<S> + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts() == other.parts()
+    }
+}
+
+impl<S: Eq> Eq for dyn RouteKeyParts<S> + '_ {}
+
+/// Hashed as its borrowed form is, which a map that finds an owned key by a borrowed one needs.
+impl<S: Hash> Hash for RouteKey<S> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self as &dyn RouteKeyParts<S>).hash(state);
+    }
+}
+
+/// A per-(keyexpr, source) route cache of one version of the tables; see the module docs.
 ///
 /// `S` is what distinguishes one route for a keyexpr from another: the source
 /// node on a mesh, whose spanning tree the route follows (upstream's mapped
 /// `NodeId`). A client leg has no such dimension, since every source reaches
 /// the same leaf faces, and keys by `()`.
 ///
-/// Interior-mutable because the forwarders route through `&self`, and behind its own reader-writer
-/// lock, as upstream's per-resource `data_routes: RwLock<DataRoutes>` is
-/// (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) data_routes: RwLock<DataRoutes>,`):
-/// a route is read on every message and written on a miss, and the tables the router will keep
-/// behind one lock (`docs/router-task-per-face.md`, phase 3) are read, not written, by the data path.
-/// So a thread that misses fills the memo under this small lock and stays a reader of the big one.
+/// The tables hold it behind an `Arc` that every version with the same inputs shares, and the
+/// writer of a version whose inputs moved gives that version a memo of its own
+/// ([`bring_to`](Self::bring_to), [`bring_to_retiring`](Self::bring_to_retiring)). Its inputs are
+/// therefore those of every version that holds it, and a reader never finds a memo of a version
+/// other than its own: no reader moves the inputs, and none computes a route it does not keep
+/// because another reader brought the memo to a newer version (`docs/router-table-snapshots.md`,
+/// sections 6.7 and 6.8).
 ///
-/// What makes that sound is that the inputs a route is fresh against cannot move while a reader
-/// holds the tables: every version in [`RouteInputs`] is moved by a mutation of the tables, and a
-/// mutation takes the tables for writing. Two threads that miss the same key therefore compute the
-/// same route at the same inputs, and the second store replaces the first with an equal value.
-/// Neither runs `compute` under the memo's lock, so a route that is slow to compute holds no reader.
+/// Interior-mutable because the forwarders route through `&self`: a route is read on every
+/// message and added on a miss. The routes are behind their own reader-writer lock, as upstream's
+/// per-resource routes are
+/// (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) data_routes: RwLock<DataRoutes>,`),
+/// and a miss adds its route under the write lock, copying its path of the persistent map where
+/// the next version's memo shares it. Measured in section 6.8, an `ArcSwap` in place of the lock
+/// cost the readers 347 instructions a Put more, about 100 a load, against the lock's one count;
+/// a lock read is the cheaper of the two at the readers' one or two lookups a message.
 ///
-/// Where readers hold different versions of the tables at once (`docs/router-table-snapshots.md`,
-/// section 3 (c)), two readers can ask at different inputs. The memo is still sound, since a route
-/// is served only at the inputs it was computed at, and it is a function of those alone. What the
-/// memo keeps is the newest inputs it has been brought to: a store or a refresh from inputs that
-/// [precede](RouteInputs::precedes) them is answered and not kept, so a reader of an older version
-/// never drops what a reader of a newer one stored.
+/// Two threads that miss the same key at the same inputs compute the same route, since a route is
+/// a function of its inputs alone, and the second store replaces the first with an equal value.
+/// Neither runs `compute` while it holds anything, so a route that is slow to compute holds no one.
 #[derive(Debug)]
 pub struct RouteCache<T, S = Zid> {
-    fresh: PlainRwLock<Fresh<T, S>>,
-    /// How many routes were COMPUTED rather than served. The witness that
-    /// separates "the cache is consulted and invalidated" from "the cache
-    /// exists": a delivery assertion alone passes with the cache bypassed.
-    computes: Counter,
+    /// The inputs the routes are fresh at: those of the versions of the tables that hold this memo.
+    /// `None` until a writer first brings the memo to a version: such a memo keeps nothing.
+    inputs: Option<RouteInputs>,
+    routes: PlainRwLock<Routes<T, S>>,
+    /// How many routes were COMPUTED rather than served, by this memo and every memo it was
+    /// brought from. The witness that separates "the cache is consulted and invalidated" from "the
+    /// cache exists": a delivery assertion alone passes with the cache bypassed.
+    computes: Arc<Counter>,
 }
 
 impl<T, S> Default for RouteCache<T, S> {
     fn default() -> Self {
         Self {
-            fresh: PlainRwLock::new(Fresh {
-                inputs: None,
-                routes: HashMap::new(),
-            }),
-            computes: Counter::new(),
+            inputs: None,
+            routes: PlainRwLock::new(PersistentMap::new()),
+            computes: Arc::new(Counter::new()),
         }
     }
 }
 
 impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
-    /// An empty cache.
+    /// An empty cache, brought to no version yet.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// The route from `source` for `keyexpr` at `inputs`: served when one was
-    /// computed at the same inputs, else computed by `compute` and, when
-    /// `resource` answers that the expression is a declared one, kept.
-    /// `resource` is asked only on a miss, so a served route never pays for
-    /// the question.
+    /// The route from `source` for `keyexpr` at `inputs`: served when this memo holds one,
+    /// else computed by `compute` and, when `resource` answers that the expression is a declared
+    /// one, kept. `resource` is asked only on a miss, so a served route never pays for the
+    /// question.
     ///
-    /// Storing at new inputs first drops every route kept at the old ones, as
-    /// upstream's `Routes::set_route` clears on a version change, so stale
-    /// entries never outlive the next store. A route computed at inputs that
-    /// [precede](RouteInputs::precedes) the kept ones is returned and not kept:
-    /// it is fresh only for the older version it was read from. `compute` must
-    /// not route through this cache.
+    /// `inputs` are those of the version the caller reads, and a memo the writer has brought to
+    /// that version has them. A caller whose inputs differ reads a version whose memo was not
+    /// brought to it: the writer reading its own draft before it publishes, or, under `rwlock`,
+    /// tables a writer left mid-write when it unwound. Its route is computed and returned, and not
+    /// kept, since it is fresh only for tables no memo was made for. `compute` must not route
+    /// through this cache.
     pub fn get_or_compute(
         &self,
         inputs: RouteInputs,
@@ -145,101 +194,98 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
         resource: impl FnOnce() -> bool,
         compute: impl FnOnce() -> T,
     ) -> T {
-        {
-            let fresh = self.fresh.read();
-            if fresh.inputs == Some(inputs) {
-                if let Some(route) = fresh.routes.get(keyexpr).and_then(|by| by.get(source)) {
-                    return route.clone();
-                }
+        let ours = self.inputs == Some(inputs);
+        if ours {
+            let key: &dyn RouteKeyParts<S> = &(keyexpr, source);
+            if let Some(route) = self.routes.read().get(key) {
+                return route.clone();
             }
         }
         let route = compute();
         self.computes.bump();
-        if resource() {
-            let mut fresh = self.fresh.write();
-            if fresh.inputs != Some(inputs) {
-                if fresh.inputs.is_some_and(|kept| inputs.precedes(kept)) {
-                    return route;
-                }
-                fresh.routes.clear();
-                fresh.inputs = Some(inputs);
-            }
-            fresh
-                .routes
-                .entry(keyexpr.to_owned())
-                .or_default()
-                .insert(source.clone(), route.clone());
+        if ours && resource() {
+            let key = RouteKey {
+                keyexpr: keyexpr.to_owned(),
+                source: source.clone(),
+            };
+            self.routes.write().insert(key, route.clone());
         }
         route
     }
 
-    /// Bring the cache to `inputs`, keeping the routes that the move cannot have changed.
+    /// Give a version of the tables whose inputs are `inputs` its memo: `memo` stays when it is
+    /// already at them, and is otherwise replaced by an empty memo at `inputs`, as upstream's
+    /// `Routes::set_route` drops every route on a version change. Called by the writer, before it
+    /// publishes the version; a version that shared `memo` before keeps it as it was.
+    pub fn bring_to(memo: &mut Arc<Self>, inputs: RouteInputs) {
+        Self::bring_to_retiring(memo, inputs, |_, _| false, |_, _| true);
+    }
+
+    /// [`bring_to`](Self::bring_to), keeping the routes that the move cannot have changed.
     ///
     /// Without this, a route is dropped whenever ANY input moved, because freshness is one comparison
     /// of versions; a service whose clients come and go then recomputes every key in use after each
-    /// change. A table that can say which keys moved lets the cache retire only the routes those keys
-    /// reach.
+    /// change. A table that can say which keys moved lets the new memo leave out only the routes
+    /// those keys reach.
     ///
     /// `changes(since, visit)` is asked, when only the declaration table's version moved, to call
-    /// `visit` with every key declared or withdrawn after `since` (the table version the cache was
-    /// fresh at), and to answer `false` when it can no longer say. `reaches(changed, cached)` is
-    /// whether a change of `changed` can alter the route kept for `cached`. A topology move (`net`)
-    /// or a table that cannot answer retires everything, which is what the version comparison did.
+    /// `visit` with every key declared or withdrawn after `since` (the table version `memo` is
+    /// at), and to answer `false` when it can no longer say. `reaches(changed, cached)` is whether
+    /// a change of `changed` can alter the route kept for `cached`. A topology move (`net`), a
+    /// memo brought to no version yet, or a table that cannot answer starts the new memo empty.
     ///
-    /// Safe by construction: it only ever retires more than it must, never fewer, because the caller
-    /// supplies the keys the table's own mutators recorded and every mutation records its key.
-    ///
-    /// A refresh to inputs that [precede](RouteInputs::precedes) the cache's moves nothing and asks
-    /// nothing: the cache stays at the newer inputs, whose routes a reader of the older version is
-    /// never served.
-    pub fn refresh(
-        &self,
+    /// Safe by construction: it only ever leaves out more than it must, never fewer, because the
+    /// caller supplies the keys the table's own mutators recorded and every mutation records its
+    /// key. The new memo starts from the routes `memo` holds when it is called, which readers of the
+    /// versions before may still add to: what they add after it is theirs alone.
+    pub fn bring_to_retiring(
+        memo: &mut Arc<Self>,
         inputs: RouteInputs,
         changes: impl FnOnce(u64, &mut dyn FnMut(&str)) -> bool,
         reaches: impl Fn(&str, &str) -> bool,
     ) {
-        // The common case, a cache already at `inputs`, is decided under the read lock: this runs
-        // on every message of the data path, and a write lock taken here would make every face's
-        // task wait for every other's whether or not anything changed. A write is taken only to
-        // move the inputs, which a mutation of the tables caused (and which holds them for
-        // writing), so two threads that both see the move and both take the write lock find it
-        // already done by the second, and return. A reader of an older version than the cache's
-        // is decided under the read lock too: it has nothing to move.
-        let at_or_past_inputs = |kept: Option<RouteInputs>| {
-            kept.is_some_and(|kept| kept == inputs || inputs.precedes(kept))
+        if memo.inputs == Some(inputs) {
+            return;
+        }
+        let kept = match memo.inputs {
+            Some(was) if was.net == inputs.net => {
+                let mut moved: Vec<String> = Vec::new();
+                if changes(was.table, &mut |keyexpr| moved.push(keyexpr.to_owned())) {
+                    let mut routes = Routes::clone(&memo.routes.read());
+                    let reached: Vec<RouteKey<S>> = routes
+                        .keys()
+                        .filter(|cached| {
+                            moved
+                                .iter()
+                                .any(|changed| reaches(changed, &cached.keyexpr))
+                        })
+                        .cloned()
+                        .collect();
+                    for cached in &reached {
+                        routes.remove(cached);
+                    }
+                    routes
+                } else {
+                    PersistentMap::new()
+                }
+            }
+            _ => PersistentMap::new(),
         };
-        if at_or_past_inputs(self.fresh.read().inputs) {
-            return;
-        }
-        let mut fresh = self.fresh.write();
-        let Some(was) = fresh.inputs else {
-            fresh.inputs = Some(inputs);
-            return;
-        };
-        if at_or_past_inputs(Some(was)) {
-            return;
-        }
-        let mut moved: Vec<String> = Vec::new();
-        let answered = was.net == inputs.net
-            && changes(was.table, &mut |keyexpr| moved.push(keyexpr.to_owned()));
-        if answered {
-            fresh
-                .routes
-                .retain(|cached, _| !moved.iter().any(|changed| reaches(changed, cached)));
-        } else {
-            fresh.routes.clear();
-        }
-        fresh.inputs = Some(inputs);
+        *memo = Arc::new(Self {
+            inputs: Some(inputs),
+            routes: PlainRwLock::new(kept),
+            computes: Arc::clone(&memo.computes),
+        });
     }
 
-    /// How many routes this cache computed rather than served.
+    /// How many routes this memo, and every memo it was brought from, computed rather than served.
     pub fn computes(&self) -> usize {
         self.computes.get()
     }
 
-    /// How many routes are kept, fresh or not.
+    /// How many routes this memo keeps.
     pub fn len(&self) -> usize {
-        self.fresh.read().routes.values().map(HashMap::len).sum()
+        self.routes.read().len()
     }
 
     /// Whether no route is kept.
@@ -258,6 +304,13 @@ mod tests {
 
     const AT: RouteInputs = RouteInputs { net: 1, table: 1 };
 
+    /// A memo brought to `inputs`, as the writer of the first version leaves it.
+    fn at<T: Clone, S: Clone + Eq + Hash>(inputs: RouteInputs) -> Arc<RouteCache<T, S>> {
+        let mut memo = Arc::new(RouteCache::new());
+        RouteCache::bring_to(&mut memo, inputs);
+        memo
+    }
+
     /// The memo is what many faces' tasks read at once (`docs/router-task-per-face.md`, phase 2), so a
     /// cache of routes that can themselves be shared is `Send + Sync`. The proof is the compile.
     #[test]
@@ -273,11 +326,10 @@ mod tests {
     #[test]
     fn threads_asking_for_one_key_at_one_input_all_get_its_route_and_it_is_kept_once() {
         const THREADS: usize = 8;
-        let cache: std::sync::Arc<RouteCache<std::sync::Arc<[Zid]>>> =
-            std::sync::Arc::new(RouteCache::new());
+        let cache: Arc<RouteCache<Arc<[Zid]>>> = at(AT);
         let workers: Vec<_> = (0..THREADS)
             .map(|_| {
-                let cache = std::sync::Arc::clone(&cache);
+                let cache = Arc::clone(&cache);
                 std::thread::spawn(move || {
                     for _ in 0..1_000 {
                         let route = cache.get_or_compute(
@@ -285,7 +337,7 @@ mod tests {
                             &zid(1),
                             "demo/a",
                             || true,
-                            || std::sync::Arc::from([zid(9)]),
+                            || Arc::from([zid(9)]),
                         );
                         assert_eq!(&*route, &[zid(9)]);
                     }
@@ -305,7 +357,7 @@ mod tests {
 
     #[test]
     fn a_resource_route_is_computed_once_and_served_at_the_same_inputs() {
-        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
+        let cache: Arc<RouteCache<Vec<Zid>>> = at(AT);
         let first = cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
         let again = cache.get_or_compute(AT, &zid(1), "demo/a", || true, || unreachable!());
         assert_eq!(first, again);
@@ -314,7 +366,7 @@ mod tests {
 
     #[test]
     fn a_route_is_per_source_and_per_keyexpr() {
-        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
+        let cache: Arc<RouteCache<Vec<Zid>>> = at(AT);
         cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
         let other_source = cache.get_or_compute(AT, &zid(2), "demo/a", || true, || vec![zid(8)]);
         let other_key = cache.get_or_compute(AT, &zid(1), "demo/b", || true, || vec![zid(7)]);
@@ -324,163 +376,135 @@ mod tests {
         assert_eq!(cache.len(), 3);
     }
 
+    /// A memo no writer has brought to a version keeps nothing: it is fresh at no inputs.
     #[test]
-    fn either_input_moving_recomputes_and_drops_the_old_routes() {
+    fn a_memo_brought_to_no_version_computes_every_time_and_keeps_nothing() {
         let cache: RouteCache<Vec<Zid>> = RouteCache::new();
         cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
-        cache.get_or_compute(AT, &zid(1), "demo/b", || true, || vec![zid(9)]);
+        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        assert_eq!(cache.computes(), 2);
+        assert!(cache.is_empty());
+    }
+
+    /// A caller at inputs other than the memo's (a writer reading its own draft) is given the
+    /// route of its tables, and the memo keeps what it held: neither the route nor the move.
+    #[test]
+    fn a_route_asked_at_other_inputs_is_computed_and_not_kept() {
+        let cache: Arc<RouteCache<Vec<Zid>>> = at(AT);
+        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        let draft = RouteInputs { table: 2, ..AT };
+        let got = cache.get_or_compute(draft, &zid(1), "demo/a", || true, || vec![zid(3)]);
+        assert_eq!(
+            got,
+            vec![zid(3)],
+            "the other inputs are not served this memo's route"
+        );
+        cache.get_or_compute(draft, &zid(1), "demo/b", || true, || vec![zid(4)]);
+        assert_eq!(
+            cache.len(),
+            1,
+            "nothing computed at the other inputs was kept"
+        );
+        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || unreachable!());
+        assert_eq!(cache.computes(), 3);
+    }
+
+    /// The writer of a version whose inputs moved gives it a memo of its own; the version before
+    /// keeps its memo, routes and all, for the readers that still hold it.
+    #[test]
+    fn a_move_gives_the_new_version_its_own_memo_and_leaves_the_old_one_whole() {
+        let old: Arc<RouteCache<Vec<Zid>>> = at(AT);
+        old.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        let mut new = Arc::clone(&old);
         let net_moved = RouteInputs { net: 2, ..AT };
-        let got = cache.get_or_compute(net_moved, &zid(1), "demo/a", || true, || vec![zid(3)]);
+        RouteCache::bring_to(&mut new, net_moved);
+        assert!(!Arc::ptr_eq(&old, &new));
+        assert!(new.is_empty(), "a topology move starts the new memo empty");
+        let got = new.get_or_compute(net_moved, &zid(1), "demo/a", || true, || vec![zid(3)]);
         assert_eq!(
             got,
             vec![zid(3)],
             "a net change must not serve the old route"
         );
-        assert_eq!(
-            cache.len(),
-            1,
-            "the store at new inputs dropped the stale route"
-        );
-        let table_moved = RouteInputs {
-            table: 2,
-            ..net_moved
-        };
-        let got = cache.get_or_compute(table_moved, &zid(1), "demo/a", || true, || vec![zid(4)]);
-        assert_eq!(
-            got,
-            vec![zid(4)],
-            "a table change must not serve the old route"
-        );
-        assert_eq!(cache.computes(), 4);
-    }
-
-    /// A cache keyed by `()` with a recorded `["demo/a"]` change, as a client leg sees it.
-    fn refreshed(cache: &RouteCache<Vec<Zid>>, to: RouteInputs, changed: Option<&[&str]>) {
-        cache.refresh(
-            to,
-            |_since, visit| match changed {
-                Some(keys) => {
-                    keys.iter().for_each(|k| visit(k));
-                    true
-                }
-                None => false,
-            },
-            |changed, cached| changed == cached,
-        );
-    }
-
-    #[test]
-    fn a_table_move_retires_only_the_routes_the_changed_key_reaches() {
-        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
-        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
-        cache.get_or_compute(AT, &zid(1), "demo/b", || true, || vec![zid(9)]);
-        let moved = RouteInputs { table: 2, ..AT };
-        refreshed(&cache, moved, Some(&["demo/a"]));
-        assert_eq!(cache.len(), 1, "only the route of the changed key went");
-        cache.get_or_compute(moved, &zid(1), "demo/b", || true, || unreachable!());
-        assert_eq!(
-            cache.computes(),
-            2,
-            "the other key was served, not computed"
-        );
-        cache.get_or_compute(moved, &zid(1), "demo/a", || true, || vec![zid(5)]);
-        assert_eq!(cache.computes(), 3, "the changed key was computed afresh");
-    }
-
-    #[test]
-    fn a_table_that_cannot_say_what_moved_retires_every_route() {
-        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
-        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
-        cache.get_or_compute(AT, &zid(1), "demo/b", || true, || vec![zid(9)]);
-        refreshed(&cache, RouteInputs { table: 2, ..AT }, None);
-        assert!(cache.is_empty());
-    }
-
-    #[test]
-    fn a_topology_move_retires_every_route_whatever_the_table_says() {
-        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
-        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
-        // The table says nothing relevant moved, but the graph did.
-        refreshed(&cache, RouteInputs { net: 2, ..AT }, Some(&[]));
-        assert!(cache.is_empty());
-    }
-
-    #[test]
-    fn a_refresh_at_the_same_inputs_keeps_everything_and_asks_nothing() {
-        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
-        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
-        cache.refresh(AT, |_, _| unreachable!(), |_, _| unreachable!());
-        assert_eq!(cache.len(), 1);
-    }
-
-    #[test]
-    fn inputs_precede_when_they_differ_and_neither_member_is_ahead() {
-        let newer = RouteInputs { net: 2, table: 3 };
-        assert!(AT.precedes(newer));
-        assert!(RouteInputs { net: 2, table: 1 }.precedes(newer));
-        assert!(!newer.precedes(newer), "inputs do not precede themselves");
-        assert!(!newer.precedes(AT));
-        let wrapped = RouteInputs { net: 3, table: 0 };
-        assert!(
-            !wrapped.precedes(newer) && !newer.precedes(wrapped),
-            "a pair where each is ahead in one member is not ordered"
-        );
-    }
-
-    /// A reader of an older version of the tables, missing a key, gets the route of its own version
-    /// and does not drop what a reader of the newer version stored: the memo stays at the newer
-    /// inputs with their routes, and serves them there without computing again.
-    #[test]
-    fn a_store_from_older_inputs_is_answered_and_keeps_the_newer_routes() {
-        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
-        let newer = RouteInputs { net: 1, table: 2 };
-        cache.get_or_compute(newer, &zid(1), "demo/a", || true, || vec![zid(9)]);
-        let older = cache.get_or_compute(AT, &zid(1), "demo/b", || true, || vec![zid(4)]);
-        assert_eq!(older, vec![zid(4)], "the older reader gets its own route");
-        assert_eq!(cache.len(), 1, "and it is not kept beside the newer ones");
-        let served = cache.get_or_compute(newer, &zid(1), "demo/a", || true, || unreachable!());
+        let served = old.get_or_compute(AT, &zid(1), "demo/a", || true, || unreachable!());
         assert_eq!(
             served,
             vec![zid(9)],
-            "the newer route survived the older store"
+            "a reader of the old version is served its route"
         );
-        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(8)]);
-        assert_eq!(
-            cache.computes(),
-            3,
-            "a route kept at the newer inputs is never served at the older ones"
-        );
+        assert_eq!(old.computes(), 2, "the memos count into one witness");
     }
 
     #[test]
-    fn a_refresh_to_older_inputs_moves_nothing_and_asks_nothing() {
-        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
-        let newer = RouteInputs { net: 2, table: 2 };
-        cache.get_or_compute(newer, &zid(1), "demo/a", || true, || vec![zid(9)]);
-        cache.refresh(AT, |_, _| unreachable!(), |_, _| unreachable!());
-        assert_eq!(cache.len(), 1);
-        cache.get_or_compute(newer, &zid(1), "demo/a", || true, || unreachable!());
-        assert_eq!(cache.computes(), 1);
+    fn a_memo_already_at_the_inputs_is_kept_and_nothing_is_asked() {
+        let old: Arc<RouteCache<Vec<Zid>>> = at(AT);
+        old.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        let mut new = Arc::clone(&old);
+        RouteCache::bring_to_retiring(&mut new, AT, |_, _| unreachable!(), |_, _| unreachable!());
+        assert!(
+            Arc::ptr_eq(&old, &new),
+            "versions at the same inputs share one memo"
+        );
     }
 
-    /// Inputs that are not ordered against the kept ones are what a counter that wrapped would give:
-    /// the memo moves to them and drops what it kept, as it did before it kept the newest.
+    /// A memo of `demo/a` and `demo/b`, brought to a table move whose log is `changed`, as a client
+    /// leg's is (`None`: the log no longer reaches back).
+    fn brought(changed: Option<&[&str]>) -> (Arc<RouteCache<Vec<Zid>>>, RouteInputs) {
+        let mut memo: Arc<RouteCache<Vec<Zid>>> = at(AT);
+        memo.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        memo.get_or_compute(AT, &zid(1), "demo/b", || true, || vec![zid(9)]);
+        let moved = RouteInputs { table: 2, ..AT };
+        RouteCache::bring_to_retiring(
+            &mut memo,
+            moved,
+            |since, visit| {
+                assert_eq!(since, AT.table, "asked from the version the memo was at");
+                match changed {
+                    Some(keys) => {
+                        keys.iter().for_each(|k| visit(k));
+                        true
+                    }
+                    None => false,
+                }
+            },
+            |changed, cached| changed == cached,
+        );
+        (memo, moved)
+    }
+
     #[test]
-    fn inputs_that_neither_precede_replace_the_routes_as_newer_ones_do() {
-        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
-        let kept = RouteInputs { net: 2, table: 2 };
-        cache.get_or_compute(kept, &zid(1), "demo/a", || true, || vec![zid(9)]);
-        let unordered = RouteInputs { net: 3, table: 1 };
-        cache.get_or_compute(unordered, &zid(1), "demo/b", || true, || vec![zid(5)]);
-        assert_eq!(cache.len(), 1);
-        cache.get_or_compute(unordered, &zid(1), "demo/b", || true, || unreachable!());
-        cache.get_or_compute(kept, &zid(1), "demo/a", || true, || vec![zid(9)]);
-        assert_eq!(cache.computes(), 3, "the route at the replaced inputs went");
+    fn a_table_move_leaves_out_only_the_routes_the_changed_key_reaches() {
+        let (memo, moved) = brought(Some(&["demo/a"]));
+        assert_eq!(memo.len(), 1, "only the route of the changed key went");
+        memo.get_or_compute(moved, &zid(1), "demo/b", || true, || unreachable!());
+        assert_eq!(memo.computes(), 2, "the other key was served, not computed");
+        memo.get_or_compute(moved, &zid(1), "demo/a", || true, || vec![zid(5)]);
+        assert_eq!(memo.computes(), 3, "the changed key was computed afresh");
+    }
+
+    #[test]
+    fn a_table_that_cannot_say_what_moved_starts_the_new_memo_empty() {
+        let (memo, _) = brought(None);
+        assert!(memo.is_empty());
+    }
+
+    #[test]
+    fn a_topology_move_starts_the_new_memo_empty_whatever_the_table_says() {
+        let mut memo: Arc<RouteCache<Vec<Zid>>> = at(AT);
+        memo.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        // The table says nothing relevant moved, but the graph did.
+        RouteCache::bring_to_retiring(
+            &mut memo,
+            RouteInputs { net: 2, ..AT },
+            |_, _| true,
+            |_, _| false,
+        );
+        assert!(memo.is_empty());
     }
 
     #[test]
     fn an_expression_that_is_not_a_resource_is_computed_every_time_and_never_kept() {
-        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
+        let cache: Arc<RouteCache<Vec<Zid>>> = at(AT);
         cache.get_or_compute(AT, &zid(1), "demo/x", || false, || vec![zid(9)]);
         cache.get_or_compute(AT, &zid(1), "demo/x", || false, || vec![zid(9)]);
         assert_eq!(cache.computes(), 2);

@@ -49,6 +49,7 @@ use wz_session_core::wireexpr_resolve::wireexpr_names_a_declaration;
 use wz_routing_graph::{LinkId, LinkstateNetwork};
 
 use crate::accept_loop::FaceId;
+use crate::client_store::{ClientStore, Held};
 use crate::interceptor::InterceptorKind;
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{ExpiredQuery, QueryReturn};
@@ -526,10 +527,7 @@ fn data_route(
     keyexpr: &str,
     wire: bool,
 ) -> Arc<[Zid]> {
-    let inputs = RouteInputs {
-        net: net.route_version(),
-        table: subs.version(),
-    };
+    let inputs = mesh_inputs(net, subs);
     let resource = || wire || (cached.names_a_resource)(keyexpr);
     cached
         .routes
@@ -573,27 +571,60 @@ pub(crate) fn client_route(
     if store.is_empty() {
         return Arc::from([]);
     }
-    let inputs = RouteInputs {
+    let resource = || wire || (cached.names_a_resource)(keyexpr);
+    cached
+        .routes
+        .get_or_compute(client_inputs(store), &(), keyexpr, resource, || {
+            store.faces_intersecting(keyexpr).into()
+        })
+}
+
+/// The inputs of a mesh leg's routes: the graph and the hat's declaration table of the plane.
+fn mesh_inputs<V>(net: &LinkstateNetwork, table: &LinkstatepeerInterest<V>) -> RouteInputs {
+    RouteInputs {
+        net: net.route_version(),
+        table: table.version(),
+    }
+}
+
+/// The inputs of a client leg's routes: the store alone, as no graph enters them.
+fn client_inputs<V: Held>(store: &ClientStore<V>) -> RouteInputs {
+    RouteInputs {
         net: 0,
         table: store.version(),
-    };
-    // A change of the store retires the routes of the keys it intersects and keeps
-    // the rest, instead of every route in the cache: a client that joins or leaves
-    // costs the keys it subscribes, not the keys in use.
-    cached.routes.refresh(
-        inputs,
+    }
+}
+
+/// Give a version of the tables the memo of a mesh leg, of the data plane or the query plane:
+/// the one it shares with the version before while `net` and `table` are unchanged, and an empty
+/// one once either moved ([`RouteCache::bring_to`]). Called by the writer before it publishes.
+pub(crate) fn bring_mesh_routes<T: Clone, V>(
+    routes: &mut Arc<RouteCache<T>>,
+    net: &LinkstateNetwork,
+    table: &LinkstatepeerInterest<V>,
+) {
+    RouteCache::bring_to(routes, mesh_inputs(net, table));
+}
+
+/// Give a version of the tables the memo of a client leg, of the data plane or the query plane
+/// ([`RouteCache::bring_to_retiring`]): a change of the store leaves out the routes of the keys it
+/// intersects and keeps the rest, instead of every route in the memo, so a client that joins or
+/// leaves costs the keys it declares, not the keys in use. A query route is reached as a data
+/// route is: a queryable's key can make a client a candidate, or complete, only for a query whose
+/// keyexpr it intersects. Called by the writer before it publishes.
+pub(crate) fn bring_client_routes<T: Clone, V: Held>(
+    routes: &mut Arc<RouteCache<T, ()>>,
+    store: &ClientStore<V>,
+) {
+    RouteCache::bring_to_retiring(
+        routes,
+        client_inputs(store),
         |since, visit| store.changed_since(since, visit),
         |changed, cached_key| {
             let target: Vec<&str> = cached_key.split('/').collect();
             keyexpr_intersects_target(changed, &target)
         },
     );
-    let resource = || wire || (cached.names_a_resource)(keyexpr);
-    cached
-        .routes
-        .get_or_compute(inputs, &(), keyexpr, resource, || {
-            store.faces_intersecting(keyexpr).into()
-        })
 }
 
 /// R2911 — the CLIENT faces a node holds, each with its queryables by decl id
@@ -633,25 +664,10 @@ pub(crate) fn client_query_route(
     if store.is_empty() {
         return Arc::from([]);
     }
-    let inputs = RouteInputs {
-        net: 0,
-        table: store.version(),
-    };
-    // A change of the store retires the routes of the keys it intersects, as the data leg's does
-    // ([`client_route`]): a queryable's key can make a client a candidate, or complete, only for a
-    // query whose keyexpr it intersects.
-    cached.routes.refresh(
-        inputs,
-        |since, visit| store.changed_since(since, visit),
-        |changed, cached_key| {
-            let target: Vec<&str> = cached_key.split('/').collect();
-            keyexpr_intersects_target(changed, &target)
-        },
-    );
     let resource = || wire || (cached.names_a_resource)(keyexpr);
     cached
         .routes
-        .get_or_compute(inputs, &(), keyexpr, resource, || {
+        .get_or_compute(client_inputs(store), &(), keyexpr, resource, || {
             // The keys the query meets, from the store's index; a face is complete for the query
             // when one of its complete queryables is on a key that includes the whole of it.
             let query_chunks: Vec<&str> = keyexpr.split('/').collect();
@@ -920,10 +936,7 @@ pub(crate) fn query_candidates(
     keyexpr: &str,
     wire: bool,
 ) -> Arc<[QueryCandidate]> {
-    let inputs = RouteInputs {
-        net: net.route_version(),
-        table: qabls.version(),
-    };
+    let inputs = mesh_inputs(net, qabls);
     let resource = || wire || (cached.names_a_resource)(keyexpr);
     cached
         .routes
