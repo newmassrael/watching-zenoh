@@ -12612,6 +12612,25 @@
       "carry_forward_bullets": [
         "Carries of the node's C door that remain: a liveliness get through the port; a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
       ]
+    },
+    "Round 4430": {
+      "decision_summary": "A node answers a liveliness get through the port's engine, which closes that carry of the node's C door: until this round the node took the port's provided answer (no liveliness get in this build), and a session of the Rust API on a node answered the get by a path of its own that read the same tokens but dropped the request's cancellation token and notifier; that session now asks through the engine as a registry session does, and the path of its own is gone.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/drive/router_node/engine.rs: RouterState's SessionEngine implements liveliness_get_on_wire (feature liveliness-get): one leg, answered by the node's own face from the tokens of the router's tables and the ones the program declared, each key one Put reply, the leg's callback let go before the get returns; a fan whose cancel has started is told nothing.",
+        "crates/wz-capi-core/src/drive/router_node/engine/port_tests.rs: a test in which a registry client and the node each declare a token; the get through the port finds both, every leg it issued has ended when it returns, a key nothing meets finds nothing, and the client's token is found no more once it is retracted.",
+        "crates/wz-zenoh/src/api/session.rs: a node's liveliness query goes through ask_liveliness, as a registry session's does, so its timeout, cancellation token and notifier are kept; router_liveliness_query is removed. A test shows a node's get refusing a token cancelled before it, beside the registry's own.",
+        "docs/zenoh-api-on-the-engine.md: the node's own face names the liveliness get through the port."
+      ],
+      "verification_bullets": [
+        "On a build machine: wz-capi-core with router-node, transport-qos and session-extshm, the port tests, 7 passed (the six before and the new one), and clippy of its lib and tests under -D warnings; zenoh with unstable, the liveliness tests of the session, 10 passed (the node's get of its own tokens among them, now through the engine, and the new refusal), and clippy of its lib and tests under -D warnings. Both crates are formatted.",
+        "Controls, each taken out on its own and reverted before this entry: the node's face reading no token of the router's tables failed the port test with only the node's own token found; the leg's callback kept past the get's return failed it at the leg not having ended; a node's liveliness query that answers without refusing failed the new zenoh test, a channel handed back for a cancelled token."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Carries of the node's C door that remain: a remote in the south read against stock; the value of a shm get arriving as bytes on a node. The scratch worktree and branch size-measure may be removed with bx-wt."
+      ]
     }
   },
   "inventory_entries": {
