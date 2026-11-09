@@ -435,7 +435,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `wz_capi_c_identity_make` and the struct it fills, declared in `wz_capi_c.h`; off by
         # default for the size of the certificate writer it links.
         # `switch-doors` the same: it gates `pub mod switch_doors`, whose public items are the
-        # seven `wz_capi_c_*_ext` doors, the three `_default` functions and the three statement
+        # nine `wz_capi_c_*_ext` doors, the three `_default` functions and the three statement
         # structs, declared in `wz_capi_c.h`; off by default, as upstream has no such statements.
         frozenset(
             {

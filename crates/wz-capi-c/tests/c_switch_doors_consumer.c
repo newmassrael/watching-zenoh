@@ -3,7 +3,7 @@
  *
  * The statements of a call beyond the zenoh-c options, made from a REAL C
  * translation unit: the three statement structs, their _default functions and
- * the seven wz_capi_c_*_ext doors, compiled against wz_capi_c.h and linked
+ * the nine wz_capi_c_*_ext doors, compiled against wz_capi_c.h and linked
  * against the library as a consumer's program is.
  *
  * What the Rust tests of the same doors cannot show, and this can: that the
@@ -224,6 +224,40 @@ static void check_entity_doors(void) {
     CHECK(!z_internal_queryable_check(&queryable), "a queryable left behind by a refusal");
 }
 
+/* Revision 13: the two liveliness doors take the same entity statement. */
+static void check_liveliness_doors(void) {
+    wz_capi_c_entity_ext_t none;
+    wz_capi_c_entity_ext_default(&none);
+    wz_capi_c_entity_ext_t links;
+    links.link_mask = 0x6;
+
+    z_owned_liveliness_token_t token;
+    memset(&token, 0xa5, sizeof token);
+    CHECK(wz_capi_c_liveliness_declare_token_ext(NULL, &token, NULL, NULL, NULL) == Z_ENULL,
+          "declare token, NULL ext");
+    CHECK(wz_capi_c_liveliness_declare_token_ext(NULL, &token, NULL, NULL, &none) == Z_ENULL,
+          "declare token, default ext");
+    memset(&token, 0xa5, sizeof token);
+    z_result_t rc = wz_capi_c_liveliness_declare_token_ext(NULL, &token, NULL, NULL, &links);
+    CHECK(STATED(rc), "declare token, links answered %d", rc);
+    CHECK(!z_internal_liveliness_token_check(&token), "a token left behind by a refusal");
+
+    z_moved_closure_sample_t sample;
+    memset(&sample, 0, sizeof sample);
+    z_owned_subscriber_t watcher;
+    memset(&watcher, 0xa5, sizeof watcher);
+    CHECK(wz_capi_c_liveliness_declare_subscriber_ext(NULL, &watcher, NULL, &sample, NULL, NULL) ==
+              Z_ENULL,
+          "declare liveliness subscriber, NULL ext");
+    CHECK(wz_capi_c_liveliness_declare_subscriber_ext(NULL, &watcher, NULL, &sample, NULL, &none) ==
+              Z_ENULL,
+          "declare liveliness subscriber, default ext");
+    memset(&watcher, 0xa5, sizeof watcher);
+    rc = wz_capi_c_liveliness_declare_subscriber_ext(NULL, &watcher, NULL, &sample, NULL, &links);
+    CHECK(STATED(rc), "declare liveliness subscriber, links answered %d", rc);
+    CHECK(!z_internal_subscriber_check(&watcher), "a liveliness subscriber left behind by a refusal");
+}
+
 int main(void) {
     CHECK(wz_capi_c_abi_version() == WZ_CAPI_C_ABI_REVISION,
           "the library reports revision %d, the header is %d", (int)wz_capi_c_abi_version(),
@@ -234,6 +268,7 @@ int main(void) {
     check_publish_doors();
     check_query_doors();
     check_entity_doors();
+    check_liveliness_doors();
     if (failures != 0) {
         fprintf(stderr, "switch_doors: %d failure(s)\n", failures);
         return 1;

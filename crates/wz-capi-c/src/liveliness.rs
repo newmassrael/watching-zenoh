@@ -35,9 +35,10 @@
 
 use std::sync::Arc;
 
-use wz_capi_core::faces::{SharedSession, SubId, TokenId};
+use wz_capi_core::faces::{SharedSession, SubId, TokenId, WireKey};
 use wz_runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
-use wz_runtime_tokio::session::LivelinessSubscriberOptions;
+use wz_runtime_tokio::session::{LivelinessOptions, LivelinessSubscriberOptions};
+use wz_session_core::link_restriction::LinkRestriction;
 
 use crate::abi::{
     z_loaned_keyexpr_t, z_loaned_liveliness_token_t, z_loaned_session_t, z_moved_closure_sample_t,
@@ -190,12 +191,32 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
     key_expr: *const z_loaned_keyexpr_t,
     _options: *const z_liveliness_token_options_t,
 ) -> ZResult {
+    // SAFETY: the caller's contract, delegated; a token limited to no links.
+    unsafe { declare_token_on(session, token, key_expr, Ok(LinkRestriction::Any)) }
+}
+
+/// The body of [`z_liveliness_declare_token`], for a token that may be limited to some links.
+/// `links` is the restriction the declaration stated or the code its refusal answers; a refused
+/// declaration leaves `token` in its gravestone state and declares nothing.
+///
+/// # Safety
+/// As [`z_liveliness_declare_token`].
+pub(crate) unsafe fn declare_token_on(
+    session: *const z_loaned_session_t,
+    token: *mut z_owned_liveliness_token_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    links: Result<LinkRestriction, ZResult>,
+) -> ZResult {
     guarded(|| {
         if token.is_null() {
             return Z_ENULL;
         }
         // The gravestone contract, written before any fallible work.
         unsafe { *token = z_owned_liveliness_token_t::null_value() };
+        let links = match links {
+            Ok(links) => links,
+            Err(refusal) => return refusal,
+        };
 
         // SAFETY: the caller's contract for both handles.
         let (Some(held), Some(ke)) = (unsafe { crate::session::session_handle(session) }, unsafe {
@@ -219,6 +240,11 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
             // A node counts the token on its own face and tells the faces that asked.
             #[cfg(feature = "router-node")]
             crate::session::SessionHandle::Node(node) => {
+                // The data plane of a node reads no restriction of links: it does not carry the
+                // call, and declares nothing.
+                if links.is_restricted() {
+                    return Z_EUNAVAILABLE;
+                }
                 let boxed = Box::new(TokenState::Node {
                     id: node.declare_token(&ke),
                     node: Arc::clone(node),
@@ -230,7 +256,14 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
                 return Z_OK;
             }
         };
-        let Some(id) = state.shared.declare_liveliness_token(ke) else {
+        // `declare_liveliness_token` is this call with no restriction, the literal wire key and
+        // the default options, so a token that states no links is declared as it always was.
+        let Some(id) = state.shared.declare_liveliness_token_on_links(
+            ke,
+            WireKey::literal(),
+            LivelinessOptions::new(),
+            links,
+        ) else {
             return Z_EUNAVAILABLE;
         };
         let boxed = Box::new(TokenState::Registry {
@@ -358,6 +391,34 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
     callback: *mut z_moved_closure_sample_t,
     options: *mut z_liveliness_subscriber_options_t,
 ) -> ZResult {
+    // SAFETY: the caller's contract, delegated; a subscriber limited to no links.
+    unsafe {
+        declare_subscriber_on(
+            session,
+            subscriber,
+            key_expr,
+            callback,
+            options,
+            Ok(LinkRestriction::Any),
+        )
+    }
+}
+
+/// The body of [`z_liveliness_declare_subscriber`], for a subscriber that may be limited to some
+/// links. `links` is the restriction the declaration stated or the code its refusal answers; the
+/// closure is consumed and the subscriber left in its gravestone state either way, so a refused
+/// declaration runs the C `drop(context)` once and declares nothing.
+///
+/// # Safety
+/// As [`z_liveliness_declare_subscriber`].
+pub(crate) unsafe fn declare_subscriber_on(
+    session: *const z_loaned_session_t,
+    subscriber: *mut z_owned_subscriber_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut z_liveliness_subscriber_options_t,
+    links: Result<LinkRestriction, ZResult>,
+) -> ZResult {
     guarded(|| {
         if subscriber.is_null() || callback.is_null() {
             return Z_ENULL;
@@ -370,6 +431,11 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         let owned = unsafe { &mut (*callback)._this };
         let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_sample_t::null_value();
+        // A refusal returns with the closure adopted above, which is dropped with the frame.
+        let links = match links {
+            Ok(links) => links,
+            Err(refusal) => return refusal,
+        };
 
         // SAFETY: the caller's contract for both handles.
         let (Some(held), Some(ke)) = (unsafe { crate::session::session_handle(session) }, unsafe {
@@ -399,6 +465,11 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
             // hosted there and withdrawn there.
             #[cfg(feature = "router-node")]
             crate::session::SessionHandle::Node(node) => {
+                // The data plane of a node reads no restriction of links: it does not carry the
+                // call, and declares nothing.
+                if links.is_restricted() {
+                    return Z_EUNAVAILABLE;
+                }
                 let declared = ke.clone();
                 let id = node.liveliness().subscribe(
                     &ke,
@@ -420,10 +491,18 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         opts.history = history;
 
         let declared = ke.clone();
-        let id: SubId = state.shared.declare_liveliness_subscriber(ke, opts, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move || Box::new(make_liveliness_callback(closure.clone())) as Box<_>)
-        });
+        // `declare_liveliness_subscriber` is this call with no restriction and the literal wire
+        // key, so a subscriber that states no links is declared as it always was.
+        let id: SubId = state.shared.declare_liveliness_subscriber_on_links(
+            ke,
+            WireKey::literal(),
+            opts,
+            links,
+            {
+                let closure = Arc::new(cclosure);
+                Arc::new(move || Box::new(make_liveliness_callback(closure.clone())) as Box<_>)
+            },
+        );
         unsafe {
             *subscriber = z_owned_subscriber_t::from_handle(subscriber_state_handle(
                 &state.shared,

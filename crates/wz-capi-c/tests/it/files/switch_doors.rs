@@ -26,15 +26,16 @@ use std::time::{Duration, Instant};
 use wz_capi_c::abi::{
     z_loaned_query_t, z_loaned_reply_t, z_loaned_sample_t, z_moved_bytes_t,
     z_moved_closure_query_t, z_moved_closure_reply_t, z_moved_closure_sample_t, z_moved_config_t,
-    z_moved_publisher_t, z_moved_queryable_t, z_moved_session_t, z_moved_subscriber_t,
-    z_owned_bytes_t, z_owned_closure_query_t, z_owned_closure_reply_t, z_owned_closure_sample_t,
-    z_owned_config_t, z_owned_publisher_t, z_owned_queryable_t, z_owned_session_t,
-    z_owned_subscriber_t, z_view_keyexpr_t,
+    z_moved_liveliness_token_t, z_moved_publisher_t, z_moved_queryable_t, z_moved_session_t,
+    z_moved_subscriber_t, z_owned_bytes_t, z_owned_closure_query_t, z_owned_closure_reply_t,
+    z_owned_closure_sample_t, z_owned_config_t, z_owned_liveliness_token_t, z_owned_publisher_t,
+    z_owned_queryable_t, z_owned_session_t, z_owned_subscriber_t, z_view_keyexpr_t,
 };
 use wz_capi_c::bytes::z_bytes_copy_from_str;
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
 use wz_capi_c::get::z_closure_reply;
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
+use wz_capi_c::liveliness::{z_internal_liveliness_token_check, z_liveliness_undeclare_token};
 use wz_capi_c::publisher::{
     z_internal_publisher_check, z_publisher_loan, z_publisher_put, z_undeclare_publisher,
 };
@@ -582,5 +583,141 @@ fn a_queryable_and_a_get_stating_nothing_answer_as_the_z_functions_do() {
         close_session(session);
         drop(Box::from_raw(qctx));
         drop(Box::from_raw(rctx));
+    }
+}
+
+/// A liveliness token and a liveliness subscriber that state nothing are the ones the `z_*`
+/// functions declare: the session's own subscriber hears the token appear (a put) and go away (a
+/// delete), for a null statement and for the default one, in any build.
+#[test]
+fn a_liveliness_token_and_subscriber_stating_nothing_are_the_z_functions_declarations() {
+    unsafe {
+        let session = open_alone();
+        let ke = CString::new(KEYEXPR).unwrap();
+        let view = view_of(&ke);
+        let none = entity_ext();
+
+        for ext in [std::ptr::null(), &none as *const wz_capi_c_entity_ext_t] {
+            let (hits, drops, ctx) = counts();
+            let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+            z_closure_sample(&mut closure, Some(on_sample), Some(on_drop), ctx.cast());
+            let mut watcher: z_owned_subscriber_t = std::mem::zeroed();
+            assert_eq!(
+                wz_capi_c_liveliness_declare_subscriber_ext(
+                    z_session_loan(&session),
+                    &mut watcher,
+                    z_view_keyexpr_loan(&view),
+                    (&mut closure as *mut z_owned_closure_sample_t)
+                        .cast::<z_moved_closure_sample_t>(),
+                    std::ptr::null_mut(),
+                    ext,
+                ),
+                Z_OK
+            );
+
+            let mut token: z_owned_liveliness_token_t = std::mem::zeroed();
+            assert_eq!(
+                wz_capi_c_liveliness_declare_token_ext(
+                    z_session_loan(&session),
+                    &mut token,
+                    z_view_keyexpr_loan(&view),
+                    std::ptr::null(),
+                    ext,
+                ),
+                Z_OK
+            );
+            assert!(z_internal_liveliness_token_check(&token));
+            assert_eq!(
+                settle(&hits, 1, Duration::from_millis(300)),
+                1,
+                "the token appears once to the session's own subscriber"
+            );
+            z_liveliness_undeclare_token(
+                (&mut token as *mut z_owned_liveliness_token_t)
+                    .cast::<z_moved_liveliness_token_t>(),
+            );
+            assert_eq!(
+                settle(&hits, 2, Duration::from_millis(300)),
+                2,
+                "and goes away once"
+            );
+
+            undeclare(watcher);
+            free_when_dropped(&drops, ctx);
+        }
+        close_session(session);
+    }
+}
+
+/// A liveliness token and a liveliness subscriber limited to links are refused while the policy is
+/// off: nothing is declared, the closure is dropped once and the handles are the gravestone. A
+/// build whose policy is on takes them, and the session's own plane, which is behind no link,
+/// still hears the token.
+#[test]
+fn a_limited_liveliness_declaration_is_refused_while_its_policy_is_off() {
+    unsafe {
+        let session = open_alone();
+        let ke = CString::new(KEYEXPR).unwrap();
+        let view = view_of(&ke);
+        let mut mask = entity_ext();
+        mask.link_mask = 0b10;
+
+        let (hits, drops, ctx) = counts();
+        let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+        z_closure_sample(&mut closure, Some(on_sample), Some(on_drop), ctx.cast());
+        let mut watcher: z_owned_subscriber_t = std::mem::zeroed();
+        let rc = wz_capi_c_liveliness_declare_subscriber_ext(
+            z_session_loan(&session),
+            &mut watcher,
+            z_view_keyexpr_loan(&view),
+            (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+            std::ptr::null_mut(),
+            &mask,
+        );
+        assert_eq!(
+            rc,
+            answer_when(links_on()),
+            "a limited liveliness subscriber"
+        );
+        assert_eq!(z_internal_subscriber_check(&watcher), links_on());
+        if !links_on() {
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "a refused declaration drops the closure once"
+            );
+        }
+
+        let mut token: z_owned_liveliness_token_t = std::mem::zeroed();
+        let rc = wz_capi_c_liveliness_declare_token_ext(
+            z_session_loan(&session),
+            &mut token,
+            z_view_keyexpr_loan(&view),
+            std::ptr::null(),
+            &mask,
+        );
+        assert_eq!(rc, answer_when(links_on()), "a limited liveliness token");
+        assert_eq!(z_internal_liveliness_token_check(&token), links_on());
+        if links_on() {
+            assert_eq!(
+                settle(&hits, 1, Duration::from_millis(300)),
+                1,
+                "the session's own plane is behind no link"
+            );
+            z_liveliness_undeclare_token(
+                (&mut token as *mut z_owned_liveliness_token_t)
+                    .cast::<z_moved_liveliness_token_t>(),
+            );
+            undeclare(watcher);
+        } else {
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                0,
+                "a refused pair declares nothing to hear"
+            );
+        }
+
+        close_session(session);
+        free_when_dropped(&drops, ctx);
     }
 }

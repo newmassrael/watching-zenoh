@@ -187,9 +187,9 @@ lifecycle-doors = ["wz-capi-core/lifecycle-doors"]
 # by default: zenoh-c has no such statements. The doors read the build's own policies
 # (`entity-link-restriction`, `publisher-admission-retry`, `multi-route-atomic-tx`,
 # `targeted-query`, each off unless the build states it) and refuse a stated value while its policy
-# is off, so the feature adds the doors and no behaviour. It names the query and queryable
-# capabilities, whose doors it extends.
-switch-doors = ["query", "queryable", "wz-capi-core/switch-doors"]
+# is off, so the feature adds the doors and no behaviour. It names the query, queryable and
+# liveliness capabilities, whose doors it extends.
+switch-doors = ["query", "queryable", "liveliness", "wz-capi-core/switch-doors"]
 # The `quic/` link, over the same certificate material as `tls/`.
 transport_quic = ["wz-runtime-tokio/transport-link-quic", "wz-capi-core/transport_quic"]
 # The `quic-datagram/` link, on the `quic/` link's connection.

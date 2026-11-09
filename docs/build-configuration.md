@@ -209,11 +209,12 @@ original reproduced by naming it. Three things follow from it:
   tokio registry reads it; the zenoh-c ABI states it through `switch-doors`;
   `BoxedLinkDriver::try_reserve_room` is the seam a wrapper must forward.
 - **Stating the four switches from the C ABI** (the non-default feature `switch-doors` of
-  `wz-capi-c`, a capability that implies `query` and `queryable`): the option structs of the
-  `z_*` functions are upstream's layout and the `z_` symbols are held to the reference
-  library's, so nothing is a field of one and nothing is a new `z_`, `zc_` or `ze_` export.
-  Seven `wz_capi_c_*_ext` doors take what `z_put`, `z_delete`, `z_declare_publisher`, `z_get`,
-  `z_declare_querier`, `z_declare_subscriber` and `z_declare_queryable` take and one more
+  `wz-capi-c`, a capability that implies `query`, `queryable` and `liveliness`): the option
+  structs of the `z_*` functions are upstream's layout and the `z_` symbols are held to the
+  reference library's, so nothing is a field of one and nothing is a new `z_`, `zc_` or `ze_`
+  export. Nine `wz_capi_c_*_ext` doors take what `z_put`, `z_delete`, `z_declare_publisher`,
+  `z_get`, `z_declare_querier`, `z_declare_subscriber`, `z_declare_queryable`,
+  `z_liveliness_declare_token` and `z_liveliness_declare_subscriber` take and one more
   argument, a pointer to a statement struct (`wz_capi_c_entity_ext_t`: `link_mask`;
   `wz_capi_c_publish_ext_t`: `link_mask`, `attempts`, `delay_ms`, `all_or_none`;
   `wz_capi_c_query_ext_t`: `link_mask`, `has_target`, `target`), each with a `_default`

@@ -24397,7 +24397,7 @@ layer_c1cc_api_compat_c() {
         echo "  C1cc FAIL: the identity C consumer printed no verdict"
         echo "$c_id_out"; return 1; }
     # The statements of a call beyond the zenoh-c options, made from C the same way: the three
-    # structs' layout written out in the consumer, each `_default` function, and each of the seven
+    # structs' layout written out in the consumer, each `_default` function, and each of the nine
     # doors called with nothing stated (answering what its z_* twin answers for the same handles)
     # and with a statement (refused by the build's policy, or past it when the build states the
     # policy on).

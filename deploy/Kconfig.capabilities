@@ -323,6 +323,7 @@ config WZ_CAP_SWITCH_DOORS
 	default n
 	select WZ_CAP_QUERY
 	select WZ_CAP_QUERYABLE
+	select WZ_CAP_LIVELINESS
 	help
 	  The statements of a call beyond the zenoh-c options: the links an entity may use, a publish's retry and all-or-none form, a query's target node (the wz_capi_c_*_ext doors, wz-own, refused while the policy that admits the statement is off).
 	  Exported by: c.

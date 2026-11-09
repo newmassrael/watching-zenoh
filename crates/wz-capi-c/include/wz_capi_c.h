@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 12
+#define WZ_CAPI_C_ABI_REVISION 13
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -1281,6 +1281,23 @@ z_result_t wz_capi_c_declare_queryable_ext(
     const z_loaned_session_t *session, z_owned_queryable_t *queryable,
     const z_loaned_keyexpr_t *key_expr, z_moved_closure_query_t *callback,
     z_queryable_options_t *options, const wz_capi_c_entity_ext_t *ext);
+
+/* Revision 13: z_liveliness_declare_token and
+ * z_liveliness_declare_subscriber limited to the links `ext` names (NULL
+ * for no limit), as an entity above is. A token is announced to the nodes
+ * behind those links only, and a multicast group, which no slot names, is
+ * not told of it; a liveliness subscriber on the session itself hears it
+ * whatever the restriction says. */
+z_result_t wz_capi_c_liveliness_declare_token_ext(
+    const z_loaned_session_t *session, z_owned_liveliness_token_t *token,
+    const z_loaned_keyexpr_t *key_expr,
+    const z_liveliness_token_options_t *options,
+    const wz_capi_c_entity_ext_t *ext);
+z_result_t wz_capi_c_liveliness_declare_subscriber_ext(
+    const z_loaned_session_t *session, z_owned_subscriber_t *subscriber,
+    const z_loaned_keyexpr_t *key_expr, z_moved_closure_sample_t *callback,
+    z_liveliness_subscriber_options_t *options,
+    const wz_capi_c_entity_ext_t *ext);
 
 #ifdef __cplusplus
 }

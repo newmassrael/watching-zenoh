@@ -1618,7 +1618,12 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// (`crate::switch_doors`): seven `wz_capi_c_*_ext` doors, three `_default` functions and the three
 /// statement structs, ten new symbols, and the code `WZ_CAPI_C_E_POLICY_OFF`, in a build with
 /// `switch-doors` (off by default, as the features above are).
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 12;
+///
+/// It moves to 13 for the two doors that state the links of a liveliness entity
+/// (`wz_capi_c_liveliness_declare_token_ext`, `wz_capi_c_liveliness_declare_subscriber_ext`), two
+/// new symbols taking the revision-12 `wz_capi_c_entity_ext_t`, in a build with `switch-doors`,
+/// which now names the liveliness capability as it names query and queryable.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 13;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;

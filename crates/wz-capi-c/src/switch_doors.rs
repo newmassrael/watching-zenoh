@@ -46,10 +46,11 @@ use wz_session_core::peer_target::{self, PeerTargetError};
 
 use crate::abi::{
     z_loaned_keyexpr_t, z_loaned_session_t, z_moved_bytes_t, z_moved_closure_query_t,
-    z_moved_closure_reply_t, z_moved_closure_sample_t, z_owned_publisher_t, z_owned_querier_t,
-    z_owned_queryable_t, z_owned_subscriber_t,
+    z_moved_closure_reply_t, z_moved_closure_sample_t, z_owned_liveliness_token_t,
+    z_owned_publisher_t, z_owned_querier_t, z_owned_queryable_t, z_owned_subscriber_t,
 };
 use crate::get::z_get_options_t;
+use crate::liveliness::{z_liveliness_subscriber_options_t, z_liveliness_token_options_t};
 use crate::publisher::z_publisher_options_t;
 use crate::put::{z_delete_options_t, z_put_options_t};
 use crate::querier::z_querier_options_t;
@@ -59,7 +60,8 @@ use crate::statement::{PublishStatement, QueryStatement};
 use crate::sub::z_subscriber_options_t;
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
-/// What a subscriber or a queryable declaration states: the links the entity may use.
+/// What a subscriber, a queryable, a liveliness token or a liveliness subscriber declaration
+/// states: the links the entity may use.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct wz_capi_c_entity_ext_t {
@@ -439,6 +441,54 @@ pub unsafe extern "C" fn wz_capi_c_declare_queryable_ext(
     // SAFETY: the caller's contract, delegated.
     unsafe {
         crate::query::declare_queryable_on(session, queryable, key_expr, callback, options, links)
+    }
+}
+
+/// `z_liveliness_declare_token`, limited to the links `ext` names (null for no limit): the token
+/// is announced to the nodes behind those links only, a link that comes up later is told of it
+/// only if its slot is named, and a multicast group, which no slot names, is not told. A
+/// subscriber on the session's own liveliness hears it whatever the restriction says. A refused
+/// declaration leaves `token` in its gravestone state; refused as [`wz_capi_c_put_ext`] is.
+///
+/// # Safety
+/// As `z_liveliness_declare_token`; `ext` must be null or a valid statement.
+#[no_mangle]
+pub unsafe extern "C" fn wz_capi_c_liveliness_declare_token_ext(
+    session: *const z_loaned_session_t,
+    token: *mut z_owned_liveliness_token_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    _options: *const z_liveliness_token_options_t,
+    ext: *const wz_capi_c_entity_ext_t,
+) -> ZResult {
+    // SAFETY: the caller's contract for `ext`.
+    let links = entity_links(unsafe { ext.as_ref() });
+    // SAFETY: the caller's contract, delegated.
+    unsafe { crate::liveliness::declare_token_on(session, token, key_expr, links) }
+}
+
+/// `z_liveliness_declare_subscriber`, limited to the links `ext` names (null for no limit): its
+/// interest is declared to the nodes behind those links only, and a link that comes up later is
+/// declared to only if its slot is named. The closure is consumed on every path and a refused
+/// declaration leaves `subscriber` in its gravestone state; refused as [`wz_capi_c_put_ext`] is.
+///
+/// # Safety
+/// As `z_liveliness_declare_subscriber`; `ext` must be null or a valid statement.
+#[no_mangle]
+pub unsafe extern "C" fn wz_capi_c_liveliness_declare_subscriber_ext(
+    session: *const z_loaned_session_t,
+    subscriber: *mut z_owned_subscriber_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut z_liveliness_subscriber_options_t,
+    ext: *const wz_capi_c_entity_ext_t,
+) -> ZResult {
+    // SAFETY: the caller's contract for `ext`.
+    let links = entity_links(unsafe { ext.as_ref() });
+    // SAFETY: the caller's contract, delegated.
+    unsafe {
+        crate::liveliness::declare_subscriber_on(
+            session, subscriber, key_expr, callback, options, links,
+        )
     }
 }
 
@@ -985,6 +1035,53 @@ mod tests {
                 ),
                 refused_or_null(links_on())
             );
+
+            let mut token: z_owned_liveliness_token_t = std::mem::zeroed();
+            assert_eq!(
+                wz_capi_c_liveliness_declare_token_ext(
+                    session,
+                    &mut token,
+                    key,
+                    std::ptr::null(),
+                    none_entity
+                ),
+                Z_ENULL
+            );
+            assert_eq!(
+                wz_capi_c_liveliness_declare_token_ext(
+                    session,
+                    &mut token,
+                    key,
+                    std::ptr::null(),
+                    &mask
+                ),
+                refused_or_null(links_on())
+            );
+
+            let mut live: z_moved_closure_sample_t = std::mem::zeroed();
+            let mut watcher: z_owned_subscriber_t = std::mem::zeroed();
+            assert_eq!(
+                wz_capi_c_liveliness_declare_subscriber_ext(
+                    session,
+                    &mut watcher,
+                    key,
+                    &mut live,
+                    std::ptr::null_mut(),
+                    none_entity
+                ),
+                Z_ENULL
+            );
+            assert_eq!(
+                wz_capi_c_liveliness_declare_subscriber_ext(
+                    session,
+                    &mut watcher,
+                    key,
+                    &mut live,
+                    std::ptr::null_mut(),
+                    &mask
+                ),
+                refused_or_null(links_on())
+            );
         }
     }
 }
@@ -999,8 +1096,9 @@ mod node_tests {
     use std::ffi::CString;
 
     use crate::abi::{
-        z_moved_config_t, z_moved_queryable_t, z_moved_session_t, z_moved_subscriber_t,
-        z_owned_bytes_t, z_owned_config_t, z_owned_session_t, z_view_keyexpr_t,
+        z_moved_config_t, z_moved_liveliness_token_t, z_moved_queryable_t, z_moved_session_t,
+        z_moved_subscriber_t, z_owned_bytes_t, z_owned_config_t, z_owned_session_t,
+        z_view_keyexpr_t,
     };
     use crate::bytes::z_bytes_copy_from_str;
     use crate::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
@@ -1222,6 +1320,65 @@ mod node_tests {
             assert_eq!(
                 crate::query::z_undeclare_queryable(
                     (&mut queryable as *mut z_owned_queryable_t).cast::<z_moved_queryable_t>()
+                ),
+                Z_OK
+            );
+
+            let mut token: z_owned_liveliness_token_t = std::mem::zeroed();
+            assert_eq!(
+                crate::liveliness::declare_token_on(loaned, &mut token, key, Ok(one_link)),
+                Z_EUNAVAILABLE
+            );
+            assert!(!crate::liveliness::z_internal_liveliness_token_check(
+                &token
+            ));
+            assert_eq!(
+                crate::liveliness::declare_token_on(
+                    loaned,
+                    &mut token,
+                    key,
+                    Ok(LinkRestriction::Any)
+                ),
+                Z_OK,
+                "a token that states no link"
+            );
+            assert_eq!(
+                crate::liveliness::z_liveliness_undeclare_token(
+                    (&mut token as *mut z_owned_liveliness_token_t)
+                        .cast::<z_moved_liveliness_token_t>()
+                ),
+                Z_OK
+            );
+
+            let mut live: z_moved_closure_sample_t = std::mem::zeroed();
+            let mut watcher: z_owned_subscriber_t = std::mem::zeroed();
+            assert_eq!(
+                crate::liveliness::declare_subscriber_on(
+                    loaned,
+                    &mut watcher,
+                    key,
+                    &mut live,
+                    std::ptr::null_mut(),
+                    Ok(one_link)
+                ),
+                Z_EUNAVAILABLE
+            );
+            assert!(!crate::sub::z_internal_subscriber_check(&watcher));
+            assert_eq!(
+                crate::liveliness::declare_subscriber_on(
+                    loaned,
+                    &mut watcher,
+                    key,
+                    &mut live,
+                    std::ptr::null_mut(),
+                    Ok(LinkRestriction::Any)
+                ),
+                Z_OK,
+                "a liveliness subscriber that states no link"
+            );
+            assert_eq!(
+                crate::sub::z_undeclare_subscriber(
+                    (&mut watcher as *mut z_owned_subscriber_t).cast::<z_moved_subscriber_t>()
                 ),
                 Z_OK
             );
