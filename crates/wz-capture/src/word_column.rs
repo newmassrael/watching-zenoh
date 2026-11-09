@@ -104,6 +104,44 @@ impl WordColumn {
         self.chunks.capacity() * core::mem::size_of::<Option<Chunk>>()
             + self.chunks.iter().flatten().count() * CHUNK_BYTES
     }
+
+    /// Keep the words of the rows `keep` names, and give back every chunk left
+    /// with none: what a holder that keeps the column between calls does with the
+    /// rows a ceiling has taken.
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(u64) -> bool) {
+        let first = self.first;
+        let mut len = self.len;
+        for (at, slot) in self.chunks.iter_mut().enumerate() {
+            let Some(bytes) = slot else {
+                continue;
+            };
+            let base = (first + at as u64) * CHUNK_ROWS as u64;
+            let mut held = false;
+            for row in 0..CHUNK_ROWS {
+                let (byte, shift) = (row / 2, (row as u32 % 2) * 4);
+                if (bytes[byte] >> shift) & 0xF == 0 {
+                    continue;
+                }
+                if keep(base + row as u64) {
+                    held = true;
+                } else {
+                    bytes[byte] &= !(0xF << shift);
+                    len -= 1;
+                }
+            }
+            if !held {
+                *slot = None;
+            }
+        }
+        self.len = len;
+        while matches!(self.chunks.front(), Some(None)) {
+            self.chunks.pop_front();
+            self.first += 1;
+        }
+        while matches!(self.chunks.back(), Some(None)) {
+            self.chunks.pop_back();
+        }
+    }
 }
 
 #[cfg(test)]

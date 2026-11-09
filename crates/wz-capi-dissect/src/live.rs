@@ -1495,6 +1495,13 @@ impl LiveDissection {
         self.values_memory.stats()
     }
 
+    /// What the selection since door's memories have done: messages folded, rows
+    /// read, and calls that went on or read every row. What a test reads instead
+    /// of a clock.
+    pub fn selection_work(&self) -> wz_capture::selection_json::SelectionWork {
+        self.selection_said.work()
+    }
+
     /// THE SELECTOR'S VERDICT OVER THE ROWS OF THE FIELD DOCUMENT, and
     /// nothing beside it: each row's four coordinates and the word the selector
     /// said, with the ceilings that made the list short.
@@ -1581,9 +1588,11 @@ impl LiveDissection {
     ///
     /// # Cost
     ///
-    /// The document follows what is new and what moved. The WALK that decides the
-    /// words is the whole capture's, as for [`Self::selection`], so a call costs
-    /// about what that one does and writes far less.
+    /// The document follows what is new and what moved, and so does the work: the
+    /// folds that decide the words are kept per selector and fed what arrived, and
+    /// the rows read are the new ones and the requests still open. When a call
+    /// must begin again, and what a ceiling's trim does to the words, is
+    /// [`wz_capture::selection_json::selection_since_json_coordinated`]'s.
     ///
     /// `&mut`, for [`Self::selection`]'s reason.
     pub fn selection_since(

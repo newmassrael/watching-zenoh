@@ -77,12 +77,21 @@ pub(crate) trait OrderedFold: Clone {
     /// Required for the reason [`Self::reads_flow_word`] is.
     fn reads_tree(&self) -> bool;
 
+    /// Whether this fold is handed the bytes of `frame`'s transport message.
+    ///
+    /// By default where it reads a tree and the frame carried a batch: the
+    /// census planes read the `Frame` around a record from them and nothing
+    /// else. A fold that judges the transport messages themselves (the row plane
+    /// a selection fold carries) wants them for more frames, and says which.
+    fn wants_message(&self, frame: &crate::messages::Row<'_>) -> bool {
+        self.reads_tree() && crate::field_path::records_carrier(frame).is_some()
+    }
+
     /// Take one message: the row `frame` of the list at `list`, its position in
     /// [`Dissection::message_lists_with_origin`], and `packet` the capture packet
     /// it resolves to; `grouping` is the capture's session grouping. `message`
     /// is the bytes the capture holds of the frame's transport message, where
-    /// the fold reads a tree and the frame carried a batch, and `None`
-    /// otherwise. The ROW and not its frame, because a fold that keys what it
+    /// [`Self::wants_message`] says so, and `None` otherwise. The ROW and not its frame, because a fold that keys what it
     /// says by row keys it by the row's place in its list
     /// ([`crate::payload::RowKey`]).
     fn feed(
@@ -105,25 +114,23 @@ pub(crate) fn fold_whole_capture<F: OrderedFold>(
     dissection: &Dissection,
     grouping: &SessionGrouping,
 ) {
-    let reads_tree = fold.reads_tree();
     let order = dissection.message_frames_in_capture_order();
     for (flow, list, packet, frame) in order.iter() {
-        let held = held_for_fold(reads_tree, &order, dissection, list, &frame);
+        let held = held_for_fold(&*fold, &order, dissection, list, &frame);
         fold.feed(&flow, list, packet, &frame, held.as_deref(), grouping);
     }
 }
 
-/// The bytes a fold that reads a tree is handed for `frame`: its transport
-/// message's, where its records have one as their envelope (a `Frame` that
-/// carried their batch, a `Fragment` that completed it), and `None` otherwise.
-fn held_for_fold<'d>(
-    reads_tree: bool,
+/// The bytes `fold` is handed for `frame`: its transport message's, where
+/// [`OrderedFold::wants_message`] says so, and `None` otherwise.
+fn held_for_fold<'d, F: OrderedFold>(
+    fold: &F,
     order: &crate::OrderedFrames<'d>,
     dissection: &'d Dissection,
     list: usize,
     frame: &crate::messages::Row<'_>,
 ) -> Option<alloc::borrow::Cow<'d, [u8]>> {
-    (reads_tree && crate::field_path::records_carrier(frame).is_some())
+    fold.wants_message(frame)
         .then(|| order.held_message_bytes(dissection, list, frame))
         .flatten()
 }
@@ -277,13 +284,12 @@ impl<F: OrderedFold> Resumable<F> {
                 let mut tap =
                     share.filter(|s| matches!(s.wanted, Wanted::Since(m) if *m == saved.marks));
                 let mut stopped = false;
-                let reads_tree = saved.fold.reads_tree();
                 for (flow, list, packet, frame) in frames.iter() {
                     if !steps(progress, F::PLANES) {
                         stopped = true;
                         break;
                     }
-                    let held = held_for_fold(reads_tree, &frames, dissection, list, &frame);
+                    let held = held_for_fold(&saved.fold, &frames, dissection, list, &frame);
                     saved
                         .fold
                         .feed(&flow, list, packet, &frame, held.as_deref(), grouping);
@@ -313,12 +319,11 @@ impl<F: OrderedFold> Resumable<F> {
                 // wants everything reads.
                 let mut tap = share.filter(|s| matches!(s.wanted, Wanted::Everything));
                 let mut fold = begin();
-                let reads_tree = fold.reads_tree();
                 for (flow, list, packet, frame) in frames.iter() {
                     if !steps(progress, F::PLANES) {
                         return None;
                     }
-                    let held = held_for_fold(reads_tree, &frames, dissection, list, &frame);
+                    let held = held_for_fold(&fold, &frames, dissection, list, &frame);
                     fold.feed(&flow, list, packet, &frame, held.as_deref(), grouping);
                     if let Some(tap) = tap.as_deref_mut() {
                         (tap.tap)(&flow, list, packet, &frame);

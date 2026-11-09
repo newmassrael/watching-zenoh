@@ -123,14 +123,30 @@
 //! is ABSENT rather than unmatched, and a consumer counting "three matched"
 //! needs to be told the list it counted in was made short.
 
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::census_json::dir_name;
 use crate::fields_json::{
-    judged_by, row_verdict_of, RenderedLists, RowCoordinates, RowJudgement, RowVerdict,
+    judged_by, PlaneReadings, RenderedLists, RowCoordinates, RowJudgement, RowVerdict,
 };
+use crate::ordered_fold::OrderedFold;
+use crate::payload::RowKey;
+
+/// Who says the word of a row, by the row's key: the judgement one walk made
+/// ([`RowJudgement`]), or the planes a selection memory keeps between calls.
+pub(crate) trait JudgesRows {
+    /// The word for the row `key`.
+    fn word(&self, key: &RowKey) -> RowVerdict;
+}
+
+impl JudgesRows for RowJudgement {
+    fn word(&self, key: &RowKey) -> RowVerdict {
+        self.verdict(key)
+    }
+}
 
 /// One row of the selection, before it is written: the coordinates a record
 /// joins on, the number the handle gave the row when it numbers rows, and the
@@ -145,6 +161,9 @@ use crate::fields_json::{
 /// write and [`crate::selected_packets`] reads to name the packets that carried
 /// them.
 pub(crate) struct Row<'a> {
+    /// The row's key in the planes, for a message row of a list the caller
+    /// numbers; `None` for a scouting row and for a list it does not.
+    pub(crate) key: Option<RowKey>,
     pub(crate) seq: Option<u64>,
     pub(crate) direction: &'static str,
     pub(crate) list_id: Option<u64>,
@@ -172,12 +191,66 @@ pub(crate) enum RowSource<'a> {
         flow: &'a crate::DatagramDissection,
         position: usize,
     },
-    /// A scouting message, carried whole by the packet `packet`.
-    Scouting { packet: usize },
+    /// A scouting message of the datagram flow at `index`, carried whole by the
+    /// packet `packet`.
+    Scouting { index: usize, packet: usize },
+}
+
+impl Row<'_> {
+    /// What a document writes of the row.
+    fn written(&self) -> Written {
+        Written {
+            seq: self.seq,
+            direction: self.direction,
+            list_id: self.list_id,
+            anchor: self.anchor,
+            batch_index: self.batch_index,
+            verdict: self.verdict,
+        }
+    }
+
+    /// Where the row stands among the groups the documents write their rows in:
+    /// the stream flows in order, then each datagram flow's transport rows and
+    /// its scouting rows. Rows of one group are written in an order no later
+    /// call changes for the rows already written, so the group and the order of
+    /// writing place a row among the others.
+    fn group(&self) -> Group {
+        match self.source {
+            RowSource::Stream { index, .. } => Group::Stream(index),
+            RowSource::Datagram { index, .. } => Group::Datagram(index, Lane::Transport),
+            RowSource::Scouting { index, .. } => Group::Datagram(index, Lane::Scouting),
+        }
+    }
+}
+
+/// A group of rows, in the order the documents write the groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    Stream(usize),
+    Datagram(usize, Lane),
+}
+
+/// Which list of a datagram flow, its transport rows first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Lane {
+    Transport,
+    Scouting,
+}
+
+/// What a document writes of one row, held apart from the row so a row written
+/// in an earlier call can be written again without reading it.
+#[derive(Debug, Clone, Copy)]
+struct Written {
+    seq: Option<u64>,
+    direction: &'static str,
+    list_id: Option<u64>,
+    anchor: u64,
+    batch_index: u64,
+    verdict: Option<RowVerdict>,
 }
 
 /// The coordinate keys of a row, without its braces and without its verdict.
-fn push_coordinates(row: &Row, out: &mut String) {
+fn push_coordinates(row: &Written, out: &mut String) {
     let _ = write!(out, "\"direction\":\"{}\"", row.direction);
     if let Some(list_id) = row.list_id {
         let _ = write!(
@@ -189,7 +262,7 @@ fn push_coordinates(row: &Row, out: &mut String) {
 }
 
 /// One row of the selection document.
-fn push_row(row: &Row, first: &mut bool, out: &mut String) {
+fn push_row(row: &Written, first: &mut bool, out: &mut String) {
     if !*first {
         out.push(',');
     }
@@ -211,31 +284,128 @@ fn push_row(row: &Row, first: &mut bool, out: &mut String) {
 /// reason: the packets it names are those of these rows and of no others.
 pub(crate) fn for_each_row<'d>(
     d: &'d crate::Dissection,
-    verdicts: Option<&RowJudgement>,
+    verdicts: Option<&dyn JudgesRows>,
     coordinates: &dyn RowCoordinates,
     each: &mut dyn FnMut(Row<'d>),
 ) {
-    let lists = RenderedLists::of(d);
+    for_each_row_after(d, verdicts, coordinates, None, each)
+        .expect("rows enumerated from the first have nothing before them to disagree with");
+}
 
+/// Where the rows a document enumerated ended, in each list it enumerates: what
+/// lets the next enumeration begin after them ([`for_each_row_after`]).
+///
+/// A list is named by its flow and its place, and a row by its produced-index,
+/// which no front trim moves.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RowMarks {
+    /// One per stream flow, in `Dissection::flows` order.
+    stream: Vec<StreamMark>,
+    /// One per datagram flow, in `Dissection::datagram_flows` order: the
+    /// produced-index its cleartext list and its scouting list had reached.
+    datagram: Vec<DatagramMark>,
+}
+
+/// Where a stream flow's rows ended: the produced-index reached, and the state
+/// its capture order continues from ([`crate::FlowDissection::capture_order`]).
+#[derive(Debug, Clone)]
+struct StreamMark {
+    flow: crate::link::FlowKey,
+    produced: u64,
+    last_packet: usize,
+    largest: Option<(usize, u64)>,
+}
+
+#[derive(Debug, Clone)]
+struct DatagramMark {
+    flow: crate::link::FlowKey,
+    produced: u64,
+    scouting: u64,
+}
+
+/// [`for_each_row`] for the rows each list produced after `after`, in the same
+/// order and with the same numbers and words, and the marks to continue from;
+/// every row when `after` is `None`.
+///
+/// `None`, before any row is handed to `each`, when the rows that arrived do
+/// not all sort after the ones enumerated: a list that left or appeared in
+/// front of one the marks name, or a stream message whose first byte came in a
+/// packet before the last one enumerated (a segment held behind a gap). A
+/// caller then enumerates every row, as it always did.
+///
+/// The rows a list produced after the marks and a ceiling has since taken are
+/// not enumerated: they are not held. A stream row whose packet its flow cannot
+/// name takes the packet of the row before it in its list, as the capture order
+/// does, and after a trim that row is the last one enumerated and not the first
+/// one held; the two orders can then part over that row alone.
+pub(crate) fn for_each_row_after<'d>(
+    d: &'d crate::Dissection,
+    verdicts: Option<&dyn JudgesRows>,
+    coordinates: &dyn RowCoordinates,
+    after: Option<&RowMarks>,
+    each: &mut dyn FnMut(Row<'d>),
+) -> Option<RowMarks> {
+    let lists = RenderedLists::of(d);
+    if let Some(after) = after {
+        // A flow that left, or another flow standing where a mark's stood.
+        let flows_kept = after.stream.len() <= d.flows().len()
+            && after.datagram.len() <= d.datagram_flows().len()
+            && after
+                .stream
+                .iter()
+                .zip(d.flows())
+                .all(|(mark, flow)| mark.flow == flow.flow)
+            && after
+                .datagram
+                .iter()
+                .zip(d.datagram_flows())
+                .all(|(mark, flow)| mark.flow == flow.flow);
+        if !flows_kept {
+            return None;
+        }
+    }
+    // Every stream flow's order first, so a refusal hands out no row.
+    let mut marks = RowMarks::default();
+    let mut orders = Vec::with_capacity(d.flows().len());
     for (i, flow) in d.flows().iter().enumerate() {
+        let first_produced = flow.frames.produced() - flow.frames.len() as u64;
+        let (start, last, largest) = match after.and_then(|a| a.stream.get(i)) {
+            Some(mark) => (
+                (mark.produced.max(first_produced) - first_produced) as usize,
+                mark.last_packet,
+                mark.largest,
+            ),
+            None => (0, 0, None),
+        };
+        // CAPTURE order, the field document's own: see
+        // `FlowDissection::capture_order`, which is this from the first row.
+        let (order, last_packet, largest) =
+            flow.capture_order_from(start, last, largest, usize::MAX)?;
+        marks.stream.push(StreamMark {
+            flow: flow.flow,
+            produced: flow.frames.produced(),
+            last_packet,
+            largest,
+        });
+        orders.push(order);
+    }
+
+    for ((i, flow), order) in d.flows().iter().enumerate().zip(orders) {
         let list = lists.stream.get(i).copied();
         let list_id = list.and_then(|l| coordinates.list_id(l));
         // The produced-index of the OLDEST message still held, so a row's number
         // is looked up by an index a front trim does not move: the field
         // document's own.
         let first_produced = flow.frames.produced() - flow.frames.len() as u64;
-        // CAPTURE order, the field document's own: see
-        // `FlowDissection::capture_order`. One function orders the rows of both
-        // documents, so "the same rows in the same order" is a property of the
-        // code and not of two walks agreeing.
-        for position in flow.capture_order() {
+        for position in order {
             let held = flow.frames().row(position);
             let frame: &wz_session_core::passive::PassiveFrame = &held;
-            let verdict = match (verdicts, list) {
-                (Some(census), Some(list)) => Some(row_verdict_of(census, list, &held)),
-                _ => None,
-            };
+            let key = list.map(|l| RowKey::of(l, &held));
+            let verdict = verdicts
+                .zip(key.as_ref())
+                .map(|(judge, key)| judge.word(key));
             each(Row {
+                key,
                 seq: list.and_then(|l| coordinates.row_seq(l, first_produced + position as u64)),
                 direction: dir_name(frame.direction),
                 list_id,
@@ -255,14 +425,20 @@ pub(crate) fn for_each_row<'d>(
         let list = lists.datagram.get(i).copied();
         let list_id = list.and_then(|l| coordinates.list_id(l));
         let first_produced = flow.frames.produced() - flow.frames.len() as u64;
-        for (position, frame) in flow.frames().iter().enumerate() {
-            let verdict = match (verdicts, list) {
-                (Some(census), Some(list)) => Some(row_verdict_of(census, list, &frame)),
-                _ => None,
-            };
+        let mark = after.and_then(|a| a.datagram.get(i));
+        let from = |reached: u64, first: u64| (reached.max(first) - first) as usize;
+        let start = mark.map_or(0, |m| from(m.produced, first_produced));
+        let frames = flow.frames();
+        for position in start..frames.len() {
+            let frame = frames.row(position);
+            let key = list.map(|l| RowKey::of(l, &frame));
+            let verdict = verdicts
+                .zip(key.as_ref())
+                .map(|(judge, key)| judge.word(key));
             // `stream_offset` names the PACKET on a datagram link, the only anchor
             // there is, as the field document's own row says.
             each(Row {
+                key,
                 seq: list.and_then(|l| coordinates.row_seq(l, first_produced + position as u64)),
                 direction: dir_name(frame.direction),
                 list_id,
@@ -283,12 +459,17 @@ pub(crate) fn for_each_row<'d>(
         let scouting_id = coordinates.scouting_list_id(&flow.flow);
         let scouting = flow.scouting();
         let scouting_first = scouting.produced() - scouting.len() as u64;
-        for (position, datagram) in scouting.iter().enumerate() {
+        let start = mark.map_or(0, |m| from(m.scouting, scouting_first));
+        for position in start..scouting.len() {
+            let Some(datagram) = scouting.get(position) else {
+                continue;
+            };
             let verdict = match (verdicts, list) {
                 (Some(_), Some(_)) => Some(RowVerdict::Unjudged),
                 _ => None,
             };
             each(Row {
+                key: None,
                 seq: coordinates.scouting_row_seq(&flow.flow, scouting_first + position as u64),
                 direction: dir_name(datagram.direction),
                 list_id: scouting_id,
@@ -296,11 +477,18 @@ pub(crate) fn for_each_row<'d>(
                 batch_index: 0,
                 verdict,
                 source: RowSource::Scouting {
+                    index: i,
                     packet: datagram.packet_index,
                 },
             });
         }
+        marks.datagram.push(DatagramMark {
+            flow: flow.flow,
+            produced: flow.frames.produced(),
+            scouting: scouting.produced(),
+        });
     }
+    Some(marks)
 }
 
 /// The selector's verdict over every row of the field document, with each row
@@ -323,8 +511,9 @@ pub fn selection_json_where_coordinated(
     crate::doc_revision::envelope_into(crate::doc_revision::SELECTION, &mut out);
     out.push_str(",\"rows\":[");
     let mut first = true;
-    for_each_row(d, verdicts.as_ref(), coordinates, &mut |row| {
-        push_row(&row, &mut first, &mut out);
+    let judge = verdicts.as_ref().map(|v| v as &dyn JudgesRows);
+    for_each_row(d, judge, coordinates, &mut |row| {
+        push_row(&row.written(), &mut first, &mut out);
     });
 
     out.push(']');
@@ -365,10 +554,241 @@ impl Said {
     fn is_empty(&self) -> bool {
         self.words.is_empty()
     }
+
+    /// Give up the words of the rows a ceiling has taken, once they outnumber the
+    /// rows held by a fraction: no later call can compare a row the handle no
+    /// longer holds, and a call does not pass over every word for a few rows.
+    fn forget_what_is_not_held(&mut self, coordinates: &dyn RowCoordinates) {
+        if self.len() <= 256 {
+            return;
+        }
+        let Some(held) = coordinates.held_row_count() else {
+            return;
+        };
+        if self.len() as u64 <= held + held / 4 + 256 {
+            return;
+        }
+        if let Some(ranges) = coordinates.held_seq_ranges() {
+            self.words
+                .retain(|seq| crate::fields_json::seq_in_ranges(&ranges, seq));
+        }
+    }
+}
+
+/// The planes that judge a row under ONE selector, folded over the capture in
+/// capture order and kept between calls ([`crate::ordered_fold::Resumable`]).
+///
+/// They are the planes [`RowJudgement`] makes in one walk: the payload plane, the
+/// exchange plane and the row plane, begun against the same selector and fed the
+/// same messages in the same order. A row's word is read of them by
+/// [`PlaneReadings`], the one list of which planes speak of a row, so a word read
+/// here and a word read of one walk are the same function of the same tables.
+#[derive(Debug, Clone)]
+pub(crate) struct SelectionFold {
+    /// Whether a selector was asked: with none there are no words.
+    judged: bool,
+    /// The planes, or `None` when no selector was asked or when the selector is
+    /// ambiguous in this capture.
+    planes: Option<SelectionPlanes>,
+    /// The `zid` terms that began more than one of the capture's zids: empty
+    /// for a selector that was judged.
+    ambiguities: Vec<crate::filter::ZidAmbiguity>,
+}
+
+#[derive(Debug, Clone)]
+struct SelectionPlanes {
+    /// The selector read against the capture's zids, which the row plane is
+    /// judged by; the census planes read it so themselves.
+    filter: crate::filter::Filter,
+    /// Where the capture began, for the row plane's `elapsed` term.
+    origin: Option<u64>,
+    payloads: crate::payload::PayloadFold,
+    exchanges: crate::exchange::ExchangeFold,
+    rows: crate::row_plane::RowPlane,
+}
+
+impl SelectionFold {
+    /// Every plane empty, against `filter` (numbered by the caller's list ids)
+    /// and `grouping`: what [`RowJudgement`] begins its walk with.
+    fn begin(
+        d: &crate::Dissection,
+        filter: &crate::filter::Filter,
+        grouping: &crate::node::SessionGrouping,
+    ) -> Self {
+        if filter.is_any() {
+            return Self {
+                judged: false,
+                planes: None,
+                ambiguities: Vec::new(),
+            };
+        }
+        let resolved = filter.resolved_against(grouping.named_zids());
+        if resolved.is_ambiguous() {
+            return Self {
+                judged: true,
+                planes: None,
+                ambiguities: resolved.into_ambiguities(),
+            };
+        }
+        Self {
+            judged: true,
+            planes: Some(SelectionPlanes {
+                filter: resolved.filter().clone(),
+                origin: d.capture_origin_ms(),
+                payloads: crate::payload::PayloadFold::begin(d, filter, grouping),
+                exchanges: crate::exchange::ExchangeFold::begin(d, filter, grouping),
+                rows: crate::row_plane::RowPlane::default(),
+            }),
+            ambiguities: Vec::new(),
+        }
+    }
+
+    /// The entries the planes keep that grow with the messages taken, which a
+    /// fold that goes on across front trims compares with what the lists hold.
+    fn kept_entries(&self) -> usize {
+        self.planes.as_ref().map_or(0, |p| {
+            p.payloads.kept_entries() + p.exchanges.kept_entries() + p.rows.len()
+        })
+    }
+
+    /// Bytes the planes hold that follow the row count.
+    fn memory(&self) -> usize {
+        self.planes.as_ref().map_or(0, |p| {
+            p.payloads.memory() + p.exchanges.memory() + p.rows.memory()
+        })
+    }
+
+    /// Who says each row's word now, with `open` the exchanges still open judged
+    /// as [`crate::exchange::ExchangeFold::open_judged`] judges them, or `None`
+    /// when no selector was asked.
+    fn judge<'f>(
+        &'f self,
+        open: Option<&'f crate::exchange::ExchangeTable>,
+    ) -> Option<FoldJudge<'f>> {
+        self.judged.then(|| FoldJudge {
+            readings: self.planes.as_ref().map(|p| PlaneReadings {
+                payloads: p.payloads.census_so_far(),
+                exchanges: p.exchanges.table_so_far(),
+                open_exchanges: open,
+                rows: &p.rows,
+            }),
+        })
+    }
+}
+
+impl OrderedFold for SelectionFold {
+    fn reads_flow_word(&self) -> bool {
+        self.planes
+            .as_ref()
+            .is_some_and(|p| p.filter.reads_flow_word())
+    }
+
+    fn reads_tree(&self) -> bool {
+        self.planes.as_ref().is_some_and(|p| p.filter.reads_tree())
+    }
+
+    /// What the row plane reads, which holds what the census planes read.
+    fn wants_message(&self, frame: &crate::messages::Row<'_>) -> bool {
+        self.planes
+            .as_ref()
+            .is_some_and(|p| crate::row_plane::RowPlane::wants_message(&p.filter, frame))
+    }
+
+    fn feed(
+        &mut self,
+        flow: &crate::link::FlowKey,
+        list: usize,
+        packet: usize,
+        frame: &crate::messages::Row<'_>,
+        message: Option<&[u8]>,
+        grouping: &crate::node::SessionGrouping,
+    ) {
+        let Some(SelectionPlanes {
+            filter,
+            origin,
+            payloads,
+            exchanges,
+            rows,
+        }) = &mut self.planes
+        else {
+            return;
+        };
+        // The census planes are handed the bytes exactly where their own walk
+        // hands them, so each reads what it reads in one walk.
+        let census_bytes = message.filter(|_| payloads.wants_message(frame));
+        payloads.feed(flow, list, packet, frame, census_bytes, grouping);
+        exchanges.feed(flow, list, packet, frame, census_bytes, grouping);
+        let ctx = grouping
+            .context(list)
+            .placed(*flow, Some(packet))
+            .holding(message);
+        rows.take(
+            filter,
+            ctx,
+            *origin,
+            list,
+            frame,
+            message,
+            exchanges.table_so_far(),
+        );
+    }
+}
+
+/// The word of a row read of a [`SelectionFold`]'s planes: `unjudged` for every
+/// row when the selector was ambiguous and no plane was made.
+struct FoldJudge<'p> {
+    readings: Option<PlaneReadings<'p>>,
+}
+
+impl JudgesRows for FoldJudge<'_> {
+    fn word(&self, key: &RowKey) -> RowVerdict {
+        self.readings
+            .as_ref()
+            .map_or(RowVerdict::Unjudged, |r| r.verdict(key))
+    }
+}
+
+/// What the last document left for the next to go on from.
+#[derive(Debug)]
+struct Left {
+    /// Where its rows ended in each list.
+    marks: RowMarks,
+    /// The cursor it gave.
+    through_seq: u64,
+    /// The rows it wrote whose word a later message can still move: those that
+    /// carried the request of an exchange still open. Every other row's word is
+    /// final once its message is taken (see [`selection_since_json_coordinated`]).
+    unsettled: BTreeMap<RowKey, Placed>,
+}
+
+/// What a document wrote of a row, kept to write it again under `revised`.
+#[derive(Debug, Clone, Copy)]
+struct Placed {
+    group: Group,
+    /// Its place in the order rows were written in, which no later call
+    /// changes for a row already written.
+    order: u64,
+    direction: &'static str,
+    anchor: u64,
+    batch_index: u64,
+}
+
+/// The work a selection memory has done, for a test to read instead of a clock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SelectionWork {
+    /// The planes' fold: messages taken, and how often it went on or began again.
+    pub fold: crate::FoldStats,
+    /// Rows read from their lists to be written or compared, summed over calls.
+    pub rows_read: u64,
+    /// Calls that read only the rows after the last document's.
+    pub continued: u64,
+    /// Calls that read every row.
+    pub whole: u64,
 }
 
 /// The word a selector said of each row the LAST call of
-/// [`selection_since_json_coordinated`] judged, by the row's number.
+/// [`selection_since_json_coordinated`] judged, by the row's number, and the
+/// planes that judged them, kept between calls.
 ///
 /// The memory that makes a revision reportable. A verdict is not final when it
 /// is given: it is the capture's reading of the row at that state, and it moves
@@ -376,7 +796,7 @@ impl Said {
 /// only the new rows would hold every earlier row at the word it was first given.
 /// Remembering what was said is what lets the next call say what changed, and it
 /// costs a word per row the handle still holds, not a copy of any row.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct SelectionMemory {
     said: Said,
     /// Whether a call of [`selection_since_json_coordinated`] has written this
@@ -385,6 +805,19 @@ pub struct SelectionMemory {
     /// the one fact that tells a caller which of the two the call found: the
     /// document says it as `window.continued`.
     written: bool,
+    /// The node census the session grouping is derived from, kept so that the
+    /// grouping is not rebuilt from every message at each call.
+    nodes: crate::node::NodeMemory,
+    /// The selector the planes were begun under, numbered by the caller's list
+    /// ids: a `flow` term compares those ids, so another numbering is another
+    /// selector.
+    asked: Option<crate::filter::Filter>,
+    fold: crate::ordered_fold::Resumable<SelectionFold>,
+    /// What the last document left, or `None` when the next call reads every row.
+    left: Option<Left>,
+    /// The order the next row written takes.
+    next_order: u64,
+    work: SelectionWork,
 }
 
 impl SelectionMemory {
@@ -398,9 +831,42 @@ impl SelectionMemory {
         self.said.is_empty()
     }
 
-    /// Bytes the memory holds: the nibble a row is held in, by chunk.
+    /// Bytes the memory holds that follow the row count: the nibble a row's word
+    /// is held in, by chunk, and the planes that judged the rows.
     pub fn memory(&self) -> usize {
-        self.said.words.allocated_bytes()
+        self.said.words.allocated_bytes() + self.fold.fold().map_or(0, SelectionFold::memory)
+    }
+
+    /// The work this memory has done since it was made.
+    pub fn work(&self) -> SelectionWork {
+        self.work
+    }
+
+    /// Give up the planes, the node census and where the last document ended,
+    /// keeping the words said: the next call then judges from the first message
+    /// and reads every row, which is what every call did before the planes were
+    /// kept. What a test holds a memory that goes on against.
+    #[cfg(test)]
+    pub(crate) fn begin_again(&mut self) {
+        self.nodes = crate::node::NodeMemory::default();
+        self.asked = None;
+        self.fold = crate::ordered_fold::Resumable::default();
+        self.left = None;
+    }
+
+    /// Whether the planes, which go on across front trims, have grown past what
+    /// the lists hold: past four entries per held message and a floor they are
+    /// begun again over what is held, one pass per that many new messages, as for
+    /// the field document's pairing.
+    fn outgrew(&self, d: &crate::Dissection) -> bool {
+        let Some(fold) = self.fold.fold() else {
+            return false;
+        };
+        let held: usize = d
+            .message_lists_with_origin()
+            .map(|(_, _, list)| list.len())
+            .sum();
+        fold.kept_entries() > 4 * held + 1024
     }
 }
 
@@ -412,7 +878,7 @@ impl SelectionMemory {
 /// or every change of selector empties the memory and the next call writes every
 /// row as new. With one memory, which is the default, a change of selector does
 /// exactly that. A selector is told apart by its text, as it always was.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct SelectionMemories {
     slots: crate::bounded_slots::BoundedSlots<String, SelectionMemory>,
 }
@@ -456,6 +922,24 @@ impl SelectionMemories {
     pub fn evictions(&self) -> u64 {
         self.slots.evicted()
     }
+
+    /// The work of every selector's memory kept now, summed: what a test reads
+    /// instead of a clock. A memory given up takes its work with it.
+    pub fn work(&self) -> SelectionWork {
+        self.slots
+            .values()
+            .map(SelectionMemory::work)
+            .fold(SelectionWork::default(), |sum, w| SelectionWork {
+                fold: crate::FoldStats {
+                    messages_folded: sum.fold.messages_folded + w.fold.messages_folded,
+                    restarts: sum.fold.restarts + w.fold.restarts,
+                    resumes: sum.fold.resumes + w.fold.resumes,
+                },
+                rows_read: sum.rows_read + w.rows_read,
+                continued: sum.continued + w.continued,
+                whole: sum.whole + w.whole,
+            })
+    }
 }
 
 /// The cursor window of a since document: the number the caller gave, and the
@@ -469,7 +953,7 @@ pub struct SelectionWindow {
 }
 
 /// A revised row also says what it read before.
-fn push_revised_row(row: &Row, was: RowVerdict, first: &mut bool, out: &mut String) {
+fn push_revised_row(row: &Written, was: RowVerdict, first: &mut bool, out: &mut String) {
     if !*first {
         out.push(',');
     }
@@ -493,9 +977,40 @@ fn push_revised_row(row: &Row, was: RowVerdict, first: &mut bool, out: &mut Stri
 /// [`selection_json_where_coordinated`] writes a word for every row, so a list
 /// refreshed once per feed step received and parsed every row again at every step.
 /// This writes the rows numbered above `since.after_seq` and nothing else, so the
-/// cost of the DOCUMENT follows what is new. The cost of the WALK does not move:
-/// the verdict is decided over the whole capture, as it is for the other door,
-/// because a verdict is a fact about the capture and not about a row.
+/// cost of the DOCUMENT follows what is new.
+///
+/// # What a call costs
+///
+/// A verdict is a fact about the capture and not about a row, so the planes that
+/// decide it are folds over the whole capture. They are kept between calls, in
+/// the [`SelectionMemory`], and fed only the messages that arrived, and the rows read
+/// are the ones after the last document's and the rows whose word can still move
+/// (below). A consumer that asks again from the `through_seq` it was given pays
+/// for what arrived, the exchanges still open, and the document.
+///
+/// The planes begin again from the first message when the capture is not the
+/// last one plus messages that sort after it (a list that left or appeared in
+/// front of another, a message decoded after a packet that followed it), when the
+/// session grouping or the capture's origin moved, when the selector or the
+/// handle's list ids it is read against are other ones, and when the planes have
+/// outgrown what the lists hold (four entries per held message and a thousand
+/// more). A front trim is not a reason: the planes go on across it, as the field
+/// document's pairing does, so a word given while a message was held is not taken
+/// back when a ceiling takes that message (a request whose final arrives after the
+/// request was trimmed still closes it). Every row is read again, as before, when
+/// the planes began again, when the cursor is below the `through_seq` the last
+/// document gave, when the last document wrote a row with no number, and when the
+/// rows that arrived do not all sort after the ones read (a segment held behind a
+/// gap).
+///
+/// Which words can move while the planes go on: a row's word is decided when its
+/// message is taken, except a request's, which is decided when its exchange
+/// closes or is displaced and reads as unclosed until then. So the rows asked
+/// again are the request rows of the exchanges that were open; every other row
+/// keeps the word it was given, which is the word a walk from the first message
+/// gives it. What can move every row (the grouping, a flow's zenoh word that a
+/// selector reads, a zid prefix that becomes ambiguous) begins the planes again,
+/// and then every row is compared, as it always was.
 ///
 /// # A verdict can change after it is given, and this says which
 ///
@@ -544,31 +1059,177 @@ pub fn selection_since_json_coordinated(
     since: SelectionWindow,
     memory: &mut SelectionMemory,
 ) -> String {
-    let grouping = crate::node::session_grouping(d);
-    let verdicts = judged_by(d, filter, &grouping, Some(coordinates));
-    let mut said_now = Said::default();
-    let mut fresh: Vec<Row> = Vec::new();
-    let mut revised: Vec<(Row, RowVerdict)> = Vec::new();
-    for_each_row(d, verdicts.as_ref(), coordinates, &mut |row| {
+    // The grouping goes on across front trims, as the field document's does: a
+    // node whose handshake a ceiling has taken is still the node its messages
+    // were judged against.
+    let grouping = crate::node::SessionGrouping::of(&memory.nodes.nodes_across_trims(d));
+    // A `flow` term compares the caller's list ids, so the selector is read
+    // against them first, as `judged_by` reads it.
+    let numbered = if filter.is_any() {
+        filter.clone()
+    } else {
+        let lists = d.message_lists_with_origin().count();
+        filter.numbered_by(lists, &|list| coordinates.list_id(list))
+    };
+    if memory.asked.as_ref() != Some(&numbered) || memory.outgrew(d) {
+        memory.fold = crate::ordered_fold::Resumable::default();
+        memory.asked = Some(numbered.clone());
+    }
+    let restarts = memory.work.fold.restarts;
+    let fold = memory
+        .fold
+        .advance_across_trims(
+            d,
+            &grouping,
+            &mut memory.work.fold,
+            None,
+            || SelectionFold::begin(d, &numbered, &grouping),
+            None,
+        )
+        .expect("a walk nobody can stop runs to its end");
+    let resumed = memory.work.fold.restarts == restarts;
+
+    let open = fold.planes.as_ref().map(|p| p.exchanges.open_judged());
+    let judge = fold.judge(open.as_ref());
+    let verdicts = judge.as_ref().map(|j| j as &dyn JudgesRows);
+    let open_rows: BTreeSet<RowKey> = fold
+        .planes
+        .as_ref()
+        .map(|p| p.exchanges.open_rows().collect())
+        .unwrap_or_default();
+
+    // The rows the last document left may be gone on from when the planes went
+    // on from where they stopped (so no word of a row already written moved but
+    // an open exchange's) and the cursor is not below the one that document gave
+    // (so every row at or below it was written then).
+    let left = memory
+        .left
+        .take()
+        .filter(|left| resumed && since.after_seq >= left.through_seq);
+
+    let mut fresh: Vec<Written> = Vec::new();
+    let mut revised: Vec<(Group, u64, Written, RowVerdict)> = Vec::new();
+    let mut words: Vec<(u64, RowVerdict)> = Vec::new();
+    let mut unsettled: BTreeMap<RowKey, Placed> = BTreeMap::new();
+    let mut unnumbered = false;
+    let mut rows_read = 0u64;
+    let mut next_order = memory.next_order;
+    let said = &memory.said;
+    let mut visit = |row: Row<'_>| {
+        rows_read += 1;
+        let order = next_order;
+        next_order += 1;
+        let written = row.written();
+        if let Some(key) = row.key.filter(|key| open_rows.contains(key)) {
+            unsettled.insert(
+                key,
+                Placed {
+                    group: row.group(),
+                    order,
+                    direction: written.direction,
+                    anchor: written.anchor,
+                    batch_index: written.batch_index,
+                },
+            );
+        }
         let Some(seq) = row.seq else {
             // A row with NO number is never passed over: with a cursor set it
             // cannot be compared, and writing a row twice is a recoverable
             // answer where dropping one is not. The field document's rule.
-            fresh.push(row);
+            unnumbered = true;
+            fresh.push(written);
             return;
         };
         if let Some(verdict) = row.verdict {
-            said_now.insert(seq, verdict);
+            words.push((seq, verdict));
         }
         if seq > since.after_seq {
-            fresh.push(row);
-        } else if let (Some(now), Some(was)) = (row.verdict, memory.said.get(seq)) {
+            fresh.push(written);
+        } else if let (Some(now), Some(was)) = (row.verdict, said.get(seq)) {
             if now != was {
-                revised.push((row, was));
+                revised.push((row.group(), order, written, was));
             }
         }
+    };
+    let gone_on = left.as_ref().and_then(|left| {
+        for_each_row_after(d, verdicts, coordinates, Some(&left.marks), &mut visit)
     });
-    memory.said = said_now;
+    let whole = gone_on.is_none();
+    let marks = match gone_on {
+        Some(marks) => marks,
+        None => for_each_row_after(d, verdicts, coordinates, None, &mut visit)
+            .expect("rows enumerated from the first have nothing before them to disagree with"),
+    };
+    if let (false, Some(left), Some(judge)) = (whole, &left, verdicts) {
+        // The rows written before whose word can still move: the requests of
+        // exchanges that were open. Each is asked again, while its list still
+        // holds it: a row a ceiling has taken is in no document, whatever number
+        // the caller still has for it, which is what a whole enumeration does.
+        let first_held: Vec<u64> = d
+            .message_lists_with_origin()
+            .map(|(_, _, frames)| frames.produced() - frames.len() as u64)
+            .collect();
+        for (key, placed) in &left.unsettled {
+            let (list, _, produced) = key.parts();
+            let produced = produced as u64;
+            if first_held.get(list).is_none_or(|first| produced < *first) {
+                continue;
+            }
+            let Some(seq) = coordinates.row_seq(list, produced) else {
+                continue;
+            };
+            rows_read += 1;
+            if open_rows.contains(key) {
+                unsettled.insert(*key, *placed);
+            }
+            let now = judge.word(key);
+            words.push((seq, now));
+            match said.get(seq) {
+                Some(was) if was != now && seq <= since.after_seq => revised.push((
+                    placed.group,
+                    placed.order,
+                    Written {
+                        seq: Some(seq),
+                        direction: placed.direction,
+                        list_id: coordinates.list_id(list),
+                        anchor: placed.anchor,
+                        batch_index: placed.batch_index,
+                        verdict: Some(now),
+                    },
+                    was,
+                )),
+                _ => {}
+            }
+        }
+    }
+    // In the order the rows are written: group by group, and within a group in
+    // the order the rows were first written, which a whole enumeration keeps.
+    revised.sort_by_key(|(group, order, _, _)| (*group, *order));
+    let ambiguities = fold.ambiguities.clone();
+
+    if whole {
+        let mut said_now = Said::default();
+        for (seq, verdict) in words {
+            said_now.insert(seq, verdict);
+        }
+        memory.said = said_now;
+        memory.work.whole += 1;
+    } else {
+        for (seq, verdict) in words {
+            memory.said.insert(seq, verdict);
+        }
+        memory.said.forget_what_is_not_held(coordinates);
+        memory.work.continued += 1;
+    }
+    memory.work.rows_read += rows_read;
+    memory.next_order = next_order;
+    // A row with no number was written whole and will be again, so the next call
+    // reads every row; every other document leaves what the next goes on from.
+    memory.left = (!unnumbered).then_some(Left {
+        marks,
+        through_seq: since.through_seq,
+        unsettled,
+    });
     // Read BEFORE it is set: whether this call found a memory an earlier call
     // had written, which is the only answer the caller cannot get anywhere else.
     let continued = core::mem::replace(&mut memory.written, true);
@@ -586,14 +1247,11 @@ pub fn selection_since_json_coordinated(
     }
     out.push_str("],\"revised\":[");
     let mut first = true;
-    for (row, was) in &revised {
+    for (_, _, row, was) in &revised {
         push_revised_row(row, *was, &mut first, &mut out);
     }
     out.push(']');
-    crate::filter::push_ambiguous_zid_prefixes(
-        verdicts.as_ref().map_or(&[], |v| v.ambiguities()),
-        &mut out,
-    );
+    crate::filter::push_ambiguous_zid_prefixes(&ambiguities, &mut out);
     out.push_str(",\"dropped_by_limits\":");
     out.push_str(&crate::report::dropped_by_limits_json(d));
     out.push('}');
@@ -601,7 +1259,7 @@ pub fn selection_since_json_coordinated(
 }
 
 /// One row of the since document: the selection row, with its number first.
-fn push_seq_row(row: &Row, first: &mut bool, out: &mut String) {
+fn push_seq_row(row: &Written, first: &mut bool, out: &mut String) {
     if !*first {
         out.push(',');
     }
@@ -1328,7 +1986,7 @@ pub(crate) mod tests {
 
     /// What a generated packet is to the exchange plane.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    enum Role {
+    pub(crate) enum Role {
         /// The `Request` that opens an exchange.
         Request,
         /// A `ResponseFinal` that closes an exchange the capture opened.
@@ -1355,7 +2013,7 @@ pub(crate) mod tests {
 
     /// What `crate::exchange::tests::dissect` takes: for each record, who sent
     /// it, when, and its bytes.
-    type Records = Vec<(bool, Option<u64>, Vec<u8>)>;
+    pub(crate) type Records = Vec<(bool, Option<u64>, Vec<u8>)>;
 
     /// A capture of forty network records chosen by `seed`, with what each one is
     /// to the exchange plane.
@@ -1365,7 +2023,7 @@ pub(crate) mod tests {
     /// exchange is then judged unclosed), replies and closes for open exchanges,
     /// closes of exchanges that were never opened, and pushes. Some exchanges are
     /// left open when the capture ends.
-    fn generated(seed: u64) -> (Records, Vec<Role>) {
+    pub(crate) fn generated(seed: u64) -> (Records, Vec<Role>) {
         let keys = ["demo/a", "demo/b", "other/c"];
         let mut rng = Lcg(seed);
         // Which of the request ids 1..=6 an exchange is open under.

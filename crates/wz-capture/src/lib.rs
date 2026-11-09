@@ -236,6 +236,10 @@ mod fields_revised_tests;
 mod ordered_fold_tests;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod payload_size_tests;
+// The selection since document of a memory that goes on, held to one that begins
+// again at every call, and the work it did.
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod selection_since_tests;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod window_tests;
 // A map that is cheap to copy while it is being grown, which is what lets a plane

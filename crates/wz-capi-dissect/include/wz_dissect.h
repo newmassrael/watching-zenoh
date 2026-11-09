@@ -7285,10 +7285,41 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * list current as rows arrive received and parsed every row again at every step,
  * and the list it held was only as fresh as its last full read. This door writes
  * the rows numbered above `after_seq` and the rows whose word moved, so the
- * DOCUMENT follows what is new. The WALK that decides the words is still the whole
- * capture's, as it is for wz_dissect_live_selection: a verdict is a fact about the
- * capture and not about a row, and judging only the new rows would be a guess. A
- * call costs about what that door costs and writes far less.
+ * DOCUMENT follows what is new.
+ *
+ * WHAT A CALL COSTS. A verdict is a fact about the capture and not about a row,
+ * so the words are decided by folds over every message; the handle keeps them
+ * between calls for each selector it keeps a memory for, and feeds them only the
+ * messages that arrived. A call that asks again under the same selector from the
+ * `through_seq` it was given reads the rows that arrived and the request rows of
+ * the exchanges still open (the only rows whose word moves while the folds go on:
+ * a request's word is decided when its exchange closes), judges each exchange
+ * still open, and writes the document. Measured on a debug build of this library,
+ * a call every 100 pushes under `kind == put`: with no ceiling, 2.2 ms a call at
+ * 10,000 rows held and 2.4 ms at 100,000, where reading every row took 0.31 s and
+ * 3.1 s; under WZ_DISSECT_LIMITS_LIVE_TAP (about 10,000 rows held) 4.8 to 9.5 ms a
+ * call on average where reading every row took 0.6 to 1.4 s, with the folds
+ * begun again once in about 30,000 rows (the last case below), that call costing
+ * what reading every row costs.
+ * The folds begin again from the first message, and every row is read, when:
+ *   - the capture is not the last one plus messages that sort after it: a list
+ *     that appeared or left in front of another (a stream flow in front of the
+ *     datagram flows), a message decoded after a packet that followed it (a
+ *     stream segment held behind a gap);
+ *   - the session grouping or the capture's origin moved (a message that names a
+ *     node, a flow's zenoh word that the selector reads);
+ *   - the selector is another one, or a `flow` term in it names a list id the
+ *     handle had not numbered;
+ *   - the folds keep more than four entries per message the handle holds, and a
+ *     thousand more.
+ * Every row is read, and the folds go on, when the cursor is below the
+ * `through_seq` the last document gave or the last document wrote a row with no
+ * `seq`. A ceiling that trims a list's front is NOT among these: the folds go on
+ * across it, so a word given while a message was held is not taken back when the
+ * ceiling takes that message (a final whose request was trimmed still closes it,
+ * a node whose handshake was trimmed is still the node), and the words of the
+ * rows you hold can then differ from what wz_dissect_live_selection, which
+ * judges what is held, says of them. A row the ceiling took is in no document.
  *
  * THE CURSOR is wz_dissect_live_fields_since's: every row carries `seq`, the
  * handle's count of rows it has issued, unique and increasing and untouched by a
@@ -7629,7 +7660,9 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  *     so it is the one figure here that stops growing with the capture.
  *   - selection is what wz_dissect_live_selection_since keeps between calls: the
  *     word each selector said of each row, which is how a later call says which
- *     moved. It is a nibble a row, for every selector the handle keeps one for.
+ *     moved, a nibble a row, and the folds that decide the words (the verdict of
+ *     each row they judged, in the census's column), for every selector the
+ *     handle keeps one for.
  *   - A new structure is a new key and not a new symbol: read it by name and
  *     tolerate keys you do not know, as every document here asks.
  *

@@ -19139,6 +19139,119 @@ mod tests {
         unsafe { wz_dissect_live_close(handle) };
     }
 
+    /// THE SELECTION SINCE DOOR GOES ON FROM THE LAST CURSOR, through the handle's
+    /// own numbering: a tap fed a few packets at a time and asked under one
+    /// selector at the `through_seq` of its last answer writes the rows that
+    /// arrived, folds each message once, and reads every row only on its first
+    /// call. Before the planes were kept, every call walked and read the whole
+    /// capture.
+    #[test]
+    fn the_live_selection_since_door_goes_on_from_the_last_cursor() {
+        let file = wz_capture::fixtures::push_run_capture(
+            600,
+            wz_capture::fixtures::RunTransport::Datagram,
+        );
+        let ends = pcap_record_ends(&file);
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        let (mut cursor, mut calls) = (0u64, 0u64);
+        for (i, &end) in ends.iter().enumerate() {
+            unsafe { (*handle).follow(&file[..end]).expect("follows") };
+            if i % 10 != 9 && i + 1 != ends.len() {
+                continue;
+            }
+            let doc = live_selection_since(handle, "kind == put", cursor).expect("answers");
+            let next = through_seq_of(&doc);
+            assert_eq!(
+                since_array(&doc, "rows").matches("\"seq\":").count() as u64,
+                next - cursor,
+                "the rows that arrived, and only they: {doc}"
+            );
+            assert_eq!(since_array(&doc, "revised"), "[]", "{doc}");
+            cursor = next;
+            calls += 1;
+        }
+        let work = unsafe { (*handle).selection_work() };
+        assert_eq!(
+            work.whole, 1,
+            "only the first call reads every row: {work:?}"
+        );
+        assert_eq!(work.continued, calls - 1, "{work:?}");
+        assert_eq!(work.rows_read, cursor, "each row is read once: {work:?}");
+        assert_eq!(work.fold.restarts, 1, "{work:?}");
+        assert_eq!(
+            work.fold.messages_folded, cursor,
+            "each message is folded once (one row a message here): {work:?}"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// MEASUREMENT, NOT A GATE (run with `--ignored --nocapture`): what one step of
+    /// the selection since door costs as the handle grows, asked under one selector
+    /// every `WZ_BENCH_STRIDE` packets at the cursor of its last answer, beside what
+    /// the selection door costs at the same size: the whole walk every since call
+    /// made before the planes were kept.
+    #[test]
+    #[ignore = "a measurement, printed"]
+    fn measure_selection_since_step_cost_against_handle_size() {
+        let env = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let (pushes, stride, every) = (
+            env("WZ_BENCH_PUSHES", 100_000),
+            env("WZ_BENCH_STRIDE", 100),
+            env("WZ_BENCH_REPORT", 10_000) as u64,
+        );
+        let file = wz_capture::fixtures::push_run_capture(
+            pushes,
+            wz_capture::fixtures::RunTransport::Datagram,
+        );
+        let ends = pcap_record_ends(&file);
+        // `WZ_BENCH_LIVE_TAP=1` opens the handle under the tap's ceilings, which
+        // trim the lists' fronts as the capture grows.
+        let limits = if env("WZ_BENCH_LIVE_TAP", 0) == 1 {
+            WZ_DISSECT_LIMITS_LIVE_TAP
+        } else {
+            WZ_DISSECT_LIMITS_NONE
+        };
+        let handle = open_live(limits).expect("opens");
+        let (mut cursor, mut report_at) = (0u64, every);
+        let (mut sum, mut max, mut steps) =
+            (std::time::Duration::ZERO, std::time::Duration::ZERO, 0u32);
+        for (i, &end) in ends.iter().enumerate() {
+            unsafe { (*handle).follow(&file[..end]).expect("follows") };
+            let last = i + 1 == ends.len();
+            if i % stride != stride - 1 && !last {
+                continue;
+            }
+            let t = std::time::Instant::now();
+            let doc = live_selection_since(handle, "kind == put", cursor).expect("answers");
+            let took = t.elapsed();
+            cursor = through_seq_of(&doc);
+            sum += took;
+            max = max.max(took);
+            steps += 1;
+            if cursor >= report_at || last {
+                let t = std::time::Instant::now();
+                let whole = live_selection(handle, "kind == put").expect("answers");
+                let walk = t.elapsed();
+                println!(
+                    "rows {cursor:>7}: since mean {:?} max {:?} over {steps} steps; \
+                     the whole walk {walk:?} ({} bytes)",
+                    sum / steps.max(1),
+                    max,
+                    whole.len()
+                );
+                (sum, max, steps) = (std::time::Duration::ZERO, std::time::Duration::ZERO, 0);
+                report_at += every;
+            }
+        }
+        println!("WORK: {:?}", unsafe { (*handle).selection_work() });
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
     /// MEASUREMENT, NOT A GATE (run with `--ignored --nocapture`): the live door over MANY
     /// interleaved flows, asked every `WZ_BENCH_STRIDE` packets at the cursor of its last
     /// answer; what one step costs as the handle grows.

@@ -1374,6 +1374,39 @@ impl ExchangeFold {
         table.drain_open(&mut open, &self.filter);
         table
     }
+
+    /// The table as the messages taken so far left it: every exchange that was
+    /// closed or displaced has its verdict in it, and none still open does.
+    /// Which request each `ResponseFinal` closed is complete in it, since a close
+    /// is recorded when the final is taken.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn table_so_far(&self) -> &ExchangeTable {
+        &self.table
+    }
+
+    /// Every exchange still open given its verdict, in a table of their own.
+    ///
+    /// [`Self::table`] is this table and [`Self::table_so_far`] together, without
+    /// the copy of the second: a reader that asks a row's verdict of both, in
+    /// that order, reads the records [`Self::table`] holds for it in the order it
+    /// holds them. It costs a pass over the exchanges still open, which is what
+    /// judging them costs wherever it is done.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn open_judged(&self) -> ExchangeTable {
+        let mut table = ExchangeTable::new();
+        table.capture_origin_ms = self.table.capture_origin_ms;
+        let mut open = self.open.clone();
+        table.drain_open(&mut open, &self.filter);
+        table
+    }
+
+    /// The row that carried the request of each exchange still open: the rows
+    /// whose verdict a later message can still change, as the close that ends
+    /// the exchange or the request that displaces it.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn open_rows(&self) -> impl Iterator<Item = crate::payload::RowKey> + '_ {
+        self.open.values().map(|entry| entry.row)
+    }
 }
 
 impl crate::ordered_fold::OrderedFold for ExchangeFold {

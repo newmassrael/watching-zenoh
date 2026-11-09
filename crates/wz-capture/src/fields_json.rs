@@ -1320,7 +1320,7 @@ fn window_end(
 
 /// Whether `seq` lies in one of `ranges`, which are ascending and disjoint (see
 /// [`RowCoordinates::held_seq_ranges`]).
-fn seq_in_ranges(ranges: &[(u64, u64)], seq: u64) -> bool {
+pub(crate) fn seq_in_ranges(ranges: &[(u64, u64)], seq: u64) -> bool {
     let at = ranges.partition_point(|(_, last)| *last < seq);
     ranges.get(at).is_some_and(|(first, _)| *first <= seq)
 }
@@ -6532,8 +6532,48 @@ impl RowJudgement {
         self.walk.as_ref().map(|w| &w.exchanges)
     }
 
-    /// The row's answer folded over the records either plane judged on it, or
-    /// `None` when neither judged one.
+    /// The word for the row `key`: `unjudged` when no walk was made.
+    pub(crate) fn verdict(&self, key: &crate::payload::RowKey) -> RowVerdict {
+        RowVerdict::of_folded(self.folded(key))
+    }
+
+    /// The row's answer folded over the records any plane judged on it, or
+    /// `None` when none judged one or no walk was made.
+    fn folded(&self, key: &crate::payload::RowKey) -> Option<crate::filter::Truth> {
+        let PlaneVerdicts {
+            payloads,
+            exchanges,
+            rows,
+        } = self.walk.as_ref()?;
+        PlaneReadings {
+            payloads,
+            exchanges,
+            open_exchanges: None,
+            rows,
+        }
+        .folded(key)
+    }
+}
+
+/// The planes that judge a row, read in place: the ONE list of which planes
+/// speak of a row, for a judgement made by one walk ([`RowJudgement`]) and for
+/// one kept between calls ([`crate::selection_json`]'s selection fold).
+#[cfg(feature = "network-codecs")]
+pub(crate) struct PlaneReadings<'p> {
+    pub(crate) payloads: &'p crate::payload::PayloadCensus,
+    /// The exchanges the walk closed (or displaced).
+    pub(crate) exchanges: &'p crate::exchange::ExchangeTable,
+    /// The exchanges still open, judged as unclosed, when they are held apart
+    /// from the closed ones ([`crate::exchange::ExchangeFold::open_judged`]);
+    /// `None` when `exchanges` already holds them.
+    pub(crate) open_exchanges: Option<&'p crate::exchange::ExchangeTable>,
+    pub(crate) rows: &'p crate::row_plane::RowPlane,
+}
+
+#[cfg(feature = "network-codecs")]
+impl PlaneReadings<'_> {
+    /// The row's answer folded over the records any plane judged on it, or
+    /// `None` when none judged one.
     fn folded(&self, key: &crate::payload::RowKey) -> Option<crate::filter::Truth> {
         fn records(
             row: Option<&crate::payload::RowVerdict>,
@@ -6542,16 +6582,19 @@ impl RowJudgement {
                 .iter()
                 .copied()
         }
-        let PlaneVerdicts {
-            payloads,
-            exchanges,
-            rows,
-        } = self.walk.as_ref()?;
         crate::payload::fold_records(
-            records(payloads.row_verdict(key))
-                .chain(records(exchanges.row_verdict(key)))
-                .chain(records(rows.row_verdict(key))),
+            records(self.payloads.row_verdict(key))
+                .chain(records(self.exchanges.row_verdict(key)))
+                .chain(records(
+                    self.open_exchanges.and_then(|open| open.row_verdict(key)),
+                ))
+                .chain(records(self.rows.row_verdict(key))),
         )
+    }
+
+    /// The word for the row `key`.
+    pub(crate) fn verdict(&self, key: &crate::payload::RowKey) -> RowVerdict {
+        RowVerdict::of_folded(self.folded(key))
     }
 }
 
@@ -6569,14 +6612,7 @@ pub(crate) fn row_verdict_of(
     list: usize,
     frame: &crate::messages::Row<'_>,
 ) -> RowVerdict {
-    use crate::filter::Truth;
-    let key = crate::payload::RowKey::of(list, frame);
-    match judged.folded(&key) {
-        Some(Truth::Yes) => RowVerdict::Yes,
-        Some(Truth::No) => RowVerdict::No,
-        Some(Truth::Unknown) => RowVerdict::Undecided,
-        None => RowVerdict::Unjudged,
-    }
+    judged.verdict(&crate::payload::RowKey::of(list, frame))
 }
 
 /// The four words a row's `selected` key carries, as ONE type.
@@ -6600,6 +6636,19 @@ pub enum RowVerdict {
 }
 
 impl RowVerdict {
+    /// The word for a row whose records the planes folded to `folded`: `None`
+    /// when no plane judged a record on it. The one mapping from a fold to a
+    /// word, for every renderer and every memory that asks.
+    pub(crate) const fn of_folded(folded: Option<crate::filter::Truth>) -> Self {
+        use crate::filter::Truth;
+        match folded {
+            Some(Truth::Yes) => Self::Yes,
+            Some(Truth::No) => Self::No,
+            Some(Truth::Unknown) => Self::Undecided,
+            None => Self::Unjudged,
+        }
+    }
+
     /// The word as a number in `1..=4`, for a column that holds one a row
     /// ([`crate::word_column`]).
     pub(crate) const fn code(self) -> u8 {

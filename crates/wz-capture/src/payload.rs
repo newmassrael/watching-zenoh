@@ -1801,6 +1801,20 @@ impl PayloadFold {
         self.census.clone()
     }
 
+    /// The census as it stands, read in place by a caller that asks it for rows
+    /// and needs no copy to keep.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn census_so_far(&self) -> &PayloadCensus {
+        &self.census
+    }
+
+    /// How many rows the plane holds a verdict for: what it keeps that grows
+    /// with the messages it has taken.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn kept_entries(&self) -> usize {
+        self.census.row_verdicts.len()
+    }
+
     /// Bytes the plane holds that follow the row count: the verdict it keeps for
     /// every record it judged, which is what the census adds to a handle per row.
     #[cfg(feature = "dissect")]
@@ -4022,7 +4036,7 @@ pub mod formats {
         }
     }
 
-    /// The character that, after [`DEFINE`], opens the name of a key binding
+    /// The character that, after the definition mark `#`, opens the name of a key binding
     /// (`#%7=demo/sensor`): `%` reads as "number", and the digits that follow
     /// are the id.
     pub const KEY_ID_MARK: char = '%';

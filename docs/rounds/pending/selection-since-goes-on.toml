@@ -1,0 +1,24 @@
+impact = ["wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"]
+
+decision = '''
+A consumer measured the selection since door of a live handle at 230 to 580 ms a call even when no row had arrived: every call folded the three planes that decide a row's word (payload, exchange and row plane) over the whole capture, then read every row to write the few after the cursor. The planes are folds in capture order, as the census's are, so they are now kept between calls per selector (as many selectors as the handle keeps memories for) and fed only the messages that arrived, going on across a front trim as the field document's pairing does. A row's word is final when its message is taken, except a request's, which is decided when its exchange closes or is displaced; so a call that asks again from the cursor the last document gave reads the rows that arrived and the request rows of the exchanges that were open, and compares only those against the words remembered. Rows are enumerated from per-list marks with the capture order's own continuation, so the document is written in the order a whole enumeration writes it. Whatever can move every row (the grouping, a flow's word a selector reads, a zid prefix, the list ids a `flow` term reads, the planes outgrowing the lists) begins the planes again, and a cursor below the last one or a row with no number reads every row; the header lists these for the consumer. The row plane is now kept in the census's verdict column, since it is now held between calls. A word given while a message was held is not taken back when a ceiling takes the message, so under a trimming ceiling the since door's words can differ from the selection door's, which judges only what is held; the header says so.
+'''
+
+changes = '''
+crates/wz-capture/src/selection_json.rs: the selection fold (three planes behind one walk) kept in each selection memory, rows enumerated after per-list marks, revisions asked of the open requests only, the work counter.
+crates/wz-capture/src/ordered_fold.rs: a fold says which messages it wants the bytes of.
+crates/wz-capture/src/row_plane.rs: one message at a time, kept in the verdict column.
+crates/wz-capture/src/fields_json.rs: the planes a row's word is read of named once (PlaneReadings), with the one mapping from a fold to a word.
+crates/wz-capture/src/exchange.rs, payload.rs: the fold's tables read in place and the open exchanges judged apart; a public doc that linked a private const (round 4450) no longer does, which failed rustdoc with warnings denied.
+crates/wz-capture/src/word_column.rs: words of rows no longer held are given up.
+crates/wz-capture/src/selection_since_tests.rs: the kept memory held to one that begins again at every call, and its work.
+crates/wz-capi-dissect: the header's cost section with the conditions and the measurement, the handle's work counter, a test that the door goes on through the handle's numbering, a measurement; the handle memory gate's ceilings with the 13 bytes a row the kept planes cost.
+'''
+
+verification = '''
+Run on the build machines. Capture crate with `dissect,fixtures`: clippy over all targets clean, library tests 1,745 passed and 6 ignored; the new equality test grows forty generated captures one packet at a time under ten selectors and every document equals the one a memory that judges from the first message writes, byte for byte, with each message folded once and every row read only on the first call. Clippy with `--no-default-features` and with `--no-default-features --features dissect` clean; rustdoc of the capture crate and the dissection C library with warnings denied clean. Dissection C library: clippy clean, tests 233 passed and 3 ignored, the handle memory gate 4 passed (after the reads 72.8, 41.9, 95.3 and 61.2 bytes a row, equal at 20,000 and 40,000 pushes). Measured in a debug build, a call every 100 pushes under `kind == put`: with no ceiling 2.2 ms at 10,000 rows and 2.4 ms at 100,000, where the whole walk took 0.31 s and 3.1 s; under the live tap's ceilings 4.8 to 9.5 ms on average where the whole walk took 0.6 to 1.4 s, the planes begun again 7 times in 200,000 pushes.
+'''
+
+carry = '''
+Under a ceiling that trims the front, the kept planes still hold the verdicts of the rows the ceiling took, and past four entries per held message they are begun again over what is held: about once in 30,000 rows on the live tap's ceilings, and that call costs the whole walk. Giving up the trimmed rows' verdicts from the planes (and the settled rows' verdicts, whose words the memory already holds, which is most of the 13 bytes a row) would remove both; not done in this round.
+'''

@@ -74,7 +74,7 @@ use wz_session_core::passive::{Carried, Direction, PassiveFrame};
 use wz_session_core::passive_messages::Messages;
 
 use crate::fields_json::{judged_by, RowCoordinates, RowVerdict};
-use crate::selection_json::{for_each_row, RowSource};
+use crate::selection_json::{for_each_row, JudgesRows, RowSource};
 
 /// The packets a selector's picked rows came in, and the counts beside them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -139,7 +139,8 @@ pub fn selected_packets_coordinated(
     let mut stream_picks: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut datagram_picks: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
 
-    for_each_row(d, verdicts.as_ref(), coordinates, &mut |row| {
+    let judge = verdicts.as_ref().map(|v| v as &dyn JudgesRows);
+    for_each_row(d, judge, coordinates, &mut |row| {
         match row.verdict {
             Some(RowVerdict::Yes) => summary.rows_yes += 1,
             Some(RowVerdict::No) => {
@@ -177,7 +178,7 @@ pub fn selected_packets_coordinated(
             }
             // Scouting rows are unjudged by construction and never reach here;
             // a packet is still the honest answer if one ever does.
-            RowSource::Scouting { packet } => {
+            RowSource::Scouting { packet, .. } => {
                 picked.insert(packet);
             }
         }

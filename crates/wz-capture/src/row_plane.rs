@@ -55,8 +55,6 @@
 //! paths through that message are decided, and every term about the record,
 //! its name (`msg`) included, is undecided.
 
-use alloc::collections::BTreeMap;
-
 use crate::filter::{Content, Filter, MessageNames, Record, RecordView, Truth};
 use crate::payload::{RowKey, RowVerdict};
 use wz_session_core::dissect::MessageName;
@@ -64,9 +62,13 @@ use wz_session_core::network_message::{BatchParse, NetworkMessage};
 use wz_session_core::passive::{Carried, PassiveFrame};
 
 /// The verdicts of the rows (and the records in them) no census plane judged.
+///
+/// In the column the census planes keep theirs in ([`crate::verdict_column`]):
+/// a selection memory keeps this plane between calls, beside theirs, so it is
+/// held at their cost per row and not at a map node's.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct RowPlane {
-    rows: BTreeMap<RowKey, RowVerdict>,
+    rows: crate::verdict_column::VerdictColumn,
 }
 
 impl RowPlane {
@@ -84,36 +86,74 @@ impl RowPlane {
         let origin = d.capture_origin_ms();
         let order = d.message_frames_in_capture_order();
         for (flow, list, packet, row) in order.iter() {
-            let frame: &PassiveFrame = &row;
-            // The transport message's bytes, where the capture keeps them and a
-            // path term reads them: a row with no batch is that message, and a
-            // batch's records stand inside it. A message the session could not
-            // decode is named from them whatever the selector reads.
-            let held = (filter.reads_tree() || frame.frame.is_err())
+            let held = Self::wants_message(filter, &row)
                 .then(|| order.held_message_bytes(d, list, &row))
                 .flatten();
             let ctx = grouping
                 .context(list)
                 .placed(flow, Some(packet))
                 .holding(held.as_deref());
-            let key = RowKey::of(list, &row);
-            let base = Base {
-                filter,
-                ctx,
-                frame,
-                origin,
-            };
-            match &frame.carried {
-                Carried::Batch(batch) => plane.batch(&base, key, batch, exchanges),
-                #[cfg(feature = "reassembly")]
-                Carried::Reassembled { batch, .. } => plane.batch(&base, key, batch, exchanges),
-                // A frame that carried no batch IS its row's message, read from
-                // the bytes the capture keeps of it; a datagram's are the
-                // caller's.
-                _ => plane.whole(&base, key, held.as_deref()),
-            }
+            plane.take(filter, ctx, origin, list, &row, held.as_deref(), exchanges);
         }
         plane
+    }
+
+    /// Whether judging `row` reads the bytes of its transport message: where a
+    /// path term reads them (a row with no batch is that message, and a batch's
+    /// records stand inside it), and for a message the session could not
+    /// decode, which is named from them whatever the selector reads.
+    pub(crate) fn wants_message(filter: &Filter, row: &crate::messages::Row<'_>) -> bool {
+        let frame: &PassiveFrame = row;
+        filter.reads_tree() || frame.frame.is_err()
+    }
+
+    /// Judge ONE message, the row `row` of the list at `list`: the step
+    /// [`Self::of`] takes for each message in capture order, and the one a fold
+    /// that keeps this plane between calls takes for each message that arrived.
+    ///
+    /// `ctx` is the list's context placed at the row's packet and holding `held`,
+    /// the bytes [`Self::wants_message`] asked for. `exchanges` need only have
+    /// taken the messages up to this one: which request a `ResponseFinal` closed
+    /// is decided when the final is taken, and nothing later changes it.
+    // Eight: the step's seven inputs and the plane.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn take(
+        &mut self,
+        filter: &Filter,
+        ctx: crate::node::ListContext<'_>,
+        origin: Option<u64>,
+        list: usize,
+        row: &crate::messages::Row<'_>,
+        held: Option<&[u8]>,
+        exchanges: &crate::exchange::ExchangeTable,
+    ) {
+        let frame: &PassiveFrame = row;
+        let key = RowKey::of(list, row);
+        let base = Base {
+            filter,
+            ctx,
+            frame,
+            origin,
+        };
+        match &frame.carried {
+            Carried::Batch(batch) => self.batch(&base, key, batch, exchanges),
+            #[cfg(feature = "reassembly")]
+            Carried::Reassembled { batch, .. } => self.batch(&base, key, batch, exchanges),
+            // A frame that carried no batch IS its row's message, read from the
+            // bytes the capture keeps of it; a datagram's are the caller's.
+            _ => self.whole(&base, key, held),
+        }
+    }
+
+    /// How many rows this plane holds a verdict for: what it keeps that grows
+    /// with the messages it has taken.
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Bytes the plane holds that follow the row count.
+    pub(crate) fn memory(&self) -> usize {
+        self.rows.memory()
     }
 
     /// The verdicts this plane recorded for one row.
@@ -161,7 +201,7 @@ impl RowPlane {
                 crate::agg::record_unit_offset(base.frame, span),
                 Remainder::Read,
             );
-            self.rows.entry(key).or_default().record(truth);
+            self.rows.record(key, truth);
         }
         if crate::field_path::has_an_unread_remainder(envelope.as_ref(), batch) {
             // The part past the stop may hold the record a selector asks
@@ -180,7 +220,7 @@ impl RowPlane {
                 None,
                 Remainder::Unread,
             );
-            self.rows.entry(key).or_default().record(truth);
+            self.rows.record(key, truth);
         } else if batch.records().next().is_none() {
             // A batch read to its end that held no record (a `Frame` of
             // extensions alone, an empty `Fragment` body): the row is its
@@ -196,7 +236,7 @@ impl RowPlane {
                 None,
                 Remainder::Read,
             );
-            self.rows.entry(key).or_default().record(truth);
+            self.rows.record(key, truth);
         }
     }
 
@@ -250,7 +290,7 @@ impl RowPlane {
             offset,
             Remainder::Read,
         );
-        self.rows.entry(key).or_default().record(truth);
+        self.rows.record(key, truth);
     }
 }
 
