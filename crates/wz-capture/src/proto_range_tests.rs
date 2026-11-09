@@ -288,6 +288,34 @@ fn a_field_that_is_no_integer_says_which_kind_it_is() {
     assert_eq!(range_of(text, "M", "r"), nanopb(0, 65_535, 16));
 }
 
+/// `type_override` makes nanopb encode a field as a type the `.proto` does not
+/// declare, so the declared type's range would be a claim about the wrong
+/// type. It is refused for every kind, a fixed width and an enum included,
+/// which the `int_size` rule alone would have answered by the declared type.
+#[test]
+fn a_type_override_claims_no_range_whatever_the_declared_type() {
+    let text = "syntax = \"proto3\";\n\
+                enum E { A = 0; }\n\
+                message M {\n\
+                  uint32 u = 1 [(nanopb).type_override = TYPE_INT32];\n\
+                  fixed32 f = 2 [(nanopb).type_override = TYPE_UINT32];\n\
+                  E e = 3 [(nanopb).type_override = TYPE_UINT32];\n\
+                  uint32 plain = 4;\n\
+                }\n";
+    for name in ["u", "f", "e"] {
+        assert_eq!(
+            range_of(text, "M", name),
+            Err(RangeRefusal::UnmodelledOption),
+            "{name}"
+        );
+    }
+    // The control: the field beside them keeps its type's range.
+    assert_eq!(
+        range_of(text, "M", "plain"),
+        by_type(0, i128::from(u32::MAX))
+    );
+}
+
 #[test]
 fn a_map_entry_takes_the_file_options_and_not_the_map_fields() {
     let text = "syntax = \"proto3\";\n\

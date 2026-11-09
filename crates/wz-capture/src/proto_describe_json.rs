@@ -88,7 +88,7 @@
 //!   `string`, `bytes` or message field), `enum` (the values are the enum's,
 //!   listed under `enum`), `map` (its key and value are the fields that hold
 //!   integers) and `unmodelled_option` (a varint integer whose `int_size` cannot
-//!   be read). The fixed widths are not changed by `int_size`. Exactly one of the
+//!   be read, or a field of any type with a nanopb `type_override`). The fixed widths are not changed by `int_size`. Exactly one of the
 //!   two keys is `null`, and the value door ([`crate::proto_encode`]) refuses a
 //!   value outside the same range (see [`crate::proto_range`]);
 //! * `oneof` is the oneof's name, or `null` for a field that is in none;

@@ -673,7 +673,7 @@ fn an_unreadable_int_size_refuses_every_value_of_the_field() {
     let e = value_error("M", &schema, r#"{"u":1}"#);
     assert_eq!(e.path, "/u");
     assert!(
-        e.reason.contains("(nanopb).int_size cannot be read"),
+        e.reason.contains("an int_size this reader cannot read"),
         "{}",
         e.reason
     );
@@ -681,9 +681,14 @@ fn an_unreadable_int_size_refuses_every_value_of_the_field() {
         e.expected
             .as_deref()
             .unwrap_or("")
-            .starts_with("uint32: an integer in the range of the field's (nanopb).int_size"),
+            .starts_with("uint32: an integer in the range nanopb takes for the field"),
         "{e:?}"
     );
+    // A type_override is refused the same way: nanopb encodes the field as a
+    // type the .proto does not declare, so the declared range is no answer.
+    let overridden = m(P3, "uint32 u = 1 [(nanopb).type_override = TYPE_INT32];");
+    let o = value_error("M", &overridden, r#"{"u":1}"#);
+    assert!(o.reason.contains("type_override"), "{}", o.reason);
     // The option has no bearing on a fixed width, so nothing is refused there.
     assert_eq!(enc("M", &schema, r#"{"f":1}"#), "1501000000");
     // An enum's number is the enum's own whatever `int_size` says.

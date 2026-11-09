@@ -32,6 +32,9 @@
 //! * An `int_size` this reader cannot read gives no range for a varint integer
 //!   (`unmodelled_option`): nanopb's own generator would not accept the schema, and
 //!   a range claimed for it would be a guess.
+//! * A field with a nanopb `type_override` gives no range either
+//!   (`unmodelled_option`), whatever its declared type: nanopb encodes it as the
+//!   overriding type, which this module does not model.
 //! * A field that holds no integer has no range, and says which kind of field it
 //!   is: `map` (its key and value are entry fields, each with a range of its own
 //!   that the encoder applies), `enum` (an enum's values are its names and
@@ -41,7 +44,7 @@
 //! [`crate::proto_nanopb`] keeps for the nanopb size; a separate `.options` file is
 //! not.
 
-use crate::proto_nanopb::{field_int_size, map_entry_int_size, IntSize};
+use crate::proto_nanopb::{field_int_size, field_type_overridden, map_entry_int_size, IntSize};
 use crate::proto_parse::ScalarKind;
 use crate::proto_schema::{FieldKind, Fld, Linker, Msg};
 
@@ -199,6 +202,11 @@ pub(crate) fn field_range(
     msg: &Msg,
     field: &Fld,
 ) -> Result<ValueRange, RangeRefusal> {
+    // Before the kind: an overridden field is not of the kind it declares, so
+    // even a fixed width or an enum has no range to claim.
+    if field_type_overridden(linker, msg, field) {
+        return Err(RangeRefusal::UnmodelledOption);
+    }
     match field.kind {
         FieldKind::Scalar(kind) => value_range(kind, field_int_size(linker, msg, field)),
         FieldKind::Enum(_) => Err(RangeRefusal::Enum),

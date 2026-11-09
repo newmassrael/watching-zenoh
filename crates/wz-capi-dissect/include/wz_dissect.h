@@ -4406,7 +4406,9 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  *              or message field), `enum` (the values are the enum's, under
  *              `enum`), `map` (its key and value hold the integers) or
  *              `unmodelled_option` (a varint integer whose int_size cannot be
- *              read, which nanopb's own generator would not accept either)
+ *              read, which nanopb's own generator would not accept either, or
+ *              a field of any type with a nanopb type_override, which nanopb
+ *              encodes as a type the .proto does not declare)
  *
  * Exactly one of the two keys is null. Only the options written in the .proto
  * are read; nanopb's separate .options file is not. The encoder,

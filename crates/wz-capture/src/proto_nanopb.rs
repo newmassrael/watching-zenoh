@@ -169,6 +169,11 @@ struct Merged {
     /// asks about `int_size` alone, and an unmodelled `type_override` elsewhere says
     /// nothing about it.
     int_size_unreadable: bool,
+    /// `type_override` was written: the generator encodes the field as another
+    /// protobuf type than the one the `.proto` declares, so the declared type's
+    /// range says nothing about what a nanopb build takes. Not modelled, and so
+    /// no range is claimed for the field, whatever its declared type.
+    type_overridden: bool,
 }
 
 /// The C integer nanopb stores a varint field in, as the `int_size` option in force
@@ -294,7 +299,11 @@ impl Merged {
                 }
             }
             // Options that change which type the generator treats a field as.
-            "type_override" | "label_override" => self.unmodelled = true,
+            "type_override" => {
+                self.unmodelled = true;
+                self.type_overridden = true;
+            }
+            "label_override" => self.unmodelled = true,
             // `fixed_length` and `fixed_count` change the C type of a field and
             // not its encoded size. Every other option is a name, a C type or a
             // flag the size does not read.
@@ -341,6 +350,15 @@ pub(crate) fn field_int_size(linker: &Linker<'_, '_>, msg: &Msg, field: &Fld) ->
     let mut merged = message_options(linker, msg);
     merged.merge(&field.options, Level::Field);
     merged.int_size()
+}
+
+/// Whether nanopb's `type_override` is in force for `field` of `msg`, merged as
+/// [`field_int_size`] merges: the field is then encoded as a type the `.proto`
+/// does not declare.
+pub(crate) fn field_type_overridden(linker: &Linker<'_, '_>, msg: &Msg, field: &Fld) -> bool {
+    let mut merged = message_options(linker, msg);
+    merged.merge(&field.options, Level::Field);
+    merged.type_overridden
 }
 
 /// The `int_size` in force for the key and the value of an entry of a map written

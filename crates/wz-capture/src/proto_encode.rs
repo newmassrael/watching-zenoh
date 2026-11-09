@@ -1313,8 +1313,9 @@ impl Encoder<'_, '_, '_> {
         match judged {
             Ok(range) => Ok(range),
             Err(RangeRefusal::UnmodelledOption) => Err(format!(
-                "the field's (nanopb).int_size cannot be read, so the range of the C \
-                 integer nanopb stores this {} in is not known and no value is written",
+                "the field's nanopb options (an int_size this reader cannot read, or a \
+                 type_override) leave unknown the range of the values nanopb takes for \
+                 this {}, so no value is written",
                 kind.keyword()
             )),
             // Not reached for an integer kind, whose place always carries a
@@ -1363,8 +1364,8 @@ impl Encoder<'_, '_, '_> {
                     range.high
                 ),
                 Err(_) => format!(
-                    "{}: an integer in the range of the field's (nanopb).int_size, which \
-                     cannot be read",
+                    "{}: an integer in the range nanopb takes for the field, which its \
+                     nanopb options leave unknown",
                     kind.keyword()
                 ),
             },
