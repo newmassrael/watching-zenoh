@@ -1309,7 +1309,9 @@ pub fn sweep_reporting<const SLOTS: usize, const CAP: usize, S, F>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::{vec, vec::Vec};
+    // `std` and not `alloc`: `reassembly` builds without the `alloc` feature (the
+    // crate links `alloc` only for it), and a test always links `std`.
+    use std::{vec, vec::Vec};
 
     const PEER_A: &[u8] = &[0xAA; 16];
     const PEER_B: &[u8] = &[0xBB; 16];
@@ -1817,7 +1819,7 @@ mod duty_tests {
     // are spelled by their producers alone.
     use crate::reassembly_slot::ReassemblySlotEvent as Event;
     use crate::reassembly_slot::ReassemblySlotState as State;
-    use alloc::vec::Vec;
+    use std::vec::Vec;
 
     const PEER: &[u8] = &[0xAA; 16];
     const MASK: u64 = crate::sn::mask_from_res(0x02);
@@ -2039,7 +2041,7 @@ mod chain_boundary_marker_tests {
     use super::*;
     use crate::extfragment::FragmentMarkers;
     use crate::reassembly_slot::ReassemblySlotState;
-    use alloc::vec::Vec;
+    use std::vec::Vec;
 
     const PEER: &[u8] = &[0xAA; 16];
     const MASK: u64 = crate::sn::mask_from_res(0x02);
@@ -2409,7 +2411,7 @@ mod unknown_ring_tests {
     use super::*;
     use crate::extfragment::FragmentMarkers;
     use crate::reassembly_slot::ReassemblySlotState;
-    use alloc::vec::Vec;
+    use std::vec::Vec;
 
     const PEER: &[u8] = &[0xAA; 16];
     /// The three rings the 2-bit `seq_num_res` can name below the widest, each
