@@ -328,6 +328,8 @@ pub(crate) struct LivelinessSubscription<'a> {
     /// What follows the declared prefix, `None` when the declaration covers the whole key.
     pub(crate) suffix: Option<String>,
     pub(crate) history: bool,
+    /// The links the subscription asks, as the links of a subscription are.
+    pub(crate) links: Links,
     pub(crate) callback: Callback<Sample>,
     /// Held until the callback can be called no more: a wait on its group ends then.
     pub(crate) notifier: Option<SyncGroupNotifier>,
@@ -1382,9 +1384,11 @@ impl Engine {
         key: &str,
         scope: ExprId,
         suffix: Option<String>,
+        links: Links,
     ) -> ZResult<Id> {
         match self {
             Engine::Router(router) => {
+                RouterEngine::refuse_links(links)?;
                 let id = router.node.declare_token(key);
                 Id::try_from(id).map_err(|_| {
                     zerror!("the router numbered a token {id}, which is more than an id holds")
@@ -1393,11 +1397,17 @@ impl Engine {
             }
             Engine::Tokio(state) => {
                 let wire = tokio_engine::wire_key_of(scope, suffix);
-                // The retraction names its token by id alone, as upstream's does.
+                // The retraction names its token by id alone, as upstream's does. The registry's
+                // own door, not the port's: the port has no operation that takes a set of links,
+                // and for no restriction the two declare the same.
                 let id = state
                     .shared
-                    .as_engine()
-                    .declare_liveliness_token_on_wire(key.to_owned(), wire, None)
+                    .declare_liveliness_token_on_links(
+                        key.to_owned(),
+                        wire,
+                        wz_capi_core::runtime::session::LivelinessOptions::new(),
+                        links,
+                    )
                     .ok_or_else(|| zerror!("this engine declares no liveliness token"))?;
                 Id::try_from(id).map_err(|_| {
                     zerror!(
@@ -1433,10 +1443,12 @@ impl Engine {
                 let LivelinessSubscription {
                     key,
                     history,
+                    links,
                     callback,
                     notifier,
                     ..
                 } = subscription;
+                RouterEngine::refuse_links(links)?;
                 let handler = tokio_engine::liveliness_sink(callback, notifier)();
                 let id = router.node.liveliness().subscribe(key, history, handler);
                 // The ids of a router's subscribers and of its liveliness subscribers are
@@ -1459,21 +1471,24 @@ impl Engine {
                     scope,
                     suffix,
                     history,
+                    links,
                     callback,
                     notifier,
                     keeps,
                 } = subscription;
                 let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
-                let id = state
-                    .shared
-                    .as_engine()
-                    .declare_liveliness_subscriber_on_wire(
-                        key.to_owned(),
-                        wire,
-                        history,
-                        tokio_engine::liveliness_sink(callback, notifier),
-                    )
-                    .ok_or_else(|| zerror!("this engine has no liveliness subscriber"))?;
+                // The registry's own door, not the port's, for the reason the token's is.
+                // `#[non_exhaustive]`: built from its default and narrowed.
+                let mut options =
+                    wz_capi_core::runtime::session::LivelinessSubscriberOptions::default();
+                options.history = history;
+                let id = state.shared.declare_liveliness_subscriber_on_links(
+                    key.to_owned(),
+                    wire,
+                    options,
+                    links,
+                    tokio_engine::liveliness_sink(callback, notifier),
+                );
                 Id::try_from(id).map_err(|_| {
                     zerror!(
                         "the engine numbered a liveliness subscriber {id}, which is more than an \
@@ -1685,6 +1700,7 @@ impl Engine {
         _key: &str,
         _scope: ExprId,
         _suffix: Option<String>,
+        _links: Links,
     ) -> ZResult<Id> {
         match *self {}
     }
@@ -3877,17 +3893,18 @@ impl SessionInner {
 
     /// Declare a liveliness token on `key_expr` on the engine and record it, so that a close
     /// retracts it.
-    fn declare_liveliness_inner(self: &Arc<Self>, key_expr: &KeyExpr) -> ZResult<Id> {
+    fn declare_liveliness_inner(self: &Arc<Self>, key_expr: &KeyExpr, links: Links) -> ZResult<Id> {
         tracing::trace!("declare_liveliness({:?})", key_expr);
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
+        admit_links(links)?;
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
         let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
-        let id = self
-            .engine
-            .declare_liveliness_token(key_expr.as_str(), wire.scope, suffix)?;
+        let id =
+            self.engine
+                .declare_liveliness_token(key_expr.as_str(), wire.scope, suffix, links)?;
         self.tokens().push(id);
         // A close that ran between the check and the record has not seen this token.
         if self.is_closed() {
@@ -3920,6 +3937,7 @@ impl SessionInner {
     fn declare_liveliness_subscriber_inner(
         self: &Arc<Self>,
         key_expr: &KeyExpr,
+        links: Links,
         history: bool,
         callback: Callback<Sample>,
         notifier: Option<SyncGroupNotifier>,
@@ -3928,6 +3946,7 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
+        admit_links(links)?;
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
         let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
@@ -3938,6 +3957,7 @@ impl SessionInner {
                 scope: wire.scope,
                 suffix,
                 history,
+                links,
                 callback,
                 notifier,
                 // The declaration of the prefix is held by the subscription for as long as the
@@ -5795,8 +5815,8 @@ impl Session {
     }
 
     /// Declare a liveliness token on `key_expr`, retracted by a close.
-    pub(crate) fn declare_liveliness_inner(&self, key_expr: &KeyExpr) -> ZResult<Id> {
-        self.0.declare_liveliness_inner(key_expr)
+    pub(crate) fn declare_liveliness_inner(&self, key_expr: &KeyExpr, links: Links) -> ZResult<Id> {
+        self.0.declare_liveliness_inner(key_expr, links)
     }
 
     /// Take the changes of the liveliness tokens of the peers on `key_expr` into `callback`, with
@@ -5807,12 +5827,13 @@ impl Session {
         &self,
         key_expr: &KeyExpr,
         _origin: Locality,
+        links: Links,
         history: bool,
         callback: Callback<Sample>,
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
         self.0
-            .declare_liveliness_subscriber_inner(key_expr, history, callback, notifier)
+            .declare_liveliness_subscriber_inner(key_expr, links, history, callback, notifier)
     }
 
     /// Ask which liveliness tokens are alive on `key_expr`.
@@ -7354,6 +7375,17 @@ mod tests {
         assert_eq!(session.declare_publisher("demo/links/a").links, Links::Any);
         assert_eq!(session.declare_querier("demo/links/a").links, Links::Any);
         assert_eq!(session.get("demo/links/a").links, Links::Any);
+        assert_eq!(
+            session.liveliness().declare_token("demo/links/a").links,
+            Links::Any
+        );
+        assert_eq!(
+            session
+                .liveliness()
+                .declare_subscriber("demo/links/a")
+                .links,
+            Links::Any
+        );
         assert_eq!(session.put("demo/links/a", "v").publisher.links, Links::Any);
         assert_eq!(session.delete("demo/links/a").publisher.links, Links::Any);
     }
@@ -7375,6 +7407,16 @@ mod tests {
             .expect("declares");
         let querier = session
             .declare_querier("demo/links/b")
+            .wait()
+            .expect("declares");
+        let _token = session
+            .liveliness()
+            .declare_token("demo/links/b")
+            .wait()
+            .expect("declares");
+        let _live = session
+            .liveliness()
+            .declare_subscriber("demo/links/b")
             .wait()
             .expect("declares");
         publisher.put("v").wait().expect("puts");
@@ -7488,6 +7530,24 @@ mod tests {
             .declare_publisher(declaration(Links::Any))
             .expect("a publisher that states no links is declared");
         session.0.engine.undeclare_publisher(id);
+        // A token is declared the same way: a set is refused, none is taken.
+        let error = session
+            .0
+            .engine
+            .declare_liveliness_token("demo/links/g", 0, None, some_links())
+            .expect_err("a node reads no set of links");
+        assert!(
+            error
+                .to_string()
+                .contains("the router engine does not read link restrictions"),
+            "{error}"
+        );
+        let token = session
+            .0
+            .engine
+            .declare_liveliness_token("demo/links/g", 0, None, Links::Any)
+            .expect("a token that states no links is declared");
+        session.0.engine.undeclare_liveliness_token(token);
     }
 
     #[cfg(feature = "link-restriction")]
@@ -7529,6 +7589,22 @@ mod tests {
         );
         assert_eq!(
             session
+                .liveliness()
+                .declare_token("demo/links/h")
+                .allowed_links(links)
+                .links,
+            links
+        );
+        assert_eq!(
+            session
+                .liveliness()
+                .declare_subscriber("demo/links/h")
+                .allowed_links(links)
+                .links,
+            links
+        );
+        assert_eq!(
+            session
                 .put("demo/links/h", "v")
                 .allowed_links(links)
                 .publisher
@@ -7564,6 +7640,22 @@ mod tests {
         assert_policy_decides(
             "get",
             session.get("demo/links/i").allowed_links(links).wait(),
+        );
+        assert_policy_decides(
+            "liveliness token",
+            session
+                .liveliness()
+                .declare_token("demo/links/i")
+                .allowed_links(links)
+                .wait(),
+        );
+        assert_policy_decides(
+            "liveliness subscriber",
+            session
+                .liveliness()
+                .declare_subscriber("demo/links/i")
+                .allowed_links(links)
+                .wait(),
         );
     }
 

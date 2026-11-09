@@ -32,6 +32,7 @@ use crate::api::{
     },
     handlers::DefaultHandler,
     key_expr::KeyExpr,
+    sample::ANY_LINKS,
     session::{Session, UndeclarableSealed, WeakSession},
     Id,
 };
@@ -134,6 +135,7 @@ impl<'a> Liveliness<'a> {
         LivelinessTokenBuilder {
             session: self.session,
             key_expr: TryIntoKeyExpr::try_into(key_expr).map_err(Into::into),
+            links: ANY_LINKS,
         }
     }
 
@@ -172,6 +174,7 @@ impl<'a> Liveliness<'a> {
             key_expr: TryIntoKeyExpr::try_into(key_expr).map_err(Into::into),
             handler: DefaultHandler::default(),
             history: false,
+            links: ANY_LINKS,
         }
     }
 

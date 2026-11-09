@@ -22,7 +22,7 @@ use crate::api::{
     key_expr::KeyExpr,
     liveliness::LivelinessToken,
     query::Reply,
-    sample::{Locality, Sample},
+    sample::{Links, Locality, Sample},
     session::Session,
     subscriber::{Subscriber, SubscriberInner, SubscriberKind},
 };
@@ -47,6 +47,22 @@ use crate::api::{
 pub struct LivelinessTokenBuilder<'a, 'b> {
     pub(crate) session: &'a Session,
     pub(crate) key_expr: ZResult<KeyExpr<'b>>,
+    pub(crate) links: Links,
+}
+
+impl LivelinessTokenBuilder<'_, '_> {
+    /// Limits the links this [`LivelinessToken`] is announced to, and so alive for, to the ones
+    /// `links` names.
+    ///
+    /// A build whose `entity-link-restriction` policy is off refuses a restricted set when the
+    /// token is declared, and a router session refuses it always. The session's own liveliness
+    /// subscribers hear the token whatever the set says: the session is behind no link.
+    #[cfg(feature = "link-restriction")]
+    #[inline]
+    pub fn allowed_links(mut self, links: Links) -> Self {
+        self.links = links;
+        self
+    }
 }
 
 impl Resolvable for LivelinessTokenBuilder<'_, '_> {
@@ -59,7 +75,7 @@ impl Wait for LivelinessTokenBuilder<'_, '_> {
         let session = self.session;
         let key_expr = self.key_expr?.into_owned();
         session
-            .declare_liveliness_inner(&key_expr)
+            .declare_liveliness_inner(&key_expr, self.links)
             .map(|id| LivelinessToken {
                 session: self.session.downgrade(),
                 id,
@@ -106,6 +122,7 @@ pub struct LivelinessSubscriberBuilder<'a, 'b, Handler, const BACKGROUND: bool =
     pub key_expr: ZResult<KeyExpr<'b>>,
     pub handler: Handler,
     pub history: bool,
+    pub(crate) links: Links,
 }
 
 impl<'a, 'b> LivelinessSubscriberBuilder<'a, 'b, DefaultHandler> {
@@ -193,12 +210,14 @@ impl<'a, 'b> LivelinessSubscriberBuilder<'a, 'b, DefaultHandler> {
             key_expr,
             handler: _,
             history,
+            links,
         } = self;
         LivelinessSubscriberBuilder {
             session,
             key_expr,
             handler,
             history,
+            links,
         }
     }
 }
@@ -230,6 +249,7 @@ impl<'a, 'b> LivelinessSubscriberBuilder<'a, 'b, Callback<Sample>> {
             key_expr: self.key_expr,
             handler: self.handler,
             history: self.history,
+            links: self.links,
         }
     }
 }
@@ -257,6 +277,19 @@ impl<Handler, const BACKGROUND: bool> LivelinessSubscriberBuilder<'_, '_, Handle
         self.history = history;
         self
     }
+
+    /// Limits the links this liveliness [`Subscriber`] asks, and so hears the tokens behind, to
+    /// the ones `links` names.
+    ///
+    /// A build whose `entity-link-restriction` policy is off refuses a restricted set when the
+    /// subscriber is declared, and a router session refuses it always. The tokens of the session
+    /// itself are heard whatever the set says: the session is behind no link.
+    #[cfg(feature = "link-restriction")]
+    #[inline]
+    pub fn allowed_links(mut self, links: Links) -> Self {
+        self.links = links;
+        self
+    }
 }
 
 impl<Handler> Resolvable for LivelinessSubscriberBuilder<'_, '_, Handler>
@@ -280,6 +313,7 @@ where
         let id = session.declare_liveliness_subscriber_inner(
             &key_expr,
             Locality::default(),
+            self.links,
             self.history,
             callback,
             callback_sync_group.notifier(),
@@ -322,6 +356,7 @@ impl Wait for LivelinessSubscriberBuilder<'_, '_, Callback<Sample>, true> {
         self.session.declare_liveliness_subscriber_inner(
             &self.key_expr?,
             Locality::default(),
+            self.links,
             self.history,
             self.handler,
             notifier,
