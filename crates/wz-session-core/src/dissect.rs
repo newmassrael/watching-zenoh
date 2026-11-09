@@ -3515,6 +3515,73 @@ pub fn walk_network_record(c: &mut SpanCursor<'_>) -> Result<Option<Field>, Code
     Ok(Some(f))
 }
 
+/// What the HEAD of a batch says about its first network message, read from
+/// bytes that may stop anywhere after it: the bytes of a fragment chain that
+/// never completed are the head of a batch and nothing more, and
+/// [`dissect_batch`] gives up a record it cannot walk to its end.
+///
+/// `message` is the first byte's network MID, named, or `None` for a MID that
+/// names no network message. `keyexpr` is the key expression a `Push`, a
+/// `Request` or a `Response` names right after its header (a `Request` and a
+/// `Response` after their request id), as the wire wrote it, when the bytes
+/// reach the end of it; `None` for every other message and for bytes that stop
+/// inside it. Nothing after the key is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchHead {
+    /// The first message's name.
+    pub message: Option<MessageName>,
+    /// The key expression it names, as written.
+    pub keyexpr: Option<HeadKeyexpr>,
+}
+
+/// A key expression as a message head wrote it: the id, the table the `M` bit
+/// named (1 the sender's, 0 the receiver's), and the suffix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadKeyexpr {
+    /// The numeric id, `0` when the key is written out in full.
+    pub id: u64,
+    /// The `M` bit.
+    pub mapping: u8,
+    /// The suffix, when the `N` flag said there is one.
+    pub suffix: Option<String>,
+}
+
+/// Read [`BatchHead`] off `payload`; `None` for no bytes.
+pub fn batch_head(payload: &[u8]) -> Option<BatchHead> {
+    let first = *payload.first()?;
+    let message = MessageName::of_network(first & 0x1F);
+    let keyexpr = match message {
+        Some(MessageName::Push) => head_keyexpr(payload, false).ok(),
+        Some(MessageName::Request | MessageName::Response) => head_keyexpr(payload, true).ok(),
+        _ => None,
+    };
+    Some(BatchHead { message, keyexpr })
+}
+
+/// The key expression right after a message's header, and after its request id
+/// when `with_request_id`, read by the walker every field tree uses.
+fn head_keyexpr(payload: &[u8], with_request_id: bool) -> Result<HeadKeyexpr, CodecError> {
+    let mut c = SpanCursor::with_base(payload, 0);
+    let (header, _) = c.u8("header")?;
+    if with_request_id {
+        c.vle_u64("rid")?;
+    }
+    let (n, m) = ((header >> 5) & 0x1, (header >> 6) & 0x1);
+    let mut key = HeadKeyexpr {
+        id: 0,
+        mapping: m,
+        suffix: None,
+    };
+    for part in walk_wireexpr(&mut c, n, Some(m))? {
+        match (part.name.as_ref(), &part.value) {
+            ("id", FieldValue::Uint(id)) => key.id = *id,
+            ("suffix", FieldValue::Text(text)) => key.suffix = Some(String::from(&**text)),
+            _ => {}
+        }
+    }
+    Ok(key)
+}
+
 /// Dissect a `Frame.payload` batch BEST-EFFORT: keep every record that walks
 /// and report where the walk stopped.
 ///

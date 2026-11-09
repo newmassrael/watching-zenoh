@@ -1114,7 +1114,10 @@
  * a declared segment profile is up to eight bytes wide); to the `expected_sn`
  * and `received_sn` of a row's `chain` (keys that exist from field document 62
  * and take the rule from their first appearance: a sequence number is as wide
- * as the session's ring); to every integer of a
+ * as the session's ring); to the `first_sn`, `last_sn` and `keyexpr_id` of a
+ * flow's `ended_chains` entry (keys that exist from field document 63 and take
+ * the rule from their first appearance, for the same reasons); to every
+ * integer of a
  * record's `segment` in the values document (that document takes the rule from
  * its revision 2, where the key arrives: the same header fields); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
@@ -1437,6 +1440,36 @@
  * a flow the cap evicted. A `chain_id` with a `begun` row and no closing one is
  * one of these. The same group the command line's capture report carries.
  *
+ * AND WHICH CHAINS, at field-document revision 63. Every flow carries, after
+ * `omitted` (after `disagreements` on a datagram flow),
+ *
+ *   "ended_chains":[{"chain_id":N,"ending":"expired","reason":null,
+ *                    "conduit":{"direction":..,"priority":..,"reliable":bool},
+ *                    "fragments":N,"bytes":N,"first_sn":N|null,"last_sn":N|null,
+ *                    "starts_at_message":bool,"message":"Push"|null,
+ *                    "keyexpr":".."|null,"keyexpr_id":N|null,
+ *                    "keyexpr_suffix":".."|null}, ...]
+ *
+ *     every fragment chain of the flow that ended WITHOUT being reassembled and
+ *     still has a row held, in the order they ended. `chain_id` is the identity
+ *     its rows carry. `ending` is `aborted` (a row ended it; `reason` is that
+ *     row's), `superseded` (a fragment restarting a chain on its key ended it;
+ *     no row says so), `expired` (its deadline passed) or `abandoned_at_end`
+ *     (the capture ended); `reason` is `null` but on `aborted`. `fragments` and
+ *     `bytes` are what it had staged and lost; `first_sn` is its first
+ *     fragment's, `last_sn` its last staged one's (`null` when none was).
+ *     `starts_at_message` says whether its first fragment began a message: it
+ *     carried the `First` marker, or the chain before it on the same key closed.
+ *     Only then are `message` (the name of the first network message in its
+ *     bytes) and the key it names read: a `Push`, `Request` or `Response` names
+ *     one right after its header, written as on a `carried` entry (`keyexpr`
+ *     resolved by the tables as they stand at the flow's last row, or by a key a
+ *     declaration fixed, with its `keyexpr_id` and `keyexpr_suffix`). A chain the
+ *     flow cap evicted leaves with its flow and is counted only above. The
+ *     integer rule applies to `first_sn`, `last_sn` and `keyexpr_id`.
+ *
+ * @values fields ending
+ *
  * R2629 -- AND A SCOUTING DATAGRAM IS A ROW, at field-document revision 10.
  *
  * A datagram flow's `messages` now also holds its SCOUT and HELLO datagrams.
@@ -1525,7 +1558,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":62,"key":"kind","values":[...],
+ *     {"name":"fields","revision":63,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1567,6 +1600,7 @@
  * @carries fields direction passenger
  * @carries fields eps_basis passenger
  * @carries fields family passenger
+ * @carries fields ending passenger
  * @carries fields keyexpr_cause passenger
  * @carries fields keyexpr_source passenger
  * @carries fields kind discriminant
@@ -5466,7 +5500,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":62,"key":"state",
+ *     "value_families":[{"name":"fields","revision":63,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -7046,6 +7080,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @values row_facts direction
  * @values row_facts eps_basis
  * @values row_facts family
+ * @values row_facts ending
  * @values row_facts keyexpr_cause
  * @values row_facts keyexpr_source
  * @values row_facts link
@@ -7078,6 +7113,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @carries row_facts direction passenger
  * @carries row_facts eps_basis passenger
  * @carries row_facts family passenger
+ * @carries row_facts ending passenger
  * @carries row_facts keyexpr_cause passenger
  * @carries row_facts keyexpr_source passenger
  * @carries row_facts link passenger

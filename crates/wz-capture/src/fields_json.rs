@@ -2577,7 +2577,9 @@ fn push_stream_flow(
             },
         );
     }
-    let _ = write!(out, "],\"shown\":{shown},\"omitted\":{omitted}}}");
+    let _ = write!(out, "],\"shown\":{shown},\"omitted\":{omitted}");
+    push_ended_chains(&flow.frames, spaces, out);
+    out.push('}');
 }
 
 // Eight: see `push_stream_flow`.
@@ -2946,7 +2948,120 @@ fn push_datagram_flow(
             },
         );
     }
-    out.push_str("]}}");
+    out.push_str("]}");
+    push_ended_chains(&flow.frames, spaces, out);
+    out.push('}');
+}
+
+/// Revision 63: the flow's `ended_chains`, every fragment chain of its list that
+/// ended without being reassembled and still has a row held, in the order they
+/// ended. See [`wz_session_core::passive_messages::ChainFold`] for how each
+/// ending is known and when a chain's first fragment begins a message.
+///
+/// The key a message head names is resolved against the tables as they stand
+/// after the flow's last row (or a key a declaration fixed); its id and suffix
+/// are written beside it, as on a `carried` entry.
+#[cfg(feature = "reassembly")]
+fn push_ended_chains(
+    list: &crate::messages::MessageList,
+    spaces: &crate::agg::KeyexprSpaces,
+    out: &mut String,
+) {
+    let integer = push_ended_integer;
+    out.push_str(",\"ended_chains\":[");
+    for (i, ended) in list.ended_chains().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let (direction, reliable, priority) = ended.key;
+        let _ = write!(out, "{{\"chain_id\":{},\"ending\":", ended.chain_id);
+        escape_into(ended.ending.word(), out);
+        out.push_str(",\"reason\":");
+        match ended.ending {
+            wz_session_core::passive_messages::ChainEnding::Aborted(why) => {
+                escape_into(ChainReason::of_abort(why).name(), out);
+            }
+            _ => out.push_str("null"),
+        }
+        let _ = write!(
+            out,
+            ",\"conduit\":{{\"direction\":\"{}\",\"priority\":",
+            dir_name(direction)
+        );
+        escape_into(priority.name(), out);
+        let _ = write!(
+            out,
+            ",\"reliable\":{reliable}}},\"fragments\":{},\"bytes\":{},\"first_sn\":",
+            ended.fragments, ended.bytes
+        );
+        match ended.first_sn {
+            Some(sn) => integer(sn, out),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"last_sn\":");
+        match ended.last_sn {
+            Some(sn) => integer(sn, out),
+            None => out.push_str("null"),
+        }
+        let _ = write!(
+            out,
+            ",\"starts_at_message\":{},\"message\":",
+            ended.starts_at_message
+        );
+        let head = ended.head.as_ref();
+        match head.and_then(|h| h.message) {
+            Some(message) => escape_into(message.name(), out),
+            None => out.push_str("null"),
+        }
+        let key = head.and_then(|h| h.keyexpr.as_ref());
+        out.push_str(",\"keyexpr\":");
+        let resolved = key.and_then(|k| {
+            let space = if k.mapping == 1 {
+                direction
+            } else {
+                direction.peer()
+            };
+            spaces
+                .resolve_parts(space, k.id, k.suffix.as_deref())
+                .ok()
+                .or_else(|| spaces.fixed_binding(k.id, k.suffix.as_deref()))
+                .filter(|keyexpr| !keyexpr.is_empty())
+        });
+        match &resolved {
+            Some(keyexpr) => escape_into(keyexpr, out),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"keyexpr_id\":");
+        match key {
+            Some(k) => integer(k.id, out),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"keyexpr_suffix\":");
+        match key.and_then(|k| k.suffix.as_deref()) {
+            Some(suffix) => escape_into(suffix, out),
+            None => out.push_str("null"),
+        }
+        out.push('}');
+    }
+    out.push(']');
+}
+
+/// A build without `reassembly` routes no fragment, so no chain ended: the
+/// array is empty, which is the true answer.
+#[cfg(not(feature = "reassembly"))]
+fn push_ended_chains(
+    _list: &crate::messages::MessageList,
+    _spaces: &crate::agg::KeyexprSpaces,
+    out: &mut String,
+) {
+    out.push_str(",\"ended_chains\":[]");
+}
+
+/// Every integer of an `ended_chains` entry that is a wire value, through the
+/// shared integer door: `first_sn`, `last_sn` and `keyexpr_id`.
+#[cfg(feature = "reassembly")]
+fn push_ended_integer(value: u64, out: &mut String) {
+    wz_session_core::json::u64_into(value, out);
 }
 
 /// The bytes of one datagram frame's message: the lz4 batch's own copy when the
@@ -8888,8 +9003,10 @@ mod tests {
         // The conduit is the one the fixture's fragments were sent on: the `R`
         // flag set, no `ext_qos` (so the upstream default band), from the low
         // endpoint.
+        // Five rows, and (revision 63) the two chains of the five that never
+        // closed, listed under `ended_chains` on the same conduit.
         let conduits = scoped(&doc, "reliable", &["direction", "priority", "reliable"]);
-        assert_eq!(conduits.len(), 5, "{doc}");
+        assert_eq!(conduits.len(), 7, "{doc}");
         for conduit in &conduits {
             assert_eq!(
                 conduit,
@@ -10348,6 +10465,10 @@ mod tests {
         // named in it: the dissection of three frames, and a container cut after
         // the first, so the second read of the later ones finds no packet.
         rendered.push(named_disagreement_document());
+        // Revision 63 — a flow's `ended_chains` with an entry in it, which only a
+        // chain that never closed brings.
+        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+        rendered.extend(crate::unresolved_chain_tests::ended_chain_documents());
 
         let mut seen: Vec<&str> = Vec::new();
         for doc in &rendered {
@@ -10451,7 +10572,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 89] = [
+        let live: [(&str, &str, Vec<&'static str>); 90] = [
             // What reading a record's payload came to, on the values document:
             // the walk over its emitter's own outcomes.
             (
@@ -10574,6 +10695,16 @@ mod tests {
                 crate::segment_chain::Unjoined::ALL
                     .iter()
                     .map(|u| u.word())
+                    .collect(),
+            ),
+            // Revision 63 — how a chain that never closed ended: the walk is
+            // the list's own enum.
+            (
+                rev::FIELDS,
+                "ending",
+                wz_session_core::passive_messages::ChainEnding::ALL
+                    .iter()
+                    .map(|e| e.word())
                     .collect(),
             ),
             // Revision 61 — where the key an entry is read under came from.
@@ -11476,6 +11607,9 @@ mod tests {
         // Revision 55 — `size_verdict` over all three of its words, on both links.
         closes_docs.extend(crate::payload_size_tests::pin_documents());
         closes_docs.extend(crate::payload_size_tests::datagram_pin_documents());
+        // Revision 63 — a flow's `ended_chains`, with two of its endings.
+        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+        closes_docs.extend(crate::unresolved_chain_tests::ended_chain_documents());
         let mut fields_docs: Vec<&String> = alloc::vec![
             &with,
             &without,

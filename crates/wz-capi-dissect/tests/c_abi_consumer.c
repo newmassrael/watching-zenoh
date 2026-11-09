@@ -4234,8 +4234,11 @@ int main(void) {
      * 62: a row's `chain` gains `index`, `offset` and `length` (where the
      * fragment's bytes went in the joined buffer) and, on an abort,
      * `expected_sn`, `received_sn`, `held_fragments` and `held_bytes`. Keys
-     * arrive; nothing retires. */
-    revisioned[2].revision = 62;
+     * arrive; nothing retires.
+     * 63: every flow's `ended_chains`, the fragment chains that ended without
+     * being reassembled, by `chain_id`, with how they ended and what they held.
+     * Keys arrive; nothing retires. */
+    revisioned[2].revision = 63;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

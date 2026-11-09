@@ -1049,6 +1049,168 @@ fn a_chain_left_open_at_the_end_of_a_capture_is_counted_with_no_handshake_too() 
     }
 }
 
+/// The `ended_chains` of a document's first stream flow (field document 63).
+fn ended_chains_of(doc: &str) -> Vec<String> {
+    let at = doc
+        .find("\"ended_chains\":")
+        .expect("a flow lists its ended chains");
+    let start = at + "\"ended_chains\":".len();
+    let end = value_end(doc, start);
+    let list = &doc[start..end];
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut from = 0usize;
+    for (i, c) in list.char_indices() {
+        match c {
+            '{' => {
+                if depth == 0 {
+                    from = i;
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push(String::from(&list[from..=i]));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// THE CHAINS THAT NEVER CLOSED, by identity (field document 63): the chain the
+/// gap aborted, with what it held and the head its first fragment began, and a
+/// chain still open when the capture ended; the chain after the gap, which
+/// began in the middle of the broken message, closes and is not listed.
+#[test]
+fn a_flow_lists_its_chains_that_never_closed_with_what_they_held() {
+    let broken = push_of("demo/broken", b'b', 80);
+    let pieces: Vec<&[u8]> = broken.chunks(broken.len().div_ceil(5)).collect();
+    let open = push_of("demo/open", b'o', 80);
+    let open_pieces: Vec<&[u8]> = open.chunks(32).collect();
+    let fragments = vec![
+        Frag::new(100, true, true, pieces[0]),
+        Frag::new(101, true, false, pieces[1]),
+        Frag::new(103, true, false, pieces[2]),
+        Frag::new(104, true, false, pieces[3]),
+        Frag::new(105, false, false, pieces[4]),
+        // A chain on the best-effort channel that never closes.
+        Frag {
+            reliable: false,
+            ..Frag::new(300, true, true, open_pieces[0])
+        },
+        Frag {
+            reliable: false,
+            ..Frag::new(301, true, false, open_pieces[1])
+        },
+    ];
+    for handshake in [Handshake::None, Handshake::CompleteWithoutMarkers] {
+        let reason = match handshake {
+            Handshake::None => "unresolvable",
+            _ => "out_of_order",
+        };
+        for link in [Link::Tcp, Link::Udp] {
+            let (d, file) = capture(link, handshake, &fragments);
+            let doc = doc_of(&d, &file);
+            let ended = ended_chains_of(&doc);
+            assert_eq!(ended.len(), 2, "{handshake:?} {link:?}: {doc}");
+            let held = pieces[0].len() + pieces[1].len();
+            assert!(
+                ended[0].starts_with(&format!(
+                    "{{\"chain_id\":0,\"ending\":\"aborted\",\"reason\":\"{reason}\",\
+                     \"conduit\":{{\"direction\":\"a\",\"priority\":\"Data\",\
+                     \"reliable\":true}},\"fragments\":2,\"bytes\":{held},\
+                     \"first_sn\":100,\"last_sn\":101,\"starts_at_message\":true,\
+                     \"message\":\"Push\",\"keyexpr\":\"demo/broken\",\"keyexpr_id\":0,\
+                     \"keyexpr_suffix\":\"demo/broken\"}}"
+                )),
+                "{handshake:?} {link:?}: {}",
+                ended[0]
+            );
+            let held = open_pieces[0].len() + open_pieces[1].len();
+            assert!(
+                ended[1].starts_with(
+                    "{\"chain_id\":2,\"ending\":\"abandoned_at_end\",\"reason\":null,"
+                ) && ended[1].contains(&format!(
+                    "\"reliable\":false}},\"fragments\":2,\"bytes\":{held},\
+                     \"first_sn\":300,\"last_sn\":301,\"starts_at_message\":true,\
+                     \"message\":\"Push\",\"keyexpr\":\"demo/open\""
+                )),
+                "{handshake:?} {link:?}: {}",
+                ended[1]
+            );
+        }
+    }
+}
+
+/// A chain whose deadline passes is listed as `expired`, at the place the
+/// router's sweep ended it: before the chain that a later packet begins on the
+/// same key, which closes and is not listed.
+#[test]
+fn a_chain_past_its_deadline_is_listed_as_expired() {
+    let late = push_of("demo/late", b'l', 80);
+    let late_pieces: Vec<&[u8]> = late.chunks(32).collect();
+    let whole = push_of("demo/whole", b'w', 40);
+    let whole_pieces: Vec<&[u8]> = whole.chunks(24).collect();
+    // (seconds, fragment): two pieces of a chain, then ten seconds of silence
+    // against a one-second window, then a chain of two that closes.
+    let timed = [
+        (0u32, Frag::new(10, true, true, late_pieces[0])),
+        (0, Frag::new(11, true, false, late_pieces[1])),
+        (10, Frag::new(20, true, true, whole_pieces[0])),
+        (10, Frag::new(21, false, false, whole_pieces[1])),
+    ];
+    let mut d = Dissection::with_reassembly_window(1000);
+    let mut packets: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+    for (i, (sec, frag)) in timed.iter().enumerate() {
+        let packet = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &frag.wire());
+        // The capture's instant, in milliseconds.
+        let ms = u64::from(*sec) * 1_000 + i as u64;
+        d.push_packet_at(LINKTYPE_ETHERNET, i, Some(ms), &packet);
+        packets.push((*sec, i as u32, packet));
+    }
+    d.finish();
+    let refs: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .map(|(s, u, b)| (*s, *u, b.as_slice()))
+        .collect();
+    let file = crate::pcap::write(LINKTYPE_ETHERNET, &refs);
+    let doc = doc_of(&d, &file);
+    let ended = ended_chains_of(&doc);
+    assert_eq!(ended.len(), 1, "{doc}");
+    assert!(
+        ended[0].starts_with(
+            "{\"chain_id\":0,\"ending\":\"expired\",\"reason\":null,\
+             \"conduit\":{\"direction\":\"a\",\"priority\":\"Data\",\"reliable\":true},\
+             \"fragments\":2,\"bytes\":64,\"first_sn\":10,\"last_sn\":11,\
+             \"starts_at_message\":true,\"message\":\"Push\",\"keyexpr\":\"demo/late\""
+        ),
+        "{}",
+        ended[0]
+    );
+}
+
+/// The documents the field document's gates read to reach `ended_chains`: a
+/// stream capture with a chain aborted and one abandoned at the end, so the
+/// entry's keys arrive and `ending` with two words.
+pub(crate) fn ended_chain_documents() -> Vec<String> {
+    let broken = push_of("demo/broken", b'b', 80);
+    let pieces: Vec<&[u8]> = broken.chunks(broken.len().div_ceil(5)).collect();
+    let fragments = vec![
+        Frag::new(100, true, true, pieces[0]),
+        Frag::new(101, true, false, pieces[1]),
+        Frag::new(103, true, false, pieces[2]),
+        Frag {
+            reliable: false,
+            ..Frag::new(300, true, true, pieces[3])
+        },
+    ];
+    let (d, file) = capture(Link::Tcp, Handshake::CompleteWithoutMarkers, &fragments);
+    vec![doc_of(&d, &file)]
+}
+
 /// WHERE EACH FRAGMENT'S BYTES WENT, AND WHAT AN ABORT MISSED (field document
 /// 62), with and without a ring: the gap of
 /// `a_gap_ends_the_chain_as_unresolvable_and_a_later_chain_still_reassembles`.

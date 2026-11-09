@@ -8710,17 +8710,32 @@ impl Dissection {
         // it dropped it FROM records its own share on the way past. The
         // capture-wide counter below cannot answer "which link is losing", and
         // the sweep is the only place that knows.
+        // And the list that numbers the flow's chains is told WHICH chains the
+        // sweep ended, so the identities its rows carry can be listed as having
+        // expired, before this packet's messages are appended after them.
+        let mut ended = Vec::new();
+        let mut note = |direction, reliable, priority| ended.push((direction, reliable, priority));
         let expired = match kind {
             FlowKind::Stream => {
-                let loss = self.flows[idx].session.observe_at_nanos_counting(ns);
-                self.flows[idx].chain_loss.absorb(loss);
+                let flow = &mut self.flows[idx];
+                let loss = flow.session.observe_at_nanos_reporting(ns, &mut note);
+                flow.chain_loss.absorb(loss);
+                #[cfg(feature = "reassembly")]
+                flow.frames.end_chains(
+                    ended.drain(..),
+                    wz_session_core::passive_messages::ChainEnding::Expired,
+                );
                 loss
             }
             FlowKind::Datagram => {
-                let loss = self.datagram_flows[idx]
-                    .session
-                    .observe_at_nanos_counting(ns);
-                self.datagram_flows[idx].chain_loss.absorb(loss);
+                let flow = &mut self.datagram_flows[idx];
+                let loss = flow.session.observe_at_nanos_reporting(ns, &mut note);
+                flow.chain_loss.absorb(loss);
+                #[cfg(feature = "reassembly")]
+                flow.frames.end_chains(
+                    ended.drain(..),
+                    wz_session_core::passive_messages::ChainEnding::Expired,
+                );
                 loss
             }
         };

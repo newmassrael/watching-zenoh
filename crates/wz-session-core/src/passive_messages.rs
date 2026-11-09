@@ -195,6 +195,10 @@ struct ChainFacts {
     /// By produced-index, what the fold made of every held row it moved; a row
     /// it did not move (no fragment, or no outcome) has none.
     rows: SortedChunks<u64, ChainFact>,
+    /// The chains that ended without closing, in the order they ended, each
+    /// with the produced-index every row of it is below: kept while any of its
+    /// rows is held, so the list of them is bounded by what the list holds.
+    ended: alloc::collections::VecDeque<(u64, EndedChain)>,
 }
 
 /// What the chain fold made of ONE fragment row: the router's outcome, the
@@ -302,20 +306,109 @@ pub type ChainKey = (crate::passive::Direction, bool, crate::qos::Priority);
 /// staged, and the chain it ended is reported as it stood. A continuation of a
 /// chain the fold never saw begin has no place: the bytes before it are not in
 /// the list's history.
+///
+/// # The chains that never closed
+///
+/// A chain that ends without being reassembled is kept as an [`EndedChain`]
+/// until [`Self::take_ended`] hands it on: one an `Aborted` row ended, one a
+/// `Begun` on its key replaced (the router's restart), and one the caller ends
+/// with [`Self::end`] because the router's sweep did (its deadline passed, or
+/// the capture ended). Each says what it had staged and, when its first
+/// fragment began a message, what that message's head shows.
+///
+/// # When a chain's first fragment begins a message
+///
+/// When it carries the `First` marker, or when the chain before it on the same
+/// key closed. A capture that joined in the middle of a chain, and the rest of a
+/// chain that was aborted, begin a chain whose first bytes are the middle of a
+/// message, and reading a head off them would name a message nobody sent.
 #[cfg(feature = "reassembly")]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChainFold {
     next: u64,
     open: Vec<(ChainKey, OpenChain)>,
+    /// Per key, whether the next chain to begin there begins at a message: the
+    /// last chain there closed.
+    boundary: Vec<(ChainKey, bool)>,
+    /// The chains that ended without closing, not yet taken.
+    ended: Vec<EndedChain>,
 }
 
-/// One open chain: its identity, and what it has staged when the fold saw it
-/// from its first fragment.
+/// One open chain: its identity, what it has staged when the fold saw it from
+/// its first fragment, and what its first fragment showed.
 #[cfg(feature = "reassembly")]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct OpenChain {
     id: u64,
     held: ChainSoFar,
+    first_sn: Option<u64>,
+    /// `None` when its first fragment did not begin a message (see the type's
+    /// doc), or when the fold did not see its first fragment.
+    head: Option<crate::dissect::BatchHead>,
+    starts_at_message: bool,
+}
+
+/// How a chain that never closed ended.
+#[cfg(feature = "reassembly")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChainEnding {
+    /// A fragment row ended it, for the reason given; that row reads `aborted`.
+    Aborted(crate::reassembly_dispatch::AbortReason),
+    /// A fragment that began a new chain on its key ended it (the router's
+    /// restart on a `First` marker); the new chain's first row reads `begun`.
+    Superseded,
+    /// Its deadline passed with no fragment to continue it.
+    Expired,
+    /// The capture ended while it was open.
+    AbandonedAtEnd,
+}
+
+#[cfg(feature = "reassembly")]
+impl ChainEnding {
+    /// The word a machine reads for how a chain ended.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Aborted(_) => "aborted",
+            Self::Superseded => "superseded",
+            Self::Expired => "expired",
+            Self::AbandonedAtEnd => "abandoned_at_end",
+        }
+    }
+
+    /// One ending of each kind, so a document's vocabulary and a test's walk of
+    /// [`Self::word`] are one list (an abort stands for every reason: the reason
+    /// is a word of its own).
+    pub const ALL: [Self; 4] = [
+        Self::Aborted(crate::reassembly_dispatch::AbortReason::OutOfOrder),
+        Self::Superseded,
+        Self::Expired,
+        Self::AbandonedAtEnd,
+    ];
+}
+
+/// One chain that ended without being reassembled.
+#[cfg(feature = "reassembly")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EndedChain {
+    /// Its identity, the one its rows carry.
+    pub chain_id: u64,
+    /// The key it was held under.
+    pub key: ChainKey,
+    /// How it ended.
+    pub ending: ChainEnding,
+    /// What it had staged when it ended: fragments, bytes, and the sequence
+    /// number of the last, with that of the first.
+    pub fragments: u32,
+    /// The bytes those fragments came to.
+    pub bytes: u64,
+    /// The sequence number of its first fragment, when the fold saw it.
+    pub first_sn: Option<u64>,
+    /// The sequence number of its last staged fragment, when it staged one.
+    pub last_sn: Option<u64>,
+    /// Whether its first fragment began a message (see [`ChainFold`]).
+    pub starts_at_message: bool,
+    /// What that message's head shows, when it began one.
+    pub head: Option<crate::dissect::BatchHead>,
 }
 
 #[cfg(feature = "reassembly")]
@@ -337,6 +430,7 @@ impl ChainFold {
             priority,
             sn,
             payload,
+            markers,
             ..
         }) = &frame.frame
         else {
@@ -365,44 +459,76 @@ impl ChainFold {
             placed: None,
             before: None,
         };
+        // Whether a chain beginning on this fragment begins at a message.
+        let starts = markers.first || self.at_boundary(key);
         match outcome {
             IngestOutcome::Begun => {
-                let mut open = self.begin();
+                // A chain still open here was ended by the router's restart.
+                if let Some(replaced) = self.take_open(key) {
+                    self.record_ended(key, replaced, ChainEnding::Superseded);
+                }
+                let mut open = self.begin(sn, starts, payload);
                 fact.chain_id = Some(open.id);
                 fact.placed = Some(open.held.take(length, sn));
                 self.set(key, open);
             }
             IngestOutcome::Continued => {
-                if let Some(mut open) = self.current(key) {
+                if let Some(open) = self.open_mut(key) {
                     fact.chain_id = Some(open.id);
                     fact.before = Some(open.held);
                     fact.placed = Some(open.held.take(length, sn));
-                    self.set(key, open);
                 }
             }
             // The closing fragment was staged; a chain that began and closed on
             // it is one fragment long and starts at 0.
             IngestOutcome::Reassembled => {
-                let mut open = self.close(key);
+                let mut open = match self.take_open(key) {
+                    Some(open) => open,
+                    None => self.begin(sn, starts, payload),
+                };
                 fact.chain_id = Some(open.id);
                 fact.before = (open.held.fragments > 0).then_some(open.held);
                 fact.placed = Some(open.held.take(length, sn));
+                self.set_boundary(key, true);
             }
             // The aborting fragment was not staged: the chain is reported as it
-            // stood, and a chain the fold did not have open held nothing.
-            IngestOutcome::Aborted(_) => {
-                let open = self.close(key);
+            // stood, and a chain the fold did not have open held nothing (its
+            // first fragment was the one refused, so it is the chain's head).
+            IngestOutcome::Aborted(why) => {
+                let open = match self.take_open(key) {
+                    Some(open) => open,
+                    None => self.begin(sn, starts, payload),
+                };
                 fact.chain_id = Some(open.id);
                 fact.before = (open.held.fragments > 0).then_some(open.held);
+                self.record_ended(key, open, ChainEnding::Aborted(why));
             }
-            IngestOutcome::Refused(_) => {}
+            // A fragment refused for want of a start marker is the middle of a
+            // message.
+            IngestOutcome::Refused(_) => self.set_boundary(key, false),
         }
         Some(fact)
     }
 
-    /// Open a chain on `key` under a new identity, replacing one still open
-    /// there: the router ended that one without a row.
-    fn begin(&mut self) -> OpenChain {
+    /// End the chain open on `key`, if one is, because the router's sweep ended
+    /// it (`ending` is [`ChainEnding::Expired`] or
+    /// [`ChainEnding::AbandonedAtEnd`]): the caller that drove the sweep says
+    /// which keys it ended.
+    pub fn end(&mut self, key: ChainKey, ending: ChainEnding) {
+        if let Some(open) = self.take_open(key) {
+            self.record_ended(key, open, ending);
+        }
+    }
+
+    /// The chains that ended without closing since the last call, in the order
+    /// they ended.
+    pub fn take_ended(&mut self) -> Vec<EndedChain> {
+        core::mem::take(&mut self.ended)
+    }
+
+    /// A new identity for a chain whose first fragment numbered `sn` carried
+    /// `payload`, reading the message head off it when `starts`.
+    fn begin(&mut self, sn: u64, starts: bool, payload: &[u8]) -> OpenChain {
         let id = self.next;
         self.next += 1;
         OpenChain {
@@ -412,7 +538,32 @@ impl ChainFold {
                 bytes: 0,
                 last_sn: 0,
             },
+            first_sn: Some(sn),
+            head: if starts {
+                crate::dissect::batch_head(payload)
+            } else {
+                None
+            },
+            starts_at_message: starts,
         }
+    }
+
+    /// Keep `open` as one that ended `ending`; the chain after it on `key`
+    /// begins at a message only when a marker says so.
+    fn record_ended(&mut self, key: ChainKey, open: OpenChain, ending: ChainEnding) {
+        self.set_boundary(key, false);
+        let staged = open.held.fragments > 0;
+        self.ended.push(EndedChain {
+            chain_id: open.id,
+            key,
+            ending,
+            fragments: open.held.fragments,
+            bytes: open.held.bytes,
+            first_sn: open.first_sn,
+            last_sn: staged.then_some(open.held.last_sn),
+            starts_at_message: open.starts_at_message,
+            head: open.head,
+        });
     }
 
     /// Record `open` as the chain open on `key`.
@@ -423,19 +574,30 @@ impl ChainFold {
         }
     }
 
-    fn current(&self, key: ChainKey) -> Option<OpenChain> {
+    fn open_mut(&mut self, key: ChainKey) -> Option<&mut OpenChain> {
         self.open
-            .iter()
+            .iter_mut()
             .find(|(k, _)| *k == key)
-            .map(|(_, open)| *open)
+            .map(|(_, open)| open)
     }
 
-    /// Take the chain open on `key` off the open list, or, when none is, a new
-    /// identity that held nothing.
-    fn close(&mut self, key: ChainKey) -> OpenChain {
-        match self.open.iter().position(|(k, _)| *k == key) {
-            Some(i) => self.open.swap_remove(i).1,
-            None => self.begin(),
+    /// Take the chain open on `key` off the open list.
+    fn take_open(&mut self, key: ChainKey) -> Option<OpenChain> {
+        let i = self.open.iter().position(|(k, _)| *k == key)?;
+        Some(self.open.swap_remove(i).1)
+    }
+
+    fn at_boundary(&self, key: ChainKey) -> bool {
+        self.boundary
+            .iter()
+            .find(|(k, _)| *k == key)
+            .is_some_and(|(_, at)| *at)
+    }
+
+    fn set_boundary(&mut self, key: ChainKey, at: bool) {
+        match self.boundary.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = at,
+            None => self.boundary.push((key, at)),
         }
     }
 }
@@ -476,7 +638,32 @@ impl MessageList {
         #[cfg(feature = "reassembly")]
         if let Some(fact) = self.chains.fold.observe(frame) {
             self.chains.rows.insert(produced, fact);
+            for ended in self.chains.fold.take_ended() {
+                self.chains.ended.push_back((produced + 1, ended));
+            }
         }
+    }
+
+    /// End the chains the router's sweep ended on this list's flow: `keys` are
+    /// the chain keys it released, `ending` why. Called by the driver that ran
+    /// the sweep, before the messages of the packet that moved the clock are
+    /// appended, so a chain is ended where the router ended it.
+    #[cfg(feature = "reassembly")]
+    pub fn end_chains(&mut self, keys: impl IntoIterator<Item = ChainKey>, ending: ChainEnding) {
+        for key in keys {
+            self.chains.fold.end(key, ending);
+        }
+        let rows_end = self.produced;
+        for ended in self.chains.fold.take_ended() {
+            self.chains.ended.push_back((rows_end, ended));
+        }
+    }
+
+    /// The chains that ended without being reassembled and still have a row
+    /// held, in the order they ended.
+    #[cfg(feature = "reassembly")]
+    pub fn ended_chains(&self) -> impl Iterator<Item = &EndedChain> {
+        self.chains.ended.iter().map(|(_, ended)| ended)
     }
 
     /// The chain fold the messages this list has DISCARDED left behind: the state
@@ -745,10 +932,25 @@ impl MessageList {
         // identity needs of it, so the count does not depend on how much of the
         // front a ceiling has taken. See the field's doc.
         #[cfg(feature = "reassembly")]
-        let _ = self.chain_prefix.observe(&frame);
+        {
+            let _ = self.chain_prefix.observe(&frame);
+            // The prefix fold is kept for the identities; the chains it sees end
+            // were kept by the list's own fold when they ended.
+            let _ = self.chain_prefix.take_ended();
+        }
         // A row no longer held has no fact to be read.
         #[cfg(feature = "reassembly")]
         self.chains.rows.remove(&first_produced);
+        // An ended chain whose every row is gone goes with its last row.
+        #[cfg(feature = "reassembly")]
+        while self
+            .chains
+            .ended
+            .front()
+            .is_some_and(|(rows_end, _)| *rows_end <= first_produced + 1)
+        {
+            self.chains.ended.pop_front();
+        }
         // A unit kept whole is let go with its last row.
         while let Some((&first, &(rows, _))) = self.whole_units.first_key_value() {
             if first + rows > first_produced + 1 {

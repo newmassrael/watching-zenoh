@@ -1003,6 +1003,19 @@ where
     /// been reused. Three rounds recorded that this number had no witness while
     /// the only place able to take it was this loop.
     pub fn sweep_counting(&mut self, now_ms: u64) -> ChainLoss {
+        self.sweep_reporting(now_ms, |_, _| {})
+    }
+
+    /// The same sweep, naming each chain it releases by the two halves of its
+    /// key a caller holding one router per peer can tell apart: whether it was
+    /// on the reliable channel, and its priority. A passive observer keys the
+    /// identities it hands out by the same key, and this is how it learns which
+    /// of them ended here, where no fragment row says so.
+    pub fn sweep_reporting(
+        &mut self,
+        now_ms: u64,
+        mut released: impl FnMut(bool, Priority),
+    ) -> ChainLoss {
         let mut loss = ChainLoss::default();
         // Split the borrow: `release` hands the chain's staging back to the
         // arena, and both live behind `&mut self`.
@@ -1020,7 +1033,11 @@ where
                 .chain
                 .as_ref()
                 .map_or(0, |chain| staging.bytes(chain).len() as u64);
+            let key = slot.key.as_ref().map(|k| (k.reliable, k.priority));
             if slot.release(staging) {
+                if let Some((reliable, priority)) = key {
+                    released(reliable, priority);
+                }
                 loss.bytes += staged;
                 loss.chains += 1;
             }

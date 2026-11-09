@@ -245,6 +245,16 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             born=62,
         ),
     ),
+    # Field document 63: the wire values of a flow's `ended_chains` entries.
+    ("crates/wz-capture/src/fields_json.rs", "push_ended_integer"): (
+        Cell(
+            "fields",
+            "an ended chain's first_sn, last_sn and keyexpr_id",
+            "the `first_sn`, `last_sn` and `keyexpr_id` of a flow's `ended_chains` entry",
+            "The integer rule applies to an entry's `first_sn`, `last_sn` and `keyexpr_id`",
+            born=63,
+        ),
+    ),
     # Values document 2: every integer of a record's `segment`, one writer for
     # the reason the field document's block has one.
     ("crates/wz-capture/src/field_values.rs", "push_piece_integer"): (

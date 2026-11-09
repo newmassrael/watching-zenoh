@@ -114,7 +114,7 @@ impl ExitingFlow for FlowDissection {
         // 3. THE OPEN CHAINS. The framing decision and the reassembler are two
         //    different things the flow was in the middle of, and settling the
         //    first does not reach the second.
-        tally.chains = self.session.abandon_open_chains_counting();
+        tally.chains = abandon_on_the_list(&mut self.session, &mut self.frames);
         // R311y713 (§B6) — on the flow's own ledger as well as the caller's.
         // A flow that leaves is the last moment anything can say it was THIS
         // flow that was mid-message.
@@ -129,13 +129,38 @@ impl ExitingFlow for DatagramDissection {
         // obligations above are not skipped here, they do not exist. What it
         // does have is chains, because a datagram flow is where fragments
         // actually arrive.
-        let chains = self.session.abandon_open_chains_counting();
+        let chains = abandon_on_the_list(&mut self.session, &mut self.frames);
         self.chain_loss.absorb(chains);
         ExitTally {
             gaps_forced: 0,
             chains,
         }
     }
+}
+
+/// Abandon every chain the flow's routers hold open, and tell the flow's list
+/// which ones, so the identities its rows carry are listed as abandoned.
+///
+/// The ending is "abandoned at the end" on both exits. An evicted flow takes its
+/// list with it, so nothing reads the ending there; it is written by the one
+/// exit after which the list is still read, the end of the capture.
+fn abandon_on_the_list(
+    session: &mut wz_session_core::passive::PassiveSession,
+    #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
+    frames: &mut crate::messages::MessageList,
+) -> ChainLoss {
+    let mut ended = Vec::new();
+    let loss = session.abandon_open_chains_reporting(|direction, reliable, priority| {
+        ended.push((direction, reliable, priority));
+    });
+    #[cfg(feature = "reassembly")]
+    frames.end_chains(
+        ended,
+        wz_session_core::passive_messages::ChainEnding::AbandonedAtEnd,
+    );
+    #[cfg(not(feature = "reassembly"))]
+    let _ = ended;
+    loss
 }
 
 /// A flow that has LEFT its table and has not yet been accounted for.

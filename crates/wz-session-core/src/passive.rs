@@ -2422,18 +2422,65 @@ impl PassiveSession {
     /// The one place the observation clock moves. `sweep_ms` is the instant the
     /// reassembly deadlines are judged against.
     fn advance_clock(&mut self, now_ns: u64, sweep_ms: u64) -> ChainLoss {
+        self.advance_clock_reporting(now_ns, sweep_ms, |_, _, _| {})
+    }
+
+    /// [`Self::advance_clock`], naming each chain the sweep ended by its
+    /// direction, channel and priority.
+    fn advance_clock_reporting(
+        &mut self,
+        now_ns: u64,
+        sweep_ms: u64,
+        ended: impl FnMut(Direction, bool, crate::qos::Priority),
+    ) -> ChainLoss {
         self.observed_at_ns = Some(now_ns);
+        self.sweep_both(sweep_ms, ended)
+    }
+
+    /// Sweep both directions' routers at `sweep_ms`, naming each chain released.
+    fn sweep_both(
+        &mut self,
+        sweep_ms: u64,
+        mut ended: impl FnMut(Direction, bool, crate::qos::Priority),
+    ) -> ChainLoss {
         #[cfg(feature = "reassembly")]
         {
-            let mut loss = self.reasm[0].sweep_counting(sweep_ms);
-            loss.absorb(self.reasm[1].sweep_counting(sweep_ms));
+            let mut loss = self.reasm[0].sweep_reporting(sweep_ms, |reliable, priority| {
+                ended(Direction::A, reliable, priority)
+            });
+            loss.absorb(
+                self.reasm[1].sweep_reporting(sweep_ms, |reliable, priority| {
+                    ended(Direction::B, reliable, priority)
+                }),
+            );
             loss
         }
         #[cfg(not(feature = "reassembly"))]
         {
-            let _ = sweep_ms;
+            let _ = (sweep_ms, &mut ended);
             ChainLoss::default()
         }
+    }
+
+    /// [`Self::observe_at_nanos_counting`], naming each chain the deadline sweep
+    /// ended by its direction, channel and priority: what a driver that hands
+    /// out chain identities needs to end the right one.
+    pub fn observe_at_nanos_reporting(
+        &mut self,
+        now_ns: u64,
+        ended: impl FnMut(Direction, bool, crate::qos::Priority),
+    ) -> ChainLoss {
+        self.advance_clock_reporting(now_ns, now_ns / NANOS_PER_MILLI, ended)
+    }
+
+    /// [`Self::abandon_open_chains_counting`], naming each chain abandoned, as
+    /// [`Self::observe_at_nanos_reporting`] does.
+    pub fn abandon_open_chains_reporting(
+        &mut self,
+        ended: impl FnMut(Direction, bool, crate::qos::Priority),
+    ) -> ChainLoss {
+        // `u64::MAX` expires every open slot: see `abandon_open_chains_counting`.
+        self.sweep_both(u64::MAX, ended)
     }
 
     /// R311y655 — abandon every chain still open, WHATEVER its deadline says.
@@ -2460,20 +2507,11 @@ impl PassiveSession {
     /// R311y713 (§B7) — the same, reporting the bytes the abandoned chains had
     /// already gathered.
     pub fn abandon_open_chains_counting(&mut self) -> ChainLoss {
-        #[cfg(feature = "reassembly")]
-        {
-            // `u64::MAX` is what makes the deadline unreachable-in-reverse: a
-            // slot is kept when `now < deadline`, so the largest instant there
-            // is expires every open slot including the ones built with no
-            // window at all, whose deadline is that same value.
-            let mut loss = self.reasm[0].sweep_counting(u64::MAX);
-            loss.absorb(self.reasm[1].sweep_counting(u64::MAX));
-            loss
-        }
-        #[cfg(not(feature = "reassembly"))]
-        {
-            ChainLoss::default()
-        }
+        // `u64::MAX` is what makes the deadline unreachable-in-reverse: a slot
+        // is kept when `now < deadline`, so the largest instant there is
+        // expires every open slot including the ones built with no window at
+        // all, whose deadline is that same value.
+        self.sweep_both(u64::MAX, |_, _, _| {})
     }
 
     /// The observation instant last handed to [`Self::observe_at`], or `0` if
