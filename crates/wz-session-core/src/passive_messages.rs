@@ -343,7 +343,9 @@ struct OpenChain {
     held: ChainSoFar,
     first_sn: Option<u64>,
     /// `None` when its first fragment did not begin a message (see the type's
-    /// doc), or when the fold did not see its first fragment.
+    /// doc), or when the fold did not see its first fragment. Read by the
+    /// field-tree walker, so kept by a build that has one.
+    #[cfg(feature = "dissect")]
     head: Option<crate::dissect::BatchHead>,
     starts_at_message: bool,
 }
@@ -407,7 +409,9 @@ pub struct EndedChain {
     pub last_sn: Option<u64>,
     /// Whether its first fragment began a message (see [`ChainFold`]).
     pub starts_at_message: bool,
-    /// What that message's head shows, when it began one.
+    /// What that message's head shows, when it began one. Read by the field-tree
+    /// walker, so present in a build that has one (`dissect`).
+    #[cfg(feature = "dissect")]
     pub head: Option<crate::dissect::BatchHead>,
 }
 
@@ -527,7 +531,9 @@ impl ChainFold {
     }
 
     /// A new identity for a chain whose first fragment numbered `sn` carried
-    /// `payload`, reading the message head off it when `starts`.
+    /// `payload`, reading the message head off it when `starts` (in a build
+    /// with the field-tree walker, which reads it).
+    #[cfg_attr(not(feature = "dissect"), allow(unused_variables))]
     fn begin(&mut self, sn: u64, starts: bool, payload: &[u8]) -> OpenChain {
         let id = self.next;
         self.next += 1;
@@ -539,6 +545,7 @@ impl ChainFold {
                 last_sn: 0,
             },
             first_sn: Some(sn),
+            #[cfg(feature = "dissect")]
             head: if starts {
                 crate::dissect::batch_head(payload)
             } else {
@@ -562,6 +569,7 @@ impl ChainFold {
             first_sn: open.first_sn,
             last_sn: staged.then_some(open.held.last_sn),
             starts_at_message: open.starts_at_message,
+            #[cfg(feature = "dissect")]
             head: open.head,
         });
     }
