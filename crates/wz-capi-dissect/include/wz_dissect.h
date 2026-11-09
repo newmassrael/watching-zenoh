@@ -6917,6 +6917,10 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * walk and the document stop at the end of a window of sequence numbers, and the
  * numbers past it are the next window's.
  *
+ * @bound cap buffer-capacity -- the size of YOUR buffer. Below the document's
+ * length it writes nothing, keeps the document and still returns its length in
+ * `needed`, so it never truncates.
+ *
  * WZ_DISSECT_ERR_INVALID_ARG for a null pointer where one is not allowed or text
  * that is not UTF-8, WZ_DISSECT_ERR_DECLARATION for a refused declaration text,
  * WZ_DISSECT_ERR_CANCELLED when the progress callback stopped it, and
@@ -7000,6 +7004,9 @@ int wz_dissect_live_row_facts_since(wz_dissect_live *h,
  * buffer, or its call failed). When `cap` is at least that, `out` holds it and the
  * handle lets it go; when it is less, nothing is written and the handle keeps it.
  * The next wz_dissect_live_row_facts_since replaces it, taken or not.
+ *
+ * @bound cap buffer-capacity -- the size of YOUR buffer, as for
+ * wz_dissect_live_row_facts_since: below the length nothing is written.
  *
  * WZ_DISSECT_ERR_INVALID_ARG for a null `h` or `needed`, or a null `out` with a
  * non-zero `cap`. */
