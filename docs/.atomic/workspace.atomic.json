@@ -13042,6 +13042,21 @@
       "carry_forward_bullets": [
         "The consumer is told the commit and reruns its read-only build; a failure past this point on that checkout is a new report."
       ]
+    },
+    "Round 4456": {
+      "decision_summary": "The hosted Platform run of the fragment-chain head (run 42593687471) was red in six jobs on macOS and Windows, all from one cause the author of that round introduced: the session core's chain fold read the head of a chain's first fragment through the field-tree walker's module, which is gated on `dissect`, from code gated on `reassembly` alone, so the crate did not build with reassembly and without the walker, which is the combination the platform legs, the C ABI crates and the interop driver build. The round's local verification ran every crate with all features, the one combination that cannot show a missing gate. The head is now kept and read only in a build that has the walker; its one reader, the field document, is itself gated on it, so no document loses anything, and a build without the walker keeps the endings, counts and sequence numbers of a chain without its head. The fix is checked on the combinations the failing jobs built, not on all features.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/passive_messages.rs: OpenChain::head and EndedChain::head, and the head read in ChainFold::begin, are gated on `dissect`. docs/hosted-red-acks.md: the row for run 42593687471, read job by job."
+      ],
+      "verification_bullets": [
+        "The failing jobs' logs were read job by job: E0433 three times in passive_messages.rs in the platform legs and the C ABI jobs, and the interop jobs' missing wz-ap-demo binary behind the same failed build. On the build machine through bx: cargo check of wz-session-core with reassembly and its tests, of wz-session-core with no default features and reassembly, of wz-capture with its defaults and its tests, and of wz-ap-demo, each with no error and no warning. The documents the field walker writes are unchanged by the gate (the walker's builds keep the head); the earlier round's tests of them were run with the walker on."
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch/2-4-transitions-in-detail"
+      ],
+      "carry_forward_bullets": [
+        "The consumer of the fragment-chain claim is told the new pin; it waits for a green hosted run before it moves its own. Lesson recorded for this author: verify a new cross-module reference with the narrowest feature set that compiles the referring code, not with all features."
+      ]
     }
   },
   "inventory_entries": {
