@@ -4831,7 +4831,7 @@ impl ChainIds {
     ) -> SessionRow {
         SessionRow {
             sn: sn_row(frame),
-            chain: Self::chain_row(list, produced, ring),
+            chain: Self::chain_row(list, produced, frame, ring),
         }
     }
 
@@ -4843,10 +4843,11 @@ impl ChainIds {
     fn chain_row(
         list: &wz_session_core::passive_messages::MessageList,
         produced: u64,
+        frame: &PassiveFrame,
         ring: Option<u64>,
     ) -> Option<ChainRow> {
         use wz_session_core::reassembly_dispatch::IngestOutcome;
-        let fact = list.chain_of(produced)?;
+        let fact = list.chain_of(produced, frame)?;
         let (outcome, reason) = match fact.outcome {
             IngestOutcome::Begun => (ChainOutcome::Begun, None),
             IngestOutcome::Continued => (ChainOutcome::Continued, None),
@@ -4868,11 +4869,8 @@ impl ChainIds {
             reason,
             chain_id: fact.chain_id,
             placed: fact.placed.map(|p| (p.index, p.offset, p.length)),
-            sns: aborted.then(|| (fact.before.map(|b| next(b.last_sn)), fact.sn)),
-            held: fact
-                .before
-                .filter(|_| aborted)
-                .map(|b| (b.fragments, b.bytes)),
+            sns: aborted.then(|| (fact.held_at_abort.map(|b| next(b.last_sn)), fact.sn)),
+            held: fact.held_at_abort.map(|b| (b.fragments, b.bytes)),
         })
     }
 
@@ -4882,6 +4880,7 @@ impl ChainIds {
     fn chain_row(
         _list: &wz_session_core::passive_messages::MessageList,
         _produced: u64,
+        _frame: &PassiveFrame,
         _ring: Option<u64>,
     ) -> Option<ChainRow> {
         None

@@ -194,16 +194,16 @@ struct ChainFacts {
     fold: ChainFold,
     /// By produced-index, what the fold made of every held row it moved; a row
     /// it did not move (no fragment, or no outcome) has none.
-    rows: SortedChunks<u64, ChainFact>,
+    rows: ChainRows,
     /// The chains that ended without closing, in the order they ended, each
     /// with the produced-index every row of it is below: kept while any of its
     /// rows is held, so the list of them is bounded by what the list holds.
-    ended: alloc::collections::VecDeque<(u64, EndedChain)>,
+    ended: EndedChains,
 }
 
 /// What the chain fold made of ONE fragment row: the router's outcome, the
 /// identity of the chain it touched, where its bytes went in that chain's joined
-/// buffer, and what the chain held before it.
+/// buffer, and, for the fragment that aborted it, what the chain had staged.
 #[cfg(feature = "reassembly")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChainFact {
@@ -214,11 +214,13 @@ pub struct ChainFact {
     /// The fragment's sequence number, as it carried it.
     pub sn: u64,
     /// Where its bytes went, when the router staged them and the fold saw the
-    /// chain from its first fragment; see [`Placed`].
+    /// chain from its first fragment; see [`Placed`]. Its index and offset are
+    /// what the chain had staged before it.
     pub placed: Option<Placed>,
-    /// The chain as it stood when this fragment met it, when the fragment met
-    /// a chain the fold had followed from its start; see [`ChainSoFar`].
-    pub before: Option<ChainSoFar>,
+    /// On an `Aborted` row, the chain as it stood when this fragment ended it,
+    /// when it had staged a fragment the fold saw; `None` on every other row. A
+    /// fact of the chain, which its [`EndedChain`] carries and this repeats.
+    pub held_at_abort: Option<ChainSoFar>,
 }
 
 /// Where a staged fragment's bytes sit in its chain's joined buffer.
@@ -461,7 +463,7 @@ impl ChainFold {
             chain_id: None,
             sn,
             placed: None,
-            before: None,
+            held_at_abort: None,
         };
         // Whether a chain beginning on this fragment begins at a message.
         let starts = markers.first || self.at_boundary(key);
@@ -479,7 +481,6 @@ impl ChainFold {
             IngestOutcome::Continued => {
                 if let Some(open) = self.open_mut(key) {
                     fact.chain_id = Some(open.id);
-                    fact.before = Some(open.held);
                     fact.placed = Some(open.held.take(length, sn));
                 }
             }
@@ -491,7 +492,6 @@ impl ChainFold {
                     None => self.begin(sn, starts, payload),
                 };
                 fact.chain_id = Some(open.id);
-                fact.before = (open.held.fragments > 0).then_some(open.held);
                 fact.placed = Some(open.held.take(length, sn));
                 self.set_boundary(key, true);
             }
@@ -504,7 +504,7 @@ impl ChainFold {
                     None => self.begin(sn, starts, payload),
                 };
                 fact.chain_id = Some(open.id);
-                fact.before = (open.held.fragments > 0).then_some(open.held);
+                fact.held_at_abort = open.held_at_end();
                 self.record_ended(key, open, ChainEnding::Aborted(why));
             }
             // A fragment refused for want of a start marker is the middle of a
@@ -559,7 +559,6 @@ impl ChainFold {
     /// begins at a message only when a marker says so.
     fn record_ended(&mut self, key: ChainKey, open: OpenChain, ending: ChainEnding) {
         self.set_boundary(key, false);
-        let staged = open.held.fragments > 0;
         self.ended.push(EndedChain {
             chain_id: open.id,
             key,
@@ -567,7 +566,7 @@ impl ChainFold {
             fragments: open.held.fragments,
             bytes: open.held.bytes,
             first_sn: open.first_sn,
-            last_sn: staged.then_some(open.held.last_sn),
+            last_sn: open.held_at_end().map(|held| held.last_sn),
             starts_at_message: open.starts_at_message,
             #[cfg(feature = "dissect")]
             head: open.head,
@@ -608,6 +607,520 @@ impl ChainFold {
             None => self.boundary.push((key, at)),
         }
     }
+
+    /// Bytes the fold holds on the heap: its open chains with what each one's
+    /// head owns, each key's boundary, and the chains that ended and were not yet
+    /// handed on, with what theirs own. Exact, as [`crate::heap_account`] counts.
+    fn allocated_bytes(&self) -> usize {
+        crate::heap_account::vec_bytes(&self.open)
+            + self
+                .open
+                .iter()
+                .map(|(_, open)| open.head_bytes())
+                .sum::<usize>()
+            + crate::heap_account::vec_bytes(&self.boundary)
+            + crate::heap_account::vec_bytes(&self.ended)
+            + self.ended.iter().map(EndedChain::head_bytes).sum::<usize>()
+    }
+}
+
+#[cfg(feature = "reassembly")]
+impl OpenChain {
+    /// What the chain had staged, when it had staged anything: what it holds
+    /// when it ends without closing.
+    fn held_at_end(&self) -> Option<ChainSoFar> {
+        (self.held.fragments > 0).then_some(self.held)
+    }
+
+    /// Bytes its head owns on the heap.
+    fn head_bytes(&self) -> usize {
+        #[cfg(feature = "dissect")]
+        {
+            head_bytes(self.head.as_ref())
+        }
+        #[cfg(not(feature = "dissect"))]
+        {
+            0
+        }
+    }
+}
+
+#[cfg(feature = "reassembly")]
+impl EndedChain {
+    /// Bytes its head owns on the heap.
+    fn head_bytes(&self) -> usize {
+        #[cfg(feature = "dissect")]
+        {
+            head_bytes(self.head.as_ref())
+        }
+        #[cfg(not(feature = "dissect"))]
+        {
+            0
+        }
+    }
+}
+
+/// Bytes a chain's message head owns on the heap: the suffix of the key it
+/// names, as its buffer allocated it.
+#[cfg(all(feature = "reassembly", feature = "dissect"))]
+fn head_bytes(head: Option<&crate::dissect::BatchHead>) -> usize {
+    head.and_then(|head| head.keyexpr.as_ref())
+        .and_then(|key| key.suffix.as_ref())
+        .map_or(0, alloc::string::String::capacity)
+}
+
+/// An abort's reason as a number below 8, for a packed column, and back.
+/// Exhaustive both ways, and held to each other by a test.
+#[cfg(feature = "reassembly")]
+const fn abort_code(why: crate::reassembly_dispatch::AbortReason) -> u64 {
+    use crate::reassembly_dispatch::AbortReason as A;
+    match why {
+        A::OutOfOrder => 0,
+        A::CapacityOverflow => 1,
+        A::SenderDropped => 2,
+        A::Superseded => 3,
+        A::Unresolvable => 4,
+    }
+}
+
+#[cfg(feature = "reassembly")]
+const fn abort_of_code(code: u64) -> Option<crate::reassembly_dispatch::AbortReason> {
+    use crate::reassembly_dispatch::AbortReason as A;
+    Some(match code {
+        0 => A::OutOfOrder,
+        1 => A::CapacityOverflow,
+        2 => A::SenderDropped,
+        3 => A::Superseded,
+        4 => A::Unresolvable,
+        _ => return None,
+    })
+}
+
+/// A refusal's reason as a number below 8, and back; see [`abort_code`].
+#[cfg(feature = "reassembly")]
+const fn refuse_code(why: crate::reassembly_dispatch::RefuseReason) -> u64 {
+    use crate::reassembly_dispatch::RefuseReason as R;
+    match why {
+        R::PeerQuota => 0,
+        R::PoolExhausted => 1,
+        R::MissingStartMarker => 2,
+    }
+}
+
+#[cfg(feature = "reassembly")]
+const fn refuse_of_code(code: u64) -> Option<crate::reassembly_dispatch::RefuseReason> {
+    use crate::reassembly_dispatch::RefuseReason as R;
+    Some(match code {
+        0 => R::PeerQuota,
+        1 => R::PoolExhausted,
+        2 => R::MissingStartMarker,
+        _ => return None,
+    })
+}
+
+/// The bits of a [`ChainRows`] word that are the outcome's code: the outcome in
+/// the low three, its reason in the three above.
+#[cfg(feature = "reassembly")]
+const OUTCOME_BITS: u64 = 0b11_1111;
+
+/// A router's outcome as a number of [`OUTCOME_BITS`], and back.
+#[cfg(feature = "reassembly")]
+const fn outcome_code(outcome: IngestOutcome) -> u64 {
+    match outcome {
+        IngestOutcome::Begun => 0,
+        IngestOutcome::Continued => 1,
+        IngestOutcome::Reassembled => 2,
+        IngestOutcome::Aborted(why) => 3 | (abort_code(why) << 3),
+        IngestOutcome::Refused(why) => 4 | (refuse_code(why) << 3),
+    }
+}
+
+#[cfg(feature = "reassembly")]
+const fn outcome_of_code(code: u64) -> Option<IngestOutcome> {
+    Some(match code & 0b111 {
+        0 => IngestOutcome::Begun,
+        1 => IngestOutcome::Continued,
+        2 => IngestOutcome::Reassembled,
+        3 => match abort_of_code(code >> 3) {
+            Some(why) => IngestOutcome::Aborted(why),
+            None => return None,
+        },
+        4 => match refuse_of_code(code >> 3) {
+            Some(why) => IngestOutcome::Refused(why),
+            None => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// The columns of a [`ChainRows`] row, in order, and how each is kept.
+#[cfg(feature = "reassembly")]
+const CHAIN_ROW_KINDS: [Kind; 6] = [
+    Kind::Rising, // produced: the row's produced-index
+    Kind::Rising, // minted: the identities the fold had handed out once it met the row
+    Kind::Plain,  // back: how many of them came after the row's own
+    Kind::Plain,  // word: the outcome's code, and the two flags below
+    Kind::Plain,  // index: its place among the chain's staged fragments
+    Kind::Plain,  // offset: where its first byte sits in the joined buffer
+];
+
+/// A [`ChainRows`] word's flag: the row has a chain identity.
+#[cfg(feature = "reassembly")]
+const ROW_HAS_ID: u64 = 1 << 6;
+
+/// A [`ChainRows`] word's flag: the row was placed in its chain.
+#[cfg(feature = "reassembly")]
+const ROW_PLACED: u64 = 1 << 7;
+
+/// What the chain fold made of each fragment row a list holds, by
+/// produced-index, as packed columns ([`crate::column_log`]): the facts of the
+/// ROW, and none its frame or its chain already carries.
+///
+/// A row keeps its produced-index, its outcome with its reason, its chain's
+/// identity, and its index and offset in that chain. It does not keep its
+/// sequence number or its length, which its frame carries
+/// ([`MessageList::chain_of`] reads them there), nor what an aborted chain had
+/// staged, which is a fact of the chain and kept once in [`EndedChains`].
+///
+/// The identity is kept as the count of identities the fold had handed out and
+/// the distance back from the newest of them, not as itself: two conduits'
+/// chains interleave, so a row's identity can be below the one before it, which
+/// a rising column would answer with a new chunk, while the count only rises and
+/// the distance is the few chains open at once. A row in a chunk of dense
+/// fragments is a few bytes.
+#[cfg(feature = "reassembly")]
+#[derive(Debug)]
+struct ChainRows {
+    log: ColumnLog<6>,
+}
+
+#[cfg(feature = "reassembly")]
+impl Default for ChainRows {
+    fn default() -> Self {
+        Self {
+            log: ColumnLog::new(CHAIN_ROW_KINDS),
+        }
+    }
+}
+
+/// One row of [`ChainRows`], as it reads back.
+#[cfg(feature = "reassembly")]
+struct ChainRowFacts {
+    outcome: IngestOutcome,
+    chain_id: Option<u64>,
+    /// Index and offset.
+    placed: Option<(u32, u64)>,
+}
+
+#[cfg(feature = "reassembly")]
+impl ChainRows {
+    /// Keep what the fold made of the row at `produced`, `minted` being the
+    /// identities it had handed out once it met the row. Rows arrive in
+    /// produced order.
+    fn push(&mut self, produced: u64, minted: u64, fact: &ChainFact) {
+        let mut word = outcome_code(fact.outcome);
+        // An identity is one the fold handed out, so it is below the count.
+        let back = match fact.chain_id {
+            Some(id) => {
+                word |= ROW_HAS_ID;
+                minted - 1 - id
+            }
+            None => 0,
+        };
+        let (index, offset) = match fact.placed {
+            Some(placed) => {
+                word |= ROW_PLACED;
+                (u64::from(placed.index), placed.offset)
+            }
+            None => (0, 0),
+        };
+        self.log
+            .push_back([produced, minted, back, word, index, offset]);
+    }
+
+    /// The row at `produced`, if it is held and the fold moved it.
+    fn get(&self, produced: u64) -> Option<ChainRowFacts> {
+        let at = self.log.partition_point_by_column(0, |p| p < produced);
+        let [at_produced, minted, back, word, index, offset] = self.log.get(at)?;
+        if at_produced != produced {
+            return None;
+        }
+        let chain_id = if word & ROW_HAS_ID != 0 {
+            Some(minted - 1 - back)
+        } else {
+            None
+        };
+        let placed = if word & ROW_PLACED != 0 {
+            Some((u32::try_from(index).ok()?, offset))
+        } else {
+            None
+        };
+        Some(ChainRowFacts {
+            outcome: outcome_of_code(word & OUTCOME_BITS)?,
+            chain_id,
+            placed,
+        })
+    }
+
+    /// Let go of every row at or before `produced`.
+    fn release_through(&mut self, produced: u64) {
+        while self.log.column(0, 0).is_some_and(|p| p <= produced) {
+            let _ = self.log.pop_front();
+        }
+    }
+
+    fn allocated_bytes(&self) -> usize {
+        self.log.allocated_bytes()
+    }
+}
+
+/// The columns of an [`EndedChains`] entry, in order, and how each is kept.
+#[cfg(feature = "reassembly")]
+const ENDED_KINDS: [Kind; 8] = [
+    Kind::Rising, // rows_end: the produced-index every row of the chain is below
+    Kind::Plain,  // chain_id
+    Kind::Plain,  // word: the key, the ending and the flags below
+    Kind::Plain,  // fragments staged
+    Kind::Plain,  // bytes staged
+    Kind::Plain,  // first_sn
+    Kind::Plain,  // last_sn
+    Kind::Plain,  // the id of the key the head names
+];
+
+/// The fields of an [`EndedChains`] word: where each starts, or its one bit.
+/// The head's are read only by a build with the field-tree walker.
+#[cfg(feature = "reassembly")]
+#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+mod ended_word {
+    /// The chain travelled in direction `B`.
+    pub const DIRECTION_B: u64 = 1 << 0;
+    /// It was on the reliable channel.
+    pub const RELIABLE: u64 = 1 << 1;
+    /// Three bits: its priority's wire value.
+    pub const PRIORITY: u32 = 2;
+    /// Two bits: aborted, superseded, expired, abandoned at the end.
+    pub const ENDING: u32 = 5;
+    /// Three bits: an abort's reason.
+    pub const REASON: u32 = 7;
+    /// Its first fragment began a message.
+    pub const STARTS_AT_MESSAGE: u64 = 1 << 10;
+    /// The fold saw its first fragment's sequence number.
+    pub const FIRST_SN: u64 = 1 << 11;
+    /// It staged a fragment, whose sequence number is kept.
+    pub const LAST_SN: u64 = 1 << 12;
+    /// Its first fragment's head was read.
+    pub const HEAD: u64 = 1 << 13;
+    /// The head names a network message.
+    pub const MESSAGE: u64 = 1 << 14;
+    /// Five bits: that message's network MID.
+    pub const MID: u32 = 15;
+    /// The head names a key.
+    pub const KEYEXPR: u64 = 1 << 20;
+    /// The key's `M` bit.
+    pub const MAPPING: u64 = 1 << 21;
+    /// The key has a suffix, kept beside the columns.
+    pub const SUFFIX: u64 = 1 << 22;
+}
+
+/// The chains of a list that ended without being reassembled, in the order they
+/// ended, each with the produced-index every row of it is below, as packed
+/// columns ([`crate::column_log`]), and the suffix of the key a chain's head
+/// names, when it has one, beside them.
+///
+/// A chain is one entry whatever its length, and it is the one place what an
+/// aborted chain had staged is kept: the row that aborted it reads it here
+/// ([`Self::held_at_abort`]).
+#[cfg(feature = "reassembly")]
+#[derive(Debug)]
+struct EndedChains {
+    log: ColumnLog<8>,
+    /// By the entry's number among every entry this log was ever given.
+    #[cfg(feature = "dissect")]
+    suffixes: SortedChunks<u64, alloc::boxed::Box<str>>,
+    /// Entries ever pushed.
+    pushed: u64,
+}
+
+#[cfg(feature = "reassembly")]
+impl Default for EndedChains {
+    fn default() -> Self {
+        Self {
+            log: ColumnLog::new(ENDED_KINDS),
+            #[cfg(feature = "dissect")]
+            suffixes: SortedChunks::new(),
+            pushed: 0,
+        }
+    }
+}
+
+#[cfg(feature = "reassembly")]
+impl EndedChains {
+    /// Keep `ended`, every row of which is below `rows_end`. Entries arrive in
+    /// the order their chains ended, which is the order of `rows_end`.
+    fn push(&mut self, rows_end: u64, ended: EndedChain) {
+        use ended_word as w;
+        let (direction, reliable, priority) = ended.key;
+        let mut word = u64::from(priority.wire_byte()) << w::PRIORITY;
+        if direction == Direction::B {
+            word |= w::DIRECTION_B;
+        }
+        if reliable {
+            word |= w::RELIABLE;
+        }
+        word |= match ended.ending {
+            ChainEnding::Aborted(why) => abort_code(why) << w::REASON,
+            ChainEnding::Superseded => 1 << w::ENDING,
+            ChainEnding::Expired => 2 << w::ENDING,
+            ChainEnding::AbandonedAtEnd => 3 << w::ENDING,
+        };
+        if ended.starts_at_message {
+            word |= w::STARTS_AT_MESSAGE;
+        }
+        if ended.first_sn.is_some() {
+            word |= w::FIRST_SN;
+        }
+        if ended.last_sn.is_some() {
+            word |= w::LAST_SN;
+        }
+        #[cfg_attr(not(feature = "dissect"), allow(unused_mut))]
+        let mut keyexpr_id = 0;
+        #[cfg(feature = "dissect")]
+        if let Some(head) = ended.head {
+            word |= w::HEAD;
+            if let Some(mid) = head.message.and_then(|m| m.network_mid()) {
+                word |= w::MESSAGE | (u64::from(mid & 0x1F) << w::MID);
+            }
+            if let Some(key) = head.keyexpr {
+                word |= w::KEYEXPR;
+                keyexpr_id = key.id;
+                if key.mapping != 0 {
+                    word |= w::MAPPING;
+                }
+                if let Some(suffix) = key.suffix {
+                    word |= w::SUFFIX;
+                    self.suffixes.insert(self.pushed, suffix.into_boxed_str());
+                }
+            }
+        }
+        self.log.push_back([
+            rows_end,
+            ended.chain_id,
+            word,
+            u64::from(ended.fragments),
+            ended.bytes,
+            ended.first_sn.unwrap_or(0),
+            ended.last_sn.unwrap_or(0),
+            keyexpr_id,
+        ]);
+        self.pushed += 1;
+    }
+
+    /// The number, among every entry ever pushed, of the oldest one held.
+    fn first_number(&self) -> u64 {
+        self.pushed - self.log.len() as u64
+    }
+
+    /// Let go of every chain whose rows are all at or before `rows_end - 1`.
+    fn release_through(&mut self, rows_end: u64) {
+        while self.log.column(0, 0).is_some_and(|end| end <= rows_end) {
+            #[cfg(feature = "dissect")]
+            {
+                let number = self.first_number();
+                let _ = self.suffixes.remove(&number);
+            }
+            let _ = self.log.pop_front();
+        }
+    }
+
+    /// What the chain `chain_id` had staged when the row just below `rows_end`
+    /// aborted it, when it had staged anything.
+    fn held_at_abort(&self, rows_end: u64, chain_id: u64) -> Option<ChainSoFar> {
+        let from = self.log.partition_point_by_column(0, |end| end < rows_end);
+        let [_, _, _, fragments, bytes, _, last_sn, _] = self
+            .log
+            .iter_from(from)
+            .take_while(|row| row[0] == rows_end)
+            .find(|row| row[1] == chain_id && (row[2] >> ended_word::ENDING) & 0b11 == 0)?;
+        Some(ChainSoFar {
+            fragments: u32::try_from(fragments).ok().filter(|n| *n > 0)?,
+            bytes,
+            last_sn,
+        })
+    }
+
+    /// Every chain held, oldest first.
+    fn iter(&self) -> impl Iterator<Item = EndedChain> + '_ {
+        self.log
+            .iter_from(0)
+            .zip(self.first_number()..)
+            .filter_map(|(row, number)| self.read(row, number))
+    }
+
+    /// The entry `row`, which is number `number`; `None` only for a word this log
+    /// did not write.
+    #[cfg_attr(not(feature = "dissect"), allow(unused_variables))]
+    fn read(&self, row: [u64; 8], number: u64) -> Option<EndedChain> {
+        use ended_word as w;
+        let [_, chain_id, word, fragments, bytes, first_sn, last_sn, keyexpr_id] = row;
+        let direction = if word & w::DIRECTION_B != 0 {
+            Direction::B
+        } else {
+            Direction::A
+        };
+        let priority = crate::qos::Priority::from_wire(((word >> w::PRIORITY) & 0b111) as u8);
+        let ending = match (word >> w::ENDING) & 0b11 {
+            0 => ChainEnding::Aborted(abort_of_code((word >> w::REASON) & 0b111)?),
+            1 => ChainEnding::Superseded,
+            2 => ChainEnding::Expired,
+            _ => ChainEnding::AbandonedAtEnd,
+        };
+        #[cfg(feature = "dissect")]
+        let head = (word & w::HEAD != 0).then(|| crate::dissect::BatchHead {
+            message: if word & w::MESSAGE != 0 {
+                crate::dissect::MessageName::of_network(((word >> w::MID) & 0x1F) as u8)
+            } else {
+                None
+            },
+            keyexpr: (word & w::KEYEXPR != 0).then(|| crate::dissect::HeadKeyexpr {
+                id: keyexpr_id,
+                mapping: u8::from(word & w::MAPPING != 0),
+                suffix: if word & w::SUFFIX != 0 {
+                    self.suffixes
+                        .get(&number)
+                        .map(|suffix| alloc::string::String::from(&**suffix))
+                } else {
+                    None
+                },
+            }),
+        });
+        Some(EndedChain {
+            chain_id,
+            key: (direction, word & w::RELIABLE != 0, priority),
+            ending,
+            fragments: u32::try_from(fragments).ok()?,
+            bytes,
+            first_sn: (word & w::FIRST_SN != 0).then_some(first_sn),
+            last_sn: (word & w::LAST_SN != 0).then_some(last_sn),
+            starts_at_message: word & w::STARTS_AT_MESSAGE != 0,
+            #[cfg(feature = "dissect")]
+            head,
+        })
+    }
+
+    /// Bytes held on the heap: the columns, and the suffixes with the slots that
+    /// hold them.
+    fn allocated_bytes(&self) -> usize {
+        #[cfg(feature = "dissect")]
+        let suffixes = self.suffixes.allocated_bytes()
+            + self
+                .suffixes
+                .values()
+                .map(|suffix| suffix.len())
+                .sum::<usize>();
+        #[cfg(not(feature = "dissect"))]
+        let suffixes = 0;
+        self.log.allocated_bytes() + suffixes
+    }
 }
 
 impl MessageList {
@@ -631,13 +1144,44 @@ impl MessageList {
         (produced < first + rows).then_some(&**bytes)
     }
 
-    /// What the chain fold made of the row at produced-index `produced`: the
-    /// router's outcome and the identity of the chain it touched, as a walk of
-    /// every message the list was ever appended would find them; `None` for a
-    /// row that is not a fragment or carries no outcome, and for one not held.
+    /// What the chain fold made of the row at produced-index `produced`, which is
+    /// `frame`: the router's outcome, the identity of the chain it touched and
+    /// where its bytes went in it, as a walk of every message the list was ever
+    /// appended would find them; `None` for a row that is not a fragment or
+    /// carries no outcome, and for one not held.
+    ///
+    /// The row's sequence number and its length are read off `frame`, which
+    /// carries them, and what an aborted chain had staged off the chain's entry
+    /// among the ended ones ([`Self::ended_chains`]): the list keeps neither a
+    /// second time.
     #[cfg(feature = "reassembly")]
-    pub fn chain_of(&self, produced: u64) -> Option<ChainFact> {
-        self.chains.rows.get(&produced).copied()
+    pub fn chain_of(&self, produced: u64, frame: &PassiveFrame) -> Option<ChainFact> {
+        let row = self.chains.rows.get(produced)?;
+        let Ok(InboundFrame::Fragment { sn, payload, .. }) = &frame.frame else {
+            // The fold kept a fact only for a fragment, and a row reads back as
+            // the frame it was appended as: this is not that row.
+            debug_assert!(false, "the row at {produced} is not the fragment it was");
+            return None;
+        };
+        let held_at_abort = match row.outcome {
+            // The chain the row aborted ended with it: every row of it is
+            // below the one after this.
+            IngestOutcome::Aborted(_) => row
+                .chain_id
+                .and_then(|id| self.chains.ended.held_at_abort(produced + 1, id)),
+            _ => None,
+        };
+        Some(ChainFact {
+            outcome: row.outcome,
+            chain_id: row.chain_id,
+            sn: *sn,
+            placed: row.placed.map(|(index, offset)| Placed {
+                index,
+                offset,
+                length: payload.len() as u64,
+            }),
+            held_at_abort,
+        })
     }
 
     /// Move the chain fold by the message about to be appended at `produced`.
@@ -645,9 +1189,10 @@ impl MessageList {
     fn note_chain(&mut self, produced: u64, frame: &PassiveFrame) {
         #[cfg(feature = "reassembly")]
         if let Some(fact) = self.chains.fold.observe(frame) {
-            self.chains.rows.insert(produced, fact);
-            for ended in self.chains.fold.take_ended() {
-                self.chains.ended.push_back((produced + 1, ended));
+            let chains = &mut self.chains;
+            chains.rows.push(produced, chains.fold.next, &fact);
+            for ended in chains.fold.ended.drain(..) {
+                chains.ended.push(produced + 1, ended);
             }
         }
     }
@@ -658,20 +1203,21 @@ impl MessageList {
     /// appended, so a chain is ended where the router ended it.
     #[cfg(feature = "reassembly")]
     pub fn end_chains(&mut self, keys: impl IntoIterator<Item = ChainKey>, ending: ChainEnding) {
+        let chains = &mut self.chains;
         for key in keys {
-            self.chains.fold.end(key, ending);
+            chains.fold.end(key, ending);
         }
         let rows_end = self.produced;
-        for ended in self.chains.fold.take_ended() {
-            self.chains.ended.push_back((rows_end, ended));
+        for ended in chains.fold.ended.drain(..) {
+            chains.ended.push(rows_end, ended);
         }
     }
 
     /// The chains that ended without being reassembled and still have a row
-    /// held, in the order they ended.
+    /// held, in the order they ended, each read out of the columns that keep it.
     #[cfg(feature = "reassembly")]
-    pub fn ended_chains(&self) -> impl Iterator<Item = &EndedChain> {
-        self.chains.ended.iter().map(|(_, ended)| ended)
+    pub fn ended_chains(&self) -> impl Iterator<Item = EndedChain> + '_ {
+        self.chains.ended.iter()
     }
 
     /// The chain fold the messages this list has DISCARDED left behind: the state
@@ -944,21 +1490,14 @@ impl MessageList {
             let _ = self.chain_prefix.observe(&frame);
             // The prefix fold is kept for the identities; the chains it sees end
             // were kept by the list's own fold when they ended.
-            let _ = self.chain_prefix.take_ended();
+            self.chain_prefix.ended.clear();
         }
         // A row no longer held has no fact to be read.
         #[cfg(feature = "reassembly")]
-        self.chains.rows.remove(&first_produced);
+        self.chains.rows.release_through(first_produced);
         // An ended chain whose every row is gone goes with its last row.
         #[cfg(feature = "reassembly")]
-        while self
-            .chains
-            .ended
-            .front()
-            .is_some_and(|(rows_end, _)| *rows_end <= first_produced + 1)
-        {
-            self.chains.ended.pop_front();
-        }
+        self.chains.ended.release_through(first_produced + 1);
         // A unit kept whole is let go with its last row.
         while let Some((&first, &(rows, _))) = self.whole_units.first_key_value() {
             if first + rows > first_produced + 1 {
@@ -1291,10 +1830,12 @@ pub struct ListMemory {
     /// follows the chains' content and not the row count, and it is read off every
     /// fact the list keeps for a row, so asking costs the number of those.
     pub joined: usize,
-    /// The chain each fragment row belongs to and what became of it, by row (as the
-    /// chunks of the map allocated it), and the chains still open. Kept by every
-    /// list that has seen a fragment, whether it keeps its rows as entries or
-    /// whole.
+    /// The chain each fragment row belongs to, what became of it and where it sat
+    /// in it, by row (as the chunks of its packed columns allocated them), the
+    /// chains that ended without closing while a row of theirs is held (their
+    /// columns, and the suffixes of the keys their heads name), and the chains
+    /// still open. Kept by every list that has seen a fragment, whether it keeps
+    /// its rows as entries or whole.
     pub chains: usize,
     /// The rest of the index, which does not follow the row count.
     pub small: usize,
@@ -1368,14 +1909,16 @@ impl Index {
 }
 
 impl MessageList {
-    /// What the chain facts of the list hold: the outcome and identity of every
-    /// fragment row, and the chains still open and the ones the discarded rows
-    /// left counted.
+    /// What the chain facts of the list hold: what the fold made of every
+    /// fragment row, the chains that ended without closing while a row of theirs
+    /// is held, and the two folds (the list's, and the one the discarded rows
+    /// left), with the chains each has open.
     #[cfg(feature = "reassembly")]
     fn chain_bytes(&self) -> usize {
         self.chains.rows.allocated_bytes()
-            + crate::heap_account::vec_bytes(&self.chains.fold.open)
-            + crate::heap_account::vec_bytes(&self.chain_prefix.open)
+            + self.chains.ended.allocated_bytes()
+            + self.chains.fold.allocated_bytes()
+            + self.chain_prefix.allocated_bytes()
     }
 
     /// Without reassembly no fragment is read and no chain is counted.
@@ -4408,5 +4951,257 @@ mod tests {
             released += 1;
         }
         assert_eq!(released, expected.len());
+    }
+
+    /// EVERY ROUTER OUTCOME SURVIVES THE CODE A CHAIN ROW KEEPS IT AS, and no two
+    /// share one. The matches below have no wildcard, so a reason added to the
+    /// router does not compile until it is listed here.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn every_router_outcome_survives_its_code() {
+        use crate::reassembly_dispatch::{AbortReason as A, RefuseReason as R};
+        let aborts = [
+            A::OutOfOrder,
+            A::CapacityOverflow,
+            A::SenderDropped,
+            A::Superseded,
+            A::Unresolvable,
+        ];
+        let refusals = [R::PeerQuota, R::PoolExhausted, R::MissingStartMarker];
+        for why in aborts {
+            match why {
+                A::OutOfOrder
+                | A::CapacityOverflow
+                | A::SenderDropped
+                | A::Superseded
+                | A::Unresolvable => {}
+            }
+        }
+        for why in refusals {
+            match why {
+                R::PeerQuota | R::PoolExhausted | R::MissingStartMarker => {}
+            }
+        }
+        let mut every = alloc::vec![
+            IngestOutcome::Begun,
+            IngestOutcome::Continued,
+            IngestOutcome::Reassembled,
+        ];
+        every.extend(aborts.map(IngestOutcome::Aborted));
+        every.extend(refusals.map(IngestOutcome::Refused));
+        let mut codes: Vec<u64> = Vec::new();
+        for outcome in every {
+            let code = outcome_code(outcome);
+            assert_eq!(code & !OUTCOME_BITS, 0, "{outcome:?} fits its bits");
+            assert_eq!(outcome_of_code(code), Some(outcome));
+            assert!(!codes.contains(&code), "{outcome:?} has a code of its own");
+            codes.push(code);
+        }
+    }
+
+    /// A CHAIN ROW READS BACK WHAT THE FOLD MADE OF IT, by produced-index, with
+    /// two conduits' chains interleaved (an identity below the row before's) and
+    /// an offset past four bytes, and a release takes the rows before it.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_chain_row_reads_back_what_the_fold_made_of_it() {
+        use crate::reassembly_dispatch::{AbortReason, RefuseReason};
+        let fact =
+            |outcome: IngestOutcome, chain_id: Option<u64>, placed: Option<(u32, u64)>| ChainFact {
+                outcome,
+                chain_id,
+                sn: 0,
+                placed: placed.map(|(index, offset)| Placed {
+                    index,
+                    offset,
+                    length: 0,
+                }),
+                held_at_abort: None,
+            };
+        let far = u64::from(u32::MAX) + 7;
+        let kept = [
+            (0, 1, fact(IngestOutcome::Begun, Some(0), Some((0, 0)))),
+            (2, 2, fact(IngestOutcome::Begun, Some(1), Some((0, 0)))),
+            (3, 3, fact(IngestOutcome::Begun, Some(2), Some((0, 0)))),
+            (
+                4,
+                3,
+                fact(IngestOutcome::Continued, Some(1), Some((1, 300))),
+            ),
+            (5, 3, fact(IngestOutcome::Continued, None, None)),
+            (
+                6,
+                3,
+                fact(
+                    IngestOutcome::Aborted(AbortReason::OutOfOrder),
+                    Some(0),
+                    None,
+                ),
+            ),
+            (
+                9,
+                3,
+                fact(
+                    IngestOutcome::Refused(RefuseReason::MissingStartMarker),
+                    None,
+                    None,
+                ),
+            ),
+            (
+                10,
+                3,
+                fact(IngestOutcome::Reassembled, Some(2), Some((1, far))),
+            ),
+        ];
+        let mut rows = ChainRows::default();
+        for (produced, minted, fact) in &kept {
+            rows.push(*produced, *minted, fact);
+        }
+        for (produced, _, fact) in &kept {
+            let got = rows.get(*produced).expect("a row the fold moved");
+            assert_eq!(got.outcome, fact.outcome, "row {produced}");
+            assert_eq!(got.chain_id, fact.chain_id, "row {produced}");
+            assert_eq!(
+                got.placed,
+                fact.placed.map(|p| (p.index, p.offset)),
+                "row {produced}"
+            );
+        }
+        assert!(rows.get(1).is_none(), "a row the fold did not move");
+        assert!(rows.get(11).is_none(), "a row past the last");
+        rows.release_through(4);
+        assert!(rows.get(4).is_none());
+        assert!(rows.get(5).is_some());
+        rows.release_through(10);
+        assert!(rows.get(10).is_none());
+    }
+
+    /// AN ENDED CHAIN READS BACK AS IT WAS KEPT, every ending, both directions and
+    /// channels, a head with and without a key and a suffix; the row that aborted
+    /// a chain reads what it had staged off it, and a release takes a chain with
+    /// its suffix.
+    #[cfg(all(feature = "reassembly", feature = "dissect"))]
+    #[test]
+    fn an_ended_chain_reads_back_as_it_was_kept() {
+        use crate::dissect::{BatchHead, HeadKeyexpr, MessageName};
+        use crate::qos::Priority;
+        use crate::reassembly_dispatch::AbortReason;
+        let chain = |chain_id: u64,
+                     key: ChainKey,
+                     ending: ChainEnding,
+                     fragments: u32,
+                     last_sn: Option<u64>,
+                     head: Option<BatchHead>| EndedChain {
+            chain_id,
+            key,
+            ending,
+            fragments,
+            bytes: u64::from(fragments) * 40,
+            first_sn: Some(chain_id * 2),
+            last_sn,
+            starts_at_message: head.is_some(),
+            head,
+        };
+        let kept = [
+            (
+                1,
+                chain(
+                    0,
+                    (Direction::A, true, Priority::Data),
+                    ChainEnding::Aborted(AbortReason::Unresolvable),
+                    2,
+                    Some(1),
+                    Some(BatchHead {
+                        message: Some(MessageName::Push),
+                        keyexpr: Some(HeadKeyexpr {
+                            id: 5,
+                            mapping: 1,
+                            suffix: Some("chain/joined".into()),
+                        }),
+                    }),
+                ),
+            ),
+            (
+                1,
+                chain(
+                    3,
+                    (Direction::B, false, Priority::Background),
+                    ChainEnding::Superseded,
+                    0,
+                    None,
+                    None,
+                ),
+            ),
+            (
+                4,
+                chain(
+                    2,
+                    (Direction::B, true, Priority::Control),
+                    ChainEnding::Expired,
+                    1,
+                    Some(9),
+                    Some(BatchHead {
+                        message: None,
+                        keyexpr: None,
+                    }),
+                ),
+            ),
+            (
+                4,
+                chain(
+                    1,
+                    (Direction::A, false, Priority::RealTime),
+                    ChainEnding::Aborted(AbortReason::OutOfOrder),
+                    0,
+                    None,
+                    None,
+                ),
+            ),
+            (
+                7,
+                chain(
+                    6,
+                    (Direction::A, true, Priority::DataLow),
+                    ChainEnding::AbandonedAtEnd,
+                    3,
+                    Some(u64::MAX),
+                    Some(BatchHead {
+                        message: Some(MessageName::Request),
+                        keyexpr: Some(HeadKeyexpr {
+                            id: 0,
+                            mapping: 0,
+                            suffix: None,
+                        }),
+                    }),
+                ),
+            ),
+        ];
+        let mut ended = EndedChains::default();
+        for (rows_end, chain) in &kept {
+            ended.push(*rows_end, chain.clone());
+        }
+        let read: Vec<EndedChain> = ended.iter().collect();
+        let want: Vec<EndedChain> = kept.iter().map(|(_, chain)| chain.clone()).collect();
+        assert_eq!(read, want);
+        assert_eq!(
+            ended.held_at_abort(1, 0),
+            Some(ChainSoFar {
+                fragments: 2,
+                bytes: 80,
+                last_sn: 1,
+            })
+        );
+        assert_eq!(
+            ended.held_at_abort(4, 1),
+            None,
+            "a chain that staged nothing held nothing"
+        );
+        assert_eq!(ended.held_at_abort(4, 2), None, "an expiry is no abort");
+        assert_eq!(ended.held_at_abort(4, 0), None, "chain 0 ended below 1");
+        ended.release_through(1);
+        assert_eq!(ended.iter().count(), 3);
+        assert!(ended.suffixes.is_empty(), "a chain's suffix goes with it");
+        ended.release_through(7);
+        assert_eq!(ended.iter().count(), 0);
     }
 }
