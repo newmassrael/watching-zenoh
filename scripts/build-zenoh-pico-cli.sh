@@ -197,10 +197,19 @@ fi
 # pointer file relative to the submodule's own path) is left out. A build directory configured
 # from another source directory (the submodule, before this copy existed) is removed first,
 # because CMake refuses to reuse a cache whose source directory differs.
+#
+# The copy is this script's own working tree, so it is made writable by its owner: tar carries
+# the submodule's modes across, and a checkout whose files are read-only (0444, as a checkout
+# hard-linked between worktrees has them, which scripts/lib/artifact-root.sh supports) left the
+# copy read-only too. A patch that writes a new file in place of the old (`sed -i`) went through,
+# and the restore that copies over a file in place (`cp -p`, after the raw Ethernet arm) was
+# refused, so the run ended before that arm was installed. `chmod` moves no modification time,
+# which the incremental build relies on.
 stage_pico_source() {
     rm -rf "$SRC_DIR"
     mkdir -p "$SRC_DIR"
     tar -C "$VENDOR_DIR" --exclude=./.git -cf - . | tar -C "$SRC_DIR" -xf -
+    chmod -R u+w "$SRC_DIR"
     local dir home
     for dir in "$BUILD_DIR" "${BUILD_DIR}-st" "${BUILD_DIR}-default" "${BUILD_DIR}-local" \
         "$BUILD_DIR_MCDECL" "$BUILD_DIR_RETH" "$BUILD_DIR_INTEG"; do
