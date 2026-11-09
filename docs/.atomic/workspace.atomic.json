@@ -13079,6 +13079,26 @@
       "carry_forward_bullets": [
         "Under a ceiling that trims the front, the kept planes still hold the verdicts of the rows the ceiling took, and past four entries per held message they are begun again over what is held: about once in 30,000 rows on the live tap's ceilings, and that call costs the whole walk. Giving up the trimmed rows' verdicts from the planes (and the settled rows' verdicts, whose words the memory already holds, which is most of the 13 bytes a row) would remove both; not done in this round."
       ]
+    },
+    "Round 4458": {
+      "decision_summary": "A get whose value is a buffer of shared memory is asked through the port's engine (SessionEngine::get_shm_on_wire), which closes the last such carry of the node's C door, and the Rust API, the consumer that lacked it, now sends such a value as the buffer and hands a queryable a received one as the buffer; until this round its get sent the bytes and its queryables were shown the bytes, as a put was not. The value of a query is one handle type end to end (ShmSendHandle), the one a publication already takes.",
+      "changes_bullets": [
+        "crates/wz-capi-port/src/engine.rs: SessionEngine::get_shm_on_wire (transport-shm), whose provided answer asks with the bytes, as publish_shm_on_wire_all's publishes them.",
+        "crates/wz-capi-core: the registry's engine (engine_port.rs) fans the get with QueryLeg::query_shm, and a router node's engine (router_node/engine.rs) asks through RouterState::get_numbered_shm; QueryLeg::query_shm (faces.rs) takes the handle.",
+        "crates/wz-runtime-tokio/src/session: Session::query_shm, query_aliased_auto_shm and both queriers' get_shm take wz_session_core::extshm::ShmSendHandle instead of the provider's own ShmBackedPayload, reserving with reserve_for_receiver, which keeps the same promise as wire_reference (a reservation not committed gives its reference back). Callers moved: wz-capi-c's registry get, the session's and the shm query value unit tests, two zenohd interop tests, the port tests.",
+        "crates/wz-zenoh/src/api/session.rs: a query's value that is one slice of shared memory is asked with as the buffer (get_shm_on_wire on a registry, get_numbered_shm on a router node), and a query handed up with a buffer of shared memory is given to the queryable as one (value_of_query, as payload_of_view does for a sample), where both were bytes. A test asks each way between a registry peer and a node peer and reads the value as shared memory on the other side.",
+        "crates/wz-capi-core/src/drive/router_node/engine/port_tests.rs: the two shared-memory get tests ask through the port (the node's engine, and the registry client's engine) instead of RouterState and the registry's fan directly."
+      ],
+      "verification_bullets": [
+        "On build machines: wz-capi-core with router-node, transport-qos and session-extshm, the port tests, 9 passed (the two shared-memory get tests now through the port); zenoh with shared-memory and unstable, the shm_provider tests, 5 passed, among them the new get asked each way between a registry peer and a node peer; wz-runtime-tokio with session-extshm, its shm lib tests, 123 passed (the session's query_shm test and the three shm query value tests moved to the handle among them). Clippy under -D warnings: wz-capi-port (transport-shm, lib and tests), wz-capi-core and wz-runtime-tokio (those features, lib and tests), zenoh (shared-memory, unstable, lib and tests), wz-capi-c with zenoh-c-shared-memory on all targets, the integration test target. The crates are formatted.",
+        "The first run of the new Rust API test failed with the registry's get reaching the node's queryable as bytes: the Rust API's query_of copied the value out where its sample conversion keeps a buffer of shared memory; value_of_query made it pass. Controls, each taken out and reverted before this entry: both engines' get_shm_on_wire removed, so the port's provided bytes answer the call, failed each port test at its own engine (the client of shared memory asked with the bytes; the node's own queryable reading bytes); the Rust API asking without the buffer failed its test at the registry's get (bytes on the node's side)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Carries of the node's C door that remain: the placement of a remote in the south compared with a stock gateway's, which needs a stock node that keeps a south apart as the oracle."
+      ]
     }
   },
   "inventory_entries": {
