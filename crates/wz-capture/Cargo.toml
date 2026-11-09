@@ -81,7 +81,24 @@ fixtures = ["network-codecs"]
 # consumers read include the relation of two key expressions, and a build that has
 # the walker and not the relation would be a build whose only difference is that
 # one document cannot be rendered.
+#
+# And it selects this crate's own `network-codecs` and `reassembly`, because the
+# two `wz-session-core` features above already turn on what those name:
+# `wz-session-core/dissect` selects the push, request, response and declare
+# codecs, and `transport-compose` selects `wz-session-core/reassembly`
+# (`build_fragment_wire`). This crate reads its own two features to know what the
+# decoder below it can do. A build that took `dissect` without them had a decoder
+# that read every network message and fragment and a crate that said it could
+# not: `--no-default-features --features dissect` stopped at E0004 on
+# `Carried`'s fragment arms and at seven uses of `RowJudgement`, and once those
+# were gated `agg::no_codec_tests` failed, because a Push this build "cannot
+# name" was decoded and counted. So the two are not a configuration that can be
+# supported by gating; they are what `dissect` is, and are named here. Every
+# consumer of `dissect` (`wz-capi-dissect`, `wz-analyze`, `wz-fuzz`) already had
+# both through this crate's defaults, so no build that compiled before changes.
 dissect = [
+    "network-codecs",
+    "reassembly",
     "wz-session-core/dissect",
     "wz-session-core/transport-compose",
     "keyexpr-relation",
