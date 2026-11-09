@@ -15,7 +15,7 @@ crates/wz-capi-dissect/include/wz_dissect.h, src/lib.rs, tests/c_abi_consumer.c:
 '''
 
 verification = '''
-nanopb's own int_size table read in nanopb 0.4.x `nanopb_generator.py` (`datatypes`): signed varint types to `intN_t`, unsigned to `uintN_t`, enum to `uintN_t`, no entry for the fixed widths. Verified on a build machine; see the counts filed with this round's run.
+nanopb's own int_size table read in nanopb 0.4.x `nanopb_generator.py` (`datatypes`): signed varint types to `intN_t`, unsigned to `uintN_t`, enum to `uintN_t`, no entry for the fixed widths. On a build machine (8 cores, 30 GB), capture crate with `dissect,fixtures`: library tests 1,742 passed, 23 failed, 6 ignored; every `proto_` test passed, the eleven range tests and six encoder tests new among them. The 23 are not this change's: 22 are round 4460's (the transport layout's closed table does not know `whatami_name`; repaid by round 4461, which this round lands on), and `memory_matrix` fails identically on main before this change and passes at round 4451, so it came with round 4452 (fragment chains over their per-row ceiling) and grew with 4454 (122,880 bytes held and not reported); repaid in its own round. Dissection C library tests 231 passed, 2 failed (the same 4460 transport pair), the handle memory gate 4 passed. Clippy over all targets of the capture crate with `dissect,fixtures`, of the capture crate with `--no-default-features`, and of the dissection C library: clean.
 '''
 
 carry = '''
