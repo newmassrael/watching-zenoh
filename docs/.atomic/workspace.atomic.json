@@ -12907,6 +12907,21 @@
         "Open: a layer that stops at its first failing step hides the legs after it; when a red is paid, run the whole layer again before calling it paid.",
         "Open (round 4414): a writer routing through its own draft computes without keeping; the client leg's reached-route scan on the writer is O(routes x changed keys); a route holding its faces' state."
       ]
+    },
+    "Round 4447": {
+      "decision_summary": "The capture crate did not build with its field walker and without its default features (`--no-default-features --features dissect`): seven uses of the selector's row judgement, which is defined only with the network codecs, and three matches on the carried unit that left out its fragment arms. The second error was the first clue. `dissect` selects the session core's own `dissect`, which turns on the push, request, response and declare codecs, and the session core's transport writers, which turn on its reassembly. The capture crate reads its own two features, `network-codecs` and `reassembly`, to know what the decoder below it can do, so this build had a decoder that read every network message and fragment and a crate that said it could not. Gating the judgement, the selector doors and the items only they read made the library and its tests compile, and then the test written for a build without the codecs failed: a Push such a build \"cannot name\" was decoded and counted. That is the contradiction itself, and no gating removes it. So `dissect` now names the two features it was already turning on underneath, and the gating was not kept. Every consumer of `dissect` (the dissection C library, the analyzer and the fuzz targets) already had both through the crate's defaults, so no build that compiled before changes; the build without the default features at all, where the no-codec test belongs, still has neither.",
+      "changes_bullets": [
+        "crates/wz-capture/Cargo.toml: `dissect` selects `network-codecs` and `reassembly`, with the reason beside it."
+      ],
+      "verification_bullets": [
+        "Run on the build machine. With `--no-default-features --features dissect`: clippy of the capture crate over all targets with warnings denied, clean; its library tests, 1,723 passed and 6 ignored; its documentation with warnings denied, clean. With `--no-default-features`: clippy, clean; library tests 1,085 passed and 2 ignored, the no-codec test among them. With the default features and `dissect,fixtures`: clippy over all targets, clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The capture crate still has `cfg(not(feature = \"network-codecs\"))` branches inside modules that need `dissect` (the field walker's empty pairing table and its silent selection writer). With this change no build compiles them; they were left as they are rather than removed in the same round."
+      ]
     }
   },
   "inventory_entries": {
