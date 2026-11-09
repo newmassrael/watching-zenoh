@@ -3551,3 +3551,22 @@ Unknown.header	uint
 Unknown.mid	bits
 Unknown.z	flag
 unparsed	bytes
+Hello.whatami_name	label
+Hello.whatami_name	label	client
+Hello.whatami_name	label	peer
+Hello.whatami_name	label	router
+Init.whatami_name	label
+Init.whatami_name	label	client
+Init.whatami_name	label	peer
+Init.whatami_name	label	router
+Join.whatami_name	label
+Join.whatami_name	label	client
+Join.whatami_name	label	peer
+Join.whatami_name	label	router
+Oam.linkstate.link_states.linkstate_entry.whatami_name	label
+Oam.linkstate.link_states.linkstate_entry.whatami_name	label	client
+Oam.linkstate.link_states.linkstate_entry.whatami_name	label	peer
+Oam.linkstate.link_states.linkstate_entry.whatami_name	label	router
+Scout.what_client	flag
+Scout.what_peer	flag
+Scout.what_router	flag

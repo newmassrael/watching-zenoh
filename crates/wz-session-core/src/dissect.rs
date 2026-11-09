@@ -63,6 +63,7 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 use sce_forge_runtime::codec::{CodecError, SceCursor};
+use wz_codecs::whatami::WhatAmI;
 
 /// A half-open byte range `[start, end)` in the dissection's coordinate space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2834,6 +2835,9 @@ pub fn walk_scout(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         version,
         cbyte_field,
         bits("what", carrier, (cbyte & 0x07) as u64),
+        flag("what_router", carrier, what_has(cbyte, WhatAmI::Router)),
+        flag("what_peer", carrier, what_has(cbyte, WhatAmI::Peer)),
+        flag("what_client", carrier, what_has(cbyte, WhatAmI::Client)),
         flag("i", carrier, (cbyte & 0x08) != 0),
         bits("zid_len_m1", carrier, ((cbyte >> 4) & 0x0F) as u64),
     ];
@@ -2858,8 +2862,9 @@ pub fn walk_hello(c: &mut SpanCursor<'_>, l: bool) -> Result<Vec<Field>, CodecEr
         version,
         cbyte_field,
         bits("whatami", carrier, (cbyte & 0x03) as u64),
-        bits("zid_len_m1", carrier, ((cbyte >> 4) & 0x0F) as u64),
     ];
+    out.extend(whatami_name(carrier, WhatAmI::from_wire(cbyte)));
+    out.push(bits("zid_len_m1", carrier, ((cbyte >> 4) & 0x0F) as u64));
     out.push(c.zid("zid", (((cbyte >> 4) & 0x0F) as usize) + 1)?);
     if l {
         let (n, count) = c.vle_u64("num_locators")?;
@@ -2869,6 +2874,33 @@ pub fn walk_hello(c: &mut SpanCursor<'_>, l: bool) -> Result<Vec<Field>, CodecEr
         }
     }
     Ok(out)
+}
+
+/// The role word a `whatami` code MEANS, as a label aliasing its carrier, or
+/// nothing when the code names no role.
+///
+/// A consumer asked for the word because the code alone left every reader to
+/// carry the code-to-role table, and that table is a fact of the protocol, so
+/// it belongs to this decoder. Both wire forms go through [`WhatAmI`], the one
+/// type that owns them: the 2-bit handshake code of `Hello`, `Init` and `Join`
+/// (`WhatAmI::from_wire`) and the one-hot byte of a linkstate record
+/// (`WhatAmI::try_from`). The word is upstream's `WhatAmI::to_str`.
+///
+/// ABSENT rather than a placeholder word when the code is outside the set
+/// (`0b11` in two bits; anything but 1, 2 or 4 in a byte): upstream refuses
+/// such a message at decode, so there is no role to name, and the raw
+/// `whatami` beside it still says what the sender wrote. `ext_name` keeps the
+/// same rule for an id its carrier does not define.
+fn whatami_name(carrier: Span, role: Option<WhatAmI>) -> Option<Field> {
+    role.map(|r| label("whatami_name", carrier, r.to_str()))
+}
+
+/// Whether a `Scout`'s `what` matcher (the cbyte's low three bits) asks for
+/// `role`. The matcher is one-hot in the role's API byte, as upstream's
+/// `WhatAmIMatcher` is (`core/whatami.rs`: `Router = 0b001`, `Peer = 0b010`,
+/// `Client = 0b100`), so one AND per role reads it.
+fn what_has(cbyte: u8, role: WhatAmI) -> bool {
+    cbyte & 0x07 & role.to_api() != 0
 }
 
 /// One `Locator` record: a VLE length then that many UTF-8 bytes.
@@ -2918,8 +2950,10 @@ fn walk_linkstate_entry(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
         fields.push(c.zid("zid", n as usize)?);
     }
     if (options & 0x02) != 0 {
-        let (_, w) = c.u8("whatami")?;
+        let (role, w) = c.u8("whatami")?;
+        let carrier = w.span;
         fields.push(w);
+        fields.extend(whatami_name(carrier, WhatAmI::try_from(role).ok()));
     }
     if (options & 0x04) != 0 {
         let (n, count) = c.vle_u64("num_locators")?;
@@ -3795,6 +3829,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             let cb_span = cbyte_field.span;
             out.push(cbyte_field);
             out.push(bits("whatami", cb_span, (cbyte & 0x03) as u64));
+            out.extend(whatami_name(cb_span, WhatAmI::from_wire(cbyte)));
             out.push(bits("zid_len", cb_span, (((cbyte >> 4) & 0xF) + 1) as u64));
             out.push(c.zid("zid", ((cbyte >> 4) & 0xF) as usize + 1)?);
             if (header & 0x40) != 0 {
@@ -3845,6 +3880,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             let cb_span = cbyte_field.span;
             out.push(cbyte_field);
             out.push(bits("whatami", cb_span, (cbyte & 0x03) as u64));
+            out.extend(whatami_name(cb_span, WhatAmI::from_wire(cbyte)));
             out.push(bits("zid_len", cb_span, (((cbyte >> 4) & 0xF) + 1) as u64));
             out.push(c.zid("zid", ((cbyte >> 4) & 0xF) as usize + 1)?);
             if (header & 0x40) != 0 {
@@ -5229,6 +5265,11 @@ mod tests {
         assert_eq!(uint(entry, "psid"), 3, "the record's OWN psid, outermost");
         assert_eq!(uint(entry, "sn"), 42);
         assert_eq!(uint(entry, "whatami"), 1);
+        assert_eq!(
+            label_of(entry, "whatami_name"),
+            "router",
+            "a linkstate role is the one-hot API byte, 1 = router",
+        );
         assert_eq!(raw(entry, "zid"), zid.to_vec());
         assert_eq!(
             entry.find("locator").map(|f| &f.value),
@@ -7333,6 +7374,7 @@ mod tests {
         assert_eq!(uint(&f, "next_sn_reliable"), 7);
         assert_eq!(uint(&f, "next_sn_best_effort"), 9);
         assert_eq!(bits_of(&f, "whatami"), 0x01);
+        assert_eq!(label_of(&f, "whatami_name"), "peer");
         assert_eq!(bits_of(&f, "zid_len"), 4);
 
         // JOIN with S CLEAR — the discriminating arm. The walker must NOT read
@@ -7545,6 +7587,55 @@ mod tests {
             .expect("scouting MID");
         assert!(g.find("num_locators").is_none());
         assert_eq!(g.span.end, 7, "the walk must stop after the zid");
+    }
+
+    /// The role WORDS: a `Scout`'s `what` is a set, read as one flag per role,
+    /// and a `whatami` code is one role, read as its word. Both alias the
+    /// cbyte, so the tiling is unchanged, and the raw code stays beside them.
+    ///
+    /// The encodings are upstream's, and they differ: `what` is one-hot in the
+    /// API byte (`WhatAmIMatcher`, router 0b001, peer 0b010, client 0b100) and
+    /// the handshake code is two bits (`zenoh-codec` `scouting/hello.rs`,
+    /// router 0b00, peer 0b01, client 0b10). A table that read one as the
+    /// other would name a peer as a router and every assertion below would
+    /// still find a word, so each leg names the word it expects.
+    #[test]
+    fn scouting_roles_are_read_as_their_words() {
+        fn flag_is(f: &Field, name: &str) -> bool {
+            match f.find(name).map(|x| &x.value) {
+                Some(FieldValue::Flag(b)) => *b,
+                other => panic!("{name} is not a flag: {other:?}"),
+            }
+        }
+        // Scout asking for peers and clients, no zid.
+        let scout = alloc::vec![0x01u8, 0x09, 0b110];
+        let f = dissect_scouting_message(&scout, 0)
+            .expect("walker")
+            .expect("scouting MID");
+        assert_eq!(bits_of(&f, "what"), 0b110);
+        assert!(!flag_is(&f, "what_router"));
+        assert!(flag_is(&f, "what_peer"));
+        assert!(flag_is(&f, "what_client"));
+        assert_tiles(&f, 0, scout.len());
+
+        for (code, word) in [(0b00u8, "router"), (0b01, "peer"), (0b10, "client")] {
+            let hello = alloc::vec![0x02u8, 0x09, code, 1];
+            let g = dissect_scouting_message(&hello, 0)
+                .expect("walker")
+                .expect("scouting MID");
+            assert_eq!(label_of(&g, "whatami_name"), word, "code {code:#04b}");
+            assert_eq!(bits_of(&g, "whatami"), u64::from(code));
+            assert_tiles(&g, 0, hello.len());
+        }
+
+        // 0b11 names no role: upstream refuses it at decode. The code stays,
+        // the word is absent rather than invented.
+        let reserved = alloc::vec![0x02u8, 0x09, 0b11, 1];
+        let h = dissect_scouting_message(&reserved, 0)
+            .expect("walker")
+            .expect("scouting MID");
+        assert_eq!(bits_of(&h, "whatami"), 0b11);
+        assert!(h.find("whatami_name").is_none());
     }
 
     /// A byte that is not a scouting MID is an ABSENCE, not a failure — the

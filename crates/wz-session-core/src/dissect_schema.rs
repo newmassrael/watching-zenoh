@@ -555,6 +555,17 @@ fn sn_res_words() -> Vec<&'static str> {
     crate::dissect::SN_RES_WORDS.to_vec()
 }
 
+/// The role words a `whatami_name` label can hold: upstream's
+/// `WhatAmI::to_str` of each role, walked from the type the walker reads them
+/// from rather than written down a second time.
+fn whatami_words() -> Vec<&'static str> {
+    use wz_codecs::whatami::WhatAmI;
+    [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
+        .iter()
+        .map(|r| r.to_str())
+        .collect()
+}
+
 // The extension entry: its header fields, under the `ext` level for a named
 // entry and directly for an unnamed one.
 const EXT_HEAD: &[SchemaNode] = &[
@@ -640,6 +651,7 @@ const LINKSTATE: &[SchemaNode] = &[group(
                     leaf("zid_len", U),
                     leaf("zid", Z),
                     leaf("whatami", U),
+                    label("whatami_name", whatami_words),
                     leaf("num_locators", U),
                     group("locators", &[LOCATOR_ENTRY]),
                     leaf("links_len", U),
@@ -1030,6 +1042,7 @@ const IDENTITY: &[SchemaNode] = &[
     leaf("version", U),
     leaf("cbyte", U),
     leaf("whatami", B),
+    label("whatami_name", whatami_words),
     leaf("zid_len", B),
     leaf("zid", Z),
 ];
@@ -1133,6 +1146,9 @@ const SCOUTING_ROOTS: &[SchemaNode] = &[
             leaf("version", U),
             leaf("cbyte", U),
             leaf("what", B),
+            leaf("what_router", F),
+            leaf("what_peer", F),
+            leaf("what_client", F),
             leaf("i", F),
             leaf("zid_len_m1", B),
             leaf("zid", Z),
@@ -1148,6 +1164,7 @@ const SCOUTING_ROOTS: &[SchemaNode] = &[
                 leaf("version", U),
                 leaf("cbyte", U),
                 leaf("whatami", B),
+                label("whatami_name", whatami_words),
                 leaf("zid_len_m1", B),
                 leaf("zid", Z),
                 leaf("num_locators", U),

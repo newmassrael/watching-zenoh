@@ -132,6 +132,19 @@ OWN_VOCABULARY = {
     "future": "Interest mode bit",
     "restricted": "Interest options bit",
     "what": "Scout's what-am-I-looking-for bits",
+    # The role words a consumer asked for, so that no reader carries the
+    # code-to-role table itself. The codec has one field for the byte
+    # (`what` / `whatami`), so these are wz's own, named after it with a
+    # suffix on the rule `sn_res_frame_sn` keeps.
+    "what_router": "bit 0 of Scout's `what` matcher: the scout asks routers to "
+    "answer. One flag per role because the matcher is a SET (one-hot in the "
+    "role's API byte), so one word could not name it",
+    "what_peer": "bit 1 of the same matcher: the scout asks peers to answer",
+    "what_client": "bit 2 of the same matcher: the scout asks clients to answer",
+    "whatami_name": "the role word a `whatami` code means, from `WhatAmI::to_str` "
+    "(router, peer or client). A `label` beside the raw code, which stays: "
+    "the code is what the sender wrote, the word what this build makes of it. "
+    "Absent when the code names no role, which upstream refuses at decode",
     "rest": "trailing bytes of a record the walker read but does not name further",
     "unparsed": "bytes after a halt -- the best-effort marker, not a wire field",
     # R2272 (paying R2270's hosted red) — the two resolutions `sn_res` codes.
