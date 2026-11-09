@@ -4265,7 +4265,7 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  *
  * Always returns WZ_DISSECT_OK for well formed arguments and writes a document:
  *
- *     {"document":{"name":"proto_message","revision":4},"ok":true,
+ *     {"document":{"name":"proto_message","revision":5},"ok":true,
  *      "root":"pkg.Reading","messages":[{"full_name":"pkg.Reading",
  *       "file":"a.proto","syntax":"proto3","oneofs":[],
  *       "comment":" One reading.\n","trailing_comment":null,
@@ -4279,7 +4279,9 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  *        "comment":null,"trailing_comment":" the sensor\n",
  *        "options":[{"name":"deprecated","kind":"identifier","value":"true",
  *                    "origin":{"class":"standard","name":null,
- *                              "package":null,"file":null}}]}]}]}
+ *                              "package":null,"file":null}}],
+ *        "value_range":{"low":0,"high":4294967295,"source":"type"},
+ *        "value_range_refusal":null}]}]}
  *
  * `messages` is the root message first, then every message it reaches, each ONCE;
  * a field of type `message` names its message by full name in `message_type`,
@@ -4380,6 +4382,38 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  * outwards, the way protoc searches a relative name, and a leading dot names the
  * full name.
  *
+ * VALUE RANGE (revision 5). Every field row also carries `value_range` and
+ * `value_range_refusal`, so a form can refuse a value as it is typed, before the
+ * encoder or a nanopb receiver does.
+ *
+ *     `value_range`  {"low":L,"high":H,"source":S}: the integers the field's
+ *              values may be, both bounds included, each a number by the rule
+ *              the enum numbers follow (a uint64's high bound is a string).
+ *              `source` is `type` for the protobuf type's own range, or
+ *              `nanopb_int_size` where the nanopb int_size in force narrowed
+ *              it to the C integer nanopb stores the value in: a uint32 under
+ *              (nanopb).int_size = IS_8 is a uint8_t, 0 to 255, and nanopb's
+ *              decoder refuses a larger value. The option is merged as nanopb's
+ *              generator merges it, the field's over the message's over the
+ *              file's, and a map entry's key and value have the file's alone.
+ *              It narrows int32, int64, uint32, uint64, sint32 and sint64 and
+ *              never widens them (an int32 under IS_64 is still the int32
+ *              range, source `type`); the fixed widths are not changed by it.
+ *              A repeated field's range is that of each element. null when the
+ *              field has no range
+ *     `value_range_refusal`  null when `value_range` is given, else why there
+ *              is none: `not_an_integer` (a double, float, bool, string, bytes
+ *              or message field), `enum` (the values are the enum's, under
+ *              `enum`), `map` (its key and value hold the integers) or
+ *              `unmodelled_option` (a varint integer whose int_size cannot be
+ *              read, which nanopb's own generator would not accept either)
+ *
+ * Exactly one of the two keys is null. Only the options written in the .proto
+ * are read; nanopb's separate .options file is not. The encoder,
+ * wz_dissect_proto_encode and the body of the e2e wrap door alike, refuses a
+ * value outside the same range, naming the option when it is the option that
+ * refuses, and refuses every value of a field whose int_size cannot be read.
+ *
  * A schema that is refused is a successful DIAGNOSIS, with the keys
  * wz_dissect_declarations_from_proto gives (`file`, `line` and `column` together
  * for a place in a file, `file` alone for a whole file, none for an argument,
@@ -4395,15 +4429,19 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  * @values proto_message kind
  * @values proto_message label
  * @values proto_message max_encoded_size_reason
+ * @values proto_message source
  * @values proto_message syntax
  * @values proto_message type
+ * @values proto_message value_range_refusal
  * @carries proto_message class passenger
  * @carries proto_message key passenger
  * @carries proto_message kind passenger
  * @carries proto_message label passenger
  * @carries proto_message max_encoded_size_reason passenger
+ * @carries proto_message source passenger
  * @carries proto_message syntax passenger
- * @carries proto_message type passenger */
+ * @carries proto_message type passenger
+ * @carries proto_message value_range_refusal passenger */
 int wz_dissect_proto_describe(const char *root_message,
                               const wz_dissect_proto_file *files,
                               size_t file_count, size_t root_file, char **out);
@@ -4500,7 +4538,10 @@ int wz_dissect_proto_messages(const wz_dissect_proto_file *files,
  *     number or a decimal string; the string is how a 64-bit value survives a
  *     reader that holds numbers as doubles, and the digits are read exactly, so
  *     18446744073709551615 and 9007199254740993 keep every bit. A number must be
- *     an integer (1.0 and 1e3 are, 1.5 is not) that fits the type, and only plain
+ *     an integer (1.0 and 1e3 are, 1.5 is not) that fits the type, narrowed by a
+ *     (nanopb).int_size written in the schema to the range the
+ *     wz_dissect_proto_describe document gives as the field's `value_range`
+ *     (a uint32 under IS_8 takes 0 to 255), and only plain
  *     JSON number grammar is read for it: 0x10, +1 and 01 are refused as
  *     numbers. A string is digits with an optional sign ("-5", "007") and
  *     nothing else; "1.0" and "1e3" are refused, as protobuf's own parser
@@ -4559,10 +4600,11 @@ int wz_dissect_proto_messages(const wz_dissect_proto_file *files,
  *     are four bytes little-endian, fixed64, sfixed64 and double eight.
  *
  * WHAT IS REFUSED, with the place and the type that was expected: a value that
- * does not fit its field's type; a key that is no field (the reason lists the
- * fields there are); a field named twice; two members of a oneof; a missing
- * required field; a null where nothing can be left out; an enum name that is
- * none of its values. And, where the JSON NAMES them and not where the schema
+ * does not fit its field's type or its nanopb int_size; any value of a varint
+ * integer field whose int_size cannot be read; a key that is no field (the
+ * reason lists the fields there are); a field named twice; two members of a
+ * oneof; a missing required field; a null where nothing can be left out; an
+ * enum name that is none of its values. And, where the JSON NAMES them and not where the schema
  * holds them, a group field (it is delimited by the deprecated start-group and
  * end-group markers, which the payload reader cannot read back) and an
  * extension written as "[pkg.ext]" (an extension is no field of the message it

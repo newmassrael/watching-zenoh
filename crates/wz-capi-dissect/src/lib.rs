@@ -2282,7 +2282,7 @@ pub unsafe extern "C" fn wz_dissect_declarations_match(
 /// [`WZ_DISSECT_OK`] with a document, for any arguments that are well formed:
 ///
 /// ```text
-/// {"document":{"name":"proto_message","revision":4},"ok":true,
+/// {"document":{"name":"proto_message","revision":5},"ok":true,
 ///  "root":"pkg.Reading","messages":[{"full_name":"pkg.Reading","file":"a.proto",
 ///   "syntax":"proto3","oneofs":[],"comment":" One reading.\n","trailing_comment":null,
 ///   "options":[{"name":"(ext).id","kind":"integer","value":7,
@@ -2295,7 +2295,9 @@ pub unsafe extern "C" fn wz_dissect_declarations_match(
 ///   "trailing_comment":" the sensor\n",
 ///   "options":[{"name":"deprecated","kind":"identifier","value":"true",
 ///               "origin":{"class":"standard","name":null,"package":null,
-///                         "file":null}}]}]}]}
+///                         "file":null}}],
+///   "value_range":{"low":0,"high":4294967295,"source":"type"},
+///   "value_range_refusal":null}]}]}
 /// ```
 ///
 /// A message row and a field row both carry `comment` and `trailing_comment` (the
@@ -2319,6 +2321,14 @@ pub unsafe extern "C" fn wz_dissect_declarations_match(
 /// or `null` and then `max_encoded_size_reason`, one of `unbounded_field`,
 /// `recursive_message`, `message_not_generated`, `unmodelled_option`, `too_large`
 /// and `too_deep`: exactly one of the two keys is `null`.
+///
+/// A field row also carries `value_range` (revision 5), the integers its values may
+/// be, `{"low","high","source"}` with `source` `type` for the protobuf type's own
+/// range or `nanopb_int_size` where the nanopb `int_size` in force narrowed it (a
+/// `uint32` under `IS_8` is 0 to 255), or `null` and then `value_range_refusal`, one
+/// of `not_an_integer`, `enum`, `map` and `unmodelled_option` (an `int_size` that
+/// cannot be read): exactly one of the two keys is `null`, and
+/// [`wz_dissect_proto_encode`] refuses a value outside the same range.
 ///
 /// `messages` is the root message first, then each message it reaches once; a field
 /// of type `message` names its message by full name in `message_type`. Every key of

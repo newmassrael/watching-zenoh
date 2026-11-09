@@ -14,6 +14,7 @@ use crate::proto_describe::{
     ORIGIN_CLASS_WORDS, SYNTAX_WORDS,
 };
 use crate::proto_describe_json::proto_message_json;
+use crate::proto_range::{refusal_words, source_words, RangeRefusal, RangeSource, ValueRange};
 use crate::proto_schema::{ProtoDiagnostic, ProtoFile};
 
 fn files<'a>(files: &'a [(&'a str, &'a str)]) -> Vec<ProtoFile<'a>> {
@@ -308,7 +309,7 @@ fn the_document_has_one_shape_for_every_row_and_closed_words() {
         0,
     );
     assert!(
-        doc.starts_with("{\"document\":{\"name\":\"proto_message\",\"revision\":4},\"ok\":true,"),
+        doc.starts_with("{\"document\":{\"name\":\"proto_message\",\"revision\":5},\"ok\":true,"),
         "{doc}"
     );
     // A field row with nothing to point at writes every key, `null` where it
@@ -318,10 +319,36 @@ fn the_document_has_one_shape_for_every_row_and_closed_words() {
             "{\"name\":\"f_int32\",\"json_name\":\"fInt32\",\"number\":3,\"type\":\"int32\",\
              \"label\":\"singular\",\"oneof\":null,\"packed\":null,\"enum\":null,\
              \"message_type\":null,\"map\":null,\"comment\":null,\"trailing_comment\":null,\
-             \"options\":[]}"
+             \"options\":[],\
+             \"value_range\":{\"low\":-2147483648,\"high\":2147483647,\"source\":\"type\"},\
+             \"value_range_refusal\":null}"
         ),
         "{doc}"
     );
+    // A row with no range has the range `null` and says why, for every reason
+    // the rich schema reaches.
+    for (name, why) in [
+        ("f_double", "not_an_integer"),
+        ("mode", "enum"),
+        ("origin", "not_an_integer"),
+        ("counts", "map"),
+    ] {
+        let at = doc
+            .find(&format!("{{\"name\":\"{name}\",\"json_name\""))
+            .unwrap_or_else(|| panic!("no row {name}: {doc}"));
+        let row = &doc[at..];
+        let end = row
+            .find("\"value_range_refusal\"")
+            .expect("every row has it");
+        assert!(
+            row[end..].starts_with(&format!("\"value_range_refusal\":\"{why}\"}}")),
+            "{name}: {row:.400}"
+        );
+        assert!(
+            row[..end].ends_with("\"value_range\":null,"),
+            "{name}: {row:.400}"
+        );
+    }
     // An enum, negative number included, and a map.
     assert!(
         doc.contains("\"enum\":{\"name\":\"demo.Mode\",\"values\":[{\"name\":\"MODE_OFF\",\"number\":0},{\"name\":\"MODE_ON\",\"number\":1},{\"name\":\"MODE_NEG\",\"number\":-1}]}"),
@@ -333,6 +360,70 @@ fn the_document_has_one_shape_for_every_row_and_closed_words() {
     );
     assert!(
         doc.contains("\"map\":{\"key\":\"int32\",\"value\":{\"type\":\"message\",\"enum\":null,\"message_type\":\"demo.Point\"}}"),
+        "{doc}"
+    );
+}
+
+/// A schema whose fields reach every word of `source` and of
+/// `value_range_refusal`: a range the type gives, one a nanopb `int_size`
+/// narrows, and one whose `int_size` cannot be read.
+const RANGED: &str = "syntax = \"proto3\";\n\
+message Ranged {\n\
+  uint32 small = 1 [(nanopb).int_size = IS_8];\n\
+  uint64 wide = 2;\n\
+  int64 signed_wide = 3;\n\
+  uint32 odd = 4 [(nanopb).int_size = IS_7];\n\
+  int32 not_narrowed = 5 [(nanopb).int_size = IS_64];\n\
+}\n";
+
+/// THE RANGE ROW: a `uint32` under `IS_8` reads nanopb's C type, and a 64-bit
+/// bound past 2^53 - 1 is written as its digits in a string.
+#[test]
+fn a_field_row_carries_the_range_nanopb_holds_it_to() {
+    let d = described("Ranged", RANGED);
+    assert_eq!(
+        field(&d, "Ranged", "small").value_range,
+        Ok(ValueRange {
+            low: 0,
+            high: 255,
+            source: RangeSource::NanopbIntSize { bits: 8 },
+        })
+    );
+    assert_eq!(
+        field(&d, "Ranged", "odd").value_range,
+        Err(RangeRefusal::UnmodelledOption)
+    );
+    let doc = proto_message_json("Ranged", &files(&[("a.proto", RANGED)]), 0);
+    assert!(
+        doc.contains(
+            "\"value_range\":{\"low\":0,\"high\":255,\"source\":\"nanopb_int_size\"},\
+             \"value_range_refusal\":null}"
+        ),
+        "{doc}"
+    );
+    assert!(
+        doc.contains(
+            "\"value_range\":{\"low\":0,\"high\":\"18446744073709551615\",\
+             \"source\":\"type\"},\"value_range_refusal\":null}"
+        ),
+        "{doc}"
+    );
+    assert!(
+        doc.contains(
+            "\"value_range\":{\"low\":\"-9223372036854775808\",\
+             \"high\":\"9223372036854775807\",\"source\":\"type\"}"
+        ),
+        "{doc}"
+    );
+    assert!(
+        doc.contains("\"value_range\":null,\"value_range_refusal\":\"unmodelled_option\"}"),
+        "{doc}"
+    );
+    // `IS_64` on an `int32` narrows nothing, so the source is the type.
+    assert!(
+        doc.contains(
+            "\"value_range\":{\"low\":-2147483648,\"high\":2147483647,\"source\":\"type\"}"
+        ),
         "{doc}"
     );
 }
@@ -392,6 +483,12 @@ fn the_declared_vocabularies_are_the_walks() {
     let mut classes = ORIGIN_CLASS_WORDS.to_vec();
     classes.sort_unstable();
     assert_eq!(family("class"), classes);
+    let mut sources = source_words().to_vec();
+    sources.sort_unstable();
+    assert_eq!(family("source"), sources);
+    let mut refusals = refusal_words().to_vec();
+    refusals.sort_unstable();
+    assert_eq!(family("value_range_refusal"), refusals);
     // A map key is any scalar a map may be keyed by: the fifteen less the three
     // (`double`, `float`, `bytes`) the language guide refuses.
     let keys = family("key");
@@ -858,6 +955,8 @@ pub(crate) fn documents_for_the_carries_gate() -> Vec<String> {
             0,
         ),
         proto_message_json("Point", &files(&[("a.proto", COMMENTED)]), 0),
+        // A range of each source, and one whose `int_size` cannot be read.
+        proto_message_json("Ranged", &files(&[("a.proto", RANGED)]), 0),
         // Messages with no nanopb size, for two of the reasons: a string with no
         // bound, and a message that holds itself.
         proto_message_json(
@@ -928,6 +1027,18 @@ fn the_carries_gate_documents_reach_every_word_of_every_family() {
         assert!(
             all.contains(&format!("\"class\":\"{word}\"")),
             "origin class {word}"
+        );
+    }
+    for word in source_words() {
+        assert!(
+            all.contains(&format!("\"source\":\"{word}\"")),
+            "range source {word}"
+        );
+    }
+    for word in refusal_words() {
+        assert!(
+            all.contains(&format!("\"value_range_refusal\":\"{word}\"")),
+            "range refusal {word}"
         );
     }
 }

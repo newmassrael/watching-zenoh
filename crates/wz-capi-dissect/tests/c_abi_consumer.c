@@ -2056,6 +2056,9 @@ static int check_relate_match_describe_doors(void) {
     CHECK(strstr(doc, "\"name\":\"proto_message\"") != NULL &&
               strstr(doc, "\"ok\":true,\"root\":\"m.Root\"") != NULL,
           "unexpected description: %s", doc);
+    /* The `int_size` of an extension that is not nanopb's narrows nothing, so
+     * the range is the uint32's own: only (nanopb), (nanopb_msgopt) and
+     * (nanopb_fileopt) carry nanopb's options. */
     CHECK(strstr(doc, "{\"name\":\"sensor_id\",\"json_name\":\"sensorId\","
                       "\"number\":1,\"type\":\"uint32\",\"label\":\"singular\","
                       "\"oneof\":null,\"packed\":null,\"enum\":null,"
@@ -2068,7 +2071,9 @@ static int check_relate_match_describe_doors(void) {
                       "{\"name\":\"(ext).max\",\"kind\":\"integer\","
                       "\"value\":8,"
                       "\"origin\":{\"class\":\"unresolved\",\"name\":null,"
-                      "\"package\":null,\"file\":null}}]}") != NULL,
+                      "\"package\":null,\"file\":null}}],"
+                      "\"value_range\":{\"low\":0,\"high\":4294967295,"
+                      "\"source\":\"type\"},\"value_range_refusal\":null}") != NULL,
           "a scalar row must carry every key: %s", doc);
     CHECK(strstr(doc, "\"comment\":\" One reading.\\n\"") != NULL,
           "a message row must carry the comment protoc attaches: %s", doc);
@@ -2076,7 +2081,8 @@ static int check_relate_match_describe_doors(void) {
                       "\"type\":\"enum\",\"label\":\"singular\",\"oneof\":null,"
                       "\"packed\":null") != NULL &&
               strstr(doc, "\"comment\":null,\"trailing_comment\":null,"
-                          "\"options\":[]}") != NULL,
+                          "\"options\":[],\"value_range\":null,"
+                          "\"value_range_refusal\":\"enum\"}") != NULL,
           "a row without a comment or an option must say so: %s", doc);
     CHECK(strstr(doc, "\"type\":\"enum\"") != NULL &&
               strstr(doc, "\"enum\":{\"name\":\"m.Mode\",\"values\":[{\"name\":"
@@ -4416,7 +4422,9 @@ int main(void) {
                                        &revisioned[14].doc);
     CHECK(rc == WZ_DISSECT_OK, "declarations_match document rc=%d", rc);
     revisioned[15].name = "proto_message";
-    revisioned[15].revision = 4;
+    /* 5: every field row gains `value_range` and `value_range_refusal`. Keys
+     * arrive; nothing retires. */
+    revisioned[15].revision = 5;
     revisioned[15].doc = NULL;
     {
         static const char one_text[] =

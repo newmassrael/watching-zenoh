@@ -24,8 +24,11 @@
 //! into paths, so a cycle has an end. Per message the full name, the file it is
 //! written in, its syntax, its oneofs, and its fields in declaration order; per
 //! field the name, the JSON name, the number, the type, the label, the oneof it
-//! belongs to, whether a repeated field is written packed, and what a type that
-//! names another type points at.
+//! belongs to, whether a repeated field is written packed, what a type that
+//! names another type points at, and the integers its values may be: the range
+//! [`crate::proto_range`] judges from the type and the nanopb `int_size`, the
+//! same range the value door holds a value to, so a form can refuse what the
+//! encoder would.
 //!
 //! A message and a field also carry the comments `protoc` attaches to them (the
 //! leading and the trailing comment, by `protoc`'s own rule, which the lexer
@@ -62,6 +65,7 @@ use alloc::vec::Vec;
 
 use crate::proto_nanopb::SizeRefusal;
 use crate::proto_parse::{FieldOption, Label, OptionValue, ScalarKind, Syntax};
+use crate::proto_range::{field_range, RangeRefusal, ValueRange};
 use crate::proto_schema::{FieldKind, Linker, MapValueKind, ProtoDiagnostic, ProtoFile};
 
 /// The words of a field's `type`: every scalar keyword, then the three that name
@@ -261,6 +265,10 @@ pub struct FieldDescription {
     pub trailing_comment: Option<String>,
     /// Every entry of the field's `[...]` list, in the order written.
     pub options: Vec<OptionDescription>,
+    /// The integers the field's values may be, by its type narrowed by the nanopb
+    /// `int_size` in force, or why the field has no such range (see
+    /// [`crate::proto_range`]). The encoder holds a value to the same range.
+    pub value_range: Result<ValueRange, RangeRefusal>,
 }
 
 /// One message.
@@ -415,6 +423,7 @@ pub fn describe_proto(
                 comment: f.docs.leading.clone(),
                 trailing_comment: f.docs.trailing.clone(),
                 options: describe_options(&linker, idx, &f.options),
+                value_range: field_range(&linker, msg, f),
             });
         }
         messages.push(MessageDescription {

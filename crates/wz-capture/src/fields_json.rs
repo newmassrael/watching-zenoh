@@ -10974,6 +10974,18 @@ mod tests {
                 words.sort_unstable();
                 words
             }),
+            // Where a field's integer range comes from, and why a field has
+            // none, each held to the range judge's own list.
+            (rev::PROTO_MESSAGE, "source", {
+                let mut words = crate::proto_range::source_words().to_vec();
+                words.sort_unstable();
+                words
+            }),
+            (rev::PROTO_MESSAGE, "value_range_refusal", {
+                let mut words = crate::proto_range::refusal_words().to_vec();
+                words.sort_unstable();
+                words
+            }),
             // The transport build document's three: what a layout row IS, how
             // its integer is laid out, and what its offset counts from. Each
             // walk is the type the report is built with, so a word a row can

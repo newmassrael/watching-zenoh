@@ -10,7 +10,7 @@
 //! # `proto_message`
 //!
 //! ```text
-//! {"document":{"name":"proto_message","revision":4},"ok":true,
+//! {"document":{"name":"proto_message","revision":5},"ok":true,
 //!  "root":"pkg.Reading",
 //!  "messages":[{"full_name":"pkg.Reading","file":"reading.proto","syntax":"proto3",
 //!    "oneofs":[],"comment":" One reading.\n","trailing_comment":null,
@@ -24,7 +24,9 @@
 //!      "comment":null,"trailing_comment":" the sensor\n",
 //!      "options":[{"name":"deprecated","kind":"identifier","value":"true",
 //!                  "origin":{"class":"standard","name":null,
-//!                            "package":null,"file":null}}]}]}]}
+//!                            "package":null,"file":null}}],
+//!      "value_range":{"low":0,"high":4294967295,"source":"type"},
+//!      "value_range_refusal":null}]}]}
 //! ```
 //!
 //! `messages` is the root message first, then every message it reaches, each
@@ -75,6 +77,20 @@
 //!   is none, one of `unbounded_field`, `recursive_message`,
 //!   `message_not_generated`, `unmodelled_option`, `too_large` and `too_deep`
 //!   (see [`crate::proto_nanopb`]). Exactly one of the two keys is `null`;
+//! * `value_range` and `value_range_refusal`, on a field row only (revision 5):
+//!   the integers the field's values may be, `{"low":L,"high":H,"source":S}`
+//!   with both bounds included and written by the integer rule below, `source`
+//!   being `type` for the protobuf type's own range and `nanopb_int_size` where
+//!   the nanopb `int_size` in force (field, then message, then file; a map
+//!   entry's fields have the file's alone) narrowed it to the C integer nanopb
+//!   stores the value in (`uint32` under `IS_8` is 0 to 255); or `null` and then
+//!   the reason there is none, one of `not_an_integer` (a floating point, `bool`,
+//!   `string`, `bytes` or message field), `enum` (the values are the enum's,
+//!   listed under `enum`), `map` (its key and value are the fields that hold
+//!   integers) and `unmodelled_option` (a varint integer whose `int_size` cannot
+//!   be read). The fixed widths are not changed by `int_size`. Exactly one of the
+//!   two keys is `null`, and the value door ([`crate::proto_encode`]) refuses a
+//!   value outside the same range (see [`crate::proto_range`]);
 //! * `oneof` is the oneof's name, or `null` for a field that is in none;
 //! * `packed` is a boolean for a repeated field of a packable type (whether it
 //!   is written as one run) and `null` for every other field;
@@ -91,7 +107,8 @@
 //! The vocabularies are closed and are the ones [`crate::proto_describe`] lists:
 //! `type` (the scalar keywords, `enum`, `message` and `map`; a map value's `type`
 //! is one of them), `key` (the scalar keywords a map may be keyed by), `label`
-//! and `syntax`. An enum value's number is a bare number up to 2^53 - 1 in either
+//! and `syntax`; `source` and `value_range_refusal` are
+//! [`crate::proto_range`]'s. An enum value's number is a bare number up to 2^53 - 1 in either
 //! direction and the digits in a string beyond, the integer rule the decoded
 //! values follow; a legal enum number is an `i32`, but this reader does not judge
 //! one.
@@ -229,6 +246,24 @@ fn push_field(field: &FieldDescription, out: &mut String) {
     }
     push_comments(&field.comment, &field.trailing_comment, out);
     push_options(&field.options, out);
+    // A range, or `null` and the reason there is none: never one without the
+    // other, as for a message's size.
+    match field.value_range {
+        Ok(range) => {
+            out.push_str(",\"value_range\":{\"low\":");
+            push_integer(range.low, out);
+            out.push_str(",\"high\":");
+            push_integer(range.high, out);
+            out.push_str(&format!(
+                ",\"source\":\"{}\"}},\"value_range_refusal\":null",
+                range.source.word()
+            ));
+        }
+        Err(why) => out.push_str(&format!(
+            ",\"value_range\":null,\"value_range_refusal\":\"{}\"",
+            why.word()
+        )),
+    }
     out.push('}');
 }
 

@@ -3209,6 +3209,30 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: PROTO_MESSAGE_R4_CARRIES,
     },
+    // THE INTEGERS A FIELD OF A DESCRIBED SCHEMA MAY HOLD.
+    //
+    // A consumer that draws an input for a field wants to refuse a value as it is
+    // typed, and a firmware that links nanopb refuses at decode a value its C
+    // integer cannot hold, which the protobuf type alone does not say: a `uint32`
+    // under `(nanopb).int_size = IS_8` is a `uint8_t`. Revision 5 adds to every
+    // field row `value_range`, `{"low","high","source"}` with `source` one of
+    // `type` and `nanopb_int_size`, or `null` with `value_range_refusal`, one of a
+    // closed set, for a field that holds no integer or whose `int_size` cannot be
+    // read. `low` and `high` take the integer rule an enum value's number does.
+    // The value door refuses a value outside the same range. Nothing retires and
+    // nothing moves.
+    //
+    // Both are PASSENGERS: a range has its three members whichever `source` it
+    // carries, and a field row has both keys whether it has a range or not.
+    DocumentShape {
+        document: PROTO_MESSAGE,
+        revision: 5,
+        keys: PROTO_MESSAGE_R5_KEYS,
+        retiring: &[],
+        families: PROTO_MESSAGE_R5_FAMILIES,
+        planes: &[],
+        carries: PROTO_MESSAGE_R5_CARRIES,
+    },
     // EVERY MESSAGE A SET OF `.proto` FILES DECLARES, or the place the schema was
     // refused.
     //
@@ -14157,6 +14181,143 @@ pub const PROTO_MESSAGE_R4_CARRIES: &[KeyCarries] = &[
     },
     KeyCarries {
         key: "type",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// The description document's key set at revision 5: revision 4's PLUS, on a field
+/// row, `value_range` and its members `low`, `high` and `source`, and
+/// `value_range_refusal`. Nothing retires.
+pub const PROTO_MESSAGE_R5_KEYS: &[&str] = &[
+    "class",
+    "column",
+    "comment",
+    "document",
+    "enum",
+    "fields",
+    "file",
+    "full_name",
+    "high",
+    "json_name",
+    "key",
+    "kind",
+    "label",
+    "line",
+    "low",
+    "map",
+    "max_encoded_size",
+    "max_encoded_size_reason",
+    "message",
+    "message_type",
+    "messages",
+    "name",
+    "number",
+    "ok",
+    "oneof",
+    "oneofs",
+    "options",
+    "origin",
+    "package",
+    "packed",
+    "reason",
+    "revision",
+    "root",
+    "source",
+    "syntax",
+    "trailing_comment",
+    "type",
+    "value",
+    "value_range",
+    "value_range_refusal",
+    "values",
+];
+
+/// Where a field's integer range comes from: the words of `source`, sorted.
+pub const PROTO_RANGE_SOURCE_R5: &[&str] = &["nanopb_int_size", "type"];
+
+/// Why a field has no integer range: the words of `value_range_refusal`, sorted,
+/// `null` when it has one.
+pub const PROTO_RANGE_REFUSAL_R5: &[&str] = &["enum", "map", "not_an_integer", "unmodelled_option"];
+
+/// The description document's value families at revision 5: revision 4's, the
+/// `source` of a field's range and the reason a field has none.
+pub const PROTO_MESSAGE_R5_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "class",
+        values: PROTO_ORIGIN_CLASS_R4,
+    },
+    ValueFamily {
+        key: "key",
+        values: PROTO_MAP_KEY_R1,
+    },
+    ValueFamily {
+        key: "kind",
+        values: PROTO_OPTION_KIND_R2,
+    },
+    ValueFamily {
+        key: "label",
+        values: PROTO_LABEL_R1,
+    },
+    ValueFamily {
+        key: "max_encoded_size_reason",
+        values: PROTO_SIZE_REASON_R3,
+    },
+    ValueFamily {
+        key: "source",
+        values: PROTO_RANGE_SOURCE_R5,
+    },
+    ValueFamily {
+        key: "syntax",
+        values: PROTO_SYNTAX_R1,
+    },
+    ValueFamily {
+        key: "type",
+        values: PROTO_TYPE_R1,
+    },
+    ValueFamily {
+        key: "value_range_refusal",
+        values: PROTO_RANGE_REFUSAL_R5,
+    },
+];
+
+/// All nine are PASSENGERS. A range has the same three members whichever `source`
+/// it names, and a field row carries `value_range` and `value_range_refusal`
+/// whichever word the refusal is, the range being `null` beside every one.
+pub const PROTO_MESSAGE_R5_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "class",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "key",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "label",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "max_encoded_size_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "source",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "syntax",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "type",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "value_range_refusal",
         shape: CarriesShape::Passenger,
     },
 ];
@@ -28492,7 +28653,9 @@ mod tests {
             // To 3 when a message gained its nanopb size: `max_encoded_size`
             // and `max_encoded_size_reason`.
             // To 4 when every option gained `origin`: where it is defined.
-            (PROTO_MESSAGE, 4),
+            // To 5 when every field gained its integer range: `value_range`,
+            // its `low`, `high` and `source`, and `value_range_refusal`.
+            (PROTO_MESSAGE, 5),
             // Every message a set of `.proto` files declares.
             (PROTO_MESSAGE_LIST, 1),
             // A protected frame built and read under a caller's profile.
