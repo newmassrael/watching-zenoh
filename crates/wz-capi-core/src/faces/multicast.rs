@@ -545,6 +545,7 @@ impl SharedSession {
         let live_subs = guard
             .live_subs
             .iter()
+            .filter(|entry| !entry.links.is_restricted())
             .map(|entry| {
                 (
                     entry.id,

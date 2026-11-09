@@ -1147,6 +1147,8 @@ struct KexprEntry {
 struct TokenEntry {
     id: TokenId,
     keyexpr: String,
+    /// The links the token is declared to; see [`SubEntry::links`].
+    links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
     /// The declaring ABI's retraction shape, kept so a replayed token retracts
@@ -1181,6 +1183,8 @@ struct LiveSubEntry {
     id: SubId,
     keyexpr: String,
     history: bool,
+    /// The links the subscription is declared to; see [`SubEntry::links`].
+    links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
     sink: LivelinessSink,
@@ -2921,7 +2925,7 @@ impl SharedSession {
         // one C callback.
         let mut tokens = BTreeMap::new();
         for entry in &guard.tokens {
-            if held.tokens.contains_key(&entry.id) {
+            if held.tokens.contains_key(&entry.id) || !entry.links.allows(link_slot_of_face(id)) {
                 continue;
             }
             if let Some(tok) =
@@ -2932,7 +2936,8 @@ impl SharedSession {
         }
         let mut live_subs = BTreeMap::new();
         for entry in &guard.live_subs {
-            if held.live_subs.contains_key(&entry.id) {
+            if held.live_subs.contains_key(&entry.id) || !entry.links.allows(link_slot_of_face(id))
+            {
                 continue;
             }
             let mut opts = LivelinessSubscriberOptions::default();
@@ -4284,6 +4289,21 @@ impl SharedSession {
         wire: WireKey,
         options: LivelinessOptions,
     ) -> Option<TokenId> {
+        self.declare_liveliness_token_on_links(keyexpr, wire, options, LinkRestriction::Any)
+    }
+
+    /// [`Self::declare_liveliness_token_on_wire`] for a token limited to the links of `links`
+    /// (policy `entity-link-restriction`): it is announced to the nodes behind those links
+    /// only, a link that comes up later is told of it only if its slot is named, and a
+    /// multicast group, which no slot names, is not told. The session's own liveliness
+    /// subscribers are not behind a link and hear it whatever the restriction says.
+    pub fn declare_liveliness_token_on_links(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        options: LivelinessOptions,
+        links: LinkRestriction,
+    ) -> Option<TokenId> {
         let mut guard = self.lock();
         let id = guard.try_take_entity_id()?;
 
@@ -4293,7 +4313,7 @@ impl SharedSession {
         // against upstream's `1`), while across a real face both saw it. The
         // machinery was never broken; the declaration just never reached the
         // plane, because the plane had no `tokens` slot to reach.
-        for face in guard.declaration_targets() {
+        for face in guard.declaration_targets_on(links) {
             if let Some(tok) = declare_token_on(&face.session, &keyexpr, &wire, options.clone()) {
                 face.tokens.insert(id, tok);
             }
@@ -4301,13 +4321,16 @@ impl SharedSession {
         // Open-debt item 913 — and every group the session joined is told of it, as its ABI
         // says.
         #[cfg(feature = "multicast-transport")]
-        Self::announce_token_on_groups(&guard, id, &keyexpr, &wire);
+        if !links.is_restricted() {
+            Self::announce_token_on_groups(&guard, id, &keyexpr, &wire);
+        }
         // The session's own liveliness subscribers, told of the token once the registry is
         // unlocked: what they run may re-enter the session.
         let legs = self.own_liveliness_legs(&guard, &keyexpr);
         guard.tokens.push(TokenEntry {
             id,
             keyexpr: keyexpr.clone(),
+            links,
             wire,
             options,
         });
@@ -4334,12 +4357,14 @@ impl SharedSession {
                 // Open-debt item 913 — retracted from every group told of it, by the key the
                 // entry holds.
                 #[cfg(feature = "multicast-transport")]
-                Self::retract_token_on_groups(
-                    &guard,
-                    id,
-                    &guard.tokens[pos].keyexpr,
-                    &guard.tokens[pos].wire,
-                );
+                if !guard.tokens[pos].links.is_restricted() {
+                    Self::retract_token_on_groups(
+                        &guard,
+                        id,
+                        &guard.tokens[pos].keyexpr,
+                        &guard.tokens[pos].wire,
+                    );
+                }
                 dropped_entry = Some(guard.tokens.remove(pos));
             }
             // R2580 — including the plane's, or a C `z_drop` on the token would
@@ -4389,13 +4414,36 @@ impl SharedSession {
         options: LivelinessSubscriberOptions,
         sink: LivelinessSink,
     ) -> SubId {
+        self.declare_liveliness_subscriber_on_links(
+            keyexpr,
+            wire,
+            options,
+            LinkRestriction::Any,
+            sink,
+        )
+    }
+
+    /// [`Self::declare_liveliness_subscriber_on_wire`] for a subscription limited to the links
+    /// of `links` (policy `entity-link-restriction`): its interest is declared to the nodes
+    /// behind those links only, so it hears no token of a node behind another, a link that
+    /// comes up later is declared to only if its slot is named, and it does not listen on a
+    /// multicast group. The tokens of the session itself are heard whatever the restriction
+    /// says: they are not behind a link.
+    pub fn declare_liveliness_subscriber_on_links(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        options: LivelinessSubscriberOptions,
+        links: LinkRestriction,
+        sink: LivelinessSink,
+    ) -> SubId {
         let mut guard = self.lock();
         let id = guard.take_entity_id();
 
         // R2580 — the plane included, which is the receiving half of the same
         // measurement: without it this subscriber cannot hear a token its own
         // session declared, however many peers it has or has not.
-        for face in guard.declaration_targets() {
+        for face in guard.declaration_targets_on(links) {
             if let Some(sub) = declare_liveliness_subscriber_on(
                 &face.session,
                 &keyexpr,
@@ -4408,8 +4456,11 @@ impl SharedSession {
         }
         // The groups hear the tokens of their members, which no face of a unicast peer carries.
         #[cfg(all(feature = "multicast-transport", feature = "liveliness"))]
-        let replayed_on_groups =
-            Self::listen_on_groups(&mut guard, id, &keyexpr, options.history, &wire, &sink);
+        let replayed_on_groups = if links.is_restricted() {
+            Vec::new()
+        } else {
+            Self::listen_on_groups(&mut guard, id, &keyexpr, options.history, &wire, &sink)
+        };
         // A history lists the tokens the session itself holds as it lists those of its peers.
         let history: Vec<(TokenId, String)> = if options.history && self.liveliness_to_self {
             guard
@@ -4426,6 +4477,7 @@ impl SharedSession {
             id,
             keyexpr,
             history: options.history,
+            links,
             wire,
             sink,
         });
@@ -8491,6 +8543,175 @@ mod face_up_order_tests {
             ),
             (0, 1),
             "the replay onto a face that comes up later honours the same slots"
+        );
+    }
+
+    /// A liveliness token limited to one slot is announced to the node behind that link and not
+    /// to the other, a face that comes up later is told of it only if its slot is named, an
+    /// unrestricted token is announced to both, and the session's own liveliness subscribers
+    /// hear a limited token as they hear any other, since the session is behind no link.
+    #[tokio::test]
+    async fn a_token_limited_to_one_link_is_announced_there_and_replayed_only_there() {
+        use wz_runtime_tokio_test_support::establish_capability_pair_between;
+        let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let late_near = establish_capability_pair_between(0x05, 0x06, false, false, |_| {}).await;
+        let late_far = establish_capability_pair_between(0x07, 0x08, false, false, |_| {}).await;
+        let shared = SharedSession::new_with_resources(
+            TokioTime::new(),
+            vec![0x11; 16],
+            SessionResources {
+                liveliness_to_self: true,
+                ..SessionResources::default()
+            },
+        )
+        .expect("test host entropy");
+        let heard = Arc::new(StdMutex::new(Vec::new()));
+        let own: LivelinessSink = {
+            let heard = heard.clone();
+            Arc::new(move || {
+                let heard = heard.clone();
+                Box::new(move |sample: LivelinessSample<'_>| {
+                    heard.lock().unwrap().push(sample.keyexpr.to_owned());
+                })
+            })
+        };
+        shared.declare_liveliness_subscriber(
+            "wz/link/**".to_owned(),
+            LivelinessSubscriberOptions::default(),
+            own,
+        );
+
+        assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
+        assert!(
+            shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
+            "slot 2"
+        );
+        let near_before = near.resp_driver.snapshot().sends.len();
+        let far_before = far.resp_driver.snapshot().sends.len();
+        let limited = shared
+            .declare_liveliness_token_on_links(
+                "wz/link/token".to_owned(),
+                WireKey::literal(),
+                LivelinessOptions::new(),
+                LinkRestriction::only([2]).expect("one slot"),
+            )
+            .expect("declares");
+        assert_eq!(
+            (
+                declares_and_pushes_since(&near, near_before).0,
+                declares_and_pushes_since(&far, far_before).0
+            ),
+            (0, 1),
+            "limited to slot 2: announced to the second link only"
+        );
+        assert_eq!(
+            heard.lock().unwrap().as_slice(),
+            ["wz/link/token"],
+            "the session's own subscriber hears it whatever the restriction says"
+        );
+
+        // A face of listener 0 (slot 1) and one of listener 1 (slot 2) come up afterwards.
+        let late_near_before = late_near.resp_driver.snapshot().sends.len();
+        let late_far_before = late_far.resp_driver.snapshot().sends.len();
+        assert!(shared.face_up(2, &late_near.resp_actions, false));
+        assert!(shared.face_up(LISTENER_FACE_STRIDE + 2, &late_far.resp_actions, false));
+        assert_eq!(
+            (
+                declares_and_pushes_since(&late_near, late_near_before).0,
+                declares_and_pushes_since(&late_far, late_far_before).0
+            ),
+            (0, 1),
+            "the replay onto a face that comes up later honours the same slots"
+        );
+
+        // Retracted, it is withdrawn from the link that was told and from no other.
+        let near_before = near.resp_driver.snapshot().sends.len();
+        let far_before = far.resp_driver.snapshot().sends.len();
+        shared.undeclare_liveliness_token(limited);
+        assert_eq!(
+            (
+                declares_and_pushes_since(&near, near_before).0,
+                declares_and_pushes_since(&far, far_before).0
+            ),
+            (0, 1),
+            "the retraction reaches the link that held the token alone"
+        );
+
+        // An unrestricted token is announced to both links.
+        let near_before = near.resp_driver.snapshot().sends.len();
+        let far_before = far.resp_driver.snapshot().sends.len();
+        shared
+            .declare_liveliness_token("wz/link/open".to_owned())
+            .expect("declares");
+        assert_eq!(
+            (
+                declares_and_pushes_since(&near, near_before).0,
+                declares_and_pushes_since(&far, far_before).0
+            ),
+            (1, 1),
+            "no restriction: announced to both"
+        );
+    }
+
+    /// A liveliness subscription limited to one slot asks the node behind that link and not the
+    /// other, a face that comes up later is asked only if its slot is named, and an
+    /// unrestricted subscription asks both.
+    #[tokio::test]
+    async fn a_liveliness_subscription_limited_to_one_link_asks_there_and_replays_only_there() {
+        use wz_runtime_tokio_test_support::establish_capability_pair_between;
+        let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let late_near = establish_capability_pair_between(0x05, 0x06, false, false, |_| {}).await;
+        let late_far = establish_capability_pair_between(0x07, 0x08, false, false, |_| {}).await;
+        let shared =
+            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy");
+        let sink: LivelinessSink = Arc::new(|| Box::new(|_sample: LivelinessSample<'_>| {}));
+        let sent = |pair: &wz_runtime_tokio_test_support::EstablishedPair| {
+            pair.resp_driver.snapshot().sends.len()
+        };
+
+        assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
+        assert!(
+            shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
+            "slot 2"
+        );
+        let (near_before, far_before) = (sent(&near), sent(&far));
+        shared.declare_liveliness_subscriber_on_links(
+            "wz/link/live".to_owned(),
+            WireKey::literal(),
+            LivelinessSubscriberOptions::default(),
+            LinkRestriction::only([2]).expect("one slot"),
+            sink.clone(),
+        );
+        assert_eq!(
+            (sent(&near) - near_before, sent(&far) > far_before),
+            (0, true),
+            "limited to slot 2: the interest goes to the second link only"
+        );
+
+        // A face of listener 0 (slot 1) and one of listener 1 (slot 2) come up afterwards.
+        let (late_near_before, late_far_before) = (sent(&late_near), sent(&late_far));
+        assert!(shared.face_up(2, &late_near.resp_actions, false));
+        assert!(shared.face_up(LISTENER_FACE_STRIDE + 2, &late_far.resp_actions, false));
+        let late_near_new = sent(&late_near) - late_near_before;
+        let late_far_new = sent(&late_far) - late_far_before;
+        assert!(
+            late_far_new > late_near_new,
+            "the replay onto a face that comes up later honours the same slots \
+             (slot 1 got {late_near_new} frame(s), slot 2 got {late_far_new})"
+        );
+
+        // The same subscription without a restriction asks the first link too.
+        let near_before = sent(&near);
+        shared.declare_liveliness_subscriber(
+            "wz/link/open".to_owned(),
+            LivelinessSubscriberOptions::default(),
+            sink,
+        );
+        assert!(
+            sent(&near) > near_before,
+            "no restriction: the first link is asked as well"
         );
     }
 
