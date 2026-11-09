@@ -12937,6 +12937,21 @@
       "carry_forward_bullets": [
         "The consumer's own parse of the binary rows has not been measured here; that is its number to read."
       ]
+    },
+    "Round 4449": {
+      "decision_summary": "The entity-link-restriction mechanism covered subscribers, queryables, publishes and queries, and left liveliness out: a token or a liveliness subscription was always declared to every link and to every multicast group. The registry now keeps the restriction on the entries of both, as it does for the other entities, and applies it at the same four places: the declaration walk, the replay onto a link that comes up later, the multicast groups (a group is a link no slot names, so a limited entity is not put on one, at declaration, at retraction and when a group face comes up), and the retraction. The session's own plane stays outside the restriction, since it is behind no link: a limited token is still told to the session's own liveliness subscribers. The existing declaration doors delegate to the new ones with the unrestricted value, so every caller of the unrestricted form is unchanged and a build with the policy off cannot reach a limited form. Reaching it from the Rust API and the C ABI is the next slice, as it was for the subscriber.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/faces.rs: the restriction on the token entry and on the liveliness subscription entry; declare_liveliness_token_on_links and declare_liveliness_subscriber_on_links, with the _on_wire forms delegating with the unrestricted value; the replay of both onto a link that comes up; the group announce, listen and retract skipped for a limited entity; two tests, one per entity, each covering the first links, a link that comes up later, the retraction and the unrestricted control. crates/wz-capi-core/src/faces/multicast.rs: a group face that comes up is not given a limited liveliness subscription."
+      ],
+      "verification_bullets": [
+        "Run on the build machine: the two new tests and the three older restriction tests, 5 passed; the crate's library tests, 185 passed (183 before); clippy of the crate over all targets with every feature and warnings denied, which compiles the multicast and liveliness arms; the control in each new test (no restriction reaches both links) passes in the same run as the limited case."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Not reachable yet from the Rust API builders or the C ABI for tokens and liveliness subscriptions, and the policy refusal for a limited form is not wired there either. The router, cooperative and lwIP engines still do not read the restriction. A liveliness get is not limited. The Node session handles still answer unavailable for a stated restriction."
+      ]
     }
   },
   "inventory_entries": {
