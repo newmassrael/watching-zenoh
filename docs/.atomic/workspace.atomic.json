@@ -12889,6 +12889,24 @@
       "carry_forward_bullets": [
         "Other readers of the history at run time exist in the capture crate (the value families a document lists and the planes check); no build of the C library reaches them today and they were not changed. The next reading of the hosted layer corrects the offset the two budgets assume if it is off. The storage-host plugins-section test over a pico client that read empty once at the previous head is still unreproduced."
       ]
+    },
+    "Round 4446": {
+      "decision_summary": "The hosted run on the ledger of round 4442 failed in eight lanes; rounds 4443 to 4445 paid them while this round was reading the same logs, and their fixes and this round's agreed (the envelope written from one row per document, the links, the pins). One leg was hidden by the failure those rounds paid: Layer C1bo stops at the first failing step, and with the C consumer at fields 60 it runs on to the bound-name gate, which refuses the two row-facts doors because their `cap` does not say which kind of bound it is. Both doors now state it is the caller's buffer capacity: below the document's length nothing is written, the handle keeps the document and `needed` still says its length.",
+      "changes_bullets": [
+        "wz_dissect.h: `@bound cap buffer-capacity` on wz_dissect_live_row_facts_since and wz_dissect_live_row_facts_take.",
+        "docs/hosted-red-acks.md: a row for run 42505060630 naming the leg paid here."
+      ],
+      "verification_bullets": [
+        "Layer C1bo on hkl001 at round 4445 with the two annotations: capi-bound-names reads 25 bound-shaped parameters over 70 declarations, each declared; the layer passes. Without them, on the same lane with the consumer at fields 60, it refused the two doors by name.",
+        "Independent readings taken before rounds 4443 to 4445 landed, consistent with them: the capic-default symbol diff on pc2 between 232aa60694 and 7e94c0a7fd had every symbol unchanged in name and size (text +17,232, data +12,000), and an envelope table of one row per document took 336,044 bytes off capic-default on hkl002. E6h's startup-section test passed 20 of 20 on pc2 and 30 of 30 pinned to one core."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: a layer that stops at its first failing step hides the legs after it; when a red is paid, run the whole layer again before calling it paid.",
+        "Open (round 4414): a writer routing through its own draft computes without keeping; the client leg's reached-route scan on the writer is O(routes x changed keys); a route holding its faces' state."
+      ]
     }
   },
   "inventory_entries": {
