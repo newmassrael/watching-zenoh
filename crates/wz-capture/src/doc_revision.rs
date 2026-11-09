@@ -23892,6 +23892,103 @@ pub fn revision(document: &str) -> Option<u32> {
     newest(document).map(|s| s.revision)
 }
 
+/// What an envelope needs of a document: the name, the revision it emits and the planes it
+/// declares. Nothing of its keys, value families or earlier rows.
+#[derive(Clone, Copy)]
+struct Emitted {
+    document: &'static str,
+    revision: u32,
+    planes: &'static [&'static str],
+}
+
+const fn same_text(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// How many documents [`DOCUMENT_HISTORY`] names.
+const DOCUMENT_COUNT: usize = {
+    let mut count = 0;
+    let mut i = 0;
+    while i < DOCUMENT_HISTORY.len() {
+        let mut seen = false;
+        let mut j = 0;
+        while j < i {
+            if same_text(DOCUMENT_HISTORY[j].document, DOCUMENT_HISTORY[i].document) {
+                seen = true;
+            }
+            j += 1;
+        }
+        if !seen {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+};
+
+/// The newest row of each document, taken out of [`DOCUMENT_HISTORY`] when the library is
+/// compiled, in the order the documents first appear. Where two rows of a document carry the
+/// same revision the later one stands, as it does for [`newest`]; the audit refuses that shape.
+///
+/// WHY A TABLE OF ITS OWN. The envelope of every document asks which revision it writes and which
+/// planes it declares, at run time, from every build that writes a document. Answering that by
+/// walking [`DOCUMENT_HISTORY`] made the whole history, every key set and value family of every
+/// revision, a run-time structure of each such build, though only the audit and the tests read
+/// it: it grew a C image of this library by 17 KB when two documents' rows were added. The
+/// history is the record the audit holds the documents to, and the envelope reads what that
+/// record says today, as constants.
+static EMITTED: [Emitted; DOCUMENT_COUNT] = {
+    let mut out = [Emitted {
+        document: "",
+        revision: 0,
+        planes: &[],
+    }; DOCUMENT_COUNT];
+    let mut filled = 0;
+    let mut i = 0;
+    while i < DOCUMENT_HISTORY.len() {
+        let row = &DOCUMENT_HISTORY[i];
+        let mut slot = filled;
+        let mut k = 0;
+        while k < filled {
+            if same_text(out[k].document, row.document) {
+                slot = k;
+            }
+            k += 1;
+        }
+        if slot == filled {
+            out[filled] = Emitted {
+                document: row.document,
+                revision: row.revision,
+                planes: row.planes,
+            };
+            filled += 1;
+        } else if row.revision >= out[slot].revision {
+            out[slot] = Emitted {
+                document: row.document,
+                revision: row.revision,
+                planes: row.planes,
+            };
+        }
+        i += 1;
+    }
+    out
+};
+
+fn emitted(document: &str) -> Option<&'static Emitted> {
+    EMITTED.iter().find(|e| e.document == document)
+}
+
 /// Write the envelope every emitted document opens with.
 ///
 /// FIRST KEY IN THE DOCUMENT at every call site, so a consumer reads the
@@ -23906,7 +24003,11 @@ pub fn revision(document: &str) -> Option<u32> {
 pub fn envelope_into(document: &str, out: &mut String) {
     out.push_str("\"document\":{\"name\":\"");
     out.push_str(document);
-    let _ = write!(out, "\",\"revision\":{}", revision(document).unwrap_or(0));
+    let _ = write!(
+        out,
+        "\",\"revision\":{}",
+        emitted(document).map_or(0, |e| e.revision)
+    );
     // R2180 (open-debt item 554) — WHICH OF THIS DOCUMENT'S TOP-LEVEL KEYS ARE
     // PLANES, written into the document rather than answered by a second door,
     // so the list cannot be paired with a document from a different build.
@@ -23922,7 +24023,7 @@ pub fn envelope_into(document: &str, out: &mut String) {
     // a silent document could have grown a `narrowed_by_selector` key and no
     // arm would have looked. The gate now derives every plane shape over all
     // six documents (`emitted_planes`), which is what the silence rests on.
-    let planes = newest(document).map(|s| s.planes).unwrap_or(&[]);
+    let planes = emitted(document).map_or(&[][..], |e| e.planes);
     if !planes.is_empty() {
         out.push_str(",\"planes\":[");
         for (i, plane) in planes.iter().enumerate() {
@@ -24873,6 +24974,33 @@ pub fn audit(rows: &[DocumentShape]) -> Result<(), String> {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    // The envelope reads the compile-time table, the audit reads the history, and the two must be
+    // one answer: every document of the history is in the table once, at the revision and with
+    // the planes `newest` gives it, and the table holds nothing the history does not name.
+    #[test]
+    fn the_envelopes_table_is_the_histories_newest_row_of_each_document() {
+        let mut names: Vec<&str> = DOCUMENT_HISTORY.iter().map(|r| r.document).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            EMITTED.len(),
+            names.len(),
+            "one entry per document of the history"
+        );
+        for name in names {
+            let newest = newest(name).expect("a document of the history");
+            let entry = emitted(name).expect("a document of the history is in the table");
+            assert_eq!(entry.revision, newest.revision, "{name}: revision");
+            assert_eq!(entry.planes, newest.planes, "{name}: planes");
+            assert_eq!(
+                EMITTED.iter().filter(|e| e.document == name).count(),
+                1,
+                "{name}: once"
+            );
+        }
+        assert!(emitted("a document nothing emits").is_none());
+    }
 
     // Every synthetic row carries the envelope's own three keys, because a
     // revision that does not is refused on its own rule — see

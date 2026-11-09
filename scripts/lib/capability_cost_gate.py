@@ -797,7 +797,17 @@ CASES: tuple[Case, ...] = (
     # `capic-default-lean`'s +14,156, split in its note), the face table +8,792
     # (`capic-router-node`'s note of this day). Chosen growth; the budget is that reading, 3,600
     # and 3,500, to the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_183_300,
+    # 2026-11-09, after that -- the table above is not chosen growth but a link-in. The envelope
+    # of every document asked at run time which revision it writes and which planes it declares
+    # by walking the whole document history, so the history (every key set and value family of
+    # every revision) was a run-time structure of each build that writes a document, though only
+    # the audit and the tests read it. The envelope now reads a table of the newest row of each
+    # document made when the library is compiled (`EMITTED` in `doc_revision.rs`), and the
+    # history left the image: `pc2` reads 10,843,648, which is 335,056 UNDER the reading before
+    # the growth (11,161,472) and 335,056 under the reading of `7e94c0a7fd`'s window taken apart
+    # above. A gain taken, so the budget comes back down: the reading, the +1,012 offset over
+    # `pc2` and 3,500, to the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 10_848_200,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST),
          exports=837,
@@ -852,12 +862,17 @@ CASES: tuple[Case, ...] = (
     # a UDP link (`a584247f7e`) 9,556,256, +4,740; the commits after it to `e18b0b27e2` +1,676.
     # The face table does not reach this build (its reading on the branch is the same). Chosen
     # growth; the budget is that reading, 3,600 and 3,500, to the hundred.
+    # 2026-11-09 -- hosted run 42505060630 read 9,602,204 (11,604 over); `capic-default`'s note of
+    # this day gives the cause and the cure, which reach this build the same way: `pc2` reads
+    # 9,266,124 now, 335,056 UNDER the reading before the growth. The budget is that reading, the
+    # 1,100 this image reads over `pc2` on the hosted lane (9,602,204 against 9,601,116) and
+    # 3,500, to the hundred.
     Case("capic-default-lean", "wz-capi-c", "libwz_capi_c.so",
          "link-udp,timestamping,peer,scout,query,queryable,liveliness,liveliness-get,advanced,"
          "group,gossip,transport_tls,transport_quic,transport_quic_datagram,transport_ws,"
          "transport_unixsock-stream,transport_multilink,auth_pubkey,e2e-sender,"
          "transport_compression,auth_usrpwd,interceptors,multicast-transport",
-         9_605_800,
+         9_270_800,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),
