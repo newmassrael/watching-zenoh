@@ -12967,6 +12967,21 @@
       "carry_forward_bullets": [
         "The consumer is told fields 61, row_facts 2, values 2 and declarations_diagnose 5 with the commit. Open: a `DeclareKeyExpr` whose scope is a fixed id still absorbs nothing (the wire tables are not fed by fixed ids, by design, so a declared alias over a fixed base stays unresolved); the values door joins only the pieces its selector picks, so a selector that drops pieces of a message leaves it unjoined; a JSON value's `typed_value` is null in the values document, which is that decoder's and not this round's."
       ]
+    },
+    "Round 4451": {
+      "decision_summary": "The registry limited a liveliness token and a liveliness subscription to some links (the round before), and no call of the Rust API could state a set for either. The builder of each now has the same wz-only door as the other entities, behind the same crate feature: a set stated on it is carried through the session to the engine. A build whose policy is off refuses a restricted set at the declaration in the policy's own words, as for the other entities, and the router engine refuses one always, because it reads none and taking the entity as it stands would make it unrestricted without saying so. An entity that states nothing is declared as before; for it the registry's door and the port's declare the same, so the two engine arms of the session now go through the registry's door, which is the only one that takes a set. The session's own plane stays outside a set, as in the registry.",
+      "changes_bullets": [
+        "crates/wz-zenoh/src/api/builders/liveliness.rs: the set on both builders, carried through every conversion between them, and the door on each behind the feature. crates/wz-zenoh/src/api/liveliness.rs: the builders start with every link. crates/wz-zenoh/src/api/session.rs: the set on the engine's token and liveliness-subscription declarations, the policy admission in the two inner declarations, the router's refusal, the registry's own door in the tokio arm of each, and the tests."
+      ],
+      "verification_bullets": [
+        "Run on the build machine, for the public API crate with its link-restriction feature: its library tests, 172 passed; the ten tests whose names say links, again after the last test was added, 10 passed; clippy of the crate over all targets with default features and again with every feature, warnings denied. The tests state a set on each new builder, hold the default of each to every link, show that a build without the policy refuses each in the policy's words and that one with it takes each, show that a node refuses a token that states a set and takes one that states none, and that entities stating no links are untouched."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The C ABI door for the two is the next slice. The liveliness get is not limited, and the router, cooperative and lwIP engines still do not read a set. The Node session handles still answer unavailable for a stated set. The on arm of the policy is tested on the registry; the API tests run in the default build, where the policy is off, and hold both arms by what the build says."
+      ]
     }
   },
   "inventory_entries": {
