@@ -750,11 +750,14 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                 // A schema file (`#@<file>="<text>"`) is typed here too, beside
                 // the `protobuf@pkg.Msg` rule that reads by it, for the reason a
                 // definition is: one subject, which decoder reads a topic and
-                // what it reads with.
+                // what it reads with. A key binding (`#%<id>=<keyexpr>`) is
+                // typed here as well: it says which key a fixed id's payload is
+                // read under, so the rules here can reach it.
                 match declaration {
                     payload_formats::DeclarationText::Rule { .. }
                     | payload_formats::DeclarationText::Definition { .. }
-                    | payload_formats::DeclarationText::SchemaFile { .. } => {}
+                    | payload_formats::DeclarationText::SchemaFile { .. }
+                    | payload_formats::DeclarationText::KeyBinding { .. } => {}
                     payload_formats::DeclarationText::Name { .. } => return Err(bad()),
                 }
                 payload_formats.push(raw.clone());
@@ -2435,6 +2438,9 @@ fn field_lines(
     let grouping = wz_capture::node::session_grouping(dissection);
     let stream_lists = wz_capture::node::stream_list_indices(dissection);
     let mut spaces = wz_capture::agg::KeyexprSpaces::new();
+    // The key ids the declarations fix, so a reference the wire does not
+    // answer is read here under the key the field document reads it under.
+    payload_formats.fix_key_ids(&mut spaces);
     // R2519 (open-debt item 713) — see the sibling listing: bound in capture
     // order up front, anchored per row below.
     wz_capture::agg::absorb_every_declaration(dissection, &grouping, &mut spaces);
@@ -2779,6 +2785,8 @@ fn declaration_flag(kind: wz_capture::payload::formats::DeclarationKind) -> &'st
         wz_capture::payload::formats::DeclarationKind::SchemaFile => "--payload-format",
         // A segment rule is written as a format rule is, at the same flag.
         wz_capture::payload::formats::DeclarationKind::SegmentRule => "--payload-format",
+        // A key binding is a `#` line, typed where the definitions are.
+        wz_capture::payload::formats::DeclarationKind::KeyBinding => "--payload-format",
     }
 }
 
@@ -2801,6 +2809,9 @@ fn declaration_note_kind(kind: wz_capture::payload::formats::DeclarationKind) ->
         wz_capture::payload::formats::DeclarationKind::SegmentRule => {
             "payload_segment_rule_unbound"
         }
+        // Its own kind: a key binding is unused when no message was read under
+        // the key it fixed, which is a fact about the ids the wire used.
+        wz_capture::payload::formats::DeclarationKind::KeyBinding => "payload_key_binding_unused",
     }
 }
 
@@ -2823,6 +2834,9 @@ fn declaration_remedy(kind: wz_capture::payload::formats::DeclarationKind) -> &'
         }
         wz_capture::payload::formats::DeclarationKind::SegmentRule => {
             "no payload under a key the pattern matched carried this profile's header"
+        }
+        wz_capture::payload::formats::DeclarationKind::KeyBinding => {
+            "no payload was read under this id: the wire declared it, or no reference used it"
         }
     }
 }

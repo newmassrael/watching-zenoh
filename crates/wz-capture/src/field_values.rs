@@ -164,18 +164,100 @@ struct Held {
     produced: u64,
     record: usize,
     observed_at_ns: Option<u64>,
+    /// The key it is read under: the wire's, or one a declaration fixed.
     keyexpr: Option<String>,
+    /// Whether `keyexpr` is a key a declaration fixed for an id the wire did
+    /// not answer.
+    fixed: bool,
+    /// The id and suffix of the reference when `keyexpr` is `None`, which key a
+    /// stream of pieces published under it.
+    missed: Option<(u64, Option<String>)>,
+    /// Whether it travelled from the low end of its list.
+    from_low: bool,
     declared: HeldEncoding,
+    /// The payload's bytes; emptied once joining has taken it as a piece, whose
+    /// bytes are in the message it joins and are never read alone.
     bytes: Vec<u8>,
     elsewhere: bool,
+    /// Whether the joining pass has taken it ([`ValuesFold::join`]).
+    fed: bool,
+    /// What joining made of it, when it is a piece of a split message.
+    piece: Option<HeldPiece>,
+}
+
+/// One piece as joining judged it.
+#[derive(Debug, Clone)]
+struct HeldPiece {
+    /// The segment profile that recognised it.
+    profile: String,
+    /// The transfer it belongs to, as its header numbers it.
+    transfer: u64,
+    /// The whole message's size, as its header states it.
+    whole_bytes: u64,
+    /// The ledger's verdict, the joined message on the piece that completed it.
+    verdict: crate::segment_chain::Verdict,
 }
 
 /// The fold: the payload plane's walk ([`crate::payload::PayloadFold`]),
-/// keeping the payloads its selector picks.
+/// keeping the payloads its selector picks, and the joining state of the
+/// pieces among them.
+///
+/// The joining state lives in the fold and not beside it: a fold that begins
+/// again (another selector, a cursor below the last, a capture it cannot
+/// continue in, other key ids or segment declarations) takes its payloads
+/// again from the first message, and its pieces must be joined again from the
+/// first piece. One value, so the two cannot begin at different places.
 #[derive(Debug, Clone)]
 pub(crate) struct ValuesFold {
     plane: crate::payload::PayloadFold,
     held: Vec<Held>,
+    segments: crate::segment_chain::SegmentLedger,
+}
+
+impl ValuesFold {
+    /// Join, in the order they were taken, the payloads not yet joined: each
+    /// one a segment rule's profile recognises is a piece, judged by the
+    /// ledger, and every other payload is an ordinary message.
+    ///
+    /// The order taken is capture order, and the ledger keys a stream by its
+    /// list, so the pieces of one stream meet in the order the field document
+    /// meets them and join to the same messages.
+    fn join(&mut self, map: &FormatMap<'_>) {
+        let Self { held, segments, .. } = self;
+        for held in held.iter_mut().filter(|h| !h.fed) {
+            held.fed = true;
+            if held.elsewhere || !map.has_segment_rules() {
+                continue;
+            }
+            let covering = match &held.keyexpr {
+                Some(keyexpr) => crate::payload::formats::SegmentKey::Resolved(keyexpr),
+                None => crate::payload::formats::SegmentKey::Unresolved,
+            };
+            let Some(matched) = map.segment_for(covering) else {
+                continue;
+            };
+            let Some(piece) = matched.profile.recognise(&held.bytes) else {
+                continue;
+            };
+            let key = match (&held.keyexpr, &held.missed) {
+                (Some(keyexpr), _) => crate::segment_chain::KeyRef::Resolved(keyexpr.clone()),
+                (None, Some((id, suffix))) => crate::segment_chain::KeyRef::Unresolved {
+                    id: *id,
+                    suffix: suffix.as_deref().map(alloc::boxed::Box::from),
+                },
+                (None, None) => continue,
+            };
+            let verdict =
+                segments.receive(matched.profile, &piece, held.list, Some(held.from_low), key);
+            held.piece = Some(HeldPiece {
+                profile: String::from(matched.profile.name()),
+                transfer: verdict.values[matched.profile.transfer()],
+                whole_bytes: verdict.values[matched.profile.total()],
+                verdict,
+            });
+            held.bytes = Vec::new();
+        }
+    }
 }
 
 impl crate::ordered_fold::OrderedFold for ValuesFold {
@@ -205,9 +287,16 @@ impl crate::ordered_fold::OrderedFold for ValuesFold {
                 record: payload.record,
                 observed_at_ns: payload.observed_at_ns,
                 keyexpr: payload.keyexpr.map(String::from),
+                fixed: payload.fixed,
+                missed: payload
+                    .missed
+                    .map(|(id, suffix)| (id, suffix.map(String::from))),
+                from_low: payload.from_low,
                 declared: HeldEncoding::of(payload.declared),
                 bytes: payload.bytes.to_vec(),
                 elsewhere: payload.elsewhere,
+                fed: false,
+                piece: None,
             });
         };
         self.plane.feed_selecting(
@@ -244,6 +333,11 @@ enum Outcome {
     },
     NotOnTheWire,
     KeyexprUnresolved,
+    /// A piece of a split message that does not complete it: the message is
+    /// not whole here, so it has no value yet, and the record's `segment` says
+    /// why (still missing bytes, a piece that joins nothing, a copy after the
+    /// message was whole).
+    SegmentPiece,
 }
 
 /// Every word a record's `state` can say: the walk the document's value family
@@ -262,6 +356,7 @@ pub(crate) fn state_names() -> Vec<&'static str> {
         },
         Outcome::NotOnTheWire,
         Outcome::KeyexprUnresolved,
+        Outcome::SegmentPiece,
     ]
     .iter()
     .map(Outcome::word)
@@ -276,6 +371,7 @@ impl Outcome {
             Self::EncodingMismatch { .. } => "encoding_mismatch",
             Self::NotOnTheWire => "not_on_the_wire",
             Self::KeyexprUnresolved => "keyexpr_unresolved",
+            Self::SegmentPiece => "segment_piece",
         }
     }
 }
@@ -283,6 +379,9 @@ impl Outcome {
 /// Read one held payload by `map`, keeping the fields at `paths`; `None` when
 /// no rule covers its key, which is a record nobody asked about.
 fn read(map: &FormatMap<'_>, paths: &[String], held: &Held) -> Option<Outcome> {
+    if let Some(piece) = &held.piece {
+        return read_piece(map, paths, held, piece);
+    }
     let Some(keyexpr) = &held.keyexpr else {
         // An id no binding resolves cannot be matched against a rule, and a
         // plot asked about some key is told a record of an unknown one came.
@@ -293,14 +392,56 @@ fn read(map: &FormatMap<'_>, paths: &[String], held: &Held) -> Option<Outcome> {
     if held.elsewhere {
         return map.matching_rule(keyexpr).map(|_| Outcome::NotOnTheWire);
     }
+    outcome_of(map, paths, keyexpr, &held.bytes, held.declared.get())
+}
+
+/// Read one PIECE: the message it completed, when it completed one, and
+/// otherwise the piece itself, which has no value.
+///
+/// Asked about when a rule covers the message's key, the condition a whole
+/// message is asked about on, so a plot of a key sees every piece of each of
+/// its messages and the value on the one that completed it. A piece whose key
+/// is unknown is told as an unknown key is, and with its `segment`, so the
+/// reader learns that the message came in pieces and how far it got.
+fn read_piece(
+    map: &FormatMap<'_>,
+    paths: &[String],
+    held: &Held,
+    piece: &HeldPiece,
+) -> Option<Outcome> {
+    let Some(keyexpr) = &held.keyexpr else {
+        return Some(match piece.verdict.joined {
+            Some(_) => Outcome::KeyexprUnresolved,
+            None => Outcome::SegmentPiece,
+        });
+    };
+    map.matching_rule(keyexpr)?;
+    match &piece.verdict.joined {
+        // The message is read as a whole message is, under the encoding the
+        // completing piece's sample declared, as the field document's
+        // `segment.joined` reads it.
+        Some(joined) => outcome_of(map, paths, keyexpr, joined, held.declared.get()),
+        None => Some(Outcome::SegmentPiece),
+    }
+}
+
+/// Read one message's bytes under `keyexpr` by `map`, keeping the fields at
+/// `paths`; `None` when no rule covers the key.
+fn outcome_of(
+    map: &FormatMap<'_>,
+    paths: &[String],
+    keyexpr: &str,
+    bytes: &[u8],
+    declared: Encoding<'_>,
+) -> Option<Outcome> {
     // A run of the declarations for this one payload: what the field
     // document's ledger would record of it is that document's to report.
     let run = Declarations::new(map);
     let decoding = decode_payload_parts(
         PayloadParts {
-            keyexpr: keyexpr.clone(),
-            bytes: &held.bytes,
-            declared: held.declared.get(),
+            keyexpr: String::from(keyexpr),
+            bytes,
+            declared,
             base: 0,
             publisher: None,
         },
@@ -331,10 +472,10 @@ fn read(map: &FormatMap<'_>, paths: &[String], held: &Held) -> Option<Outcome> {
         PayloadDecoding::NotOnTheWire { .. } => Outcome::NotOnTheWire,
         PayloadDecoding::KeyexprUnresolved => Outcome::KeyexprUnresolved,
         // Not covered by any rule, or no payload to read: not asked about. A
-        // piece of a split message is neither the message nor a refusal of it,
-        // so it has no value to give and is not asked about either; the
-        // message's values are read where it is joined, on the field
-        // document's `segment.joined`, which this door does not yet walk.
+        // piece is found by joining before this is asked (`read_piece`), so a
+        // payload read here as a piece is one joining did not take, a joined
+        // message whose own bytes open with a piece's header among them; it
+        // has no value to give here.
         PayloadDecoding::NoRule(_)
         | PayloadDecoding::NoRules
         | PayloadDecoding::NoPayload
@@ -351,6 +492,10 @@ pub struct ValuesMemory {
     /// The cursor the memory was last asked at: the payloads held are the ones
     /// after it, so a lower cursor cannot be answered from them.
     asked_from: u64,
+    /// The declarations the fold keys and joins by
+    /// ([`FormatMap::keying_text`]): the key ids it reads references under and
+    /// the segment rules it joins pieces by. Other text there is another fold.
+    keying: String,
     stats: crate::FoldStats,
 }
 
@@ -416,24 +561,39 @@ pub fn field_values_since(
     let mut map = FormatMap::new();
     map.declare_all(ask.declarations)
         .map_err(ValuesError::Declarations)?;
-    if memory.selector.as_deref() != Some(ask.selector) || ask.after_seq < memory.asked_from {
+    // The key ids and segment declarations are read by the WALK (a key decides
+    // what a selector picks and which stream a piece joins), so another text of
+    // them is another walk; every other declaration is read when a record is
+    // written, and another text of those reads the same kept payloads.
+    let keying = map.keying_text();
+    if memory.selector.as_deref() != Some(ask.selector)
+        || ask.after_seq < memory.asked_from
+        || memory.keying != keying
+    {
         memory.fold = crate::ordered_fold::Resumable::default();
     }
     let grouping = crate::node::session_grouping(dissection);
     memory
         .fold
         .advance(dissection, &grouping, &mut memory.stats, progress, || {
+            let mut plane = crate::payload::PayloadFold::begin(dissection, ask.filter, &grouping);
+            plane.fix_key_ids(map.key_bindings());
             ValuesFold {
-                plane: crate::payload::PayloadFold::begin(dissection, ask.filter, &grouping),
+                plane,
                 held: Vec::new(),
+                segments: crate::segment_chain::SegmentLedger::new(),
             }
         })
         .ok_or(ValuesError::Cancelled)?;
     memory.selector = Some(String::from(ask.selector));
     memory.asked_from = ask.after_seq;
+    memory.keying = keying;
     let Some(fold) = memory.fold.fold_mut() else {
         return Err(ValuesError::Cancelled);
     };
+    // Joined BEFORE the cursor gives payloads up: a piece at or below the
+    // cursor still belongs to a message that may complete after it.
+    fold.join(&map);
     // The payloads the cursor has passed are the caller's now.
     let after = ask.after_seq;
     fold.held.retain(|h| {
@@ -504,6 +664,24 @@ fn push_record(seq: u64, held: &Held, outcome: &Outcome, out: &mut String) {
         Some(k) => escape_into(k, out),
         None => out.push_str("null"),
     }
+    // Revision 2: where `keyexpr` came from, in the field document's words.
+    out.push_str(",\"keyexpr_source\":");
+    let source = match (&held.keyexpr, held.fixed) {
+        (None, _) => None,
+        (Some(_), false) => Some(crate::payload_decode::KeySource::Wire),
+        (Some(_), true) => Some(crate::payload_decode::KeySource::FixedId),
+    };
+    match source {
+        Some(source) => escape_into(source.word(), out),
+        None => out.push_str("null"),
+    }
+    // Revision 2: the piece's verdict, on every record, `null` on one that is
+    // not a piece of a split message.
+    out.push_str(",\"segment\":");
+    match &held.piece {
+        Some(piece) => push_piece(piece, out),
+        None => out.push_str("null"),
+    }
     out.push_str(",\"state\":\"");
     out.push_str(outcome.word());
     out.push('"');
@@ -537,9 +715,69 @@ fn push_record(seq: u64, held: &Held, outcome: &Outcome, out: &mut String) {
             out.push_str(",\"declared\":");
             escape_into(declared, out);
         }
-        Outcome::NotOnTheWire | Outcome::KeyexprUnresolved => {}
+        Outcome::NotOnTheWire | Outcome::KeyexprUnresolved | Outcome::SegmentPiece => {}
     }
     out.push('}');
+}
+
+/// A piece's `segment`: which message of its stream it belongs to, how big that
+/// message is, where the piece sits in it or why it joins nothing, what of the
+/// message is still missing, and the messages of its stream it ended before
+/// they were whole. The words and the integers are the field document's
+/// `segment` block's, a subset of it: what a reader of values needs to say why a
+/// message has no value yet.
+fn push_piece(piece: &HeldPiece, out: &mut String) {
+    let integer = push_piece_integer;
+    let verdict = &piece.verdict;
+    out.push_str("{\"profile\":");
+    escape_into(&piece.profile, out);
+    out.push_str(",\"transfer\":");
+    integer(piece.transfer, out);
+    out.push_str(",\"whole_bytes\":");
+    integer(piece.whole_bytes, out);
+    out.push_str(",\"place\":");
+    match verdict.place {
+        Some(place) => escape_into(place.word(), out),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"unjoined\":");
+    match verdict.unjoined {
+        Some(why) => escape_into(why.word(), out),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"missing_ranges\":[");
+    for (i, (from, to)) in verdict.missing.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        integer(*from, out);
+        out.push(',');
+        integer(*to, out);
+        out.push(']');
+    }
+    out.push_str("],\"ended_transfers\":[");
+    for (i, ended) in verdict.ended.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"transfer\":");
+        integer(ended.transfer, out);
+        out.push_str(",\"whole_bytes\":");
+        integer(ended.total, out);
+        out.push_str(",\"received_bytes\":");
+        integer(ended.received, out);
+        let _ = write!(out, ",\"evicted\":{}}}", ended.evicted);
+    }
+    out.push_str("]}");
+}
+
+/// Every integer of a record's `segment`, through the shared integer door:
+/// `transfer`, `whole_bytes`, the bounds of each `missing_ranges` pair and the
+/// `transfer`, `whole_bytes` and `received_bytes` of each `ended_transfers`
+/// entry. One writer, so they are one cell of the integer rule.
+fn push_piece_integer(value: u64, out: &mut String) {
+    wz_session_core::json::u64_into(value, out);
 }
 
 fn push_value(v: &Picked, out: &mut String) {

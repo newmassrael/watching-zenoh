@@ -2589,6 +2589,31 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R59_CARRIES,
     },
+    // Revision 61 ADDS `keyexpr_source` to every `carried` entry (the row's and
+    // a completed chain's `above_transport.carried`), after `keyexpr_suffix`,
+    // and retires nothing. A declaration text may now FIX key ids
+    // (`#%<id>=<keyexpr>`, a `key_binding` line of the declaration verdict) for
+    // a sender that never declares its ids on the wire.
+    //
+    // ⚠ A VALUE MOVES under a stationary key: on an entry whose reference the
+    // wire's tables did not answer and whose id a declaration fixed, `keyexpr`
+    // is the fixed key with the reference's suffix appended, where it was
+    // `null`, and `keyexpr_source` says `fixed_id`; `keyexpr_cause`,
+    // `keyexpr_id` and `keyexpr_suffix` still say what the wire did not answer.
+    // Every rule then applies to that key: `payload_decode`, `e2e` and
+    // `segment` (whose `joined.payload_decode` read it as `keyexpr_unresolved`
+    // before) read the message under it. `keyexpr_source` is `wire` where the
+    // tables answered and `null` where there is no key. Like `keyexpr` it can
+    // change in an issued row.
+    DocumentShape {
+        document: FIELDS,
+        revision: 61,
+        keys: FIELDS_R61_KEYS,
+        retiring: &[],
+        families: FIELDS_R61_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R61_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -2927,6 +2952,23 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         families: DECLARATIONS_DIAGNOSE_R4_FAMILIES,
         planes: &[],
         carries: DECLARATIONS_DIAGNOSE_R4_CARRIES,
+    },
+    // A SIXTH KIND OF LINE: A KEY BINDING.
+    //
+    // Revision 5 widens `kind` by `key_binding` and moves no key. The line is
+    // `#%<id>=<keyexpr>`: a definition line whose name is `%` and decimal digits
+    // only, which fixes the key id `<id>` to the key for a sender that never
+    // declares it on the wire. It carries `line` and, as its `pattern`, the key
+    // it binds. The id `0`, an id bound twice and a key that is not a key
+    // expression are refused, each with its own `message`.
+    DocumentShape {
+        document: DECLARATIONS_DIAGNOSE,
+        revision: 5,
+        keys: DECLARATIONS_DIAGNOSE_R2_KEYS,
+        retiring: &[],
+        families: DECLARATIONS_DIAGNOSE_R5_FAMILIES,
+        planes: &[],
+        carries: DECLARATIONS_DIAGNOSE_R5_CARRIES,
     },
     // A SINGLE KEY EXPRESSION, JUDGED, WITHOUT BUILDING A DECLARATION LINE.
     //
@@ -4091,6 +4133,42 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELD_VALUES_R1_CARRIES,
     },
+    // Revision 2 ADDS `keyexpr_source` and `segment` to every record and the
+    // state `segment_piece`, and retires nothing.
+    //
+    // A message its sender split over several samples on one key (a declared
+    // segment profile recognises each piece) is read WHOLE: its pieces are
+    // joined in capture order, as the field document joins them, and the piece
+    // that completed it carries the message's values under the state reading
+    // the joined bytes gave (`decoded` and its `values`, or `refused`, ...).
+    // Every other piece is a record of state `segment_piece`, with no value: its
+    // `segment` says which message of its stream it belongs to (`transfer`,
+    // `whole_bytes`), where it sits (`place`) or why it joins none
+    // (`unjoined`), what of the message is still missing below the furthest
+    // byte received (`missing_ranges`), and the messages it ended before they
+    // were whole (`ended_transfers`). A piece is a record when a rule covers the
+    // message's key, as a whole message is; `segment` is `null` on a record
+    // that is not a piece.
+    //
+    // `keyexpr_source` is the field document's (revision 61): `fixed_id` where
+    // the key is one a declaration fixed for an id the wire did not answer, and
+    // the selector is judged against that key.
+    //
+    // ⚠ A VALUE MOVES: a piece was not a record at revision 1, and the record
+    // of a fixed id's message said `keyexpr_unresolved` with a `null` key.
+    //
+    // The document takes the integer rule here: it applies to every integer of
+    // a record's `segment` (a header field of a declared segment profile is up
+    // to eight bytes wide).
+    DocumentShape {
+        document: FIELD_VALUES,
+        revision: 2,
+        keys: FIELD_VALUES_R2_KEYS,
+        retiring: &[],
+        families: FIELD_VALUES_R2_FAMILIES,
+        planes: &[],
+        carries: FIELD_VALUES_R2_CARRIES,
+    },
     // THE FIELD DOCUMENT'S ROWS WITHOUT THEIR TREES, in CBOR.
     //
     // A document of its own because it is the answer of a door of its own
@@ -4110,6 +4188,18 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         families: ROW_FACTS_R1_FAMILIES,
         planes: &[],
         carries: ROW_FACTS_R1_CARRIES,
+    },
+    // Revision 2 is the field document's revision 61 on these rows: every
+    // `carried` entry gains `keyexpr_source`, and an entry whose id a
+    // declaration fixed carries the fixed key in `keyexpr`. See that row.
+    DocumentShape {
+        document: ROW_FACTS,
+        revision: 2,
+        keys: ROW_FACTS_R2_KEYS,
+        retiring: &[],
+        families: ROW_FACTS_R2_FAMILIES,
+        planes: &[],
+        carries: ROW_FACTS_R2_CARRIES,
     },
     // THE SAME MOVE ON THE CENSUS: a `zid` prefix is read against the capture
     // and an ambiguous one is reported.
@@ -5051,6 +5141,662 @@ pub const ROW_FACTS_R1_CARRIES: &[KeyCarries] = &[
     },
     KeyCarries {
         key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// The row-facts document's key set at revision 2: the field document's at
+/// revision 61 without [`ROW_FACTS_TREE_ONLY_KEYS`].
+pub const ROW_FACTS_R2_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "announced_version",
+    "answers",
+    "at",
+    "at_least",
+    "at_most_bytes",
+    "basis",
+    "batch_header",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "check",
+    "checks",
+    "chunk_bytes",
+    "chunk_offset",
+    "close_seen",
+    "closes",
+    "completion_ns",
+    "compression",
+    "conduit",
+    "confirmed",
+    "context",
+    "count",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "crc_stated",
+    "crossed_at_packet",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "disagreements",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "ended_transfers",
+    "enum_number",
+    "eps_basis",
+    "evicted",
+    "evidence",
+    "example",
+    "expired_chains",
+    "explained",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "first_reply",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "headed_resyncs",
+    "headed_units",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "joined",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "keyexpr_source",
+    "keyexpr_suffix",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "log2_lr_max_millibits",
+    "log2_lr_millibits",
+    "log2_lr_min_millibits",
+    "log2_lr_no_max_millibits",
+    "log2_lr_no_millibits",
+    "log2_lr_no_min_millibits",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "millibits",
+    "missing",
+    "missing_ranges",
+    "model",
+    "name",
+    "named",
+    "negotiated",
+    "no_at_millibits",
+    "no_millibits",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "out_of_order",
+    "outcome",
+    "overlap",
+    "packet",
+    "parameters",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "payload_size",
+    "phase",
+    "place",
+    "plain_resyncs",
+    "plain_units",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "q_basis",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "received_bytes",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "residual",
+    "revised",
+    "revision",
+    "round_trip_ns",
+    "rst_seen",
+    "samples",
+    "schema",
+    "scout_askers",
+    "scouting",
+    "segment",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "size_verdict",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stated",
+    "stream",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "strength",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "transfer",
+    "type",
+    "typed",
+    "typed_value",
+    "undecoded",
+    "under",
+    "unit_readings",
+    "units",
+    "unjoined",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "violated",
+    "whole_bytes",
+    "why",
+    "window",
+    "wrong",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+    "zid",
+];
+
+/// The row-facts document's value families at revision 2: the field
+/// document's at revision 61 without [`ROW_FACTS_TREE_ONLY_FAMILIES`].
+pub const ROW_FACTS_R2_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "basis",
+        values: BASIS_R45,
+    },
+    ValueFamily {
+        key: "batch_header",
+        values: BATCH_HEADER_R44,
+    },
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R50,
+    },
+    ValueFamily {
+        key: "counter_reason",
+        values: COUNTER_REASON_R34,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_EPS_BASIS_R50,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "keyexpr_source",
+        values: KEYEXPR_SOURCE_R61,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "place",
+        values: SEGMENT_PLACE_R59,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "request_kind",
+        values: REQUEST_KIND_R37,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "size_verdict",
+        values: SIZE_VERDICT_R55,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R59,
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "unjoined",
+        values: SEGMENT_UNJOINED_R59,
+    },
+    ValueFamily {
+        key: "unopened_reason",
+        values: UNOPENED_REASON_R35,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
+/// The row-facts document's carries at revision 2: revision 1's and the field
+/// document's `keyexpr_source`, a passenger.
+pub const ROW_FACTS_R2_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "announced_version",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "batch_header",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(ROW_FACTS_CARRIED_STATE_CARRIES_R1),
+    },
+    KeyCarries {
+        key: "check",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "eps_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_source",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(ROW_FACTS_OFFSET_SPACE_CARRIES_R1),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "place",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "q_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "request_kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "size_verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R59),
+    },
+    KeyCarries {
+        key: "strength",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unjoined",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// The values document's key set at revision 2: revision 1's, and per record
+/// `keyexpr_source` and `segment` with what a `segment` holds.
+pub const FIELD_VALUES_R2_KEYS: &[&str] = &[
+    "after_seq",
+    "declared",
+    "document",
+    "ended_transfers",
+    "enum_number",
+    "evicted",
+    "keyexpr",
+    "keyexpr_source",
+    "missing_ranges",
+    "name",
+    "path",
+    "paths",
+    "place",
+    "profile",
+    "received_bytes",
+    "record",
+    "records",
+    "revision",
+    "schema",
+    "segment",
+    "seq",
+    "state",
+    "through_seq",
+    "time_ns",
+    "transfer",
+    "type",
+    "typed",
+    "typed_value",
+    "unjoined",
+    "values",
+    "whole_bytes",
+    "why",
+    "window",
+];
+
+/// What a record's `state` says at values-document revision 2: revision 1's
+/// words and `segment_piece`.
+pub const FIELD_VALUES_STATE_R2: &[&str] = &[
+    "decoded",
+    "encoding_mismatch",
+    "keyexpr_unresolved",
+    "not_on_the_wire",
+    "refused",
+    "segment_piece",
+];
+
+/// The values document's value families at revision 2: `state`, and the field
+/// document's `keyexpr_source`, `place` and `unjoined`, over the same words.
+pub const FIELD_VALUES_R2_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "keyexpr_source",
+        values: KEYEXPR_SOURCE_R61,
+    },
+    ValueFamily {
+        key: "place",
+        values: SEGMENT_PLACE_R59,
+    },
+    ValueFamily {
+        key: "state",
+        values: FIELD_VALUES_STATE_R2,
+    },
+    ValueFamily {
+        key: "unjoined",
+        values: SEGMENT_UNJOINED_R59,
+    },
+];
+
+/// What a record's words bring at revision 2: revision 1's, with
+/// `keyexpr_source` and `segment` on every record, and `segment_piece`, which
+/// brings nothing more; `keyexpr_source`, `place` and `unjoined` decide no key.
+pub const FIELD_VALUES_R2_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "keyexpr_source",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "place",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(&[
+            WordCarries {
+                word: "decoded",
+                shapes: &[&[
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "schema",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                    "typed",
+                    "values",
+                ]],
+            },
+            WordCarries {
+                word: "encoding_mismatch",
+                shapes: &[&[
+                    "declared",
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                ]],
+            },
+            WordCarries {
+                word: "keyexpr_unresolved",
+                shapes: &[&[
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                ]],
+            },
+            WordCarries {
+                word: "not_on_the_wire",
+                shapes: &[&[
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                ]],
+            },
+            WordCarries {
+                word: "refused",
+                shapes: &[&[
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                    "why",
+                ]],
+            },
+            WordCarries {
+                word: "segment_piece",
+                shapes: &[&[
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                ]],
+            },
+        ]),
+    },
+    KeyCarries {
+        key: "unjoined",
         shape: CarriesShape::Passenger,
     },
 ];
@@ -11973,6 +12719,68 @@ pub const DECLARATIONS_DIAGNOSE_R4_CARRIES: &[KeyCarries] = &[
             WordCarries {
                 word: "format_rule",
                 shapes: &[&["line", "pattern", "rule_index"]],
+            },
+            WordCarries {
+                word: "schema_file",
+                shapes: &[&["line"]],
+            },
+            WordCarries {
+                word: "segment_rule",
+                shapes: &[&["line", "pattern", "rule_index"]],
+            },
+        ]),
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// What a `lines[].kind` says at declaration-verdict revision 5: revision 4's
+/// words and `key_binding`.
+pub const DECLARATION_KIND_R5: &[&str] = &[
+    "field_name",
+    "format_definition",
+    "format_rule",
+    "key_binding",
+    "schema_file",
+    "segment_rule",
+];
+
+/// The declaration verdict's value families at revision 5.
+pub const DECLARATIONS_DIAGNOSE_R5_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "kind",
+        values: DECLARATION_KIND_R5,
+    },
+    ValueFamily {
+        key: "reason",
+        values: KEYEXPR_FAULT_R1,
+    },
+];
+
+/// What the declaration verdict's words decide at revision 5: revision 4's,
+/// and a `key_binding` line, which carries its `line` and the key it binds as
+/// its `pattern`.
+pub const DECLARATIONS_DIAGNOSE_R5_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(&[
+            WordCarries {
+                word: "field_name",
+                shapes: &[&["line", "pattern"]],
+            },
+            WordCarries {
+                word: "format_definition",
+                shapes: &[&["line"]],
+            },
+            WordCarries {
+                word: "format_rule",
+                shapes: &[&["line", "pattern", "rule_index"]],
+            },
+            WordCarries {
+                word: "key_binding",
+                shapes: &[&["line", "pattern"]],
             },
             WordCarries {
                 word: "schema_file",
@@ -20169,6 +20977,512 @@ pub const FIELDS_R59_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// `keyexpr_source` at field-document revision 61, sorted: the wire's tables
+/// answered the reference, or a declaration fixed the id they did not answer.
+pub const KEYEXPR_SOURCE_R61: &[&str] = &["fixed_id", "wire"];
+
+/// The keys the field document carries at revision 61: revision 60's PLUS
+/// `keyexpr_source` on every `carried` entry.
+pub const FIELDS_R61_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "announced_version",
+    "answers",
+    "at",
+    "at_least",
+    "at_most_bytes",
+    "basis",
+    "batch_header",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "check",
+    "checks",
+    "chunk_bytes",
+    "chunk_offset",
+    "close_seen",
+    "closes",
+    "completion_ns",
+    "compression",
+    "conduit",
+    "confirmed",
+    "context",
+    "count",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "crc_stated",
+    "crossed_at_packet",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "disagreements",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "ended_transfers",
+    "enum_number",
+    "eps_basis",
+    "evicted",
+    "evidence",
+    "example",
+    "expired_chains",
+    "explained",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "first_reply",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "headed_resyncs",
+    "headed_units",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "joined",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "keyexpr_source",
+    "keyexpr_suffix",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "log2_lr_max_millibits",
+    "log2_lr_millibits",
+    "log2_lr_min_millibits",
+    "log2_lr_no_max_millibits",
+    "log2_lr_no_millibits",
+    "log2_lr_no_min_millibits",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "millibits",
+    "missing",
+    "missing_ranges",
+    "model",
+    "name",
+    "named",
+    "negotiated",
+    "no_at_millibits",
+    "no_millibits",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "out_of_order",
+    "outcome",
+    "overlap",
+    "packet",
+    "parameters",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "payload_size",
+    "phase",
+    "place",
+    "plain_resyncs",
+    "plain_units",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "q_basis",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "received_bytes",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "residual",
+    "revised",
+    "revision",
+    "round_trip_ns",
+    "rst_seen",
+    "samples",
+    "schema",
+    "scout_askers",
+    "scouting",
+    "segment",
+    "selected",
+    "selector_path",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "size_verdict",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stated",
+    "stream",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "strength",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "transfer",
+    "type",
+    "typed",
+    "typed_value",
+    "undecoded",
+    "under",
+    "unit_readings",
+    "units",
+    "unjoined",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "violated",
+    "whole_bytes",
+    "why",
+    "window",
+    "wrong",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+    "zid",
+];
+
+/// The field document's value families at revision 61: revision 59's and
+/// `keyexpr_source`.
+pub const FIELDS_R61_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "basis",
+        values: BASIS_R45,
+    },
+    ValueFamily {
+        key: "batch_header",
+        values: BATCH_HEADER_R44,
+    },
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R50,
+    },
+    ValueFamily {
+        key: "counter_reason",
+        values: COUNTER_REASON_R34,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_EPS_BASIS_R50,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "keyexpr_source",
+        values: KEYEXPR_SOURCE_R61,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "place",
+        values: SEGMENT_PLACE_R59,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "request_kind",
+        values: REQUEST_KIND_R37,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "size_verdict",
+        values: SIZE_VERDICT_R55,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R59,
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "unjoined",
+        values: SEGMENT_UNJOINED_R59,
+    },
+    ValueFamily {
+        key: "unopened_reason",
+        values: UNOPENED_REASON_R35,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
+/// What the field document's words decide at revision 61: revision 59's, and
+/// `keyexpr_source`, which decides no key (`keyexpr` is on every entry).
+pub const FIELDS_R61_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "announced_version",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "batch_header",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "check",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "eps_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_source",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R56),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "place",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "q_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "request_kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "size_verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R59),
+    },
+    KeyCarries {
+        key: "strength",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unjoined",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// What a payload block's `state` brings at field-document revision 57:
 /// revision 28's, with `schema` and `typed` on `decoded`.
 pub const PAYLOAD_STATE_CARRIES_R57: &[WordCarries] = &[
@@ -25538,7 +26852,7 @@ mod tests {
             // of a split message, and the payload state `segment_piece`.
             // To 60 when the key set declared a datagram flow's `disagreements`
             // group, written since the field layer's first round.
-            (FIELDS, 60),
+            (FIELDS, 61),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -25593,7 +26907,7 @@ mod tests {
             // as and a refused key named its chunk, byte and reason.
             // To 3 when a line could be a `.proto` file, `schema_file`.
             // To 4 when a rule could bind a segment profile, `segment_rule`.
-            (DECLARATIONS_DIAGNOSE, 4),
+            (DECLARATIONS_DIAGNOSE, 5),
             // The verdict on one key expression.
             (KEYEXPR_DIAGNOSE, 1),
             // To 2 when the text began to carry the schema files and to name
@@ -25685,9 +26999,9 @@ mod tests {
             // What a live handle holds in memory, by structure.
             (MEMORY, 1),
             // The typed values of a few payload field paths.
-            (FIELD_VALUES, 1),
+            (FIELD_VALUES, 2),
             // The field document's rows without their trees.
-            (ROW_FACTS, 1),
+            (ROW_FACTS, 2),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");

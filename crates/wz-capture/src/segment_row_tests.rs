@@ -302,9 +302,16 @@ pub(crate) fn pin_documents() -> Vec<String> {
         put(&mut wire, key(), &demo_piece(4, 1, 4, 2, b"abc"));
         // A profile with no CRC.
         put(&mut wire, literal("demo/plain/x"), &piece(5, 1, 0..11));
+        // An id the wire never declared and a declaration fixed, so an entry's
+        // `keyexpr_source` says `fixed_id` (every other says `wire` or null).
+        // No format rule covers the fixed key: it adds the word and no state.
+        put(&mut wire, (7, None), MESSAGE);
         // `protobuf` reads the joined message: a decoder the other pins already
         // render, so these documents add the `segment` keys and nothing else.
-        alloc::vec![document(&mut wire, &declarations("demo/**=protobuf"))]
+        alloc::vec![document(
+            &mut wire,
+            &declarations("demo/**=protobuf\n#%7=other/fixed")
+        )]
     }
 }
 

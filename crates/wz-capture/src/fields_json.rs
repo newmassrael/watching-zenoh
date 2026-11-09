@@ -1174,6 +1174,7 @@ pub const REVISABLE_ROW_CELLS: &[&str] = &[
     "/above_transport/carried[]/keyexpr",
     "/above_transport/carried[]/keyexpr_cause",
     "/above_transport/carried[]/keyexpr_id",
+    "/above_transport/carried[]/keyexpr_source",
     "/above_transport/carried[]/keyexpr_suffix",
     "/above_transport/carried[]/payload_decode/**",
     "/above_transport/carried[]/segment/**",
@@ -1181,6 +1182,7 @@ pub const REVISABLE_ROW_CELLS: &[&str] = &[
     "/carried[]/keyexpr",
     "/carried[]/keyexpr_cause",
     "/carried[]/keyexpr_id",
+    "/carried[]/keyexpr_source",
     "/carried[]/keyexpr_suffix",
     "/carried[]/segment/**",
     // A final's `closes` (on its `carried` entry) names the request the exchange
@@ -1804,6 +1806,13 @@ fn fields_json_selected(
         spaces,
         requests: list_requests_of,
     } = tables;
+    // The key ids THIS call's declarations fix. The table above outlives the
+    // call and is the capture's; the fixed ids are the declaration text's, so
+    // they are set on every call, and a call that declares none clears them.
+    match declarations {
+        Some(declarations) => declarations.fix_key_ids(spaces),
+        None => spaces.fix_key_ids(core::iter::empty::<(u64, &str)>()),
+    }
     // R2100 (open-debt item 509) — the document's own revision, first key. See
     // `doc_revision`; the census document opens the same way.
     let mut out = String::from("{");
@@ -2136,7 +2145,13 @@ fn enter<'a>(
             shared.enter_flow(grouping.owners(list));
             shared
         }
-        None => own.insert(crate::agg::KeyexprSpaces::new()),
+        None => {
+            // Private tables, and the same fixed ids: those are the
+            // declarations', not any list's.
+            let mut private = crate::agg::KeyexprSpaces::new();
+            private.fix_key_ids(shared.fixed_key_ids());
+            own.insert(private)
+        }
     }
 }
 
@@ -3203,17 +3218,22 @@ fn judge_record<'d>(
     // as a piece and never as a frame, because it is not one (its counter
     // would be read out of a chunk). The message it completes, when it
     // completes one, is the frame, judged here at this piece's instant.
+    // The key a record is read under: the wire's, or the key a declaration
+    // fixed for an id the wire did not answer.
+    let read_as = keyexpr.and_then(crate::payload_decode::key_read_as);
     if let (Some(payload), Some(reference)) = (payload, keyexpr) {
-        let key = match reference {
-            Ok(keyexpr) => crate::segment_chain::KeyRef::Resolved(keyexpr.clone()),
-            Err(miss) => crate::segment_chain::KeyRef::Unresolved {
+        let key = match (read_as, reference) {
+            (Some(keyexpr), _) => crate::segment_chain::KeyRef::Resolved(keyexpr.into()),
+            (None, Err(miss)) => crate::segment_chain::KeyRef::Unresolved {
                 id: miss.id,
                 suffix: miss.suffix.clone(),
             },
+            // A reference that resolved is read as itself, above.
+            (None, Ok(_)) => return none,
         };
         if let Some(segment) = declarations.judge_segment(key, payload, source.from_low) {
-            let joined_e2e = match (&segment.verdict.joined, reference) {
-                (Some(joined), Ok(keyexpr)) => declarations.judge_e2e(
+            let joined_e2e = match (&segment.verdict.joined, read_as) {
+                (Some(joined), Some(keyexpr)) => declarations.judge_e2e(
                     keyexpr,
                     Some(joined),
                     source.sender,
@@ -3230,7 +3250,7 @@ fn judge_record<'d>(
             };
         }
     }
-    let Some(Ok(keyexpr)) = keyexpr else {
+    let Some(keyexpr) = read_as else {
         return none;
     };
     RecordJudged {
@@ -3562,11 +3582,7 @@ fn push_carried(
             ",\"start\":{},\"end\":{},\"keyexpr\":",
             node.span.start, node.span.end
         );
-        match &keyexpr {
-            Some(Ok(keyexpr)) => escape_into(keyexpr, out),
-            Some(Err(_)) | None => out.push_str("null"),
-        }
-        push_keyexpr_miss(keyexpr.as_ref().and_then(|k| k.as_ref().err()), out);
+        push_keyexpr_read(keyexpr.as_ref(), judging.declarations, out);
         push_payload_slot(payload.as_ref(), out);
         push_payload_size(session, is_record.then_some(node), out);
         push_e2e(judged.e2e.as_ref(), out);
@@ -4041,6 +4057,37 @@ fn push_body(node: &wz_session_core::dissect::Field, out: &mut String) {
 /// (a bare number up to 2^53 - 1, a decimal string past it); the wire id is a
 /// 32-bit value in practice, and the door is what makes that a property of the
 /// writer rather than of a capture that obeys it.
+fn push_keyexpr_read(
+    outcome: Option<&Result<String, crate::payload_decode::UnresolvedRef>>,
+    declarations: Option<&Declarations<'_>>,
+    out: &mut String,
+) {
+    // The key the message is READ under: the wire's, or, since revision 61,
+    // the key a declaration fixed for an id the wire did not answer.
+    match outcome.and_then(crate::payload_decode::key_read_as) {
+        Some(keyexpr) => escape_into(keyexpr, out),
+        None => out.push_str("null"),
+    }
+    let miss = outcome.and_then(|o| o.as_ref().err());
+    push_keyexpr_miss(miss, out);
+    // Revision 61: where `keyexpr` came from. `wire` when the wire's tables
+    // answered the reference, `fixed_id` when they did not and a declaration
+    // fixed the id (the miss cells above still say what the wire did not
+    // answer), `null` when there is no key.
+    out.push_str(",\"keyexpr_source\":");
+    match outcome.and_then(crate::payload_decode::KeySource::of) {
+        Some(source) => {
+            if let (crate::payload_decode::KeySource::FixedId, Some(declarations), Some(miss)) =
+                (source, declarations, miss)
+            {
+                declarations.record_key_binding(miss.id);
+            }
+            escape_into(source.word(), out);
+        }
+        None => out.push_str("null"),
+    }
+}
+
 fn push_keyexpr_miss(miss: Option<&crate::payload_decode::UnresolvedRef>, out: &mut String) {
     out.push_str(",\"keyexpr_cause\":");
     match miss {
@@ -4288,11 +4335,7 @@ fn push_above_transport(
                 record.span.start, record.span.end
             );
             let outcome = crate::payload_decode::subtree_keyexpr_outcome(record, at);
-            match &outcome {
-                Some(Ok(keyexpr)) => escape_into(keyexpr, out),
-                _ => out.push_str("null"),
-            }
-            push_keyexpr_miss(outcome.as_ref().and_then(|o| o.as_ref().err()), out);
+            push_keyexpr_read(outcome.as_ref(), judging.declarations, out);
             // Revision 28 — the same `payload` the row's own entries carry, from
             // the same finder, in the JOINED buffer's coordinates like the
             // entry's `start` and `end`.
@@ -10335,7 +10378,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 85] = [
+        let live: [(&str, &str, Vec<&'static str>); 89] = [
             // What reading a record's payload came to, on the values document:
             // the walk over its emitter's own outcomes.
             (
@@ -10454,6 +10497,41 @@ mod tests {
             ),
             (
                 rev::FIELDS,
+                "unjoined",
+                crate::segment_chain::Unjoined::ALL
+                    .iter()
+                    .map(|u| u.word())
+                    .collect(),
+            ),
+            // Revision 61 — where the key an entry is read under came from.
+            (
+                rev::FIELDS,
+                "keyexpr_source",
+                crate::payload_decode::KeySource::ALL
+                    .iter()
+                    .map(|s| s.word())
+                    .collect(),
+            ),
+            // The values document's revision 2 carries the same three words
+            // of a piece and a key, from the same enums.
+            (
+                rev::FIELD_VALUES,
+                "keyexpr_source",
+                crate::payload_decode::KeySource::ALL
+                    .iter()
+                    .map(|s| s.word())
+                    .collect(),
+            ),
+            (
+                rev::FIELD_VALUES,
+                "place",
+                crate::segment_chain::Place::ALL
+                    .iter()
+                    .map(|p| p.word())
+                    .collect(),
+            ),
+            (
+                rev::FIELD_VALUES,
                 "unjoined",
                 crate::segment_chain::Unjoined::ALL
                     .iter()
@@ -11484,6 +11562,8 @@ mod tests {
                 name = crate::segment_profile::synthetic::NAME,
                 profile = crate::segment_profile::synthetic::PROFILE,
             )),
+            // Revision 5 — a key binding.
+            crate::diagnose_json::declarations_diagnose_json("#%7=demo/fixed"),
         ];
         let mut keyexpr_verdicts: Vec<String> =
             alloc::vec![crate::diagnose_json::keyexpr_diagnose_json("demo/**")];
@@ -12571,6 +12651,7 @@ mod tests {
         assert!(
             chain.contains(&alloc::format!(
                 "\"keyexpr_cause\":null,\"keyexpr_id\":null,\"keyexpr_suffix\":null,\
+                 \"keyexpr_source\":\"wire\",\
                  \"payload\":{{\"start\":{start},\"end\":{end},\
                  \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false}},\
                  \"payload_size\":{{\"size_verdict\":\"measured\",\"bytes\":{bytes},\
@@ -12710,7 +12791,7 @@ mod tests {
         assert!(
             doc.contains(&alloc::format!(
                 "\"keyexpr\":null,\"keyexpr_cause\":\"no_session\",\"keyexpr_id\":7,\
-                 \"keyexpr_suffix\":null,\
+                 \"keyexpr_suffix\":null,\"keyexpr_source\":null,\
                  \"payload\":{{\"start\":{start},\"end\":{end},\
                  \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false}},\
                  \"payload_size\":{{\"size_verdict\":\"measured\",\"bytes\":3,\

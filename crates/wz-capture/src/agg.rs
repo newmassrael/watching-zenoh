@@ -806,6 +806,16 @@ pub struct KeyexprSpaces {
     /// [`Self::at_packet`] last set it. Both an absorb and a resolve are taken
     /// at this point.
     at: usize,
+    /// The key ids a DECLARATION fixed (`crate::payload::formats::DeclarationKind::KeyBinding`):
+    /// id to key expression, for a sender that never declares its ids on the
+    /// wire.
+    ///
+    /// Kept apart from `tables` and consulted only through
+    /// [`Self::fixed_binding`], never by [`Self::resolve_parts`]: the tables are
+    /// what the WIRE said, and every plane that counts unresolved references
+    /// counts what the wire did not say. A reader that applies a binding asks
+    /// for it by name after the wire's answer was no, and says that it did.
+    fixed: BTreeMap<u64, String>,
 }
 
 impl KeyexprSpaces {
@@ -841,6 +851,57 @@ impl KeyexprSpaces {
     /// which is one instance per flow under a different name.
     pub fn enter_flow(&mut self, owners: [SpaceOwner; 2]) {
         self.sides = [Some(owners[0]), Some(owners[1])];
+    }
+
+    /// Take the key ids a declaration text fixed, replacing any taken before.
+    ///
+    /// The ids apply to every space alike: a sender whose ids are fixed in
+    /// advance uses one table for all of them, and the binding is a fact about
+    /// the deployment rather than about one session.
+    pub fn fix_key_ids<'k>(&mut self, bindings: impl IntoIterator<Item = (u64, &'k str)>) {
+        self.fixed = bindings
+            .into_iter()
+            .map(|(id, keyexpr)| (id, keyexpr.to_string()))
+            .collect();
+    }
+
+    /// The key ids a declaration fixed, with their key expressions.
+    pub fn fixed_key_ids(&self) -> impl Iterator<Item = (u64, &str)> {
+        self.fixed
+            .iter()
+            .map(|(id, keyexpr)| (*id, keyexpr.as_str()))
+    }
+
+    /// The key a FIXED id names, with `suffix` appended as
+    /// [`Self::resolve_parts`] appends it; `None` when no declaration fixed
+    /// `id`. Asked by a reader only after the wire's tables did not answer.
+    pub fn fixed_binding(&self, id: u64, suffix: Option<&str>) -> Option<String> {
+        let base = self.fixed.get(&id)?;
+        let mut out = base.clone();
+        if let Some(s) = suffix {
+            out.push_str(s);
+        }
+        Some(out)
+    }
+
+    /// [`Self::resolve`], falling back to a fixed id when the wire's tables do
+    /// not answer: `Ok` with the key and whether it came from a fixed id
+    /// (`true`), or the wire's `Err` when neither answers.
+    pub fn resolve_or_fixed<S: WireexprStorage>(
+        &self,
+        direction: Direction,
+        body: &WireexprOwnedVariant<S>,
+    ) -> Result<(String, bool), (Direction, u64)> {
+        match self.resolve(direction, body) {
+            Ok(keyexpr) => Ok((keyexpr, false)),
+            Err(miss) => {
+                let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(body);
+                match self.fixed_binding(id, suffix) {
+                    Some(keyexpr) => Ok((keyexpr, true)),
+                    None => Err(miss),
+                }
+            }
+        }
     }
 
     /// The owner of one direction of the current list.

@@ -336,6 +336,23 @@ impl<'a> Declarations<'a> {
         self.has_e2e_rules() || self.has_segment_rules()
     }
 
+    /// Hand the key ids these declarations fix to the tables a walk resolves
+    /// against, so a reference the wire does not answer is read under the
+    /// declared key ([`crate::agg::KeyexprSpaces::fix_key_ids`]). Every walk
+    /// that reads payloads by these declarations calls it once, before its
+    /// first row, so one declaration text reads one key on every surface.
+    pub fn fix_key_ids(&self, spaces: &mut crate::agg::KeyexprSpaces) {
+        spaces.fix_key_ids(self.map.key_bindings());
+    }
+
+    /// Mark the binding of the key id `id` used: a message was read under the
+    /// key it fixed.
+    pub fn record_key_binding(&self, id: u64) {
+        if let Some(binding) = self.map.key_binding_of(id) {
+            self.used.borrow_mut().insert(binding);
+        }
+    }
+
     /// How many open transfers the bound on held bytes ended in this run.
     pub fn segments_evicted(&self) -> usize {
         self.e2e.borrow().segments().evicted()
@@ -1590,8 +1607,21 @@ impl PayloadDecoding {
 ///
 /// The resolution itself is [`KeyexprSpaces::resolve_parts`], never a second
 /// copy of the rule.
+///
+/// A reference the wire's tables did not answer is read under the key a
+/// declaration fixed for its id, when one did ([`UnresolvedRef::bound`]): this
+/// is the key a message is READ under, so every rule applies to it.
 pub fn subtree_keyexpr(field: &Field, at: KeyexprAt<'_>) -> Option<String> {
-    subtree_keyexpr_outcome(field, at).and_then(Result::ok)
+    subtree_key_read(field, at).map(|(keyexpr, _)| keyexpr)
+}
+
+/// [`subtree_keyexpr`], answering also the fixed id the key was read through,
+/// when it was: the id a reader marks used.
+fn subtree_key_read(field: &Field, at: KeyexprAt<'_>) -> Option<(String, Option<u64>)> {
+    match subtree_keyexpr_outcome(field, at)? {
+        Ok(keyexpr) => Some((keyexpr, None)),
+        Err(miss) => miss.bound.map(|bound| (String::from(bound), Some(miss.id))),
+    }
 }
 
 /// One keyexpr reference the tables could not answer: WHY, and WHICH id.
@@ -1620,6 +1650,65 @@ pub struct UnresolvedRef {
     /// The suffix the `WireExpr` wrote after the id, verbatim, or `None` when it
     /// wrote none.
     pub suffix: Option<Box<str>>,
+    /// The key a declaration FIXED for the id, with the suffix appended
+    /// ([`crate::agg::KeyexprSpaces::fixed_binding`]), or `None` when none did.
+    ///
+    /// The reference is still unresolved, which is what the three fields above
+    /// say: the wire's tables did not answer it. This is the key the analysis
+    /// reads it under instead, because the operator said what the id means;
+    /// [`UnresolvedRef::read_as`] is the key a reader of the message uses.
+    pub bound: Option<Box<str>>,
+}
+
+impl UnresolvedRef {
+    /// The key the message is read under: the fixed id's, when a declaration
+    /// fixed one.
+    pub fn read_as(&self) -> Option<&str> {
+        self.bound.as_deref()
+    }
+}
+
+/// The key a reader reads a message under, from what [`subtree_keyexpr_outcome`]
+/// answered: the wire's key, or the key a declaration fixed for an id the wire
+/// did not answer. `None` when neither names one.
+pub fn key_read_as(outcome: &Result<String, UnresolvedRef>) -> Option<&str> {
+    match outcome {
+        Ok(keyexpr) => Some(keyexpr),
+        Err(miss) => miss.read_as(),
+    }
+}
+
+/// Where the key a message is read under came from: the word a document's
+/// `keyexpr_source` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    /// The wire's tables answered the reference.
+    Wire,
+    /// They did not, and a declaration fixed the id
+    /// (`crate::payload::formats::DeclarationKind::KeyBinding`).
+    FixedId,
+}
+
+impl KeySource {
+    /// Every source, so a document's vocabulary and a test's walk are one list.
+    pub const ALL: [Self; 2] = [Self::Wire, Self::FixedId];
+
+    /// The word a machine reads for this source.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Wire => "wire",
+            Self::FixedId => "fixed_id",
+        }
+    }
+
+    /// The source of the key [`key_read_as`] answers for `outcome`, or `None`
+    /// when it answers none.
+    pub fn of(outcome: &Result<String, UnresolvedRef>) -> Option<Self> {
+        match outcome {
+            Ok(_) => Some(Self::Wire),
+            Err(miss) => miss.bound.as_ref().map(|_| Self::FixedId),
+        }
+    }
 }
 
 /// R2458 (open-debt item 703) — the same walk, answering WHY when it does not
@@ -1711,6 +1800,7 @@ pub fn subtree_keyexpr_outcome(
                     cause: at.spaces.cause(space),
                     id,
                     suffix: suffix.filter(|s| !s.is_empty()).map(Box::from),
+                    bound: at.spaces.fixed_binding(id, suffix).map(Box::from),
                 })),
             };
         }
@@ -1762,7 +1852,17 @@ pub fn subtree_payload_bytes(field: &Field) -> Option<&Field> {
 /// naming the right topic. So the pair is found INNERMOST-FIRST inside one
 /// subtree: the node returned is the smallest one holding both.
 pub fn keyexpr_and_payload<'a>(field: &'a Field, at: KeyexprAt<'_>) -> Option<(String, &'a Field)> {
-    message_node(field, at).map(|(_, keyexpr, payload)| (keyexpr, payload))
+    message_node(field, at).map(|found| (found.keyexpr, found.payload))
+}
+
+/// What [`message_node`] found: the smallest node holding one message's key
+/// and payload, the key it is read under, the payload, and the fixed key id
+/// the key was read through when a declaration's binding supplied it.
+struct MessageNode<'a> {
+    node: &'a Field,
+    keyexpr: String,
+    payload: &'a Field,
+    fixed: Option<u64>,
 }
 
 /// R311y873 — the same search, answering with the NODE it stopped at.
@@ -1774,7 +1874,7 @@ pub fn keyexpr_and_payload<'a>(field: &'a Field, at: KeyexprAt<'_>) -> Option<(S
 /// payload, it is beside it — and taking the first `encoding` anywhere in the
 /// whole tree would pair a batch's second message's claim with this one's
 /// bytes, which is exactly the defect that doc warns about for `payload`.
-fn message_node<'a>(field: &'a Field, at: KeyexprAt<'_>) -> Option<(&'a Field, String, &'a Field)> {
+fn message_node<'a>(field: &'a Field, at: KeyexprAt<'_>) -> Option<MessageNode<'a>> {
     if let FieldValue::Nested(children) = &field.value {
         for child in children {
             if let Some(found) = message_node(child, at) {
@@ -1782,9 +1882,14 @@ fn message_node<'a>(field: &'a Field, at: KeyexprAt<'_>) -> Option<(&'a Field, S
             }
         }
     }
-    let keyexpr = subtree_keyexpr(field, at)?;
+    let (keyexpr, fixed) = subtree_key_read(field, at)?;
     let payload = subtree_payload_bytes(field)?;
-    Some((field, keyexpr, payload))
+    Some(MessageNode {
+        node: field,
+        keyexpr,
+        payload,
+        fixed,
+    })
 }
 
 /// R311y873 — the encoding ONE message declared, read off its walked group.
@@ -2177,14 +2282,17 @@ pub fn decode_joined(
     if map.is_empty() {
         return PayloadDecoding::NoRules;
     }
-    let Some((node, keyexpr, _)) = message_node(record, at) else {
+    let Some(found) = message_node(record, at) else {
         return PayloadDecoding::KeyexprUnresolved;
     };
+    if let Some(id) = found.fixed {
+        map.record_key_binding(id);
+    }
     decode_payload_parts(
         PayloadParts {
-            keyexpr,
+            keyexpr: found.keyexpr,
             bytes: joined,
-            declared: declared_encoding(node),
+            declared: declared_encoding(found.node),
             base: 0,
             publisher: at.publisher,
         },
@@ -2215,7 +2323,7 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     if map.is_empty() {
         return PayloadDecoding::NoRules;
     }
-    let Some((node, keyexpr, payload)) = message_node(field, at) else {
+    let Some(found) = message_node(field, at) else {
         // Either there is no payload under any keyexpr, or the only keyexpr is
         // a numeric id. The two are told apart by asking again for each half.
         return if subtree_payload_bytes(field).is_none() {
@@ -2224,14 +2332,19 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
             PayloadDecoding::KeyexprUnresolved
         };
     };
-    let FieldValue::Bytes(bytes) = &payload.value else {
+    let FieldValue::Bytes(bytes) = &found.payload.value else {
         return PayloadDecoding::NoPayload;
     };
+    // Read under a key a declaration fixed: that binding applied.
+    if let Some(id) = found.fixed {
+        map.record_key_binding(id);
+    }
+    let payload = found.payload;
     decode_payload_parts(
         PayloadParts {
-            keyexpr,
+            keyexpr: found.keyexpr,
             bytes,
-            declared: declared_encoding(node),
+            declared: declared_encoding(found.node),
             base: payload.span.start,
             publisher: at.publisher,
         },

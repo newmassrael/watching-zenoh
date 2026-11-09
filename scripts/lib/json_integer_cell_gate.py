@@ -90,6 +90,7 @@ RULE_REVISION: dict[str, int] = {
     "transport_build": 1,
     "transport_layout": 1,
     "session_table": 1,
+    "field_values": 2,
 }
 
 
@@ -231,6 +232,16 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             "every integer of a `segment` block",
             "every integer of a `segment` block",
             born=59,
+        ),
+    ),
+    # Values document 2: every integer of a record's `segment`, one writer for
+    # the reason the field document's block has one.
+    ("crates/wz-capture/src/field_values.rs", "push_piece_integer"): (
+        Cell(
+            "field_values",
+            "a record segment's integers",
+            "every integer of a record's `segment` in the values document",
+            "every integer of a record's `segment`",
         ),
     ),
     ("crates/wz-capture/src/e2e_row.rs", "push_optional"): (

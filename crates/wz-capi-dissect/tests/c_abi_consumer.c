@@ -1684,8 +1684,8 @@ static int check_follow_door(void) {
         rc = wz_dissect_live_field_values_since(h, "demo/**=protobuf", "", "1", 0, &doc);
         CHECK(rc == WZ_DISSECT_OK && doc != NULL, "field_values_since rc=%d", rc);
         CHECK(strncmp(doc,
-                      "{\"document\":{\"name\":\"field_values\",\"revision\":1},",
-                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":1},")) ==
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":2},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":2},")) ==
                   0,
               "the values document opens with its revision: %s", doc);
         wz_dissect_string_free(doc);
@@ -3745,9 +3745,10 @@ int main(void) {
     /* Revision 2 names the KIND each line was read as, and a rule its position
      * among the rules: the number a field row's matched_rule.index reports.
      * Revision 3 adds the kind `schema_file`, which this text has none of.
-     * Revision 4 adds the kind `segment_rule`, which it has none of either. */
+     * Revision 4 adds the kind `segment_rule`, which it has none of either,
+     * and revision 5 the kind `key_binding`, nor that. */
     CHECK(strcmp(declared,
-                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":4},"
+                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":5},"
                  "\"ok\":true,\"installed\":1,\"lines\":[{\"line\":0,"
                  "\"kind\":\"format_rule\",\"pattern\":\"demo/temp\","
                  "\"rule_index\":0}]}") == 0,
@@ -4225,8 +4226,12 @@ int main(void) {
      * nothing retires.
      * 60: four keys the document already wrote are declared (a datagram
      * flow's `disagreements` group: `count`, and `named` with an `at` and a
-     * `why`). Nothing written moves. */
-    revisioned[2].revision = 60;
+     * `why`). Nothing written moves.
+     * 61: every `carried` entry's `keyexpr_source` (`wire`, `fixed_id` for a
+     * key the declarations fixed for an id the wire never declared, or null).
+     * A key arrives; on a fixed id's entry `keyexpr` moves from null to the
+     * fixed key. Nothing retires. */
+    revisioned[2].revision = 61;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

@@ -267,6 +267,9 @@ pub mod selection_json;
 pub mod field_values;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod field_values_tests;
+// Fixed key ids, and the values door over messages sent in pieces.
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod key_binding_tests;
 // The row-facts document against the field document it is cut from, and the
 // cut the field document's gates take a row-facts population from.
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]

@@ -1407,7 +1407,12 @@ impl PayloadCensus {
         if !judges_row && payload.is_none() {
             return;
         }
-        let keyexpr = spaces.resolve(direction, keyexpr_body).ok();
+        // The key the record is read under: the wire's, or the key a
+        // declaration fixed for an id the wire did not answer, when the walk
+        // was given any (see `PayloadFold::fix_key_ids`).
+        let read = spaces.resolve_or_fixed(direction, keyexpr_body).ok();
+        let fixed = read.as_ref().is_some_and(|(_, fixed)| *fixed);
+        let keyexpr = read.map(|(keyexpr, _)| keyexpr);
         let payload_bytes = crate::agg::sized_payload(&counts);
         // Walked only for a selector that names a path: see `Filter::reads_tree`.
         let tree = at.tree(frame);
@@ -1476,10 +1481,18 @@ impl PayloadCensus {
         // A walk that wants the payloads takes them here, judged and resolved by
         // the lines above, and the census tally below is not this walk's.
         if let Some(sink) = sink {
+            // The id and suffix of a reference neither the wire nor a fixed id
+            // answered: a reader that joins pieces keys their stream by it.
+            let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(keyexpr_body);
             sink(SelectedPayload {
                 row: RowKey::of(ctx.list(), frame),
                 record,
                 keyexpr: keyexpr.as_deref(),
+                fixed,
+                missed: keyexpr
+                    .is_none()
+                    .then(|| (id, suffix.filter(|s| !s.is_empty()))),
+                from_low: crate::agg::dir_index(direction) == 0,
                 declared: encoding,
                 bytes,
                 elsewhere: shm,
@@ -1572,8 +1585,16 @@ pub(crate) struct SelectedPayload<'a> {
     pub(crate) row: RowKey,
     /// Its place among the records of that row's batch, from 0.
     pub(crate) record: usize,
-    /// The resolved keyexpr, or `None` when the id named no binding.
+    /// The key the record is read under, or `None` when its id named no
+    /// binding the wire made and none a declaration fixed.
     pub(crate) keyexpr: Option<&'a str>,
+    /// Whether `keyexpr` is a key a declaration fixed for an id the wire did
+    /// not answer.
+    pub(crate) fixed: bool,
+    /// The id and suffix of the reference, when `keyexpr` is `None`.
+    pub(crate) missed: Option<(u64, Option<&'a str>)>,
+    /// Whether the record travelled from the low end of its list.
+    pub(crate) from_low: bool,
     /// The encoding the sample declared.
     pub(crate) declared: Encoding<'a>,
     /// The payload's bytes; a descriptor's when `elsewhere`.
@@ -1763,6 +1784,16 @@ impl PayloadFold {
             spaces: crate::agg::KeyexprSpaces::new(),
             filter: resolved.filter().clone(),
         }
+    }
+
+    /// Read a reference the wire does not answer under the key a declaration
+    /// fixed for its id ([`crate::agg::KeyexprSpaces::fix_key_ids`]), from the
+    /// first message on. A fold that reads payloads by declarations calls it
+    /// before it takes any; the census door, which reads no declarations, never
+    /// does, so its counts stay the wire's.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn fix_key_ids<'k>(&mut self, bindings: impl IntoIterator<Item = (u64, &'k str)>) {
+        self.spaces.fix_key_ids(bindings);
     }
 
     /// The census as it stands, for a caller that keeps folding.
@@ -2556,6 +2587,14 @@ pub mod formats {
             String,
             alloc::boxed::Box<crate::proto_schema::ProtoDiagnostic>,
         ),
+        /// A key binding (`#%<id>=<keyexpr>`) of the id `0`, carried with the
+        /// key it named. The wire's id `0` names no table, so a reference
+        /// written with it is never looked up and the binding could not apply.
+        KeyIdZero(String),
+        /// A second key binding of an id already bound. A reference to it would
+        /// read as either key, so the second is refused rather than either
+        /// winning.
+        KeyIdBound(u64),
     }
 
     impl core::fmt::Display for FormatMapError {
@@ -2634,6 +2673,16 @@ pub mod formats {
                 Self::SchemaRefused(token, why) => write!(
                     f,
                     "the declared schema files cannot be read for `{token}`: {why}"
+                ),
+                Self::KeyIdZero(keyexpr) => write!(
+                    f,
+                    "the key id 0 cannot be bound (to `{keyexpr}`): a reference written with \
+                     id 0 names no table and is never looked up"
+                ),
+                Self::KeyIdBound(id) => write!(
+                    f,
+                    "the key id {id} is already bound: a reference to it would read as either \
+                     key, so bind each id once"
                 ),
             }
         }
@@ -2777,6 +2826,9 @@ pub mod formats {
         /// first-match-wins would make a key either split or framed, and a
         /// split message is both.
         segment_rules: Vec<(String, usize)>,
+        /// The fixed key ids: (id, key expression), in the order declared, at
+        /// most one per id. See [`DeclarationKind::KeyBinding`].
+        key_bindings: Vec<(u64, String)>,
     }
 
     /// R311y726 — a handle to ONE declaration installed in a [`FormatMap`].
@@ -2833,17 +2885,24 @@ pub mod formats {
         /// the key may be split into pieces; the key's format rule still says
         /// what the joined message is.
         SegmentRule,
+        /// A key expression bound to a numeric key id (`#%<id>=<keyexpr>`), for
+        /// a sender whose ids are fixed in advance and never declared on the
+        /// wire. A reference the wire's tables cannot answer is read under the
+        /// bound key (with its suffix appended), so the rules above apply to it;
+        /// a reference the wire does answer is read as the wire says.
+        KeyBinding,
     }
 
     impl DeclarationKind {
         /// Every kind, so the vocabulary a consumer switches on and a test's
         /// walk of it are one list.
-        pub const ALL: [Self; 5] = [
+        pub const ALL: [Self; 6] = [
             Self::FormatRule,
             Self::FieldName,
             Self::FormatDefinition,
             Self::SchemaFile,
             Self::SegmentRule,
+            Self::KeyBinding,
         ];
 
         /// The word a machine reads for this kind: the `kind` of a line in
@@ -2856,6 +2915,7 @@ pub mod formats {
                 Self::FormatDefinition => "format_definition",
                 Self::SchemaFile => "schema_file",
                 Self::SegmentRule => "segment_rule",
+                Self::KeyBinding => "key_binding",
             }
         }
     }
@@ -3003,6 +3063,7 @@ pub mod formats {
                 schema_rules: Vec::new(),
                 segment_profiles: Vec::new(),
                 segment_rules: Vec::new(),
+                key_bindings: Vec::new(),
             }
         }
 
@@ -3131,7 +3192,83 @@ pub mod formats {
                     }),
                 });
             }
+            // The key bindings, last, for the same reason.
+            let first_binding = self.first_key_binding_id();
+            for (at, (id, keyexpr)) in self.key_bindings.iter().enumerate() {
+                let keyexpr = escape_field(keyexpr);
+                out.push(Declaration {
+                    id: DeclarationId(first_binding + at),
+                    kind: DeclarationKind::KeyBinding,
+                    text: declaration_text(&DeclarationText::KeyBinding {
+                        id: *id,
+                        keyexpr: &keyexpr,
+                    }),
+                });
+            }
             out
+        }
+
+        /// The handle of the first key binding: after the segment rules.
+        fn first_key_binding_id(&self) -> usize {
+            self.first_segment_rule_id() + self.segment_rules.len()
+        }
+
+        /// Every fixed key id this map binds, with its key expression, in the
+        /// order declared.
+        pub fn key_bindings(&self) -> impl Iterator<Item = (u64, &str)> {
+            self.key_bindings.iter().map(|(id, k)| (*id, k.as_str()))
+        }
+
+        /// The declarations a walk that READS KEYS AND JOINS PIECES depends on,
+        /// as the lines that declare them: the segment profiles, the segment
+        /// rules and the key bindings, as [`Self::declarations`] lists them.
+        /// Two maps with the same
+        /// text key every reference and join every piece alike, so a walk kept
+        /// between calls may go on under the second when it was begun under the
+        /// first, and must begin again when the texts differ.
+        pub fn keying_text(&self) -> String {
+            self.declarations()
+                .into_iter()
+                .filter(|d| {
+                    matches!(
+                        d.kind,
+                        DeclarationKind::KeyBinding | DeclarationKind::SegmentRule
+                    ) || (d.id.0 >= self.first_segment_profile_id()
+                        && d.id.0 < self.first_segment_rule_id())
+                })
+                .map(|d| d.text)
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        /// The handle of the binding of the key id `id`, for a run's ledger of
+        /// what applied; `None` when no binding names it.
+        pub fn key_binding_of(&self, id: u64) -> Option<DeclarationId> {
+            let at = self
+                .key_bindings
+                .iter()
+                .position(|(bound, _)| *bound == id)?;
+            Some(DeclarationId(self.first_key_binding_id() + at))
+        }
+
+        /// Bind the key id `id` to `keyexpr`, for a sender that uses the id
+        /// without declaring it (see [`DeclarationKind::KeyBinding`]).
+        ///
+        /// Refused: the id `0`, which on the wire names no table and so is
+        /// never looked up; a second binding of an id already bound, because a
+        /// reference to it would read as either key; and a key that is not a
+        /// key expression.
+        pub fn bind_key_id(&mut self, id: u64, keyexpr: &str) -> Result<(), FormatMapError> {
+            if id == 0 {
+                return Err(FormatMapError::KeyIdZero(keyexpr.to_owned()));
+            }
+            if self.key_bindings.iter().any(|(bound, _)| *bound == id) {
+                return Err(FormatMapError::KeyIdBound(id));
+            }
+            wz_session_core::keyexpr_canon::validate_keyexpr(keyexpr)
+                .map_err(|why| FormatMapError::NotAKeyexpr(keyexpr.to_owned(), why))?;
+            self.key_bindings.push((id, keyexpr.to_owned()));
+            Ok(())
         }
 
         /// The handle of the first segment profile: after the schema files.
@@ -3677,6 +3814,7 @@ pub mod formats {
                 && self.e2e_profiles.is_empty()
                 && self.segment_profiles.is_empty()
                 && self.segment_rules.is_empty()
+                && self.key_bindings.is_empty()
         }
 
         /// The patterns, in the order they are tried.
@@ -3857,6 +3995,18 @@ pub mod formats {
             /// The file's text as one JSON string, as written.
             text: &'a str,
         },
+        /// `#%<id>=<keyexpr>` -- the key a fixed key id names
+        /// ([`DeclarationKind::KeyBinding`]).
+        ///
+        /// Told from a definition by its name: [`KEY_ID_MARK`] and then decimal
+        /// digits and nothing else. A format definition reads the same as before
+        /// this kind existed unless its name is `%` followed by digits only.
+        KeyBinding {
+            /// The id, as the wire writes it in a reference.
+            id: u64,
+            /// The key expression, quoted as the dialect quotes a field.
+            keyexpr: &'a str,
+        },
     }
 
     impl DeclarationText<'_> {
@@ -3867,9 +4017,15 @@ pub mod formats {
                 Self::Name { .. } => DeclarationKind::FieldName,
                 Self::Definition { .. } => DeclarationKind::FormatDefinition,
                 Self::SchemaFile { .. } => DeclarationKind::SchemaFile,
+                Self::KeyBinding { .. } => DeclarationKind::KeyBinding,
             }
         }
     }
+
+    /// The character that, after [`DEFINE`], opens the name of a key binding
+    /// (`#%7=demo/sensor`): `%` reads as "number", and the digits that follow
+    /// are the id.
+    pub const KEY_ID_MARK: char = '%';
 
     /// The character a JSON string opens with: what a schema file's value
     /// opens with ([`DeclarationText::SchemaFile`]).
@@ -3903,6 +4059,9 @@ pub mod formats {
             }
             DeclarationText::SchemaFile { name, text } => {
                 alloc::format!("{DEFINE}{}{name}={text}", crate::e2e_rule::SCHEMA_MARK)
+            }
+            DeclarationText::KeyBinding { id, keyexpr } => {
+                alloc::format!("{DEFINE}{KEY_ID_MARK}{id}={keyexpr}")
             }
         }
     }
@@ -4042,6 +4201,19 @@ pub mod formats {
             // The record-layout grammar has no `{`, so no layout line changes
             // meaning.
             if let Some((name, value)) = split_once_unescaped(rest, '=') {
+                // A key binding: `#%<digits>=<keyexpr>`. The digits are the
+                // whole name, so `#%7x=...` stays a definition named `%7x`. A
+                // run of digits too long for an id is a binding that names no
+                // id, and is refused rather than read as a format's name.
+                if let Some(digits) = name.strip_prefix(KEY_ID_MARK) {
+                    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                        let id = digits.parse::<u64>().map_err(|_| bad())?;
+                        if value.is_empty() {
+                            return Err(bad());
+                        }
+                        return Ok(DeclarationText::KeyBinding { id, keyexpr: value });
+                    }
+                }
                 // A schema file: `#@<file>="<text>"`. Split at the first `=`
                 // for the profile's reason: the text is JSON and may hold one.
                 if let Some(file) = name.strip_prefix(crate::e2e_rule::SCHEMA_MARK) {
@@ -4213,6 +4385,17 @@ pub mod formats {
                     Ok(DeclaredLine {
                         kind: DeclarationKind::SchemaFile,
                         pattern: None,
+                        rule_index: None,
+                    })
+                }
+                DeclarationText::KeyBinding { id, keyexpr } => {
+                    let keyexpr = unquote(keyexpr)?;
+                    self.bind_key_id(id, &keyexpr)?;
+                    // The key is what the line binds, so it is reported where
+                    // a rule reports its pattern.
+                    Ok(DeclaredLine {
+                        kind: DeclarationKind::KeyBinding,
+                        pattern: Some(keyexpr),
                         rule_index: None,
                     })
                 }

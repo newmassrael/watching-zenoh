@@ -11993,7 +11993,7 @@ mod tests {
                 "encoding_mismatch",
             ),
         ];
-        cases
+        let mut docs: Vec<String> = cases
             .iter()
             .map(|(pcap, declarations, state)| {
                 let handle = replayed(pcap);
@@ -12005,7 +12005,46 @@ mod tests {
                 );
                 doc
             })
-            .collect()
+            .collect();
+        docs.push(field_values_of_pieces());
+        docs
+    }
+
+    /// The values document over a message its sender split (revision 2): the
+    /// first piece of a message, a piece that disagrees on its total, one whose
+    /// CRC is wrong, then a second message whose first piece ends the first one
+    /// unjoined and whose second completes it, so every key a record's
+    /// `segment` writes arrives, and the message's value with it.
+    fn field_values_of_pieces() -> String {
+        use wz_capture::segment_profile::synthetic::{piece, NAME, PROFILE};
+        let message: &[u8] = br#"{"temp":21}"#;
+        let size = message.len() as u32;
+        let mut damaged = piece(1, 1, size, 4, &message[4..8]);
+        *damaged.last_mut().expect("a chunk") ^= 0x01;
+        let pieces: [Vec<u8>; 5] = [
+            piece(1, 1, size, 0, &message[..4]),
+            piece(1, 1, 40, 4, b"abcd"),
+            damaged,
+            piece(1, 2, size, 0, &message[..6]),
+            piece(1, 2, size, 6, &message[6..]),
+        ];
+        // Each piece's sample declares JSON (5), the encoding of the message the
+        // pieces join to, which is what the completing piece's declaration says.
+        let samples: Vec<(u32, &[u8])> = pieces.iter().map(|p| (5, p.as_slice())).collect();
+        let handle = replayed(&capture_declaring_many(&samples));
+        let declarations = format!("#{NAME}={PROFILE}\n**={NAME}\ndemo/sensor=json");
+        let doc = call_field_values(handle, &declarations, "", "$.temp", 0);
+        unsafe { wz_dissect_live_close(handle) };
+        for needle in [
+            "\"state\":\"segment_piece\"",
+            "\"unjoined\":\"crc_mismatch\"",
+            "\"place\":\"closing\"",
+            "\"evicted\":false",
+            "\"state\":\"decoded\"",
+        ] {
+            assert!(doc.contains(needle), "{needle}: {doc}");
+        }
+        doc
     }
 
     /// A SET OF FIELD VALUES REACHES THE READER'S NAMES THROUGH THE ABI, with no
@@ -13821,7 +13860,7 @@ mod tests {
     #[test]
     fn the_declaration_diagnostic_names_the_line_and_needs_no_capture() {
         // R2100 (open-debt item 509) — the verdict opens with its own revision.
-        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":4}";
+        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":5}";
         assert_eq!(
             call_declarations_diagnose("demo/**=protobuf\ndemo/**:1=temperature"),
             format!(
@@ -19495,6 +19534,7 @@ mod tests {
                     "/carried[]/keyexpr",
                     "/carried[]/keyexpr_cause",
                     "/carried[]/keyexpr_id",
+                    "/carried[]/keyexpr_source",
                 ]),
             ),
             (
@@ -19509,6 +19549,7 @@ mod tests {
                     "/carried[]/keyexpr",
                     "/carried[]/keyexpr_cause",
                     "/carried[]/keyexpr_id",
+                    "/carried[]/keyexpr_source",
                     "/payload_decode/format",
                     "/payload_decode/keyexpr",
                     // Revision 28 -- the rule that won starts from the resolved
@@ -19530,6 +19571,7 @@ mod tests {
                     "/above_transport/carried[]/keyexpr",
                     "/above_transport/carried[]/keyexpr_cause",
                     "/above_transport/carried[]/keyexpr_id",
+                    "/above_transport/carried[]/keyexpr_source",
                 ]),
             ),
             // Revision 59 -- a piece under a segment rule narrower than every
@@ -19550,6 +19592,7 @@ mod tests {
                     "/carried[]/keyexpr",
                     "/carried[]/keyexpr_cause",
                     "/carried[]/keyexpr_id",
+                    "/carried[]/keyexpr_source",
                     // The block arrives whole, so the cell is the block itself.
                     "/carried[]/segment",
                     // The row's own payload state turns to `segment_piece`, with
@@ -19574,6 +19617,7 @@ mod tests {
                     "/above_transport/carried[]/keyexpr",
                     "/above_transport/carried[]/keyexpr_cause",
                     "/above_transport/carried[]/keyexpr_id",
+                    "/above_transport/carried[]/keyexpr_source",
                     "/above_transport/carried[]/payload_decode/keyexpr",
                     "/above_transport/carried[]/payload_decode/matched_rule",
                     "/above_transport/carried[]/payload_decode/profile",
@@ -19597,6 +19641,7 @@ mod tests {
                     "/carried[]/keyexpr",
                     "/carried[]/keyexpr_cause",
                     "/carried[]/keyexpr_id",
+                    "/carried[]/keyexpr_source",
                     "/carried[]/keyexpr_suffix",
                 ]),
             ),
@@ -19613,6 +19658,7 @@ mod tests {
                     "/above_transport/carried[]/keyexpr",
                     "/above_transport/carried[]/keyexpr_cause",
                     "/above_transport/carried[]/keyexpr_id",
+                    "/above_transport/carried[]/keyexpr_source",
                     "/above_transport/carried[]/keyexpr_suffix",
                 ]),
             ),
@@ -19628,6 +19674,7 @@ mod tests {
                     "/above_transport/carried[]/keyexpr",
                     "/above_transport/carried[]/keyexpr_cause",
                     "/above_transport/carried[]/keyexpr_id",
+                    "/above_transport/carried[]/keyexpr_source",
                     "/above_transport/carried[]/payload_decode/format",
                     "/above_transport/carried[]/payload_decode/keyexpr",
                     "/above_transport/carried[]/payload_decode/matched_rule",
@@ -19647,6 +19694,7 @@ mod tests {
                     "/carried[]/keyexpr",
                     "/carried[]/keyexpr_cause",
                     "/carried[]/keyexpr_id",
+                    "/carried[]/keyexpr_source",
                     // The block exists only for a key a rule covers, so it
                     // arrives with the key's resolution.
                     "/carried[]/e2e",
@@ -19669,6 +19717,7 @@ mod tests {
                     "/above_transport/carried[]/keyexpr",
                     "/above_transport/carried[]/keyexpr_cause",
                     "/above_transport/carried[]/keyexpr_id",
+                    "/above_transport/carried[]/keyexpr_source",
                     "/above_transport/carried[]/e2e",
                     "/above_transport/carried[]/payload_decode/format",
                     "/above_transport/carried[]/payload_decode/keyexpr",

@@ -20,7 +20,7 @@ const SCHEMA: &str = "syntax = \"proto3\"; package pkg; \
     message Pose { sint32 x = 1; double heading = 2; Gear gear = 3; }";
 
 /// Every list and row numbered by its produced-index plus one, as a handle's.
-struct Numbered;
+pub(crate) struct Numbered;
 
 impl RowCoordinates for Numbered {
     fn list_id(&self, list: usize) -> Option<u64> {
@@ -107,7 +107,8 @@ fn each_record_writes_the_typed_values_of_the_asked_paths_only() {
     );
     assert!(
         doc.contains(
-            "{\"seq\":1,\"record\":0,\"time_ns\":0,\"keyexpr\":\"demo/pose\",\"state\":\"decoded\",\
+            "{\"seq\":1,\"record\":0,\"time_ns\":0,\"keyexpr\":\"demo/pose\",\
+             \"keyexpr_source\":\"wire\",\"segment\":null,\"state\":\"decoded\",\
              \"typed\":true,\"schema\":\"pkg.Pose\",\"values\":[\
              {\"path\":\"1\",\"type\":\"sint32\",\"typed_value\":-3,\"enum_number\":null},\
              {\"path\":\"3\",\"type\":\"pkg.Gear\",\"typed_value\":\"GEAR_DRIVE\",\"enum_number\":2}]}"
@@ -278,7 +279,7 @@ pub(crate) fn documents_for_the_gates() -> Vec<String> {
         // An id no declaration bound.
         push_declaring_aliased(9, 0, &pose(-3, 0.5)),
     ];
-    samples
+    let mut docs: Vec<String> = samples
         .iter()
         .map(|record| {
             let mut d = Dissection::new();
@@ -294,7 +295,10 @@ pub(crate) fn documents_for_the_gates() -> Vec<String> {
             )
             .expect("a document")
         })
-        .collect()
+        .collect();
+    // Revision 2 — the pieces of split messages and a fixed key id.
+    docs.extend(crate::key_binding_tests::values_documents_for_the_gates());
+    docs
 }
 
 #[test]

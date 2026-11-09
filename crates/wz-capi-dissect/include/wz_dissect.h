@@ -506,6 +506,34 @@
  * @values fields place
  * @values fields unjoined
  *
+ * AND WHERE THE KEY CAME FROM, at field-document revision 61.
+ *
+ * A sender whose key ids are fixed in advance never declares them on the wire,
+ * so every reference it writes is a miss. A declaration text may FIX an id:
+ *
+ *     #%7=demo/sensor
+ *
+ * (`%` and the decimal id; a `key_binding` line of the declaration verdict,
+ * verdict revision 5). A reference the wire's tables do not answer and whose id
+ * is fixed is then READ under the fixed key with the reference's suffix
+ * appended (`7` and `/@history` read as `demo/sensor/@history`), and every rule
+ * applies to that key: `payload_decode`, `e2e`, a segment rule's pattern and
+ * the `joined` message's own decode. A reference the wire does answer is the
+ * wire's, whatever is fixed.
+ *
+ *     `keyexpr_source`  `wire` (the tables answered), `fixed_id` (they did
+ *                       not, and a declaration fixed the id), or `null` (no
+ *                       key).
+ *
+ * On every entry, after `keyexpr_suffix`. On a `fixed_id` entry `keyexpr` is
+ * the fixed key, and `keyexpr_cause`, `keyexpr_id` and `keyexpr_suffix` still
+ * say what the wire did not answer, so a reader can tell a key it was told from
+ * a key the capture showed. The census document counts what the wire did not
+ * answer and reads no declarations, so it is unchanged. Like `keyexpr` it can
+ * change in an issued row.
+ *
+ * @values fields keyexpr_source
+ *
  * ⚠ REVISION 9 ALSO MOVED WHICH REFERENCES RESOLVE AT ALL, under a stationary
  * `keyexpr`, and no `value_families` row can say so. Until it, this document
  * folded a keyexpr id space PER FLOW, while a zenoh session with
@@ -1083,12 +1111,14 @@
  * `sn_mask` are rings that can pass the line, and one writer serves both
  * entries); to every integer of a `segment` block (keys that exist from field
  * document 59 and take the rule from their first appearance: a header field of
- * a declared segment profile is up to eight bytes wide); and to
+ * a declared segment profile is up to eight bytes wide); to every integer of a
+ * record's `segment` in the values document (that document takes the rule from
+ * its revision 2, where the key arrives: the same header fields); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
  * offsets, sizes and millisecond spans this library measures: those count
  * things the host holds, and stay bare numbers. Revisions: fields 23, census
  * 16, summary 5, retention 2, e2e_wrap 1, e2e_open 1, transport_build 1,
- * transport_layout 1, session_table 1.
+ * transport_layout 1, session_table 1, field_values 2.
  * The gap total saturates at the top of `u64` instead of wrapping.
  *
  * @values fields carried_state
@@ -1472,7 +1502,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":60,"key":"kind","values":[...],
+ *     {"name":"fields","revision":61,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1515,6 +1545,7 @@
  * @carries fields eps_basis passenger
  * @carries fields family passenger
  * @carries fields keyexpr_cause passenger
+ * @carries fields keyexpr_source passenger
  * @carries fields kind discriminant
  * @carries fields link passenger
  * @carries fields message passenger
@@ -3681,6 +3712,14 @@ int wz_dissect_pcap_fields_where_limited(const unsigned char *bytes, size_t len,
  *     `format_definition`  #<format>=<layout>
  *     `schema_file`        #@<file>="<text>"   (verdict revision 3)
  *     `segment_rule`       <keyexpr>=<segment profile>   (verdict revision 4)
+ *     `key_binding`        #%<id>=<keyexpr>               (verdict revision 5)
+ *
+ * A `key_binding` fixes the key id `<id>` (decimal) to `<keyexpr>` for a sender
+ * that never declares its ids on the wire; it carries the key as its `pattern`
+ * (see `keyexpr_source` at field-document revision 61). It is a definition
+ * line whose name is `%` and digits only, so `#%7x=...` still defines a format
+ * named `%7x`. The id `0` (which the wire never looks up), an id bound twice
+ * and a key that is not a key expression are each refused with a `message`.
  *
  * A `segment_rule` is written as a format rule is; it is one when the name
  * after `=` is a SEGMENT PROFILE the text defines (`#name={"name":..,
@@ -5404,7 +5443,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":60,"key":"state",
+ *     "value_families":[{"name":"fields","revision":61,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -6605,6 +6644,8 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *     /above_transport/carried[]/keyexpr_id    the `keyexpr` it was written beside.
  *     /carried[]/keyexpr_suffix                since revision 58: the suffix moves
  *     /above_transport/carried[]/keyexpr_suffix  with the id.
+ *     /carried[]/keyexpr_source                since revision 61: where the key
+ *     /above_transport/carried[]/keyexpr_source  came from moves with the key.
  *     /carried[]/segment (its whole subtree)   since revision 59: a piece is
  *     /above_transport/carried[]/segment       covered once its key resolves,
  *                                              and the joined message is read by
@@ -6825,9 +6866,10 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * writes them (`1`, `4.1`, `$.x`), at most 64. `after_seq` is the cursor, as
  * for wz_dissect_live_fields_since.
  *
- *     {"document":{"name":"field_values","revision":1},
+ *     {"document":{"name":"field_values","revision":2},
  *      "window":{"after_seq":0,"through_seq":2},"paths":["1"],
  *      "records":[{"seq":1,"record":0,"time_ns":1000000,"keyexpr":"demo/pose",
+ *                  "keyexpr_source":"wire","segment":null,
  *                  "state":"decoded","typed":true,"schema":"pkg.Pose",
  *                  "values":[{"path":"1","type":"sint32","typed_value":-3,
  *                             "enum_number":null}]}]}
@@ -6842,6 +6884,49 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * carries `why`, `encoding_mismatch` the encoding the sample `declared`, and
  * `not_on_the_wire` and `keyexpr_unresolved` nothing more. A record no rule
  * covers is not written.
+ *
+ * WHICH KEY, at values-document revision 2. `keyexpr_source` is the field
+ * document's word (revision 61): `wire`, `fixed_id` for a key the declarations
+ * fixed for an id the wire never declared (`#%<id>=<keyexpr>`; the selector is
+ * judged against that key too), or `null` with a `null` key.
+ *
+ * A MESSAGE SENT IN PIECES, at values-document revision 2. When a segment rule
+ * covers a record's key and its profile recognises the payload (see "AND WHAT A
+ * PIECE IS" above), the record is a piece: the pieces are joined in capture
+ * order, per sender, key and stream, as the field document joins them, and
+ *
+ *   * the piece that completed the message is written with the MESSAGE's
+ *     reading: `decoded` and its `values` (or `refused`, ...), as a whole message
+ *     on that key would be;
+ *   * every other piece is written with `state` `segment_piece` and no value.
+ *
+ * Both carry `segment`, `null` on a record that is not a piece:
+ *
+ *     "segment":{"profile":"split-a","transfer":N,"whole_bytes":N,
+ *                "place":"first","unjoined":null,"missing_ranges":[[from,to]],
+ *                "ended_transfers":[{"transfer":N,"whole_bytes":N,
+ *                                    "received_bytes":N,"evicted":false}]}
+ *
+ * with the field document's words: `place` where the piece sits (`first`,
+ * `continuing`, `closing`, `whole`, `after_closing`), or `unjoined` why it
+ * joins none (`crc_mismatch`, `total_disagrees`, ...); `missing_ranges` what
+ * of the message is still missing below the furthest byte received; and
+ * `ended_transfers` the messages of its stream it ended before they were whole,
+ * which are never read. A piece is written when a rule covers the message's
+ * key, the condition a whole message is written on; a piece whose key is
+ * unknown is written as an unknown key is (`keyexpr_unresolved` on the piece
+ * that completed it, `segment_piece` on the others), with its `segment`. The
+ * pieces are joined from the first one the walk took, so a cursor that passed a
+ * message's first pieces still gets its value on the piece that completes it;
+ * another text of fixed ids or segment declarations walks from the first
+ * message, as another selector does.
+ *
+ * @values field_values keyexpr_source
+ * @values field_values place
+ * @values field_values unjoined
+ * @carries field_values keyexpr_source passenger
+ * @carries field_values place passenger
+ * @carries field_values unjoined passenger
  *
  * WHAT A CALL COSTS. The walk is kept between calls for the selector, so a caller
  * that asks again from the `through_seq` it was given pays for what arrived
@@ -6939,6 +7024,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @values row_facts eps_basis
  * @values row_facts family
  * @values row_facts keyexpr_cause
+ * @values row_facts keyexpr_source
  * @values row_facts link
  * @values row_facts message
  * @values row_facts offset_space
@@ -6970,6 +7056,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @carries row_facts eps_basis passenger
  * @carries row_facts family passenger
  * @carries row_facts keyexpr_cause passenger
+ * @carries row_facts keyexpr_source passenger
  * @carries row_facts link passenger
  * @carries row_facts message passenger
  * @carries row_facts offset_space discriminant

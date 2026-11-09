@@ -212,7 +212,7 @@ pub struct Verdict {
 }
 
 /// One transfer of a stream.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Transfer {
     number: u64,
     total: u64,
@@ -303,7 +303,10 @@ impl Transfer {
 
 /// The joining state of a run: a transfer per stream seen, and the verdicts
 /// kept by row.
-#[derive(Debug)]
+///
+/// `Clone` because a fold kept between calls is (the values door keeps one in
+/// its fold, beside the payloads that fold already holds by value).
+#[derive(Debug, Clone)]
 pub struct SegmentLedger {
     streams: BTreeMap<StreamKey, Transfer>,
     /// The most bytes the open transfers may hold together.
