@@ -1159,7 +1159,7 @@ fn query_leg(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
         ))]
-        Some(chunk) => leg.query_shm(keyexpr, opts, chunk, on_reply),
+        Some(chunk) => leg.query_shm(keyexpr, opts, &chunk.send_handle(), on_reply),
         #[cfg(not(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")

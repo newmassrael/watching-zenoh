@@ -824,9 +824,9 @@ mod shared_memory {
         }
     }
 
-    /// A get of the node whose value is a chunk sends the chunk's descriptor to a client that
-    /// negotiated shared memory and its bytes to one that did not, and the node's own queryable
-    /// reads the chunk.
+    /// A get through the node's port whose value is a chunk (`get_shm_on_wire`) sends the chunk's
+    /// descriptor to a client that negotiated shared memory and its bytes to one that did not, and
+    /// the node's own queryable reads the chunk.
     #[test]
     fn a_get_of_the_node_sends_its_chunk_as_a_descriptor_to_a_shm_peer_and_as_bytes_to_another() {
         let node = open_node_offering_shm();
@@ -841,15 +841,18 @@ mod shared_memory {
         let (on_node, _) = answer(&engine);
         let value = chunk();
         until_each_is_told(&[&on_shared, &on_plain, &on_node], || {
-            node.get_numbered_shm(
-                ASKED,
-                &QueryOptions::default(),
-                value.send_handle(),
-                None,
-                Box::new(|_: &dyn ReplyView| {}),
-                Box::new(|| {}),
-            )
-            .expect("a node asks with a chunk");
+            assert_eq!(
+                engine.get_shm_on_wire(
+                    ASKED,
+                    &WireKey::literal(),
+                    &QueryOptions::default(),
+                    value.send_handle(),
+                    None,
+                    &mut || Box::new(|_: &dyn ReplyView| {}),
+                ),
+                Some(1),
+                "a node asks with a chunk on one leg"
+            );
         });
 
         assert_eq!(
@@ -875,9 +878,10 @@ mod shared_memory {
         node.close();
     }
 
-    /// What a client that negotiated shared memory sends the node as a chunk, the value of a get
-    /// and a publication, the node's own queryable and subscriber read as the chunk: the node
-    /// reads a descriptor with the default reader, having been opened over none.
+    /// What a client that negotiated shared memory sends the node as a chunk through its port, the
+    /// value of a get (`get_shm_on_wire` of the registry) and a publication, the node's own
+    /// queryable and subscriber read as the chunk: the node reads a descriptor with the default
+    /// reader, having been opened over none.
     #[test]
     fn a_queryable_and_a_subscriber_of_the_node_read_the_chunks_a_shm_peer_sends() {
         let node = open_node_offering_shm();
@@ -889,17 +893,14 @@ mod shared_memory {
         let (asked, _) = answer(&engine);
         let (told, _) = subscribe(&engine);
         let value = chunk();
-        let options = QueryOptions::default();
         until_each_is_told(&[&asked], || {
-            shared.0.shared.fan_query(
-                Locality::Remote,
-                crate::faces::QueryReach::of(&options),
+            other.get_shm_on_wire(
+                ASKED,
+                &WireKey::literal(),
+                &QueryOptions::default(),
+                value.send_handle(),
                 None,
-                |leg| {
-                    leg.query_shm(ASKED, options.clone(), &value, |_| {})
-                        .ok()
-                        .map(|handle| handle.rid())
-                },
+                &mut || Box::new(|_: &dyn ReplyView| {}),
             );
         });
         until_each_is_told(&[&told], || {

@@ -740,7 +740,7 @@ impl QueryLeg<'_> {
         &self,
         keyexpr: &str,
         opts: QueryOptions,
-        value: &wz_runtime_tokio::shm_provider::ShmBackedPayload,
+        value: &wz_session_core::extshm::ShmSendHandle,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         let opts = opts.with_allowed_destination(self.locality());

@@ -575,12 +575,13 @@ async fn wz_getter_through_router() -> Option<GetterRun> {
             tokio::time::sleep(Duration::from_millis(250)).await;
             let mut held = ShmBackedPayload::alloc(WZ_QUERY_VALUE.len()).expect("alloc a value");
             held.write(WZ_QUERY_VALUE.as_bytes());
+            let held = std::sync::Arc::new(held);
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             session
                 .query_shm(
                     "demo/example/zenoh-rs-queryable",
                     QueryOptions::default(),
-                    &held,
+                    &held.send_handle(),
                     move |reply| {
                         let _ = tx.send(reply.payload().to_vec());
                     },

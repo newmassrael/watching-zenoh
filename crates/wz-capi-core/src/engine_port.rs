@@ -496,6 +496,37 @@ impl SessionEngine for SharedSession {
         );
         Some(issued)
     }
+
+    #[cfg(all(feature = "transport-shm", feature = "query"))]
+    fn get_shm_on_wire(
+        &self,
+        keyexpr: &str,
+        _wire: &WireKey,
+        opts: &wz_session_core::query_options::QueryOptions,
+        value: wz_session_core::extshm::ShmSendHandle,
+        fan: Option<&crate::cancellation::CancellableFan>,
+        leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
+    ) -> Option<usize> {
+        // `get_on_wire`'s fan, each leg asking with the chunk (`QueryLeg::query_shm`): a face that
+        // negotiated shared memory is sent its descriptor and every other leg the bytes. A query
+        // whose value is a chunk names its key literally, as the registry's own getter does, so
+        // `wire` is not used.
+        let mut issued = 0;
+        self.fan_query(
+            opts.allowed_destination,
+            crate::faces::QueryReach::of(opts),
+            fan,
+            |query_leg| {
+                let rid = query_leg
+                    .query_shm(keyexpr, opts.clone(), &value, leg())
+                    .ok()
+                    .map(|handle| handle.rid());
+                issued += usize::from(rid.is_some());
+                rid
+            },
+        );
+        Some(issued)
+    }
 }
 
 /// One face's session as the port's [`QueryHolder`](wz_capi_port::QueryHolder): a query held

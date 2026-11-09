@@ -136,7 +136,7 @@ async fn ask(
         let _ = tx.send(reply.payload().to_vec());
     };
     let key = QUERYABLE_KEY;
-    let mut buffer: Option<ShmBackedPayload> = None;
+    let mut buffer: Option<std::sync::Arc<ShmBackedPayload>> = None;
     let options = QueryOptions::default();
     match value {
         GetterValue::None => session.query(key, options, on_reply, |_| {}),
@@ -145,16 +145,18 @@ async fn ask(
         | GetterValue::AliasedQuerierShm(text) => {
             let mut held = ShmBackedPayload::alloc(text.len()).expect("alloc a value buffer");
             held.write(text.as_bytes());
+            let held = std::sync::Arc::new(held);
+            let value_handle = held.send_handle();
             let sent = match value {
                 GetterValue::QuerierShm(_) => {
                     session
                         .declare_querier(key, options)
-                        .get_shm(&held, on_reply, |_| {})
+                        .get_shm(&value_handle, on_reply, |_| {})
                 }
                 GetterValue::AliasedQuerierShm(_) => session
                     .declare_querier_aliased(QUERY_MAPPING_ID, None, options)
-                    .get_shm(&held, on_reply, |_| {}),
-                _ => session.query_shm(key, options, &held, on_reply, |_| {}),
+                    .get_shm(&value_handle, on_reply, |_| {}),
+                _ => session.query_shm(key, options, &value_handle, on_reply, |_| {}),
             };
             buffer = Some(held);
             sent

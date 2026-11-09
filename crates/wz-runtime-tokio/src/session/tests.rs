@@ -1221,10 +1221,11 @@ fn query_shm_hands_a_same_session_queryable_the_chunk_and_only_when_it_listens()
         .expect("query-queryable is ON in this test build");
     let mut payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("alloc");
     payload.write(b"local");
+    let payload = Arc::new(payload);
     let local = || QueryOptions::get().with_allowed_destination(Locality::SessionLocal);
 
     session
-        .query_shm("home/temp", local(), &payload, |_| {}, |_| {})
+        .query_shm("home/temp", local(), &payload.send_handle(), |_| {}, |_| {})
         .expect("query");
     assert_eq!(
         *seen.lock().unwrap(),
@@ -1250,7 +1251,13 @@ fn query_shm_hands_a_same_session_queryable_the_chunk_and_only_when_it_listens()
 
     // A key nobody here answers fires nothing, and leaves the owner unique.
     session
-        .query_shm("home/other", local(), &payload, |_| {}, |_| {})
+        .query_shm(
+            "home/other",
+            local(),
+            &payload.send_handle(),
+            |_| {},
+            |_| {},
+        )
         .expect("query");
     assert_eq!(seen.lock().unwrap().len(), 2, "the queryable did not fire");
     assert!(payload.is_unique());

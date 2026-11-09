@@ -442,6 +442,37 @@ impl SessionEngine for RouterState {
         Some(1)
     }
 
+    #[cfg(feature = "transport-shm")]
+    fn get_shm_on_wire(
+        &self,
+        keyexpr: &str,
+        _wire: &WireKey,
+        opts: &QueryOptions,
+        value: wz_session_core::extshm::ShmSendHandle,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Option<usize> {
+        // One leg, as `get_on_wire`'s: the node's own face asks, with the chunk as the value, and
+        // the router sends its descriptor to a face that negotiated shared memory and its bytes
+        // to any other (`RouterState::get_numbered_shm`).
+        let mut callback = leg();
+        let id = self
+            .get_numbered_shm(
+                keyexpr,
+                opts,
+                value,
+                None,
+                Box::new(move |view| callback(view)),
+                Box::new(|| {}),
+            )
+            .ok()?;
+        if let Some(fan) = fan {
+            let face = Arc::clone(&self.liveliness);
+            fan.record(move || face.cancel_query(id));
+        }
+        Some(1)
+    }
+
     #[cfg(feature = "liveliness-get")]
     fn liveliness_get_on_wire(
         &self,

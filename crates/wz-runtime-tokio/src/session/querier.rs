@@ -585,7 +585,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
     #[cfg(all(feature = "transport-shm", feature = "query-value"))]
     pub fn get_shm(
         &self,
-        value: &crate::shm_provider::ShmBackedPayload,
+        value: &wz_session_core::extshm::ShmSendHandle,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
@@ -977,7 +977,7 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
     #[cfg(all(feature = "transport-shm", feature = "query-value"))]
     pub fn get_shm(
         &self,
-        value: &crate::shm_provider::ShmBackedPayload,
+        value: &wz_session_core::extshm::ShmSendHandle,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {

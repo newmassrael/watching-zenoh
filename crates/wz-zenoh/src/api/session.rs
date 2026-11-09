@@ -2531,6 +2531,19 @@ mod tokio_engine {
         ZBytes::from(view.payload().to_vec())
     }
 
+    /// The value of a query the engine hands up, as [`payload_of_view`] reads a sample's: the
+    /// buffer of shared memory it is when the reader of this crate made it, the bytes otherwise.
+    fn value_of_query(view: &dyn QueryView) -> Option<ZBytes> {
+        #[cfg(feature = "shared-memory")]
+        if let Some(shared) = view
+            .payload_shared()
+            .and_then(crate::api::shm::transport::payload_of)
+        {
+            return Some(shared);
+        }
+        view.payload().map(|payload| ZBytes::from(payload.to_vec()))
+    }
+
     fn sample_of(
         view: &dyn SampleView,
         #[cfg(feature = "unstable")] receive: Option<&TimestampSource>,
@@ -2686,12 +2699,7 @@ mod tokio_engine {
                 .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
                 .unwrap_or_default(),
         );
-        let value = view.payload().map(|payload| {
-            (
-                ZBytes::from(payload.to_vec()),
-                encoding_from(view.encoding()),
-            )
-        });
+        let value = value_of_query(view).map(|payload| (payload, encoding_from(view.encoding())));
         let attachment = view.attachment().map(|bytes| ZBytes::from(bytes.to_vec()));
         // The stack the query arrives with: what the nodes it crossed recorded on it, and what
         // this node records on receiving it (its routing first, when the query came in over a
@@ -2818,11 +2826,23 @@ mod tokio_engine {
             key,
             wire,
             options,
+            #[cfg(feature = "shared-memory")]
+            shm_value,
             callback,
             fan,
             consolidation,
         } = asked_of(request)?;
         let mut leg = leg_minter(callback, fan.clone(), consolidation);
+        // A value that is a buffer of shared memory is asked with as the buffer, as a put of one
+        // is published.
+        #[cfg(feature = "shared-memory")]
+        let issued = match shm_value {
+            Some(value) => {
+                engine.get_shm_on_wire(key, &wire, &options, value, fan.as_deref(), &mut leg)
+            }
+            None => engine.get_on_wire(key, &wire, &options, fan.as_deref(), &mut leg),
+        };
+        #[cfg(not(feature = "shared-memory"))]
         let issued = engine.get_on_wire(key, &wire, &options, fan.as_deref(), &mut leg);
         // The closure holds the delivery the legs share: what it let go of is the last hold, when
         // no leg is left.
@@ -2844,6 +2864,8 @@ mod tokio_engine {
         let Asked {
             key,
             options,
+            #[cfg(feature = "shared-memory")]
+            shm_value,
             callback,
             fan,
             consolidation,
@@ -2876,14 +2898,18 @@ mod tokio_engine {
             });
         #[cfg(not(feature = "unstable"))]
         let ingress = None;
-        node.get(
-            key,
-            &options,
-            ingress,
-            Box::new(move |view: &dyn ReplyView| on_reply(view)),
-            Box::new(|| {}),
-        )
-        .map_err(|error| zerror!("{error}").into())
+        let on_reply = Box::new(move |view: &dyn ReplyView| on_reply(view));
+        // A value that is a buffer of shared memory goes as the buffer: its descriptor to a face
+        // that negotiated shared memory, its bytes to any other, as the registry's get sends it.
+        #[cfg(feature = "shared-memory")]
+        if let Some(value) = shm_value {
+            return node
+                .get_numbered_shm(key, &options, value, ingress, on_reply, Box::new(|| {}))
+                .map(|_id| ())
+                .map_err(|error| zerror!("{error}").into());
+        }
+        node.get(key, &options, ingress, on_reply, Box::new(|| {}))
+            .map_err(|error| zerror!("{error}").into())
     }
 
     /// What a query asks of an engine, in the engine's own types: the key, how the wire names
@@ -2893,6 +2919,11 @@ mod tokio_engine {
         key: &'a str,
         wire: WireKey,
         options: QueryOptions,
+        /// The buffer of shared memory the value is, when it is one: the engine sends its
+        /// descriptor to a peer that negotiated shared memory, as a put's is sent, and the bytes
+        /// in `options` to any other.
+        #[cfg(feature = "shared-memory")]
+        shm_value: Option<wz_session_core::extshm::ShmSendHandle>,
         callback: Callback<Reply>,
         fan: Option<Arc<CancellableFan>>,
         consolidation: ConsolidationMode,
@@ -3006,10 +3037,16 @@ mod tokio_engine {
                     *stack = engine_stack_of(&arrived);
                 }));
         }
+        #[cfg(feature = "shared-memory")]
+        let shm_value = value
+            .as_ref()
+            .and_then(|(payload, _)| crate::api::shm::transport::send_handle_of(payload));
         Ok(Asked {
             key,
             wire,
             options,
+            #[cfg(feature = "shared-memory")]
+            shm_value,
             callback,
             fan,
             consolidation,
@@ -6933,6 +6970,88 @@ mod tests {
                 session.get_shm_provider(),
                 ShmProviderState::Initializing(_)
             ));
+        }
+
+        /// A get whose value is a buffer of shared memory reaches a queryable of the other session
+        /// as one, asked by the registry of faces (the peer that dials) and by a router node (the
+        /// peer that listens): each sends the value as the buffer's descriptor, as a put of one is
+        /// sent, where it used to send the bytes.
+        #[test]
+        fn a_get_whose_value_is_a_buffer_of_shared_memory_reaches_the_queryable_as_one() {
+            const BODY: &[u8] = b"a value in shared memory";
+            let port = unautoselected_port();
+            let on = |id: &str, listen: &str, connect: &str| {
+                with_the_node(|| {
+                    open(
+                        Config::from_json5(&format!(
+                            r#"{{ id: "{id}", mode: "peer",
+                                  listen: {{ endpoints: [{listen}] }},
+                                  connect: {{ endpoints: [{connect}] }},
+                                  scouting: {{ multicast: {{ enabled: false }} }},
+                                  transport: {{ shared_memory: {{ enabled: true }} }} }}"#
+                        ))
+                        .expect("a configuration zenoh reads"),
+                    )
+                    .wait()
+                    .expect("opens")
+                })
+            };
+            let node = on("a1b2f8", &format!(r#""tcp/127.0.0.1:{port}""#), "");
+            let registry = on("a1b2f9", "", &format!(r#""tcp/127.0.0.1:{port}""#));
+            assert_eq!(
+                connected(&registry, 1).1.len(),
+                1,
+                "the sessions are linked"
+            );
+            assert!(matches!(&*node.0.engine, Engine::Router(_)), "a node");
+            assert!(
+                matches!(&*registry.0.engine, Engine::Tokio(_)),
+                "a registry"
+            );
+
+            for (who, asker, answerer, key) in [
+                ("the registry", &registry, &node, "demo/shm/get/a"),
+                ("the node", &node, &registry, "demo/shm/get/b"),
+            ] {
+                let (sender, told) = std::sync::mpsc::channel();
+                let sender = std::sync::Mutex::new(sender);
+                let _queryable = answerer
+                    .declare_queryable(key)
+                    .callback(move |query| {
+                        let value = query
+                            .payload()
+                            .map(|value| (value.to_bytes().into_owned(), value.as_shm().is_some()));
+                        let _ = sender.lock().unwrap().send(value);
+                    })
+                    .wait()
+                    .expect("declares");
+                let provider = asker
+                    .get_shm_provider()
+                    .wait()
+                    .expect("a session with shared memory has a provider");
+                // The queryable's declaration reaches the asker over the link; until it has, a
+                // get has no queryable to go to, so it is asked again.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let value = loop {
+                    let mut buffer = provider.alloc(BODY.len()).wait().expect("a buffer");
+                    buffer.copy_from_slice(BODY);
+                    let _replies = asker
+                        .get(key)
+                        .payload(ZBytes::from(buffer))
+                        .wait()
+                        .expect("asks");
+                    match told.recv_timeout(Duration::from_millis(200)) {
+                        Ok(value) => break value,
+                        Err(_) if Instant::now() < deadline => {}
+                        Err(_) => panic!("{who}'s get never reached the queryable"),
+                    }
+                };
+                assert_eq!(
+                    value,
+                    Some((BODY.to_vec(), true)),
+                    "{who}'s get did not hand the queryable its value as shared memory"
+                );
+            }
         }
     }
 

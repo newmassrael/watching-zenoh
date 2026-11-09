@@ -52,10 +52,10 @@ fn session(peer_offered: bool) -> (TokioSession, Arc<RecordingLinkDriver>) {
     (session, driver)
 }
 
-fn held_value() -> ShmBackedPayload {
+fn held_value() -> std::sync::Arc<ShmBackedPayload> {
     let mut held = ShmBackedPayload::alloc(VALUE.len()).expect("alloc a value buffer");
     held.write(VALUE);
-    held
+    std::sync::Arc::new(held)
 }
 
 /// The last frame the link was handed, after printing every one: the output of a test
@@ -79,9 +79,11 @@ fn send(
     call: Call,
     session: &TokioSession,
     driver: &RecordingLinkDriver,
-    held: &ShmBackedPayload,
+    held: &std::sync::Arc<ShmBackedPayload>,
 ) -> Vec<u8> {
     let options = QueryOptions::get();
+    // The value as every query takes it: the engine-neutral handle to the chunk.
+    let held = &held.send_handle();
     match call {
         Call::Session => {
             session

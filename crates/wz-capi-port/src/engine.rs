@@ -379,6 +379,27 @@ pub trait SessionEngine: Send + Sync + 'static {
         None
     }
 
+    /// [`Self::get_on_wire`] for a query whose VALUE is a buffer of shared memory some owner of a
+    /// segment holds, as upstream's `get(..).payload(shm_buf)`: a peer that negotiated shared
+    /// memory is sent the buffer's descriptor, any other its bytes, and a queryable of this
+    /// session is handed the buffer. The value is `value` under the encoding `opts` name, and not
+    /// `opts`' payload. The provided answer asks with the bytes, which is right for an engine with
+    /// no shared memory, and is what [`Self::publish_shm_on_wire_all`]'s is for a publication.
+    #[cfg(feature = "transport-shm")]
+    fn get_shm_on_wire(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        opts: &QueryOptions,
+        value: wz_session_core::extshm::ShmSendHandle,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Option<usize> {
+        let mut opts = opts.clone();
+        opts.payload = Some(value.bytes().to_vec());
+        self.get_on_wire(keyexpr, wire, &opts, fan, leg)
+    }
+
     /// Run `tick` every `period_ms` on the engine's own clock, until it answers `false` or
     /// [`Self::stop_ticker`] is called with the id returned. At least a millisecond: a shorter
     /// period is raised to it, so a job cannot make the engine spin.

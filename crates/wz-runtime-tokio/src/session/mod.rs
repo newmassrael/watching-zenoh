@@ -356,8 +356,12 @@ use crate::session_glue::SessionLinkActions;
 /// ordinary query takes the same parameter in every build. Its two users are in the
 /// unicast `impl`, so a multicast-only build has no use for it and the alias is
 /// gated with them.
+///
+/// The buffer is the engine-neutral handle (`ShmSendHandle`), the one a publication and a
+/// router node's query take as well, so that a chunk any owner of a segment holds can be a
+/// query's value and not only one this crate's provider allocated.
 #[cfg(all(feature = "transport-unicast", feature = "transport-shm"))]
-type ShmValueRef<'a> = &'a crate::shm_provider::ShmBackedPayload;
+type ShmValueRef<'a> = &'a wz_session_core::extshm::ShmSendHandle;
 #[cfg(all(feature = "transport-unicast", not(feature = "transport-shm")))]
 type ShmValueRef<'a> = &'a core::convert::Infallible;
 thread_local! {
@@ -5695,7 +5699,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         &self,
         keyexpr: &str,
         mut opts: QueryOptions,
-        value: &crate::shm_provider::ShmBackedPayload,
+        value: &wz_session_core::extshm::ShmSendHandle,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
@@ -6099,7 +6103,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         let (request, reference) = match shm_value {
             Some(value) => {
                 let mut request = request;
-                let reference = value.wire_reference();
+                let reference = value.reserve_for_receiver();
                 let wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) =
                     &mut request.body
                 else {
@@ -6132,7 +6136,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// [`Self::query_via`], which decides per leg: the remote one sends the descriptor on a
     /// session that negotiated SHM, and the local one hands a queryable the chunk (R3061).
     #[cfg(all(feature = "transport-shm", feature = "query-value"))]
-    fn adopt_shm_value(opts: &mut QueryOptions, value: &crate::shm_provider::ShmBackedPayload) {
+    fn adopt_shm_value(opts: &mut QueryOptions, value: &wz_session_core::extshm::ShmSendHandle) {
         opts.payload = Some(value.bytes().to_vec());
     }
 
@@ -6357,7 +6361,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         mapping_id: u64,
         inline_suffix: Option<&str>,
         mut opts: QueryOptions,
-        value: &crate::shm_provider::ShmBackedPayload,
+        value: &wz_session_core::extshm::ShmSendHandle,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
