@@ -26,10 +26,14 @@
 //!
 //! Every length and integer head takes the fewest bytes that hold it, and every
 //! container has a definite length (RFC 8949 §4.1). A float is written as the
-//! shortest of half, single and double that holds its value exactly. Lengths
-//! are known before a container is written because the text is read twice: once
-//! to count the members of every container, in the order they open, and once to
-//! write.
+//! shortest of half, single and double that holds its value exactly.
+//!
+//! The text is read once. A container's head is written as one byte when it
+//! opens, which is the whole head of any container of fewer than 24 members,
+//! and completed when it closes; a container of 24 members or more has its head
+//! widened there, the bytes after it moved once. An earlier form read the text
+//! twice, counting every container's members before writing, and the counting
+//! pass cost nearly as much as the writing one.
 //!
 //! # What it refuses
 //!
@@ -59,37 +63,17 @@ pub struct Refused {
 ///
 /// [`Refused`] for text that is not one JSON value; see the module doc.
 pub fn cbor_of_json(text: &str) -> Result<Vec<u8>, Refused> {
-    let mut counts = Vec::new();
-    let mut count = Reader::new(text.as_bytes(), Pass::Count(&mut counts));
-    count.document()?;
-    let mut out = Vec::with_capacity(text.len() / 2);
-    let mut write = Reader::new(
-        text.as_bytes(),
-        Pass::Write {
-            counts: &counts,
-            next: 0,
-            out: &mut out,
-            scratch: Vec::new(),
-        },
-    );
-    write.document()?;
-    Ok(out)
-}
-
-/// The two readings of the text: counting the members of each container, and
-/// writing with those counts.
-enum Pass<'a> {
-    /// Each container's member count (pairs for an object), in the order the
-    /// containers open.
-    Count(&'a mut Vec<u64>),
-    Write {
-        counts: &'a [u64],
-        /// The next container's place in `counts`.
-        next: usize,
-        out: &'a mut Vec<u8>,
-        /// A string's unescaped bytes, before its length is written.
-        scratch: Vec<u8>,
-    },
+    let mut reader = Reader {
+        text: text.as_bytes(),
+        at: 0,
+        depth: 0,
+        // The field document's binary form is about three quarters of its text,
+        // so the text's length is room enough without a second allocation.
+        out: Vec::with_capacity(text.len()),
+        scratch: Vec::new(),
+    };
+    reader.document()?;
+    Ok(reader.out)
 }
 
 /// CBOR major types, shifted into the head byte's top three bits.
@@ -107,24 +91,17 @@ const FLOAT_HALF: u8 = MAJOR_SIMPLE | 25;
 const FLOAT_SINGLE: u8 = MAJOR_SIMPLE | 26;
 const FLOAT_DOUBLE: u8 = MAJOR_SIMPLE | 27;
 
-/// One pass over the text.
-struct Reader<'t, 'p> {
+/// The one pass over the text, and what it has written.
+struct Reader<'t> {
     text: &'t [u8],
     at: usize,
     depth: usize,
-    pass: Pass<'p>,
+    out: Vec<u8>,
+    /// A string's unescaped bytes, before its length is written.
+    scratch: Vec<u8>,
 }
 
-impl<'t, 'p> Reader<'t, 'p> {
-    fn new(text: &'t [u8], pass: Pass<'p>) -> Self {
-        Self {
-            text,
-            at: 0,
-            depth: 0,
-            pass,
-        }
-    }
-
+impl Reader<'_> {
     fn refuse<T>(&self, why: &'static str) -> Result<T, Refused> {
         Err(Refused { at: self.at, why })
     }
@@ -161,7 +138,7 @@ impl<'t, 'p> Reader<'t, 'p> {
     fn literal(&mut self, word: &[u8], head: u8) -> Result<(), Refused> {
         if self.text[self.at..].starts_with(word) {
             self.at += word.len();
-            self.byte(head);
+            self.out.push(head);
             Ok(())
         } else {
             self.refuse("not a JSON value")
@@ -219,39 +196,29 @@ impl<'t, 'p> Reader<'t, 'p> {
                 }
             }
         }
-        self.close(place, members);
+        self.close(place, major, members);
         self.depth -= 1;
         Ok(())
     }
 
-    /// Opens a container: the count pass keeps a place for its count, the write
-    /// pass writes its head from the count kept there.
+    /// Opens a container: its head's first byte, holding no count yet. Returns
+    /// where that byte is.
     fn open(&mut self, major: u8) -> usize {
-        match &mut self.pass {
-            Pass::Count(counts) => {
-                counts.push(0);
-                counts.len() - 1
-            }
-            Pass::Write {
-                counts, next, out, ..
-            } => {
-                let place = *next;
-                *next += 1;
-                head(major, counts[place], out);
-                place
-            }
-        }
+        let place = self.out.len();
+        self.out.push(major);
+        place
     }
 
-    fn close(&mut self, place: usize, members: u64) {
-        if let Pass::Count(counts) = &mut self.pass {
-            counts[place] = members;
-        }
-    }
-
-    fn byte(&mut self, b: u8) {
-        if let Pass::Write { out, .. } = &mut self.pass {
-            out.push(b);
+    /// Completes the head opened at `place` with the container's count. Under 24
+    /// the count fits the byte already there; past it, the argument bytes go in
+    /// after that byte and the members written since move along by their width.
+    fn close(&mut self, place: usize, major: u8, members: u64) {
+        let mut wide = [0u8; 9];
+        let len = head_into(major, members, &mut wide);
+        self.out[place] = wide[0];
+        if len > 1 {
+            self.out
+                .splice(place + 1..place + 1, wide[1..len].iter().copied());
         }
     }
 
@@ -273,41 +240,28 @@ impl<'t, 'p> Reader<'t, 'p> {
         let end = self.run_end(start);
         if self.text.get(end) == Some(&b'"') {
             self.at = end + 1;
-            if let Pass::Write { out, .. } = &mut self.pass {
-                head(MAJOR_TEXT, (end - start) as u64, out);
-                out.extend_from_slice(&self.text[start..end]);
-            }
+            head(MAJOR_TEXT, (end - start) as u64, &mut self.out);
+            self.out.extend_from_slice(&self.text[start..end]);
             return Ok(());
         }
-        let writing = matches!(self.pass, Pass::Write { .. });
-        let mut scratch = match &mut self.pass {
-            Pass::Write { scratch, .. } => core::mem::take(scratch),
-            Pass::Count(_) => Vec::new(),
-        };
+        let mut scratch = core::mem::take(&mut self.scratch);
         scratch.clear();
-        let result = self.string_body(writing, &mut scratch);
-        if let Pass::Write {
-            out, scratch: kept, ..
-        } = &mut self.pass
-        {
-            if result.is_ok() {
-                head(MAJOR_TEXT, scratch.len() as u64, out);
-                out.extend_from_slice(&scratch);
-            }
-            *kept = scratch;
+        let result = self.string_body(&mut scratch);
+        if result.is_ok() {
+            head(MAJOR_TEXT, scratch.len() as u64, &mut self.out);
+            self.out.extend_from_slice(&scratch);
         }
+        self.scratch = scratch;
         result
     }
 
-    fn string_body(&mut self, writing: bool, into: &mut Vec<u8>) -> Result<(), Refused> {
+    fn string_body(&mut self, into: &mut Vec<u8>) -> Result<(), Refused> {
         loop {
             // The run of bytes up to the next quote, escape or control byte is
             // copied as it stands: the text is UTF-8 already.
             let start = self.at;
             self.at = self.run_end(start);
-            if writing {
-                into.extend_from_slice(&self.text[start..self.at]);
-            }
+            into.extend_from_slice(&self.text[start..self.at]);
             match self.peek() {
                 Some(b'"') => {
                     self.at += 1;
@@ -316,10 +270,8 @@ impl<'t, 'p> Reader<'t, 'p> {
                 Some(b'\\') => {
                     self.at += 1;
                     let c = self.escape()?;
-                    if writing {
-                        let mut buf = [0u8; 4];
-                        into.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-                    }
+                    let mut buf = [0u8; 4];
+                    into.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
                 }
                 Some(_) => return self.refuse("a control byte inside a string"),
                 None => return self.refuse("the text ends inside a string"),
@@ -419,9 +371,7 @@ impl<'t, 'p> Reader<'t, 'p> {
             }
             self.digits();
         }
-        let Pass::Write { out, .. } = &mut self.pass else {
-            return Ok(());
-        };
+        let out = &mut self.out;
         // The text is ASCII digits and signs by construction above.
         let spelled = core::str::from_utf8(&self.text[start..self.at]).unwrap_or("");
         let digits = spelled.strip_prefix('-').unwrap_or(spelled);
@@ -473,19 +423,33 @@ impl<'t, 'p> Reader<'t, 'p> {
 
 /// A head: `major` with argument `n`, in the fewest bytes (RFC 8949 §3).
 fn head(major: u8, n: u64, out: &mut Vec<u8>) {
+    let mut wide = [0u8; 9];
+    let len = head_into(major, n, &mut wide);
+    out.extend_from_slice(&wide[..len]);
+}
+
+/// The head of `major` with argument `n`, into `wide`; returns how many of its
+/// bytes it took.
+fn head_into(major: u8, n: u64, wide: &mut [u8; 9]) -> usize {
     if n < 24 {
-        out.push(major | n as u8);
+        wide[0] = major | n as u8;
+        1
     } else if let Ok(n) = u8::try_from(n) {
-        out.extend_from_slice(&[major | 24, n]);
+        wide[0] = major | 24;
+        wide[1] = n;
+        2
     } else if let Ok(n) = u16::try_from(n) {
-        out.push(major | 25);
-        out.extend_from_slice(&n.to_be_bytes());
+        wide[0] = major | 25;
+        wide[1..3].copy_from_slice(&n.to_be_bytes());
+        3
     } else if let Ok(n) = u32::try_from(n) {
-        out.push(major | 26);
-        out.extend_from_slice(&n.to_be_bytes());
+        wide[0] = major | 26;
+        wide[1..5].copy_from_slice(&n.to_be_bytes());
+        5
     } else {
-        out.push(major | 27);
-        out.extend_from_slice(&n.to_be_bytes());
+        wide[0] = major | 27;
+        wide[1..9].copy_from_slice(&n.to_be_bytes());
+        9
     }
 }
 
@@ -820,6 +784,53 @@ mod tests {
         // The map after it holds one pair whose value is an array of one.
         let tail = &bytes[bytes.len() - 5..];
         assert_eq!(tail, &[0xa1, 0x61, b'k', 0x81, 0x07]);
+    }
+
+    /// A container's head is completed when it closes, so every width a count can
+    /// take is written at each edge of it: the inline range and one-, two- and
+    /// four-byte arguments, for an array and for a map, inside a map with a member
+    /// after it so the bytes moved by a widened head are seen in place. The
+    /// expected head is spelled out here rather than taken from the writer.
+    #[test]
+    fn a_head_completed_at_the_close_takes_every_width_at_each_edge() {
+        fn spelled(major: u8, n: usize) -> Vec<u8> {
+            match n {
+                0..=23 => alloc::vec![major | n as u8],
+                24..=0xff => alloc::vec![major | 24, n as u8],
+                0x100..=0xffff => {
+                    let mut v = alloc::vec![major | 25];
+                    v.extend_from_slice(&(n as u16).to_be_bytes());
+                    v
+                }
+                _ => {
+                    let mut v = alloc::vec![major | 26];
+                    v.extend_from_slice(&(n as u32).to_be_bytes());
+                    v
+                }
+            }
+        }
+        for n in [0usize, 23, 24, 255, 256, 65_535, 65_536] {
+            let items: Vec<&str> = (0..n).map(|_| "0").collect();
+            let text = alloc::format!("{{\"a\":[{}],\"b\":1}}", items.join(","));
+            let mut expected = alloc::vec![0xa2, 0x61, b'a'];
+            expected.extend(spelled(0x80, n));
+            expected.extend(core::iter::repeat_n(0x00, n));
+            expected.extend([0x61, b'b', 0x01]);
+            assert_eq!(cbor_of_json(&text), Ok(expected), "an array of {n}");
+
+            let pairs: Vec<String> = (0..n).map(|i| alloc::format!("\"{i}\":0")).collect();
+            let text = alloc::format!("[{{{}}},1]", pairs.join(","));
+            let mut expected = alloc::vec![0x82];
+            expected.extend(spelled(0xa0, n));
+            for i in 0..n {
+                let key = alloc::format!("{i}");
+                expected.extend(spelled(0x60, key.len()));
+                expected.extend_from_slice(key.as_bytes());
+                expected.push(0x00);
+            }
+            expected.push(0x01);
+            assert_eq!(cbor_of_json(&text), Ok(expected), "a map of {n}");
+        }
     }
 
     /// Each kind of malformed text is refused, at the byte where it goes wrong.

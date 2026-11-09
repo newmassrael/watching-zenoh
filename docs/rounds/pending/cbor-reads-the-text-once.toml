@@ -1,0 +1,17 @@
+impact = ["wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"]
+
+decision = '''
+The row-facts door hands its rows as the CBOR form of the treeless field document, and that conversion read the JSON text twice: once to count every container's members and once to write with those counts, because a definite-length head is written before the members it counts. The counting pass cost nearly as much as the writing one. The second writer that would avoid the conversion altogether was not built, for the reason the converter's module states: it would be a second derivation of every fact on a row. Instead the converter now reads the text once. A container's head is written as one byte when it opens, which is the whole head of any container of fewer than 24 members, and completed when it closes; a container of 24 members or more has its argument bytes put in after that byte there, the members written since moving once. The output is the same bytes: preferred serialization and definite lengths, as before. The head of a given width is now written by one function, which both the open writer and the close use.
+'''
+
+changes = '''
+crates/wz-capture/src/cbor_of_json.rs: one reader that writes as it reads (the two-pass state and its count table removed), the head completed at the container's close, `head_into` as the one writer of a head, the module doc's account of the single reading, and a test of every head width at each edge for an array and a map, inside a container with a member after it, against heads spelled out in the test.
+'''
+
+verification = '''
+Run on one build machine (hkl001). The converter's tests, 8 passed, the new one among them; the row-facts tests of the capture crate, which hold every door's bytes read back to the document it wrote, 8 passed; the dissection crate's library tests, 232 passed and 2 ignored; clippy of the capture crate over all targets with warnings denied, and of its dissect-only build. The row-facts cost bench before and after on the same machine: the CBOR of the treeless rows 2.00 to 1.26 us a row over 2,004 rows and 2.06 to 1.31 over 20,004, the bytes the same to the byte in both (1,413,898 and 14,139,902). The JSON writer, which this does not touch, read 6 to 10 percent apart between the two runs, which is the noise of the machine.
+'''
+
+carry = '''
+The consumer's own parse of the binary rows has not been measured here; that is its number to read.
+'''
