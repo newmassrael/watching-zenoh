@@ -13099,6 +13099,21 @@
       "carry_forward_bullets": [
         "Carries of the node's C door that remain: the placement of a remote in the south compared with a stock gateway's, which needs a stock node that keeps a south apart as the oracle."
       ]
+    },
+    "Round 4459": {
+      "decision_summary": "The liveliness token and the liveliness subscriber could state a set of links from the registry and from the Rust API, and a C program could state none. The C library now has two more doors beside the seven it has, behind the same feature: each takes what its zenoh-c twin takes and a pointer to the entity statement that a subscriber or a queryable already takes. A null pointer and a default struct state nothing, and a declaration that states nothing goes through the same body its twin runs, which now takes the restriction as an argument. A build whose policy is off refuses a stated set before anything is declared, leaves the out-parameter in its gravestone state and drops the closure once, as the other entities do; a session that is a node answers unavailable for a stated set and declares nothing. The feature now names the liveliness capability as it names query and queryable, since the doors extend it. The C ABI revision moves from 12 to 13, and the pinned symbol set, the stamp pin and the header move with it in the same change.",
+      "changes_bullets": [
+        "crates/wz-capi-c/src/liveliness.rs: the bodies of the two declarations take the restriction (a refusal is a code), the registry arm calls the core door that takes a set, the node arm refuses a set. crates/wz-capi-c/src/switch_doors.rs: the two doors, the unit tests of their refusal before the handles and of the node's refusal. crates/wz-capi-c/src/abi.rs, crates/wz-capi-c/include/wz_capi_c.h: revision 13 and the two declarations. crates/wz-capi-c/Cargo.toml, deploy/wz-config.toml, deploy/Kconfig.capabilities: the feature and the capability name the liveliness capability. scripts/lib/capi_c_abi_pin.py, scripts/lib/abi_stamp_gate.py: the symbol set and the stamp at 13. crates/wz-capi-c/tests: two integration tests and a section of the C consumer. docs/build-configuration.md and the surface census comment: nine doors."
+      ],
+      "verification_bullets": [
+        "Run on the build machine for the C library with switch-doors, peer and the node role: the doors' unit tests and the integration tests whose names say switch_doors or liveliness, 14 and 8 passed in a build whose policy is off, and 14 and 8 passed again in a build whose link policy is on; clippy over all targets with warnings denied. The tests show that a declaration stating nothing is the z_* declaration (the session's own subscriber hears the token appear and go away, for a null and for a default statement), that a stated set is refused by a build without the policy with the closure dropped once and the handle at its gravestone, and taken by one with it, with the session's own plane still hearing the token."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The liveliness get is not limited and has no door. The router, cooperative and lwIP engines read no set, and a node session answers unavailable for a stated one. The C consumer program and the pin script are run by the hosted lanes, not here."
+      ]
     }
   },
   "inventory_entries": {
