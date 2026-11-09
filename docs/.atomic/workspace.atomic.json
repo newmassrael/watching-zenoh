@@ -13027,6 +13027,21 @@
       "carry_forward_bullets": [
         "The consumer is told fields 63 and row_facts 4 with the commit, which closes its claim. Watch on the next hosted run: the router's sweep is shared with the embedded builds and now routes its counting form through a generic reporting form with a no-op listener; the capability-cost layer (C1cs) reads whether that moved any image's size. A chain evicted with its flow is in the top-level counts only."
       ]
+    },
+    "Round 4455": {
+      "decision_summary": "A consumer building the pico command-line oracles from a checkout whose files are read-only (0444, as a checkout hard-linked between worktrees has them, with the artifact root set) saw the build die after the raw Ethernet arm's programs were built: the restore of the two library files that arm patches is an in-place copy, and it was refused. The staged copy the script builds from is made by tar, which carries the submodule's modes, so the copy was read-only too; the earlier patches replace a file with a new one and went through, and only the in-place copy met the mode. The copy is the script's own working tree, so the fix is where it is made: right after staging it is made writable by its owner. That keeps the submodule only read, and moves no modification time, which the incremental build relies on. The artifact-root helper names this consumption shape as supported, so the script is held to it.",
+      "changes_bullets": [
+        "scripts/build-zenoh-pico-cli.sh: stage_pico_source grants the owner write permission over the staged copy after the tar copy, with the reason stated beside it."
+      ],
+      "verification_bullets": [
+        "The mechanism, reproduced and cleared in a scratch directory with the script's own two steps over a 0444 source: staged by tar, patched by an in-place stream edit, restored by a mode-keeping copy. Without the grant the patch returned 0 and the restore was refused with permission denied, the consumer's failure; with it both returned 0 and the restored file held the source's text. bash -n and shellcheck -x on the script are clean. The whole script was not run here over a read-only checkout: making the submodule's files read-only on this machine or a build host would change the mode of inodes the worktrees and the build hosts' content store share. The consumer's run is the end-to-end check."
+      ],
+      "impact_refs": [
+        "watching-zenoh/build-and-verify"
+      ],
+      "carry_forward_bullets": [
+        "The consumer is told the commit and reruns its read-only build; a failure past this point on that checkout is a new report."
+      ]
     }
   },
   "inventory_entries": {
