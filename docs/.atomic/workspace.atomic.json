@@ -13114,6 +13114,24 @@
       "carry_forward_bullets": [
         "The liveliness get is not limited and has no door. The router, cooperative and lwIP engines read no set, and a node session answers unavailable for a stated one. The C consumer program and the pin script are run by the hosted lanes, not here."
       ]
+    },
+    "Round 4460": {
+      "decision_summary": "A consumer asked for the node role as a word: the dissection gave a Scout's `what` and a Hello's `whatami` only as their bits, so every reader that wanted to show router, peer or client had to carry the code-to-role table itself, and that table is a fact of the protocol, so the decoder's. The walker now reads the role through `wz_codecs::whatami::WhatAmI`, the one type that owns both wire forms. A `whatami` code (Hello, Init and Join carry the 2-bit handshake code, a linkstate record the one-hot API byte) gains a `whatami_name` label beside it, in upstream's `WhatAmI::to_str` spelling, and none when the code names no role (`0b11`, or a byte other than 1, 2 or 4), which upstream refuses at decode; the raw code stays. A Scout's `what` is a SET of roles, so one word cannot name it: it gains one flag per role (`what_router`, `what_peer`, `what_client`), always all three, read as upstream's one-hot `WhatAmIMatcher`. All of them alias the cbyte, so the tiling is unchanged.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/dissect.rs: `whatami_name` and `what_has`; the Scout flags, the label on Hello, Init, Join and the linkstate record; a test that names the word each code must read as, and the reserved code that reads as none.",
+        "crates/wz-session-core/src/dissect_schema.rs: the declared shape gains the four names, the label's words walked from `WhatAmI`.",
+        "crates/wz-session-core/src/published_selector_paths.txt: the 19 facts the shape now declares, appended.",
+        "scripts/lib/dissect_name_census.py: the four names declared as own vocabulary with their reasons."
+      ],
+      "verification_bullets": [
+        "Upstream encodings read at the pinned 1.10.2: the Hello, Init and Join codecs pack the role as router 0b00, peer 0b01, client 0b10 and refuse 0b11; the Scout codec reads `what` as a `WhatAmIMatcher`; the linkstate codec reads the role with `WhatAmI::try_from`. Dissect name census clean. On a build machine, session core with `dissect`: the dissect and dissect schema library tests pass, the published-fact test with the appended lines included; clippy with `--no-default-features --features dissect` over all targets, and with `dissect-serde`, clean."
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/1-2-scout-hello-wire-shape"
+      ],
+      "carry_forward_bullets": [
+        "None for this change."
+      ]
     }
   },
   "inventory_entries": {
