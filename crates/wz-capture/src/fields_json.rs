@@ -10621,7 +10621,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 90] = [
+        let live: [(&str, &str, Vec<&'static str>); 92] = [
             // What reading a record's payload came to, on the values document:
             // the walk over its emitter's own outcomes.
             (
