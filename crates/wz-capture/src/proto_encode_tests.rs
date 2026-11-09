@@ -549,6 +549,150 @@ fn an_integer_out_of_its_type_is_refused_with_the_type() {
     }
 }
 
+/// A NANOPB `int_size` NARROWS THE RANGE THE WRITER HOLDS A VALUE TO: nanopb's
+/// decoder refuses a value its C integer cannot hold, so a sender that wrote it
+/// would be refused at the receiver.
+#[test]
+fn a_nanopb_int_size_narrows_the_range_of_a_varint_field() {
+    let schema = m(
+        P3,
+        "uint32 u = 1 [(nanopb).int_size = IS_8]; int32 i = 2 [(nanopb).int_size = IS_8];",
+    );
+    let e = value_error("M", &schema, r#"{"u":300}"#);
+    assert_eq!(e.path, "/u");
+    assert_eq!(e.field.as_deref(), Some("M.u"));
+    assert_eq!(
+        e.reason,
+        "`300` is out of range for uint32 with (nanopb).int_size = IS_8: 0 to 255"
+    );
+    assert_eq!(
+        e.expected.as_deref(),
+        Some(
+            "uint32 with (nanopb).int_size = IS_8: an integer from 0 to 255, as a JSON number \
+             or a decimal string"
+        )
+    );
+    // The bound itself is a value the C integer holds.
+    assert_eq!(enc("M", &schema, r#"{"u":255}"#), "08ff01");
+    assert_eq!(enc("M", &schema, r#"{"u":"255"}"#), "08ff01");
+    let e = value_error("M", &schema, r#"{"i":-129}"#);
+    assert_eq!(e.path, "/i");
+    assert!(
+        e.reason
+            .contains("for int32 with (nanopb).int_size = IS_8: -128 to 127"),
+        "{}",
+        e.reason
+    );
+    assert_eq!(enc("M", &schema, r#"{"i":-128}"#), "1080ffffffffffffffff01");
+    // Every element of a repeated field is held to the range.
+    let repeated = m(P3, "repeated uint32 r = 1 [(nanopb).int_size = IS_16];");
+    let e = value_error("M", &repeated, r#"{"r":[1,65536]}"#);
+    assert_eq!(e.path, "/r/1");
+    assert!(e.reason.contains("IS_16: 0 to 65535"), "{}", e.reason);
+}
+
+#[test]
+fn a_field_with_no_nanopb_option_keeps_its_types_whole_range() {
+    let schema = m(
+        P3,
+        "uint32 u = 1; fixed32 f = 2 [(nanopb).int_size = IS_8];",
+    );
+    assert_eq!(enc("M", &schema, r#"{"u":4294967295}"#), "08ffffffff0f");
+    // A fixed width is not changed by `int_size`.
+    assert_eq!(enc("M", &schema, r#"{"f":300}"#), "152c010000");
+    let e = value_error("M", &schema, r#"{"u":4294967296}"#);
+    assert_eq!(e.reason, "`4294967296` is out of range for uint32");
+}
+
+#[test]
+fn an_int_size_at_the_message_or_the_file_level_applies_to_its_fields() {
+    let by_message =
+        format!("{P3}message M {{ option (nanopb_msgopt).int_size = IS_8; uint32 u = 1; }}");
+    let e = value_error("M", &by_message, r#"{"u":256}"#);
+    assert!(e.reason.contains("IS_8: 0 to 255"), "{}", e.reason);
+    assert_eq!(enc("M", &by_message, r#"{"u":255}"#), "08ff01");
+    let by_file =
+        format!("{P3}option (nanopb_fileopt).int_size = IS_16;\nmessage M {{ sint32 s = 1; }}");
+    let e = value_error("M", &by_file, r#"{"s":32768}"#);
+    assert!(
+        e.reason
+            .contains("sint32 with (nanopb).int_size = IS_16: -32768 to 32767"),
+        "{}",
+        e.reason
+    );
+    // A field's own option replaces the file's.
+    let replaced = format!(
+        "{P3}option (nanopb_fileopt).int_size = IS_8;\n\
+         message M {{ uint32 u = 1 [(nanopb).int_size = IS_DEFAULT]; }}"
+    );
+    assert_eq!(enc("M", &replaced, r#"{"u":300}"#), "08ac02");
+}
+
+#[test]
+fn a_map_entry_is_held_to_the_file_level_int_size() {
+    let schema = format!(
+        "{P3}option (nanopb_fileopt).int_size = IS_8;\n\
+         message M {{ map<string, uint32> m = 1; map<int32, string> k = 2; }}"
+    );
+    let e = value_error("M", &schema, r#"{"m":{"a":300}}"#);
+    assert_eq!(e.path, "/m/a");
+    assert_eq!(e.field.as_deref(), Some("M.m"));
+    assert!(
+        e.reason
+            .contains("uint32 with (nanopb).int_size = IS_8: 0 to 255"),
+        "{}",
+        e.reason
+    );
+    // The entry `{1: "a", 2: 255}` is the six bytes 0a 01 61 10 ff 01.
+    assert_eq!(enc("M", &schema, r#"{"m":{"a":255}}"#), "0a060a016110ff01");
+    // The key of an entry is held to the same width.
+    let e = value_error("M", &schema, r#"{"k":{"128":"x"}}"#);
+    assert_eq!(e.path, "/k/128");
+    assert!(
+        e.reason
+            .contains("int32 with (nanopb).int_size = IS_8: -128 to 127"),
+        "{}",
+        e.reason
+    );
+    // A message-level option does not reach a map entry's fields.
+    let by_message = format!(
+        "{P3}message M {{ option (nanopb_msgopt).int_size = IS_8; map<string, uint32> m = 1; }}"
+    );
+    assert_eq!(
+        enc("M", &by_message, r#"{"m":{"a":300}}"#),
+        "0a060a016110ac02"
+    );
+}
+
+#[test]
+fn an_unreadable_int_size_refuses_every_value_of_the_field() {
+    let schema = m(
+        P3,
+        "uint32 u = 1 [(nanopb).int_size = IS_7]; fixed32 f = 2 [(nanopb).int_size = IS_7];",
+    );
+    let e = value_error("M", &schema, r#"{"u":1}"#);
+    assert_eq!(e.path, "/u");
+    assert!(
+        e.reason.contains("(nanopb).int_size cannot be read"),
+        "{}",
+        e.reason
+    );
+    assert!(
+        e.expected
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("uint32: an integer in the range of the field's (nanopb).int_size"),
+        "{e:?}"
+    );
+    // The option has no bearing on a fixed width, so nothing is refused there.
+    assert_eq!(enc("M", &schema, r#"{"f":1}"#), "1501000000");
+    // An enum's number is the enum's own whatever `int_size` says.
+    let enumed = format!(
+        "{P3}enum E {{ A = 0; B = 300; }}\nmessage M {{ E e = 1 [(nanopb).int_size = IS_8]; }}"
+    );
+    assert_eq!(enc("M", &enumed, r#"{"e":"B"}"#), "08ac02");
+}
+
 #[test]
 fn a_value_that_is_not_a_plain_number_is_refused_not_guessed() {
     let schema = m(P3, "int32 a = 1;");

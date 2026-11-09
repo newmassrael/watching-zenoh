@@ -52,6 +52,10 @@
 //! field, an inner option that is SET replacing an outer one; a nested message
 //! takes the file's options and NOT those of the message around it.
 //!
+//! The same merge gives the `int_size` in force for one field, which is what
+//! [`crate::proto_range`] judges a field's integer range by: one reader of the
+//! options for the size and the range, so the two cannot read a schema apart.
+//!
 //! ## What is not a number, and why it says so
 //!
 //! The answer is a number or one of a closed set of reasons ([`SizeRefusal`]), and
@@ -159,6 +163,25 @@ struct Merged {
     /// A size-changing option this module does not model, or a modelled one with a
     /// value it cannot read, was written.
     unmodelled: bool,
+    /// An `int_size` was written with a value this reader cannot read, or inside
+    /// an aggregate it cannot follow and so might be. Kept apart from
+    /// `unmodelled`, which answers for the size of a message: the range of a field
+    /// asks about `int_size` alone, and an unmodelled `type_override` elsewhere says
+    /// nothing about it.
+    int_size_unreadable: bool,
+}
+
+/// The C integer nanopb stores a varint field in, as the `int_size` option in force
+/// for the field chooses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IntSize {
+    /// No `int_size`, or `IS_DEFAULT`: the width of the field's own type.
+    Default,
+    /// `IS_8`, `IS_16`, `IS_32` or `IS_64`: the width in bits.
+    Bits(u8),
+    /// An `int_size` was written that this reader cannot read. nanopb's generator
+    /// would not accept the schema either, so no width is claimed.
+    Unreadable,
 }
 
 /// The extension that carries nanopb's options at each level.
@@ -203,10 +226,19 @@ impl Merged {
                             self.set(key, value);
                         }
                     }
-                    None => self.unmodelled = true,
+                    // Text this reader does not follow may set any option,
+                    // `int_size` among them.
+                    None => {
+                        self.unmodelled = true;
+                        self.int_size_unreadable = true;
+                    }
                 },
-                // A bare `(nanopb) = 3` is no option this module can read.
-                ("", _) => self.unmodelled = true,
+                // A bare `(nanopb) = 3` is no option this module can read, and
+                // so no `int_size` it can rule out.
+                ("", _) => {
+                    self.unmodelled = true;
+                    self.int_size_unreadable = true;
+                }
                 (key, OptionValue::Int(n)) => self.set(key, Value::Int(*n)),
                 (key, OptionValue::Ident(word)) => self.set(key, Value::Word(word)),
                 (key, _) => self.set(key, Value::Other),
@@ -238,7 +270,10 @@ impl Merged {
                 Value::Word("IS_16") => self.int_size = Some(16),
                 Value::Word("IS_32") => self.int_size = Some(32),
                 Value::Word("IS_64") => self.int_size = Some(64),
-                _ => self.unmodelled = true,
+                _ => {
+                    self.unmodelled = true;
+                    self.int_size_unreadable = true;
+                }
             },
             "type" => match value {
                 Value::Word("FT_IGNORE") => self.ignore = Some(true),
@@ -270,6 +305,49 @@ impl Merged {
     fn ignored(&self) -> bool {
         self.ignore == Some(true)
     }
+
+    /// The `int_size` these options leave in force. An unreadable one at any level
+    /// stays unreadable whatever an inner level sets, as `unmodelled` does: the
+    /// generator refuses the schema, so there is no width to replace.
+    fn int_size(&self) -> IntSize {
+        if self.int_size_unreadable {
+            return IntSize::Unreadable;
+        }
+        match self.int_size {
+            None | Some(0) => IntSize::Default,
+            Some(bits) => u8::try_from(bits).map_or(IntSize::Unreadable, IntSize::Bits),
+        }
+    }
+}
+
+/// The options of file `file`, the outermost level and the only one a map entry's
+/// fields have.
+fn file_options(linker: &Linker<'_, '_>, file: usize) -> Merged {
+    let mut merged = Merged::default();
+    merged.merge(&linker.file_options[file], Level::File);
+    merged
+}
+
+/// The options in force for a message: its file's, then its own.
+fn message_options(linker: &Linker<'_, '_>, msg: &Msg) -> Merged {
+    let mut merged = file_options(linker, msg.file);
+    merged.merge(&msg.options, Level::Message);
+    merged
+}
+
+/// The `int_size` in force for `field` of `msg`: the file's options, then the
+/// message's, then the field's, merged as the size is.
+pub(crate) fn field_int_size(linker: &Linker<'_, '_>, msg: &Msg, field: &Fld) -> IntSize {
+    let mut merged = message_options(linker, msg);
+    merged.merge(&field.options, Level::Field);
+    merged.int_size()
+}
+
+/// The `int_size` in force for the key and the value of an entry of a map written
+/// in file `file`: the file's alone, because nanopb's generator gives an entry's
+/// fields no options of their own.
+pub(crate) fn map_entry_int_size(linker: &Linker<'_, '_>, file: usize) -> IntSize {
+    file_options(linker, file).int_size()
 }
 
 /// The part of an option name after the extension in parentheses, when the name
@@ -400,14 +478,6 @@ struct Sizer<'l, 'f, 'a> {
 }
 
 impl Sizer<'_, '_, '_> {
-    /// The options in force for a message: its file's, then its own.
-    fn message_options(&self, msg: &Msg) -> Merged {
-        let mut merged = Merged::default();
-        merged.merge(&self.linker.file_options[msg.file], Level::File);
-        merged.merge(&msg.options, Level::Message);
-        merged
-    }
-
     fn message(&mut self, idx: usize) -> Result<u128, SizeRefusal> {
         if let Some(done) = self.memo[idx] {
             return done;
@@ -434,7 +504,7 @@ impl Sizer<'_, '_, '_> {
     fn message_inner(&mut self, idx: usize) -> Result<u128, SizeRefusal> {
         let linker = self.linker;
         let msg = &linker.msgs[idx];
-        let own = self.message_options(msg);
+        let own = message_options(linker, msg);
         if own.unmodelled {
             return Err(SizeRefusal::UnmodelledOption);
         }
@@ -502,8 +572,7 @@ impl Sizer<'_, '_, '_> {
         key: ScalarKind,
         value: MapValueKind,
     ) -> Result<u128, SizeRefusal> {
-        let mut entry_options = Merged::default();
-        entry_options.merge(&self.linker.file_options[file], Level::File);
+        let entry_options = file_options(self.linker, file);
         if entry_options.unmodelled {
             return Err(SizeRefusal::UnmodelledOption);
         }

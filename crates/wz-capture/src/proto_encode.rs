@@ -35,7 +35,10 @@
 //! * `int32`, `uint32`, `sint32`, `fixed32`, `sfixed32` and the 64-bit kinds are
 //!   a JSON number or a decimal string, and the string is how a 64-bit value
 //!   survives a reader that holds numbers as doubles. A number must be an
-//!   integer (`1.0` and `1e3` are accepted, `1.5` is not) and fit the type. A
+//!   integer (`1.0` and `1e3` are accepted, `1.5` is not) and fit the type, as
+//!   a `(nanopb).int_size` written in the schema narrows it for the varint
+//!   kinds ([`crate::proto_range`]: a `uint32` under `IS_8` takes 0 to 255,
+//!   because nanopb's decoder refuses what its C integer cannot hold). A
 //!   string is digits with an optional sign (`"-5"`, `"007"`) and nothing else:
 //!   `"1.0"` and `"1e3"` are refused, as protobuf's own parser refuses them, and
 //!   so is a minus sign in a string for an unsigned type, even on a zero
@@ -117,6 +120,11 @@
 //! values reach, because it decides which keys that message answers to; `packed`
 //! only for a field the values name.
 //!
+//! A varint integer field whose `(nanopb).int_size` cannot be read refuses every
+//! value given for it, as a VALUE error at that value: the range nanopb would
+//! hold it to is not known, and writing a value that a receiver may refuse is
+//! the outcome the range exists to prevent.
+//!
 //! ## Where it differs from libprotobuf's own JSON parser
 //!
 //! MEASURED against `JsonToBinaryString` of libprotobuf 3.21.12 over 309
@@ -179,7 +187,11 @@ use core::fmt;
 use wz_session_core::json5::{self, Json5Value};
 use wz_session_core::json5_lex::{Json5Error, Lexer};
 
+use crate::proto_nanopb::IntSize;
 use crate::proto_parse::{Label, OptionValue, ScalarKind, Syntax};
+use crate::proto_range::{
+    field_range, map_entry_range, value_range, RangeRefusal, RangeSource, ValueRange,
+};
 use crate::proto_schema::{FieldKind, Fld, Linker, MapValueKind, Msg, ProtoDiagnostic, ProtoFile};
 
 /// The most bytes a message may encode to.
@@ -540,25 +552,6 @@ fn string_integer(text: &str) -> Option<i128> {
     Some(if negative { -magnitude } else { magnitude })
 }
 
-/// The inclusive range an integer kind holds.
-fn integer_range(kind: ScalarKind) -> Option<(i128, i128)> {
-    Some(match kind {
-        ScalarKind::Int32 | ScalarKind::Sint32 | ScalarKind::Sfixed32 => {
-            (i128::from(i32::MIN), i128::from(i32::MAX))
-        }
-        ScalarKind::Int64 | ScalarKind::Sint64 | ScalarKind::Sfixed64 => {
-            (i128::from(i64::MIN), i128::from(i64::MAX))
-        }
-        ScalarKind::Uint32 | ScalarKind::Fixed32 => (0, i128::from(u32::MAX)),
-        ScalarKind::Uint64 | ScalarKind::Fixed64 => (0, i128::from(u64::MAX)),
-        ScalarKind::Double
-        | ScalarKind::Float
-        | ScalarKind::Bool
-        | ScalarKind::String
-        | ScalarKind::Bytes => return None,
-    })
-}
-
 /// Base64, either alphabet (not both in one string), padding optional.
 fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
     let bytes = text.as_bytes();
@@ -687,6 +680,10 @@ struct Place<'p> {
     path: &'p str,
     /// The field the value is for.
     field: &'p str,
+    /// The integers a value here may be, or why there is no such range: judged
+    /// once per field by [`crate::proto_range`], so the writer refuses exactly
+    /// what the description document says the field cannot hold.
+    range: Result<ValueRange, RangeRefusal>,
 }
 
 /// The spellings a message's fields answer to, built the first time the message
@@ -951,13 +948,23 @@ impl Encoder<'_, '_, '_> {
         out: &mut Vec<u8>,
     ) -> Result<(), EncodeError> {
         let here = child(path, member.key);
-        let (number, kind, label, oneof, name) = {
-            let f = &self.msg(msg).fields[member.field];
-            (f.number, f.kind, f.label, f.oneof, self.field_name(msg, f))
+        let (number, kind, label, oneof, name, range, file) = {
+            let message = self.msg(msg);
+            let f = &message.fields[member.field];
+            (
+                f.number,
+                f.kind,
+                f.label,
+                f.oneof,
+                self.field_name(msg, f),
+                field_range(self.schema, message, f),
+                message.file,
+            )
         };
         let place = Place {
             path: &here,
             field: &name,
+            range,
         };
         match kind {
             FieldKind::Group => Err(self.value_error(
@@ -968,7 +975,7 @@ impl Encoder<'_, '_, '_> {
                  start-group and end-group markers, which this library does not write",
             )),
             FieldKind::Map { key, value } => {
-                self.map(number, key, value, member.value, &place, out)
+                self.map(number, file, key, value, member.value, &place, out)
             }
             _ if label == Label::Repeated => {
                 self.repeated(msg, member.field, number, kind, member.value, &place, out)
@@ -1098,6 +1105,7 @@ impl Encoder<'_, '_, '_> {
                 &Place {
                     path: &at,
                     field: place.field,
+                    range: place.range,
                 },
             )?);
         }
@@ -1120,9 +1128,13 @@ impl Encoder<'_, '_, '_> {
         Ok(())
     }
 
+    /// A map field written in file `file`, whose entries' key and value take
+    /// their ranges from that file's options alone.
+    #[allow(clippy::too_many_arguments)]
     fn map(
         &mut self,
         number: u64,
+        file: usize,
         key: ScalarKind,
         value: MapValueKind,
         json: &Json5Value,
@@ -1137,13 +1149,17 @@ impl Encoder<'_, '_, '_> {
                 format!("expected an object, found {}", describe(json)),
             ));
         };
+        let key_range = map_entry_range(self.schema, file, key);
+        let (value_kind, entry_value_range) = match value {
+            MapValueKind::Scalar(s) => {
+                (FieldKind::Scalar(s), map_entry_range(self.schema, file, s))
+            }
+            MapValueKind::Enum(e) => (FieldKind::Enum(e), Err(RangeRefusal::Enum)),
+            MapValueKind::Message(m) => (FieldKind::Message(m), Err(RangeRefusal::NotAnInteger)),
+        };
         let mut sorted: BTreeMap<MapKey, Vec<u8>> = BTreeMap::new();
         for (text, item) in entries {
             let at = child(place.path, text);
-            let at_place = Place {
-                path: &at,
-                field: place.field,
-            };
             if matches!(item, Json5Value::Null) {
                 return Err(self.value_error(
                     &at,
@@ -1152,13 +1168,18 @@ impl Encoder<'_, '_, '_> {
                     "null is not a map value: there is nothing to leave out of a map",
                 ));
             }
-            let (ordering, key_wire) = self.map_key(key, text, &at_place)?;
-            let value_kind = match value {
-                MapValueKind::Scalar(s) => FieldKind::Scalar(s),
-                MapValueKind::Enum(e) => FieldKind::Enum(e),
-                MapValueKind::Message(m) => FieldKind::Message(m),
+            let key_place = Place {
+                path: &at,
+                field: place.field,
+                range: key_range,
             };
-            let value_wire = self.single(value_kind, item, &at_place)?;
+            let (ordering, key_wire) = self.map_key(key, text, &key_place)?;
+            let value_place = Place {
+                path: &at,
+                field: place.field,
+                range: entry_value_range,
+            };
+            let value_wire = self.single(value_kind, item, &value_place)?;
             let mut entry = Vec::new();
             put_tag(&mut entry, 1, key_wire.wire_type());
             key_wire.put(&mut entry);
@@ -1205,17 +1226,19 @@ impl Encoder<'_, '_, '_> {
                 )),
             },
             _ => {
-                let number = Self::integer(kind, text, true).map_err(|reason| {
-                    self.value_error(
-                        place.path,
-                        Some(place.field),
-                        Some(format!(
-                            "a {} map key, written as a string of digits",
-                            kind.keyword()
-                        )),
-                        reason,
-                    )
-                })?;
+                let number = Self::bounds(kind, place.range)
+                    .and_then(|range| Self::integer(kind, range, text, true))
+                    .map_err(|reason| {
+                        self.value_error(
+                            place.path,
+                            Some(place.field),
+                            Some(format!(
+                                "a {} map key, written as a string of digits",
+                                kind.keyword()
+                            )),
+                            reason,
+                        )
+                    })?;
                 Ok((MapKey::Number(number), Self::integer_wire(kind, number)))
             }
         }
@@ -1229,8 +1252,16 @@ impl Encoder<'_, '_, '_> {
     /// optional sign and nothing else: protobuf's JSON mapping reads a string
     /// as an integer in the 64-bit sense, and `"1.0"` or `"1e3"` is not one.
     /// (`protobuf`'s own parser agrees; MEASURED against libprotobuf 3.21.12.)
-    fn integer(kind: ScalarKind, text: &str, from_string: bool) -> Result<i128, String> {
-        let (low, high) = integer_range(kind).unwrap_or((0, 0));
+    ///
+    /// `range` is the field's judged range ([`Self::bounds`]), which a nanopb
+    /// `int_size` may have narrowed below the type's.
+    fn integer(
+        kind: ScalarKind,
+        range: ValueRange,
+        text: &str,
+        from_string: bool,
+    ) -> Result<i128, String> {
+        let ValueRange { low, high, source } = range;
         // A string for an unsigned type takes no minus sign, not even on a zero
         // (`"-0"`); a JSON number `-0` is the number zero and is read as one.
         // Both are as libprotobuf 3.21.12 reads them, MEASURED.
@@ -1260,14 +1291,59 @@ impl Encoder<'_, '_, '_> {
             }
         };
         if integer < low || integer > high {
-            return Err(format!("`{text}` is out of range for {}", kind.keyword()));
+            return Err(match source {
+                RangeSource::Type => format!("`{text}` is out of range for {}", kind.keyword()),
+                // The type admits the value and nanopb's decoder would not, so
+                // the sentence names the option and the range it leaves.
+                RangeSource::NanopbIntSize { .. } => format!(
+                    "`{text}` is out of range for {}: {low} to {high}",
+                    Self::type_phrase(kind, range)
+                ),
+            });
         }
         Ok(integer)
     }
 
+    /// The range an integer of `kind` at a place is held to, or the sentence
+    /// that refuses every value there because the range cannot be known.
+    fn bounds(
+        kind: ScalarKind,
+        judged: Result<ValueRange, RangeRefusal>,
+    ) -> Result<ValueRange, String> {
+        match judged {
+            Ok(range) => Ok(range),
+            Err(RangeRefusal::UnmodelledOption) => Err(format!(
+                "the field's (nanopb).int_size cannot be read, so the range of the C \
+                 integer nanopb stores this {} in is not known and no value is written",
+                kind.keyword()
+            )),
+            // Not reached for an integer kind, whose place always carries a
+            // range or the refusal above; the type is the honest bound if it is.
+            Err(RangeRefusal::NotAnInteger | RangeRefusal::Enum | RangeRefusal::Map) => {
+                ValueRange::of_type(kind).ok_or_else(|| {
+                    format!(
+                        "internal: an integer was asked of a {}, which holds none",
+                        kind.keyword()
+                    )
+                })
+            }
+        }
+    }
+
+    /// The type a range is the range of: the keyword, and the nanopb option
+    /// beside it when the option narrowed it.
+    fn type_phrase(kind: ScalarKind, range: ValueRange) -> String {
+        match range.source {
+            RangeSource::Type => String::from(kind.keyword()),
+            RangeSource::NanopbIntSize { bits } => {
+                format!("{} with (nanopb).int_size = IS_{bits}", kind.keyword())
+            }
+        }
+    }
+
     // ---- scalars ---------------------------------------------------------
 
-    fn expected_scalar(kind: ScalarKind) -> String {
+    fn expected_scalar(kind: ScalarKind, judged: Result<ValueRange, RangeRefusal>) -> String {
         match kind {
             ScalarKind::Double | ScalarKind::Float => format!(
                 "{}: a JSON number, a decimal string, or one of the strings \"NaN\", \
@@ -1279,13 +1355,19 @@ impl Encoder<'_, '_, '_> {
             ScalarKind::Bytes => String::from(
                 "bytes: a base64 string, standard or URL-safe alphabet, padding optional",
             ),
-            _ => {
-                let (low, high) = integer_range(kind).unwrap_or((0, 0));
-                format!(
-                    "{}: an integer from {low} to {high}, as a JSON number or a decimal string",
+            _ => match Self::bounds(kind, judged) {
+                Ok(range) => format!(
+                    "{}: an integer from {} to {}, as a JSON number or a decimal string",
+                    Self::type_phrase(kind, range),
+                    range.low,
+                    range.high
+                ),
+                Err(_) => format!(
+                    "{}: an integer in the range of the field's (nanopb).int_size, which \
+                     cannot be read",
                     kind.keyword()
-                )
-            }
+                ),
+            },
         }
     }
 
@@ -1299,7 +1381,7 @@ impl Encoder<'_, '_, '_> {
             self.value_error(
                 place.path,
                 Some(place.field),
-                Some(Self::expected_scalar(kind)),
+                Some(Self::expected_scalar(kind, place.range)),
                 reason,
             )
         };
@@ -1349,7 +1431,10 @@ impl Encoder<'_, '_, '_> {
                         )))
                     }
                 };
-                Self::integer(kind, text, matches!(value, Json5Value::String(_)))
+                Self::bounds(kind, place.range)
+                    .and_then(|range| {
+                        Self::integer(kind, range, text, matches!(value, Json5Value::String(_)))
+                    })
                     .map(|v| Self::integer_wire(kind, v))
                     .map_err(bad)
             }
@@ -1374,7 +1459,8 @@ impl Encoder<'_, '_, '_> {
             ScalarKind::Sfixed32 => Wire::Fixed32(v as i32 as u32),
             ScalarKind::Fixed64 => Wire::Fixed64(v as u64),
             ScalarKind::Sfixed64 => Wire::Fixed64(v as i64 as u64),
-            // Not integers: the caller sends only the kinds `integer_range` knows.
+            // Not integers: the caller sends only the kinds that have a type range
+            // (`crate::proto_range::type_range`).
             ScalarKind::Double
             | ScalarKind::Float
             | ScalarKind::Bool
@@ -1443,6 +1529,13 @@ impl Encoder<'_, '_, '_> {
                 reason,
             )
         };
+        // An enum's number is an int32 whatever `int_size` the schema sets: the
+        // values it may hold are the enum's own, which are judged below.
+        let int32 = Self::bounds(
+            ScalarKind::Int32,
+            value_range(ScalarKind::Int32, IntSize::Default),
+        )
+        .map_err(bad)?;
         // Whether the number came from the text of the JSON and not from a name
         // in the schema: only a number can be one the enum does not have.
         let mut written_as_number = true;
@@ -1455,7 +1548,7 @@ impl Encoder<'_, '_, '_> {
                     // A name cannot be digits, so a string of digits is a number
                     // and cannot be a misspelt name; protobuf's own parser reads
                     // it the same way.
-                    Self::integer(ScalarKind::Int32, name, true).map_err(bad)?
+                    Self::integer(ScalarKind::Int32, int32, name, true).map_err(bad)?
                 } else {
                     return Err(bad(format!(
                         "`{name}` is not a value of the enum `{}`",
@@ -1464,7 +1557,7 @@ impl Encoder<'_, '_, '_> {
                 }
             }
             Json5Value::Number(text) => {
-                Self::integer(ScalarKind::Int32, text, false).map_err(bad)?
+                Self::integer(ScalarKind::Int32, int32, text, false).map_err(bad)?
             }
             other => {
                 return Err(bad(format!(

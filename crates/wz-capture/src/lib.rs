@@ -491,6 +491,9 @@ mod proto_nanopb_tests;
 /// the syntax tree the declaration and value doors need, and the refusals that
 /// are syntax.
 mod proto_parse;
+pub mod proto_range;
+#[cfg(test)]
+mod proto_range_tests;
 /// `.proto` schema text turned into DECLARATION text: the field names a
 /// protobuf payload's wire format does not carry, in the dialect
 /// [`payload::formats::FormatMap`] already installs.
