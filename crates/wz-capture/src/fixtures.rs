@@ -355,7 +355,7 @@ pub fn stream_chain_sequence_capture(chains: usize) -> Vec<u8> {
         .map(|(from_low, wire)| (from_low, stream_unit(&wire)))
         .collect::<Vec<_>>();
     for chain in 0..chains {
-        let sn = (2 * chain) as u8;
+        let sn = 2 * chain as u64;
         units.push((
             true,
             stream_unit(&fragment_wire(sn, true, &record[..split])),
@@ -537,7 +537,7 @@ pub fn multilink_declaration_behind_a_gap_carrying(
     if reference_in_a_chain {
         let split = reference.len() / 2;
         for (sn, more, piece) in [
-            (0u8, true, &reference[..split]),
+            (0u64, true, &reference[..split]),
             (1, false, &reference[split..]),
         ] {
             let unit = stream_unit(&fragment_wire(sn, more, piece));
@@ -626,7 +626,7 @@ fn full_handshake() -> Vec<(bool, Vec<u8>)> {
 }
 
 /// One reliable-channel FRAGMENT with sequence number `sn`, carrying `piece`.
-fn fragment_wire(sn: u8, more: bool, piece: &[u8]) -> Vec<u8> {
+fn fragment_wire(sn: u64, more: bool, piece: &[u8]) -> Vec<u8> {
     let mut wire = alloc::vec![
         wz_session_core::wire_const::T_MID_FRAGMENT
             | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
@@ -634,11 +634,34 @@ fn fragment_wire(sn: u8, more: bool, piece: &[u8]) -> Vec<u8> {
                 wz_codecs::wire_const::FLAG_T_FRAGMENT_M
             } else {
                 0
-            },
-        sn,
+            }
     ];
+    // The sequence number is a VLE, as the decoder reads it. Written as one raw
+    // byte it was a valid VLE only below 128: past 64 chains half the fragments
+    // read as other numbers, their chains never closed, and a case that says
+    // every chain completes measured chains that ended open.
+    put_vle(&mut wire, sn);
     wire.extend_from_slice(piece);
     wire
+}
+
+/// Append `value` as zenoh's VLE: seven bits a byte, low bits first, the top bit
+/// set on every byte but the last. The fixtures' sequence numbers stay far below
+/// the 2^56 where zenoh's ninth byte would carry eight bits, which is asserted.
+fn put_vle(out: &mut Vec<u8>, mut value: u64) {
+    assert!(
+        value < 1 << 56,
+        "a fixture sequence number this large is not written"
+    );
+    loop {
+        let low = (value & 0x7F) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(low);
+            return;
+        }
+        out.push(low | 0x80);
+    }
 }
 
 /// ONE unicast session over UDP that carries `chains` fragment chains, one after
@@ -674,7 +697,7 @@ fn chains_after(mut rows: Vec<(bool, Vec<u8>)>, chains: usize) -> Vec<u8> {
     let record = push(sender_space(0, Some("chain/joined")), &[7u8; 8]);
     let split = record.len() / 2;
     for chain in 0..chains {
-        let sn = (2 * chain) as u8;
+        let sn = 2 * chain as u64;
         rows.push((true, fragment_wire(sn, true, &record[..split])));
         rows.push((true, fragment_wire(sn + 1, false, &record[split..])));
     }
