@@ -614,8 +614,15 @@ fn is_stream(o: &MessageListOrigin) -> bool {
 /// | scouting            |  57.3  |  41.0  | a SCOUT, a HELLO, a SCOUT with tail  |
 /// | quic datagram       |  22.4  | (none) | recovered plaintext                  |
 /// | quic stream         |  41.8  | (none) | recovered plaintext                  |
-/// | udp fragment chains |  95.2  |  75.3  | two fragments a chain                |
-/// | tcp fragment chains | 110.6  |  90.8  | two fragments a chain                |
+/// | udp fragment chains |  83.9  |  64.0  | two fragments a chain                |
+/// | tcp fragment chains |  99.4  |  79.5  | two fragments a chain                |
+///
+/// The fragment chains were 95.2 and 75.3, 110.6 and 90.8 while the fixtures wrote
+/// a fragment's sequence number as one raw byte, which past 64 chains read as other
+/// numbers and left half the chains open; the chain detail of fields revisions 62 and
+/// 63 then took them to 208.4 and 188.6, 224.0 and 204.1 (a 104-byte map slot a
+/// fragment row, and a 120-byte ended-chain entry nobody counted) until the chain
+/// facts were kept as packed columns, every one of them counted.
 ///
 /// Before the entries and the run map were packed columns (D10) these read 60.1 and
 /// 49.2, 101.1 and 90.2, 68.4 and 68.4, 150.3 and 139.4, 121.9, 57.3 and 41.0, 60.1,
