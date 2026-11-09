@@ -156,6 +156,12 @@ impl RowPlane {
         self.rows.memory()
     }
 
+    /// Give up the verdicts of the rows `keep` says no to: the rows no list
+    /// holds any more, which nothing will ask for again.
+    pub(crate) fn forget_rows(&mut self, keep: &impl Fn(&RowKey) -> bool) {
+        self.rows.retain(keep);
+    }
+
     /// The verdicts this plane recorded for one row.
     pub(crate) fn row_verdict(&self, key: &RowKey) -> Option<&RowVerdict> {
         self.rows.get(key)

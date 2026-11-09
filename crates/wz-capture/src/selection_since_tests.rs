@@ -203,6 +203,7 @@ fn delta(before: SelectionWork, after: SelectionWork) -> SelectionWork {
         rows_read: after.rows_read - before.rows_read,
         continued: after.continued - before.continued,
         whole: after.whole - before.whole,
+        forgets: after.forgets - before.forgets,
     }
 }
 
@@ -440,6 +441,101 @@ fn a_ceiling_that_trims_the_front_does_not_begin_the_planes_again() {
     assert_eq!(work.whole, 1, "{work:?}");
     assert_eq!(work.fold.restarts, 1, "{work:?}");
     assert_eq!(work.fold.messages_folded, 30, "{work:?}");
+}
+
+/// A HANDLE UNDER A CEILING HOLDS THE PLANES OF THE ROWS IT HOLDS. Thousands of
+/// exchanges, some left open, through a list that holds six messages: the
+/// planes give up the rows the ceiling took instead of beginning again, so they
+/// fold each message once and stay near what the list holds, and every document
+/// is the one a memory whose planes keep every row they took writes, byte for
+/// byte.
+///
+/// The memory held against is not one that begins again: under a ceiling the
+/// two differ by design (a final whose request the ceiling took is closed by
+/// planes that went on and an orphan to planes begun over what is held; see
+/// `selection_since_json_coordinated`). Giving rows up must change nothing a
+/// document says, which is what keeping them shows.
+#[test]
+fn a_ceiling_makes_the_planes_give_up_the_rows_it_took() {
+    const ROUNDS: u64 = 900;
+    for selector in [
+        "kind == query",
+        "closed == no",
+        "key == demo/**",
+        "msg == ResponseFinal",
+    ] {
+        let limits = DissectionLimits {
+            frames_per_flow: Some(6),
+            ..DissectionLimits::default()
+        };
+        let mut d = Dissection::with_limits(limits);
+        let filter = Filter::parse(selector).expect("the selector parses");
+        let mut numbering = Numbering::default();
+        let mut forgets = SelectionMemory::default();
+        let mut keeps = SelectionMemory::keeping_everything();
+        let (mut packets, mut cursor, mut most_kept) = (0usize, 0u64, 0usize);
+        for round in 1..=ROUNDS {
+            // Every fifth request is never closed, so open exchanges outlive
+            // the rows that carried them.
+            let closes = round % 5 != 0;
+            let mut records = alloc::vec![
+                (true, request_query(round, sender_space(0, Some("demo/q")))),
+                (
+                    false,
+                    response_reply(round, sender_space(0, Some("demo/q")), b"ok"),
+                ),
+            ];
+            if closes {
+                records.push((false, response_final(round)));
+            }
+            records.push((
+                true,
+                push(sender_space(0, Some("demo/p")), &[round as u8; 4]),
+            ));
+            for (from_low, record) in records {
+                let wire = frame_carrying(&record);
+                let packet = if from_low {
+                    udp_packet(LOW, 43210, HIGH, 7447, &wire)
+                } else {
+                    udp_packet(HIGH, 7447, LOW, 43210, &wire)
+                };
+                d.push_packet(LINKTYPE_ETHERNET, packets, &packet);
+                packets += 1;
+                numbering.drain(&d);
+                let window = SelectionWindow {
+                    after_seq: cursor,
+                    through_seq: numbering.issued,
+                };
+                let given_up =
+                    selection_since_json_coordinated(&d, &filter, &numbering, window, &mut forgets);
+                let kept =
+                    selection_since_json_coordinated(&d, &filter, &numbering, window, &mut keeps);
+                assert_eq!(
+                    given_up, kept,
+                    "{selector}, round {round}: giving rows up changed the document"
+                );
+                cursor = window.through_seq;
+                most_kept = most_kept.max(forgets.kept_entries());
+            }
+        }
+        let work = forgets.work();
+        assert_eq!(work.fold.restarts, 1, "{selector}: {work:?}");
+        assert_eq!(
+            work.fold.messages_folded, packets as u64,
+            "{selector}: each message is folded once"
+        );
+        assert_eq!(work.whole, 1, "{selector}: {work:?}");
+        assert!(work.forgets >= 2, "{selector}: {work:?}");
+        // ANTI-VACUITY: the memory held against kept the thousands of rows the
+        // capture carried, and this one stayed near the floor and what the list
+        // and the open exchanges hold.
+        assert!(
+            keeps.kept_entries() > most_kept,
+            "{selector}: kept {} against {most_kept}",
+            keeps.kept_entries()
+        );
+        assert!(most_kept < 2 * 1024 + 512, "{selector}: kept {most_kept}");
+    }
 }
 
 /// A transport INIT naming `zid`.

@@ -1585,10 +1585,13 @@ fn the_table_and_the_corpus_hold_each_other() {
 }
 
 /// What the dissector emits at the header of an extension entry beyond the four
-/// bit-fields is a READING of the body or a name, and is the only thing the
-/// report skips: nothing else the walker emits is dropped.
+/// bit-fields is a READING of the body or a name, and so is a declared reading
+/// of a message's bit-field (`transport_layout::READINGS`) beside that field's
+/// row; those are the only things the report skips: nothing else the walker
+/// emits is dropped, and every declared reading is met in the corpus.
 #[test]
 fn nothing_the_walker_emits_is_dropped_but_readings_of_an_extension_body() {
+    let mut readings_met: Vec<&str> = Vec::new();
     for case in corpus() {
         let b = built(&case.json, Framing::Datagram);
         let root = dissect_transport_message(&b.body, 0).expect("dissects");
@@ -1597,8 +1600,18 @@ fn nothing_the_walker_emits_is_dropped_but_readings_of_an_extension_body() {
         };
         let mut dropped: Vec<String> = Vec::new();
         for child in top {
+            let reading = crate::transport_layout::READINGS
+                .iter()
+                .find(|(reading, of)| {
+                    *reading == child.name.as_ref() && b.layout.iter().any(|r| r.name == *of)
+                })
+                .map(|(reading, _)| *reading);
+            if let Some(reading) = reading {
+                readings_met.push(reading);
+            }
             let accounted = b.layout.iter().any(|r| r.name == child.name.as_ref())
-                || matches!(child.name.as_ref(), "extensions");
+                || matches!(child.name.as_ref(), "extensions")
+                || reading.is_some();
             if !accounted {
                 dropped.push(child.name.to_string());
             }
@@ -1633,6 +1646,12 @@ fn nothing_the_walker_emits_is_dropped_but_readings_of_an_extension_body() {
                 }
             }
         }
+    }
+    for (reading, _) in crate::transport_layout::READINGS {
+        assert!(
+            readings_met.contains(reading),
+            "the corpus never emits the declared reading `{reading}`"
+        );
     }
 }
 

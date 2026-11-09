@@ -430,6 +430,24 @@ pub(crate) const LEAVES: &[LeafSpec] = &[
     leaf("value", Kind::Other, Encoding::Vle, None),
 ];
 
+/// What the dissector emits beside a bit-field that is a READING of it and not
+/// a field of the message: the reading's name and the bit-field it reads.
+///
+/// `whatami_name` is the role word the `whatami` code means. It aliases the
+/// cbyte as the code does and owns none of its bits, so a caller who wants
+/// another role writes the code, which is a row. The report skips a reading
+/// only when the carrier it aliases has the field it reads; the table is closed
+/// as [`LEAVES`] is, and `transport_build_tests` holds that every reading here
+/// is emitted beside a row of its field and that nothing else is skipped.
+pub(crate) const READINGS: &[(&str, &str)] = &[("whatami_name", "whatami")];
+
+/// Whether `name`, emitted at `carrier`, is a reading of one of its bit-fields.
+fn reads_a_field_of(name: &str, carrier: Option<&Carrier>) -> bool {
+    READINGS.iter().any(|(reading, of)| {
+        *reading == name && carrier.is_some_and(|c| c.aliases.iter().any(|a| a.name == *of))
+    })
+}
+
 fn leaf_spec(name: &str) -> Result<&'static LeafSpec, LayoutError> {
     LEAVES
         .iter()
@@ -603,10 +621,9 @@ fn level(
         };
         if let Some(reading) = reading {
             // A bit-field or flag of the carrier byte just read.
-            let found = carrier
-                .as_ref()
-                .filter(|c| c.span == child.span)
-                .and_then(|c| c.aliases.iter().find(|a| a.name == name).copied());
+            let here = carrier.as_ref().filter(|c| c.span == child.span);
+            let found = here.and_then(|c| c.aliases.iter().find(|a| a.name == name).copied());
+            let reads_one = reads_a_field_of(name, here);
             match (found, carrier.as_mut()) {
                 (Some(spec), Some(c)) => {
                     c.covered |= spec.mask;
@@ -617,6 +634,8 @@ fn level(
                 // What an extension's walker reads out of its body (`ext_name`,
                 // `priority`, ...) is not a field of the entry.
                 _ if in_entry => {}
+                // The word a code means, beside the code's own row.
+                _ if reads_one => {}
                 _ => return Err(unclassified(name)),
             }
             continue;

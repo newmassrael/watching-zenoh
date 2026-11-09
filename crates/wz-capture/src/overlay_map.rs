@@ -99,6 +99,15 @@ impl<K: Ord + Clone, V: Clone + Default> OverlayMap<K, V> {
                 .sum::<usize>()
     }
 
+    /// Keep the keys `keep` says yes to, in both layers. The shared layer is
+    /// written in place when nothing else holds it and copied once when a copy
+    /// does, so a reading that is alive still reads what it was given.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
+        Arc::make_mut(&mut self.base).retain(|k, _| keep(k));
+        self.delta.retain(|k, _| keep(k));
+    }
+
     /// Fold `delta` into `base` when it has grown past a fraction of it, and when
     /// nothing else holds `base`, which is what keeps this from copying it.
     fn fold_into_base_if_due(&mut self) {
@@ -140,6 +149,35 @@ mod tests {
             }
         }
         assert_eq!(overlay.get(&10_000), None, "a reading's write is not kept");
+    }
+
+    /// `retain` keeps what a single map keeps, in either layer, and a copy taken
+    /// before it still reads what it was given.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    #[test]
+    fn retain_keeps_what_a_single_map_keeps_and_spares_a_copy() {
+        let mut overlay: OverlayMap<u32, u32> = OverlayMap::default();
+        let mut plain: BTreeMap<u32, u32> = BTreeMap::new();
+        for step in 0..3000u32 {
+            let key = (step * 7919) % 900;
+            *overlay.entry_or_default(key) += step;
+            *plain.entry(key).or_default() += step;
+        }
+        let reading = overlay.clone();
+        overlay.retain(|k| k % 3 != 0 && *k > 100);
+        plain.retain(|k, _| k % 3 != 0 && *k > 100);
+        assert_eq!(overlay.len(), plain.len());
+        for key in 0..900u32 {
+            assert_eq!(overlay.get(&key), plain.get(&key), "key {key}");
+        }
+        assert_eq!(reading.get(&3), Some(&plain_sum(3)), "the copy is spared");
+        assert_eq!(reading.len(), 900);
+    }
+
+    /// What the writes of the test above left at `key` of a single map.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    fn plain_sum(key: u32) -> u32 {
+        (0..3000u32).filter(|step| (step * 7919) % 900 == key).sum()
     }
 
     /// The point of it: a copy shares the shared layer and does not copy it.

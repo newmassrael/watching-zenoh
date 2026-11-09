@@ -1815,6 +1815,13 @@ impl PayloadFold {
         self.census.row_verdicts.len()
     }
 
+    /// Give up the verdicts of the rows `keep` says no to: the rows no list
+    /// holds any more, which nothing will ask for again.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn forget_rows(&mut self, keep: &impl Fn(&RowKey) -> bool) {
+        self.census.row_verdicts.retain(keep);
+    }
+
     /// Bytes the plane holds that follow the row count: the verdict it keeps for
     /// every record it judged, which is what the census adds to a handle per row.
     #[cfg(feature = "dissect")]

@@ -96,6 +96,17 @@ impl<K, V> SortedChunks<K, V> {
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, v)| v)
     }
+
+    /// Keep the entries `keep` says yes to, in one pass, and give back every
+    /// chunk left with none. The order of what is kept does not move, so every
+    /// chunk is still sorted and above the one before it.
+    pub fn retain(&mut self, mut keep: impl FnMut(&K, &V) -> bool) {
+        for chunk in &mut self.chunks {
+            chunk.retain(|(k, v)| keep(k, v));
+        }
+        self.chunks.retain(|chunk| !chunk.is_empty());
+        self.len = self.chunks.iter().map(Vec::len).sum();
+    }
 }
 
 impl<K: Ord, V> SortedChunks<K, V> {
@@ -288,6 +299,41 @@ mod tests {
                 last = Some(*key);
             }
         }
+    }
+
+    /// `retain` keeps what a `BTreeMap::retain` keeps, gives back the chunks it
+    /// empties, and leaves a map later inserts and removals still answer right.
+    #[test]
+    fn retain_keeps_what_the_btree_map_keeps() {
+        let mut map: SortedChunks<u64, u64> = SortedChunks::new();
+        let mut reference: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut rng = Lcg(11);
+        for step in 0..20_000u64 {
+            let key = rng.next() % 30_000;
+            map.insert(key, step);
+            reference.insert(key, step);
+        }
+        let chunks_before = map.chunks.len();
+        // A front cut and a scattered cut at once.
+        let keep = |k: &u64, v: &u64| *k >= 12_000 && v % 5 != 0;
+        map.retain(keep);
+        reference.retain(|k, v| keep(k, v));
+        assert_eq!(map.len(), reference.len());
+        assert!(
+            map.chunks.len() < chunks_before,
+            "emptied chunks are given back"
+        );
+        assert!(map.chunks.iter().all(|chunk| !chunk.is_empty()));
+        for step in 0..5_000u64 {
+            let key = rng.next() % 31_000;
+            assert_eq!(map.insert(key, step), reference.insert(key, step));
+            let gone = rng.next() % 31_000;
+            assert_eq!(map.remove(&gone), reference.remove(&gone));
+        }
+        assert!(map
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .eq(reference.iter().map(|(k, v)| (*k, *v))));
     }
 
     /// `append` moves a younger map in whole, merges an overlapping one, and a key

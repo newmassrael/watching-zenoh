@@ -1367,6 +1367,17 @@ impl ExchangeFold {
             + self.table.row_verdicts.len()
     }
 
+    /// Give up what the per-row tables hold of the rows `keep` says no to: the
+    /// rows no list holds any more, which nothing will ask for again. The
+    /// exchanges still open stay whatever row their request was in, since a
+    /// close to come is judged by them.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn forget_rows(&mut self, keep: &impl Fn(&crate::payload::RowKey) -> bool) {
+        self.table.row_verdicts.retain(keep);
+        self.table.closings.retain(|(row, _)| keep(row));
+        self.table.answers.retain(|(row, _)| keep(row));
+    }
+
     /// The table with every exchange still open given its verdict, over a copy.
     pub(crate) fn table(&self) -> ExchangeTable {
         let mut table = self.table.clone();

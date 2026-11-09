@@ -158,6 +158,33 @@ impl Base {
                 .sum::<usize>()
     }
 
+    /// This base with only the rows `keep` says yes to, in blocks of exactly the
+    /// size they hold; a block left with none is gone.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    fn retained(&self, keep: &mut impl FnMut(&RowKey) -> bool) -> Self {
+        let mut blocks = Vec::new();
+        let mut rows = 0;
+        for b in &self.blocks {
+            let (at, pattern): (Vec<usize>, Vec<u32>) =
+                b.at.iter()
+                    .zip(&b.pattern)
+                    .filter(|(at, _)| keep(&RowKey::from_parts(b.list, b.direction, **at)))
+                    .map(|(at, pattern)| (*at, *pattern))
+                    .unzip();
+            if at.is_empty() {
+                continue;
+            }
+            rows += at.len();
+            blocks.push(Block {
+                list: b.list,
+                direction: b.direction,
+                at,
+                pattern,
+            });
+        }
+        Self { blocks, rows }
+    }
+
     /// This base with `delta` written over it, in blocks of exactly the size
     /// they hold.
     fn merged(&self, delta: &SortedChunks<RowKey, u32>) -> Self {
@@ -265,6 +292,17 @@ impl VerdictColumn {
         self.base.bytes() + self.delta.allocated_bytes() + self.patterns.bytes()
     }
 
+    /// Keep the rows `keep` says yes to and give up the rest: what a holder that
+    /// goes on across front trims does with the rows no list holds any more. The
+    /// sorted rows are rebuilt, never written in place, so a copy that is alive
+    /// still reads what it was given. The patterns stay: they are the few
+    /// distinct answers, not the rows.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&RowKey) -> bool) {
+        self.base = Arc::new(self.base.retained(&mut keep));
+        self.delta.retain(|key, _| keep(key));
+    }
+
     /// Fold `delta` into the sorted rows when it has grown past a fraction of
     /// them and nothing else holds them, which is what keeps a copy that is alive
     /// (a reading in progress) from making the fold copy the rows.
@@ -347,6 +385,52 @@ mod tests {
         assert!(column.get(&key(5, 0, 0)).is_none());
         // The recent writes were folded into the sorted rows along the way.
         assert!(column.base.rows > 0, "no fold happened");
+    }
+
+    /// `retain` gives up the rows a map's `retain` gives up, in the sorted rows and
+    /// the recent writes alike, leaves a copy taken before it as it was, and a
+    /// row written after it reads as a single map's would.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    #[test]
+    fn retain_gives_up_what_the_map_gives_up() {
+        let mut column = VerdictColumn::default();
+        let mut reference: BTreeMap<RowKey, Vec<Truth>> = BTreeMap::new();
+        let mut rng = Lcg(13);
+        let write = |column: &mut VerdictColumn,
+                     reference: &mut BTreeMap<RowKey, Vec<Truth>>,
+                     rng: &mut Lcg,
+                     from: u64| {
+            for _ in 0..8_000 {
+                let k = key(
+                    (rng.next() % 3) as usize,
+                    (rng.next() % 2) as usize,
+                    (from + rng.next() % 4_000) as usize,
+                );
+                let t = truth_of(rng.next());
+                column.record(k, t);
+                reference.entry(k).or_default().push(t);
+            }
+        };
+        write(&mut column, &mut reference, &mut rng, 0);
+        let reading = column.clone();
+        let before = reading.len();
+        // A front trim of list 1 and the whole of list 2, as ceilings would.
+        let keep = |k: &RowKey| {
+            let (list, _, at) = k.parts();
+            list == 0 || (list == 1 && at >= 2_500)
+        };
+        column.retain(keep);
+        reference.retain(|k, _| keep(k));
+        assert_eq!(reading.len(), before, "the copy reads what it was given");
+        write(&mut column, &mut reference, &mut rng, 3_000);
+        assert_eq!(column.len(), reference.len());
+        for (k, want) in &reference {
+            assert_eq!(
+                column.get(k).map(RowVerdict::records),
+                Some(want.as_slice()),
+                "{k:?}"
+            );
+        }
     }
 
     /// The distinct answers are few however many rows have them, and what a row

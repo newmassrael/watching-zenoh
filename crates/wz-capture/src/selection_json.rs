@@ -658,6 +658,26 @@ impl SelectionFold {
         })
     }
 
+    /// Give up what the planes hold of the rows no list holds any more. Nothing
+    /// asks for them again: a document writes only rows a list holds, and a row
+    /// is asked again only while its list holds it. What the planes keep that is
+    /// not a row's (the exchanges still open) stays.
+    fn forget_rows_not_held(&mut self, d: &crate::Dissection) {
+        let Some(p) = self.planes.as_mut() else {
+            return;
+        };
+        let first = first_held(d);
+        let keep = |key: &RowKey| {
+            let (list, _, produced) = key.parts();
+            first
+                .get(list)
+                .is_some_and(|first| produced as u64 >= *first)
+        };
+        p.payloads.forget_rows(&keep);
+        p.exchanges.forget_rows(&keep);
+        p.rows.forget_rows(&keep);
+    }
+
     /// Who says each row's word now, with `open` the exchanges still open judged
     /// as [`crate::exchange::ExchangeFold::open_judged`] judges them, or `None`
     /// when no selector was asked.
@@ -784,6 +804,9 @@ pub struct SelectionWork {
     pub continued: u64,
     /// Calls that read every row.
     pub whole: u64,
+    /// Times the planes gave up the rows no list held any more, instead of
+    /// beginning again.
+    pub forgets: u64,
 }
 
 /// The word a selector said of each row the LAST call of
@@ -813,6 +836,13 @@ pub struct SelectionMemory {
     /// selector.
     asked: Option<crate::filter::Filter>,
     fold: crate::ordered_fold::Resumable<SelectionFold>,
+    /// The entries the planes kept when they last gave up the rows no list
+    /// held, or were begun: they give them up again when they have doubled.
+    kept_after_forget: usize,
+    /// Never give up a row nor begin again for what the planes keep: the memory
+    /// a test holds one that gives them up against.
+    #[cfg(test)]
+    keeps_everything: bool,
     /// What the last document left, or `None` when the next call reads every row.
     left: Option<Left>,
     /// The order the next row written takes.
@@ -842,6 +872,24 @@ impl SelectionMemory {
         self.work
     }
 
+    /// The entries the planes keep that grow with the messages taken, for a test
+    /// that holds them to what the lists hold.
+    #[cfg(test)]
+    pub(crate) fn kept_entries(&self) -> usize {
+        self.fold.fold().map_or(0, SelectionFold::kept_entries)
+    }
+
+    /// A memory whose planes never give up a row and never begin again for what
+    /// they keep: what the planes were before they gave rows up, for a test to
+    /// hold one that does against.
+    #[cfg(test)]
+    pub(crate) fn keeping_everything() -> Self {
+        Self {
+            keeps_everything: true,
+            ..Self::default()
+        }
+    }
+
     /// Give up the planes, the node census and where the last document ended,
     /// keeping the words said: the next call then judges from the first message
     /// and reads every row, which is what every call did before the planes were
@@ -854,19 +902,40 @@ impl SelectionMemory {
         self.left = None;
     }
 
-    /// Whether the planes, which go on across front trims, have grown past what
-    /// the lists hold: past four entries per held message and a floor they are
-    /// begun again over what is held, one pass per that many new messages, as for
-    /// the field document's pairing.
-    fn outgrew(&self, d: &crate::Dissection) -> bool {
-        let Some(fold) = self.fold.fold() else {
+    /// Keep the planes, which go on across front trims, to what the lists hold,
+    /// and say whether they outgrew it all the same.
+    ///
+    /// The planes keep a verdict of every row they took, and a ceiling takes rows
+    /// from the front of a list, so the planes would hold the rows of the whole
+    /// capture. When their entries have doubled since they last gave up the rows
+    /// no list holds (and past a floor), or have passed four entries per held
+    /// message and the floor, they give them up again: one pass over what they
+    /// keep per as many new entries, and the planes stay near what the lists
+    /// hold. What is kept that is not a row's (the exchanges still open) cannot
+    /// be given up that way; when it alone is past the bound the planes are begun
+    /// again over what is held, as the field document's pairing is.
+    fn keep_to_what_is_held(&mut self, d: &crate::Dissection) -> bool {
+        #[cfg(test)]
+        if self.keeps_everything {
+            return false;
+        }
+        let Some(fold) = self.fold.fold_mut() else {
             return false;
         };
         let held: usize = d
             .message_lists_with_origin()
             .map(|(_, _, list)| list.len())
             .sum();
-        fold.kept_entries() > 4 * held + 1024
+        let outgrown = 4 * held + 1024;
+        // Past the bound the rows are given up first, whether or not the
+        // entries doubled: only what is left after that begins the planes again.
+        let kept = fold.kept_entries();
+        if kept > 2 * self.kept_after_forget + 1024 || kept > outgrown {
+            fold.forget_rows_not_held(d);
+            self.kept_after_forget = fold.kept_entries();
+            self.work.forgets += 1;
+        }
+        fold.kept_entries() > outgrown
     }
 }
 
@@ -938,6 +1007,7 @@ impl SelectionMemories {
                 rows_read: sum.rows_read + w.rows_read,
                 continued: sum.continued + w.continued,
                 whole: sum.whole + w.whole,
+                forgets: sum.forgets + w.forgets,
             })
     }
 }
@@ -969,6 +1039,13 @@ fn push_revised_row(row: &Written, was: RowVerdict, first: &mut bool, out: &mut 
     let _ = write!(out, ",\"was\":\"{}\"}}", was.word());
 }
 
+/// The produced-index of the oldest row each list holds, by the list's place.
+fn first_held(d: &crate::Dissection) -> Vec<u64> {
+    d.message_lists_with_origin()
+        .map(|(_, _, frames)| frames.produced() - frames.len() as u64)
+        .collect()
+}
+
 /// The selector's verdict over the rows issued AFTER a cursor, and the rows
 /// BEFORE it whose word has changed since the last time it was asked.
 ///
@@ -992,12 +1069,16 @@ fn push_revised_row(row: &Written, was: RowVerdict, first: &mut bool, out: &mut 
 /// last one plus messages that sort after it (a list that left or appeared in
 /// front of another, a message decoded after a packet that followed it), when the
 /// session grouping or the capture's origin moved, when the selector or the
-/// handle's list ids it is read against are other ones, and when the planes have
-/// outgrown what the lists hold (four entries per held message and a thousand
-/// more). A front trim is not a reason: the planes go on across it, as the field
-/// document's pairing does, so a word given while a message was held is not taken
-/// back when a ceiling takes that message (a request whose final arrives after the
-/// request was trimmed still closes it). Every row is read again, as before, when
+/// handle's list ids it is read against are other ones, and when what the planes
+/// keep that is not a row's (the exchanges still open) has outgrown what the
+/// lists hold (four entries per held message and a thousand more). A front trim
+/// is not a reason: the planes go on across it, as the field document's pairing
+/// does, so a word given while a message was held is not taken back when a
+/// ceiling takes that message (a request whose final arrives after the request
+/// was trimmed still closes it). What the planes keep of the rows a ceiling took
+/// is given up once it has doubled, in one pass over what they keep, so a
+/// handle under a ceiling holds the planes of the rows it holds and does not
+/// begin them again. Every row is read again, as before, when
 /// the planes began again, when the cursor is below the `through_seq` the last
 /// document gave, when the last document wrote a row with no number, and when the
 /// rows that arrived do not all sort after the ones read (a segment held behind a
@@ -1071,7 +1152,7 @@ pub fn selection_since_json_coordinated(
         let lists = d.message_lists_with_origin().count();
         filter.numbered_by(lists, &|list| coordinates.list_id(list))
     };
-    if memory.asked.as_ref() != Some(&numbered) || memory.outgrew(d) {
+    if memory.asked.as_ref() != Some(&numbered) || memory.keep_to_what_is_held(d) {
         memory.fold = crate::ordered_fold::Resumable::default();
         memory.asked = Some(numbered.clone());
     }
@@ -1088,6 +1169,9 @@ pub fn selection_since_json_coordinated(
         )
         .expect("a walk nobody can stop runs to its end");
     let resumed = memory.work.fold.restarts == restarts;
+    if !resumed {
+        memory.kept_after_forget = fold.kept_entries();
+    }
 
     let open = fold.planes.as_ref().map(|p| p.exchanges.open_judged());
     let judge = fold.judge(open.as_ref());
@@ -1165,10 +1249,7 @@ pub fn selection_since_json_coordinated(
         // exchanges that were open. Each is asked again, while its list still
         // holds it: a row a ceiling has taken is in no document, whatever number
         // the caller still has for it, which is what a whole enumeration does.
-        let first_held: Vec<u64> = d
-            .message_lists_with_origin()
-            .map(|(_, _, frames)| frames.produced() - frames.len() as u64)
-            .collect();
+        let first_held = first_held(d);
         for (key, placed) in &left.unsettled {
             let (list, _, produced) = key.parts();
             let produced = produced as u64;

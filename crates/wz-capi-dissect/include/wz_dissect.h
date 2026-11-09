@@ -7297,10 +7297,10 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * still open, and writes the document. Measured on a debug build of this library,
  * a call every 100 pushes under `kind == put`: with no ceiling, 2.2 ms a call at
  * 10,000 rows held and 2.4 ms at 100,000, where reading every row took 0.31 s and
- * 3.1 s; under WZ_DISSECT_LIMITS_LIVE_TAP (about 10,000 rows held) 4.8 to 9.5 ms a
- * call on average where reading every row took 0.6 to 1.4 s, with the folds
- * begun again once in about 30,000 rows (the last case below), that call costing
- * what reading every row costs.
+ * 3.1 s; under WZ_DISSECT_LIMITS_LIVE_TAP (about 10,000 rows held) over 200,000
+ * pushes, 2.3 to 2.6 ms a call on average and 10 ms at most where reading every
+ * row took 0.31 to 0.33 s on the same machine, the folds giving up the rows the
+ * ceiling took 20 times and never beginning again after the first call.
  * The folds begin again from the first message, and every row is read, when:
  *   - the capture is not the last one plus messages that sort after it: a list
  *     that appeared or left in front of another (a stream flow in front of the
@@ -7310,8 +7310,11 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  *     node, a flow's zenoh word that the selector reads);
  *   - the selector is another one, or a `flow` term in it names a list id the
  *     handle had not numbered;
- *   - the folds keep more than four entries per message the handle holds, and a
- *     thousand more.
+ *   - what the folds keep that is not a row's (the exchanges still open) is
+ *     more than four entries per message the handle holds, and a thousand
+ *     more. What they keep of the rows a ceiling took is given up before that,
+ *     in one pass, each time it has doubled, so a ceiling alone never begins
+ *     them again.
  * Every row is read, and the folds go on, when the cursor is below the
  * `through_seq` the last document gave or the last document wrote a row with no
  * `seq`. A ceiling that trims a list's front is NOT among these: the folds go on
