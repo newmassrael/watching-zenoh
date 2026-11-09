@@ -4230,8 +4230,12 @@ int main(void) {
      * 61: every `carried` entry's `keyexpr_source` (`wire`, `fixed_id` for a
      * key the declarations fixed for an id the wire never declared, or null).
      * A key arrives; on a fixed id's entry `keyexpr` moves from null to the
-     * fixed key. Nothing retires. */
-    revisioned[2].revision = 61;
+     * fixed key. Nothing retires.
+     * 62: a row's `chain` gains `index`, `offset` and `length` (where the
+     * fragment's bytes went in the joined buffer) and, on an abort,
+     * `expected_sn`, `received_sn`, `held_fragments` and `held_bytes`. Keys
+     * arrive; nothing retires. */
+    revisioned[2].revision = 62;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

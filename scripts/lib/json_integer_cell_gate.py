@@ -234,6 +234,17 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             born=59,
         ),
     ),
+    # Field document 62: the two sequence numbers of an aborted row's `chain`,
+    # one writer.
+    ("crates/wz-capture/src/fields_json.rs", "push_chain_sn"): (
+        Cell(
+            "fields",
+            "a chain's expected_sn and received_sn",
+            "the `expected_sn` and `received_sn` of a row's `chain`",
+            "The SNs take the integer rule",
+            born=62,
+        ),
+    ),
     # Values document 2: every integer of a record's `segment`, one writer for
     # the reason the field document's block has one.
     ("crates/wz-capture/src/field_values.rs", "push_piece_integer"): (

@@ -2353,7 +2353,12 @@ fn push_stream_flow(
         folded.push(FoldedRow {
             packet: last_packet,
             // The list's own fact, decided when the row was appended.
-            session: ChainIds::of(&flow.frames, produced, frame),
+            session: ChainIds::of(
+                &flow.frames,
+                produced,
+                frame,
+                flow.session.context().sn_mask(),
+            ),
             seq,
         });
     }
@@ -2670,7 +2675,12 @@ fn push_datagram_flow(
         // The chain identity is the list's own fact, decided when the row was
         // appended, so a datagram the second read disagrees about keeps it.
         let produced = first_produced + position as u64;
-        let session_row = ChainIds::of(&flow.frames, produced, frame);
+        let session_row = ChainIds::of(
+            &flow.frames,
+            produced,
+            frame,
+            flow.session.context().sn_mask(),
+        );
         // BEFORE the second read: a row the cursor passes over is not re-read
         // from the container, which is most of what a datagram row costs.
         let seq = tags.frame_seq(produced);
@@ -4432,6 +4442,18 @@ struct ChainRow {
     /// `None` for a refusal: the router refused the fragment BEFORE allocating
     /// a chain, so there is nothing for an identity to name.
     chain_id: Option<u64>,
+    /// Revision 62: where the fragment's bytes went in the chain's joined
+    /// buffer (its place among the chain's fragments, the offset of its first
+    /// byte, its length), when the router staged it and the list saw the chain
+    /// from its first fragment.
+    placed: Option<(u32, u64, u64)>,
+    /// Revision 62, on an abort only: the sequence number the chain expected
+    /// next (`None` when no chain the list followed was open) and the one this
+    /// fragment carried.
+    sns: Option<(Option<u64>, u64)>,
+    /// Revision 62, on an abort only: the fragments and bytes the chain had
+    /// staged when this fragment ended it, which are lost with it.
+    held: Option<(u32, u64)>,
 }
 
 /// The one word per `SnVerdict` variant this document writes under
@@ -4690,46 +4712,52 @@ impl ChainIds {
         list: &wz_session_core::passive_messages::MessageList,
         produced: u64,
         frame: &PassiveFrame,
+        ring: Option<u64>,
     ) -> SessionRow {
         SessionRow {
             sn: sn_row(frame),
-            chain: Self::chain_row(list, produced),
+            chain: Self::chain_row(list, produced, ring),
         }
     }
 
+    /// `ring` is the flow's sequence-number mask, when its handshake said: the
+    /// sequence number a chain expects after its last is that one plus one on
+    /// the ring, and plain plus one where there is no ring, which is the step a
+    /// chain of such a flow is followed by.
     #[cfg(feature = "reassembly")]
     fn chain_row(
         list: &wz_session_core::passive_messages::MessageList,
         produced: u64,
+        ring: Option<u64>,
     ) -> Option<ChainRow> {
         use wz_session_core::reassembly_dispatch::IngestOutcome;
-        let (outcome, chain_id) = list.chain_of(produced)?;
-        Some(match outcome {
-            IngestOutcome::Begun => ChainRow {
-                outcome: ChainOutcome::Begun,
-                reason: None,
-                chain_id,
-            },
-            IngestOutcome::Continued => ChainRow {
-                outcome: ChainOutcome::Continued,
-                reason: None,
-                chain_id,
-            },
-            IngestOutcome::Reassembled => ChainRow {
-                outcome: ChainOutcome::Reassembled,
-                reason: None,
-                chain_id,
-            },
-            IngestOutcome::Aborted(why) => ChainRow {
-                outcome: ChainOutcome::Aborted,
-                reason: Some(ChainReason::of_abort(why)),
-                chain_id,
-            },
-            IngestOutcome::Refused(why) => ChainRow {
-                outcome: ChainOutcome::Refused,
-                reason: Some(ChainReason::of_refusal(why)),
-                chain_id,
-            },
+        let fact = list.chain_of(produced)?;
+        let (outcome, reason) = match fact.outcome {
+            IngestOutcome::Begun => (ChainOutcome::Begun, None),
+            IngestOutcome::Continued => (ChainOutcome::Continued, None),
+            IngestOutcome::Reassembled => (ChainOutcome::Reassembled, None),
+            IngestOutcome::Aborted(why) => {
+                (ChainOutcome::Aborted, Some(ChainReason::of_abort(why)))
+            }
+            IngestOutcome::Refused(why) => {
+                (ChainOutcome::Refused, Some(ChainReason::of_refusal(why)))
+            }
+        };
+        let aborted = matches!(fact.outcome, IngestOutcome::Aborted(_));
+        let next = |last: u64| match ring {
+            Some(mask) => last.wrapping_add(1) & mask,
+            None => last.wrapping_add(1),
+        };
+        Some(ChainRow {
+            outcome,
+            reason,
+            chain_id: fact.chain_id,
+            placed: fact.placed.map(|p| (p.index, p.offset, p.length)),
+            sns: aborted.then(|| (fact.before.map(|b| next(b.last_sn)), fact.sn)),
+            held: fact
+                .before
+                .filter(|_| aborted)
+                .map(|b| (b.fragments, b.bytes)),
         })
     }
 
@@ -4739,6 +4767,7 @@ impl ChainIds {
     fn chain_row(
         _list: &wz_session_core::passive_messages::MessageList,
         _produced: u64,
+        _ring: Option<u64>,
     ) -> Option<ChainRow> {
         None
     }
@@ -4816,9 +4845,47 @@ fn push_session_row(row: &SessionRow, out: &mut String) {
                 }
                 None => out.push_str("null"),
             }
+            // Revision 62. Counts of bytes and fragments this reader holds are
+            // bare numbers; a sequence number is a wire value up to the ring,
+            // and takes the integer door.
+            match chain.placed {
+                Some((index, offset, length)) => {
+                    let _ = write!(
+                        out,
+                        ",\"index\":{index},\"offset\":{offset},\"length\":{length}"
+                    );
+                }
+                None => out.push_str(",\"index\":null,\"offset\":null,\"length\":null"),
+            }
+            out.push_str(",\"expected_sn\":");
+            match chain.sns.and_then(|(expected, _)| expected) {
+                Some(sn) => push_chain_sn(sn, out),
+                None => out.push_str("null"),
+            }
+            out.push_str(",\"received_sn\":");
+            match chain.sns {
+                Some((_, sn)) => push_chain_sn(sn, out),
+                None => out.push_str("null"),
+            }
+            match chain.held {
+                Some((fragments, bytes)) => {
+                    let _ = write!(
+                        out,
+                        ",\"held_fragments\":{fragments},\"held_bytes\":{bytes}"
+                    );
+                }
+                None => out.push_str(",\"held_fragments\":null,\"held_bytes\":null"),
+            }
             out.push('}');
         }
     }
+}
+
+/// The `expected_sn` and `received_sn` of a row's `chain`, through the shared
+/// integer door: a sequence number is a wire value as wide as the session's
+/// ring, which can pass 2^53.
+fn push_chain_sn(sn: u64, out: &mut String) {
+    wz_session_core::json::u64_into(sn, out);
 }
 
 /// The captured packet holding a row's FIRST BYTE, and the link
@@ -8488,6 +8555,9 @@ mod tests {
                         outcome: word,
                         reason: None,
                         chain_id: Some(0),
+                        placed: Some((0, 0, 4)),
+                        sns: None,
+                        held: None,
                     }),
                 },
                 &mut out,
@@ -8505,6 +8575,9 @@ mod tests {
                         outcome: ChainOutcome::Aborted,
                         reason: Some(word),
                         chain_id: None,
+                        placed: None,
+                        sns: Some((Some(1), 3)),
+                        held: Some((1, 4)),
                     }),
                 },
                 &mut out,

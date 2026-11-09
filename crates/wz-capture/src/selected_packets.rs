@@ -302,7 +302,7 @@ fn chain_members(list: Messages<'_>, picked: &[usize]) -> BTreeSet<usize> {
     let mut fold = list.chain_prefix().clone();
     let ids: Vec<Option<u64>> = list
         .iter()
-        .map(|frame| fold.observe(&frame).and_then(|(_, id)| id))
+        .map(|frame| fold.observe(&frame).and_then(|fact| fact.chain_id))
         .collect();
     let wanted: BTreeSet<u64> = picked.iter().filter_map(|&p| ids[p]).collect();
     ids.iter()

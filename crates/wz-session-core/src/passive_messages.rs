@@ -192,9 +192,75 @@ pub struct MessageList {
 struct ChainFacts {
     /// The fold as the last appended message left it.
     fold: ChainFold,
-    /// By produced-index, the outcome and identity of every held row the fold
-    /// moved; a row it did not move (no fragment, or no outcome) has none.
-    rows: SortedChunks<u64, (IngestOutcome, Option<u64>)>,
+    /// By produced-index, what the fold made of every held row it moved; a row
+    /// it did not move (no fragment, or no outcome) has none.
+    rows: SortedChunks<u64, ChainFact>,
+}
+
+/// What the chain fold made of ONE fragment row: the router's outcome, the
+/// identity of the chain it touched, where its bytes went in that chain's joined
+/// buffer, and what the chain held before it.
+#[cfg(feature = "reassembly")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainFact {
+    /// What the router did with the fragment.
+    pub outcome: IngestOutcome,
+    /// The identity of the chain it touched; see [`ChainFold`].
+    pub chain_id: Option<u64>,
+    /// The fragment's sequence number, as it carried it.
+    pub sn: u64,
+    /// Where its bytes went, when the router staged them and the fold saw the
+    /// chain from its first fragment; see [`Placed`].
+    pub placed: Option<Placed>,
+    /// The chain as it stood when this fragment met it, when the fragment met
+    /// a chain the fold had followed from its start; see [`ChainSoFar`].
+    pub before: Option<ChainSoFar>,
+}
+
+/// Where a staged fragment's bytes sit in its chain's joined buffer.
+///
+/// The router stages a fragment's payload at the end of what the chain holds,
+/// so the offset is the bytes the chain held before it and the index the
+/// fragments it held before it: the same arithmetic the router does, over the
+/// same fragments, in the same order.
+#[cfg(feature = "reassembly")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placed {
+    /// Its place among the chain's staged fragments, from 0.
+    pub index: u32,
+    /// Where its first byte sits in the joined buffer.
+    pub offset: u64,
+    /// How many bytes it added.
+    pub length: u64,
+}
+
+/// What an open chain held: its staged fragments, their bytes, and the sequence
+/// number of the last of them.
+#[cfg(feature = "reassembly")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainSoFar {
+    /// How many fragments it had staged.
+    pub fragments: u32,
+    /// How many bytes they came to.
+    pub bytes: u64,
+    /// The sequence number of the last one.
+    pub last_sn: u64,
+}
+
+#[cfg(feature = "reassembly")]
+impl ChainSoFar {
+    /// Take one more staged fragment of `length` bytes numbered `sn`.
+    fn take(&mut self, length: u64, sn: u64) -> Placed {
+        let placed = Placed {
+            index: self.fragments,
+            offset: self.bytes,
+            length,
+        };
+        self.fragments += 1;
+        self.bytes += length;
+        self.last_sn = sn;
+        placed
+    }
 }
 
 /// The key a fragment chain is held under: the direction it travelled, whether
@@ -226,11 +292,30 @@ pub type ChainKey = (crate::passive::Direction, bool, crate::qos::Priority);
 /// * `Reassembled` and `Aborted` take it and close it, or mint one for a chain
 ///   that began and ended on this very fragment.
 /// * `Refused` has none: no chain was allocated.
+///
+/// # Where each fragment went, and what an ended chain held
+///
+/// Beside each open identity the fold keeps what the chain has staged
+/// ([`ChainSoFar`]), following the same outcomes: a `Begun`, `Continued` or
+/// `Reassembled` fragment was staged at the end of the chain, so it is placed
+/// at the chain's byte count and its fragment count; an `Aborted` one was not
+/// staged, and the chain it ended is reported as it stood. A continuation of a
+/// chain the fold never saw begin has no place: the bytes before it are not in
+/// the list's history.
 #[cfg(feature = "reassembly")]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChainFold {
     next: u64,
-    open: Vec<(ChainKey, u64)>,
+    open: Vec<(ChainKey, OpenChain)>,
+}
+
+/// One open chain: its identity, and what it has staged when the fold saw it
+/// from its first fragment.
+#[cfg(feature = "reassembly")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OpenChain {
+    id: u64,
+    held: ChainSoFar,
 }
 
 #[cfg(feature = "reassembly")]
@@ -242,17 +327,22 @@ impl ChainFold {
     /// outcome (a whole lz4 batch no message was read out of): the fold does not
     /// move. The identity is `None` for a continuation of a chain this fold never
     /// saw begin, and for a refusal.
-    pub fn observe(&mut self, frame: &PassiveFrame) -> Option<(IngestOutcome, Option<u64>)> {
+    pub fn observe(&mut self, frame: &PassiveFrame) -> Option<ChainFact> {
         use crate::inbound::InboundFrame;
         use crate::passive::Carried;
         use crate::reassembly_dispatch::AbortReason;
 
         let Ok(InboundFrame::Fragment {
-            reliable, priority, ..
+            reliable,
+            priority,
+            sn,
+            payload,
+            ..
         }) = &frame.frame
         else {
             return None;
         };
+        let (sn, length) = (*sn, payload.len() as u64);
         let key = (frame.direction, *reliable, *priority);
         let outcome = match &frame.carried {
             Carried::Fragment(outcome) => *outcome,
@@ -268,37 +358,84 @@ impl ChainFold {
             // so no fragment reached the router.
             Carried::Undecompressible | Carried::Nothing | Carried::Batch(_) => return None,
         };
-        let identity = match outcome {
-            IngestOutcome::Begun => Some(self.begin(key)),
-            IngestOutcome::Continued => self.current(key),
-            IngestOutcome::Reassembled | IngestOutcome::Aborted(_) => Some(self.close(key)),
-            IngestOutcome::Refused(_) => None,
+        let mut fact = ChainFact {
+            outcome,
+            chain_id: None,
+            sn,
+            placed: None,
+            before: None,
         };
-        Some((outcome, identity))
+        match outcome {
+            IngestOutcome::Begun => {
+                let mut open = self.begin();
+                fact.chain_id = Some(open.id);
+                fact.placed = Some(open.held.take(length, sn));
+                self.set(key, open);
+            }
+            IngestOutcome::Continued => {
+                if let Some(mut open) = self.current(key) {
+                    fact.chain_id = Some(open.id);
+                    fact.before = Some(open.held);
+                    fact.placed = Some(open.held.take(length, sn));
+                    self.set(key, open);
+                }
+            }
+            // The closing fragment was staged; a chain that began and closed on
+            // it is one fragment long and starts at 0.
+            IngestOutcome::Reassembled => {
+                let mut open = self.close(key);
+                fact.chain_id = Some(open.id);
+                fact.before = (open.held.fragments > 0).then_some(open.held);
+                fact.placed = Some(open.held.take(length, sn));
+            }
+            // The aborting fragment was not staged: the chain is reported as it
+            // stood, and a chain the fold did not have open held nothing.
+            IngestOutcome::Aborted(_) => {
+                let open = self.close(key);
+                fact.chain_id = Some(open.id);
+                fact.before = (open.held.fragments > 0).then_some(open.held);
+            }
+            IngestOutcome::Refused(_) => {}
+        }
+        Some(fact)
     }
 
-    fn begin(&mut self, key: ChainKey) -> u64 {
+    /// Open a chain on `key` under a new identity, replacing one still open
+    /// there: the router ended that one without a row.
+    fn begin(&mut self) -> OpenChain {
         let id = self.next;
         self.next += 1;
-        match self.open.iter_mut().find(|(k, _)| *k == key) {
-            Some(slot) => slot.1 = id,
-            None => self.open.push((key, id)),
+        OpenChain {
+            id,
+            held: ChainSoFar {
+                fragments: 0,
+                bytes: 0,
+                last_sn: 0,
+            },
         }
-        id
     }
 
-    fn current(&self, key: ChainKey) -> Option<u64> {
-        self.open.iter().find(|(k, _)| *k == key).map(|(_, id)| *id)
+    /// Record `open` as the chain open on `key`.
+    fn set(&mut self, key: ChainKey, open: OpenChain) {
+        match self.open.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = open,
+            None => self.open.push((key, open)),
+        }
     }
 
-    fn close(&mut self, key: ChainKey) -> u64 {
+    fn current(&self, key: ChainKey) -> Option<OpenChain> {
+        self.open
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, open)| *open)
+    }
+
+    /// Take the chain open on `key` off the open list, or, when none is, a new
+    /// identity that held nothing.
+    fn close(&mut self, key: ChainKey) -> OpenChain {
         match self.open.iter().position(|(k, _)| *k == key) {
             Some(i) => self.open.swap_remove(i).1,
-            None => {
-                let id = self.next;
-                self.next += 1;
-                id
-            }
+            None => self.begin(),
         }
     }
 }
@@ -329,7 +466,7 @@ impl MessageList {
     /// every message the list was ever appended would find them; `None` for a
     /// row that is not a fragment or carries no outcome, and for one not held.
     #[cfg(feature = "reassembly")]
-    pub fn chain_of(&self, produced: u64) -> Option<(IngestOutcome, Option<u64>)> {
+    pub fn chain_of(&self, produced: u64) -> Option<ChainFact> {
         self.chains.rows.get(&produced).copied()
     }
 

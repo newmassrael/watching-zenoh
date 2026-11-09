@@ -385,7 +385,43 @@ fn count(list: &[&str], word: &str) -> usize {
     list.iter().filter(|w| **w == word).count()
 }
 
-/// One row's `chain` object as the document writes it.
+/// Every row's `chain` object as far as `chain_id`, closed there: the three keys
+/// the tests below are about. The keys after it (field document 62, where the
+/// row's bytes went and what an abort missed) are held by their own tests.
+fn chains_of(doc: &str) -> Vec<String> {
+    values_of(doc, "chain")
+        .into_iter()
+        .map(|chain| match chain.find(",\"index\":") {
+            Some(at) => format!("{}}}", &chain[..at]),
+            None => String::from(chain),
+        })
+        .collect()
+}
+
+/// The keys of a row's `chain` after `chain_id` (field document 62), as the
+/// document writes them: `placed` is `(index, offset, length)`, `sns` the
+/// expected and received sequence numbers, `held` the fragments and bytes.
+fn chain_tail(
+    placed: Option<(u32, usize, usize)>,
+    sns: Option<(Option<u64>, u64)>,
+    held: Option<(u32, usize)>,
+) -> String {
+    let null = || String::from("null");
+    let (index, offset, length) = placed.map_or((null(), null(), null()), |(i, o, l)| {
+        (i.to_string(), o.to_string(), l.to_string())
+    });
+    let (expected, received) = sns.map_or((null(), null()), |(e, r)| {
+        (e.map_or(null(), |e| e.to_string()), r.to_string())
+    });
+    let (fragments, bytes) = held.map_or((null(), null()), |(f, b)| (f.to_string(), b.to_string()));
+    format!(
+        ",\"index\":{index},\"offset\":{offset},\"length\":{length},\
+         \"expected_sn\":{expected},\"received_sn\":{received},\
+         \"held_fragments\":{fragments},\"held_bytes\":{bytes}}}"
+    )
+}
+
+/// One row's `chain` object as far as `chain_id` (see [`chains_of`]).
 fn chain_text(outcome: &str, reason: Option<&str>, chain_id: Option<u64>) -> String {
     let reason = reason.map_or(String::from("null"), |r| format!("\"{r}\""));
     let chain_id = chain_id.map_or(String::from("null"), |id| id.to_string());
@@ -516,7 +552,7 @@ fn closed_chains_of_consecutive_fragments_reassemble_with_no_handshake_in_the_ca
 
         // Row i of chain k: begun, then continued, then reassembled, one
         // identity to a chain.
-        let chains = values_of(&doc, "chain");
+        let chains = chains_of(&doc);
         assert_eq!(chains.len(), 85);
         for (i, text) in chains.iter().enumerate() {
             let (k, step) = ((i / ROBOT_FRAGMENTS) as u64, i % ROBOT_FRAGMENTS);
@@ -670,7 +706,7 @@ fn a_gap_ends_the_chain_as_unresolvable_and_a_later_chain_still_reassembles() {
         let (d, file) = capture(link, Handshake::None, &fragments);
         let doc = doc_of(&d, &file);
         let states = words(&doc, "carried_state");
-        let chains = values_of(&doc, "chain");
+        let chains = chains_of(&doc);
         // Rows: 0 begun, 1 continued, 2 the ending, 3 and 4 the tail of the broken
         // chain as a chain of its own (begun, reassembled as a message that does
         // not begin at a message), then the whole chain.
@@ -718,7 +754,7 @@ fn a_gap_ends_the_chain_as_unresolvable_and_a_later_chain_still_reassembles() {
         let known_doc = doc_of(&known, &known_file);
         let skip = Handshake::CompleteWithoutMarkers.messages().len();
         let known_states = words(&known_doc, "carried_state");
-        let known_chains = values_of(&known_doc, "chain");
+        let known_chains = chains_of(&known_doc);
         // The only row that differs is the ending, and it differs in both cells
         // the contract moves: the word, and the chain's reason.
         assert_eq!(known_states[skip + 2], "fragment", "{link:?}");
@@ -757,11 +793,7 @@ fn a_step_across_the_seam_of_a_small_ring_is_judged_by_the_ring_and_by_nothing_e
         let (d, file) = capture(Link::Tcp, handshake, &fragments);
         let doc = doc_of(&d, &file);
         let skip = handshake.messages().len();
-        let chains: Vec<String> = values_of(&doc, "chain")
-            .into_iter()
-            .skip(skip)
-            .map(String::from)
-            .collect();
+        let chains: Vec<String> = chains_of(&doc).into_iter().skip(skip).collect();
         let states: Vec<String> = words(&doc, "carried_state")
             .into_iter()
             .skip(skip)
@@ -810,7 +842,7 @@ fn a_single_closed_two_fragment_chain_reassembles_with_no_ring() {
             "{link:?}"
         );
         assert_eq!(
-            values_of(&doc, "chain"),
+            chains_of(&doc),
             [
                 chain_text("begun", None, Some(0)),
                 chain_text("reassembled", None, Some(0))
@@ -931,7 +963,7 @@ fn with_only_the_initsyn_the_markers_are_enforced_and_the_ring_is_still_unknown(
     let doc = doc_of(&d, &file);
 
     let skip = Handshake::InitSynOnly.messages().len();
-    let chains: Vec<&str> = values_of(&doc, "chain").into_iter().skip(skip).collect();
+    let chains: Vec<String> = chains_of(&doc).into_iter().skip(skip).collect();
     assert_eq!(
         chains,
         [
@@ -1014,5 +1046,87 @@ fn a_chain_left_open_at_the_end_of_a_capture_is_counted_with_no_handshake_too() 
             "{handshake:?}"
         );
         assert_eq!(planes.puts, 0, "{handshake:?}: nothing closed");
+    }
+}
+
+/// WHERE EACH FRAGMENT'S BYTES WENT, AND WHAT AN ABORT MISSED (field document
+/// 62), with and without a ring: the gap of
+/// `a_gap_ends_the_chain_as_unresolvable_and_a_later_chain_still_reassembles`.
+/// A staged fragment is placed at the bytes its chain held before it; the
+/// fragment that ends the chain was not staged, names the SN the chain expected
+/// and the one it carried, and the chain's staged fragments and bytes; the
+/// closing fragment's offset plus length is the joined message's size.
+#[test]
+fn each_fragment_says_where_its_bytes_went_and_an_abort_what_it_missed() {
+    let broken = push_of("demo/broken", b'b', 80);
+    let whole = push_of("demo/whole", b'w', 80);
+    let pieces: Vec<&[u8]> = broken.chunks(broken.len().div_ceil(5)).collect();
+    let mut fragments = vec![
+        Frag::new(100, true, true, pieces[0]),
+        Frag::new(101, true, false, pieces[1]),
+        // 102 never reached the capture.
+        Frag::new(103, true, false, pieces[2]),
+        Frag::new(104, true, false, pieces[3]),
+        Frag::new(105, false, false, pieces[4]),
+    ];
+    let tail = chain_of(&whole, 32, 200);
+    fragments.extend(tail.iter().cloned());
+    let (p0, p1, p3, p4) = (
+        pieces[0].len(),
+        pieces[1].len(),
+        pieces[3].len(),
+        pieces[4].len(),
+    );
+    let with = |head: String, tail: String| format!("{}{tail}", &head[..head.len() - 1]);
+    for handshake in [Handshake::None, Handshake::CompleteWithoutMarkers] {
+        let reason = match handshake {
+            Handshake::None => "unresolvable",
+            _ => "out_of_order",
+        };
+        for link in [Link::Tcp, Link::Udp] {
+            let (d, file) = capture(link, handshake, &fragments);
+            let doc = doc_of(&d, &file);
+            let skip = handshake.messages().len();
+            let chains: Vec<&str> = values_of(&doc, "chain").into_iter().skip(skip).collect();
+            let expect = [
+                with(
+                    chain_text("begun", None, Some(0)),
+                    chain_tail(Some((0, 0, p0)), None, None),
+                ),
+                with(
+                    chain_text("continued", None, Some(0)),
+                    chain_tail(Some((1, p0, p1)), None, None),
+                ),
+                // Expected 102 on either reading: plain `+1`, and `+1` on the
+                // 28-bit ring, which 101 is nowhere near the top of.
+                with(
+                    chain_text("aborted", Some(reason), Some(0)),
+                    chain_tail(None, Some((Some(102), 103)), Some((2, p0 + p1))),
+                ),
+                with(
+                    chain_text("begun", None, Some(1)),
+                    chain_tail(Some((0, 0, p3)), None, None),
+                ),
+                with(
+                    chain_text("reassembled", None, Some(1)),
+                    chain_tail(Some((1, p3, p4)), None, None),
+                ),
+            ];
+            for (row, want) in expect.iter().enumerate() {
+                assert_eq!(chains[row], want, "{handshake:?} {link:?}: row {row}");
+            }
+            // The whole chain: its closing row ends where the message does.
+            let closing = chains.last().expect("rows");
+            let last = tail.len() - 1;
+            let offset = 32 * last;
+            assert!(
+                closing.ends_with(&chain_tail(
+                    Some((last as u32, offset, whole.len() - offset)),
+                    None,
+                    None
+                )),
+                "{handshake:?} {link:?}: {closing}"
+            );
+        }
     }
 }

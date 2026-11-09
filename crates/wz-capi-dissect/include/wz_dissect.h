@@ -1111,7 +1111,10 @@
  * `sn_mask` are rings that can pass the line, and one writer serves both
  * entries); to every integer of a `segment` block (keys that exist from field
  * document 59 and take the rule from their first appearance: a header field of
- * a declared segment profile is up to eight bytes wide); to every integer of a
+ * a declared segment profile is up to eight bytes wide); to the `expected_sn`
+ * and `received_sn` of a row's `chain` (keys that exist from field document 62
+ * and take the rule from their first appearance: a sequence number is as wide
+ * as the session's ring); to every integer of a
  * record's `segment` in the values document (that document takes the rule from
  * its revision 2, where the key arrives: the same header fields); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
@@ -1161,12 +1164,32 @@
  * @values fields verdict
  * @values fields priority
  *
- *   "chain":{"outcome":..,"reason":..|null,"chain_id":N|null}
+ *   "chain":{"outcome":..,"reason":..|null,"chain_id":N|null,
+ *            "index":N|null,"offset":N|null,"length":N|null,
+ *            "expected_sn":N|null,"received_sn":N|null,
+ *            "held_fragments":N|null,"held_bytes":N|null}
  *
  *     What the reassembly router did with a Fragment row, and an identity
  *     shared by every row of one chain (unique within the flow, counted from 0
- *     in the order chains began). The identity names ROWS; it is NOT a
- *     coordinate into the joined buffer, whose offsets stay off this document.
+ *     in the order chains began). The identity names ROWS; where the row's
+ *     bytes went is the next three keys.
+ *
+ *     WHERE THE BYTES WENT, at field-document revision 62. `index` is the
+ *     fragment's place among the fragments its chain staged (from 0), `offset`
+ *     where its first byte sits in the chain's joined buffer and `length` how
+ *     many bytes it added; the closing row's `offset + length` is the joined
+ *     message's size. They are `null` on a fragment the router did not stage
+ *     (`aborted`, `refused`) and on a continuation of a chain this capture never
+ *     saw begin, whose earlier bytes it does not have.
+ *
+ *     WHAT AN ABORT MISSED, at field-document revision 62. On an `aborted` row
+ *     `received_sn` is the sequence number this fragment carried and
+ *     `expected_sn` the one its chain expected next (the last staged one plus
+ *     one, on the flow's ring when `context.sn_mask` is known); `held_fragments`
+ *     and `held_bytes` are what the chain had staged, which the abort lost. The
+ *     four are `null` on every other row, and `expected_sn` and the two counts
+ *     are `null` on an abort that met no chain this capture followed (a first
+ *     fragment too large to stage). The two SNs take the integer rule.
  *     `reason` is filled for `aborted` and `refused`; `chain_id` is `null` for
  *     `refused`, which allocates no chain. `null` on every non-Fragment row.
  *     (Until field-document revision 32 it was also `null` on every Fragment of
@@ -1502,7 +1525,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":61,"key":"kind","values":[...],
+ *     {"name":"fields","revision":62,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -5443,7 +5466,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":61,"key":"state",
+ *     "value_families":[{"name":"fields","revision":62,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
