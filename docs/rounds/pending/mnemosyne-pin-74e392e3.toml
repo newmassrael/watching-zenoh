@@ -1,0 +1,17 @@
+impact = ["watching-zenoh/local-ci-gates"]
+
+decision = '''
+The Mnemosyne pin moves from ee934276 to 74e392e3, which carries its Rounds 1345 to 1347, and the schema ceiling stays 49 because none of them adds a rung to the ladder. Round 1345 makes a sealed store's committed reads splice the segments of the same revision, where they had read the segments of the working tree. Round 1346 makes the validator ask git about the directory it names instead of a GIT_DIR it inherits. A linked worktree's pre-commit exports GIT_DIR, git then took the store's own directory for the top of the work tree, and the census of the committed store answered UNDECIDABLE in every worktree of this repository. Round 1347 pays Mnemosyne's own hosted red on the Ubuntu 26.04 image.
+'''
+
+changes = '''
+scripts/install-mnemosyne-cli.sh: MNEMOSYNE_REV is 74e392e3, with the reason beside it; MNEMOSYNE_MAX_SCHEMA stays 49. mnemosyne.toml: the tool pin is the same revision.
+'''
+
+verification = '''
+The cli was installed at the new revision before the pin moved, printed it as its version and read schema 49 (verify-mnemosyne-pin); the MCP server, which its installer builds from the revision at HEAD, was installed after the commit and printed the same revision. mnemosyne-cli validate-workspace over this tree at the new revision reported no new T1 orphan, and the pre-commit of this commit ran in a linked worktree with the schema pin gate and the validator at that revision.
+'''
+
+carry = '''
+A fleet machine builds the pinned cli the first time a file-round run needs it (bx.toml tools.mnemosyne-cli).
+'''

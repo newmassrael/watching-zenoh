@@ -118,7 +118,12 @@ set -euo pipefail
 # config parses. MNEMOSYNE_MAX_SCHEMA stays 44 because 44 is what the NEW rev
 # reads (see below) — the pairing rule binds a ceiling that moves alone, not a
 # rev that moves alone.
-MNEMOSYNE_REV="ee9342762997d6ca0102cb64a0d9e7e509d3576a"
+# Moved ee934276 -> 74e392e3 (mnemosyne Rounds 1345-1347) with the ceiling
+# standing at 49: a sealed store's committed reads splice the segments of the
+# same revision, git is asked about the directory a hook names rather than an
+# inherited GIT_DIR (the UNDECIDABLE census line in a linked worktree's
+# pre-commit), and no rung was added to the ladder.
+MNEMOSYNE_REV="74e392e3b7deac8bb7fc1bc3b11acd9995a4651f"
 
 # The pinned rev's CURRENT_SCHEMA_VERSION: the HIGHEST atomic-store schema this
 # CLI can read. Verified at the pin, not inherited from prose —

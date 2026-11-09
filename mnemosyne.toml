@@ -99,7 +99,7 @@ scan_exclusions = ["vendor", "out", "third-party"]
 # TOML parse before it can explain itself, and MNEMOSYNE_PIN_SKIP=1 does NOT
 # rescue that — the env var is read only AFTER the config has parsed.
 [tool]
-pin = "ee9342762997d6ca0102cb64a0d9e7e509d3576a"
+pin = "74e392e3b7deac8bb7fc1bc3b11acd9995a4651f"
 
 [style]
 locale = "en"
