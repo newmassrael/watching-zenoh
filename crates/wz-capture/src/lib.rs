@@ -1318,6 +1318,7 @@ pub(crate) struct ListMark {
 
 /// What `FlowDissection::capture_order_from` returns: the positions in capture
 /// order, the running packet at the end, and the largest key.
+#[cfg(feature = "dissect")]
 pub(crate) type OrderRun = (Vec<usize>, usize, Option<(usize, u64)>);
 
 /// The messages `Dissection::capture_order_since` returns, each with its flow,
@@ -3345,7 +3346,7 @@ impl FlowDissection {
     /// to this; every shipped reader orders a window and goes on from it, so the
     /// method is built for the tests only (a public accessor no shipped surface
     /// asked was what the accessor reach census refused).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "dissect"))]
     pub(crate) fn capture_order(&self) -> Vec<usize> {
         self.capture_order_from(0, 0, None, usize::MAX)
             .map(|(order, _, _)| order)
@@ -3415,6 +3416,9 @@ impl FlowDissection {
     /// returns is the order it always returned. The positions in the answer are
     /// still positions in the list as it stands, because that is what a caller
     /// indexes with.
+    ///
+    /// Built with `dissect`: the documents that order a window are its callers.
+    #[cfg(feature = "dissect")]
     pub(crate) fn capture_order_from(
         &self,
         start: usize,
