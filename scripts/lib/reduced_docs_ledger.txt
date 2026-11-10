@@ -65,7 +65,6 @@ wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `Cance
 wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `CancellationToken::register`: no item named `CancellationToken` in scope
 wz-capi-port	wz-capi-port/src/cancellation.rs	2	error: unresolved link to `Registration`: no item named `Registration` in scope
 wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `register_fan`: no item named `register_fan` in scope
-wz-capture	wz-capture/src/fields_json.rs	4	error[E0425]: cannot find type `RowJudgement` in this scope: not found in this scope
 wz-codecs	wz-codecs/src/lib.rs	1	error: unresolved link to `FLAG_D_N`: no item named `FLAG_D_N` in scope
 wz-codecs-test-support	wz-codecs-test-support/src/lib.rs	1	error: unresolved link to `with_empty_inline_put`: no item named `with_empty_inline_put` in scope
 wz-ext-pubsub	wz-ext-pubsub/src/advanced_publisher.rs	1	error: unresolved link to `AdvancedPublisherOn::emit_heartbeat_once`: the struct `AdvancedPublisherOn` has no field or associated item named `emit_heartbeat_once`

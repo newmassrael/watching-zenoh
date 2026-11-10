@@ -18,7 +18,15 @@
 //! plane
 //!
 //! wz exports its dissection through two consumption surfaces, and they carry
-//! different halves of it. [`crate::agg`], [`crate::exchange`], [`crate::node`]
+#![cfg_attr(
+    feature = "network-codecs",
+    doc = "different halves of it. [`crate::agg`], [`crate::exchange`], [`crate::node`]"
+)]
+#![cfg_attr(
+    not(feature = "network-codecs"),
+    doc = "different halves of it. [`crate::agg`], `exchange` (with `network-codecs`), \
+           [`crate::node`]"
+)]
 //! and [`crate::payload`] were reachable ONLY from `wz-analyze`, the command
 //! line — a person at a terminal. `wz-capi-dissect`, the C ABI a framework
 //! links, could reach a per-flow frame count and the health counters and

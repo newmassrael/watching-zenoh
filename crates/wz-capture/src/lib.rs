@@ -322,7 +322,14 @@ use exit::ExitingFlow as _;
 /// R311y616 (§1.1f) — the FILTER LANGUAGE: a selector a reader types, compiled
 /// into a three-valued predicate over records.
 ///
-/// UNGATED, unlike [`exchange`]: the language is text and a tree walk, and its
+#[cfg_attr(
+    feature = "network-codecs",
+    doc = "UNGATED, unlike [`exchange`]: the language is text and a tree walk, and its"
+)]
+#[cfg_attr(
+    not(feature = "network-codecs"),
+    doc = "UNGATED, unlike `exchange`: the language is text and a tree walk, and its"
+)]
 /// one external call is the keyexpr matcher, which `wz-session-core` ships
 /// unconditionally. A build without the network codecs has fewer records to
 /// judge and judges them by the same rules.

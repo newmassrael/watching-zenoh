@@ -15,7 +15,15 @@
 //!
 //! **A report carries its gaps or it is not a report.**
 //!
-//! [`crate::agg::ThroughputGaps`] and [`crate::exchange::ExchangeGaps`] were
+#![cfg_attr(
+    feature = "network-codecs",
+    doc = "[`crate::agg::ThroughputGaps`] and [`crate::exchange::ExchangeGaps`] were"
+)]
+#![cfg_attr(
+    not(feature = "network-codecs"),
+    doc = "[`crate::agg::ThroughputGaps`] and `exchange::ExchangeGaps` (with \
+           `network-codecs`) were"
+)]
 //! built because a total that is quietly short reads exactly like a total that
 //! is right. Serialising the rows and dropping the gaps would undo both in one
 //! line — so the gap objects are STRUCTURAL here (always emitted, never

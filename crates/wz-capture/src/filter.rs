@@ -196,7 +196,7 @@
 //! over a capture with no clock, and for the same reason.
 //!
 //! `dir` is `a` / `b` and not `a2b` / `b2a` because
-//! [`Direction`](wz_session_core::passive::Direction) is what the rest of the
+//! [`Direction`] is what the rest of the
 //! crate says and a second vocabulary for one axis is a second thing to get
 //! wrong.
 //!
@@ -345,7 +345,15 @@ impl RecordKind {
 /// R311y636 (§1.1v) — how an exchange TURNED OUT, for the terms no `Request`
 /// can answer.
 ///
-/// Built by the plane that correlates exchanges ([`crate::exchange`]) at the
+#[cfg_attr(
+    feature = "network-codecs",
+    doc = "Built by the plane that correlates exchanges ([`crate::exchange`]) at the"
+)]
+#[cfg_attr(
+    not(feature = "network-codecs"),
+    doc = "Built by the plane that correlates exchanges (`exchange`, with \
+           `network-codecs`) at the"
+)]
 /// point the exchange is complete, which is the only point every field below is
 /// a fact rather than a guess. Every interval is an `Option` for the reason the
 /// rest of this crate keeps them so: an exchange nothing answered has no
@@ -366,7 +374,11 @@ pub struct OutcomeView {
     pub completion_ms: Option<u64>,
     /// Whether a `ResponseFinal` closed it. `false` covers both "the capture
     /// ended first" and "the rid was reused", which is what
-    /// [`ExchangeTable::unclosed`](crate::exchange::ExchangeTable::unclosed)
+    #[cfg_attr(
+        feature = "network-codecs",
+        doc = "[`ExchangeTable::unclosed`](crate::exchange::ExchangeTable::unclosed)"
+    )]
+    #[cfg_attr(not(feature = "network-codecs"), doc = "`ExchangeTable::unclosed`")]
     /// already counts as one thing.
     pub closed: bool,
 }

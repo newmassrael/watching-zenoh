@@ -481,7 +481,15 @@ pub struct KeyexprRow {
     /// from another space do not move it. `false` says other spaces also landed
     /// here, which makes the interval a statement about part of the row rather
     /// than a wrong statement about all of it. The name follows
-    /// [`crate::interest::Coverage::unclaimed_exact`], which draws the same
+    #[cfg_attr(
+        feature = "network-codecs",
+        doc = "[`crate::interest::Coverage::unclaimed_exact`], which draws the same"
+    )]
+    #[cfg_attr(
+        not(feature = "network-codecs"),
+        doc = "`interest::Coverage::unclaimed_exact` (the interest plane, with \
+               `network-codecs`), which draws the same"
+    )]
     /// line between an answer and a partial one.
     pub anchors_exact: bool,
     /// R311y919 (open-debt item 452) — WHICH coordinate space
@@ -1369,7 +1377,15 @@ pub struct ThroughputGaps {
     /// partial — the bytes were there and are unreadable.
     pub undecompressible_batches: usize,
     /// Fragments the chain router could not place for want of the SN
-    /// resolution ([`Carried::FragmentWithoutResolution`]): this observer never
+    #[cfg_attr(
+        feature = "reassembly",
+        doc = "resolution ([`Carried::FragmentWithoutResolution`]): this observer never"
+    )]
+    #[cfg_attr(
+        not(feature = "reassembly"),
+        doc = "resolution (`Carried::FragmentWithoutResolution`, which a build without \
+               `reassembly` never carries, so this stays 0): this observer never"
+    )]
     /// saw an InitAck, and the step from the chain's last fragment to this one
     /// was not a plain `+1`, which only the ring could have judged. Each is the
     /// END of one chain, and the staged bytes of that chain never became a batch.
@@ -1394,7 +1410,15 @@ impl ThroughputGaps {
 ///
 /// # The gap this closes, and the half of the item that was already closed
 ///
-/// The `0x2 First` / `0x3 Drop` markers ([`wz_session_core::extfragment`])
+#[cfg_attr(
+    feature = "reassembly",
+    doc = "The `0x2 First` / `0x3 Drop` markers ([`wz_session_core::extfragment`])"
+)]
+#[cfg_attr(
+    not(feature = "reassembly"),
+    doc = "The `0x2 First` / `0x3 Drop` markers (`wz_session_core::extfragment`, in a build \
+           with `reassembly`)"
+)]
 /// reach the consumption surface in TWO different senses, and item 565 was
 /// filed over only one of them:
 ///
@@ -1409,7 +1433,14 @@ impl ThroughputGaps {
 /// * the SESSION fact — what the marker CAUSED — reached nothing. The
 ///   observer computes it in full: `passive.rs` hands the projected markers
 ///   to the router, which answers with an
-///   [`IngestOutcome`](wz_session_core::reassembly_dispatch::IngestOutcome)
+#[cfg_attr(
+    feature = "reassembly",
+    doc = "  [`IngestOutcome`](wz_session_core::reassembly_dispatch::IngestOutcome)"
+)]
+#[cfg_attr(
+    not(feature = "reassembly"),
+    doc = "  `IngestOutcome` (with `reassembly`)"
+)]
 ///   naming the chain-boundary consequences apart from every other cause
 ///   (`AbortReason::SenderDropped` is the sender saying so, `Superseded` is
 ///   a restart, `RefuseReason::MissingStartMarker` is a reader that joined
