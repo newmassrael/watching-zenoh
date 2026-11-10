@@ -73,6 +73,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DISSECT = ROOT / "crates" / "wz-session-core" / "src" / "dissect.rs"
 QOS = ROOT / "crates" / "wz-session-core" / "src" / "qos.rs"
+WHATAMI = ROOT / "crates" / "wz-codecs" / "src" / "whatami.rs"
 PICO_CONSTANTS = ROOT / "vendor" / "zenoh-pico" / "include" / "zenoh-pico" / "api" / "constants.h"
 
 # ── What decides each label site's value ─────────────────────────────────────
@@ -179,6 +180,21 @@ DECIDED_BY_METHOD = {
         ),
         "extra": {},
     },
+    # Round 4460 — the role of a Hello, an Init, a Join and a linkstate entry,
+    # read as its word. The words are zenoh's own `WhatAmI::to_str` (lowercase),
+    # which `wz_codecs::whatami::WhatAmI::to_str` matches, and pico names the
+    # same three roles in `Z_WHATAMI_*` (a bitmask, so its members are written in
+    # hex). `case` says the method spells them in lowercase, which is how the
+    # wire's role is written in every zenoh config and admin key.
+    "whatami_name": {
+        "source": WHATAMI,
+        "type": "WhatAmI",
+        "method": "to_str",
+        "prefix": "Z_WHATAMI_",
+        "case": "lower",
+        "sites": ("r.to_str()",),
+        "extra": {},
+    },
 }
 
 
@@ -238,8 +254,12 @@ def function_literals(src: str, name: str) -> set[str] | None:
     return set(re.findall(r'"([A-Z][A-Za-z0-9]*)"', body))
 
 
-def impl_method_literals(src: str, type_name: str, method: str) -> set[str] | None:
-    """Every CamelCase string literal inside `impl <type_name> { fn <method> }`.
+def impl_method_literals(
+    src: str, type_name: str, method: str, case: str = "camel"
+) -> set[str] | None:
+    """Every CamelCase string literal inside `impl <type_name> { fn <method> }`,
+    or every lowercase one when `case` is `"lower"` (a method whose words are
+    lowercase, as `WhatAmI::to_str`'s are).
 
     `None` when the impl block or the method is absent, which is a FAIL rather
     than an empty set, for the reason `function_literals` gives: a table entry
@@ -270,7 +290,10 @@ def impl_method_literals(src: str, type_name: str, method: str) -> set[str] | No
         elif src[j] == "}":
             depth -= 1
             if depth == 0:
-                return set(re.findall(r'"([A-Z][A-Za-z0-9]*)"', src[i : j + 1]))
+                literal = (
+                    r'"([a-z][a-z0-9_]*)"' if case == "lower" else r'"([A-Z][A-Za-z0-9]*)"'
+                )
+                return set(re.findall(literal, src[i : j + 1]))
     return None
 
 
@@ -292,8 +315,13 @@ def pico_members(header: str, prefix: str) -> set[str]:
     reject.
     """
     out: set[str] = set()
+    # A member's number is decimal or hex: `Z_WHATAMI_*` is a bitmask and is
+    # written `0x01`, `0x02`, `0x04`; an alias names another member and is
+    # neither, so it is still left out.
     for m in re.finditer(
-        r"^\s*_?" + re.escape(prefix) + r"([A-Z0-9_]+)\s*=\s*\d+\s*,?\s*$",
+        r"^\s*_?"
+        + re.escape(prefix)
+        + r"([A-Z0-9_]+)\s*=\s*(?:0[xX][0-9A-Fa-f]+|\d+)\s*,?\s*$",
         header,
         re.M,
     ):
@@ -362,8 +390,12 @@ def main() -> int:
     # arms rather than in the walker -- and in both directions, per the table's
     # own note.
     for field, spec in sorted(DECIDED_BY_METHOD.items()):
+        case = spec.get("case", "camel")
         arms = impl_method_literals(
-            spec["source"].read_text(encoding="utf-8"), spec["type"], spec["method"]
+            spec["source"].read_text(encoding="utf-8"),
+            spec["type"],
+            spec["method"],
+            case,
         )
         if arms is None:
             failures.append(
@@ -373,6 +405,8 @@ def main() -> int:
             )
             continue
         allowed = pico_members(header, spec["prefix"])
+        if case == "lower":
+            allowed = {member.lower() for member in allowed}
         if not allowed:
             failures.append(
                 f"pico's `{spec['prefix']}*` enum yielded NO numbered member, so "
