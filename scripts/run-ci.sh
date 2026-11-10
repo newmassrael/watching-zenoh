@@ -4632,12 +4632,99 @@ for a in "$@"; do
 done
 exit 0
 EOF
-    if WZ_APT_CMD="$stub" WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+    if WZ_APT_RETRY_PAUSE=0 WZ_APT_CMD="$stub" WZ_APT_DEADLINE=5 \
+        bash "$script" cmake >/dev/null 2>&1; then
         echo "  Layer C0g FAIL: an \`install\` that FAILED was reported as success." \
             "Continuing past a failed update must not become continuing past" \
             "everything -- the install is the one verdict this step owns" >&2
         return 1
     fi
+
+    # AN INSTALL APT REFUSED IS TRIED AGAIN AFTER A FRESH `update`, AND A DEADLINE IS
+    # NOT. Three arms, each a way to be wrong. The stand-ins count their own calls in
+    # a log, because an exit status cannot say how many attempts were made.
+    #
+    #   flaky   -- the first install is refused, the second succeeds: the step passes,
+    #              and the log holds two installs with an update before each (run
+    #              42755847834, a mirror that 404'd a version its index named).
+    #   refused -- every install is refused: the step fails, after exactly the
+    #              attempts it was allowed (two), not after one and not unbounded.
+    #   hung    -- the install never returns: the step fails after ONE install. A
+    #              retry of a silence would double it, which is what the ceiling is for.
+    local calls
+    calls="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$hang' '$stub' '$marker' '$calls' '$stubborn'" RETURN
+    cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    update) echo update >>"$WZ_CALLS" ;;
+    install)
+      echo install >>"$WZ_CALLS"
+      # Refused on the first install only.
+      [ "$(grep -c '^install$' "$WZ_CALLS")" -ge 2 ] || exit 100
+      ;;
+  esac
+done
+exit 0
+EOF
+    : >"$calls"
+    if ! WZ_CALLS="$calls" WZ_APT_RETRY_PAUSE=0 WZ_APT_CMD="$stub" WZ_APT_DEADLINE=5 \
+        bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: an install apt refused once was not tried again. Run" \
+            "42755847834 lost a whole job to a mirror race that a fresh update and" \
+            "one more attempt outwaits" >&2
+        return 1
+    fi
+    if [[ "$(tr '\n' ' ' <"$calls")" != "update install update install " ]]; then
+        echo "  Layer C0g FAIL: the retry did not refresh the index between the two" \
+            "installs; the calls were: $(tr '\n' ' ' <"$calls")" >&2
+        return 1
+    fi
+    cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    install) echo install >>"$WZ_CALLS"; exit 100 ;;
+  esac
+done
+exit 0
+EOF
+    : >"$calls"
+    if WZ_CALLS="$calls" WZ_APT_RETRY_PAUSE=0 WZ_APT_CMD="$stub" WZ_APT_DEADLINE=5 \
+        bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: an install refused on every attempt was reported as" \
+            "success" >&2
+        return 1
+    fi
+    if [[ "$(grep -c '^install$' "$calls")" -ne 2 ]]; then
+        echo "  Layer C0g FAIL: an install that is always refused ran" \
+            "$(grep -c '^install$' "$calls") time(s), not the two attempts allowed" >&2
+        return 1
+    fi
+    cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    install) echo install >>"$WZ_CALLS"; sleep 30; exit 0 ;;
+  esac
+done
+exit 0
+EOF
+    : >"$calls"
+    if WZ_CALLS="$calls" WZ_APT_RETRY_PAUSE=0 WZ_APT_CMD="$stub" WZ_APT_DEADLINE=2 \
+        WZ_APT_KILL_AFTER=1 bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: an install that hung was reported as success" >&2
+        return 1
+    fi
+    if [[ "$(grep -c '^install$' "$calls")" -ne 1 ]]; then
+        echo "  Layer C0g FAIL: an install killed by its deadline was tried again" \
+            "($(grep -c '^install$' "$calls") installs). A retry of a silence doubles" \
+            "it, which is what the ceiling exists to prevent" >&2
+        return 1
+    fi
+    rm -f "$calls"
 
     # NEGATIVE — called with no packages is a caller error, not an install of
     # nothing. Exit 2, distinct from the exit 1 the ceiling answers with.

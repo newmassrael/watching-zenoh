@@ -135,6 +135,10 @@
 #                             wants one number
 #   WZ_APT_KILL_AFTER         grace between TERM and KILL, seconds (default 30)
 #   WZ_APT_RETRIES            apt's own per-source retry count (default 2)
+#   WZ_APT_INSTALL_ATTEMPTS   how many times an install apt REFUSED is tried, with a
+#                             fresh `update` between (default 2); a deadline is
+#                             never retried
+#   WZ_APT_RETRY_PAUSE        seconds before the fresh `update` of a retry (default 10)
 #   WZ_APT_CMD                the command to run instead of apt-get; the test
 #                             lane's only entry point. Never set in CI.
 #   WZ_APT_ARCHIVES           where apt downloads its .debs. Unset = apt's own
@@ -154,6 +158,9 @@ WZ_APT_UPDATE_DEADLINE="${WZ_APT_DEADLINE:-${WZ_APT_UPDATE_DEADLINE:-300}}"
 WZ_APT_INSTALL_DEADLINE="${WZ_APT_DEADLINE:-${WZ_APT_INSTALL_DEADLINE:-900}}"
 WZ_APT_KILL_AFTER="${WZ_APT_KILL_AFTER:-30}"
 WZ_APT_RETRIES="${WZ_APT_RETRIES:-2}"
+WZ_APT_INSTALL_ATTEMPTS="${WZ_APT_INSTALL_ATTEMPTS:-2}"
+WZ_APT_RETRY_PAUSE="${WZ_APT_RETRY_PAUSE:-10}"
+WZ_APT_LAST_RC=0
 
 # Compose the argv that runs `$@` under a ceiling of `$1` seconds.
 #
@@ -197,6 +204,10 @@ wz_apt_bounded() {
     done < <(wz_apt_compose "${deadline}" "$@")
     local rc=0
     "${argv[@]}" || rc=$?
+    # The caller reads WHY it failed, because a refusal is worth another attempt and a
+    # deadline is not (see `wz_apt_install`). Not `local`: a function cannot hand a code
+    # back through its own status, which already says only pass or fail.
+    WZ_APT_LAST_RC="${rc}"
     # 137 as well as 124: with `--kill-after` the second signal is what actually
     # ends a TERM-ignoring apt, and a shell reports a KILLed child as 128+9. A
     # ceiling that named only 124 would read its own successful kill as apt
@@ -388,8 +399,45 @@ wz_apt_install() {
             "runner image shipped. The install below is what this step is for, and" \
             "it either succeeds or fails by name; it is not being skipped." >&2
     fi
-    if ! wz_apt_bounded "error" "install of $*" "${WZ_APT_INSTALL_DEADLINE}" \
-        "${apt[@]}" "${opts[@]}" install -y --no-install-recommends "$@"; then
+    #
+    # AN INSTALL APT REFUSED IS TRIED AGAIN, ONCE, AGAINST A FRESH INDEX.
+    #
+    # Run 42755847834: `update` succeeded, and the install it led to failed with
+    # `404 Not Found` for `perl 5.34.0-3ubuntu1.10`, a version the index named and
+    # the mirrors did not yet (or no longer) hold -- `security.ubuntu.com` answered
+    # 404 and every alternate answered `Ign`. apt's own last line says what to do:
+    # "maybe run apt-get update". Nothing in this repository was involved, and the
+    # whole job (and the push's verdict with it) was lost to a race between two
+    # mirrors that settles in a minute.
+    #
+    # WHAT IS RETRIED AND WHAT IS NOT. A REFUSAL (apt exited non-zero by itself) is
+    # an answer from the mirror, and asking again after refreshing the index is how
+    # the race is outwaited. A DEADLINE (124, 137) is a silence, and asking again
+    # doubles it: the ceiling above exists to keep that to one deadline, so a killed
+    # install is never retried. The retry is bounded by the same ceilings and by
+    # WZ_APT_INSTALL_ATTEMPTS, and a second refusal fails the step by name exactly
+    # as the first would have -- there is no arm where a package is quietly absent.
+    local attempt=1 installed=0
+    while :; do
+        if wz_apt_bounded "error" "install of $*" "${WZ_APT_INSTALL_DEADLINE}" \
+            "${apt[@]}" "${opts[@]}" install -y --no-install-recommends "$@"; then
+            installed=1
+            break
+        fi
+        if [[ "${WZ_APT_LAST_RC}" -eq 124 || "${WZ_APT_LAST_RC}" -eq 137 \
+            || "${attempt}" -ge "${WZ_APT_INSTALL_ATTEMPTS}" ]]; then
+            break
+        fi
+        attempt=$((attempt + 1))
+        echo "::warning::apt: the install was refused (exit ${WZ_APT_LAST_RC}); refreshing" \
+            "the index and trying again (attempt ${attempt} of ${WZ_APT_INSTALL_ATTEMPTS})." >&2
+        sleep "${WZ_APT_RETRY_PAUSE}"
+        if ! wz_apt_bounded "warning" "update" "${WZ_APT_UPDATE_DEADLINE}" \
+            "${apt[@]}" "${opts[@]}" update; then
+            stale=1
+        fi
+    done
+    if [[ "${installed}" -ne 1 ]]; then
         # BEFORE the return, and that order is the whole point: this is the path
         # a slow mirror takes, and it is the path whose partial download has to
         # survive into the next run. apt keeps completed .debs in the archive and
