@@ -212,6 +212,7 @@ impl<'a> Liveliness<'a> {
             key_expr,
             timeout: self.session.queries_default_timeout(),
             handler: DefaultHandler::default(),
+            links: ANY_LINKS,
             #[cfg(feature = "unstable")]
             cancellation_token: None,
         }

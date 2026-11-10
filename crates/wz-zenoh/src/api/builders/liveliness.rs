@@ -397,6 +397,9 @@ pub struct LivelinessGetBuilder<'a, 'b, Handler> {
     pub(crate) key_expr: ZResult<KeyExpr<'b>>,
     pub(crate) timeout: Duration,
     pub(crate) handler: Handler,
+    /// The links the query is asked on: every link unless [`Self::allowed_links`] says
+    /// otherwise.
+    pub(crate) links: Links,
     #[cfg(feature = "unstable")]
     pub(crate) cancellation_token: Option<crate::api::cancellation::CancellationToken>,
 }
@@ -483,6 +486,7 @@ impl<'a, 'b> LivelinessGetBuilder<'a, 'b, DefaultHandler> {
             key_expr,
             timeout,
             handler: _,
+            links,
             #[cfg(feature = "unstable")]
             cancellation_token,
         } = self;
@@ -491,6 +495,7 @@ impl<'a, 'b> LivelinessGetBuilder<'a, 'b, DefaultHandler> {
             key_expr,
             timeout,
             handler,
+            links,
             #[cfg(feature = "unstable")]
             cancellation_token,
         }
@@ -502,6 +507,19 @@ impl<Handler> LivelinessGetBuilder<'_, '_, Handler> {
     #[inline]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Ask only on the links in `links`, as a query limited to them is asked (a wz-only door,
+    /// not upstream's: behind the crate feature `link-restriction`).
+    ///
+    /// A build whose `entity-link-restriction` policy is off refuses a restricted set when the
+    /// query is asked, and a router session refuses it always. The tokens of the session itself
+    /// answer whatever the set says: the session is behind no link.
+    #[cfg(feature = "link-restriction")]
+    #[inline]
+    pub fn allowed_links(mut self, links: Links) -> Self {
+        self.links = links;
         self
     }
 }
@@ -561,6 +579,7 @@ where
         self.session.liveliness_query(
             &self.key_expr?,
             self.timeout,
+            self.links,
             callback,
             #[cfg(feature = "unstable")]
             self.cancellation_token,

@@ -4550,6 +4550,79 @@ impl SharedSession {
         found.len()
     }
 
+    /// Ask a liveliness get on `keyexpr`, limited to the links of `links` (policy
+    /// `entity-link-restriction`): one leg for the tokens of this session itself, which is
+    /// behind no link and is always asked, and one for each face whose slot the restriction
+    /// names. A multicast group is a link no slot names, and the liveliness get has never been
+    /// asked on one. `leg` mints the callback of each leg, whose drop is that leg's end, and
+    /// `fan`, when the get can be cancelled, is told of each leg as it is issued. The number of
+    /// legs that were issued on a face.
+    ///
+    /// With [`LinkRestriction::Any`] this is the walk the snapshot get has always made: the
+    /// same faces, in the same order.
+    #[cfg(feature = "liveliness-get")]
+    pub fn liveliness_get_on_links(
+        &self,
+        keyexpr: &str,
+        timeout_ms: u32,
+        links: LinkRestriction,
+        fan: Option<&crate::cancellation::CancellableFan>,
+        leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
+    ) -> usize {
+        let opts =
+            crate::runtime::session::LivelinessGetOptions::default().with_timeout_ms(timeout_ms);
+        let mut issued = 0;
+        // The leg no face is behind: the tokens of this session itself, which upstream's get
+        // finds beside those of its peers. It answers at once, and its end is the leg being
+        // dropped when this call returns.
+        let mut own = leg();
+        self.answer_liveliness_get_locally(keyexpr, |view| own(view));
+        drop(own);
+        for QueryFace {
+            session,
+            revised,
+            slot,
+            ..
+        } in self.query_targets().faces
+        {
+            // A get limited to some links is not asked on the others.
+            if !links.allows(slot) {
+                continue;
+            }
+            let mut reply = leg();
+            // Completion is the pending entry's sink being DROPPED, which covers a real final,
+            // a timeout sweep and a face death alike, so the final needs no body.
+            let got = session.liveliness_get(
+                keyexpr.to_owned(),
+                opts,
+                move |view: &dyn wz_session_core::reply_sink::ReplyView| reply(view),
+                |_id| {},
+            );
+            // The interest id this face registered under, recorded so a later cancel can
+            // unregister it. `record` answers `false` when the token cancelled while the fan was
+            // running; it has already undone THIS registration, so only the issuing stops.
+            let cancelled_mid_fan = match (fan, &got) {
+                (Some(fan), Ok(interest_id)) => {
+                    let undo = session.clone();
+                    let interest_id = *interest_id;
+                    !fan.record(move || {
+                        undo.cancel_pending_liveliness_get(interest_id);
+                    })
+                }
+                _ => false,
+            };
+            issued += usize::from(got.is_ok());
+            drop(got);
+            if cancelled_mid_fan {
+                break;
+            }
+            // Wake this face's drive loop so it re-arms on the deadline just registered;
+            // without it a silent session sweeps the snapshot only at the next keepalive wake.
+            revised.notify_one();
+        }
+        issued
+    }
+
     /// A snapshot of every connected face's session, taken OUT of the registry
     /// lock — what a fan-out operation iterates.
     ///
@@ -8756,6 +8829,72 @@ mod face_up_order_tests {
             legs(LinkRestriction::only([5]).expect("one slot")),
             0,
             "limited to a slot no link has: none"
+        );
+    }
+
+    /// A liveliness get limited to some links is asked on those links only, and the tokens of
+    /// the session itself, which is behind no link, answer it whatever the restriction says; a
+    /// get that states nothing is asked on every link as it always was.
+    #[cfg(feature = "liveliness-get")]
+    #[tokio::test]
+    async fn a_liveliness_get_limited_to_one_link_is_asked_there_only() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wz_runtime_tokio_test_support::establish_capability_pair_between;
+        let near = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let far = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        // The session answers its own liveliness gets, as upstream's does; zenoh-pico's
+        // does not, which is the default.
+        let shared = SharedSession::new_with_resources(
+            TokioTime::new(),
+            vec![0x11; 16],
+            SessionResources {
+                liveliness_to_self: true,
+                ..SessionResources::default()
+            },
+        )
+        .expect("test host entropy");
+        assert!(shared.face_up(1, &near.resp_actions, false), "slot 1");
+        assert!(
+            shared.face_up(LISTENER_FACE_STRIDE + 1, &far.resp_actions, false),
+            "slot 2"
+        );
+        shared
+            .declare_liveliness_token("wz/link/live".to_owned())
+            .expect("a token");
+
+        // `(legs issued on a face, replies of the session's own tokens)`.
+        let asked = |links: LinkRestriction| {
+            let own = Arc::new(AtomicUsize::new(0));
+            let counted = own.clone();
+            let mut mint = move || -> wz_capi_port::ReplyCallback {
+                let counted = counted.clone();
+                Box::new(move |_view: &dyn ReplyView| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                })
+            };
+            let faces =
+                shared.liveliness_get_on_links("wz/link/live", 1000, links, None, &mut mint);
+            (faces, own.load(Ordering::SeqCst))
+        };
+        assert_eq!(
+            asked(LinkRestriction::Any),
+            (2, 1),
+            "no restriction: both links, and the session's own token"
+        );
+        assert_eq!(
+            asked(LinkRestriction::only([1]).expect("one slot")),
+            (1, 1),
+            "limited to slot 1: one link, and the session's own token"
+        );
+        assert_eq!(
+            asked(LinkRestriction::only([1, 2]).expect("two slots")),
+            (2, 1),
+            "limited to both slots: both links"
+        );
+        assert_eq!(
+            asked(LinkRestriction::only([5]).expect("one slot")),
+            (0, 1),
+            "limited to a slot no link has: no link, and the session's own token still answers"
         );
     }
 

@@ -303,6 +303,8 @@ pub(crate) struct LivelinessRequest<'a> {
     /// What follows the declared prefix, `None` when the declaration covers the whole key.
     pub(crate) suffix: Option<String>,
     pub(crate) timeout: Duration,
+    /// The links the query is asked on, as the links of a query are.
+    pub(crate) links: Links,
     /// What each token that is alive is handed to, as a reply; it is dropped when the query is
     /// over, which ends the channel of a handler.
     pub(crate) callback: Callback<Reply>,
@@ -1505,9 +1507,26 @@ impl Engine {
         match self {
             // A router node answers it through its engine as the registry does, so the timeout,
             // the cancellation token and the notifier of the request are kept the same way.
-            Engine::Router(router) => tokio_engine::ask_liveliness(&router.node, request),
+            Engine::Router(router) => {
+                RouterEngine::refuse_links(request.links)?;
+                let node: &dyn wz_capi_port::SessionEngine = &router.node;
+                tokio_engine::ask_liveliness(
+                    request,
+                    Box::new(move |key, wire, timeout_ms, fan, leg| {
+                        node.liveliness_get_on_wire(key, wire, timeout_ms, fan, leg)
+                    }),
+                )
+            }
+            // The registry's own door is the one that takes a set of links; for a query that
+            // states none it is the walk the port's door makes.
             Engine::Tokio(state) => {
-                tokio_engine::ask_liveliness(state.shared.engine_ref(), request)
+                let (shared, links) = (&state.shared, request.links);
+                tokio_engine::ask_liveliness(
+                    request,
+                    Box::new(move |key, _wire, timeout_ms, fan, leg| {
+                        Some(shared.liveliness_get_on_links(key, timeout_ms, links, fan, leg))
+                    }),
+                )
             }
         }
     }
@@ -3053,17 +3072,31 @@ mod tokio_engine {
         })
     }
 
-    /// Ask the liveliness query `request` says of `engine`, handing each token that is alive to
-    /// its callback as a reply, as [`ask`] does for a query.
+    /// What issues the legs of a liveliness query: the key, the key as the wire names it, the
+    /// timeout in milliseconds, what cancels the legs, and what mints the callback of each.
+    /// The number of legs issued, or `None` from an engine that asks no liveliness queries.
+    pub(super) type IssueLiveliness<'a> = dyn FnOnce(
+            &str,
+            &WireKey,
+            u32,
+            Option<&CancellableFan>,
+            &mut dyn FnMut() -> ReplyCallback,
+        ) -> Option<usize>
+        + 'a;
+
+    /// Ask the liveliness query `request` says through `issue`, handing each token that is alive
+    /// to its callback as a reply, as [`ask`] does for a query. `issue` is the engine's own door:
+    /// the port's for an engine that reads no set of links, the registry's for one that does.
     pub(super) fn ask_liveliness(
-        engine: &dyn SessionEngine,
         request: LivelinessRequest<'_>,
+        issue: Box<IssueLiveliness<'_>>,
     ) -> ZResult<()> {
         let LivelinessRequest {
             key,
             scope,
             suffix,
             timeout,
+            links: _,
             callback,
             #[cfg(feature = "unstable")]
             cancellation_token,
@@ -3082,8 +3115,7 @@ mod tokio_engine {
         // instant one.
         let timeout_ms = u32::try_from(timeout.as_millis().max(1)).unwrap_or(u32::MAX);
         let mut leg = leg_minter(callback, fan.clone(), ConsolidationMode::None);
-        let issued =
-            engine.liveliness_get_on_wire(key, &wire, timeout_ms, fan.as_deref(), &mut leg);
+        let issued = issue(key, &wire, timeout_ms, fan.as_deref(), &mut leg);
         drop(leg);
         match issued {
             Some(_) => Ok(()),
@@ -4016,6 +4048,7 @@ impl SessionInner {
         self: &Arc<Self>,
         key_expr: &KeyExpr,
         timeout: Duration,
+        links: Links,
         callback: Callback<Reply>,
         #[cfg(feature = "unstable")] cancellation_token: Option<CancellationToken>,
     ) -> ZResult<()> {
@@ -4023,6 +4056,7 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
+        admit_links(links)?;
         #[cfg(feature = "unstable")]
         let fan = cancellation_token
             .is_some()
@@ -4037,6 +4071,7 @@ impl SessionInner {
             scope: wire.scope,
             suffix,
             timeout,
+            links,
             callback,
             #[cfg(feature = "unstable")]
             cancellation_token,
@@ -5878,12 +5913,14 @@ impl Session {
         &self,
         key_expr: &KeyExpr,
         timeout: Duration,
+        links: Links,
         callback: Callback<Reply>,
         #[cfg(feature = "unstable")] cancellation_token: Option<CancellationToken>,
     ) -> ZResult<()> {
         self.0.liveliness_query(
             key_expr,
             timeout,
+            links,
             callback,
             #[cfg(feature = "unstable")]
             cancellation_token,
@@ -7494,6 +7531,7 @@ mod tests {
         assert_eq!(session.declare_publisher("demo/links/a").links, Links::Any);
         assert_eq!(session.declare_querier("demo/links/a").links, Links::Any);
         assert_eq!(session.get("demo/links/a").links, Links::Any);
+        assert_eq!(session.liveliness().get("demo/links/a").links, Links::Any);
         assert_eq!(
             session.liveliness().declare_token("demo/links/a").links,
             Links::Any
@@ -7667,6 +7705,35 @@ mod tests {
             .declare_liveliness_token("demo/links/g", 0, None, Links::Any)
             .expect("a token that states no links is declared");
         session.0.engine.undeclare_liveliness_token(token);
+        // A liveliness query is asked the same way: a set is refused, none is taken.
+        let request = |links: Links| crate::api::session::LivelinessRequest {
+            key: "demo/links/g",
+            scope: 0,
+            suffix: None,
+            timeout: Duration::from_millis(50),
+            links,
+            callback: crate::api::handlers::Callback::from(|_reply: Reply| {}),
+            #[cfg(feature = "unstable")]
+            cancellation_token: None,
+            fan: None,
+            notifier: None,
+        };
+        let error = session
+            .0
+            .engine
+            .liveliness_query(request(some_links()))
+            .expect_err("a node reads no set of links");
+        assert!(
+            error
+                .to_string()
+                .contains("the router engine does not read link restrictions"),
+            "{error}"
+        );
+        session
+            .0
+            .engine
+            .liveliness_query(request(Links::Any))
+            .expect("a query that states no links is asked");
     }
 
     #[cfg(feature = "link-restriction")]
@@ -7724,6 +7791,14 @@ mod tests {
         );
         assert_eq!(
             session
+                .liveliness()
+                .get("demo/links/h")
+                .allowed_links(links)
+                .links,
+            links
+        );
+        assert_eq!(
+            session
                 .put("demo/links/h", "v")
                 .allowed_links(links)
                 .publisher
@@ -7773,6 +7848,14 @@ mod tests {
             session
                 .liveliness()
                 .declare_subscriber("demo/links/i")
+                .allowed_links(links)
+                .wait(),
+        );
+        assert_policy_decides(
+            "liveliness get",
+            session
+                .liveliness()
+                .get("demo/links/i")
                 .allowed_links(links)
                 .wait(),
         );

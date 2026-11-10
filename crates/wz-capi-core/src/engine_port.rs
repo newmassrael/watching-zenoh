@@ -370,48 +370,8 @@ impl SessionEngine for SharedSession {
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
     ) -> Option<usize> {
-        let opts =
-            crate::runtime::session::LivelinessGetOptions::default().with_timeout_ms(timeout_ms);
-        let mut issued = 0;
-        // The leg no face is behind: the tokens of this session itself, which upstream's get
-        // finds beside those of its peers. It answers at once, and its end is the leg being
-        // dropped when this call returns.
-        let mut own = leg();
-        self.answer_liveliness_get_locally(keyexpr, |view| own(view));
-        drop(own);
-        for (session, revised) in self.face_sessions_with_wake() {
-            let mut reply = leg();
-            // Completion is the pending entry's sink being DROPPED, which covers a real final,
-            // a timeout sweep and a face death alike, so the final needs no body.
-            let got = session.liveliness_get(
-                keyexpr.to_owned(),
-                opts,
-                move |view: &dyn wz_session_core::reply_sink::ReplyView| reply(view),
-                |_id| {},
-            );
-            // The interest id this face registered under, recorded so a later cancel can
-            // unregister it. `record` answers `false` when the token cancelled while the fan was
-            // running; it has already undone THIS registration, so only the issuing stops.
-            let cancelled_mid_fan = match (fan, &got) {
-                (Some(fan), Ok(interest_id)) => {
-                    let undo = session.clone();
-                    let interest_id = *interest_id;
-                    !fan.record(move || {
-                        undo.cancel_pending_liveliness_get(interest_id);
-                    })
-                }
-                _ => false,
-            };
-            issued += usize::from(got.is_ok());
-            drop(got);
-            if cancelled_mid_fan {
-                break;
-            }
-            // Wake this face's drive loop so it re-arms on the deadline just registered;
-            // without it a silent session sweeps the snapshot only at the next keepalive wake.
-            revised.notify_one();
-        }
-        Some(issued)
+        // The walk is the registry's own, for a get that states no links.
+        Some(self.liveliness_get_on_links(keyexpr, timeout_ms, LinkRestriction::Any, fan, leg))
     }
 
     // The runtime's token names in its retraction the key it was declared on, which is the key
