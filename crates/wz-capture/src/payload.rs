@@ -1309,7 +1309,7 @@ impl PayloadCensus {
         ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,
     ) {
-        self.observe_frame_selecting(frame, filter, ctx, spaces, None);
+        self.observe_frame_selecting(frame, filter, ctx, spaces, None, None);
     }
 
     /// [`Self::observe_frame_where`], handing every payload the selector says
@@ -1317,6 +1317,11 @@ impl PayloadCensus {
     /// wants the payloads themselves ([`crate::field_values`]). The selector is
     /// judged, the keyexpr resolved and the payload found by the very lines the
     /// census uses, so the payloads one selector picks are the census's.
+    ///
+    /// `judging` is the end-to-end judge the selector's `e2e` terms read a
+    /// published sample by ([`crate::e2e_plane`]), handed every such sample in
+    /// the order this walk meets it; `None` where the plane was handed no
+    /// declarations, and then those terms are undecided over a sample.
     pub(crate) fn observe_frame_selecting<'f>(
         &mut self,
         frame: &crate::messages::Row<'_>,
@@ -1324,14 +1329,17 @@ impl PayloadCensus {
         ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,
         sink: Option<PayloadSink<'_, 'f>>,
+        judging: Option<&mut crate::e2e_plane::E2eJudging>,
     ) {
         use wz_session_core::passive::Carried;
 
         match &frame.carried {
-            Carried::Batch(batch) => self.observe_batch(spaces, frame, batch, filter, ctx, sink),
+            Carried::Batch(batch) => {
+                self.observe_batch(spaces, frame, batch, filter, ctx, sink, judging)
+            }
             #[cfg(feature = "reassembly")]
             Carried::Reassembled { batch, .. } => {
-                self.observe_batch(spaces, frame, batch, filter, ctx, sink)
+                self.observe_batch(spaces, frame, batch, filter, ctx, sink, judging)
             }
             // Matched by name for the reason R311y614 matched them by name
             // in the throughput plane: a new `Carried` variant must fail to
@@ -1345,6 +1353,8 @@ impl PayloadCensus {
         }
     }
 
+    // Eight: the frame's batch, what its records are read with, and the judge.
+    #[allow(clippy::too_many_arguments)]
     fn observe_batch<'f>(
         &mut self,
         spaces: &mut crate::agg::KeyexprSpaces,
@@ -1353,6 +1363,7 @@ impl PayloadCensus {
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
         mut sink: Option<PayloadSink<'_, 'f>>,
+        mut judging: Option<&mut crate::e2e_plane::E2eJudging>,
     ) {
         if batch.halt.is_some() {
             self.gaps.halted_batches += 1;
@@ -1368,10 +1379,20 @@ impl PayloadCensus {
                 record,
                 sink: sink.as_deref_mut(),
             };
-            self.observe_message(spaces, frame, message, seen, filter, ctx);
+            self.observe_message(
+                spaces,
+                frame,
+                message,
+                seen,
+                filter,
+                ctx,
+                judging.as_deref_mut(),
+            );
         }
     }
 
+    // Seven: what a record is read with, and the judge of its frame.
+    #[allow(clippy::too_many_arguments)]
     fn observe_message(
         &mut self,
         spaces: &mut crate::agg::KeyexprSpaces,
@@ -1380,6 +1401,7 @@ impl PayloadCensus {
         seen: Seen<'_, '_, '_>,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
+        judging: Option<&mut crate::e2e_plane::E2eJudging>,
     ) {
         use wz_session_core::network_message::NetworkMessage;
         let Seen { at, record, sink } = seen;
@@ -1417,8 +1439,34 @@ impl PayloadCensus {
         // Walked only for a selector that names a path: see `Filter::reads_tree`.
         let tree = at.tree(frame);
         let names = crate::filter::MessageNames::of(frame, Some(message.name()));
+        // What the end-to-end judge made of the record. Only a `Push` carrying a
+        // `put` is a frame, as the field document reads one; every other record
+        // carries none, which is decided whatever the declarations say. A sample
+        // is judged here, before the selector is asked, so every sample of a
+        // slot is judged in the order this walk meets it.
+        let e2e = match payload {
+            Some((_, _, bytes, shm)) if crate::e2e_words::is_published_sample(message) => judging
+                .and_then(|judge| {
+                    let (id, suffix) =
+                        wz_session_core::wireexpr_resolve::id_and_suffix(keyexpr_body);
+                    judge.judge(crate::e2e_plane::Sample {
+                        list: ctx.list(),
+                        keyexpr: keyexpr.as_deref(),
+                        missed: keyexpr
+                            .is_none()
+                            .then(|| (id, suffix.filter(|s| !s.is_empty()))),
+                        payload: bytes,
+                        elsewhere: shm,
+                        sender: ctx.zid(direction),
+                        observed_at_ns: frame.observed_at_ns,
+                        from_low: crate::agg::dir_index(direction) == 0,
+                    })
+                }),
+            _ => Some(crate::e2e_words::E2eWords::NONE),
+        };
         // R311y618 — asked after resolution and before the bytes are inspected.
         let truth = filter.matches(&crate::filter::RecordView {
+            e2e,
             tree: tree.as_ref(),
             row: ctx.row_facts(names.as_slice(), direction),
             direction,
@@ -1751,7 +1799,23 @@ pub fn payloads_grouped(
     // heading states it. List order left a publisher's topic blank on a finding
     // against that publisher whenever the id was declared on the session's other
     // link; `crate::agg::aggregate_grouped` carries the whole argument.
+    payloads_read_by(dissection, filter, grouping, None)
+}
+
+/// [`payloads_grouped`], with the capture read by `map` where one is given
+/// ([`PayloadFold::read_by`]): the walk of a document that was handed
+/// declarations, whose selector's `e2e` terms are then decided.
+#[cfg(feature = "network-codecs")]
+pub(crate) fn payloads_read_by(
+    dissection: &crate::Dissection,
+    filter: &crate::filter::Filter,
+    grouping: &crate::node::SessionGrouping,
+    map: Option<&formats::FormatMap<'_>>,
+) -> PayloadCensus {
     let mut fold = PayloadFold::begin(dissection, filter, grouping);
+    if let Some(map) = map {
+        fold.read_by(map);
+    }
     crate::ordered_fold::fold_whole_capture(&mut fold, dissection, grouping);
     fold.census()
 }
@@ -1764,6 +1828,10 @@ pub(crate) struct PayloadFold {
     census: PayloadCensus,
     spaces: crate::agg::KeyexprSpaces,
     filter: crate::filter::Filter,
+    /// The end-to-end judge the selector's `e2e` terms read a sample by, kept
+    /// with the fold so the two begin again together; `None` until a walk
+    /// hands the fold declarations ([`Self::read_by`]).
+    e2e: Option<crate::e2e_plane::E2eJudging>,
 }
 
 #[cfg(feature = "network-codecs")]
@@ -1783,6 +1851,20 @@ impl PayloadFold {
             census,
             spaces: crate::agg::KeyexprSpaces::new(),
             filter: resolved.filter().clone(),
+            e2e: None,
+        }
+    }
+
+    /// Read the capture by `map`, from the first message on: a reference the
+    /// wire does not answer is read under the key `map` fixes for its id, as
+    /// the field document reads it, and where the selector names an `e2e`
+    /// term every published sample is judged end to end under `map`'s profile
+    /// rules, so those terms are decided over a sample. A selector that names
+    /// none pays nothing for the judge.
+    pub(crate) fn read_by(&mut self, map: &formats::FormatMap<'_>) {
+        self.spaces.fix_key_ids(map.key_bindings());
+        if self.filter.reads_e2e() {
+            self.e2e = Some(crate::e2e_plane::E2eJudging::new(map.judging_rules()));
         }
     }
 
@@ -1888,6 +1970,7 @@ impl PayloadFold {
                 .holding(message),
             &mut self.spaces,
             sink,
+            self.e2e.as_mut(),
         );
     }
 }
@@ -2807,6 +2890,34 @@ pub mod formats {
         Unresolved,
     }
 
+    /// The position of the first of `patterns` that covers `keyexpr`: the
+    /// first-match-wins rule, for the format rules of a [`FormatMap`] and for
+    /// an owned copy of them ([`crate::e2e_plane`]) alike.
+    pub(crate) fn first_covering<'p>(
+        patterns: impl IntoIterator<Item = &'p str>,
+        keyexpr: &str,
+    ) -> Option<usize> {
+        patterns.into_iter().position(|pattern| {
+            // The matcher takes CHUNKS, which is the same split
+            // `filter::compile_pattern` performs for the same function.
+            let chunks: Vec<&str> = pattern.split('/').collect();
+            wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
+        })
+    }
+
+    /// The position of the first of the segment rules' `patterns` that covers
+    /// `key` (see [`SegmentKey`]), for [`FormatMap::segment_for`] and its owned
+    /// copy alike.
+    pub(crate) fn first_segment_covering<'p>(
+        patterns: impl IntoIterator<Item = &'p str>,
+        key: SegmentKey<'_>,
+    ) -> Option<usize> {
+        patterns.into_iter().position(|pattern| match key {
+            SegmentKey::Resolved(keyexpr) => first_covering([pattern], keyexpr).is_some(),
+            SegmentKey::Unresolved => pattern == "**",
+        })
+    }
+
     #[derive(Default)]
     pub struct FormatMap<'a> {
         rules: Vec<(String, RuleTarget<'a>)>,
@@ -3314,16 +3425,12 @@ pub mod formats {
         /// `segment_rules`); an unresolved key is covered only by `**`
         /// ([`SegmentKey::Unresolved`]).
         pub fn segment_for(&self, key: SegmentKey<'_>) -> Option<SegmentRuleMatch<'_>> {
-            let at = self
-                .segment_rules
-                .iter()
-                .position(|(pattern, _)| match key {
-                    SegmentKey::Resolved(keyexpr) => {
-                        let chunks: Vec<&str> = pattern.split('/').collect();
-                        wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
-                    }
-                    SegmentKey::Unresolved => pattern == "**",
-                })?;
+            let at = first_segment_covering(
+                self.segment_rules
+                    .iter()
+                    .map(|(pattern, _)| pattern.as_str()),
+                key,
+            )?;
             let (pattern, profile_at) = &self.segment_rules[at];
             Some(SegmentRuleMatch {
                 id: DeclarationId(self.first_segment_rule_id() + at),
@@ -3759,12 +3866,40 @@ pub mod formats {
         /// The position of the first rule that covers `keyexpr`: the one place
         /// the first-match-wins rule is applied.
         fn first_rule_covering(&self, keyexpr: &str) -> Option<usize> {
-            self.rules.iter().position(|(pattern, _)| {
-                // The matcher takes CHUNKS, which is the same split
-                // `filter::compile_pattern` performs for the same function.
-                let chunks: Vec<&str> = pattern.split('/').collect();
-                wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
-            })
+            first_covering(
+                self.rules.iter().map(|(pattern, _)| pattern.as_str()),
+                keyexpr,
+            )
+        }
+
+        /// What judging a record end to end needs of these declarations, owned,
+        /// for a plane that keeps its judging between calls
+        /// ([`crate::e2e_plane`]): every rule's pattern in the order tried, with
+        /// the profile of each profile rule, and the segment rules with their
+        /// profiles. Empty when no rule binds a key to a profile: then no record
+        /// is a frame, which is decided, and nothing is copied.
+        #[cfg(feature = "network-codecs")]
+        pub(crate) fn judging_rules(&self) -> crate::e2e_plane::JudgingRules {
+            if !self.has_e2e_rules() {
+                return crate::e2e_plane::JudgingRules::default();
+            }
+            let rules = self
+                .rules
+                .iter()
+                .map(|(pattern, target)| {
+                    let profile = match target {
+                        RuleTarget::E2e(at) => Some(self.e2e_rules[*at].1.profile().clone()),
+                        _ => None,
+                    };
+                    (pattern.clone(), profile)
+                })
+                .collect();
+            let segments = self
+                .segment_rules
+                .iter()
+                .map(|(pattern, at)| (pattern.clone(), self.segment_profiles[*at].profile.clone()))
+                .collect();
+            crate::e2e_plane::JudgingRules::new(rules, segments)
         }
 
         /// R2114 (open-debt item 237) — the DEFINITION one rule was resolved

@@ -206,7 +206,10 @@ impl Outcome {
 /// frontier left. That is the reference dissector's first pass (a frame's
 /// stateful verdicts stored on its first visit), kept per declaration text
 /// because the text decides the profiles.
-#[derive(Debug, Default)]
+///
+/// `Clone` because a fold kept between calls is, and the payload plane's
+/// judging keeps one in its fold (`crate::e2e_plane`).
+#[derive(Debug, Default, Clone)]
 pub struct SlotLedger {
     judges: BTreeMap<Slot, Judge>,
     /// The list that judged each slot first.

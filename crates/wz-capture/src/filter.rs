@@ -69,6 +69,10 @@
 //! | `flow` | an integer, the number the document gives the row's flow (`list_id`) | `==` `!=` `<` `<=` `>` `>=` | as above |
 //! | `packet` | an integer, the packet the document numbers the row by | `==` `!=` `<` `<=` `>` `>=` | as above, or the reader cannot place the message |
 //! | `zenoh` | the flow's word for whether its bytes are zenoh: `yes` `no` `undecided` | `==` `!=` | as above, or the plane holds no evidence of the row's flow (a tap handed no node census) |
+//! | `e2e` | the end-to-end judge's verdict on the record's frame: `ok` `error` `unjudged` `none` | `==` `!=` | the record is a published sample and the plane was handed no declarations, or its key did not resolve |
+//! | `e2e.crc` | `ok` `error`; absent where the record carries no frame | `==` `!=` | as `e2e` |
+//! | `e2e.counter` | `none` `repeat` `out_of_range` `unjudged`; absent as `e2e.crc` | `==` `!=` | as `e2e` |
+//! | `e2e.timeout` | `ok` `error` `unjudged`; absent as `e2e.crc` | `==` `!=` | as `e2e` |
 //!
 //! The table is the language's field list as it is WRITTEN. The list the
 //! parser reads and the one the field list document prints are one
@@ -134,6 +138,26 @@
 //! open, and a payload that rides shared memory instead of the wire. A
 //! record whose message was cut before its payload ended is not a record the
 //! plane produced at all, so a payload this term sees is always a whole one.
+//!
+//! ## The `e2e` fields read the end-to-end judge's verdict
+//!
+//! A `Push` carrying a `put` under a key a profile rule covers is a FRAME, and
+//! the judge that writes the field document's `e2e` block says what became of
+//! it. The four fields read that verdict in closed words, made in one place
+//! ([`crate::e2e_words`], which has the table of what each word restates):
+//! `e2e.crc == error` selects the frames whose CRC did not match, and
+//! `e2e == error` every frame anything was wrong with. `unjudged` is not a
+//! failure: the first frame of a slot, a frame from a sender the capture never
+//! named and a frame whose packet carried no time are judged as far as they can
+//! be, and say which part was not.
+//!
+//! A record that carries no frame (no profile rule covers its key, or it is a
+//! `del`, a query, a reply) reads `e2e == none`, decided, with no parts. A
+//! frame's verdict depends on the frames of its slot before it, so only the
+//! payload plane judges one, as it walks the capture, and only when the door
+//! was handed the declarations that name the profiles
+//! (`crate::e2e_plane`); over a door handed none, every `e2e` term over a
+//! sample is undecided.
 //!
 //! ## R311y636 (§1.1v) — the last five are about the OUTCOME, not the request
 //!
@@ -503,6 +527,17 @@ pub struct RecordView<'a> {
     /// flow and its endpoints. `None` where the plane was not given them, and
     /// then every term over them is undecidable.
     pub row: Option<RowFacts<'a>>,
+    /// What the end-to-end judge made of the record, in the words the `e2e`
+    /// terms read ([`crate::e2e_words`]), or `None` where whether it is a frame
+    /// cannot be decided here.
+    ///
+    /// A record that is not a `Push` carrying a `put` carries no frame, and
+    /// that needs no declarations to say: [`E2eWords::NONE`](crate::e2e_words::E2eWords::NONE)
+    /// on every plane. A sample is judged only by the payload plane, and only
+    /// when it was handed declarations (`crate::e2e_plane`); `None` there is
+    /// a plane handed none, or a sample whose key did not resolve, so no rule
+    /// can be matched against it.
+    pub e2e: Option<crate::e2e_words::E2eWords>,
 }
 
 /// Whether a judged message is a record, and of what kind: the three states a
@@ -802,6 +837,10 @@ selector_fields! {
     Flow => "flow",
     Packet => "packet",
     Zenoh => "zenoh",
+    E2e => "e2e",
+    E2eCrc => "e2e.crc",
+    E2eCounter => "e2e.counter",
+    E2eTimeout => "e2e.timeout",
 }
 
 /// The words a `msg` term takes: every message name a row or a record can
@@ -868,7 +907,11 @@ impl Field {
             | Self::Dst
             | Self::Addr
             | Self::Link
-            | Self::Zenoh => EQUALITY,
+            | Self::Zenoh
+            | Self::E2e
+            | Self::E2eCrc
+            | Self::E2eCounter
+            | Self::E2eTimeout => EQUALITY,
             // The binder replaces a `node` term whole, one name per term.
             Self::Node => &["==", "!="],
             Self::Bytes
@@ -897,6 +940,19 @@ impl Field {
             Self::Msg => Some(MESSAGE_WORDS.to_vec()),
             Self::Link => Some(crate::link::LinkKind::names()),
             Self::Zenoh => Some(crate::session_table::ZenohVerdict::names()),
+            _ => self.e2e_part().map(|part| part.words().to_vec()),
+        }
+    }
+
+    /// The part of the end-to-end verdict this field reads, for the four that
+    /// read one ([`crate::e2e_words`]).
+    const fn e2e_part(self) -> Option<crate::e2e_words::E2ePart> {
+        use crate::e2e_words::E2ePart;
+        match self {
+            Self::E2e => Some(E2ePart::Verdict),
+            Self::E2eCrc => Some(E2ePart::Crc),
+            Self::E2eCounter => Some(E2ePart::Counter),
+            Self::E2eTimeout => Some(E2ePart::Timeout),
             _ => None,
         }
     }
@@ -1143,6 +1199,13 @@ enum Term {
         want: crate::session_table::ZenohVerdict,
         negated: bool,
     },
+    /// The end-to-end judge's word for one part of the record's frame is this
+    /// one ([`crate::e2e_words`]).
+    E2e {
+        part: crate::e2e_words::E2ePart,
+        want: &'static str,
+        negated: bool,
+    },
     /// The row's list number compares with the integer.
     Flow {
         op: Op,
@@ -1273,7 +1336,8 @@ impl Term {
         Some(match self {
             Self::Key { negated, .. }
             | Self::Kind { negated, .. }
-            | Self::Closed { negated, .. } => Truth::of(*negated),
+            | Self::Closed { negated, .. }
+            | Self::E2e { negated, .. } => Truth::of(*negated),
             Self::Bytes { op, .. }
             | Self::Delay { op, .. }
             | Self::Replies { op, .. }
@@ -1346,6 +1410,17 @@ impl Term {
             Self::Zenoh { want, negated } => match record.row.map(|row| row.zenoh) {
                 None | Some(None) => Truth::Unknown,
                 Some(Some(word)) => Truth::of((word == *want) != *negated),
+            },
+            // Undecided where the judge could not be asked; a part the record
+            // does not carry (every part of a record that is not a frame) is
+            // decided, as a path the walked tree lacks is.
+            Self::E2e {
+                part,
+                want,
+                negated,
+            } => match record.e2e {
+                None => Truth::Unknown,
+                Some(words) => Truth::of((words.word(*part) == Some(*want)) != *negated),
             },
             Self::Flow { op, value } => match record.row {
                 None => Truth::Unknown,
@@ -1788,6 +1863,13 @@ impl Filter {
     pub fn reads_flow_word(&self) -> bool {
         self.root
             .any_term(&|term| matches!(term, Term::Zenoh { .. }))
+    }
+
+    /// `true` when some term reads the end-to-end judge's verdict (`e2e`,
+    /// `e2e.crc`, `e2e.counter`, `e2e.timeout`): for a plane handed
+    /// declarations to judge the samples it walks only when a selector asks.
+    pub fn reads_e2e(&self) -> bool {
+        self.root.any_term(&|term| matches!(term, Term::E2e { .. }))
     }
 
     /// `true` when some term reads the row's facts ([`RowFacts`]): for a
@@ -4214,6 +4296,26 @@ fn build_fixed(
             };
             Term::Zenoh { want, negated }
         }
+        Field::E2e | Field::E2eCrc | Field::E2eCounter | Field::E2eTimeout => {
+            let negated = equality_negation(op, known.name(), op_at)?;
+            let part = known
+                .e2e_part()
+                .expect("each of the four end-to-end fields reads a part");
+            let Some(want) = part.words().iter().copied().find(|word| *word == value) else {
+                return Err(FilterError {
+                    at: value_at,
+                    kind: FilterErrorKind::UnknownValue {
+                        field: known.name(),
+                        value,
+                    },
+                });
+            };
+            Term::E2e {
+                part,
+                want,
+                negated,
+            }
+        }
         Field::Flow => Term::Flow {
             op,
             value: integer(&value, value_at)?,
@@ -4416,6 +4518,9 @@ mod tests {
             // The default is the NON-correlating plane, so every pre-existing
             // test below drives the view the throughput plane builds.
             outcome: None,
+            // Undecided, on the `zid` line's rule: a test that drives the
+            // end-to-end axis writes `RecordView { e2e: Some(..), ..view(..) }`.
+            e2e: None,
             // No tree, on the `zid` line's rule: a path term over the default
             // view is undecidable, and a test that drives the tree axis says so.
             tree: None,

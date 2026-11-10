@@ -976,6 +976,9 @@ impl ExchangeTable {
             // rather than the close's delay standing in for the request's.
             source_delay_ms: entry.requested_delay_ms,
             observed_at_ms: requested_at_ms,
+            // A request and its close are an exchange, never a published
+            // sample: no frame, whatever the declarations say.
+            e2e: Some(crate::e2e_words::E2eWords::NONE),
             tree: entry.tree.as_ref(),
             // R311y638 (§1.1r) — relative to the CAPTURE and taken at the same
             // instant `time` is, so the two fields cannot name different

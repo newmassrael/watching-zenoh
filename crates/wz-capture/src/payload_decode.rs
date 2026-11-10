@@ -315,6 +315,12 @@ impl<'a> Declarations<'a> {
         Some((matched.rule, matched.format))
     }
 
+    /// The declarations this run reads by, for a plane that reads the capture
+    /// by them without keeping this run's ledger (the selector's verdicts).
+    pub(crate) fn map(&self) -> &'a FormatMap<'a> {
+        self.map
+    }
+
     /// Whether any rule binds a key to an end-to-end profile.
     ///
     /// The question a walker asks before it does the work of finding the frames:

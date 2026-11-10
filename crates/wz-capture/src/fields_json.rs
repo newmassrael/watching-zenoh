@@ -144,7 +144,13 @@ pub fn fields_json_where(
     filter: &crate::filter::Filter,
 ) -> String {
     let grouping = crate::node::session_grouping(d);
-    let verdicts = judged_by(d, filter, &grouping, None);
+    let verdicts = judged_by(
+        d,
+        filter,
+        &grouping,
+        None,
+        declarations.map(|run| run.map()),
+    );
     fields_json_selected(
         d,
         capture,
@@ -170,11 +176,17 @@ pub fn fields_json_where(
 /// (a live handle) the term is read against them first
 /// ([`crate::filter::Filter::numbered_by`]); without them a list's number is
 /// its position, which is what every plane hands a row already.
+///
+/// `map` is the declarations the document was handed, which the payload plane
+/// reads the capture by ([`crate::payload::PayloadFold::read_by`]): the keys
+/// they fix, and the end-to-end judge a selector's `e2e` terms read. `None` for
+/// a document handed none, where those terms are undecided over a sample.
 pub(crate) fn judged_by(
     d: &crate::Dissection,
     filter: &crate::filter::Filter,
     grouping: &crate::node::SessionGrouping,
     coordinates: Option<&dyn RowCoordinates>,
+    map: Option<&crate::payload::formats::FormatMap<'_>>,
 ) -> Option<RowJudgement> {
     if filter.is_any() {
         return None;
@@ -183,9 +195,9 @@ pub(crate) fn judged_by(
         Some(c) => {
             let lists = d.message_lists_with_origin().count();
             let numbered = filter.numbered_by(lists, &|list| c.list_id(list));
-            RowJudgement::of(d, &numbered, grouping)
+            RowJudgement::of(d, &numbered, grouping, map)
         }
-        None => RowJudgement::of(d, filter, grouping),
+        None => RowJudgement::of(d, filter, grouping, map),
     })
 }
 
@@ -241,7 +253,13 @@ pub fn fields_json_where_coordinated_progress(
     progress: Option<&crate::Progress<'_>>,
 ) -> Option<String> {
     let grouping = crate::node::session_grouping(d);
-    let verdicts = judged_by(d, filter, &grouping, Some(coordinates));
+    let verdicts = judged_by(
+        d,
+        filter,
+        &grouping,
+        Some(coordinates),
+        declarations.map(|run| run.map()),
+    );
     let document = fields_json_selected(
         d,
         capture,
@@ -6498,6 +6516,7 @@ impl RowJudgement {
         d: &crate::Dissection,
         filter: &crate::filter::Filter,
         grouping: &crate::node::SessionGrouping,
+        map: Option<&crate::payload::formats::FormatMap<'_>>,
     ) -> Self {
         let resolved = filter.resolved_against(grouping.named_zids());
         if resolved.is_ambiguous() {
@@ -6510,7 +6529,7 @@ impl RowJudgement {
         let rows = crate::row_plane::RowPlane::of(d, resolved.filter(), grouping, &exchanges);
         Self {
             walk: Some(PlaneVerdicts {
-                payloads: crate::payload::payloads_grouped(d, filter, grouping),
+                payloads: crate::payload::payloads_read_by(d, filter, grouping, map),
                 exchanges,
                 rows,
             }),

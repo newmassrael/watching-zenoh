@@ -6556,18 +6556,26 @@ mod tests {
         let block = &block[..block.find("*/").expect("the comment closes")];
 
         // A row is ` *   <name>  <description>  <comparisons>`: three spaces
-        // after the comment margin and a lower-case name. Every other line of
-        // the block is indented otherwise, and the pin below says so by finding
-        // exactly the parser's own count.
+        // after the comment margin and a field name, which starts with a
+        // lower-case letter and goes on in lower-case letters, digits, `_` and
+        // the `.` of a dotted part (`e2e.crc`). Every other line of the block
+        // is indented otherwise, and the pin below says so by finding exactly
+        // the parser's own count.
         let rows: Vec<(&str, &str)> = block
             .lines()
             .filter_map(|line| {
                 let rest = line.strip_prefix(" *   ")?;
+                if !rest.starts_with(|c: char| c.is_ascii_lowercase()) {
+                    return None;
+                }
                 let name_len = rest
                     .chars()
-                    .take_while(|c| c.is_ascii_lowercase() || *c == '_')
+                    .take_while(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.')
+                    })
                     .count();
-                (name_len > 0 && rest[name_len..].starts_with("  "))
+                rest[name_len..]
+                    .starts_with("  ")
                     .then(|| (&rest[..name_len], rest[name_len..].trim()))
             })
             .collect();
@@ -6589,6 +6597,8 @@ mod tests {
             "closed" => "yes",
             "value" => "\"x\"",
             "node" => "\"front camera\"",
+            "e2e" | "e2e.crc" | "e2e.timeout" => "ok",
+            "e2e.counter" => "repeat",
             _ => "1",
         };
         for (field, description) in &rows {
@@ -6616,7 +6626,7 @@ mod tests {
 
         // The words of the closed vocabularies: each one the header names is
         // accepted, and one it does not name is refused.
-        let words: [(&str, &[&str], &str); 3] = [
+        let words: [(&str, &[&str], &str); 7] = [
             ("dir", &["a", "b", "A", "B"], "c"),
             (
                 "kind",
@@ -6624,6 +6634,14 @@ mod tests {
                 "frobnicate",
             ),
             ("closed", &["yes", "no", "y", "n"], "maybe"),
+            ("e2e", &["ok", "error", "unjudged", "none"], "repeat"),
+            ("e2e.crc", &["ok", "error"], "unjudged"),
+            (
+                "e2e.counter",
+                &["none", "repeat", "out_of_range", "unjudged"],
+                "ok",
+            ),
+            ("e2e.timeout", &["ok", "error", "unjudged"], "none"),
         ];
         for (field, accepted, refused) in words {
             let description = rows
@@ -6641,7 +6659,7 @@ mod tests {
                 assert!(
                     description
                         .to_ascii_lowercase()
-                        .split(|c: char| !c.is_ascii_alphanumeric())
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                         .any(|w| w == word.to_ascii_lowercase()),
                     "{field}: the header's row does not name {word}: {description}"
                 );
@@ -9111,11 +9129,12 @@ mod tests {
         // added two fields and the escapes of a quoted value, nor revision 5's
         // (paths, the list operators, the braces of a list), nor revision 6's
         // (the row's facts as fields). Revision 7 adds each token's `role`, what
-        // the parser read it as. Revision 8 is `zenoh` joining the fields, and
-        // revision 9 its words becoming the sequential test's three.
+        // the parser read it as. Revision 8 is `zenoh` joining the fields,
+        // revision 9 its words becoming the sequential test's three, and
+        // revision 10 the four `e2e` fields joining.
         assert_eq!(
             verdict,
-            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":9},\"ok\":true,\
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":10},\"ok\":true,\
              \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},\
              {\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},\
              {\"start\":7,\"end\":14,\"kind\":\"word\",\"role\":\"value\"}]}"
@@ -9135,7 +9154,7 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         assert!(
             verdict.starts_with(
-                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":9},\"ok\":false,\"at\":"
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":10},\"ok\":false,\"at\":"
             ),
             "the verdict must carry a position: {verdict}"
         );

@@ -3642,11 +3642,12 @@ int main(void) {
      * Revision 7 adds each token's `role`, what the parser read it as.
      * Revision 8 is `zenoh` joining the fields, and nothing on this branch.
      * Revision 9 is its words becoming the sequential test's three, and
-     * nothing on this branch either.
+     * nothing on this branch either; nor is revision 10, the four e2e fields
+     * joining.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":9},"
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":10},"
                  "\"ok\":true,\"tokens\":["
                  "{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},"
                  "{\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},"
@@ -4483,8 +4484,10 @@ int main(void) {
      * facts join the fixed fields. 3: `zenoh`, the flow's word, joins them.
      * 4: its words become the sequential test's three. */
     revisioned[19].name = "selector_fields";
-    /* 5: `renamed`, the renames of published paths, joined; empty here. */
-    revisioned[19].revision = 5;
+    /* 5: `renamed`, the renames of published paths, joined; empty here.
+     * 6: the end-to-end judge's four fields join the fixed fields; no key
+     * moves. */
+    revisioned[19].revision = 6;
     revisioned[19].doc = NULL;
     rc = wz_dissect_selector_fields(&revisioned[19].doc);
     CHECK(rc == WZ_DISSECT_OK, "selector_fields document rc=%d", rc);

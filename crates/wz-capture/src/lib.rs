@@ -114,6 +114,13 @@ mod e2e_slot_tests;
 pub mod e2e_slots;
 #[cfg(test)]
 mod e2e_tests;
+// The closed words a selector reads the judge's verdict on one record by, and
+// the plane that judges the records a selector walks. Each documents itself.
+#[cfg(feature = "network-codecs")]
+mod e2e_plane;
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod e2e_selector_tests;
+pub mod e2e_words;
 /// R311y615 (§1.1f) — the second ANALYSIS plane: Query/Reply exchanges and
 /// their latency at the tap.
 ///

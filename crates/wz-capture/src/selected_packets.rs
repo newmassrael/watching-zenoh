@@ -131,7 +131,8 @@ pub fn selected_packets_coordinated(
     context: bool,
 ) -> SelectedPackets {
     let grouping = crate::node::session_grouping(d);
-    let verdicts = judged_by(d, filter, &grouping, Some(coordinates));
+    // Handed no declarations: an `e2e` term is undecided over a sample here.
+    let verdicts = judged_by(d, filter, &grouping, Some(coordinates), None);
     let mut summary = SelectedPacketsSummary::default();
     let mut picked: BTreeSet<usize> = BTreeSet::new();
     // The picked positions per flow, by the flow's index in its table: what

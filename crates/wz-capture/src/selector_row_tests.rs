@@ -156,6 +156,7 @@ fn view<'a>(row: Option<RowFacts<'a>>, kind: Record) -> RecordView<'a> {
         zid: None,
         tree: None,
         row,
+        e2e: None,
     }
 }
 

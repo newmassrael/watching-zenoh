@@ -57,7 +57,7 @@ pub(crate) const LINKS: [Link; 2] = [Link::Udp, Link::Tcp];
 /// A one-line profile: CRC first, a 2-byte counter that wraps at 65536, an
 /// identifier whose wire value is XORed and split, and a slot keyed on the
 /// whole identifier. `name` and `max_gap` vary between uses.
-fn profile_text(name: &str, max_gap: u32) -> String {
+pub(crate) fn profile_text(name: &str, max_gap: u32) -> String {
     format!(
         r#"{{"name": "{name}", "fields": [{{"name": "crc", "bytes": 4}}, {{"name": "length", "bytes": 2}}, {{"name": "counter", "bytes": 2}}, {{"name": "ident", "bytes": 4, "xor": "0x00FF00FF", "split": [{{"name": "domain", "lsb": 24, "width": 8}}, {{"name": "msg", "lsb": 0, "width": 16}}]}}], "crc": {{"field": "crc", "width": 32, "poly": "0xF4ACFB13", "init": "0xFFFFFFFF", "refin": true, "refout": true, "xorout": "0xFFFFFFFF", "cover": ["length", "ident", "@payload", "counter"]}}, "length": {{"field": "length", "counts": "frame"}}, "counter": {{"field": "counter", "max_gap": {max_gap}, "timeout_ms": 100}}, "slot": {{"message": ["ident"]}}}}"#
     )
@@ -76,7 +76,7 @@ fn prof() -> Profile {
 }
 
 /// A `prof` frame carrying `body`, with this counter.
-fn frame(counter: u64, body: &[u8]) -> Vec<u8> {
+pub(crate) fn frame(counter: u64, body: &[u8]) -> Vec<u8> {
     build(
         &prof(),
         &Values::new()
@@ -89,7 +89,7 @@ fn frame(counter: u64, body: &[u8]) -> Vec<u8> {
 }
 
 /// The same frame with a body bit flipped.
-fn damaged(mut bytes: Vec<u8>) -> Vec<u8> {
+pub(crate) fn damaged(mut bytes: Vec<u8>) -> Vec<u8> {
     let last = bytes.len() - 1;
     bytes[last] ^= 0x01;
     bytes
@@ -151,7 +151,13 @@ impl Wire {
     }
 
     /// A Push of `payload` under `key`, alone in a Frame.
-    fn put(&mut self, from_low: bool, ns: Option<u64>, key: &'static str, payload: &[u8]) {
+    pub(crate) fn put(
+        &mut self,
+        from_low: bool,
+        ns: Option<u64>,
+        key: &'static str,
+        payload: &[u8],
+    ) {
         let record = push(sender_space(0, Some(key)), payload);
         self.send(from_low, ns, &frame_carrying(&record));
     }

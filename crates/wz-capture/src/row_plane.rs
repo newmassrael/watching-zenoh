@@ -374,6 +374,10 @@ impl Base<'_> {
             zid: self.ctx.zid(direction),
             tree,
             row,
+            // A row with no record carries no frame, and a record this plane
+            // cannot read is undecided: `Term::eval` answers both from `kind`
+            // before it reads this.
+            e2e: None,
         })
     }
 }

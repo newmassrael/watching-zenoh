@@ -2256,6 +2256,30 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *   flow         an integer, the flow's list_id              == != < <= > >=
  *   packet       an integer, the row's packet                == != < <= > >=
  *   zenoh        the flow's word: yes no undecided           == !=
+ *   e2e          ok error unjudged none                      == !=
+ *   e2e.crc      ok error                                    == !=
+ *   e2e.counter  none repeat out_of_range unjudged           == !=
+ *   e2e.timeout  ok error unjudged                           == !=
+ *
+ * THE END-TO-END JUDGE'S VERDICT. A Push carrying a put under a key a profile
+ * rule covers is a FRAME, and the four `e2e` fields read what the judge that
+ * writes the field document's `e2e` block made of it: `e2e.crc` is its
+ * `crc_error`, `e2e.counter` its `counter_reason`, `e2e.timeout` its
+ * `timeout_error`, and `e2e` all three (`error` when any part was an error or
+ * the payload is shorter than the profile's header). `unjudged` is a part the
+ * judge could not judge, and is not a failure: the counter of a slot's first
+ * frame and of a frame whose CRC did not match, every part but the CRC for a
+ * sender the capture never named, the timeout of a frame whose packet carried
+ * no time, and `e2e` itself for a payload that is not one run of bytes. Select
+ * failures with `e2e == error` or `e2e.crc == error`. A record that carries no
+ * frame (no profile rule covers its key, a del, a query, a reply) is
+ * `e2e == none`, decided, and carries no part: `e2e.crc == ok` is `no` over it
+ * and `e2e.crc != ok` is `yes`. A frame's verdict depends on the frames of its
+ * slot before it, so the payload plane judges every sample it walks, in capture
+ * order, under the declarations the door was handed. Over a door that takes
+ * none (the selection doors, the census doors) every `e2e` term over a
+ * published sample is UNDECIDED, and so it is over a sample whose key did not
+ * resolve; a door that takes declarations (the field documents) decides them.
  *
  * `zenoh` reads the word WHETHER A FLOW IS ZENOH (wz_dissect_pcap_session_table
  * describes it) gives the flow a row is in, as the flow's evidence stands when
@@ -3095,7 +3119,7 @@ int wz_dissect_selector_term(const char *node, int verb, const char *selector,
  * this BUILD's, not a capture's), returns WZ_DISSECT_OK and a string you free
  * with wz_dissect_string_free:
  *
- *     {"document":{"name":"selector_fields","revision":5},
+ *     {"document":{"name":"selector_fields","revision":6},
  *      "matches":true,
  *      "fields":[{"name":"key","operators":["==","!=","in","contains","matches"]},
  *                {"name":"dir","operators":["==","!=","in"],"words":["a","b"]},
@@ -3114,7 +3138,7 @@ int wz_dissect_selector_term(const char *node, int verb, const char *selector,
  *                nothing the parser refuses.
  *   `fields`     the fixed fields of THE SELECTOR LANGUAGE's table, in its
  *                order. `words` only for those with a closed set: `dir`, `kind`,
- *                `closed`, `msg`, `link`, `zenoh`.
+ *                `closed`, `msg`, `link`, `zenoh`, and the four `e2e` fields.
  *   `paths`      every path into a record's dissection, written from its
  *                message root. A selector may write any tail of one. `kind` is
  *                the dissection's own kind word and DECIDES the object: a

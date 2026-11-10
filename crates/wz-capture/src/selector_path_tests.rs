@@ -42,6 +42,7 @@ fn record(tree: Option<&RecordTree>) -> RecordView<'_> {
         zid: None,
         tree,
         row: None,
+        e2e: None,
     }
 }
 

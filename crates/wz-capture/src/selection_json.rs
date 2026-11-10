@@ -505,8 +505,9 @@ pub fn selection_json_where_coordinated(
     let grouping = crate::node::session_grouping(d);
     // No question, no walk: an empty selector is the identity and judges nothing,
     // so it pays nothing either. The rule lives in `judged_by`, which the field
-    // document asks too.
-    let verdicts = judged_by(d, filter, &grouping, Some(coordinates));
+    // document asks too. Handed no declarations: an `e2e` term is undecided
+    // over a sample here.
+    let verdicts = judged_by(d, filter, &grouping, Some(coordinates), None);
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::SELECTION, &mut out);
     out.push_str(",\"rows\":[");

@@ -4056,6 +4056,35 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTOR_DIAGNOSE_R7_CARRIES,
     },
+    // THE END-TO-END JUDGE'S VERDICT JOINS THE LANGUAGE, and no key moves on
+    // either document.
+    //
+    // * Four fixed fields arrive, last in the table's order: `e2e`, `e2e.crc`,
+    //   `e2e.counter`, `e2e.timeout` (`crate::e2e_words`). A selector that names
+    //   one with one of its words reads `ok:true`, its value is a `word`, and the
+    //   verdict's unknown-field refusal may now offer them among its nearest
+    //   names; any other word is refused at the value's own byte.
+    // * The field list carries them under `fields` with the equality operators
+    //   and `words`: `ok` `error` `unjudged` `none`, `ok` `error`, `none`
+    //   `repeat` `out_of_range` `unjudged`, `ok` `error` `unjudged`.
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 10,
+        keys: SELECTOR_DIAGNOSE_R7_KEYS,
+        retiring: &[],
+        families: SELECTOR_DIAGNOSE_R7_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_DIAGNOSE_R7_CARRIES,
+    },
+    DocumentShape {
+        document: SELECTOR_FIELDS,
+        revision: 6,
+        keys: SELECTOR_FIELDS_R5_KEYS,
+        retiring: &[],
+        families: SELECTOR_FIELDS_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_FIELDS_R1_CARRIES,
+    },
     // A `zid` PREFIX IS READ AGAINST THE CAPTURE, and an ambiguous one is
     // reported on the verdict document.
     //
@@ -28621,7 +28650,8 @@ mod tests {
             // To 7 when a token gained `role`, what the parser read it as.
             // To 8 when `zenoh`, the flow's word, joined the fields.
             // To 9 when its words became the sequential test's three.
-            (SELECTOR_DIAGNOSE, 9),
+            // To 10 when the four `e2e` fields joined.
+            (SELECTOR_DIAGNOSE, 10),
             // The node names of a selector resolved to the zids a caller's
             // table gives them.
             (SELECTOR_BIND, 1),
@@ -28631,7 +28661,8 @@ mod tests {
             // To 3 when `zenoh`, the flow's word, joined.
             // To 4 when its words became the sequential test's three.
             // To 5 when `renamed`, the renames of published paths, joined.
-            (SELECTOR_FIELDS, 5),
+            // To 6 when the four `e2e` fields joined.
+            (SELECTOR_FIELDS, 6),
             // To 2 when the success branch named the kind each line was read
             // as and a refused key named its chunk, byte and reason.
             // To 3 when a line could be a `.proto` file, `schema_file`.

@@ -751,6 +751,7 @@ fn view(tree: &crate::field_path::RecordTree) -> RecordView<'_> {
         source_delay_ms: None,
         outcome: None,
         zid: None,
+        e2e: None,
         tree: Some(tree),
         row: None,
     }

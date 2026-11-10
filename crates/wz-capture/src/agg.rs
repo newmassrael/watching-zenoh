@@ -1830,6 +1830,13 @@ impl ThroughputTable {
             // undecidable, which is what puts the records in
             // `selection().undecided` rather than in an empty answer.
             outcome: None,
+            // This plane judges no frame: a published sample's `e2e` terms
+            // are undecided here, for the reason the outcome terms are, and
+            // every other record carries no frame.
+            #[cfg(feature = "network-codecs")]
+            e2e: crate::e2e_words::unjudged(message),
+            #[cfg(not(feature = "network-codecs"))]
+            e2e: Some(crate::e2e_words::E2eWords::NONE),
         };
         let truth = filter.matches(&view);
         self.selection.record(truth);
