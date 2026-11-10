@@ -807,7 +807,18 @@ CASES: tuple[Case, ...] = (
     # the growth (11,161,472) and 335,056 under the reading of `7e94c0a7fd`'s window taken apart
     # above. A gain taken, so the budget comes back down: the reading, the +1,012 offset over
     # `pc2` and 3,500, to the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 10_848_200,
+    # 2026-11-10 -- hosted run 42628697148 (`80a88aae4e`) read 10,859,740 (11,540 over) and the
+    # next (`e0461bff3f`) 10,859,888. SPLIT on `pc2`: `0265c3a66f` 10,846,072, `efe34452e1`
+    # 10,846,076, `80a88aae4e` 10,854,632, so the step is the value range round alone (+8,556,
+    # `.text` +7,872). TAKEN APART by `nm -S`: +7,808 in eleven names, every one the proto
+    # encoder's (`Encoder::message` +2,128, the nanopb option merge `Merged::merge` +2,059 and
+    # `Merged::set` +1,249, `proto_range::field_range` +582 and `value_range` +482, the rest the
+    # encoder's refusal and its phrase). The frame writer of `e2e-sender` encodes a payload by
+    # its `.proto`, and it now refuses a value the field's `int_size` cannot hold instead of
+    # writing what nanopb would truncate: the growth is that check, chosen. The hosted lane read
+    # 5,108 over `pc2` on the same commit, not the 1,012 above; the budget is the hosted reading
+    # of `e0461bff3f` and 3,500, to the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 10_863_400,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST),
          exports=837,
@@ -867,12 +878,16 @@ CASES: tuple[Case, ...] = (
     # 9,266,124 now, 335,056 UNDER the reading before the growth. The budget is that reading, the
     # 1,100 this image reads over `pc2` on the hosted lane (9,602,204 against 9,601,116) and
     # 3,500, to the hundred.
+    # 2026-11-10 -- hosted run 42638072176 (`e0461bff3f`) read 9,282,528 (11,728 over); the step
+    # is the proto encoder's range check `capic-default`'s note of this day takes apart, which
+    # reaches this build by the same `e2e-sender` frame writer. Chosen; the budget is that
+    # reading and 3,500, to the hundred.
     Case("capic-default-lean", "wz-capi-c", "libwz_capi_c.so",
          "link-udp,timestamping,peer,scout,query,queryable,liveliness,liveliness-get,advanced,"
          "group,gossip,transport_tls,transport_quic,transport_quic_datagram,transport_ws,"
          "transport_unixsock-stream,transport_multilink,auth_pubkey,e2e-sender,"
          "transport_compression,auth_usrpwd,interceptors,multicast-transport",
-         9_270_800,
+         9_286_100,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),
