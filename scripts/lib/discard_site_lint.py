@@ -230,11 +230,24 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "self.chains.rows.remove(&first_produced);",
+        # Round 4463 kept the chain facts as packed columns: the map's
+        # `remove(&first_produced)` became a walk that lets go of every row at
+        # or before the one the door takes, the same facts in a new spelling.
+        "let _ = self.log.pop_front();",
         "Open-debt item 924, D9 — the chain fact of the row the door is "
-        "taking: the row itself leaves in the `#[must_use] Discarded` receipt, "
-        "and the fact is what the fold decided for that row and is read for no "
-        "other",
+        "taking (`ChainRows::release_through`): the row itself leaves in the "
+        "`#[must_use] Discarded` receipt, and the fact is what the fold decided "
+        "for that row and is read for no other. The same line is the ended-chain "
+        "list's (`EndedChains::release_through`): an ended chain is kept until "
+        "the last of its rows leaves by that door, and is read for those rows "
+        "only",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "let _ = self.suffixes.remove(&number);",
+        "the key expression suffix an ended chain carried, let go with the chain "
+        "(`EndedChains::release_through`, the entry above): it is read for that "
+        "chain's rows only, and they have left by the door",
     ),
     (
         "wz-session-core/passive_messages.rs",
@@ -737,7 +750,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "Some(i) => self.open.swap_remove(i).1,",
+        "Some(self.open.swap_remove(i).1)",
         "a fragment chain leaving the list's OPEN-chain index because it closed; "
         "the removal returns the chain's id to the row being rendered. The fold "
         "moved here from the renderer so the list can keep it across a front trim; "
@@ -769,6 +782,125 @@ ALLOWED = [
         "(`*lost +=` in `advance`, whose `first_held` is what this compares "
         "against), so the only thing removed here is the bookkeeping for rows "
         "that no longer exist",
+    ),
+    # The selection door goes on from its last cursor (round 4457): the planes
+    # that judge a row are kept between calls, and what they kept of a row is
+    # given up once no list holds that row. Each line below is one plane's
+    # share of `forget_rows_not_held` in `selection_json.rs`, or the storage
+    # under it. The rows themselves were counted as lost when a ceiling took
+    # them (`*lost +=`), so what leaves here is a verdict about a row that no
+    # document can write again.
+    (
+        "wz-capture/exchange.rs",
+        "self.table.row_verdicts.retain(keep);",
+        "the exchange plane's verdict of each row no list holds any more "
+        "(`forget_rows`); the row was counted as lost when the ceiling took it, "
+        "and an exchange still open stays whatever row its request was in",
+    ),
+    (
+        "wz-capture/exchange.rs",
+        "self.table.closings.retain(|(row, _)| keep(row));",
+        "the close each row no list holds any more said (`forget_rows`, the "
+        "entry above); the row was counted as lost when the ceiling took it",
+    ),
+    (
+        "wz-capture/exchange.rs",
+        "self.table.answers.retain(|(row, _)| keep(row));",
+        "the answer each row no list holds any more carried (`forget_rows`, the "
+        "entries above); the row was counted as lost when the ceiling took it",
+    ),
+    (
+        "wz-capture/row_plane.rs",
+        "self.rows.retain(keep);",
+        "the row plane's verdicts of the rows no list holds any more "
+        "(`forget_rows`); the row was counted as lost when the ceiling took it",
+    ),
+    (
+        "wz-capture/selection_json.rs",
+        ".retain(|seq| crate::fields_json::seq_in_ranges(&ranges, seq));",
+        "the word the selection door said of each row the handle no longer "
+        "HOLDS, given up so the memory follows the handle's size, as the "
+        "digests are (`fields_json.rs`'s entry). The row was counted as lost "
+        "when the ceiling took it",
+    ),
+    (
+        "wz-capture/overlay_map.rs",
+        "Arc::make_mut(&mut self.base).retain(|k, _| keep(k));",
+        "the map's own `retain`, a primitive: its callers' `keep` is what decides, "
+        "and they are the `forget_rows` sites registered above with their reasons",
+    ),
+    (
+        "wz-capture/overlay_map.rs",
+        "self.delta.retain(|k, _| keep(k));",
+        "the map's own `retain`, a primitive (the entry above), for its second "
+        "layer",
+    ),
+    (
+        "wz-capture/verdict_column.rs",
+        "self.delta.retain(|key, _| keep(key));",
+        "the column's own `retain`, a primitive: its callers' `keep` is what "
+        "decides, and they are the `forget_rows` sites registered above",
+    ),
+    (
+        "wz-capture/word_column.rs",
+        "self.chunks.pop_front();",
+        "the storage under `retain`: a chunk none of whose rows is held is "
+        "given back, after `retain` gave up the words of rows the handle no "
+        "longer holds, as `digest_column.rs`'s chunks are",
+    ),
+    (
+        "wz-capture/overlay_map.rs",
+        "overlay.retain(|k| k % 3 != 0 && *k > 100);",
+        "a test that drives the map and a reference map through the same trim; "
+        "no capture is in either",
+    ),
+    (
+        "wz-capture/overlay_map.rs",
+        "plain.retain(|k, _| k % 3 != 0 && *k > 100);",
+        "a test that drives the map and a reference map through the same trim; "
+        "no capture is in either",
+    ),
+    (
+        "wz-capture/verdict_column.rs",
+        "column.retain(keep);",
+        "a test that drives the column and a reference map through the same "
+        "trim; no capture is in either",
+    ),
+    (
+        "wz-capture/verdict_column.rs",
+        "reference.retain(|k, _| keep(k));",
+        "a test that drives the column and a reference map through the same "
+        "trim; no capture is in either",
+    ),
+    (
+        "wz-capture/selection_since_tests.rs",
+        "self.numbering.drain(&self.d);",
+        "not a removal: the test's row numbering reads the rows the dissection "
+        "produced since its last call (a method named `drain`), and nothing "
+        "captured leaves anything",
+    ),
+    (
+        "wz-capture/selection_since_tests.rs",
+        "numbering.drain(&d);",
+        "not a removal: the test's row numbering reads the rows the dissection "
+        "produced since its last call (a method named `drain`), and nothing "
+        "captured leaves anything",
+    ),
+    (
+        "wz-capture/key_binding_tests.rs",
+        "decodes.retain(|s| s != \"no_payload\");",
+        "a test leaving out of the states it collected from a field document "
+        "the rows that carry no payload, which the assertion is not about; the "
+        "document is the test's own rendering",
+    ),
+    # Round 4452: the sweep that ends chains by their age hands the flow's
+    # message list WHICH chains it ended, so their identities can be listed.
+    (
+        "wz-capture/lib.rs",
+        "ended.drain(..),",
+        "a local list of the chains the age sweep ended, handed whole to the "
+        "flow's message list (`end_chains`), which records each as expired: a "
+        "transfer, and the sweep's loss is absorbed into `chain_loss` beside it",
     ),
 ]
 
