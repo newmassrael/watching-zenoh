@@ -3340,9 +3340,29 @@ impl FlowDissection {
         }
     }
 
-    /// The positions of this flow's messages in CAPTURE ORDER: the order of the
-    /// packets that carried their first bytes, and within one packet the order
-    /// of the bytes.
+    /// The whole list in capture order: [`Self::capture_order_from`] from the
+    /// first message, with nothing before it and no end. The tests hold the rule
+    /// to this; every shipped reader orders a window and goes on from it, so the
+    /// method is built for the tests only (a public accessor no shipped surface
+    /// asked was what the accessor reach census refused).
+    #[cfg(test)]
+    pub(crate) fn capture_order(&self) -> Vec<usize> {
+        self.capture_order_from(0, 0, None, usize::MAX)
+            .map(|(order, _, _)| order)
+            .expect("an order from the first message has nothing before it to disagree with")
+    }
+
+    /// The positions of this flow's messages from position `start` up to, not
+    /// including, position `end`, in CAPTURE ORDER: the order of the packets
+    /// that carried their first bytes, and within one packet the order of the
+    /// bytes. `last` is the running packet the messages before `start` left and
+    /// `after` the key of the last of them; the answer is `None` when the first
+    /// message from `start` does not sort after `after`.
+    ///
+    /// Returns the positions from `start` in capture order, the running packet
+    /// at the end, and the largest key. From `start` 0 with nothing before it and
+    /// an `end` past the list this is the whole list's capture order, so a caller
+    /// that continues an order and one that makes it whole use one rule.
     ///
     /// # Why the list is not already in this order
     ///
@@ -3374,22 +3394,6 @@ impl FlowDissection {
     ///
     /// The positions are indexes into [`Self::frames`] as it stands, which move
     /// when a ceiling trims the list.
-    pub fn capture_order(&self) -> Vec<usize> {
-        self.capture_order_from(0, 0, None, usize::MAX)
-            .map(|(order, _, _)| order)
-            .expect("an order from the first message has nothing before it to disagree with")
-    }
-
-    /// [`Self::capture_order`] for the messages from position `start` up to, not
-    /// including, position `end`, given the running packet `last` the messages
-    /// before `start` left and the key `after` of the last of them, or `None` when
-    /// the first message from `start` does not sort after `after`.
-    ///
-    /// Returns the positions from `start` in capture order, the running packet
-    /// at the end, and the largest key. From `start` 0 with nothing before it and
-    /// an `end` past the list this IS [`Self::capture_order`], which is defined by
-    /// it, so a caller that continues an order and one that makes it whole use one
-    /// rule.
     ///
     /// # `end`, and what it saves
     ///

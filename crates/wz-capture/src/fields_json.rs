@@ -2363,7 +2363,7 @@ fn push_stream_flow(
         });
     }
     // PASS TWO, in CAPTURE order: the order of the packets that carried each
-    // message's first byte. See `FlowDissection::capture_order` for the rule and
+    // message's first byte. See `FlowDissection::capture_order_from` for the rule and
     // its tiebreak. The cap counts rows from the FRONT of this order, so the rows
     // a ceiling holds back are the last ones the capture took.
     //

@@ -26,8 +26,8 @@
 //! Rows are grouped by flow, stream flows first and then datagram flows, each
 //! flow's scouting rows after its transport rows. Within a stream flow they are
 //! in CAPTURE order since revision 3: the packet that carried the row's first
-//! byte, then its place in that packet, which is
-//! [`crate::FlowDissection::capture_order`] and is the order the field document
+//! byte, then its place in that packet, which is a [`crate::FlowDissection`]'s
+//! capture order and is the order the field document
 //! writes the same flow's `messages` in. It was the order the session decoded
 //! the messages in before, which is the order their last bytes arrived in, and
 //! the two parted whenever a message completed after one that began later. A
@@ -307,7 +307,7 @@ pub(crate) struct RowMarks {
 }
 
 /// Where a stream flow's rows ended: the produced-index reached, and the state
-/// its capture order continues from ([`crate::FlowDissection::capture_order`]).
+/// its capture order continues from ([`crate::FlowDissection::capture_order_from`]).
 #[derive(Debug, Clone)]
 struct StreamMark {
     flow: crate::link::FlowKey,
@@ -378,7 +378,7 @@ pub(crate) fn for_each_row_after<'d>(
             None => (0, 0, None),
         };
         // CAPTURE order, the field document's own: see
-        // `FlowDissection::capture_order`, which is this from the first row.
+        // `FlowDissection::capture_order_from`, whose rule this goes on with.
         let (order, last_packet, largest) =
             flow.capture_order_from(start, last, largest, usize::MAX)?;
         marks.stream.push(StreamMark {
