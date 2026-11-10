@@ -21,21 +21,42 @@
 //!
 //! # Shape
 //!
-//! Chunks of [`CHUNK`] words, in a deque indexed by `seq / CHUNK`, each allocated
-//! when a row in it is first written and given back when none is held: a front
-//! trim that takes the oldest rows frees whole chunks, and a handle that holds
-//! rows by number far apart pays for the chunks they sit in and no others. A cell
+//! Chunks of up to [`CHUNK`] words, in a deque indexed by `seq / CHUNK`, each
+//! allocated when a row in it is first written and given back when none is held:
+//! a front trim that takes the oldest rows frees whole chunks, and a handle that
+//! holds rows by number far apart pays for the chunks they sit in and no others.
+//! A chunk holds the words up to the last row written in it and grows by powers
+//! of two to the whole chunk ([`grow_to`]), so a handle that has written a few
+//! rows pays for a few words and not for 8 KiB: the empty handle of the C ABI's
+//! memory gate held a whole chunk for its handshake's rows. A cell
 //! holds `0` for no digest, and a digest is never `0` (see [`Self::set`]), so a
 //! cell needs no tag beside it. A second reserved word ([`DECLINED`]) lets one
 //! document's column say that a row it wrote now reads `declined`, which, merged
 //! into the memory's column, removes the digest an earlier document left: it is
 //! what an `Option` inside the old map was for.
 
-use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 
-/// Words in a chunk: 8 KiB.
+/// Words in a whole chunk: 8 KiB.
 const CHUNK: usize = 1024;
+
+/// Make `cells` reach index `at`, the new cells `empty`, growing its allocation
+/// to the next power of two above `at` and never past `whole` cells: a chunk
+/// pays for the rows written in it, and a chunk of written rows is exactly as
+/// large as a chunk allocated whole. `at` is below `whole`. The word column
+/// (`crate::word_column`) keeps its chunks the same way.
+pub(crate) fn grow_to<T: Copy>(cells: &mut Vec<T>, at: usize, whole: usize, empty: T) {
+    debug_assert!(at < whole, "a cell past its chunk");
+    if at < cells.len() {
+        return;
+    }
+    let want = (at + 1).next_power_of_two().min(whole);
+    if cells.capacity() < want {
+        cells.reserve_exact(want - cells.len());
+    }
+    cells.resize(at + 1, empty);
+}
 
 /// A cell that holds no digest.
 const NONE: u64 = 0;
@@ -56,7 +77,8 @@ const fn word(digest: u64) -> u64 {
     }
 }
 
-type Chunk = Box<[u64; CHUNK]>;
+/// The words of one chunk, up to the last row written in it.
+type Chunk = Vec<u64>;
 
 /// One digest per row, by sequence number.
 #[derive(Debug, Clone, Default)]
@@ -91,7 +113,10 @@ impl DigestColumn {
             return NONE;
         };
         match self.chunks.get(at as usize) {
-            Some(Some(words)) => words[(seq % CHUNK as u64) as usize],
+            Some(Some(words)) => words
+                .get((seq % CHUNK as u64) as usize)
+                .copied()
+                .unwrap_or(NONE),
             _ => NONE,
         }
     }
@@ -104,8 +129,8 @@ impl DigestColumn {
         }
     }
 
-    /// The chunk row `seq` is in, made when it is not there.
-    fn chunk_for(&mut self, seq: u64) -> &mut Chunk {
+    /// The cell of row `seq`, its chunk made or grown when it does not reach it.
+    fn cell_mut(&mut self, seq: u64) -> &mut u64 {
         let chunk = seq / CHUNK as u64;
         if self.chunks.is_empty() {
             self.first = chunk;
@@ -118,7 +143,10 @@ impl DigestColumn {
         while self.chunks.len() <= at {
             self.chunks.push_back(None);
         }
-        self.chunks[at].get_or_insert_with(|| Box::new([NONE; CHUNK]))
+        let words = self.chunks[at].get_or_insert_with(Vec::new);
+        let slot = (seq % CHUNK as u64) as usize;
+        grow_to(words, slot, CHUNK, NONE);
+        &mut words[slot]
     }
 
     /// Say what row `seq` reads: a digest, or nothing (`None`: it read
@@ -128,8 +156,7 @@ impl DigestColumn {
     pub(crate) fn set(&mut self, seq: u64, digest: Option<u64>) {
         let cell = digest.map_or(DECLINED, word);
         let held_before = !matches!(self.cell(seq), NONE | DECLINED);
-        let slot = (seq % CHUNK as u64) as usize;
-        self.chunk_for(seq)[slot] = cell;
+        *self.cell_mut(seq) = cell;
         let held_after = cell != DECLINED;
         match (held_before, held_after) {
             (false, true) => self.len += 1,
@@ -148,7 +175,9 @@ impl DigestColumn {
         let Some(Some(words)) = self.chunks.get_mut(at as usize) else {
             return;
         };
-        let cell = &mut words[(seq % CHUNK as u64) as usize];
+        let Some(cell) = words.get_mut((seq % CHUNK as u64) as usize) else {
+            return;
+        };
         if !matches!(*cell, NONE | DECLINED) {
             self.len -= 1;
         }
@@ -219,7 +248,12 @@ impl DigestColumn {
     /// Bytes the column has allocated: its chunks and the deque that holds them.
     pub(crate) fn allocated_bytes(&self) -> usize {
         self.chunks.capacity() * core::mem::size_of::<Option<Chunk>>()
-            + self.chunks.iter().flatten().count() * CHUNK * core::mem::size_of::<u64>()
+            + self
+                .chunks
+                .iter()
+                .flatten()
+                .map(|words| words.capacity() * core::mem::size_of::<u64>())
+                .sum::<usize>()
     }
 }
 

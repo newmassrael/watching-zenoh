@@ -14,19 +14,23 @@
 //!
 //! A nibble holds `0` for no word and `1..=15` for a word the holder numbers, so a
 //! cell needs no tag beside it. Chunks are allocated when a row in them is first
-//! written and the rows are given back whole when a holder replaces the column,
-//! which is what a selection memory does on every call.
+//! written, grow as the digest column's do (`crate::digest_column::grow_to`) so a
+//! few rows cost a few bytes, and are given back whole when a holder replaces the
+//! column, which is what a selection memory does on every call.
 
-use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 
-/// Rows in a chunk: 2 KiB.
+use crate::digest_column::grow_to;
+
+/// Rows in a whole chunk: 2 KiB.
 const CHUNK_ROWS: usize = 4096;
 
-/// Bytes in a chunk, two rows to a byte.
+/// Bytes in a whole chunk, two rows to a byte.
 const CHUNK_BYTES: usize = CHUNK_ROWS / 2;
 
-type Chunk = Box<[u8; CHUNK_BYTES]>;
+/// The bytes of one chunk, up to the byte of the last row written in it.
+type Chunk = Vec<u8>;
 
 /// One word, `1..=15`, or none, for each row number.
 #[derive(Debug, Clone, Default)]
@@ -62,7 +66,7 @@ impl WordColumn {
         let Some(Some(bytes)) = self.chunks.get(at as usize) else {
             return None;
         };
-        match (bytes[byte] >> shift) & 0xF {
+        match (bytes.get(byte).copied().unwrap_or(0) >> shift) & 0xF {
             0 => None,
             word => Some(word),
         }
@@ -90,7 +94,8 @@ impl WordColumn {
         while self.chunks.len() <= at {
             self.chunks.push_back(None);
         }
-        let bytes = self.chunks[at].get_or_insert_with(|| Box::new([0; CHUNK_BYTES]));
+        let bytes = self.chunks[at].get_or_insert_with(Vec::new);
+        grow_to(bytes, byte, CHUNK_BYTES, 0);
         bytes[byte] = (bytes[byte] & !(0xF << shift)) | (word.unwrap_or(0) << shift);
         match (held_before, word.is_some()) {
             (false, true) => self.len += 1,
@@ -102,7 +107,12 @@ impl WordColumn {
     /// Bytes the column has allocated: its chunks and the deque that holds them.
     pub(crate) fn allocated_bytes(&self) -> usize {
         self.chunks.capacity() * core::mem::size_of::<Option<Chunk>>()
-            + self.chunks.iter().flatten().count() * CHUNK_BYTES
+            + self
+                .chunks
+                .iter()
+                .flatten()
+                .map(Vec::capacity)
+                .sum::<usize>()
     }
 
     /// Keep the words of the rows `keep` names, and give back every chunk left
@@ -117,7 +127,7 @@ impl WordColumn {
             };
             let base = (first + at as u64) * CHUNK_ROWS as u64;
             let mut held = false;
-            for row in 0..CHUNK_ROWS {
+            for row in 0..bytes.len() * 2 {
                 let (byte, shift) = (row / 2, (row as u32 % 2) * 4);
                 if (bytes[byte] >> shift) & 0xF == 0 {
                     continue;

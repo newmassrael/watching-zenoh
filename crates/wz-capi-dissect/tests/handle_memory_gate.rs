@@ -105,8 +105,17 @@ const ROWS: usize = 20_000;
 const FIELD_WINDOW: u64 = 8192;
 
 /// What an empty handle (a handshake and no pushes) may hold. Measured at about
-/// 46 KiB; the bound is what keeps a table sized for the largest capture out of
-/// the handle every capture pays for.
+/// 46 KiB first; the bound is what keeps a table sized for the largest capture out
+/// of the handle every capture pays for.
+///
+/// It caught one on 2026-11-10. The selection door's kept planes (one selector's
+/// folds, about 10.6 KB on an empty capture) took the tcp case to 65,502 B on
+/// `pc2` and 68,958 B on hosted CI, and under them the row columns of the field
+/// walk and the selection door each allocated a whole chunk for the handshake's
+/// few rows: 8 KiB of digests and 2 KiB of words. The chunks now grow to the rows
+/// written in them (`digest_column`'s `grow_to`), and the empty handle reads
+/// 54,507, 54,155, 55,458 and 54,722 B on `pc2` (udp owned and lent, tcp owned
+/// and lent). The bound did not move.
 const FLOOR_BOUND: isize = 64 * 1024;
 
 /// Which replay door opens the capture.
