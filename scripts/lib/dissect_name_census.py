@@ -145,6 +145,13 @@ OWN_VOCABULARY = {
     "(router, peer or client). A `label` beside the raw code, which stays: "
     "the code is what the sender wrote, the word what this build makes of it. "
     "Absent when the code names no role, which upstream refuses at decode",
+    # The mode word a consumer asked for, on the same rule as `whatami_name`:
+    # the codec has one field for the byte (`consolidation`), so the reading is
+    # wz's own, named after it with a suffix.
+    "consolidation_name": "the mode word a Query's or a Reply's consolidation "
+    "byte names, from `ConsolidationMode::wire_word` on zenoh's numbering "
+    "(Auto, None, Monotonic or Latest). A `label` beside the raw byte, which "
+    "stays. Absent for a byte zenoh's decoder does not number",
     "rest": "trailing bytes of a record the walker read but does not name further",
     "unparsed": "bytes after a halt -- the best-effort marker, not a wire field",
     # R2272 (paying R2270's hosted red) — the two resolutions `sn_res` codes.

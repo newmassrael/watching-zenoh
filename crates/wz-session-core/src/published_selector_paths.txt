@@ -3570,3 +3570,13 @@ Oam.linkstate.link_states.linkstate_entry.whatami_name	label	router
 Scout.what_client	flag
 Scout.what_peer	flag
 Scout.what_router	flag
+Request.query.consolidation_name	label
+Request.query.consolidation_name	label	Auto
+Request.query.consolidation_name	label	Latest
+Request.query.consolidation_name	label	Monotonic
+Request.query.consolidation_name	label	None
+Response.reply.consolidation_name	label
+Response.reply.consolidation_name	label	Auto
+Response.reply.consolidation_name	label	Latest
+Response.reply.consolidation_name	label	Monotonic
+Response.reply.consolidation_name	label	None

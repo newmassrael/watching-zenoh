@@ -2309,8 +2309,10 @@ pub fn walk_query(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         flag("z", carrier, (header & 0x80) != 0),
     ];
     if (header & 0x20) != 0 {
-        let (_, f) = c.u8("consolidation")?;
+        let (byte, f) = c.u8("consolidation")?;
+        let span = f.span;
         out.push(f);
+        out.extend(consolidation_name(span, byte));
     }
     if (header & 0x40) != 0 {
         let (n, len) = c.vle_u64("parameters_len")?;
@@ -2334,8 +2336,10 @@ pub fn walk_reply(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         flag("z", carrier, (header & 0x80) != 0),
     ];
     if (header & 0x20) != 0 {
-        let (_, f) = c.u8("consolidation")?;
+        let (byte, f) = c.u8("consolidation")?;
+        let span = f.span;
         out.push(f);
+        out.extend(consolidation_name(span, byte));
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
@@ -2344,6 +2348,24 @@ pub fn walk_reply(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     out.push(walk_put_or_del_body(c)?);
     Ok(out)
+}
+
+/// The mode a `Query`'s or a `Reply`'s consolidation byte names, as a label
+/// beside the byte: [`crate::query_mode::ConsolidationMode::wire_word`], which
+/// reads the byte on zenoh's numbering.
+///
+/// ABSENT for a byte zenoh's decoder does not number, as `whatami_name` is for
+/// a role code, and the raw `consolidation` beside it still says what the
+/// sender wrote. The label aliases the byte and owns none of it, so the tiling
+/// is unchanged.
+///
+/// The byte is read on one numbering, not per sender: nothing in the message
+/// says which implementation wrote it. A stock zenoh-pico sender writes its API
+/// enum one slot low (`query_mode`'s `wire_byte` states the measurement), and
+/// its byte reads here as the mode a zenoh receiver applies to it.
+fn consolidation_name(span: Span, byte: u8) -> Option<Field> {
+    let consolidation_word = crate::query_mode::ConsolidationMode::wire_word(u64::from(byte))?;
+    Some(label("consolidation_name", span, consolidation_word))
 }
 
 /// `Err` (zenoh MID 0x05).
@@ -6564,6 +6586,7 @@ mod tests {
         assert_eq!(uint(&f, "rid"), 9001);
         assert_eq!(text(&f, "suffix"), "k/e");
         assert_eq!(uint(&f, "consolidation"), 2);
+        assert_eq!(label_of(&f, "consolidation_name"), "Monotonic");
         assert_eq!(raw(&f, "parameters"), params);
         assert_eq!(uint(&f, "parameters_len"), 150);
     }
@@ -6594,7 +6617,55 @@ mod tests {
         );
         assert_eq!(uint(&f, "request_id"), 77);
         assert!(f.find("reply").is_some(), "the reply arm was not taken");
+        assert_eq!(uint(&f, "consolidation"), 1);
+        assert_eq!(label_of(&f, "consolidation_name"), "None");
         assert_eq!(raw(&f, "payload"), b"v".to_vec());
+    }
+
+    /// Every consolidation byte a `Query` or a `Reply` can carry reads as the
+    /// word of the mode zenoh numbers it, and a byte zenoh does not number
+    /// keeps its raw value and gets no word. Each leg names the word it
+    /// expects, so a table shifted by one slot (pico's numbering) reds here.
+    #[test]
+    fn a_consolidation_byte_is_named_as_zenoh_numbers_it() {
+        for (byte, word) in [
+            (0u8, Some("Auto")),
+            (1, Some("None")),
+            (2, Some("Monotonic")),
+            (3, Some("Latest")),
+            (4, None),
+            (0xFF, None),
+        ] {
+            let query = alloc::vec![0x03u8 | 0x20, byte];
+            let reply = concat(&[
+                alloc::vec![0x04u8 | 0x20, byte],
+                msg_put(None, None, &[], b"v"),
+            ]);
+            type Walk = fn(&mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError>;
+            for (name, bytes, walk) in [
+                ("Query", &query, walk_query as Walk),
+                ("Reply", &reply, walk_reply as Walk),
+            ] {
+                let mut c = SpanCursor::new(bytes);
+                let fields = walk(&mut c).expect("the walker rejected the fixture");
+                let f = group(name, 0, c.offset(), fields);
+                assert_tiles(&f, 0, bytes.len());
+                assert_eq!(
+                    uint(&f, "consolidation"),
+                    u64::from(byte),
+                    "{name} {byte:#04x}"
+                );
+                match word {
+                    Some(w) => {
+                        assert_eq!(label_of(&f, "consolidation_name"), w, "{name} {byte:#04x}")
+                    }
+                    None => assert!(
+                        f.find("consolidation_name").is_none(),
+                        "{name} {byte:#04x} must carry no word"
+                    ),
+                }
+            }
+        }
     }
 
     #[test]

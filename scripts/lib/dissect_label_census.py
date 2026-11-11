@@ -74,6 +74,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DISSECT = ROOT / "crates" / "wz-session-core" / "src" / "dissect.rs"
 QOS = ROOT / "crates" / "wz-session-core" / "src" / "qos.rs"
 WHATAMI = ROOT / "crates" / "wz-codecs" / "src" / "whatami.rs"
+QUERY_MODE = ROOT / "crates" / "wz-session-core" / "src" / "query_mode.rs"
 PICO_CONSTANTS = ROOT / "vendor" / "zenoh-pico" / "include" / "zenoh-pico" / "api" / "constants.h"
 
 # ── What decides each label site's value ─────────────────────────────────────
@@ -194,6 +195,24 @@ DECIDED_BY_METHOD = {
         "case": "lower",
         "sites": ("r.to_str()",),
         "extra": {},
+    },
+    # The mode a Query's or a Reply's consolidation byte names. The words are
+    # zenoh's `ConsolidationMode` variants, and pico names the same modes in
+    # `Z_CONSOLIDATION_MODE_*`. The NUMBERING is not checked here (pico's is
+    # one slot low); `query_mode`'s `wire_byte` tests pin zenoh's.
+    "consolidation_name": {
+        "source": QUERY_MODE,
+        "type": "ConsolidationMode",
+        "method": "wire_word",
+        "prefix": "Z_CONSOLIDATION_MODE_",
+        "sites": ("consolidation_word",),
+        "extra": {
+            "Auto": (
+                "pico's AUTO is the sentinel -1, which its encoder never "
+                "writes, so it is not a numbered member; zenoh numbers it 0 "
+                "and its decoder reads 0 as Auto"
+            ),
+        },
     },
 }
 

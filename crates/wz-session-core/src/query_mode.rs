@@ -102,6 +102,37 @@ impl ConsolidationMode {
         }
     }
 
+    /// The mode a consolidation byte NAMES, as a word: zenoh's
+    /// `ConsolidationMode` variant for each value its decoder reads
+    /// (`commons/zenoh-codec/src/zenoh/query.rs:55-64`), `0 -> "Auto"`,
+    /// `1 -> "None"`, `2 -> "Monotonic"`, `3 -> "Latest"`. This is the
+    /// dissector's reading of the byte, and the one place its words are
+    /// spelled.
+    ///
+    /// It differs from [`from_wire_byte`](Self::from_wire_byte) in one value,
+    /// and for a reason: that function answers which mode a receiver APPLIES,
+    /// where `0` and an absent field both mean that the requester named none.
+    /// This one answers what the byte SAYS, and `0` says `Auto`.
+    ///
+    /// Any other value has no word. Zenoh's decoder falls back to `Auto` for
+    /// it, but that is what the decoder does with a byte it cannot read, not
+    /// what the byte means, so naming it `Auto` would describe a mode the
+    /// sender never wrote.
+    ///
+    /// The numbering is zenoh's, for the reason [`wire_byte`](Self::wire_byte)
+    /// gives. A stock zenoh-pico sender encodes its API enum raw, one slot
+    /// low, so its bytes read here as the mode a zenoh receiver applies to
+    /// them, which is not always the mode its caller asked for.
+    pub const fn wire_word(byte: u64) -> Option<&'static str> {
+        match byte {
+            0 => Some("Auto"),
+            1 => Some("None"),
+            2 => Some("Monotonic"),
+            3 => Some("Latest"),
+            _ => Option::None,
+        }
+    }
+
     /// Resolve the mode a get will APPLY LOCALLY from the mode its caller named
     /// (or did not) plus the selector parameters, mirroring zenoh's `get()`:
     ///
@@ -273,6 +304,29 @@ mod tests {
         assert_eq!(ConsolidationMode::from_wire_byte(0), Option::None);
         assert_eq!(ConsolidationMode::from_wire_byte(4), Option::None);
         assert_eq!(ConsolidationMode::from_wire_byte(255), Option::None);
+    }
+
+    /// The word a byte reads as is the mode that byte encodes: each
+    /// transmitted mode's own `wire_byte` reads as that mode's name, `0` reads
+    /// as zenoh's `Auto`, and a value zenoh's decoder does not number reads as
+    /// no word. Walked through `wire_byte` rather than through literal bytes,
+    /// so the numbering stays the one [`ConsolidationMode::wire_byte`] pins.
+    #[test]
+    fn a_consolidation_byte_reads_as_the_word_of_the_mode_it_encodes() {
+        for (mode, word) in [
+            (ConsolidationMode::None, "None"),
+            (ConsolidationMode::Monotonic, "Monotonic"),
+            (ConsolidationMode::Latest, "Latest"),
+        ] {
+            assert_eq!(
+                ConsolidationMode::wire_word(u64::from(mode.wire_byte())),
+                Some(word)
+            );
+        }
+        assert_eq!(ConsolidationMode::wire_word(0), Some("Auto"));
+        for unknown in [4u64, 0x7F, 0x80, u64::MAX] {
+            assert_eq!(ConsolidationMode::wire_word(unknown), Option::None);
+        }
     }
 
     /// R311y836 — an explicitly named mode passes through untouched. This is

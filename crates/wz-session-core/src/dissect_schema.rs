@@ -566,6 +566,15 @@ fn whatami_words() -> Vec<&'static str> {
         .collect()
 }
 
+/// The mode words a `consolidation_name` label can hold, walked from
+/// `ConsolidationMode::wire_word` over every value the byte can take rather
+/// than written down a second time.
+fn consolidation_words() -> Vec<&'static str> {
+    (0..=u64::from(u8::MAX))
+        .filter_map(crate::query_mode::ConsolidationMode::wire_word)
+        .collect()
+}
+
 // The extension entry: its header fields, under the `ext` level for a named
 // entry and directly for an unnamed one.
 const EXT_HEAD: &[SchemaNode] = &[
@@ -858,6 +867,7 @@ const QUERY: SchemaNode = group(
             leaf("p", F),
             leaf("z", F),
             leaf("consolidation", U),
+            label("consolidation_name", consolidation_words),
             leaf("parameters_len", U),
             leaf("parameters", BY),
         ],
@@ -873,6 +883,7 @@ const REPLY: SchemaNode = group(
             leaf("c", F),
             leaf("z", F),
             leaf("consolidation", U),
+            label("consolidation_name", consolidation_words),
         ],
         UNNAMED,
         &[PUT, DEL],
