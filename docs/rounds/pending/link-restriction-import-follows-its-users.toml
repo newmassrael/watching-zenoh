@@ -1,0 +1,19 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism"]
+
+decision = '''
+The hosted CI run of 4e5800426e (round 4467) was red in four jobs, and every one is the same compile error, which round 4466 made and this round pays: `wz-capi-core/src/engine_port.rs` [374:64] `error[E0433]: cannot find type LinkRestriction`. Round 4466 named `LinkRestriction::Any` in the port's liveliness get operation, under `liveliness-get`, while the module's import of the type stayed under `queryable`, the one feature that used it before. A build with the liveliness get and no queryable therefore could not compile `wz-capi-core`: the pico client-only build that C1co runs (`engine-tokio,link-udp,query,liveliness-get,...`) and one reduced documentation configuration each of `wz-capi-pico` and `wz-capi-c` (C1bzr shards 2 and 5, and the settle that joins them). Round 4466's own CI run was cancelled while queued and graded nothing, so the red first showed on the next head. The import is now gated on the union of the features that name the type (`queryable` or `liveliness-get`): the gate of an import is the gate of its users, so neither a build without the type nor a build with it is left with an unused or a missing name. `faces.rs` imports the type unconditionally and needed nothing. The round's acknowledgement row is `red-4e58-link-restriction-import` in `docs/hosted-red-acks.md`.
+'''
+
+changes = '''
+crates/wz-capi-core/src/engine_port.rs: the `LinkRestriction` import is gated on `queryable` or `liveliness-get`.
+docs/hosted-red-acks.md: the row for run 42850723720.
+'''
+
+verification = '''
+Read from the run's own job logs (gh api, run 42850723720): C1bzr shard 2 `wz-capi-pico`, shard 5 `wz-capi-c`, and the settle each report one line where the ledger carries 0, the same `E0433` at `engine_port.rs` [374:64]; C1co `engine-tokio on a tokio listener` fails compiling `wz-capi-core` (lib) on the same error. The isolated-crate lanes job was cancelled; the Platform run of the head passed.
+After the fix (remote): `cargo check -p wz-capi-core --no-default-features --features liveliness-get` passes, the configuration with the liveliness get and no queryable. `cargo doc -p wz-capi-pico --no-deps` over C1co's feature set no longer reports `LinkRestriction`; it reports the five unresolved links (`crate::sync`, `crate::query`, `crate::advanced::ze_advanced_publisher_options_t`, `crate::scout` twice) that `scripts/lib/reduced_docs_ledger.txt` already carries for `wz-capi-pico`, and nothing else. `scripts/run-ci.sh --layer C1co` passes (304 s), the failed arm `client_only_dials_a_listener` among it with its listener tests run and passed. The full C1bzr sweep was not rerun here: its new line was this error, which the two configurations above reproduce and no longer show.
+'''
+
+carry = '''
+None from this round.
+'''

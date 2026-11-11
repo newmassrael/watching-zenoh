@@ -12,7 +12,8 @@ use wz_capi_port::{
     SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
-#[cfg(feature = "queryable")]
+// Named by the queryable's and the liveliness get's link-limited forms.
+#[cfg(any(feature = "queryable", feature = "liveliness-get"))]
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
