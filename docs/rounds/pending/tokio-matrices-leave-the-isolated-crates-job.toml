@@ -1,0 +1,22 @@
+impact = ["watching-zenoh/local-ci-gates"]
+
+decision = '''
+The hosted CI run of c0455d6f22 (round 4468) ended cancelled: 51 of its 52 jobs passed, and the isolated-crate lanes job was stopped by its 30-minute limit one second after its last lane, Layer C1bf, passed (903 s). That job reached its limit in three of the four runs read on 2026-11-10/11 (42755847834, 42850723720, 42929004554) and took 26 minutes in the fourth (42799806651), so the cancellation is a standing budget fault, not this head's. Two causes. First, its cache entry had grown to 1,295 MB against a class budget of 840 MB, and the cache pruner's over-target pass dropped it (run 42857288356, `least dear first`), so the next run built cold, and a cold run of this job does not fit 30 minutes; the run that cold build saved is dropped the same way whenever the repository passes its target, so the loop repeats. Second, Layer C1bf clippies wz-runtime-tokio at `--all-features`, which turns on its `rocksdb` feature, and the job never restored the native RocksDB engine that `.github/actions/rocksdb-engine` keeps in a protected cache, so every cold run compiled RocksDB from source inside the clippy step. The rule the earlier splits followed (round 4245 for the analyzer crates, round 4359 for their docs) is to split rather than raise: a larger limit is spent by the next lane the genre gains. The three wz-runtime-tokio matrices (C4c, C4d, C1bf) therefore move to a job of their own, `tokio-matrices`, which restores the engine and reads the `ci` job's entry as the other feature-set jobs do. The class budgets already sum to 8,465 of the 8,500 MB target, so the new job adds no cache class. `isolated-crates` keeps C3, C1m, C1n and C1ns. Each job is now sized to fit its limit cold, which is the state the pruner can leave it in.
+'''
+
+changes = '''
+.github/workflows/ci.yml: the job `tokio-matrices` runs Layers C4c, C4d and C1bf with the RocksDB engine and the `ci` cache read-only; they leave `isolated-crates`.
+.github/cache-classes.json: `tokio-matrices` joins the owners of `rocksdb-engine` and `apt-archives` and the readers of `rust-ci`.
+scripts/lib/apt_package_census.py: `tokio-matrices` takes the codec, engine cmake, libclang, clang, perl and pkg-config rows.
+'''
+
+verification = '''
+Read from the hosted logs (gh api): job 130222700113 of run 42929004554 restored no Rust cache (`No cache found.`), passed C3 (87 s), C1m (490 s), C1n, C1ns, C4c, C4d and C1bf (903 s), and was cancelled at 30 minutes; jobs 129973625478 (4e5800426e, cold) and 129629913831 (5a2f534fa3, a partial 168 MB restore) were cancelled the same way, and job 129774108802 (4357237f06) passed in 26 minutes. The pruner's runs show the entry at 1,295.4 MB `OVER BUDGET` and its deletion as `over target: 8522 MB against 8500 MB` in run 42857288356. The cancelled job of run 42929004554 was re-run once, with its cache now saved.
+Static gates pass over the change: `apt_package_census.py` (248 job-package pairs adjudicated; cmake on `tokio-matrices` derived as `invokes cmake`), `workflow_cache_budget_gate.py` (153 uses, 15 classes, 8,465 of 8,500 MB), `workflow_cache_save_gate.py`, `unwired_lane_lint.py` (181 lanes, 0 absent), `lane_locality_claim_gate.py`, `job_budget_binding.py`, `store_reader_lane_lint.py`, `shard_matrix_binding.py`, `runci_plan.py --check` (181 lanes) and actionlint. `scripts/run-ci.sh` is unchanged, so the three lanes run the commands they ran before; their new job's time is read from the next hosted run.
+'''
+
+carry = '''
+Read the next hosted run's `tokio-matrices` and `isolated-crates` times, cold and warm, and record `measured_mb` of `rust-isolated-crates` from the pruner's table once its entry no longer holds the matrices.
+The previous-run gate grades a run, and a run whose job hit its time limit ends `cancelled`, the same conclusion as a run a later push replaced; a job cancelled by its limit is therefore read as superseded rather than red. Grading the jobs of a cancelled run, and not only its conclusion, is owed.
+Several cache classes measure over their budgets in the pruner's table (`apt-archives`, `rust-interop`, `rust-capi-c-arms`, `rust-ci`), so the registry's `measured_mb` values are stale and the over-target pass runs on most pushes.
+'''

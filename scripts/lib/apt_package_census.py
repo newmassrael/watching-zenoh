@@ -179,9 +179,12 @@ for _codec_package in ("libsnappy-dev", "liblz4-dev", "libzstd-dev", "zlib1g-dev
           # workspace build.
           "feature-gates-peel-2",
           "transport-modes", "reduced-docs", "capi-c-arms", "e2e-demo", "e2e-demo-pico",
-          "e2e-router-scale"])
+          "e2e-router-scale",
+          # Layer C1bf clippies wz-runtime-tokio at --all-features, which turns on
+          # its `rocksdb` feature, so the matrices' job restores the engine.
+          "tokio-matrices"])
 _add("cmake", "Builds the cached native RocksDB engine via the local composite action.",
-     ["nondefault", "nondefault-builds", "nondefault-legs", "reduced-docs"])
+     ["nondefault", "nondefault-builds", "nondefault-legs", "reduced-docs", "tokio-matrices"])
 _add("strace", "Layer C1st's facility oracle reads each packaged artifact's runs through it "
      "(scripts/lib/facility_trace.py --judge).", ["capi-c-arms"])
 _add("bubblewrap", "Layer C1st's facility oracle runs a raw Ethernet group on a network of its own "
@@ -286,6 +289,10 @@ _add(
         "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
+        # The wz-runtime-tokio matrices (C4c, C4d, C1bf), peeled off `isolated-crates`
+        # for its budget: they build that crate at every subset and at --all-features,
+        # which reaches librocksdb-sys, so the job takes the same rows.
+        "tokio-matrices",
         # R4245 -- five lanes peeled off `isolated-crates` for its budget, one of them
         # Layer C1bz, which documents every workspace member: it takes that job's rows.
         "analyzer-crates",
@@ -352,6 +359,7 @@ _add(
         "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
+        "tokio-matrices",
         "analyzer-crates",
         "analyzer-docs",
         "capi-c-arms",
@@ -416,6 +424,7 @@ _add(
         "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
+        "tokio-matrices",
         "analyzer-crates",
         "analyzer-docs",
         "capi-c-arms",
@@ -635,6 +644,7 @@ _add(
         "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
+        "tokio-matrices",
         "analyzer-crates",
         "analyzer-docs",
         "capi-c-arms",

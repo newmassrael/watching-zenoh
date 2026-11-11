@@ -5930,7 +5930,9 @@ jobs:
       - name: Cache Cargo registry + build artifacts
         # Class `rust-isolated-crates`: a private SAVER. Of every job it has the
         # largest measured payback (about 9 of 23 minutes cold, against a 30
-        # minute ceiling), which is what earns a 776 MB entry its place.
+        # minute ceiling), which is what earns a 776 MB entry its place. The
+        # pruner may still drop it, so the job is sized to fit its limit cold;
+        # the matrices that broke that moved to `tokio-matrices`.
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -5954,26 +5956,119 @@ jobs:
       # host tests (excluded since R2940, laneless) run here.
       - name: Layer C1ns — no_std-forcing members, isolated (R2948)
         run: bash scripts/run-ci.sh --layer C1ns
+      # The MATRIX half of this genre (C4c, C4d, C1bf) runs in `tokio-matrices`
+      # below, on a runner of its own; that job states why.
 
-      # R311y420 — the MATRIX half of this job's genre, and the close of the
-      # R311y332 gap R311y419 explicitly left open rather than papering over.
+  # ─────────────────────────────────────────────────────────────────
+  # The wz-runtime-tokio feature MATRICES, out of `isolated-crates`. That job
+  # reached its 30-minute limit in three of the four runs read on 2026-11-10/11
+  # (42755847834, 42850723720, 42929004554) and took 26 minutes in the fourth.
+  # Its cache entry is 1,295 MB, past its class budget of 840 MB, so the
+  # pruner's over-target pass dropped it (run 42857288356), the next run built
+  # cold, and a cold run does not fit 30 minutes: in 42929004554 Layer C1bf
+  # passed (903 s) one second before the limit cancelled the step.
+  #
+  # Two causes, one per half of this split. C1bf clippies wz-runtime-tokio at
+  # --all-features, which turns on its `rocksdb` feature, and that job never
+  # restored the native engine, so every cold run compiled RocksDB from source
+  # inside the clippy step. And the job held two subjects: the isolated crates
+  # (C3, C1m, C1n, C1ns) and these three matrices over the workspace's own
+  # crates. Here the engine comes from its protected cache and the rest from
+  # the `ci` job's entry, so this job adds no cache class; each job now fits its
+  # limit cold, which is the state the pruner leaves it in.
+  #
+  # R311y420 hosted these three and hardened them first: all three matrices
+  # read their subset list through a process substitution whose exit status
+  # the reading loop cannot see, so an empty SSOT would have passed as a green
+  # matrix over zero rows. A discovery floor reds that, verified by neutering
+  # the producer (0 subsets -> both lanes red).
+  tokio-matrices:
+    name: wz-runtime-tokio feature matrices (Layers C4c, C4d, C1bf)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Free runner disk space (headroom for the matrix feature sets)
+        # `isolated-crates`' prune, for the same reason: each subset is a
+        # feature set of its own and so its own set of artifacts.
+        run: |
+          echo "=== free space BEFORE prune ==="
+          df -h /
+          prune() {
+            local started=$SECONDS
+            "$@" || true
+            echo "prune: $* took $((SECONDS - started))s"
+          }
+          prune sudo rm -rf /usr/share/dotnet &
+          prune sudo rm -rf /usr/local/lib/android &
+          prune sudo rm -rf /opt/ghc &
+          prune sudo rm -rf /usr/local/share/boost &
+          prune sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          prune sudo docker image prune --all --force &
+          wait
+          echo "=== free space AFTER prune ==="
+          df -h /
+
+      - name: Checkout (with submodules)
+        # `recursive`: wz-session-core compiles against sce_forge_runtime from
+        # vendor/sce, and the engine builds RocksDB from its submodule.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `isolated-crates` copy for why RESTORE and SAVE are split.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # The five codecs and cmake serve the RocksDB engine's build; clang and
+        # libclang serve bindgen (librocksdb-sys); perl and pkg-config are the
+        # sibling jobs' set.
+        run: |
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        # See the `isolated-crates` copy for why `always()` and why the dirty gate.
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`); see there.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
+
       # C4c / C4d build and clippy wz-runtime-tokio under each of the 10
       # coherent consumer-plane subsets, which `--workspace` unification can
-      # only ever evaluate as their union; C1bf clippies that crate at
-      # --all-features, the combination Layer C2's default-feature run never
-      # composes. Hardened first, same rule as y419: all three matrices read
-      # their subset list through a process substitution whose exit status the
-      # reading loop cannot see, so an empty SSOT would have passed as a green
-      # matrix over zero rows. A discovery floor now reds that, verified by
-      # neutering the producer (0 subsets -> both lanes red). The floor was
-      # applied to C1j too, which has been hosted since R311y318 carrying the
-      # identical hole.
+      # only ever evaluate as their union.
       - name: Layer C4c — wz-runtime-tokio subset BUILD matrix (R311y420)
         run: bash scripts/run-ci.sh --layer C4c
 
       - name: Layer C4d — wz-runtime-tokio subset CLIPPY matrix (R311y420)
         run: bash scripts/run-ci.sh --layer C4d
 
+      # C1bf clippies each crate of its hazard class at --all-features, the
+      # combination Layer C2's default-feature run never composes.
       - name: Layer C1bf — wz-runtime-tokio --all-features clippy (R311y420)
         run: bash scripts/run-ci.sh --layer C1bf
 
