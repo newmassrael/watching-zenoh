@@ -104,7 +104,8 @@ impl ConsolidationMode {
 
     /// The mode a consolidation byte NAMES, as a word: zenoh's
     /// `ConsolidationMode` variant for each value its decoder reads
-    /// (`commons/zenoh-codec/src/zenoh/query.rs:55-64`), `0 -> "Auto"`,
+    /// (`commons/zenoh-codec/src/zenoh/query.rs` @
+    /// `0 => ConsolidationMode::Auto,`), `0 -> "Auto"`,
     /// `1 -> "None"`, `2 -> "Monotonic"`, `3 -> "Latest"`. This is the
     /// dissector's reading of the byte, and the one place its words are
     /// spelled.
