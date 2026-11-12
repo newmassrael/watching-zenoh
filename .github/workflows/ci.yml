@@ -6513,11 +6513,11 @@ jobs:
         run: bash scripts/build-zenoh-pico-cli.sh
 
       - name: Cache the zenoh-c oracle (pinned 1.10.2)
-        # SAME key as the `ci` job's, deliberately: `install-zenoh-c.sh` clones
-        # the whole zenoh-c REPOSITORY into ~/zenoh-c-ref (not just its
+        # SAME key as the `ci` job's, deliberately: `install-zenoh-c.sh` unpacks
+        # the whole zenoh-c source tree into ~/zenoh-c-ref (not just its
         # examples), which is exactly the source checkout both checks below
         # need. Sharing the key means whichever job runs first populates it for
-        # the other rather than each paying for its own clone.
+        # the other rather than each paying for its own fetch.
         # R2872 — restore/save split, for the reason on `zenohd-cache`.
         id: zenoh-c-cache
         uses: actions/cache/restore@v4

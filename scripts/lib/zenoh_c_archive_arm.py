@@ -1251,7 +1251,16 @@ def cmd_selftest() -> int:
         case("the shipped pin file names every key its readers use",
              all(pin_value(PIN_FILE.read_text(encoding="utf-8"), k)
                  for k in ("ZENOH_C_VERSION", "ZENOH_C_ARCHIVE",
-                           "ZENOH_C_RELEASE_URL")))
+                           "ZENOH_C_RELEASE_URL", "ZENOH_C_SOURCE_URL",
+                           "ZENOH_C_SOURCE_SHA256",
+                           # the targets install-zenoh-c.sh maps `uname -m` to
+                           "ZENOH_C_SHA256_x86_64-unknown-linux-gnu",
+                           "ZENOH_C_SHA256_aarch64-unknown-linux-gnu")))
+        digests = [line.split("=", 1)[1]
+                   for line in PIN_FILE.read_text(encoding="utf-8").splitlines()
+                   if line.startswith(("ZENOH_C_SHA256_", "ZENOH_C_SOURCE_SHA256="))]
+        case("every pinned digest is a SHA-256 in lowercase hex",
+             bool(digests) and all(re.fullmatch(r"[0-9a-f]{64}", d) for d in digests))
 
     print(f"  archive-arm selftest: {passed}/{passed + failed} arm(s) pass")
     return 1 if failed else 0

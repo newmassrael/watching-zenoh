@@ -279,6 +279,36 @@ def tracked() -> list[str]:
     return [p for p in out.split("\0") if p]
 
 
+TAG_ARCHIVE = re.compile(r"(https://github\.com/[\w.-]+/[\w.-]+)/archive/refs/tags/@VERSION@\.tar\.gz")
+
+
+def pin_file_sources(text: str) -> dict[str, str]:
+    """`repository URL -> tag`, for each source a pin file (`scripts/*.pin`) fetches.
+
+    The third place the tree names an upstream, beside a submodule and a
+    `git clone`: a pin kept as data fetches the source as the tag's archive,
+    `<P>_SOURCE_URL=https://github.com/O/R/archive/refs/tags/@VERSION@.tar.gz`,
+    and the tag is the same file's `<P>_VERSION`. `install-zenoh-c.sh` moved
+    from a clone to this archive so that the pin holds the source to a digest;
+    read only from clones, zenoh-c would drop out of every gate that derives
+    the upstreams and their pins. One reader, for both of those.
+    """
+    values = {}
+    for line in text.splitlines():
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            values[key] = value
+    sources: dict[str, str] = {}
+    for key, value in values.items():
+        if not key.endswith("_SOURCE_URL"):
+            continue
+        got = TAG_ARCHIVE.fullmatch(value)
+        version = values.get(key[: -len("SOURCE_URL")] + "VERSION")
+        if got and version:
+            sources[got.group(1)] = version
+    return sources
+
+
 def upstream_urls(paths: list[str]) -> frozenset[str]:
     """Every repository URL this tree already fetches, DERIVED from the tree.
 
@@ -315,6 +345,8 @@ def upstream_urls(paths: list[str]) -> frozenset[str]:
         found: list[str] = []
         if path == ".gitmodules":
             found += re.findall(r"url\s*=\s*(\S+)", joined)
+        if path.endswith(".pin"):
+            found += pin_file_sources(text)
         for clone in re.findall(r"git\s+clone[^\n]*", joined):
             found += re.findall(r"(?:https://|git@)\S+", clone)
         for url in found:

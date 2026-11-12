@@ -25,6 +25,31 @@
 # The environment variable ZENOH_C_VERSION overrides the version for one run of
 # the installer; the installer then asserts the version it installed, so an
 # override that does not match what the archive carries fails there.
+#
+# Every archive the installer unpacks is checked against a SHA-256 written
+# here, whether the installer fetched it or was handed it (WZ_ZENOH_C_ARCHIVE,
+# WZ_ZENOH_C_SOURCE). The release archive has one key per target,
+# ZENOH_C_SHA256_<target>; a target with no key is refused, not installed
+# unchecked. The values are the digests upstream's release lists for each
+# asset, so they belong to ZENOH_C_VERSION: a version move rewrites every
+# digest in the same commit. A version override has no digest here and must
+# bring its own (WZ_ZENOH_C_SHA256, WZ_ZENOH_C_SOURCE_SHA256).
+#
+# The source archive is the tag's tree as GitHub serves it: the example
+# corpus, upstream's tests, and the checkout the oracle arms are built from.
 ZENOH_C_VERSION=1.10.2
 ZENOH_C_ARCHIVE=zenoh-c-@VERSION@-@TARGET@-standalone.zip
 ZENOH_C_RELEASE_URL=https://github.com/eclipse-zenoh/zenoh-c/releases/download/@VERSION@/@ARCHIVE@
+ZENOH_C_SHA256_x86_64-unknown-linux-gnu=d2da2ac370381d553cb6619abe23549966b80207687ebea6de9c4a491fda5f67
+ZENOH_C_SHA256_x86_64-unknown-linux-musl=ae7ee757ac0f3661e023a2a8ab4c7d585510c1f1a824ff8ef0980775ce1af9e5
+ZENOH_C_SHA256_aarch64-unknown-linux-gnu=0fdafdf08cee6f0da361735da159cd6cbe4dfcf351ee578cb0ea9f05ce083b47
+ZENOH_C_SHA256_aarch64-unknown-linux-musl=18a9bc8f9df8055e3462fa581f878969e2289a490ac7cdf0bf201387f918ee9f
+ZENOH_C_SHA256_arm-unknown-linux-gnueabi=5f76498fe5723226653d0667a768ccc4d4aa9202324b52e7367dc5c14b7524e4
+ZENOH_C_SHA256_arm-unknown-linux-gnueabihf=61018b9828375a4a5a7dad52134e62a0b1d4066eb0a3a7a9af406876fbc21047
+ZENOH_C_SHA256_armv7-unknown-linux-gnueabihf=41d981909c48d30961cdb4e9207e4ff3d81d12a8f0e777964fc72e1e0d4e9a2f
+ZENOH_C_SHA256_x86_64-apple-darwin=64eaa7a9ae93c4abb309dc18aef678730f0376c1a6ef6bdf501a3597701880dd
+ZENOH_C_SHA256_aarch64-apple-darwin=633312653225a83093ce62b4440c96892bf735f29e1cf50355a43ab1c99e9964
+ZENOH_C_SHA256_x86_64-pc-windows-msvc=2ae07b3e42902dbc5381e03e0bc7bbe245af68f50ebf6df702592cd41d634bec
+ZENOH_C_SHA256_x86_64-pc-windows-gnu=352b9ad0a8fb6a799eece03cb82538a250031f8088d8fb1c88973cd7a1583ef5
+ZENOH_C_SOURCE_URL=https://github.com/eclipse-zenoh/zenoh-c/archive/refs/tags/@VERSION@.tar.gz
+ZENOH_C_SOURCE_SHA256=766bd6220749c6743bf3715af74afdf5ae129525fac9b3a372b74070fe1704d4

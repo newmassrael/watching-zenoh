@@ -614,6 +614,10 @@ def script_pins(paths: list[str]) -> dict[str, str]:
             text = (ROOT / path).read_text(errors="replace")
         except OSError:
             continue
+        if path.endswith(".pin"):
+            # The third shape: a pin kept as data fetches the tag's archive.
+            pins.update(grc.pin_file_sources(text))
+            continue
         joined = text.replace("\\\n", " ")
         defaults = dict(re.findall(r'(\w+)="\$\{\1:-([^}"]+)\}"', joined))
         defaults.update(dict(re.findall(r"^\s*(\w+):\s*([0-9a-zA-Z._-]+)\s*$", joined, re.M)))
@@ -1147,10 +1151,14 @@ def selftest() -> int:
     want_version = next(
         line.split("=", 1)[1] for line in pin_text.splitlines() if line.startswith("ZENOH_C_VERSION=")
     )
-    derived = script_pins(["scripts/install-zenoh-c.sh"])
-    if list(derived.values()) != [want_version]:
+    derived = script_pins(["scripts/zenoh-c-oracle.pin"])
+    if derived != {"https://github.com/eclipse-zenoh/zenoh-c": want_version}:
         bad += 1
-        print(f"  selftest FAIL: the installer's pin derives {derived}, want [{want_version!r}]")
+        print(f"  selftest FAIL: the zenoh-c pin file derives {derived}, want [{want_version!r}]")
+    if grc.pin_file_sources("# P_SOURCE_URL=https://github.com/o/r/archive/refs/tags/@VERSION@.tar.gz\n"
+                     "P_VERSION=1\n"):
+        bad += 1
+        print("  selftest FAIL: a commented-out source URL was read as a pin")
     if pin_file_value("scripts/install-zenoh-c.sh", "no PIN_FILE line here", "$(pin_get X)") != "$(pin_get X)":
         bad += 1
         print("  selftest FAIL: a script that names no pin file resolved a placeholder anyway")
