@@ -13369,6 +13369,28 @@
       "carry_forward_bullets": [
         "The lanes themselves ran about 1.6 times slower on that run, uniformly. If that recurs, the job budgets need splitting rather than raising, as the margin alarm says."
       ]
+    },
+    "Round 4473": {
+      "decision_summary": "A consumer that lists live rows through the treeless `row_facts` door still read five facts off the field tree, so it could not move off the tree-bearing door: a `Frame` or `Fragment` row's transport header (its sequence number, `R` and `M`), the id a declaration declares, the extensions the walker names no extension for, a sample's own timestamp, and where a payload's bytes are. Each is now a row or entry key, read from the tree by one module, `tree_facts`, so the row and the tree cannot disagree. Field revision 64 (row_facts 5) adds, on every walked row, `transport_header` (`{\"sn\",\"reliable\",\"more\"}` on a `Frame` or `Fragment`, `more` null on a `Frame`, `null` on any other row) and `unnamed_extensions` (the `ext_id` of every `ext` node without an `ext_name`, over the whole row tree in walk order, each node once); on every `carried` entry, the row's own and a completed chain's, `declared_id` (the `id` of a body that holds both an `id` and a `keyexpr`) and `timestamp_ntp64` (the `time` of the first `timestamp` under the body outside every extension chain, so a `Reply`'s nested sample's and not a query's extension), both null on a row's own entry when the row is split into records, the rule its `keyexpr` already follows. For the payload the consumer asked for a contract rather than a key, and reading `payload_slot` showed the contract does not hold in one case: a payload a shared-memory marker made sliced, with no SHM slice, is spanned by its `slices` group, which is not the payload's bytes and looked the same as a payload leaf. So `payload` gains `span_of` (`payload`, `slices`, `shm_descriptor`), a closed word the slot's writer takes from the node it found, `shm_descriptor` becomes a derivation of it, and the header states the contract: the range is exactly the span of the node the word names, and a body with a `payload` leaf always answers `payload` with that leaf's span. Sequence numbers, ids and NTP64 times take the integer door. The two row keys are walk facts, so they join the cells a byte trim swaps when a row is written again as declined.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/dissect.rs: `Field::body_field`, the branch `body()` names, and `body()` through it.",
+        "crates/wz-capture/src/tree_facts.rs: new; `transport_header`, `unnamed_extensions`, `declared_id`, `body_timestamp`, with unit tests over built trees (an unnamed extension at two depths, a Frame and a Fragment header, a declaration and an undeclaration, a Reply's nested timestamp beside an extension's).",
+        "crates/wz-capture/src/payload_decode.rs: `SlotSpan` and `PayloadSlot::span_of`, `shm_descriptor()` derived from it; a test of a sliced payload without a descriptor.",
+        "crates/wz-capture/src/fields_json.rs: `push_row_header_facts` after a walked row's name, `push_message_facts` on every carried entry, `span_of` in `payload`; `/transport_header` and `/unnamed_extensions` join `RETIRABLE_ROW_CELLS`; the family joins the vocabulary gate; expectations moved, the sliced payload's now saying `slices`.",
+        "crates/wz-capture/src/tree_facts_tests.rs: new; every tracked capture's rows against their own trees, read by a JSON reader of the test's own, and a completed chain and a declaration built for the cases the captures lack.",
+        "crates/wz-capture/src/doc_revision.rs: fields 64 and row_facts 5 with their keys, families, carries and `offset_space` shapes.",
+        "crates/wz-capi-dissect/include/wz_dissect.h and tests/c_abi_consumer.c: the keys, the payload contract, the integer cells, the swap list, the families and carries markers, the live-revision examples; the C consumer pins fields 64.",
+        "scripts/lib/json_integer_cell_gate.py: the two new integer writers."
+      ],
+      "verification_bullets": [
+        "Upstream layouts read at the pinned 1.10.2 through this tree's walker: the Frame and Fragment header's `R` and `M` bits and SN, the declaration bodies' id and wire expression, the Put and Del timestamp. On a build machine: wz-capture with `dissect,fixtures` library tests (1780 passed, the contrast test over the five tracked captures among them); session core `dissect` tests (121 passed); wz-capi-dissect tests (233 passed) and its memory gate (4 passed); clippy clean for wz-capture over `dissect,fixtures` with tests, `--no-default-features`, and `--no-default-features --features dissect` with tests, for wz-session-core with `dissect`, and for wz-capi-dissect over all targets; rustdoc of wz-capture clean; rustfmt clean; the integer-cell gate names all 48 door calls."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "carry_forward_bullets": [
+        "`unnamed_extensions` covers the row's own tree; a completed chain's records are walked in `above_transport` and their unnamed extensions are not listed, since the consumer reads those trees only for a picked row. The tracked captures hold no declaration body, so `declared_id` is held to a tree only by the built declaration."
+      ]
     }
   },
   "inventory_entries": {
