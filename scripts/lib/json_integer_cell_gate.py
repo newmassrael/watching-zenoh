@@ -255,6 +255,26 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             born=63,
         ),
     ),
+    # Field document 64: a carried entry's declared id and sample timestamp.
+    ("crates/wz-capture/src/fields_json.rs", "push_message_facts"): (
+        Cell(
+            "fields",
+            "a carried entry's declared_id and timestamp_ntp64",
+            "the `declared_id` and `timestamp_ntp64` of a `carried` entry",
+            "The integer rule applies to an entry's `declared_id` and `timestamp_ntp64`",
+            born=64,
+        ),
+    ),
+    # Field document 64: a Frame or Fragment row's transport sequence number.
+    ("crates/wz-capture/src/fields_json.rs", "push_row_header_facts"): (
+        Cell(
+            "fields",
+            "a row's transport_header.sn",
+            "the `sn` of a row's `transport_header`",
+            "and to the `sn` of a row's `transport_header`",
+            born=64,
+        ),
+    ),
     # Values document 2: every integer of a record's `segment`, one writer for
     # the reason the field document's block has one.
     ("crates/wz-capture/src/field_values.rs", "push_piece_integer"): (

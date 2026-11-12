@@ -3530,18 +3530,24 @@ impl Field {
     /// through the type, and a test over every body the codecs can build holds
     /// it there.
     pub fn body(&self) -> Option<BodyName> {
+        self.body_field()
+            .and_then(|branch| BodyName::named(&branch.name))
+    }
+
+    /// The branch [`Self::body`] names: the body node itself, for a reader that
+    /// wants what the body holds and not only which body it is. The same rule,
+    /// so the two never disagree about which branch is the body; `None` where
+    /// that answers `None` for want of a branch with a `mid`.
+    pub fn body_field(&self) -> Option<&Field> {
         let FieldValue::Nested(children) = &self.value else {
             return None;
         };
-        children
-            .iter()
-            .find(|branch| {
-                matches!(
-                    &branch.value,
-                    FieldValue::Nested(inner) if inner.iter().any(|f| f.name == "mid")
-                )
-            })
-            .and_then(|branch| BodyName::named(&branch.name))
+        children.iter().find(|branch| {
+            matches!(
+                &branch.value,
+                FieldValue::Nested(inner) if inner.iter().any(|f| f.name == "mid")
+            )
+        })
     }
 }
 

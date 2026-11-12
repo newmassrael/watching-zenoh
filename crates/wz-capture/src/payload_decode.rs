@@ -2215,29 +2215,71 @@ pub struct PayloadSlot {
     /// `unknown(N)`, as upstream prints it, and is NOT `None`: a publisher said
     /// something and calling that "nothing" would erase it.
     pub encoding: Option<String>,
+    /// Which node of the message's tree the range is the span of.
+    pub span_of: SlotSpan,
+}
+
+impl PayloadSlot {
     /// Whether the slot holds an SHM descriptor, so the data it stands for is
     /// elsewhere and the range is an address and not content.
-    pub shm_descriptor: bool,
+    pub fn shm_descriptor(&self) -> bool {
+        self.span_of == SlotSpan::ShmDescriptor
+    }
+}
+
+/// The node of a message's tree a [`PayloadSlot`]'s range is the span of.
+///
+/// A CLOSED set, because a reader builds on the range only when it knows what
+/// the range covers: the payload's bytes, a sliced payload's slices (their
+/// kinds and lengths between the bytes), or an SHM descriptor (an address).
+/// Without the word the slices and the payload are both ranges that are not a
+/// descriptor, and a reader that reads one as the other lays a payload's
+/// structure over slice headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotSpan {
+    /// The body's `payload` leaf: the payload's bytes and nothing else.
+    Payload,
+    /// The `slices` group of a payload a shared-memory marker made sliced,
+    /// none of whose slices is an SHM descriptor: each slice's kind and
+    /// length lie between the bytes.
+    Slices,
+    /// An `shm_descriptor` leaf: the first SHM slice of a sliced payload, or
+    /// the descriptor an `Err` carries in place of its payload.
+    ShmDescriptor,
+}
+
+impl SlotSpan {
+    /// Every word, in declaration order.
+    pub const ALL: [SlotSpan; 3] = [Self::Payload, Self::Slices, Self::ShmDescriptor];
+
+    /// The word the document writes, which is the tree node's own name.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Payload => "payload",
+            Self::Slices => "slices",
+            Self::ShmDescriptor => "shm_descriptor",
+        }
+    }
 }
 
 /// [`PayloadSlot`] of one network message, or `None` when it has no slot.
 pub fn payload_slot(message: &Field) -> Option<PayloadSlot> {
-    let (span, shm_descriptor) = if let Some(slices) = subtree_group(message, "slices") {
+    let (span, span_of) = if let Some(slices) = subtree_group(message, "slices") {
         match subtree_shm_descriptor(slices) {
-            Some(descriptor) => (&descriptor.span, true),
-            None => (&slices.span, false),
+            Some(descriptor) => (&descriptor.span, SlotSpan::ShmDescriptor),
+            None => (&slices.span, SlotSpan::Slices),
         }
     } else if let Some(payload) = subtree_payload_bytes(message) {
-        (&payload.span, false)
+        (&payload.span, SlotSpan::Payload)
     } else {
         let descriptor = subtree_shm_descriptor(message)?;
-        (&descriptor.span, true)
+        (&descriptor.span, SlotSpan::ShmDescriptor)
     };
     Some(PayloadSlot {
         start: span.start,
         end: span.end,
         encoding: encoding_text(declared_encoding(message)),
-        shm_descriptor,
+        span_of,
     })
 }
 
@@ -4660,7 +4702,10 @@ mod tests {
         let put = put_declaring(ENC_JSON, br#"{"a":1}"#);
         let slot = payload_slot(&put).expect("a Put has a payload slot");
         assert_eq!(slot.encoding.as_deref(), Some("application/json"));
-        assert!(!slot.shm_descriptor);
+        assert!(!slot.shm_descriptor());
+        assert_eq!(slot.span_of, SlotSpan::Payload);
+        let leaf = subtree_payload_bytes(&put).expect("the payload leaf");
+        assert_eq!((slot.start, slot.end), (leaf.span.start, leaf.span.end));
         let none = payload_slot(&Field {
             name: "msg_del".into(),
             span: wz_session_core::dissect::Span { start: 0, end: 1 },
@@ -4668,7 +4713,46 @@ mod tests {
         });
         assert_eq!(none, None, "a message with no payload slot has none");
         let shm = payload_slot(&put_with_shm_descriptor(ENC_JSON, 24)).expect("a descriptor");
-        assert!(shm.shm_descriptor);
+        assert!(shm.shm_descriptor());
+        assert_eq!(shm.span_of, SlotSpan::ShmDescriptor);
         assert_eq!((shm.start, shm.end), (0, 24));
+    }
+
+    /// A sliced payload with no SHM slice is spanned by its `slices` group,
+    /// and says so: the range covers each slice's kind and length as well as
+    /// its bytes, so it must not read as the payload's bytes.
+    #[test]
+    fn a_sliced_payload_without_a_descriptor_says_its_range_is_the_slices() {
+        use wz_session_core::dissect::Span;
+        let leaf = |name: &'static str, start, end, value| Field {
+            name: name.into(),
+            span: Span { start, end },
+            value,
+        };
+        let entry = leaf(
+            "slice_entry",
+            1,
+            6,
+            FieldValue::Nested(vec![
+                leaf("kind", 1, 2, FieldValue::Uint(0)),
+                leaf("len", 2, 3, FieldValue::Uint(3)),
+                leaf("bytes", 3, 6, FieldValue::Bytes(vec![1, 2, 3])),
+            ]),
+        );
+        let put = leaf(
+            "Put",
+            0,
+            6,
+            FieldValue::Nested(vec![
+                leaf("slice_count", 0, 1, FieldValue::Uint(1)),
+                leaf("slices", 1, 6, FieldValue::Nested(vec![entry])),
+            ]),
+        );
+        let slot = payload_slot(&put).expect("a sliced payload has a slot");
+        assert_eq!(slot.span_of, SlotSpan::Slices);
+        assert_eq!((slot.start, slot.end), (1, 6));
+        assert!(!slot.shm_descriptor());
+        let words: Vec<_> = SlotSpan::ALL.iter().map(|s| s.word()).collect();
+        assert_eq!(words, ["payload", "slices", "shm_descriptor"]);
     }
 }

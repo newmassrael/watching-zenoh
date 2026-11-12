@@ -4244,8 +4244,12 @@ int main(void) {
      * arrive; nothing retires.
      * 63: every flow's `ended_chains`, the fragment chains that ended without
      * being reassembled, by `chain_id`, with how they ended and what they held.
-     * Keys arrive; nothing retires. */
-    revisioned[2].revision = 63;
+     * Keys arrive; nothing retires.
+     * 64: a walked row's `transport_header` and `unnamed_extensions`, a
+     * `carried` entry's `declared_id` and `timestamp_ntp64`, and a `payload`'s
+     * `span_of` (the node its range is the span of). Keys arrive; nothing
+     * retires. */
+    revisioned[2].revision = 64;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

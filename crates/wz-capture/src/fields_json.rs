@@ -1236,6 +1236,9 @@ pub const RETIRABLE_ROW_CELLS: &[&str] = &[
     "/first_byte",
     "/l2",
     "/name",
+    // Revision 64: the walk's own facts go with the walk.
+    "/transport_header",
+    "/unnamed_extensions",
 ];
 
 /// Does `pattern` — a path in the syntax [`REVISABLE_ROW_CELLS`] states — name
@@ -3266,6 +3269,7 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
                     out.push_str(",\"fields\":");
                     out.push_str(&to_json(&field));
                 }
+                push_row_header_facts(&field, out);
                 let planes = RecordPlanes {
                     closes,
                     session: SessionBatch::of_row(carried, &field, space),
@@ -3707,6 +3711,7 @@ fn push_carried(
     let mut entry = |word: &str,
                      node: &wz_session_core::dissect::Field,
                      is_record: bool,
+                     facts: bool,
                      keyexpr: Option<Result<String, crate::payload_decode::UnresolvedRef>>,
                      payload: Option<crate::payload_decode::PayloadSlot>,
                      judged: RecordJudged<'_>,
@@ -3728,6 +3733,7 @@ fn push_carried(
         push_keyexpr_read(keyexpr.as_ref(), judging.declarations, out);
         push_payload_slot(payload.as_ref(), out);
         push_payload_size(session, is_record.then_some(node), out);
+        push_message_facts(facts.then_some(node), out);
         push_e2e(judged.e2e.as_ref(), out);
         push_segment(judged.segment.as_ref(), node, judging.declarations, at, out);
         // On EVERY entry, `null` on one that is not a `ResponseFinal`: the rule
@@ -3749,10 +3755,14 @@ fn push_carried(
         } else {
             None
         };
+        // The row's own message speaks for itself only when it is not split
+        // into records, the rule its `keyexpr` follows.
+        let facts = records.is_empty();
         entry(
             message.name(),
             field,
             false,
+            facts,
             keyexpr,
             None,
             RecordJudged::default(),
@@ -3784,6 +3794,7 @@ fn push_carried(
         entry(
             word,
             record,
+            true,
             true,
             keyexpr,
             crate::payload_decode::payload_slot(record),
@@ -4009,8 +4020,78 @@ fn push_payload_slot(slot: Option<&crate::payload_decode::PayloadSlot>, out: &mu
         None => out.push_str("null"),
     }
     out.push_str(",\"shm_descriptor\":");
-    out.push_str(if slot.shm_descriptor { "true" } else { "false" });
+    out.push_str(if slot.shm_descriptor() {
+        "true"
+    } else {
+        "false"
+    });
+    // Revision 64 — which node the range is the span of. The range is the
+    // body's `payload` leaf exactly when this says `payload`.
+    out.push_str(",\"span_of\":");
+    escape_into(slot.span_of.word(), out);
     out.push('}');
+}
+
+/// The `declared_id` and `timestamp_ntp64` keys of one `carried` entry, after
+/// `payload_size` (revision 64).
+///
+/// On EVERY entry, `null` where the message has none, so a reader's lookup does
+/// not depend on which message an entry is. `declared_id` is the id a
+/// declaration body declares ([`crate::tree_facts::declared_id`]);
+/// `timestamp_ntp64` is the NTP64 time of the sample's own timestamp, the one
+/// its `Put` or `Del` body carries, a `Reply`'s included
+/// ([`crate::tree_facts::body_timestamp`]). Both are protocol values and take
+/// the shared integer door: an NTP64 time passes 2^53 for any date after 1900,
+/// so it is a decimal string on every stamped sample. `message` is `None` for a
+/// row's own entry when the row is split into records, which then speak for
+/// themselves.
+fn push_message_facts(message: Option<&wz_session_core::dissect::Field>, out: &mut String) {
+    let optional = |value: Option<u64>, out: &mut String| match value {
+        Some(value) => wz_session_core::json::u64_into(value, out),
+        None => out.push_str("null"),
+    };
+    out.push_str(",\"declared_id\":");
+    optional(message.and_then(crate::tree_facts::declared_id), out);
+    out.push_str(",\"timestamp_ntp64\":");
+    optional(message.and_then(crate::tree_facts::body_timestamp), out);
+}
+
+/// The `transport_header` and `unnamed_extensions` keys of a walked row, after
+/// its `name` (and its `fields`, where the trees are written) (revision 64).
+///
+/// `transport_header` is `{"sn":N,"reliable":bool,"more":bool|null}` on a
+/// `Frame` or `Fragment` row and `null` on every other walked row; `more` is
+/// `null` on a `Frame`, whose header has no such flag. `sn` takes the shared
+/// integer door. `unnamed_extensions` is the `ext_id` of every extension in the
+/// row's tree that the walker names no extension for, in walk order, over the
+/// transport header's chain, the network messages' and the bodies'; an empty
+/// array when there is none. Each extension is listed once.
+fn push_row_header_facts(row: &wz_session_core::dissect::Field, out: &mut String) {
+    out.push_str(",\"transport_header\":");
+    match crate::tree_facts::transport_header(row) {
+        Some(header) => {
+            out.push_str("{\"sn\":");
+            wz_session_core::json::u64_into(header.sn, out);
+            let _ = write!(out, ",\"reliable\":{},\"more\":", header.reliable);
+            match header.more {
+                Some(more) => out.push_str(if more { "true" } else { "false" }),
+                None => out.push_str("null"),
+            }
+            out.push('}');
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"unnamed_extensions\":[");
+    for (i, id) in crate::tree_facts::unnamed_extensions(row)
+        .iter()
+        .enumerate()
+    {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{id}");
+    }
+    out.push(']');
 }
 
 /// The SESSION's parse of the batch a walked list's records come from, and
@@ -4486,6 +4567,9 @@ fn push_above_transport(
             // Since revision 55 — the census's size of the same message, as on a
             // row's own entries.
             push_payload_size(Some(session), Some(record), out);
+            // Since revision 64 — the declared id and the timestamp, as on a
+            // row's own entries.
+            push_message_facts(Some(record), out);
             // The end-to-end verdict of a message that arrived in pieces: the
             // frames a profile protects are the ones large enough to be
             // fragmented, so a chain's records are judged like a batch's, at
@@ -9071,8 +9155,10 @@ mod tests {
         // flag set, no `ext_qos` (so the upstream default band), from the low
         // endpoint.
         // Five rows, and (revision 63) the two chains of the five that never
-        // closed, listed under `ended_chains` on the same conduit.
-        let conduits = scoped(&doc, "reliable", &["direction", "priority", "reliable"]);
+        // closed, listed under `ended_chains` on the same conduit. Scoped by
+        // `priority`, which a conduit carries and a row's `transport_header`
+        // (revision 64, which also says `reliable`) does not.
+        let conduits = scoped(&doc, "priority", &["direction", "priority", "reliable"]);
         assert_eq!(conduits.len(), 7, "{doc}");
         for conduit in &conduits {
             assert_eq!(
@@ -10639,7 +10725,17 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 92] = [
+        let live: [(&str, &str, Vec<&'static str>); 93] = [
+            // The node a `payload` range is the span of: the walk over the
+            // closed set its writer's word comes from.
+            (
+                rev::FIELDS,
+                "span_of",
+                crate::payload_decode::SlotSpan::ALL
+                    .iter()
+                    .map(|s| s.word())
+                    .collect(),
+            ),
             // What reading a record's payload came to, on the values document:
             // the walk over its emitter's own outcomes.
             (
@@ -12939,9 +13035,10 @@ mod tests {
                 "\"keyexpr_cause\":null,\"keyexpr_id\":null,\"keyexpr_suffix\":null,\
                  \"keyexpr_source\":\"wire\",\
                  \"payload\":{{\"start\":{start},\"end\":{end},\
-                 \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false}},\
+                 \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false,\
+                 \"span_of\":\"payload\"}},\
                  \"payload_size\":{{\"size_verdict\":\"measured\",\"bytes\":{bytes},\
-                 \"at_most_bytes\":null}},\
+                 \"at_most_bytes\":null}},\"declared_id\":null,\"timestamp_ntp64\":null,\
                  \"payload_decode\":{{\"state\":\"decoded\",\
                  \"keyexpr\":\"demo/sensor\"",
                 bytes = payload.len()
@@ -13079,9 +13176,10 @@ mod tests {
                 "\"keyexpr\":null,\"keyexpr_cause\":\"no_session\",\"keyexpr_id\":7,\
                  \"keyexpr_suffix\":null,\"keyexpr_source\":null,\
                  \"payload\":{{\"start\":{start},\"end\":{end},\
-                 \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false}},\
+                 \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false,\
+                 \"span_of\":\"payload\"}},\
                  \"payload_size\":{{\"size_verdict\":\"measured\",\"bytes\":3,\
-                 \"at_most_bytes\":null}},\
+                 \"at_most_bytes\":null}},\"declared_id\":null,\"timestamp_ntp64\":null,\
                  \"payload_decode\":{{\"state\":\"keyexpr_unresolved\"}}"
             )),
             "{doc}"
@@ -13817,37 +13915,51 @@ mod tests {
 
         // (key, the payload as the entry should write it)
         let tail = |frame: usize, length: usize| (lengths[frame] - length, lengths[frame]);
-        let slot = |range: (usize, usize), encoding: &str, shm: bool| {
+        // Revision 64: `span_of` names the node, and `shm_descriptor` is true
+        // exactly when that node is a descriptor.
+        let slot = |range: (usize, usize), encoding: &str, span_of: &str| {
             alloc::format!(
-                "{{\"start\":{},\"end\":{},\"encoding\":{encoding},\"shm_descriptor\":{shm}}}",
+                "{{\"start\":{},\"end\":{},\"encoding\":{encoding},\"shm_descriptor\":{},\
+                 \"span_of\":\"{span_of}\"}}",
                 range.0,
-                range.1
+                range.1,
+                span_of == "shm_descriptor",
             )
         };
         let want: [(&str, String); 9] = [
-            ("demo/json", slot(tail(0, 7), "\"application/json\"", false)),
+            (
+                "demo/json",
+                slot(tail(0, 7), "\"application/json\"", "payload"),
+            ),
             // No `E` bit: the sample carried NO encoding, which is `null` and
             // not the default's name.
-            ("demo/plain", slot(tail(1, 3), "null", false)),
+            ("demo/plain", slot(tail(1, 3), "null", "payload")),
             (
                 "demo/schema",
-                slot(tail(2, 2), "\"application/protobuf;pkg.Msg\"", false),
+                slot(tail(2, 2), "\"application/protobuf;pkg.Msg\"", "payload"),
             ),
             // An id past the table's last entry, spelled as upstream spells it.
-            ("demo/odd", slot(tail(3, 1), "\"unknown(60)\"", false)),
+            ("demo/odd", slot(tail(3, 1), "\"unknown(60)\"", "payload")),
             // The SHM descriptor's own three bytes, flagged as an address.
-            ("demo/shm", slot(tail(4, 3), "\"application/json\"", true)),
+            (
+                "demo/shm",
+                slot(tail(4, 3), "\"application/json\"", "shm_descriptor"),
+            ),
             // Two plain slices of two and three bytes: each element is a kind
-            // byte, a length byte and its bytes, so the group is nine bytes.
+            // byte, a length byte and its bytes, so the group is nine bytes,
+            // and the word says the range is the slices, not the payload.
             (
                 "demo/sliced",
-                slot(tail(5, 9), "\"application/json\"", false),
+                slot(tail(5, 9), "\"application/json\"", "slices"),
             ),
             ("demo/del", String::from("null")),
             ("demo/query", String::from("null")),
             // A query's body lives in an extension and has the default encoding
             // written explicitly (id 0).
-            ("demo/valued", slot(tail(8, 7), "\"zenoh/bytes\"", false)),
+            (
+                "demo/valued",
+                slot(tail(8, 7), "\"zenoh/bytes\"", "payload"),
+            ),
         ];
         for (key, payload) in &want {
             let entry = entry_named(&doc, key);
@@ -13902,7 +14014,7 @@ mod tests {
             raw(&entry, "payload"),
             alloc::format!(
                 "{{\"start\":{},\"end\":{},\"encoding\":\"application/json\",\
-                 \"shm_descriptor\":false}}",
+                 \"shm_descriptor\":false,\"span_of\":\"payload\"}}",
                 lengths[0] - 7,
                 lengths[0]
             ),
@@ -13998,7 +14110,7 @@ mod tests {
             raw(&entry_named(&doc, "demo/a"), "payload"),
             alloc::format!(
                 "{{\"start\":{},\"end\":{first_end},\"encoding\":\"application/json\",\
-                 \"shm_descriptor\":false}}",
+                 \"shm_descriptor\":false,\"span_of\":\"payload\"}}",
                 first_end - 7
             ),
             "{doc}"
@@ -14007,7 +14119,7 @@ mod tests {
             raw(&entry_named(&doc, "demo/b"), "payload"),
             alloc::format!(
                 "{{\"start\":{},\"end\":{second_end},\"encoding\":null,\
-                 \"shm_descriptor\":false}}",
+                 \"shm_descriptor\":false,\"span_of\":\"payload\"}}",
                 second_end - 2
             ),
             "{doc}"

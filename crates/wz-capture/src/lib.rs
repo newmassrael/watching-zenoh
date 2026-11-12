@@ -456,6 +456,13 @@ pub mod payload_decode;
 /// [`payload::formats`] where the trait, the map and the dialect are. A caller
 /// reads one module.
 mod payload_described;
+/// The facts a row's field tree holds that the row also says: a transport
+/// header, a declared id, the unnamed extensions and a body's timestamp.
+/// Gated on `dissect` because it reads a walked tree.
+#[cfg(feature = "dissect")]
+pub mod tree_facts;
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod tree_facts_tests;
 
 /// The `protobuf` format with a body schema: a payload read by the types its
 /// `.proto` schema gives it. Private for the reason [`payload_builtin`] is, and

@@ -579,6 +579,63 @@
  * application data. The range is derived from the message's bytes and does not
  * change in an issued row.
  *
+ * AND WHAT THE RANGE IS THE SPAN OF, at field-document revision 64:
+ * `payload.span_of`, the last key of the object.
+ *
+ *     `span_of`  `payload`, `slices` or `shm_descriptor`
+ *
+ * THE CONTRACT: `start` and `end` are EXACTLY the span of the tree node this
+ * word names, in the entry's own coordinates, on every entry of `carried` and
+ * of `above_transport.carried`. `payload` is the message body's `payload` leaf
+ * -- the payload's bytes and nothing else -- and a body that has that leaf
+ * always answers `payload` with its span. `slices` is the `slices` group of a
+ * payload a shared-memory marker made sliced when none of its slices is an SHM
+ * descriptor: each slice's kind and length lie between the bytes, so the range
+ * is NOT the payload's bytes. `shm_descriptor` is an `shm_descriptor` leaf: the
+ * first SHM slice of a sliced payload, or the descriptor an `Err` carries in
+ * place of its payload; `shm_descriptor` is then `true`, and on the other two
+ * words `false`. A body with no `payload` leaf and no slices or descriptor has
+ * `payload: null`, as does a row's own entry. So a reader that builds on a
+ * payload's bytes (an end-to-end frame, a decode) builds on the range exactly
+ * when the word is `payload`.
+ *
+ * @values fields span_of
+ *
+ * AND THE FACTS AN ENTRY'S MESSAGE STATES, at field-document revision 64.
+ *
+ *     `declared_id`      N, or `null`
+ *     `timestamp_ntp64`  N, or `null`
+ *
+ * On every entry of `carried` and of `above_transport.carried`, after
+ * `payload_size`. `declared_id` is the id a declaration body declares -- the
+ * `id` of a body that holds both an `id` and a `keyexpr` (`DeclareKeyExpr`,
+ * `DeclareSubscriber`, `DeclareQueryable`, `DeclareToken`) -- and `null` on
+ * every other entry, an undeclaration among them. `timestamp_ntp64` is the
+ * NTP64 time of the sample's own timestamp, the one its `Put` or `Del` body
+ * carries (a `Reply`'s nested one included), and `null` when the body is
+ * unstamped or is not a sample; a timestamp in an extension chain (a query's, a
+ * network message's) is not this one. Both are `null` on a row's own entry
+ * when the row is split into records, which then state their own. Both take
+ * the integer rule above, and an NTP64 time is past its line on every stamped
+ * sample, so it is a decimal string there.
+ *
+ * AND THE ROW'S TRANSPORT HEADER AND UNNAMED EXTENSIONS, at field-document
+ * revision 64. On every walked row (not on a declined one), after `name` and
+ * `fields`:
+ *
+ *     `transport_header`    {"sn":N,"reliable":true,"more":null}, or `null`
+ *     `unnamed_extensions`  [N, ...]
+ *
+ * `transport_header` is a `Frame` or `Fragment` row's header as the wire wrote
+ * it: its sequence number (the integer rule above applies), its `R` flag and,
+ * on a `Fragment`, its `M` flag (more fragments follow); `more` is `null` on a
+ * `Frame`, whose header has no such flag. It is `null` on every other row.
+ * `unnamed_extensions` is the `ext_id` of every extension in the row's tree
+ * that this library names no extension for -- over the transport header's
+ * chain, every network message's and every body's -- in walk order, each
+ * extension once, and empty when there is none. A completed chain's records
+ * are not in it: their trees are `above_transport`'s.
+ *
  * AND HOW LARGE THE CENSUS SAYS THAT PAYLOAD IS, at field-document revision 55.
  *
  *     `payload_size`  {"size_verdict":"measured","bytes":N,"at_most_bytes":null}
@@ -1116,7 +1173,11 @@
  * and take the rule from their first appearance: a sequence number is as wide
  * as the session's ring); to the `first_sn`, `last_sn` and `keyexpr_id` of a
  * flow's `ended_chains` entry (keys that exist from field document 63 and take
- * the rule from their first appearance, for the same reasons); to every
+ * the rule from their first appearance, for the same reasons); to the
+ * `declared_id` and `timestamp_ntp64` of a `carried` entry and to the `sn` of a
+ * row's `transport_header` (keys that exist from field document 64 and take the
+ * rule from their first appearance: an NTP64 time is past the line for every
+ * date after 1900, and an id and a sequence number are wire values); to every
  * integer of a
  * record's `segment` in the values document (that document takes the rule from
  * its revision 2, where the key arrives: the same header fields); and to
@@ -1558,7 +1619,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":63,"key":"kind","values":[...],
+ *     {"name":"fields","revision":64,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1616,6 +1677,7 @@
  * @carries fields request_kind passenger
  * @carries fields selected passenger
  * @carries fields size_verdict passenger
+ * @carries fields span_of passenger
  * @carries fields state discriminant
  * @carries fields strength passenger
  * @carries fields under passenger
@@ -5568,7 +5630,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":63,"key":"state",
+ *     "value_families":[{"name":"fields","revision":64,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -6830,7 +6892,8 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *
  * A row whose message bytes the per-direction byte ceiling has since discarded
  * reads, if it is asked for again, as `declined` in place of its walk: /name,
- * /fields, /carried, /above_transport, /first_byte, /l2 and /declined swap. The
+ * /fields, /carried, /above_transport, /first_byte, /l2, /declined and, since
+ * field-document revision 64, /transport_header and /unnamed_extensions swap. The
  * row you hold stays true -- the bytes were the message's when it was written --
  * so do not treat that `declined` as a correction. `seq`, the four coordinates,
  * `direction`, `offset_space`, `message_at`, `packet`, `sn` and the rest of
@@ -7163,6 +7226,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @values row_facts request_kind
  * @values row_facts selected
  * @values row_facts size_verdict
+ * @values row_facts span_of
  * @values row_facts state
  * @values row_facts strength
  * @values row_facts under
@@ -7196,6 +7260,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @carries row_facts request_kind passenger
  * @carries row_facts selected passenger
  * @carries row_facts size_verdict passenger
+ * @carries row_facts span_of passenger
  * @carries row_facts state discriminant
  * @carries row_facts strength passenger
  * @carries row_facts under passenger
