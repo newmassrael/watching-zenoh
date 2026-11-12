@@ -4436,6 +4436,12 @@ _runci_free_port_gate() {
 
 layer_c0g_apt_ceiling() {
     local script="scripts/lib/apt-install.sh"
+    # HERMETIC. On a runner `GITHUB_ACTIONS` is `true`, so an arm that names no
+    # archive directory would get the job's own restored `$HOME/.cache/wz-apt`,
+    # and the cached-archive attempt would answer before the arm's stand-in
+    # was asked what the arm means to ask it. Every arm below that wants an
+    # archive names one; the runner-default arm sets this back to `true` itself.
+    local -x GITHUB_ACTIONS=''
 
     if [[ ! -r "$script" ]]; then
         echo "  Layer C0g FAIL: $script is not there, so the ceiling every apt step in" \
@@ -4996,6 +5002,101 @@ EOF
         echo "  Layer C0g FAIL: the install FAILED after downloading part of the" \
             "archive and the workflow was not told to save it. That is exactly" \
             "the slow-mirror path, and without the save it never makes progress" >&2
+        return 1
+    fi
+
+    # A WARM ARCHIVE IS INSTALLED FROM BEFORE THE MIRROR IS ASKED ANYTHING (run
+    # 43058242762: five jobs lost 4min 40s each to an `update` against a mirror
+    # whose name did not resolve, then fetched 0 B). Four arms, one per answer the
+    # cached attempt can get. The stand-in logs `cached` for an install carrying
+    # `--no-download`, so the log says which road each call took.
+    #
+    #   warm     -- the archive holds a .deb and the cached install succeeds: that
+    #               one call and nothing else, no `update`.
+    #   refused  -- the cached install is refused: the step falls through to the
+    #               ordinary `update` + `install` and passes.
+    #   cold     -- the archive holds no .deb (only a half-fetched one): no cached
+    #               attempt at all, `update` first as before.
+    #   hung     -- the cached install never returns: the step fails after that one
+    #               call. It fetched nothing, so a retry would only double dpkg's
+    #               silence.
+    local warm_dir warm_calls
+    warm_dir="$(mktemp -d)"
+    warm_calls="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$archives' '$dirty_dir' '$warm_dir'; rm -f '$argv_log' '$stub' '$marker' '$ghenv' '$warm_calls'" RETURN
+    cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+cached=0
+for a in "$@"; do [[ "$a" == --no-download ]] && cached=1; done
+for a in "$@"; do
+  case "$a" in
+    update) echo update >>"$WZ_CALLS"; exit 0 ;;
+    install)
+      if [[ "$cached" -eq 1 ]]; then
+        echo cached >>"$WZ_CALLS"
+        case "${WZ_STUB_CACHED:-ok}" in
+          refuse) exit 100 ;;
+          hang) sleep 30 ;;
+        esac
+        exit 0
+      fi
+      echo install >>"$WZ_CALLS"; exit 0 ;;
+  esac
+done
+exit 0
+EOF
+    chmod +x "$stub"
+    mkdir -p "${warm_dir}/partial"
+    : >"${warm_dir}/cmake.deb"
+    local want got arm
+    for arm in ok refuse; do
+        : >"$warm_calls"
+        if ! WZ_STUB_CACHED="$arm" WZ_CALLS="$warm_calls" WZ_APT_ARCHIVES="$warm_dir" \
+            WZ_APT_CMD="$stub" WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+            echo "  Layer C0g FAIL: the cached-archive arm '${arm}' failed the step." \
+                "A warm archive must install, and a refused cached install must fall" \
+                "through to the mirror rather than end the step" >&2
+            return 1
+        fi
+        want="cached "
+        [[ "$arm" == refuse ]] && want="cached update install "
+        got="$(tr '\n' ' ' <"$warm_calls")"
+        if [[ "$got" != "$want" ]]; then
+            echo "  Layer C0g FAIL: the cached-archive arm '${arm}' called '${got}'," \
+                "not '${want}'. A warm archive that still asks the mirror is the" \
+                "run 43058242762 shape: 4min 40s of DNS failures to fetch 0 B" >&2
+            return 1
+        fi
+    done
+    rm -f "${warm_dir}/cmake.deb"
+    echo half >"${warm_dir}/partial/cmake.deb"
+    : >"$warm_calls"
+    if ! WZ_CALLS="$warm_calls" WZ_APT_ARCHIVES="$warm_dir" WZ_APT_CMD="$stub" \
+        WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: the cold-archive arm failed the step" >&2
+        return 1
+    fi
+    got="$(tr '\n' ' ' <"$warm_calls")"
+    if [[ "$got" != "update install " ]]; then
+        echo "  Layer C0g FAIL: an archive holding only a half-fetched .deb called" \
+            "'${got}', not 'update install '. A half-fetched file cannot be installed" \
+            "from, so the cached attempt there is a wasted call" >&2
+        return 1
+    fi
+    : >"${warm_dir}/cmake.deb"
+    : >"$warm_calls"
+    if WZ_STUB_CACHED=hang WZ_CALLS="$warm_calls" WZ_APT_ARCHIVES="$warm_dir" \
+        WZ_APT_CMD="$stub" WZ_APT_DEADLINE=2 WZ_APT_KILL_AFTER=1 \
+        bash "$script" cmake >/dev/null 2>&1; then
+        echo "  Layer C0g FAIL: a cached install that hung was reported as success" >&2
+        return 1
+    fi
+    got="$(tr '\n' ' ' <"$warm_calls")"
+    if [[ "$got" != "cached " ]]; then
+        echo "  Layer C0g FAIL: a cached install killed by its deadline went on to" \
+            "call '${got}'. It fetched nothing, so the silence is dpkg's and asking" \
+            "the mirror next only adds to it" >&2
         return 1
     fi
 

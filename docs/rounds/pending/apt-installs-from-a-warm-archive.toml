@@ -1,0 +1,18 @@
+impact = ["watching-zenoh/local-ci-gates"]
+
+decision = '''
+Hosted run 43058242762 graded the previous landing and reported two jobs failed and three cancelled. Every lane that ran had passed: the two failures were the job-budget margin alarm (96% of budget), and the three cancels were time limits. Each of the five jobs spent 4min 40s in `apt-get update`, because `azure.archive.ubuntu.com` did not resolve, and then printed `Need to get 0 B` for the install. The restored apt archive already held every .deb, and the index shipped with the runner image named exactly those versions. An earlier round moved the archive into a cache so that the mirror would not be on the critical path, but the `update` in front of the install kept it there. `apt-install.sh` now first tries the install with `--no-download` when the archive holds a .deb. apt still checks each file against the index hash. A refusal (a missing .deb, or an index naming a newer version) falls through to `update` and the existing attempts unchanged. A deadline on that attempt is not retried, because it fetched nothing. The lanes in that run were also about 1.6 times slower than in the run before, layer by layer, with no layer standing out; that is the runner, not this tree, and with the mirror off the path the two failed jobs come in at about 81% and 73% of their budgets.
+'''
+
+changes = '''
+scripts/lib/apt-install.sh: `wz_apt_archive_holds_debs`, and a cached-archive install with `--no-download` before `update` when the archive holds a .deb.
+scripts/run-ci.sh: Layer C0g runs its arms with `GITHUB_ACTIONS` cleared, so a runner's own archive cannot answer for a stand-in; four new arms cover a warm archive, a refused cached install, an archive holding only a half-fetched .deb, and a hung cached install, each checked by the calls it logs.
+'''
+
+verification = '''
+Read from the hosted logs of run 43058242762: the update step's timeline, `Temporary failure resolving 'azure.archive.ubuntu.com'`, `Need to get 0 B` in all five jobs, and per-layer times against run 42998549386. On a build machine: Layer C0g pass in 27s; with the cached attempt disabled, the same lane failed by name on the warm-archive arm (it called `update install` instead of `cached`); restored. shellcheck on apt-install.sh clean.
+'''
+
+carry = '''
+The lanes themselves ran about 1.6 times slower on that run, uniformly. If that recurs, the job budgets need splitting rather than raising, as the margin alarm says.
+'''

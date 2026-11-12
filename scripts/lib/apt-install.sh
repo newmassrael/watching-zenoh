@@ -245,6 +245,17 @@ wz_apt_fingerprint() {
     find "${dir}" -type f -printf '%s %P\n' 2>/dev/null | LC_ALL=C sort || true
 }
 
+# Whether the archive directory holds at least one .deb at its top level.
+#
+# `partial/` is not looked at: a half-fetched file cannot be installed from. An
+# unset or missing directory holds nothing, which is the local case and the
+# cold-cache case, and both go straight to `update`.
+wz_apt_archive_holds_debs() {
+    local dir="$1"
+    [[ -n "${dir}" && -d "${dir}" ]] || return 1
+    [[ -n "$(find "${dir}" -maxdepth 1 -type f -name '*.deb' -print -quit 2>/dev/null)" ]]
+}
+
 # Tell the workflow whether the archive is worth saving.
 #
 # `GITHUB_ENV` is how a step hands a variable to the steps after it; absent (a
@@ -391,6 +402,41 @@ wz_apt_install() {
     local before priv=""
     [[ "${apt[0]}" == "sudo" ]] && priv="sudo"
     before="$(wz_apt_fingerprint "${archives}")"
+    # A WARM ARCHIVE IS INSTALLED FROM WITHOUT ASKING THE MIRROR ANYTHING.
+    #
+    # Run 43058242762: five jobs went red or were cancelled at their time limit,
+    # and every lane that ran had passed. Each job spent 4min 40s in `update`
+    # because `azure.archive.ubuntu.com` did not resolve, and then printed
+    # `Need to get 0 B/25.3 MB of archives`: the restored archive already held
+    # every .deb, and the shipped index named exactly those versions. R311y882
+    # put the archive in a cache so that "no mirror is on the critical path at
+    # all", and the `update` in front of the install kept one there.
+    #
+    # So when the archive holds any .deb, the install is tried first with
+    # `--no-download`. apt still checks each .deb against the index's hash, so
+    # nothing unverified is installed. A refusal (a .deb missing, or the index
+    # naming a newer version than the one cached) is the ordinary cold case and
+    # falls through to `update` and the attempts below, exactly as before. A
+    # deadline is not retried: this attempt reads no network, so a silence here
+    # is dpkg's, and retrying it would only double it.
+    if wz_apt_archive_holds_debs "${archives}"; then
+        if wz_apt_bounded "notice" "install of $* from the cached archive" \
+            "${WZ_APT_INSTALL_DEADLINE}" \
+            "${apt[@]}" "${opts[@]}" install -y --no-install-recommends --no-download "$@"; then
+            wz_apt_hand_back "${archives}" "${priv}"
+            wz_apt_mark_dirty "${archives}" "${before}"
+            echo "::notice::apt: installed from the cached archive; the mirror was not" \
+                "contacted." >&2
+            return 0
+        fi
+        if [[ "${WZ_APT_LAST_RC}" -eq 124 || "${WZ_APT_LAST_RC}" -eq 137 ]]; then
+            wz_apt_hand_back "${archives}" "${priv}"
+            wz_apt_mark_dirty "${archives}" "${before}"
+            echo "::error::apt: the install from the cached archive ran past its" \
+                "deadline. It fetches nothing, so this is dpkg and not the mirror." >&2
+            return 1
+        fi
+    fi
     local stale=0
     if ! wz_apt_bounded "warning" "update" "${WZ_APT_UPDATE_DEADLINE}" \
         "${apt[@]}" "${opts[@]}" update; then
