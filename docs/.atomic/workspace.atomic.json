@@ -13391,6 +13391,25 @@
       "carry_forward_bullets": [
         "`unnamed_extensions` covers the row's own tree; a completed chain's records are walked in `above_transport` and their unnamed extensions are not listed, since the consumer reads those trees only for a picked row. The tracked captures hold no declaration body, so `declared_id` is held to a tree only by the built declaration."
       ]
+    },
+    "Round 4474": {
+      "decision_summary": "A consumer moving its message list from the field document to the row-facts document asked for how each message's key travelled. A `carried` entry wrote `keyexpr_id` and `keyexpr_suffix` only when the reference was a miss, so a resolved key said nothing about whether the sender wrote it whole, as an id it had declared, or as that id with a suffix. The field document's tree holds the `keyexpr` node's id and suffix and answers it; the row-facts document has no tree, so every resolved row read as unknown there. Every `carried` entry (the row's and a completed chain's `above_transport.carried`) now writes `keyexpr_carriage` after `keyexpr_source`: `whole_key` (scope 0, the suffix is the whole key), `id` (a declared id alone), `id_and_suffix` (a declared id and a suffix), or `null` where the entry references no key. It is a closed word rather than two cells because the reader asked a question with three answers, and the id and suffix of a resolved reference stay out of the miss cells, which keep their meaning. The word is read in the walk that resolves the key, off the same `keyexpr` node, through `subtree_keyexpr_reference`, so it describes the reference the key came from; `subtree_keyexpr_outcome` is now a projection of it. The cell comes from the bytes alone, so it is not a revisable cell. The field document moves to revision 65 and the row-facts document, written by the same writer, to revision 6, on top of the revisions 64 and 5 another round filed while this one was in review. A flow's `ended_chains` entries are unchanged: they already write the head's id and suffix whether or not the key resolved.",
+      "changes_bullets": [
+        "crates/wz-capture/src/payload_decode.rs: `KeyCarriage` with its words, `KeyReference`, and `subtree_keyexpr_reference`, of which `subtree_keyexpr_outcome` is the projection.",
+        "crates/wz-capture/src/fields_json.rs: every `carried` entry writes `keyexpr_carriage`; the vocabulary walk holds the family to `KeyCarriage::ALL`; a test with one capture per carriage, resolved and missed; two entry expectations gain the cell.",
+        "crates/wz-capture/src/doc_revision.rs: field revision 65 and row-facts revision 6, with their key sets, families and carries; the revision expectations move.",
+        "crates/wz-capture/src/agg.rs: a fixture `Push` naming any scope and suffix.",
+        "crates/wz-capi-dissect/include/wz_dissect.h and tests/c_abi_consumer.c: the cell and its words described, the family declared on both documents, the C consumer's pin moved to 65."
+      ],
+      "verification_bullets": [
+        "On a build machine: wz-capture with `dissect,fixtures` library tests (1781 passed after the rebase onto revision 64, including the new test over whole key, id and id with suffix, resolved and missed, and the other round's contrast test of rows against their trees); clippy of wz-capture with `dissect,fixtures` over all targets with warnings denied, clean; wz-capi-dissect tests (233 library, 4 memory gate); Layer C1bo, which compiles and runs the C consumer, pass. The consumer revision pin gate agrees (22 pins over 28 documents). rustfmt applied."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "carry_forward_bullets": [
+        "None from this round."
+      ]
     }
   },
   "inventory_entries": {
