@@ -13334,6 +13334,25 @@
       "carry_forward_bullets": [
         "The walker and the generated codec read the byte as a u8, where zenoh's codec reads a z64. The two agree for every value below 0x80, which is every value either upstream writes; a byte at or above 0x80 would be read as one byte here and as the start of a longer value by zenoh."
       ]
+    },
+    "Round 4471": {
+      "decision_summary": "A consumer builds its verify image with no network, after fetching every release input once per host into a cache addressed by SHA-256. The zenoh-c oracle installer was the one input it could not hand over: it fetched the release archive itself, git-cloned the source from GitHub, and the pin held no digest, so nothing said the bytes were upstream's. The pin file now carries one `ZENOH_C_SHA256_<target>` per standalone archive upstream publishes for the pinned version, and `ZENOH_C_SOURCE_URL` with `ZENOH_C_SOURCE_SHA256` for the tag's source tarball. The installer takes `WZ_ZENOH_C_ARCHIVE` (the release zip) and `WZ_ZENOH_C_SOURCE` (the tarball, or a directory holding the tree, which is copied and never written to), fetches whichever is unset, and checks every archive against the pinned digest before unpacking it, handed in or fetched, because both are the same claim that the bytes are the release. A target with no digest is refused, and a version override must bring its own digest (`WZ_ZENOH_C_SHA256`, `WZ_ZENOH_C_SOURCE_SHA256`), so no path unpacks an archive unchecked. The source is now the tarball rather than a clone: the tag's tree is the same (zenoh-c marks nothing export-ignore), nothing downstream needs the history, and only bytes can be held to a digest. A directory has no bytes to hash and is held to the version it states, as a checkout always was. Because the gates that derive the tree's upstreams and their pins read only submodules and `git clone` lines, zenoh-c would have dropped out of them; a pin file's tag-archive source URL is now a third shape, read once by `gate_reason_claims.pin_file_sources` for both the fetched set and the pin.",
+      "changes_bullets": [
+        "scripts/zenoh-c-oracle.pin: eleven per-target archive digests, the source tarball URL and its digest, and the rule that a version move rewrites them.",
+        "scripts/install-zenoh-c.sh: handed-in archive and source, `pinned_digest`, `verify_sha256`, `obtain`; the source tree from the tarball or a copied directory; the version check now runs on every tree, present or new.",
+        "scripts/lib/gate_reason_claims.py: `pin_file_sources`, and `upstream_urls` reads a pin file's source URL.",
+        "scripts/lib/upstream_release_distance.py: `script_pins` reads a pin file through `pin_file_sources`; the selftest derives the zenoh-c pin from the pin file and refuses a commented-out URL.",
+        "scripts/lib/zenoh_c_archive_arm.py: the selftest holds the pin to the new keys and every digest to lowercase hex SHA-256."
+      ],
+      "verification_bullets": [
+        "The eleven archive digests are the ones upstream's release API lists for 1.10.2; the x86_64 Linux archive was downloaded and hashed to the same value, and the source tarball was downloaded twice with identical digests. The installer, run into scratch prefixes: with both inputs handed in it fetched nothing and installed 1.10.2; a handed-in archive with one byte appended was refused before unpacking, nothing installed; a version override without a digest was refused; a read-only source directory was copied and installed; with nothing handed in it fetched, matched both digests and installed. `zenoh_c_archive_arm.py --derive --require` against the tarball-made tree read upstream's release workflow and named the installed arm `unstable-shm`. Selftests of upstream_release_distance, gate_reason_claims, zenoh_c_archive_arm (40/40), pin_constant_binding_gate, upstream_switch_map, bump_sweep and upstream_feature_census pass; upstream_release_distance, pin_constant_binding_gate --check and gate_reason_claims pass on the tree; shellcheck clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The digests are upstream's published ones and one of eleven was re-hashed here; the other targets are checked the first time a host of that target installs. The Windows and macOS hosts do not run this installer."
+      ]
     }
   },
   "inventory_entries": {
