@@ -534,6 +534,21 @@
  *
  * @values fields keyexpr_source
  *
+ * AND HOW THE WIRE CARRIED THE KEY, at field-document revision 65.
+ *
+ *     `keyexpr_carriage`  `whole_key` (the `WireExpr` named no declared id: its
+ *                         suffix is the whole key), `id` (a declared id alone),
+ *                         `id_and_suffix` (a declared id and a suffix written
+ *                         after it), or `null` (no key).
+ *
+ * On every entry, after `keyexpr_source`, and on a resolved entry as on a miss:
+ * `keyexpr_id` and `keyexpr_suffix` are written only on a miss, so before this
+ * a reader holding a resolved key and no tree (the row-facts document) could not
+ * tell how it travelled. It is read off the message's bytes, so unlike the keys
+ * before it it does not change in an issued row.
+ *
+ * @values fields keyexpr_carriage
+ *
  * ⚠ REVISION 9 ALSO MOVED WHICH REFERENCES RESOLVE AT ALL, under a stationary
  * `keyexpr`, and no `value_families` row can say so. Until it, this document
  * folded a keyexpr id space PER FLOW, while a zenoh session with
@@ -1619,7 +1634,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":64,"key":"kind","values":[...],
+ *     {"name":"fields","revision":65,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1662,6 +1677,7 @@
  * @carries fields eps_basis passenger
  * @carries fields family passenger
  * @carries fields ending passenger
+ * @carries fields keyexpr_carriage passenger
  * @carries fields keyexpr_cause passenger
  * @carries fields keyexpr_source passenger
  * @carries fields kind discriminant
@@ -5630,7 +5646,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":64,"key":"state",
+ *     "value_families":[{"name":"fields","revision":65,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -7212,6 +7228,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @values row_facts eps_basis
  * @values row_facts family
  * @values row_facts ending
+ * @values row_facts keyexpr_carriage
  * @values row_facts keyexpr_cause
  * @values row_facts keyexpr_source
  * @values row_facts link
@@ -7246,6 +7263,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @carries row_facts eps_basis passenger
  * @carries row_facts family passenger
  * @carries row_facts ending passenger
+ * @carries row_facts keyexpr_carriage passenger
  * @carries row_facts keyexpr_cause passenger
  * @carries row_facts keyexpr_source passenger
  * @carries row_facts link passenger

@@ -3712,7 +3712,7 @@ fn push_carried(
                      node: &wz_session_core::dissect::Field,
                      is_record: bool,
                      facts: bool,
-                     keyexpr: Option<Result<String, crate::payload_decode::UnresolvedRef>>,
+                     keyexpr: Option<crate::payload_decode::KeyReference>,
                      payload: Option<crate::payload_decode::PayloadSlot>,
                      judged: RecordJudged<'_>,
                      closed: Option<String>,
@@ -3751,7 +3751,7 @@ fn push_carried(
     let records = row_records(field, space);
     if let Some(message) = bytes.first().and_then(|b| space.head(b & 0x1F)) {
         let keyexpr = if records.is_empty() {
-            crate::payload_decode::subtree_keyexpr_outcome(field, at)
+            crate::payload_decode::subtree_keyexpr_reference(field, at)
         } else {
             None
         };
@@ -3773,14 +3773,15 @@ fn push_carried(
     }
     for (index, record) in records.into_iter().enumerate() {
         let word = record_word(bytes, record);
-        let keyexpr = crate::payload_decode::subtree_keyexpr_outcome(record, at);
+        let keyexpr = crate::payload_decode::subtree_keyexpr_reference(record, at);
         // Judged HERE, in the order the entries are written, which is the order
         // the frames were batched in: a slot's counter is walked in the order
         // its frames were sent.
         let judged = judging
             .declarations
             .map(|declarations| {
-                judge_record(record, word, keyexpr.as_ref(), declarations, judging.source)
+                let outcome = keyexpr.as_ref().map(|r| &r.outcome);
+                judge_record(record, word, outcome, declarations, judging.source)
             })
             .unwrap_or_default();
         // The pairing is by the record's place in its row, which is `index`: the
@@ -4282,10 +4283,11 @@ fn push_body(node: &wz_session_core::dissect::Field, out: &mut String) {
 /// 32-bit value in practice, and the door is what makes that a property of the
 /// writer rather than of a capture that obeys it.
 fn push_keyexpr_read(
-    outcome: Option<&Result<String, crate::payload_decode::UnresolvedRef>>,
+    reference: Option<&crate::payload_decode::KeyReference>,
     declarations: Option<&Declarations<'_>>,
     out: &mut String,
 ) {
+    let outcome = reference.map(|r| &r.outcome);
     // The key the message is READ under: the wire's, or, since revision 61,
     // the key a declaration fixed for an id the wire did not answer.
     match outcome.and_then(crate::payload_decode::key_read_as) {
@@ -4308,6 +4310,14 @@ fn push_keyexpr_read(
             }
             escape_into(source.word(), out);
         }
+        None => out.push_str("null"),
+    }
+    // Revision 65: how the wire carried the key (`whole_key`, `id`,
+    // `id_and_suffix`), on a resolved reference as on a miss, so a reader of a
+    // row without its tree can still tell. `null` when there is no reference.
+    out.push_str(",\"keyexpr_carriage\":");
+    match reference {
+        Some(reference) => escape_into(reference.carriage.word(), out),
         None => out.push_str("null"),
     }
 }
@@ -4558,8 +4568,9 @@ fn push_above_transport(
                 ",\"start\":{},\"end\":{},\"keyexpr\":",
                 record.span.start, record.span.end
             );
-            let outcome = crate::payload_decode::subtree_keyexpr_outcome(record, at);
-            push_keyexpr_read(outcome.as_ref(), judging.declarations, out);
+            let reference = crate::payload_decode::subtree_keyexpr_reference(record, at);
+            push_keyexpr_read(reference.as_ref(), judging.declarations, out);
+            let outcome = reference.map(|r| r.outcome);
             // Revision 28 — the same `payload` the row's own entries carry, from
             // the same finder, in the JOINED buffer's coordinates like the
             // entry's `start` and `end`.
@@ -8371,6 +8382,108 @@ mod tests {
         }
     }
 
+    /// Every `Push` entry's `(keyexpr, keyexpr_cause, keyexpr_carriage)`, raw,
+    /// with `"<absent>"` for a carriage key that is not there.
+    #[cfg(feature = "network-codecs")]
+    fn push_carriages(doc: &str) -> Vec<(&str, &str, &str)> {
+        crate::doc_revision::object_scopes(doc)
+            .into_iter()
+            .filter(|scope| {
+                scope
+                    .iter()
+                    .any(|(k, v)| *k == "message" && *v == "\"Push\"")
+            })
+            .filter_map(|scope| {
+                let key = scope.iter().find(|(k, _)| *k == "keyexpr")?.1;
+                let cause = scope.iter().find(|(k, _)| *k == "keyexpr_cause")?.1;
+                let carriage = scope
+                    .iter()
+                    .find(|(k, _)| *k == "keyexpr_carriage")
+                    .map_or("<absent>", |(_, v)| *v);
+                Some((key, cause, carriage))
+            })
+            .collect()
+    }
+
+    /// HOW THE WIRE CARRIED THE KEY IS WRITTEN RESOLVED OR NOT (revision 65).
+    ///
+    /// `keyexpr_id` and `keyexpr_suffix` are written only on a miss, so a
+    /// resolved `demo/temp` said nothing about whether the sender wrote it
+    /// whole, as the id it declared, or as that id and a suffix; a reader with
+    /// no tree could not tell. Each way is one capture here, with the id
+    /// declared before the reference (resolved) and after it (a miss):
+    ///
+    /// * scope 0 and a suffix is `whole_key`;
+    /// * id 7 alone is `id`, resolved and missed alike;
+    /// * id 7 and a suffix is `id_and_suffix`, resolved and missed alike.
+    ///
+    /// Every other entry carries the key too: an entry with a reference names
+    /// its carriage and an entry with none says `null`.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn how_the_wire_carried_a_key_is_written_whether_it_resolved_or_not() {
+        use crate::agg::tests::{
+            multilink_session_declaring_after_the_reference_carrying_with_file as missed,
+            multilink_session_declaring_on_the_later_link_carrying_with_file as declared,
+            push_naming,
+        };
+        let cases = [
+            (
+                "a whole key",
+                declared(push_naming(0, Some("demo/whole"))),
+                ("\"demo/whole\"", "null", "\"whole_key\""),
+            ),
+            (
+                "a declared id",
+                declared(push_naming(7, None)),
+                ("\"demo/temp\"", "null", "\"id\""),
+            ),
+            (
+                "a declared id and a suffix",
+                declared(push_naming(7, Some("/x"))),
+                ("\"demo/temp/x\"", "null", "\"id_and_suffix\""),
+            ),
+            (
+                "an id the tables do not answer",
+                missed(push_naming(7, None)),
+                ("null", "\"no_declaration\"", "\"id\""),
+            ),
+            (
+                "an id and a suffix the tables do not answer",
+                missed(push_naming(7, Some("/@history"))),
+                ("null", "\"no_declaration\"", "\"id_and_suffix\""),
+            ),
+        ];
+        for (name, (d, file), want) in cases {
+            let doc = fields_json(&d, &file, None, None);
+            assert_eq!(push_carriages(&doc), vec![want], "{name}: {doc}");
+            let scopes = crate::doc_revision::object_scopes(&doc);
+            let entries: Vec<_> = scopes
+                .iter()
+                .filter(|scope| scope.iter().any(|(k, _)| *k == "keyexpr_source"))
+                .collect();
+            assert!(
+                entries.len() > 1,
+                "{name}: only the Push was written: {doc}"
+            );
+            for scope in entries {
+                let get = |key: &str| scope.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+                let carriage = get("keyexpr_carriage");
+                assert!(
+                    carriage.is_some(),
+                    "{name}: an entry has no carriage: {scope:?}"
+                );
+                let referenced =
+                    get("keyexpr") != Some("null") || get("keyexpr_cause") != Some("null");
+                assert_eq!(
+                    carriage != Some("null"),
+                    referenced,
+                    "{name}: a carriage is written exactly where a key is referenced: {scope:?}"
+                );
+            }
+        }
+    }
+
     /// THE PROPERTY THE PER-FLOW RULE PROTECTED, kept in this document: a flow
     /// whose session is unknown still resolves its OWN declarations.
     ///
@@ -10725,7 +10838,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 93] = [
+        let live: [(&str, &str, Vec<&'static str>); 94] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -10877,6 +10990,16 @@ mod tests {
                 crate::payload_decode::KeySource::ALL
                     .iter()
                     .map(|s| s.word())
+                    .collect(),
+            ),
+            // Revision 65 — how the wire carried the key. The walk is the
+            // reference's own enum, whose word is an exhaustive match.
+            (
+                rev::FIELDS,
+                "keyexpr_carriage",
+                crate::payload_decode::KeyCarriage::ALL
+                    .iter()
+                    .map(|c| c.word())
                     .collect(),
             ),
             // The values document's revision 2 carries the same three words
@@ -13033,7 +13156,7 @@ mod tests {
         assert!(
             chain.contains(&alloc::format!(
                 "\"keyexpr_cause\":null,\"keyexpr_id\":null,\"keyexpr_suffix\":null,\
-                 \"keyexpr_source\":\"wire\",\
+                 \"keyexpr_source\":\"wire\",\"keyexpr_carriage\":\"whole_key\",\
                  \"payload\":{{\"start\":{start},\"end\":{end},\
                  \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false,\
                  \"span_of\":\"payload\"}},\
@@ -13175,6 +13298,7 @@ mod tests {
             doc.contains(&alloc::format!(
                 "\"keyexpr\":null,\"keyexpr_cause\":\"no_session\",\"keyexpr_id\":7,\
                  \"keyexpr_suffix\":null,\"keyexpr_source\":null,\
+                 \"keyexpr_carriage\":\"id\",\
                  \"payload\":{{\"start\":{start},\"end\":{end},\
                  \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false,\
                  \"span_of\":\"payload\"}},\

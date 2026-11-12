@@ -4248,8 +4248,11 @@ int main(void) {
      * 64: a walked row's `transport_header` and `unnamed_extensions`, a
      * `carried` entry's `declared_id` and `timestamp_ntp64`, and a `payload`'s
      * `span_of` (the node its range is the span of). Keys arrive; nothing
-     * retires. */
-    revisioned[2].revision = 64;
+     * retires.
+     * 65: every `carried` entry's `keyexpr_carriage` (`whole_key`, `id`,
+     * `id_and_suffix`, or null), how the wire carried the key, resolved or
+     * not. A key arrives; nothing retires. */
+    revisioned[2].revision = 65;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

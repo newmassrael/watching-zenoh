@@ -1717,6 +1717,58 @@ impl KeySource {
     }
 }
 
+/// How a message's `WireExpr` carried its key: the word a document's
+/// `keyexpr_carriage` carries.
+///
+/// A fact of the reference as the wire wrote it, read off the same `keyexpr`
+/// node the key is resolved from, so it is the same whether the tables answered
+/// or not. A reader that has the resolved key and not the tree cannot recover it:
+/// `demo/sensor/temp` reads the same whether the sender wrote it whole, as an id
+/// it had declared, or as an id and the suffix `/temp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyCarriage {
+    /// Scope 0: the suffix is the whole key and no declared id was used.
+    WholeKey,
+    /// A declared id alone, with no suffix.
+    Id,
+    /// A declared id with a suffix appended after its key.
+    IdAndSuffix,
+}
+
+impl KeyCarriage {
+    /// Every carriage, so a document's vocabulary and a test's walk are one list.
+    pub const ALL: [Self; 3] = [Self::WholeKey, Self::Id, Self::IdAndSuffix];
+
+    /// The word a machine reads for this carriage.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::WholeKey => "whole_key",
+            Self::Id => "id",
+            Self::IdAndSuffix => "id_and_suffix",
+        }
+    }
+
+    /// The carriage of a `WireExpr` with scope `id` and `suffix`. An empty
+    /// suffix is no suffix, as [`UnresolvedRef::suffix`] reads it.
+    pub fn of(id: u64, suffix: Option<&str>) -> Self {
+        match (id, suffix.is_some_and(|s| !s.is_empty())) {
+            (0, _) => Self::WholeKey,
+            (_, false) => Self::Id,
+            (_, true) => Self::IdAndSuffix,
+        }
+    }
+}
+
+/// One keyexpr reference as [`subtree_keyexpr_reference`] read it: what the
+/// tables made of it, and how the wire carried it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyReference {
+    /// The resolved key, or why the tables could not answer.
+    pub outcome: Result<String, UnresolvedRef>,
+    /// How the `WireExpr` carried the key, whatever the tables answered.
+    pub carriage: KeyCarriage,
+}
+
 /// R2458 (open-debt item 703) — the same walk, answering WHY when it does not
 /// resolve.
 ///
@@ -1756,6 +1808,13 @@ pub fn subtree_keyexpr_outcome(
     field: &Field,
     at: KeyexprAt<'_>,
 ) -> Option<Result<String, UnresolvedRef>> {
+    subtree_keyexpr_reference(field, at).map(|reference| reference.outcome)
+}
+
+/// [`subtree_keyexpr_outcome`], answering also how the wire carried the key
+/// ([`KeyReference::carriage`]). The same walk and the same node: the carriage
+/// is read where the outcome is, so the two always describe one reference.
+pub fn subtree_keyexpr_reference(field: &Field, at: KeyexprAt<'_>) -> Option<KeyReference> {
     if field.name == "keyexpr" {
         if let FieldValue::Nested(parts) = &field.value {
             let mut id = 0u64;
@@ -1793,34 +1852,38 @@ pub fn subtree_keyexpr_outcome(
                 // receiver's table alone.
                 None => at.spaces.resolve_declared_parts(at.direction, id, suffix),
             };
-            return match resolved {
-                Ok(keyexpr) if !keyexpr.is_empty() => Some(Ok(keyexpr)),
+            let outcome = match resolved {
+                Ok(keyexpr) if !keyexpr.is_empty() => Ok(keyexpr),
                 // Resolved to NOTHING: `id == 0` with no suffix names no
                 // keyexpr, so there is no reference here to explain. The
                 // pre-R2458 `.filter(|k| !k.is_empty())` said exactly this and
                 // this arm is where it lives now.
-                Ok(_) => None,
+                Ok(_) => return None,
                 // R2457's rule, read off the OWNER rather than off the tables:
                 // see `KeyexprSpaces::cause`.
-                Err((space, _)) => Some(Err(UnresolvedRef {
+                Err((space, _)) => Err(UnresolvedRef {
                     cause: at.spaces.cause(space),
                     id,
                     suffix: suffix.filter(|s| !s.is_empty()).map(Box::from),
                     bound: at.spaces.fixed_binding(id, suffix).map(Box::from),
-                })),
+                }),
             };
+            return Some(KeyReference {
+                outcome,
+                carriage: KeyCarriage::of(id, suffix),
+            });
         }
     }
     if let FieldValue::Nested(children) = &field.value {
         let mut first_miss = None;
         for child in children {
-            match subtree_keyexpr_outcome(child, at) {
-                Some(Ok(keyexpr)) => return Some(Ok(keyexpr)),
-                Some(Err(cause)) => first_miss = first_miss.or(Some(cause)),
+            match subtree_keyexpr_reference(child, at) {
+                Some(found @ KeyReference { outcome: Ok(_), .. }) => return Some(found),
+                Some(miss) => first_miss = first_miss.or(Some(miss)),
                 None => {}
             }
         }
-        return first_miss.map(Err);
+        return first_miss;
     }
     None
 }

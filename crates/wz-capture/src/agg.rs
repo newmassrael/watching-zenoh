@@ -6077,6 +6077,14 @@ pub(crate) mod tests {
         push(sender_space(7, Some(suffix)), &[0u8; 11])
     }
 
+    /// A `Push` whose `WireExpr` writes scope `id` (0 names no declared id) and
+    /// `suffix`, so each way a key can travel is one call. `dissect`-gated: its
+    /// only reader is `crate::fields_json`'s test module.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn push_naming(id: u64, suffix: Option<&'static str>) -> Vec<u8> {
+        push(sender_space(id, suffix), &[0u8; 11])
+    }
+
     /// R2513 — the same capture, plus the pcap FILE it is made of.
     ///
     /// `crate::fields_json` reads the capture a SECOND time to slice a message's
