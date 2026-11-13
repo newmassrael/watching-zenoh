@@ -13481,6 +13481,23 @@
       "carry_forward_bullets": [
         "Open: read the hosted run of the previous head at the start of the next round: the size lane (the two C budgets), Layer E6h (the failure now carries the host's whole log) and the Z8 job under its 60-minute budget."
       ]
+    },
+    "Round 4479": {
+      "decision_summary": "The push was refused by the hosted verdict of the last pushed head (five red jobs), which is read and paid before another push. Four of the five are paid in this round, each from its own job log: the capi-c stamp had one revision written by hand in two files and the round before moved only one, so the stamp gate now reads the revision from the pin of the header and the export list and the two cannot disagree; the null-meaning list of the node record added three ungated adminspace tests, which moved every count guard over that filter by three, and all eight commands were run on the build machine so each guard states what its command printed (the hosted lane had measured two of them and stopped at the first failure of each layer); the fixed-memory admin image reads 334,580 bytes of text on the hosted lane and on a local build of the same tree, 1,348 more than its row, and the row moves with the owners that moved (the session core and its MCU generics) and the reason. The fifth, the Z8 regions order2 duplicate delivery, is an intermittent race that is not reproduced here; it is filed as a debt item with its evidence and its closing condition, and acknowledged in the ack table as not paid. A regression from the window's four session-core commits is judged unlikely and not excluded, and the item says so.",
+      "changes_bullets": [
+        "The stamp gate takes the capi-c revision from the header pin; eight adminspace count guards move by three (57, 57, 54, 54, 62, 70, 49, 54); the admin image row in the text budget moves to 334,580 bytes with its owners and reason.",
+        "One ack row for the last head's run, and one new debt item for the unpaid Z8 order2 duplicate delivery."
+      ],
+      "verification_bullets": [
+        "Each red was read from its own job log; the stamp gate selftest passes and prints revision 14 for capi-c; the eight adminspace commands were run on the build machine and print the new counts; the Zephyr admin image was rebuilt locally and its text, 334,580 bytes, equals the hosted reading; the owner row was emitted by the text gate from that build.",
+        "Not run: the hosted lanes on this head (the kit lane on the new row, the count guards, the stamp gate), and the Z8 order2 test, whose cause is open in the debt item."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the hosted run of this head at the start of the next round: the five repaid jobs, the size lane (the two C budgets) and Layer E6h; Z8 regions order2 is the debt item filed here, closed by a stress run with the peer trace lines read for the face that delivered the second copy."
+      ]
     }
   },
   "inventory_entries": {
