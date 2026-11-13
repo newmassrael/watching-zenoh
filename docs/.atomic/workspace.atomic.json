@@ -13464,6 +13464,23 @@
       "carry_forward_bullets": [
         "None from this round."
       ]
+    },
+    "Round 4478": {
+      "decision_summary": "The open items left by the size-lane round (ledger 4444) are filed as store debt entries so they have a name, a reason and a closing condition, instead of living only in a carry list: the unreproduced empty read of the pico storage-host test, the relocation cost of static pointer tables in the C images, the writer queue reserve and permit still linked through the link driver trait, and the first hosted reading of the Z8 job under its 60-minute budget. Each states what closes it. Nothing else is open from that round: the two C budgets are moved and landed, and the hosted run of that head is read at the start of the next round, not waited for.",
+      "changes_bullets": [
+        "Four active inventory entries with the open-debt source: the empty-read race (closes on a logged order fixed in the host, or a stress run that shows it cannot happen), the pointer-table relocations (compact to offsets into one string block when the history grows again), the writer queue legs (split the link driver trait by policy, about 1,300 bytes), the Z8 budget reading.",
+        "No code and no script changed; the store sidecar gains the four entries."
+      ],
+      "verification_bullets": [
+        "The four ids were checked against the 93 existing debt entries for a same-name or same-subject duplicate (none); the entries were added with the typed add-inventory-entry primitive in the working tree, not through the shared checkout.",
+        "Not run: any build or test; this round changes the store only. The hosted run of the last head is not read here."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the hosted run of the previous head at the start of the next round: the size lane (the two C budgets), Layer E6h (the failure now carries the host's whole log) and the Z8 job under its 60-minute budget."
+      ]
     }
   },
   "inventory_entries": {
