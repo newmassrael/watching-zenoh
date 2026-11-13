@@ -47,6 +47,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import capi_c_abi_pin  # noqa: E402
 import elf_facts  # noqa: E402
 
 # The pinned stamp of each family's DEFAULT build. Edit with the family's revision constant, in the
@@ -66,7 +67,10 @@ EXPECTED = {
         },
     },
     "capi-c": {
-        "revision": 13,
+        # Read from capi_c_abi_pin.EXPECTED_REVISION, the pin of the header and the export list. The
+        # revision was written by hand in both files and a round moved only one of them (hosted run
+        # 43360452070, C1st: 14 in the artifact, 13 here); one pin cannot fall behind itself.
+        "revision": capi_c_abi_pin.EXPECTED_REVISION,
         "layout": {"unstable_api": True, "shared_memory": False},
     },
     "ap-demo-surface": {"revision": 1, "layout": {}},

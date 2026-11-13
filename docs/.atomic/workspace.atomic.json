@@ -14181,6 +14181,11 @@
       "source": "open-debt register",
       "reason": "OPEN, WAITING ON A HOSTED RUN: the Z8 job was given a 60-minute timeout-minutes and its margin gate argument in the same change (bound by job_budget_binding.py), but no hosted Z8 run on a head carrying that budget has been read. Until one is, the budget floor and ceiling are unmeasured: a run that finishes at a small fraction of 3,600 s fires the floor, one near it fires the ceiling. Read the first completed run at the start of a round, then set the budget from the reading plus the usual margin; do not wait for it."
     },
+    "debt-z8-s7-order2-pubsub-duplicate-delivery": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN, INTERMITTENT, ROOT CAUSE NOT READ: Layer Z8 regions measured 125 of 126 on hosted run 43360452070 (head dcaed6aeed) because scenario7::test_regions_scenario7_order2_pubsub failed its final assertion at scenario7.rs:871, that every one of the nine subscribers (s9110 to s9330) sees unique timestamps -- at least one subscriber was delivered a sample twice. The other 125 regions tests passed. The window since the previous reading changed the session core by four commits (the chain head gated on its walker, the reassembly tests built without alloc, the consolidation mode word, a citation) and the router crates by none; none of the four is on the delivery path of a published sample, but no commit was bisected, so a regression is not excluded, only unlikely. Related and already fixed: order3's 1.5 to 4.4 percent duplicate delivery had its cause in the transport event listener announcing a face twice (watch plus history), closed by FaceLedger. What closes it: a stress run of order2 on the build machine with the peer trace lines on, read for WHICH subscriber got the second copy and through which face, then a fix in the router (not a retry in the test) and 200 of 200 passes."
+    },
     "declare-final": {
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",

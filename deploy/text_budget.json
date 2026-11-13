@@ -180,21 +180,21 @@
       "evidence": "docs/text-ownership.md"
     },
     "zephyr-admin-fixed-tls": {
-      "text_bytes": 333232,
+      "text_bytes": 334580,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
-        "wz_session_core": 60016,
+        "wz_session_core": 60348,
         "c:mbedtls": 54968,
         "c:net_": 25114,
-        "wz_session_mcu": 23666,
-        "(smaller owners)": 13187,
+        "wz_session_mcu": 24122,
+        "(smaller owners)": 13431,
         "c:tcp": 10846,
         "c:z_": 10502,
-        "(no symbol)": 10277,
+        "(no symbol)": 10563,
         "c:psa": 9286,
-        "c:wz_": 9344,
-        "wz_codecs": 9292,
+        "c:wz_": 9112,
+        "wz_codecs": 9420,
         "sce_rust_runtime": 7516,
         "core": 7072,
         "wz_runtime_coop": 6648,
@@ -203,7 +203,7 @@
         "c:zsock": 5632,
         "c:other": 5300,
         "c:Cy": 4486,
-        "wz_zephyr_admin_node": 3858,
+        "wz_zephyr_admin_node": 3802,
         "c:": 3616,
         "c:sys_": 2698,
         "sha2": 2382,
@@ -223,7 +223,7 @@
         "c:context": 1016,
         "compiler_builtins": 864,
         "wz_eth_mac_cyt4bf": 850,
-        "sce_forge_runtime": 1848,
+        "sce_forge_runtime": 1902,
         "c:register": 758,
         "c:zeth": 728,
         "c:gpio": 722,
@@ -238,7 +238,7 @@
         "heapless": 548,
         "c:route": 514
       },
-      "measured": "2026-11-02, scripts/kit-lane.sh build of the fixed-memory admin node over Zephyr's sockets and the secure channel (overlays/t2g_admin_fixed_tls.conf), at the first row of this image: text 326,088 bytes, data 4,132, bss 412,711 with the main stack at 47,104 bytes; 325,720 once the pending-query registries were stated as zero (the stack 19,584, .bss 385,207), 368 bytes less, inside the row's tolerance, and the row moved to it. Most of it is the channel (Mbed TLS, about 55 KB of its own symbols with the PSA and ECP parts beside) and the session core (60 KB, the verbs and the admin surface among it). 332,424 on 2026-11-05 (.bss 236,935, data 2,788) with the SCE pin at 07cb8c5020 (see the asking client's row): 5,664 bytes less than the row held, 3,714 of them in wz_codecs (13,506 to 9,792) and 2,254 in wz_session_core (64,588 to 62,334). 333,232 on 2026-11-05 with the admin space moved into the wz-admin crate (server-layer split, step 7): the code is the same and changes owner, wz_session_core 61,554 to 60,016 and wz_admin 2,090 to 3,628 (1,538 bytes each way), the image 136 bytes less than the row held.",
+      "measured": "2026-11-02, scripts/kit-lane.sh build of the fixed-memory admin node over Zephyr's sockets and the secure channel (overlays/t2g_admin_fixed_tls.conf), at the first row of this image: text 326,088 bytes, data 4,132, bss 412,711 with the main stack at 47,104 bytes; 325,720 once the pending-query registries were stated as zero (the stack 19,584, .bss 385,207), 368 bytes less, inside the row's tolerance, and the row moved to it. Most of it is the channel (Mbed TLS, about 55 KB of its own symbols with the PSA and ECP parts beside) and the session core (60 KB, the verbs and the admin surface among it). 332,424 on 2026-11-05 (.bss 236,935, data 2,788) with the SCE pin at 07cb8c5020 (see the asking client's row): 5,664 bytes less than the row held, 3,714 of them in wz_codecs (13,506 to 9,792) and 2,254 in wz_session_core (64,588 to 62,334). 333,232 on 2026-11-05 with the admin space moved into the wz-admin crate (server-layer split, step 7): the code is the same and changes owner, wz_session_core 61,554 to 60,016 and wz_admin 2,090 to 3,628 (1,538 bytes each way), the image 136 bytes less than the row held. 334,580 on 2026-11-13 (.bss 230,887, data 2,788; the hosted lane of run 43360452070 and a local build of the same tree read the same figure): 1,348 bytes more than the row held, 332 of them in wz_session_core (60,016 to 60,348), 456 in wz_session_mcu (23,666 to 24,122, which holds the core's generics), 286 in the symbol-less text, 244 in the smaller owners and 128 in wz_codecs, against 232 less in the C glue of wz_ (9,344 to 9,112). The session core was changed in the window by four commits (the chain head gated on its walker, the reassembly tests built without alloc, the consolidation mode word, the mode word's citation); none was measured on this image alone, so the growth is attributed to the window and not to one commit, and the row is moved to it as chosen growth of the session core.",
       "evidence": "docs/text-ownership.md"
     }
   }
