@@ -31,15 +31,17 @@ use wz_session_core::transport_compose::{vle_range, Framing};
 use wz_session_core::wire_const;
 
 use crate::doc_revision::{
-    key_set, newest, TRANSPORT_BUILD, TRANSPORT_LAYOUT, TRANSPORT_LAYOUT_R1_KEYS,
+    key_set, newest, TRANSPORT_BUILD, TRANSPORT_LAYOUT, TRANSPORT_LAYOUT_R2_KEYS,
 };
+use crate::e2e_frame::{self, Values};
+use crate::e2e_profile::Profile;
 use crate::transport_build::{build, RESOLUTION_WORDS};
 use crate::transport_build_json::build_document;
 use crate::transport_build_tests::corpus_descriptions;
 use crate::transport_layout::{
-    layout, Encoding, Kind, LayoutError, RelativeTo, Row, COVERED_MESSAGES,
+    layout, layout_under, Encoding, Kind, LayoutError, RelativeTo, Row, COVERED_MESSAGES,
 };
-use crate::transport_layout_json::{layout_document, ring_max_of};
+use crate::transport_layout_json::{layout_document, layout_document_under, ring_max_of};
 
 // ---------------------------------------------------------------- helpers
 
@@ -74,7 +76,7 @@ fn layout_member(doc: &str) -> &str {
 }
 
 fn is_refusal(doc: &str) -> bool {
-    doc.starts_with(r#"{"document":{"name":"transport_layout","revision":1},"ok":false,"reason":""#)
+    doc.starts_with(r#"{"document":{"name":"transport_layout","revision":2},"ok":false,"reason":""#)
 }
 
 /// A refusal is a value of one shape: the envelope, `ok:false`, a reason and its
@@ -106,7 +108,38 @@ pub(crate) fn documents_for_the_carries_gate() -> Vec<String> {
         }
     }
     docs.push(layout_document(&[0x03], Framing::Datagram, None));
+    // Under a profile: a Frame whose Put carries a protected frame, so the
+    // frame's rows and their two words are in the population, and a profile
+    // refused at a byte and at a pointer, for the two place keys.
+    let protected = frame_of_a_put(KEY, &protected_frame(7, b"hello"));
+    for framing in Framing::ALL {
+        let unit = framed(&protected, framing);
+        docs.push(layout_document_under(&unit, framing, None, PROFILE));
+    }
+    docs.push(layout_document_under(
+        &protected,
+        Framing::Datagram,
+        None,
+        "{",
+    ));
+    docs.push(layout_document_under(
+        &protected,
+        Framing::Datagram,
+        None,
+        r#"{"name":"p"}"#,
+    ));
     docs
+}
+
+/// The unit `framing` writes for `body`: the stream prefix, little-endian, of
+/// the framing's width, then the body.
+fn framed(body: &[u8], framing: Framing) -> Vec<u8> {
+    let width = framing.prefix_bytes();
+    let mut unit: Vec<u8> = (0..width)
+        .map(|i| ((body.len() >> (8 * i)) & 0xFF) as u8)
+        .collect();
+    unit.extend_from_slice(body);
+    unit
 }
 
 /// A frame with a payload that is a whole network message, laid by hand.
@@ -136,7 +169,7 @@ fn the_layout_of_every_built_unit_is_the_builds_own_layout() {
             // The envelope is the one place the two differ, by name.
             assert!(
                 read.starts_with(
-                    r#"{"document":{"name":"transport_layout","revision":1},"ok":true,"#
+                    r#"{"document":{"name":"transport_layout","revision":2},"ok":true,"#
                 ),
                 "{read}"
             );
@@ -628,12 +661,12 @@ fn the_headers_worked_example_is_what_the_door_writes() {
     );
     assert!(
         doc.starts_with(concat!(
-            r#"{"document":{"name":"transport_layout","revision":1},"ok":true,"#,
+            r#"{"document":{"name":"transport_layout","revision":2},"ok":true,"#,
             r#""prefix_bytes":2,"body_bytes":4,"layout":["#,
             r#"{"name":"unit_length","kind":"length","offset":0,"width":2,"#,
             r#""relative_to":"unit","encoding":"fixed","value":4,"min":0,"max":65535,"#,
             r#""bit_mask":null,"carrier":null,"stored":null,"measures":"body","#,
-            r#""ring_max":null,"ring_max_width":null},"#
+            r#""ring_max":null,"ring_max_width":null,"within":null,"covered_by":null},"#
         )),
         "{doc}"
     );
@@ -954,7 +987,7 @@ impl Rng {
 /// tile the body, and are the rows `layout` returns.
 fn check_answer(unit: &[u8], framing: Framing, doc: &str) -> bool {
     assert!(
-        doc.starts_with(r#"{"document":{"name":"transport_layout","revision":1},"ok":"#),
+        doc.starts_with(r#"{"document":{"name":"transport_layout","revision":2},"ok":"#),
         "{unit:02x?}: {doc}"
     );
     json5::parse(doc).unwrap_or_else(|e| panic!("{unit:02x?}: not JSON ({e:?}): {doc}"));
@@ -1089,7 +1122,29 @@ fn the_layout_documents_vocabularies_are_the_build_documents() {
             })
             .collect()
     };
-    assert_eq!(words(layout_shape), words(build_shape), "the same families");
+    // The layout document's words are the build document's and the two only a
+    // protected frame's rows carry: the build door builds transport messages,
+    // and the layout door also reads the frame a carried message holds.
+    let frame_only = |key: &str| -> Vec<String> {
+        match key {
+            "kind" => alloc::vec![String::from(Kind::Checksum.word())],
+            "encoding" => alloc::vec![String::from(Encoding::BigEndian.word())],
+            _ => Vec::new(),
+        }
+    };
+    let built_and_frame_only: Vec<(String, Vec<String>)> = words(build_shape)
+        .into_iter()
+        .map(|(key, mut values)| {
+            values.extend(frame_only(&key));
+            values.sort();
+            (key, values)
+        })
+        .collect();
+    assert_eq!(
+        words(layout_shape),
+        built_and_frame_only,
+        "the build document's families, and the frame's words"
+    );
     assert_eq!(
         layout_shape
             .carries
@@ -1126,6 +1181,20 @@ fn the_layout_documents_vocabularies_are_the_build_documents() {
     assert_eq!(family("kind"), sorted(Kind::names()));
     assert_eq!(family("encoding"), sorted(Encoding::names()));
     assert_eq!(family("relative_to"), sorted(RelativeTo::names()));
+    let built_family = |key: &str| -> Vec<&'static str> {
+        build_shape
+            .families
+            .iter()
+            .find(|f| f.key == key)
+            .expect("a family")
+            .values
+            .to_vec()
+    };
+    assert_eq!(built_family("kind"), sorted(Kind::transport_names()));
+    assert_eq!(
+        built_family("encoding"),
+        sorted(Encoding::transport_names())
+    );
 
     // The row keys of the two documents are the same, in the same order.
     let b = build(
@@ -1165,7 +1234,7 @@ fn the_document_uses_exactly_the_keys_the_registry_pins() {
     }
     keys.sort_unstable();
     keys.dedup();
-    assert_eq!(keys, TRANSPORT_LAYOUT_R1_KEYS, "{TRANSPORT_LAYOUT}");
+    assert_eq!(keys, TRANSPORT_LAYOUT_R2_KEYS, "{TRANSPORT_LAYOUT}");
     assert!(docs.iter().any(|d| d.contains("\"ok\":true")));
     assert!(docs.iter().any(|d| d.contains("\"ok\":false")));
 }
@@ -1193,6 +1262,431 @@ fn a_cell_past_two_to_the_fifty_third_is_a_string() {
         doc.contains(r#""ring_max":"9223372036854775807","ring_max_width":9"#),
         "{doc}"
     );
+}
+
+// ------------------------------------- 6. the protected frames a Frame carries
+
+/// A profile with the CRC first and not covering itself, a length that counts
+/// the frame, a two-byte counter, and an identifier that is XORed and split,
+/// whose CRC covers the other three fields and the body in its own order.
+const PROFILE: &str = r#"{"name": "prof", "fields": [{"name": "crc", "bytes": 4}, {"name": "length", "bytes": 2}, {"name": "counter", "bytes": 2}, {"name": "ident", "bytes": 4, "xor": "0x00FF00FF", "split": [{"name": "domain", "lsb": 24, "width": 8}, {"name": "msg", "lsb": 0, "width": 16}]}], "crc": {"field": "crc", "width": 32, "poly": "0xF4ACFB13", "init": "0xFFFFFFFF", "refin": true, "refout": true, "xorout": "0xFFFFFFFF", "cover": ["length", "ident", "@payload", "counter"]}, "length": {"field": "length", "counts": "frame"}, "counter": {"field": "counter", "max_gap": 3, "timeout_ms": 100}}"#;
+
+const KEY: &str = "demo/e2e";
+
+fn profile() -> Profile {
+    Profile::parse(PROFILE).expect("the profile reads")
+}
+
+/// A frame under [`PROFILE`] with this counter around `body`, identifier
+/// domain 2 and message 700.
+fn protected_frame(counter: u64, body: &[u8]) -> Vec<u8> {
+    e2e_frame::build(
+        &profile(),
+        &Values::new()
+            .whole("counter", counter)
+            .parts("ident", &[("domain", 2), ("msg", 700)]),
+        body,
+    )
+    .expect("the frame builds")
+    .bytes
+}
+
+/// A Frame (R, sequence number 5) carrying one Push of a Put under `key` with
+/// `payload`, laid by hand from the header rules: the Push names its key whole
+/// (scope 0 and a suffix, so its N flag), the Put has no flag and writes the
+/// payload's length and the payload. Every length here is under 128, so each
+/// VLE is one byte.
+fn frame_of_a_put(key: &str, payload: &[u8]) -> Vec<u8> {
+    assert!(key.len() < 128 && payload.len() < 128);
+    let mut body = alloc::vec![
+        wire_const::T_MID_FRAME | wire_const::FLAG_T_FRAME_R,
+        0x05,
+        wire_const::N_MID_PUSH | wire_const::FLAG_N_N,
+        0x00,
+        key.len() as u8,
+    ];
+    body.extend_from_slice(key.as_bytes());
+    body.extend_from_slice(&[0x01, payload.len() as u8]);
+    body.extend_from_slice(payload);
+    body
+}
+
+/// Where the payload starts in [`frame_of_a_put`]'s body: the Frame's two
+/// bytes, the Push header, the scope, the suffix length and the suffix, the Put
+/// header and the payload length.
+fn payload_at(key: &str) -> usize {
+    2 + 1 + 1 + 1 + key.len() + 1 + 1
+}
+
+/// The bytes of one row, as an integer read most significant byte first.
+fn big_endian_at(body: &[u8], row: &Row) -> u64 {
+    body[row.offset..row.offset + row.width]
+        .iter()
+        .fold(0u64, |acc, b| acc << 8 | u64::from(*b))
+}
+
+fn row_named<'a>(rows: &'a [Row], name: &str) -> &'a Row {
+    rows.iter().find(|r| r.name == name).unwrap_or_else(|| {
+        panic!(
+            "no row `{name}` in {:?}",
+            rows.iter().map(|r| &r.name).collect::<Vec<_>>()
+        )
+    })
+}
+
+/// The frame's rows, typed by hand from the profile: where each field is, what
+/// it is, what it holds as written, and which of them the CRC is taken over.
+#[test]
+fn a_protected_frame_in_a_carried_put_is_reported_under_its_profile() {
+    let frame = protected_frame(7, b"hello");
+    let body = frame_of_a_put(KEY, &frame);
+    let at = payload_at(KEY);
+    assert_eq!(
+        &body[at..],
+        frame.as_slice(),
+        "the fixture puts the frame there"
+    );
+
+    let plain = layout(&body, Framing::Datagram, None).expect("a frame");
+    let rows = layout_under(&body, Framing::Datagram, None, Some(&profile())).expect("a frame");
+    assert_eq!(
+        &rows[..plain.len()],
+        plain.as_slice(),
+        "the transport rows are the rows without a profile, in order"
+    );
+    let e2e = &rows[plain.len()..];
+    let names: Vec<&str> = e2e.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "carried[0].e2e",
+            "carried[0].e2e.crc",
+            "carried[0].e2e.length",
+            "carried[0].e2e.counter",
+            "carried[0].e2e.ident",
+            "carried[0].e2e.@payload",
+        ]
+    );
+    /// One frame row, as a reader of the profile writes it down.
+    struct Want {
+        name: &'static str,
+        kind: Kind,
+        offset: usize,
+        width: usize,
+        encoding: Encoding,
+        value: Option<u64>,
+        within: &'static str,
+        covered_by: Option<&'static str>,
+        measures: Option<&'static str>,
+    }
+    let header = |name, kind, offset, width, value, covered_by, measures| Want {
+        name,
+        kind,
+        offset,
+        width,
+        encoding: Encoding::BigEndian,
+        value: Some(value),
+        within: "carried[0].e2e",
+        covered_by,
+        measures,
+    };
+    let crc = Some("carried[0].e2e.crc");
+    let written_crc = u64::from(u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]));
+    let want = [
+        Want {
+            name: "carried[0].e2e",
+            kind: Kind::Other,
+            offset: at,
+            width: 17,
+            encoding: Encoding::Fixed,
+            value: None,
+            within: "payload",
+            covered_by: None,
+            measures: None,
+        },
+        header(
+            "carried[0].e2e.crc",
+            Kind::Checksum,
+            at,
+            4,
+            written_crc,
+            None,
+            None,
+        ),
+        header(
+            "carried[0].e2e.length",
+            Kind::Length,
+            at + 4,
+            2,
+            17,
+            crc,
+            Some("carried[0].e2e"),
+        ),
+        header(
+            "carried[0].e2e.counter",
+            Kind::SequenceNumber,
+            at + 6,
+            2,
+            7,
+            crc,
+            None,
+        ),
+        // Domain 2 at bit 24 and message 700, 0x020002BC, XORed with
+        // 0x00FF00FF as written.
+        header(
+            "carried[0].e2e.ident",
+            Kind::Other,
+            at + 8,
+            4,
+            0x02FF_0243,
+            crc,
+            None,
+        ),
+        Want {
+            name: "carried[0].e2e.@payload",
+            kind: Kind::Other,
+            offset: at + 12,
+            width: 5,
+            encoding: Encoding::Fixed,
+            value: None,
+            within: "carried[0].e2e",
+            covered_by: crc,
+            measures: None,
+        },
+    ];
+    for (row, w) in e2e.iter().zip(want) {
+        let Want {
+            name,
+            kind,
+            offset,
+            width,
+            encoding,
+            value,
+            within,
+            covered_by,
+            measures,
+        } = w;
+        assert_eq!(row.name, name);
+        assert_eq!(row.kind, kind, "{name} kind");
+        assert_eq!((row.offset, row.width), (offset, width), "{name} place");
+        assert_eq!(row.relative_to, RelativeTo::Body, "{name} relative_to");
+        assert_eq!(row.encoding, encoding, "{name} encoding");
+        assert_eq!(row.value, value, "{name} value");
+        assert_eq!(row.within.as_deref(), Some(within), "{name} within");
+        assert_eq!(row.covered_by.as_deref(), covered_by, "{name} covered_by");
+        assert_eq!(row.measures.as_deref(), measures, "{name} measures");
+        assert_eq!(
+            (row.bit_mask, row.carrier.as_deref(), row.stored),
+            (None, None, None)
+        );
+        if encoding == Encoding::BigEndian {
+            assert_eq!(
+                (row.min, row.max),
+                (Some(0), Some((1u64 << (8 * width)) - 1)),
+                "{name}"
+            );
+            assert_eq!(
+                Some(big_endian_at(&body, row)),
+                row.value,
+                "{name} reads back"
+            );
+        } else {
+            assert_eq!((row.min, row.max), (None, None), "{name}");
+        }
+    }
+    // Every transport row is outside a frame and covered by nothing.
+    assert!(plain
+        .iter()
+        .all(|r| r.within.is_none() && r.covered_by.is_none()));
+}
+
+/// The case the report is for: a CRC made wrong from the report alone. Any
+/// other value written big-endian into the checksum row fails the CRC, and the
+/// frame's other facts, and the transport message around it, do not move.
+#[test]
+fn a_checksum_replaced_from_the_report_alone_fails_and_nothing_else_moves() {
+    let profile = profile();
+    for framing in Framing::ALL {
+        let mut unit = framed(&frame_of_a_put(KEY, &protected_frame(7, b"hello")), framing);
+        let prefix = framing.prefix_bytes();
+        let before = layout_under(&unit, framing, None, Some(&profile)).expect("reads");
+        let crc = row_named(&before, "carried[0].e2e.crc").clone();
+        let wrong = crc.value.expect("an integer") ^ 1;
+        for (i, byte) in wrong.to_be_bytes()[8 - crc.width..].iter().enumerate() {
+            unit[prefix + crc.offset + i] = *byte;
+        }
+        let after = layout_under(&unit, framing, None, Some(&profile)).expect("still reads");
+        for (a, b) in before.iter().zip(&after) {
+            if a.name == crc.name {
+                assert_eq!(b.value, Some(wrong));
+            } else {
+                assert_eq!(a, b, "only the checksum row moves");
+            }
+        }
+        let frame_row = row_named(&after, "carried[0].e2e");
+        let at = prefix + frame_row.offset;
+        let opened = e2e_frame::open(&profile, &unit[at..at + frame_row.width]).expect("opens");
+        assert!(!opened.crc_ok, "{}: the CRC must fail", framing.name());
+        assert!(opened.length_matches_frame);
+        assert_eq!(opened.counter(&profile), 7);
+    }
+}
+
+/// A counter that skips and a CRC that is still right: the frame is built
+/// again by the wrap door's function and written over the frame row, which the
+/// report places, and the report of the new unit says the new counter.
+#[test]
+fn a_counter_rebuilt_over_the_frame_row_keeps_the_checksum_right() {
+    let profile = profile();
+    let mut unit = frame_of_a_put(KEY, &protected_frame(7, b"hello"));
+    let rows = layout_under(&unit, Framing::Datagram, None, Some(&profile)).expect("reads");
+    let frame_row = row_named(&rows, "carried[0].e2e").clone();
+    let skipped = protected_frame(12, b"hello");
+    assert_eq!(
+        skipped.len(),
+        frame_row.width,
+        "the same body and profile, the same length"
+    );
+    unit[frame_row.offset..frame_row.offset + frame_row.width].copy_from_slice(&skipped);
+    let after = layout_under(&unit, Framing::Datagram, None, Some(&profile)).expect("reads");
+    assert_eq!(row_named(&after, "carried[0].e2e.counter").value, Some(12));
+    let opened = e2e_frame::open(
+        &profile,
+        &unit[frame_row.offset..frame_row.offset + frame_row.width],
+    )
+    .expect("opens");
+    assert!(opened.crc_ok && opened.length_matches_frame);
+    assert_eq!(opened.counter(&profile), 12);
+}
+
+/// No frame rows where there is no frame to read: a payload shorter than the
+/// header, a Fragment's piece, a Frame whose message carries no payload, and a
+/// unit with no Frame. The transport rows are the rows without a profile.
+#[test]
+fn no_frame_rows_where_no_payload_can_hold_a_frame() {
+    let profile = profile();
+    let short = frame_of_a_put(KEY, &[0u8; 11]);
+    let fragment = {
+        let mut body = frame_of_a_put(KEY, &protected_frame(7, b"hello"));
+        body[0] = wire_const::T_MID_FRAGMENT | wire_const::FLAG_T_FRAGMENT_R;
+        body
+    };
+    let keep_alive = build(r#"{"message":"keep_alive"}"#, Framing::Datagram)
+        .expect("builds")
+        .unit;
+    for (label, unit) in [
+        ("a payload one byte short of the header", short),
+        ("a Fragment", fragment),
+        (
+            "a Frame with no network message",
+            FRAME_WITH_A_PUSH[..2].to_vec(),
+        ),
+        ("a KeepAlive", keep_alive),
+    ] {
+        let plain = layout(&unit, Framing::Datagram, None).expect(label);
+        let under = layout_under(&unit, Framing::Datagram, None, Some(&profile)).expect(label);
+        assert_eq!(under, plain, "{label}");
+    }
+    // One byte more and the frame is read, empty body and all.
+    let exact = frame_of_a_put(KEY, &[0u8; 12]);
+    let rows = layout_under(&exact, Framing::Datagram, None, Some(&profile)).expect("reads");
+    assert_eq!(row_named(&rows, "carried[0].e2e.@payload").width, 0);
+}
+
+/// Two messages in one Frame: each has its own rows, by its index in the
+/// Frame, and they do not overlap.
+#[test]
+fn each_carried_message_has_its_own_frame_rows_by_its_index() {
+    let first = frame_of_a_put(KEY, &protected_frame(7, b"one"));
+    let second = frame_of_a_put("demo/other", &protected_frame(8, b"second"));
+    let mut body = first.clone();
+    body.extend_from_slice(&second[2..]);
+    let rows =
+        layout_under(&body, Framing::Datagram, None, Some(&profile())).expect("two messages");
+    let c0 = row_named(&rows, "carried[0].e2e.counter");
+    let c1 = row_named(&rows, "carried[1].e2e.counter");
+    assert_eq!((c0.value, c1.value), (Some(7), Some(8)));
+    let f0 = row_named(&rows, "carried[0].e2e");
+    let f1 = row_named(&rows, "carried[1].e2e");
+    assert!(f0.offset + f0.width <= f1.offset);
+    assert_eq!(f1.offset, first.len() + payload_at("demo/other") - 2);
+}
+
+/// The document: the transport rows the door writes without a profile, then
+/// the frame's, with the two words only a frame has; and a profile that does
+/// not read refused at its place, the unit unread.
+#[test]
+fn the_document_under_a_profile_adds_the_frame_rows_and_refuses_a_bad_profile() {
+    let body = frame_of_a_put(KEY, &protected_frame(7, b"hello"));
+    for framing in Framing::ALL {
+        let unit = framed(&body, framing);
+        let plain = layout_document(&unit, framing, None);
+        let under = layout_document_under(&unit, framing, None, PROFILE);
+        let plain_rows = &plain[..plain.len() - 2];
+        assert!(under.starts_with(plain_rows), "{under}");
+        assert!(
+            under[plain_rows.len()..].starts_with(r#",{"name":"carried[0].e2e","kind":"other""#)
+        );
+        assert!(
+            under.contains(r#""kind":"checksum""#) && under.contains(r#""encoding":"big_endian""#)
+        );
+        assert!(under.contains(r#""within":"payload","covered_by":null}"#));
+        assert!(under.contains(r#""covered_by":"carried[0].e2e.crc"}"#));
+    }
+
+    let not_json = layout_document_under(&body, Framing::Datagram, None, "{");
+    assert!(
+        not_json.starts_with(
+            r#"{"document":{"name":"transport_layout","revision":2},"ok":false,"profile_offset":1,"#
+        ),
+        "{not_json}"
+    );
+    let not_a_profile = layout_document_under(&body, Framing::Datagram, None, r#"{"name":"p"}"#);
+    assert!(
+        not_a_profile.starts_with(
+            r#"{"document":{"name":"transport_layout","revision":2},"ok":false,"profile_path":"#
+        ),
+        "{not_a_profile}"
+    );
+    for doc in [&not_json, &not_a_profile] {
+        assert!(!doc.contains("\"layout\""), "{doc}");
+        json5::parse(doc).expect("a refusal is JSON");
+    }
+}
+
+/// Under a profile, a unit cut at every byte and a frame mutated at every bit
+/// is a refusal or a report whose rows lie inside the unit, with the frame rows
+/// inside the payload row; never a panic.
+#[test]
+fn every_cut_and_flip_under_a_profile_is_refused_or_reported_inside_the_unit() {
+    let profile = profile();
+    let body = frame_of_a_put(KEY, &protected_frame(7, b"hello"));
+    let mut units: Vec<Vec<u8>> = (0..=body.len()).map(|n| body[..n].to_vec()).collect();
+    for bit in 0..body.len() * 8 {
+        let mut flipped = body.clone();
+        flipped[bit / 8] ^= 1 << (bit % 8);
+        units.push(flipped);
+    }
+    let mut reported = 0usize;
+    for unit in &units {
+        let Ok(rows) = layout_under(unit, Framing::Datagram, None, Some(&profile)) else {
+            continue;
+        };
+        reported += 1;
+        let payload = rows.iter().find(|r| r.name == "payload");
+        for row in &rows {
+            assert!(
+                row.offset + row.width <= unit.len(),
+                "{unit:02x?}: {}",
+                row.name
+            );
+            if row.within.as_deref() == Some("payload") {
+                let p = payload.expect("a frame row implies a payload row");
+                assert!(row.offset >= p.offset && row.offset + row.width <= p.offset + p.width);
+            }
+        }
+    }
+    assert!(reported > body.len(), "only {reported} reports");
 }
 
 /// The hex of a unit the way `transport_build` prints it, round-tripped here so

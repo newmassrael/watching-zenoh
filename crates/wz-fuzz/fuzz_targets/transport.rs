@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The doors that read one transport message from bytes a consumer holds:
-//! `wz_dissect_transport_message`, `wz_dissect_transport_message_in` and
-//! `wz_dissect_transport_layout`.
+//! `wz_dissect_transport_message`, `wz_dissect_transport_message_in`,
+//! `wz_dissect_transport_layout` and `wz_dissect_transport_layout_e2e` (under
+//! a fixed profile that reads).
 //!
 //! Input: four bytes of arguments, the session context (JSON, to a NUL), a
 //! sequence-number ring word (to a NUL), then the message bytes.
@@ -54,4 +55,13 @@ fuzz_target!(|data: &[u8]| {
     string_door("transport_layout", |o| unsafe {
         wz_dissect_transport_layout(b, n, framing, ring_ptr, o)
     });
+    // Under a profile that reads, so the bytes, and not the profile reader
+    // (the `e2e` target's), decide which frame rows there are.
+    let profile = PROFILE.as_ptr().cast();
+    string_door("transport_layout_e2e", |o| unsafe {
+        wz_dissect_transport_layout_e2e(b, n, framing, ring_ptr, profile, o)
+    });
 });
+
+/// A profile of four fields, the CRC covering the other three and the body.
+const PROFILE: &[u8] = b"{\"name\":\"f\",\"fields\":[{\"name\":\"crc\",\"bytes\":2},{\"name\":\"length\",\"bytes\":1},{\"name\":\"counter\",\"bytes\":1},{\"name\":\"ident\",\"bytes\":2,\"xor\":\"0x00FF\"}],\"crc\":{\"field\":\"crc\",\"width\":16,\"poly\":\"0x1021\",\"init\":\"0xFFFF\",\"refin\":false,\"refout\":false,\"xorout\":0,\"cover\":[\"length\",\"ident\",\"@payload\",\"counter\"]},\"length\":{\"field\":\"length\",\"counts\":\"frame\"},\"counter\":{\"field\":\"counter\",\"max_gap\":4,\"timeout_ms\":100}}\0";

@@ -3487,6 +3487,33 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: TRANSPORT_LAYOUT_R1_CARRIES,
     },
+    // Revision 2 of both transport documents: the report reaches into the
+    // protected frame a carried message's payload holds, when the caller names
+    // its profile. Every layout row gains `within` (the row whose bytes hold
+    // it) and `covered_by` (the checksum row computed over it), `null` on a row
+    // of the transport message, so the build document's rows gain the two keys
+    // as well and it moves with this one. The layout document's `kind` gains
+    // `checksum` and its `encoding` `big_endian`, the words of a frame's CRC and
+    // header integers, which the build door never writes; its refusal gains the
+    // place of a profile that does not read, `profile_path` or `profile_offset`.
+    DocumentShape {
+        document: TRANSPORT_BUILD,
+        revision: 2,
+        keys: TRANSPORT_BUILD_R2_KEYS,
+        retiring: &[],
+        families: TRANSPORT_BUILD_R1_FAMILIES,
+        planes: &[],
+        carries: TRANSPORT_BUILD_R1_CARRIES,
+    },
+    DocumentShape {
+        document: TRANSPORT_LAYOUT,
+        revision: 2,
+        keys: TRANSPORT_LAYOUT_R2_KEYS,
+        retiring: &[],
+        families: TRANSPORT_LAYOUT_R2_FAMILIES,
+        planes: &[],
+        carries: TRANSPORT_LAYOUT_R1_CARRIES,
+    },
     // The capture read as SESSIONS: one row per zid pair, in the cells a
     // sessions editor shows, from a capture container or from a live handle.
     //
@@ -16358,6 +16385,102 @@ pub const TRANSPORT_LAYOUT_R1_CARRIES: &[KeyCarries] = &[
     KeyCarries {
         key: "relative_to",
         shape: CarriesShape::Passenger,
+    },
+];
+
+/// The `transport_build` document's key set at revision 2: revision 1's, and
+/// the two row keys every layout row gained, `within` and `covered_by`. A built
+/// message's rows are the transport message's, so both are `null` on every one
+/// of them; they are keys of the row shape both documents share.
+pub const TRANSPORT_BUILD_R2_KEYS: &[&str] = &[
+    "bit_mask",
+    "body",
+    "carrier",
+    "covered_by",
+    "description_offset",
+    "description_path",
+    "document",
+    "encoding",
+    "kind",
+    "layout",
+    "max",
+    "measures",
+    "message",
+    "min",
+    "name",
+    "offset",
+    "ok",
+    "prefix_bytes",
+    "reason",
+    "relative_to",
+    "revision",
+    "ring_max",
+    "ring_max_width",
+    "stored",
+    "unit",
+    "value",
+    "width",
+    "within",
+];
+
+/// The `transport_layout` document's key set at revision 2: revision 1's, the
+/// two row keys `within` and `covered_by`, and the place a refused profile is
+/// named by, `profile_path` or `profile_offset`, which only the door that takes
+/// a profile writes.
+pub const TRANSPORT_LAYOUT_R2_KEYS: &[&str] = &[
+    "bit_mask",
+    "body_bytes",
+    "carrier",
+    "covered_by",
+    "document",
+    "encoding",
+    "kind",
+    "layout",
+    "max",
+    "measures",
+    "message",
+    "min",
+    "name",
+    "offset",
+    "ok",
+    "prefix_bytes",
+    "profile_offset",
+    "profile_path",
+    "reason",
+    "relative_to",
+    "revision",
+    "ring_max",
+    "ring_max_width",
+    "stored",
+    "value",
+    "width",
+    "within",
+];
+
+/// The `transport_layout` document's value families at revision 2: revision
+/// 1's, and the two words only a protected frame's rows carry, `checksum` (its
+/// CRC) and `big_endian` (its header integers). The build document builds
+/// transport messages only, so its families keep revision 1's words
+/// (`transport_layout::Kind::TRANSPORT`, `Encoding::TRANSPORT`).
+pub const TRANSPORT_LAYOUT_R2_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "encoding",
+        values: &["big_endian", "fixed", "vle"],
+    },
+    ValueFamily {
+        key: "kind",
+        values: &[
+            "checksum",
+            "flag",
+            "length",
+            "other",
+            "reserved",
+            "sequence_number",
+        ],
+    },
+    ValueFamily {
+        key: "relative_to",
+        values: &["body", "unit"],
     },
 ];
 
@@ -31408,9 +31531,13 @@ mod tests {
             (PROTO_ENCODE, 1),
             // A transport message built from a description, with the report
             // of its bytes.
-            (TRANSPORT_BUILD, 1),
+            // To 2 when every layout row gained `within` and `covered_by`.
+            (TRANSPORT_BUILD, 2),
             // The same report for bytes that already exist.
-            (TRANSPORT_LAYOUT, 1),
+            // To 2 when it reached into a carried message's protected frame
+            // under a profile: the two row keys, `checksum` and `big_endian`,
+            // and the place of a refused profile.
+            (TRANSPORT_LAYOUT, 2),
             // The capture read as sessions, one row per zid pair.
             // To 2 when `caps` gained `frames_total`, the ceiling over every
             // flow: one key, no word moves and nothing retires.

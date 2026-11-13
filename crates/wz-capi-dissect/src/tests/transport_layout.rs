@@ -67,10 +67,162 @@ pub(super) fn documents() -> Vec<String> {
         call(&[0x01, 0x05], WZ_DISSECT_FRAMING_DATAGRAM, None),
         call(&[0x09, 0x00, 0x25], WZ_DISSECT_FRAMING_TCP_STREAM, None),
         call(&[0x07, 0, 0, 0, 0, 0], WZ_DISSECT_FRAMING_DATAGRAM, None),
+        // Under a profile: the frame's rows, and a profile refused at a byte
+        // and at a pointer.
+        call_e2e(
+            &protected_unit(),
+            WZ_DISSECT_FRAMING_DATAGRAM,
+            None,
+            PROFILE,
+        ),
+        call_e2e(&protected_unit(), WZ_DISSECT_FRAMING_DATAGRAM, None, "{"),
+        call_e2e(
+            &protected_unit(),
+            WZ_DISSECT_FRAMING_DATAGRAM,
+            None,
+            r#"{"name":"p"}"#,
+        ),
     ]
     .into_iter()
     .map(|r| r.expect("bytes are always answered"))
     .collect()
+}
+
+/// A profile with a two-byte CRC over the other fields and the body.
+const PROFILE: &str = r#"{"name":"p","fields":[{"name":"crc","bytes":2},{"name":"length","bytes":1},{"name":"counter","bytes":1}],"crc":{"field":"crc","width":16,"poly":"0x1021","init":"0xFFFF","refin":false,"refout":false,"xorout":0,"cover":["length","@payload","counter"]},"length":{"field":"length","counts":"frame"},"counter":{"field":"counter","max_gap":4,"timeout_ms":100}}"#;
+
+/// A Frame (R, sn 5) carrying a Push of a Put under `demo/e2e` whose payload
+/// is a frame under [`PROFILE`] (CRC 0000, length 6, counter 7, body `ab cd`):
+/// the CRC is not computed, which the report does not read.
+fn protected_unit() -> Vec<u8> {
+    let mut unit = vec![0x25, 0x05, 0x3D, 0x00, 0x08];
+    unit.extend_from_slice(b"demo/e2e");
+    unit.extend_from_slice(&[0x01, 0x06, 0x00, 0x00, 0x06, 0x07, 0xAB, 0xCD]);
+    unit
+}
+
+/// Drive the profile door the way C does.
+fn call_e2e(
+    bytes: &[u8],
+    framing: c_int,
+    ring: Option<&str>,
+    profile: &str,
+) -> Result<String, c_int> {
+    let ring = ring.map(|w| CString::new(w).expect("no interior NUL"));
+    let profile = CString::new(profile).expect("no interior NUL");
+    let mut out: *mut c_char = core::ptr::null_mut();
+    let rc = unsafe {
+        wz_dissect_transport_layout_e2e(
+            bytes.as_ptr(),
+            bytes.len(),
+            framing,
+            ring.as_ref().map_or(core::ptr::null(), |r| r.as_ptr()),
+            profile.as_ptr(),
+            &mut out,
+        )
+    };
+    if rc != WZ_DISSECT_OK {
+        assert!(out.is_null(), "an error must not hand back a string");
+        return Err(rc);
+    }
+    assert!(!out.is_null(), "OK must come with a string");
+    let s = unsafe { std::ffi::CStr::from_ptr(out) }
+        .to_str()
+        .expect("utf8")
+        .to_string();
+    unsafe { wz_dissect_string_free(out) };
+    Ok(s)
+}
+
+/// The profile door across the boundary: the transport rows the plain door
+/// writes, then the frame's; a profile that does not read refused at its
+/// place; and a caller's bug, a null or non-UTF-8 profile among them, a code
+/// and no string.
+#[test]
+fn the_profile_door_adds_the_frames_rows_to_the_plain_doors() {
+    let unit = protected_unit();
+    let plain = call(&unit, WZ_DISSECT_FRAMING_DATAGRAM, None).expect("answered");
+    let under = call_e2e(&unit, WZ_DISSECT_FRAMING_DATAGRAM, None, PROFILE).expect("answered");
+    let plain_rows = &plain[..plain.len() - 2];
+    assert!(under.starts_with(plain_rows), "{under}");
+    assert!(
+        under.contains(
+            r#"{"name":"carried[0].e2e.crc","kind":"checksum","offset":15,"width":2,"relative_to":"body","encoding":"big_endian","value":0,"min":0,"max":65535"#
+        ),
+        "{under}"
+    );
+    assert!(
+        under.contains(
+            r#"{"name":"carried[0].e2e.counter","kind":"sequence_number","offset":18,"width":1,"relative_to":"body","encoding":"big_endian","value":7"#
+        ),
+        "{under}"
+    );
+    assert!(
+        under.contains(r#""within":"carried[0].e2e","covered_by":"carried[0].e2e.crc"}"#),
+        "{under}"
+    );
+
+    let refused = call_e2e(&unit, WZ_DISSECT_FRAMING_DATAGRAM, None, "{").expect("answered");
+    assert!(
+        refused.starts_with(
+            r#"{"document":{"name":"transport_layout","revision":2},"ok":false,"profile_offset":"#
+        ),
+        "{refused}"
+    );
+
+    let mut out: *mut c_char = core::ptr::null_mut();
+    let rc = unsafe {
+        wz_dissect_transport_layout_e2e(
+            unit.as_ptr(),
+            unit.len(),
+            WZ_DISSECT_FRAMING_DATAGRAM,
+            core::ptr::null(),
+            core::ptr::null(),
+            &mut out,
+        )
+    };
+    assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
+    assert!(out.is_null());
+    let not_utf8 = [0xFFu8, 0x00];
+    let rc = unsafe {
+        wz_dissect_transport_layout_e2e(
+            unit.as_ptr(),
+            unit.len(),
+            WZ_DISSECT_FRAMING_DATAGRAM,
+            core::ptr::null(),
+            not_utf8.as_ptr().cast(),
+            &mut out,
+        )
+    };
+    assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
+    assert!(out.is_null());
+    let profile = CString::new(PROFILE).expect("no NUL");
+    let rc = unsafe {
+        wz_dissect_transport_layout_e2e(
+            unit.as_ptr(),
+            unit.len(),
+            3,
+            core::ptr::null(),
+            profile.as_ptr(),
+            &mut out,
+        )
+    };
+    assert_eq!(
+        rc, WZ_DISSECT_ERR_INVALID_ARG,
+        "a framing no constant names"
+    );
+    assert!(out.is_null());
+    let rc = unsafe {
+        wz_dissect_transport_layout_e2e(
+            unit.as_ptr(),
+            unit.len(),
+            WZ_DISSECT_FRAMING_DATAGRAM,
+            core::ptr::null(),
+            profile.as_ptr(),
+            core::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG, "a null out");
 }
 
 /// A message built through the build door, through this ABI, is reported by this
@@ -200,7 +352,7 @@ fn a_callers_bug_is_a_code_and_unreadable_bytes_are_a_refusal() {
     unsafe { wz_dissect_string_free(out) };
     assert!(
         empty.starts_with(
-            r#"{"document":{"name":"transport_layout","revision":1},"ok":false,"reason":""#
+            r#"{"document":{"name":"transport_layout","revision":2},"ok":false,"reason":""#
         ),
         "{empty}"
     );

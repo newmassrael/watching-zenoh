@@ -28,7 +28,7 @@ use wz_session_core::transport_compose::{vle_range, vle_width, Framing};
 use wz_session_wire_fixtures as oracle;
 
 use crate::doc_revision::{
-    key_set, TRANSPORT_BUILD, TRANSPORT_BUILD_R1_FAMILIES, TRANSPORT_BUILD_R1_KEYS,
+    key_set, TRANSPORT_BUILD, TRANSPORT_BUILD_R1_FAMILIES, TRANSPORT_BUILD_R2_KEYS,
 };
 use crate::e2e_profile::DocError;
 use crate::transport_build::{build, BuildError, Built, RESOLUTION_WORDS};
@@ -905,6 +905,9 @@ fn replaced(b: &Built, row: &Row, new: u64) -> Vec<u8> {
         (None, Encoding::Vle) => {
             unit[at..at + row.width].copy_from_slice(&vle_in(row.width, new));
         }
+        (None, Encoding::BigEndian) => {
+            unit[at..at + row.width].copy_from_slice(&new.to_be_bytes()[8 - row.width..]);
+        }
     }
     unit
 }
@@ -1666,11 +1669,13 @@ fn the_closed_vocabularies_are_walked_and_declared() {
         v
     };
     let shape = newest(TRANSPORT_BUILD).expect("declared");
-    assert_eq!(shape.revision, 1);
+    assert_eq!(shape.revision, 2);
     assert_eq!(shape.families.len(), TRANSPORT_BUILD_R1_FAMILIES.len());
+    // The build door builds transport messages, so its words are the ones a
+    // transport message's rows take; a protected frame's are the layout door's.
     for (key, walked) in [
-        ("kind", Kind::names()),
-        ("encoding", Encoding::names()),
+        ("kind", Kind::transport_names()),
+        ("encoding", Encoding::transport_names()),
         ("relative_to", RelativeTo::names()),
     ] {
         let declared: Vec<String> = shape
@@ -1699,8 +1704,8 @@ fn the_closed_vocabularies_are_walked_and_declared() {
         }
     }
     for (used, walked) in [
-        (&mut kinds, Kind::names()),
-        (&mut encodings, Encoding::names()),
+        (&mut kinds, Kind::transport_names()),
+        (&mut encodings, Encoding::transport_names()),
         (&mut origins, RelativeTo::names()),
     ] {
         used.sort_unstable();
@@ -1773,10 +1778,10 @@ fn the_documents_use_exactly_the_keys_the_registry_pins() {
     }
     keys.sort_unstable();
     keys.dedup();
-    assert_eq!(keys, TRANSPORT_BUILD_R1_KEYS, "{TRANSPORT_BUILD}");
+    assert_eq!(keys, TRANSPORT_BUILD_R2_KEYS, "{TRANSPORT_BUILD}");
     for doc in &docs {
         assert!(
-            doc.starts_with(r#"{"document":{"name":"transport_build","revision":1}"#),
+            doc.starts_with(r#"{"document":{"name":"transport_build","revision":2}"#),
             "{doc}"
         );
     }
@@ -1787,7 +1792,7 @@ fn the_documents_use_exactly_the_keys_the_registry_pins() {
 /// reads a key.
 #[test]
 fn every_row_has_every_key() {
-    const ROW_KEYS: [&str; 15] = [
+    const ROW_KEYS: [&str; 17] = [
         "name",
         "kind",
         "offset",
@@ -1803,6 +1808,8 @@ fn every_row_has_every_key() {
         "measures",
         "ring_max",
         "ring_max_width",
+        "within",
+        "covered_by",
     ];
     let mut rows = 0usize;
     for case in corpus() {

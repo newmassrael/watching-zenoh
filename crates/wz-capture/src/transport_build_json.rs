@@ -9,12 +9,13 @@
 //! and a second consumer would not get to invent another.
 //!
 //! ```text
-//! {"document":{"name":"transport_build","revision":1},"ok":true,
+//! {"document":{"name":"transport_build","revision":2},"ok":true,
 //!  "prefix_bytes":2,"unit":"0c00...","body":"...",
 //!  "layout":[{"name":"unit_length","kind":"length","offset":0,"width":2,
 //!             "relative_to":"unit","encoding":"fixed","value":N,"min":0,"max":65535,
 //!             "bit_mask":null,"carrier":null,"stored":null,"measures":"body",
-//!             "ring_max":null,"ring_max_width":null}, ...]}
+//!             "ring_max":null,"ring_max_width":null,"within":null,
+//!             "covered_by":null}, ...]}
 //! ```
 //!
 //! # One shape for every row

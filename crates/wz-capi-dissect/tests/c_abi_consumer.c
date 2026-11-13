@@ -2583,7 +2583,7 @@ static int check_transport_build_door(void) {
     static const char frame[] =
         "{\"message\":\"frame\",\"reliable\":true,\"sn\":5,\"payload\":\"dead\"}";
     static const char opening[] =
-        "{\"document\":{\"name\":\"transport_build\",\"revision\":1},"
+        "{\"document\":{\"name\":\"transport_build\",\"revision\":2},"
         "\"ok\":true,\"prefix_bytes\":2,\"unit\":\"";
     unsigned char body[16];
     unsigned char unit[16];
@@ -2688,10 +2688,97 @@ static int check_transport_build_door(void) {
  * and nothing else is, the report is the build door's for the same message, a
  * lie about the length is a refusal that says so, and a caller's bug is a code
  * and no string. */
+/* (ABI 56) -- THE REPORT REACHES INTO THE PROTECTED FRAME. A Frame carrying a
+ * Put whose payload is a frame under `e2e_profile`, laid by hand: the CRC is
+ * found by its row and made wrong from the row alone, and the open door says
+ * the CRC fails and nothing else does. */
+static int check_transport_layout_e2e_door(void) {
+    static const unsigned char body[] = {0xDE, 0xAD, 0xBE};
+    static const char crc_row[] =
+        "{\"name\":\"carried[0].e2e.crc\",\"kind\":\"checksum\",\"offset\":";
+    /* Frame (R, sn 5), Push naming `demo/e2e` whole, Put of 9 bytes. */
+    unsigned char unit[32] = {0x25, 0x05, 0x3D, 0x00, 0x08, 'd', 'e', 'm', 'o',
+                              '/',  'e',  '2',  'e',  0x01, 0x09};
+    const size_t payload_at = 15;
+    char *doc = NULL;
+    const char *at;
+    unsigned offset = 0;
+    unsigned width = 0;
+    size_t i;
+    int rc;
+
+    rc = wz_dissect_e2e_wrap(e2e_profile,
+                             "{\"counter\":7,\"ident\":{\"hi\":1,\"lo\":2}}",
+                             body, sizeof body, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "e2e_wrap rc=%d", rc);
+    at = strstr(doc, "\"frame\":\"");
+    CHECK(at != NULL, "no frame in the document: %s", doc);
+    at += strlen("\"frame\":\"");
+    for (i = 0; i < 9; i++) {
+        unit[payload_at + i] = hex_pair(at + i * 2);
+    }
+    wz_dissect_string_free(doc);
+
+    doc = NULL;
+    rc = wz_dissect_transport_layout_e2e(unit, payload_at + 9,
+                                         WZ_DISSECT_FRAMING_DATAGRAM, NULL,
+                                         e2e_profile, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "transport_layout_e2e rc=%d", rc);
+    CHECK(strncmp(doc,
+                  "{\"document\":{\"name\":\"transport_layout\",\"revision\":2},"
+                  "\"ok\":true,",
+                  strlen("{\"document\":{\"name\":\"transport_layout\","
+                         "\"revision\":2},\"ok\":true,")) == 0,
+          "unexpected opening: %s", doc);
+    CHECK(strstr(doc, "{\"name\":\"carried[0].e2e\",\"kind\":\"other\","
+                      "\"offset\":15,\"width\":9,") != NULL,
+          "the frame row must place the payload: %s", doc);
+    at = strstr(doc, crc_row);
+    CHECK(at != NULL, "no checksum row in the report: %s", doc);
+    CHECK(sscanf(at + strlen(crc_row), "%u,\"width\":%u", &offset, &width) == 2,
+          "the checksum row must give an offset and a width: %s", at);
+    CHECK(offset == payload_at && width == 2 &&
+              strstr(at, "\"encoding\":\"big_endian\"") != NULL,
+          "the CRC is the frame's first two bytes, big-endian: %s", at);
+    CHECK(strstr(doc, "\"name\":\"carried[0].e2e.counter\",\"kind\":"
+                      "\"sequence_number\"") != NULL &&
+              strstr(doc, "\"covered_by\":\"carried[0].e2e.crc\"") != NULL,
+          "the counter is a sequence number the CRC covers: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* Make the checksum wrong by its row alone. */
+    unit[offset] ^= 0x01;
+    doc = NULL;
+    rc = wz_dissect_e2e_open(e2e_profile, unit + payload_at, 9, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "e2e_open rc=%d", rc);
+    CHECK(strstr(doc, "\"crc_ok\":false") != NULL &&
+              strstr(doc, "\"length_matches_frame\":true") != NULL,
+          "a wrong checksum fails the CRC and nothing else: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* A profile that does not read is a refusal at its place; a null one is a
+     * caller's bug. */
+    doc = NULL;
+    rc = wz_dissect_transport_layout_e2e(unit, payload_at + 9,
+                                         WZ_DISSECT_FRAMING_DATAGRAM, NULL, "{",
+                                         &doc);
+    CHECK(rc == WZ_DISSECT_OK && strstr(doc, "\"ok\":false,\"profile_offset\":") != NULL,
+          "a profile that is not JSON is refused at a byte: rc=%d %s", rc,
+          doc ? doc : "(null)");
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_transport_layout_e2e(unit, payload_at + 9,
+                                         WZ_DISSECT_FRAMING_DATAGRAM, NULL, NULL,
+                                         &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a null profile rc=%d", rc);
+    return 0;
+}
+
 static int check_transport_layout_door(void) {
     static const unsigned char captured[6] = {0x04, 0x00, 0x25, 0x05, 0xDE, 0xAD};
     static const char opening[] =
-        "{\"document\":{\"name\":\"transport_layout\",\"revision\":1},"
+        "{\"document\":{\"name\":\"transport_layout\",\"revision\":2},"
         "\"ok\":true,\"prefix_bytes\":2,\"body_bytes\":4,\"layout\":["
         "{\"name\":\"unit_length\",\"kind\":\"length\",\"offset\":0,\"width\":2,"
         "\"relative_to\":\"unit\",\"encoding\":\"fixed\",\"value\":4,";
@@ -4365,20 +4452,22 @@ int main(void) {
         CHECK(rc == WZ_DISSECT_OK, "proto_encode document rc=%d", rc);
     }
     /* (ABI 30) -- the transport build document. 1: the first revision a
-     * consumer could read. Built from a KeepAlive, the smallest message there
-     * is. */
+     * consumer could read. 2: every layout row's `within` and `covered_by`.
+     * Built from a KeepAlive, the smallest message there is. */
     revisioned[10].name = "transport_build";
-    revisioned[10].revision = 1;
+    revisioned[10].revision = 2;
     revisioned[10].doc = NULL;
     rc = wz_dissect_transport_build("{\"message\":\"keep_alive\"}",
                                     WZ_DISSECT_FRAMING_DATAGRAM,
                                     &revisioned[10].doc);
     CHECK(rc == WZ_DISSECT_OK, "transport_build document rc=%d", rc);
     /* (ABI 32) -- the layout document of a unit already held. 1: the first
-     * revision a consumer could read. Built from a KeepAlive, the smallest
-     * message there is, as the build document above is. */
+     * revision a consumer could read. 2: a protected frame's rows under a
+     * profile (ABI 56), the two row keys, `checksum` and `big_endian`. Built
+     * from a KeepAlive, the smallest message there is, as the build document
+     * above is. */
     revisioned[11].name = "transport_layout";
-    revisioned[11].revision = 1;
+    revisioned[11].revision = 2;
     revisioned[11].doc = NULL;
     {
         static const unsigned char keepalive_unit[1] = {0x04};
@@ -4848,6 +4937,12 @@ int main(void) {
     /* (ABI 32) -- and the same report for a unit the consumer already holds,
      * which is what a program that mutates captured frames asks. */
     if (check_transport_layout_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 56) -- and the protected frame a carried message's payload holds,
+     * under a profile, so a checksum is found by its row. */
+    if (check_transport_layout_e2e_door() != 0) {
         return 1;
     }
 

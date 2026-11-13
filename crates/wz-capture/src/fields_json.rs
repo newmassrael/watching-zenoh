@@ -11226,16 +11226,18 @@ mod tests {
             // The transport build document's three: what a layout row IS, how
             // its integer is laid out, and what its offset counts from. Each
             // walk is the type the report is built with, so a word a row can
-            // carry that this list lacks cannot be built.
+            // carry that this list lacks cannot be built. The build door builds
+            // transport messages, so `kind` and `encoding` are held to the
+            // words a transport message's rows take.
             (
                 rev::TRANSPORT_BUILD,
                 "kind",
-                crate::transport_layout::Kind::names(),
+                crate::transport_layout::Kind::transport_names(),
             ),
             (
                 rev::TRANSPORT_BUILD,
                 "encoding",
-                crate::transport_layout::Encoding::names(),
+                crate::transport_layout::Encoding::transport_names(),
             ),
             (
                 rev::TRANSPORT_BUILD,
@@ -11243,9 +11245,9 @@ mod tests {
                 crate::transport_layout::RelativeTo::names(),
             ),
             // The same three, declared again by the layout document that reports
-            // bytes which already exist, each held to the SAME walk the build
-            // document's is: two declarations of one vocabulary and one type
-            // behind both.
+            // bytes which already exist, held to the whole walk: it also reports
+            // a protected frame's rows, whose CRC is a `checksum` and whose
+            // integers are `big_endian`.
             (
                 rev::TRANSPORT_LAYOUT,
                 "kind",

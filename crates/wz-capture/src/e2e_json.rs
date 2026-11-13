@@ -319,6 +319,15 @@ pub(crate) fn profile_refusal(error: &DocError) -> String {
     refuse_text(&envelope(E2E_WRAP), Source::Profile, error)
 }
 
+/// A refused profile text in another document's envelope `head`: the same
+/// place keys (`profile_path`, `profile_offset`) and words, so a profile is
+/// refused alike by every door that takes one. Only the structural report,
+/// which exists with `dissect`, takes a profile in another envelope.
+#[cfg(feature = "dissect")]
+pub(crate) fn profile_refusal_in(head: &str, error: &DocError) -> String {
+    refuse_text(head, Source::Profile, error)
+}
+
 /// A refusal that is about no text, in the `e2e_wrap` envelope.
 pub(crate) fn plain_refusal(reason: &str) -> String {
     refuse_plain(&envelope(E2E_WRAP), reason)

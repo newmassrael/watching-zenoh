@@ -2019,7 +2019,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 55
+#define WZ_DISSECT_ABI_REVISION 56
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -5365,12 +5365,13 @@ int wz_dissect_e2e_open_expecting(const char *profile_json,
 
 /* wz_dissect_transport_build -- the document.
  *
- *     {"document":{"name":"transport_build","revision":1},"ok":true,
+ *     {"document":{"name":"transport_build","revision":2},"ok":true,
  *      "prefix_bytes":2,"unit":"0600a5053103dead","body":"a5053103dead",
  *      "layout":[{"name":"unit_length","kind":"length","offset":0,"width":2,
  *                 "relative_to":"unit","encoding":"fixed","value":6,"min":0,
  *                 "max":65535,"bit_mask":null,"carrier":null,"stored":null,
- *                 "measures":"body","ring_max":null,"ring_max_width":null},
+ *                 "measures":"body","ring_max":null,"ring_max_width":null,
+ *                 "within":null,"covered_by":null},
  *                ...]}
  *
  * for {"message":"frame","reliable":true,"sn":5,"priority":3,"payload":"dead"}
@@ -5417,8 +5418,20 @@ int wz_dissect_e2e_open_expecting(const char *profile_json,
  *   ring_max_width  for a sequence number, when you named the ring: the width
  *                in bytes of the VLE at `ring_max`, the widest the field can
  *                become in that session.
+ *   within       (revision 2) for a row INSIDE another row's bytes, that row's
+ *                `name`: a protected frame's rows, which only
+ *                wz_dissect_transport_layout_e2e writes, are within the
+ *                `payload` that carries them. `null` on a row of the transport
+ *                message, and those are the rows that tile the body.
+ *   covered_by   (revision 2) for a row a checksum is computed over, the
+ *                checksum row's `name`: replacing its value makes that checksum
+ *                wrong unless it is computed again. `null` otherwise, and on
+ *                every row of the transport message, which has no checksum.
  *
- * `kind` is one of `length`, `sequence_number`, `reserved`, `flag` and `other`.
+ * `kind` is one of `length`, `sequence_number`, `reserved`, `flag` and `other`
+ * in this document; the layout document adds `checksum` (a value computed over
+ * other bytes of the message that a receiver computes again: a protected
+ * frame's CRC), which only a protected frame's rows carry.
  * A `length` is a count of the bytes that follow (`cookie_len`, an extension's
  * `value_len`, the stream prefix `unit_length`) or one less than one
  * (`zid_len`). A `reserved` row is every bit of a byte that no field of that
@@ -5432,13 +5445,16 @@ int wz_dissect_e2e_open_expecting(const char *profile_json,
  *
  * `encoding` is one of `fixed` (a fixed number of bytes, a byte string at the
  * width it has in this message, or a bit range inside one) and `vle` (a
- * variable-length integer). `relative_to` is one of `unit` (counted from the
+ * variable-length integer); the layout document adds `big_endian` (a fixed
+ * number of bytes holding an integer most significant byte first: a protected
+ * frame's header field). `relative_to` is one of `unit` (counted from the
  * first byte of the unit as written to the link: only the stream length prefix
  * is placed this way) and `body` (counted from the message's header byte,
  * behind any prefix). In a unit, a `body` row is at `prefix_bytes + offset`.
  *
  * TO REPLACE A FIELD USING ONLY THE REPORT. For a `fixed` row, write the value
- * little-endian into `width` bytes at the offset. For a `vle` row, write a VLE
+ * little-endian into `width` bytes at the offset; for a `big_endian` row, most
+ * significant byte first. For a `vle` row, write a VLE
  * of the value into `width` bytes at the offset: seven bits at a time, least
  * significant first, the high bit of every byte but the last set, and in the
  * ninth byte of a 9-byte VLE all eight bits raw. For a row with a `bit_mask`,
@@ -5451,7 +5467,9 @@ int wz_dissect_e2e_open_expecting(const char *profile_json,
  *
  * WHAT THE LAYOUT COVERS. The transport message. A network message carried by a
  * Frame is one row, `payload`, because the carried bytes are the caller's and
- * their layout is a different message's (wz_dissect_transport_message reads it);
+ * their layout is a different message's (wz_dissect_transport_message reads it;
+ * wz_dissect_transport_layout_e2e reports the protected frame a carried
+ * message's payload holds, inside this row, under a profile you name);
  * a Fragment's `payload` is one row likewise. An extension is a header row with
  * its bit-fields and a body: `value` for a z64, `value_len` and `value` for a
  * zbuf, nothing for a unit.
@@ -5526,15 +5544,16 @@ int wz_dissect_transport_build(const char *description_json, int framing,
  *                   words are the library's, so one it does not know is a bug
  *                   and not a ring.
  *
- * THE DOCUMENT (revision 1). The same rows as the transport_build document's
+ * THE DOCUMENT (revision 2). The same rows as the transport_build document's
  * `layout`, key for key, in the same order, rendered by the same function:
  *
- *     {"document":{"name":"transport_layout","revision":1},"ok":true,
+ *     {"document":{"name":"transport_layout","revision":2},"ok":true,
  *      "prefix_bytes":2,"body_bytes":4,
  *      "layout":[{"name":"unit_length","kind":"length","offset":0,"width":2,
  *                 "relative_to":"unit","encoding":"fixed","value":4,"min":0,
  *                 "max":65535,"bit_mask":null,"carrier":null,"stored":null,
- *                 "measures":"body","ring_max":null,"ring_max_width":null},
+ *                 "measures":"body","ring_max":null,"ring_max_width":null,
+ *                 "within":null,"covered_by":null},
  *                ...]}
  *
  * for the unit 04 00 25 05 de ad as WZ_DISSECT_FRAMING_TCP_STREAM (a Frame, R
@@ -5544,9 +5563,11 @@ int wz_dissect_transport_build(const char *description_json, int framing,
  * the three vocabularies `kind`, `encoding` and `relative_to`, are described at
  * wz_dissect_transport_build above: the same words with the same meaning, and the
  * same revision rule -- a word added to one of them moves the document revision
- * of BOTH documents in the round it is added, and the library holds the two
- * documents to the same sets, so one cannot gain a word the other lacks. An
- * integer cell past 2^53 is a string, as there.
+ * of BOTH documents in the round it is added. The library holds this document's
+ * words to the build document's and the two only a protected frame's rows
+ * carry, `checksum` and `big_endian` (revision 2), which the build door, building
+ * transport messages, never writes. An integer cell past 2^53 is a string, as
+ * there.
  *
  * TO MUTATE A FIELD USING ONLY THE REPORT is the build document's recipe, to the
  * letter: write `value` into `width` bytes at the offset, little-endian for a
@@ -5561,7 +5582,7 @@ int wz_dissect_transport_build(const char *description_json, int framing,
  * A REFUSAL IS A VALUE. For bytes the report cannot be given for, the door
  * returns WZ_DISSECT_OK and writes
  *
- *     {"document":{"name":"transport_layout","revision":1},"ok":false,
+ *     {"document":{"name":"transport_layout","revision":2},"ok":false,
  *      "reason":"the tcp_stream framing's length prefix announces 4 bytes and 3 follow it: the unit is cut short or holds more than one message",
  *      "message":"..."}
  *
@@ -5622,6 +5643,78 @@ int wz_dissect_transport_build(const char *description_json, int framing,
 int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
                                 int framing, const char *sn_resolution,
                                 char **out);
+
+/* (ABI 56) -- THE SAME REPORT, AND THE PROTECTED FRAMES A FRAME'S MESSAGES
+ * CARRY: wz_dissect_transport_layout's document for the unit, with the rows of
+ * the end-to-end header each carried message's payload holds under a profile.
+ *
+ * WHY IT IS HERE. A program that mutates a captured frame picks the bytes to
+ * change by a row of the report, and the report stopped at the transport
+ * message: a Frame's network messages were one row, `payload`. A protected
+ * frame's header -- its CRC, its length, its counter -- lies inside that row,
+ * at a place that moves with the key, the extensions and the encoding of each
+ * message, so a fixed bit position cannot name it, and computing the place is
+ * a second reader of the network message and of the profile. This door
+ * reports those fields as rows of the same report, read by the walker and the
+ * profile reader every other door uses.
+ *
+ * ARGUMENTS. `bytes`, `len`, `framing` and `sn_resolution` are
+ * wz_dissect_transport_layout's, refused the same way. `profile_json` is a
+ * profile, the text wz_dissect_e2e_wrap and wz_dissect_e2e_open take; NULL, or
+ * text that is not UTF-8, is WZ_DISSECT_ERR_INVALID_ARG (call
+ * wz_dissect_transport_layout for no profile). A profile that does not read is
+ * a REFUSAL document naming its place, `profile_path` (an RFC 6901 pointer) or
+ * `profile_offset` (a byte, when the text is not JSON), in the words the
+ * protected-frame doors refuse it in; the unit is not read then.
+ *
+ * THE DOCUMENT is transport_layout's, revision 2: every row
+ * wz_dissect_transport_layout writes for the same unit, in the same order, and
+ * after them, for each message the Frame carries at index i (the index of its
+ * entry in the field document's `carried`) whose payload is inline bytes at
+ * least as long as the profile's header:
+ *
+ *   carried[i].e2e           the protected frame: the payload's bytes,
+ *                            `within` the `payload` row.
+ *   carried[i].e2e.<field>   one row per header field of the profile, in the
+ *                            profile's order, `within` the frame, `big_endian`,
+ *                            `value` the integer AS WRITTEN (a field's `xor` is
+ *                            not undone, so `value` is what a replacement
+ *                            writes back), `min` 0 and `max` the largest
+ *                            integer of its width. The CRC field is a
+ *                            `checksum`, the length field a `length` that
+ *                            `measures` the frame (by the profile's rule, which
+ *                            may leave fields out of the count), the counter a
+ *                            `sequence_number`, every other field `other`. A
+ *                            split field is one row: its parts are bits of the
+ *                            integer, which the profile names.
+ *   carried[i].e2e.@payload  the bytes after the header, `within` the frame,
+ *                            named by the word the profile's `cover` list names
+ *                            them by.
+ *
+ * A row the profile's CRC is computed over carries the CRC row's name in
+ * `covered_by`. The rows say where the fields ARE if the payload is a frame
+ * under this profile; they do not say it is one: which keys a profile covers
+ * is the declarations', and a unit does not always hold its keys. A Fragment's
+ * payload is a piece of a batch and has no frame rows, and neither has a
+ * payload in shared memory or one shorter than the header.
+ *
+ * TO MAKE A CHECKSUM WRONG: write any value other than `value`, most
+ * significant byte first, into the checksum row's `width` bytes at its offset
+ * (in the unit, `prefix_bytes + offset`). The frame's other fields and the
+ * transport message do not move. TO CHANGE A COVERED FIELD AND KEEP THE
+ * CHECKSUM RIGHT (a counter that skips): read the frame at the
+ * `carried[i].e2e` row with wz_dissect_e2e_open, build it again with the field
+ * changed with wz_dissect_e2e_wrap, and write the new frame over that row; a
+ * frame of the same body and profile has the same length.
+ *
+ * Returns WZ_DISSECT_ERR_INVALID_ARG, and no string, for what
+ * wz_dissect_transport_layout refuses and for the `profile_json` above. The
+ * memory rule does not move: the document is a `char*` released by
+ * wz_dissect_string_free, the bytes and the profile are read for the call and
+ * not kept, nothing is retained between calls, and no callback runs. */
+int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
+                                    int framing, const char *sn_resolution,
+                                    const char *profile_json, char **out);
 
 /* R311y913 (ABI 9) — what this build can READ, without a capture.
  *

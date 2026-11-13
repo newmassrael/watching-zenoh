@@ -53,7 +53,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 55
+EXPECTED_VERSION = 56
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -354,6 +354,15 @@ EXPECTED_SYMBOLS = {
     # Two symbols; nothing crosses allocated, so the memory rule does not move.
     "wz_dissect_live_row_facts_since",
     "wz_dissect_live_row_facts_take",
+    # (ABI 56) -- the structural report of a unit with the rows of the protected
+    # frame each message of a Frame carries under a profile: its CRC, length,
+    # counter and other header fields inside the `payload` row, so a consumer
+    # that mutates a frame's CRC finds it by a row. One symbol; the profile
+    # crosses as the C string the protected-frame doors take. The memory rule
+    # does not move: the document is a `char*` released by
+    # `wz_dissect_string_free`, nothing is retained between calls, and no
+    # callback runs.
+    "wz_dissect_transport_layout_e2e",
     # (ABI 35) -- the NODE NAMES of a selector resolved to the zids a caller's
     # table gives them. A `node` term names a node the way the application's own
     # list does, and a record carries only the zid its sender announced; this is

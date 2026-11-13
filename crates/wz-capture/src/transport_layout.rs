@@ -38,7 +38,12 @@
 //! * the stream length prefix, when the framing has one, relative to the unit.
 //!
 //! A network message carried in a Frame is ONE row (`payload`): the report is of
-//! the transport message, and the carried bytes are the caller's.
+//! the transport message, and the carried bytes are the caller's. The one
+//! exception is asked for by name: given an end-to-end profile
+//! ([`layout_under`]), the report adds the rows of the protected frame each
+//! carried message's payload holds, INSIDE the `payload` row (`within`), so a
+//! caller that mutates a frame's CRC or counter finds them as it finds a
+//! sequence number. Those rows do not tile the body; the `payload` row does.
 //!
 //! # What a replacement needs
 //!
@@ -62,6 +67,9 @@ use wz_session_core::transport_compose::{
     vle_range, vle_width, Framing, SN_RES_FRAME_MASK, SN_RES_REQUEST_ID_MASK,
 };
 
+use crate::e2e_profile::{Cover, Profile, PAYLOAD};
+use crate::payload_decode::{payload_slot, SlotSpan};
+
 /// What a field IS to someone who wants to change it.
 ///
 /// A closed vocabulary of five. `Other` is a word a field is GIVEN, never a
@@ -79,17 +87,21 @@ pub enum Kind {
     Reserved,
     /// A single bit that says a part is present or a variant is taken.
     Flag,
+    /// A value computed over other bytes of the message, which a receiver
+    /// computes again and compares: a protected frame's CRC.
+    Checksum,
     /// Every other field.
     Other,
 }
 
 impl Kind {
     /// Every kind, in the order the vocabulary lists them.
-    pub const ALL: [Kind; 5] = [
+    pub const ALL: [Kind; 6] = [
         Kind::Length,
         Kind::SequenceNumber,
         Kind::Reserved,
         Kind::Flag,
+        Kind::Checksum,
         Kind::Other,
     ];
 
@@ -100,13 +112,30 @@ impl Kind {
             Kind::SequenceNumber => "sequence_number",
             Kind::Reserved => "reserved",
             Kind::Flag => "flag",
+            Kind::Checksum => "checksum",
             Kind::Other => "other",
         }
     }
 
+    /// The kinds a transport message's own rows take: every kind but
+    /// [`Kind::Checksum`], which only a protected frame's header has. The
+    /// build door builds transport messages, so these are its words.
+    pub const TRANSPORT: [Kind; 5] = [
+        Kind::Length,
+        Kind::SequenceNumber,
+        Kind::Reserved,
+        Kind::Flag,
+        Kind::Other,
+    ];
+
     /// Every word [`Self::word`] can return, walked.
     pub fn names() -> Vec<&'static str> {
         Kind::ALL.iter().map(|k| k.word()).collect()
+    }
+
+    /// The words of [`Self::TRANSPORT`], walked.
+    pub fn transport_names() -> Vec<&'static str> {
+        Kind::TRANSPORT.iter().map(|k| k.word()).collect()
     }
 }
 
@@ -119,23 +148,37 @@ pub enum Encoding {
     /// A variable-length integer: `width` bytes now, and `min..=max` is every
     /// value that would take the same number.
     Vle,
+    /// A fixed number of bytes holding an integer most significant byte
+    /// first: a protected frame's header field. `Fixed` integers of the
+    /// transport message are least significant byte first.
+    BigEndian,
 }
 
 impl Encoding {
     /// Every encoding, in the order the vocabulary lists them.
-    pub const ALL: [Encoding; 2] = [Encoding::Fixed, Encoding::Vle];
+    pub const ALL: [Encoding; 3] = [Encoding::Fixed, Encoding::Vle, Encoding::BigEndian];
 
     /// The word the document prints for this encoding.
     pub const fn word(self) -> &'static str {
         match self {
             Encoding::Fixed => "fixed",
             Encoding::Vle => "vle",
+            Encoding::BigEndian => "big_endian",
         }
     }
+
+    /// The encodings a transport message's own rows take: every encoding but
+    /// [`Encoding::BigEndian`], which only a protected frame's header has.
+    pub const TRANSPORT: [Encoding; 2] = [Encoding::Fixed, Encoding::Vle];
 
     /// Every word [`Self::word`] can return, walked.
     pub fn names() -> Vec<&'static str> {
         Encoding::ALL.iter().map(|e| e.word()).collect()
+    }
+
+    /// The words of [`Self::TRANSPORT`], walked.
+    pub fn transport_names() -> Vec<&'static str> {
+        Encoding::TRANSPORT.iter().map(|e| e.word()).collect()
     }
 }
 
@@ -206,6 +249,15 @@ pub struct Row {
     /// For a sequence number, the width of the VLE at `ring_max`: the widest
     /// this field can become in that session.
     pub ring_max_width: Option<usize>,
+    /// For a row INSIDE another row's bytes, that row's name: a protected
+    /// frame is within the `payload` that carries it, and its header fields and
+    /// body are within the frame. `None` for a row of the transport message,
+    /// and those are the rows that tile the body.
+    pub within: Option<String>,
+    /// For a row whose bytes a checksum is computed over, the checksum row's
+    /// name: replacing this row's value makes that checksum wrong unless it is
+    /// computed again.
+    pub covered_by: Option<String>,
 }
 
 /// Why a report could not be derived.
@@ -524,6 +576,8 @@ impl Report {
             measures,
             ring_max: None,
             ring_max_width: None,
+            within: None,
+            covered_by: None,
         });
     }
 
@@ -555,7 +609,9 @@ impl Report {
         };
         let (min, max) = match (integer, encoding) {
             (None, _) => (None, None),
-            (Some(_), Encoding::Fixed) => (Some(0), Some(fixed_max(width))),
+            // No transport leaf is big-endian, and one would hold the same
+            // range of values in its width as a little-endian one.
+            (Some(_), Encoding::Fixed | Encoding::BigEndian) => (Some(0), Some(fixed_max(width))),
             (Some(v), Encoding::Vle) => {
                 let canonical = vle_width(v);
                 let bucket = if canonical == width {
@@ -594,6 +650,8 @@ impl Report {
             measures: spec.measures.map(|m| format!("{prefix}{m}")),
             ring_max: ring,
             ring_max_width: ring.map(vle_width),
+            within: None,
+            covered_by: None,
         });
         Ok(())
     }
@@ -724,6 +782,8 @@ fn prefix_row(head: &[u8]) -> Row {
         measures: Some(String::from("body")),
         ring_max: None,
         ring_max_width: None,
+        within: None,
+        covered_by: None,
     }
 }
 
@@ -740,6 +800,22 @@ pub fn layout(
     unit: &[u8],
     framing: Framing,
     ring_max: Option<u64>,
+) -> Result<Vec<Row>, LayoutError> {
+    layout_under(unit, framing, ring_max, None)
+}
+
+/// [`layout`], and when `e2e` names a profile, the rows of the protected frame
+/// each message a `Frame` carries holds under that profile (see
+/// [`e2e_frame_rows`]).
+///
+/// The transport rows are the same rows [`layout`] gives, in the same order;
+/// the frame rows follow them. They do not take part in the tiling of the body,
+/// because they lie inside the `payload` row, which does.
+pub fn layout_under(
+    unit: &[u8],
+    framing: Framing,
+    ring_max: Option<u64>,
+    e2e: Option<&Profile>,
 ) -> Result<Vec<Row>, LayoutError> {
     let prefix = framing.prefix_bytes();
     if unit.len() < prefix {
@@ -783,7 +859,124 @@ pub fn layout(
     if next != body.len() {
         return Err(LayoutError::Untiled { at: next });
     }
+    if let (Some(profile), Scope::Frame) = (e2e, scope) {
+        e2e_frame_rows(&mut report.rows, children, body, profile);
+    }
     Ok(report.rows)
+}
+
+/// The rows of the protected frame that each message of a `Frame` carries,
+/// read under `profile`, appended to `rows`.
+///
+/// A message is read when its payload slot is the body's `payload` leaf (not
+/// the slices or the descriptor of shared memory) and holds at least the
+/// profile's header. For the message at index `i` of the Frame's `payload`
+/// group, which is the index of its entry in the field document's `carried`:
+///
+/// * `carried[i].e2e`, the frame, `within` the transport `payload` row;
+/// * one row per header field of the profile, `carried[i].e2e.<field>`,
+///   `within` the frame, `big_endian`, with the integer AS WRITTEN (a field's
+///   `xor` is not undone, so `value` is what a replacement writes back). The
+///   CRC field is a `checksum`, the length field a `length` that `measures`
+///   the frame, the counter a `sequence_number`, every other field `other`.
+///   A split field is one row: its parts are bits of the integer, and the
+///   profile, not the report, names them;
+/// * `carried[i].e2e.@payload`, the bytes after the header, named by the word
+///   the profile's own `cover` list names them by ([`PAYLOAD`]); a field's name
+///   is letters, digits, `_`, `-` and `.`, so no field row can take it.
+///
+/// Every row the profile's CRC is computed over carries the CRC row's name in
+/// `covered_by`, in the profile's own cover list. Replacing such a value and
+/// not the CRC is a frame whose CRC fails; replacing it and keeping the CRC
+/// right is the wrap door's (`e2e_json::wrap_document`), which builds the frame
+/// again from its values, and the frame row says where it goes.
+///
+/// The rows say where the fields ARE if the payload is a frame under this
+/// profile; they do not say that it is one. Which messages a profile covers is
+/// a fact of the key, which one unit does not always hold.
+pub fn e2e_frame_rows(rows: &mut Vec<Row>, children: &[Field], body: &[u8], profile: &Profile) {
+    let Some(carried) = children.iter().find_map(|c| match &c.value {
+        FieldValue::Nested(messages) if &*c.name == "payload" => Some(messages),
+        _ => None,
+    }) else {
+        return;
+    };
+    let fields = profile.fields();
+    let crc = profile.crc();
+    for (i, message) in carried.iter().enumerate() {
+        let Some(slot) = payload_slot(message) else {
+            continue;
+        };
+        if slot.span_of != SlotSpan::Payload
+            || slot.end > body.len()
+            || slot.end.saturating_sub(slot.start) < profile.header_bytes()
+        {
+            continue;
+        }
+        let frame = format!("carried[{i}].e2e");
+        let crc_row = format!("{frame}.{}", fields[crc.field].name);
+        let covered = |cover: Cover| crc.cover.contains(&cover).then(|| crc_row.clone());
+        let bare = |name: String, offset: usize, width: usize, within: &str| Row {
+            name,
+            kind: Kind::Other,
+            offset,
+            width,
+            relative_to: RelativeTo::Body,
+            encoding: Encoding::Fixed,
+            value: None,
+            min: None,
+            max: None,
+            bit_mask: None,
+            carrier: None,
+            stored: None,
+            measures: None,
+            ring_max: None,
+            ring_max_width: None,
+            within: Some(String::from(within)),
+            covered_by: None,
+        };
+        rows.push(bare(
+            frame.clone(),
+            slot.start,
+            slot.end - slot.start,
+            "payload",
+        ));
+        for (index, field) in fields.iter().enumerate() {
+            let at = slot.start + field.offset;
+            let written = body[at..at + field.bytes]
+                .iter()
+                .fold(0u64, |acc, byte| acc << 8 | u64::from(*byte));
+            let kind = if index == crc.field {
+                Kind::Checksum
+            } else if index == profile.length().field {
+                Kind::Length
+            } else if index == profile.counter().field {
+                Kind::SequenceNumber
+            } else {
+                Kind::Other
+            };
+            rows.push(Row {
+                kind,
+                encoding: Encoding::BigEndian,
+                value: Some(written),
+                min: Some(0),
+                max: Some(fixed_max(field.bytes)),
+                measures: (kind == Kind::Length).then(|| frame.clone()),
+                covered_by: covered(Cover::Field(index)),
+                ..bare(format!("{frame}.{}", field.name), at, field.bytes, &frame)
+            });
+        }
+        let header = profile.header_bytes();
+        rows.push(Row {
+            covered_by: covered(Cover::Payload),
+            ..bare(
+                format!("{frame}.{PAYLOAD}"),
+                slot.start + header,
+                slot.end - slot.start - header,
+                &frame,
+            )
+        });
+    }
 }
 
 /// Every leaf name in the classification table, for the tests that hold it

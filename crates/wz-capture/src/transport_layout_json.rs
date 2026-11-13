@@ -13,13 +13,26 @@
 //! and a consumer that reads one reads the other.
 //!
 //! ```text
-//! {"document":{"name":"transport_layout","revision":1},"ok":true,
+//! {"document":{"name":"transport_layout","revision":2},"ok":true,
 //!  "prefix_bytes":2,"body_bytes":4,
 //!  "layout":[{"name":"unit_length","kind":"length","offset":0,"width":2,
 //!             "relative_to":"unit","encoding":"fixed","value":4,"min":0,"max":65535,
 //!             "bit_mask":null,"carrier":null,"stored":null,"measures":"body",
-//!             "ring_max":null,"ring_max_width":null}, ...]}
+//!             "ring_max":null,"ring_max_width":null,"within":null,
+//!             "covered_by":null}, ...]}
 //! ```
+//!
+//! # With a profile
+//!
+//! [`layout_document_under`] takes an end-to-end profile as well, and adds the
+//! rows of the protected frame each message of a `Frame` carries
+//! (`carried[i].e2e`, its header fields and its `@payload`), after the
+//! transport rows, `within` the row whose bytes hold them, with `covered_by`
+//! naming the CRC row on every row the CRC is computed over. Those rows bring
+//! the two words only a protected frame has, `checksum` and `big_endian`, which
+//! is why this document's `kind` and `encoding` hold words the build
+//! document's do not (revision 2). A profile that does not read is refused at
+//! its place, with `profile_path` or `profile_offset`.
 //!
 //! # A refusal is a value
 //!
@@ -58,8 +71,10 @@ use wz_session_core::json::{escape_into, u64_into};
 use wz_session_core::transport_compose::{sn_ring_max, Framing};
 
 use crate::doc_revision::{envelope, TRANSPORT_LAYOUT};
+use crate::e2e_json::profile_refusal_in;
+use crate::e2e_profile::Profile;
 use crate::transport_build::RESOLUTION_WORDS;
-use crate::transport_layout::{layout, LayoutError, Row, COVERED_MESSAGES};
+use crate::transport_layout::{layout_under, LayoutError, Row, COVERED_MESSAGES};
 
 /// One integer cell: the number, a string past 2^53, or `null`.
 fn push_cell(key: &str, cell: Option<u64>, out: &mut String) {
@@ -109,6 +124,8 @@ fn push_row(row: &Row, out: &mut String) {
         }
         None => out.push_str(",\"ring_max_width\":null"),
     }
+    push_text_cell("within", row.within.as_deref(), out);
+    push_text_cell("covered_by", row.covered_by.as_deref(), out);
     out.push('}');
 }
 
@@ -203,6 +220,29 @@ pub(crate) fn refusal_for(error: &LayoutError, body_bytes: usize) -> String {
 /// caller knows the ring ([`ring_max_of`]): the sequence-number rows then carry
 /// it and the widest their VLE can become, and otherwise carry `null`.
 pub fn layout_document(unit: &[u8], framing: Framing, ring_max: Option<u64>) -> String {
+    document(unit, framing, ring_max, None)
+}
+
+/// [`layout_document`], with the rows of the protected frame each message of a
+/// `Frame` carries under the profile `profile_text`
+/// ([`crate::transport_layout::e2e_frame_rows`]).
+///
+/// A profile that does not read is refused at its place, `profile_path` or
+/// `profile_offset`, in the words the protected-frame documents refuse it in;
+/// the unit is not read then.
+pub fn layout_document_under(
+    unit: &[u8],
+    framing: Framing,
+    ring_max: Option<u64>,
+    profile_text: &str,
+) -> String {
+    match Profile::parse(profile_text) {
+        Ok(profile) => document(unit, framing, ring_max, Some(&profile)),
+        Err(error) => profile_refusal_in(&envelope(TRANSPORT_LAYOUT), &error),
+    }
+}
+
+fn document(unit: &[u8], framing: Framing, ring_max: Option<u64>, e2e: Option<&Profile>) -> String {
     let head = envelope(TRANSPORT_LAYOUT);
     let prefix = framing.prefix_bytes();
     if unit.len() < prefix {
@@ -233,7 +273,7 @@ pub fn layout_document(unit: &[u8], framing: Framing, ring_max: Option<u64>) -> 
             );
         }
     }
-    match layout(unit, framing, ring_max) {
+    match layout_under(unit, framing, ring_max, e2e) {
         Ok(rows) => {
             let mut out = alloc::format!(
                 "{{{head},\"ok\":true,\"prefix_bytes\":{prefix},\"body_bytes\":{body_bytes},"

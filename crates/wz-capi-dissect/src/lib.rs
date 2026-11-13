@@ -457,6 +457,11 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 55, for `wz_dissect_live_row_facts_since` and `wz_dissect_live_row_facts_take`:
     // the rows after a cursor without their field trees, in CBOR, into a buffer
     // the caller owns. The memory rule does not move.
+    // 56, for `wz_dissect_transport_layout_e2e`: the structural report with the
+    // rows of the protected frame each message of a Frame carries under a
+    // profile. The `transport_layout` and `transport_build` documents moved to
+    // revision 2 on the same step (two row keys; `checksum` and `big_endian` on
+    // the layout document), which moves no symbol.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -474,7 +479,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 55;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 56;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2940,6 +2945,88 @@ pub unsafe extern "C" fn wz_dissect_transport_layout(
     };
     write_string(
         wz_capture::transport_layout_json::layout_document(unit, framing, ring_max),
+        out,
+    )
+}
+
+/// (ABI 56) THE SAME REPORT, AND THE PROTECTED FRAMES A FRAME'S MESSAGES CARRY:
+/// [`wz_dissect_transport_layout`]'s document for the unit, with the rows of the
+/// end-to-end header each carried message's payload holds under a profile.
+///
+/// # Why this is a door
+///
+/// A program that mutates a captured frame picks the bytes by a row of the
+/// report, and the report stopped at the transport message: a Frame's network
+/// messages were one row, `payload`. A protected frame's CRC, length and counter
+/// lie inside it at a place that moves with each message's key, extensions and
+/// encoding, so a fixed bit position cannot name them, and computing the place
+/// is a second reader of the network message and of the profile. This door
+/// reports them as rows of the same report
+/// (`wz_capture::transport_layout::e2e_frame_rows`), read by the walker and the
+/// profile reader every other door uses.
+///
+/// # Arguments
+///
+/// `bytes`, `len`, `framing` and `sn_resolution` are
+/// [`wz_dissect_transport_layout`]'s, with its errors. `profile_json` is a
+/// profile, the text [`wz_dissect_e2e_wrap`] and [`wz_dissect_e2e_open`] take.
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with a `transport_layout` document: every row
+/// [`wz_dissect_transport_layout`] writes for the unit, then for each message of
+/// a Frame whose payload is inline bytes at least as long as the profile's
+/// header, `carried[i].e2e`, one row per header field and
+/// `carried[i].e2e.@payload`. A profile that does not read is a refusal naming
+/// its place (`profile_path` or `profile_offset`). See `wz_dissect.h`.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for what [`wz_dissect_transport_layout`]
+/// refuses, and for a null or non-UTF-8 `profile_json`.
+///
+/// # Safety
+/// As [`wz_dissect_transport_layout`], and `profile_json` a NUL-terminated C
+/// string.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_transport_layout_e2e(
+    bytes: *const u8,
+    len: usize,
+    framing: c_int,
+    sn_resolution: *const c_char,
+    profile_json: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if out.is_null() || profile_json.is_null() || (bytes.is_null() && len != 0) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let Some(framing) = framing_from_abi(framing) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let ring_max = if sn_resolution.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract above; non-null was checked just now.
+        let Ok(word) = (unsafe { std::ffi::CStr::from_ptr(sn_resolution) }).to_str() else {
+            return WZ_DISSECT_ERR_INVALID_ARG;
+        };
+        match wz_capture::transport_layout_json::ring_max_of(word) {
+            Some(ring) => Some(ring),
+            None => return WZ_DISSECT_ERR_INVALID_ARG,
+        }
+    };
+    // SAFETY: caller contract above; non-null was checked at the top.
+    let Ok(profile) = (unsafe { std::ffi::CStr::from_ptr(profile_json) }).to_str() else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let unit: &[u8] = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller contract above; non-null was checked at the top.
+        unsafe { core::slice::from_raw_parts(bytes, len) }
+    };
+    write_string(
+        wz_capture::transport_layout_json::layout_document_under(unit, framing, ring_max, profile),
         out,
     )
 }
@@ -9711,7 +9798,10 @@ mod tests {
         // 55, for `wz_dissect_live_row_facts_since` and
         // `wz_dissect_live_row_facts_take`: two symbols, the bytes into a buffer
         // the caller owns; what does not fit stays in the handle until taken.
-        assert_eq!(wz_dissect_abi_version(), 55);
+        // 56, for `wz_dissect_transport_layout_e2e`: one symbol, the unit as
+        // bytes and the profile as a C string in, a `char*` released by
+        // `wz_dissect_string_free` out; no struct is new.
+        assert_eq!(wz_dissect_abi_version(), 56);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT

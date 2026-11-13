@@ -471,6 +471,17 @@ ONLY_CAPI = {
         "a field is; neither reports a message's fields by kind.",
         (),
     ),
+    "the structural report with the protected frames a Frame's messages carry": (
+        "wz_dissect_transport_layout_e2e",
+        "DELIBERATE, for the reason the report's own row gives, one layer down. A "
+        "consumer that LINKS this library and makes a protected frame's CRC or "
+        "counter wrong in a captured frame must find those fields inside the "
+        "carried message's payload, at a place that moves with the key and the "
+        "encoding; computing it would put a second reader of the network message "
+        "and of the profile in its tree. The command line mutates nothing, and "
+        "reads a protected frame's header in the field document's `e2e` block.",
+        (),
+    ),
     "the capture read as sessions, one row per zid pair": (
         "wz_dissect_pcap_session_table",
         "DELIBERATE for now. The door exists because a consumer that LINKS this "
