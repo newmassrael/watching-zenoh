@@ -1556,14 +1556,143 @@ pub fn admin_unspoken_fields() -> &'static [&'static str] {
     fields
 }
 
+/// What a `null` at one path of the root document (`local_data`) means.
+///
+/// `unspoken` ([`admin_unspoken_fields`]) answers one question about a `null`:
+/// is it the build's silence? A consumer that met a `null` the list does not
+/// name could only infer that it was an answer, and could not tell which
+/// answer, so every key had to be read in this crate's source again, and a new
+/// key could not be read by a rule. This is the rule: every path at which this
+/// build can write `null` is declared with one meaning, and the meanings are
+/// of two kinds ([`Self::is_silence`]).
+///
+/// - A SILENCE is the build's: the node never says this value, and asking it
+///   again does not change that. Only a different build does.
+/// - An ANSWER is the node's: it has nothing to report at this path now, and a
+///   change of its config or of its links can change that.
+///
+/// The words are the document's (`reason`), the kind is written beside them
+/// (`null_is`), so a consumer that meets a word it does not know still knows
+/// which kind of `null` it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminNullMeaning {
+    /// `feature_off` — a silence: this build was made without the switch that
+    /// writes the value (`plugins` without `adminspace-plugins-handlers`).
+    FeatureOff,
+    /// `config_unset` — an answer: the node's config sets no value at this key
+    /// (`metadata`), which is upstream's value for the same config.
+    ConfigUnset,
+    /// `no_weighted_link` — an answer: the node holds no weighted link to this
+    /// session's peer (`sessions[].weight`).
+    NoWeightedLink,
+    /// `not_advertised` — an answer: that end of the link advertised no weight,
+    /// which is not the same as advertising the default
+    /// (`sessions[].weight.dst_weight`, `sessions[].weight.src_weight`).
+    NotAdvertised,
+}
+
+impl AdminNullMeaning {
+    /// Every meaning, in declaration order.
+    pub const ALL: [Self; 4] = [
+        Self::FeatureOff,
+        Self::ConfigUnset,
+        Self::NoWeightedLink,
+        Self::NotAdvertised,
+    ];
+
+    /// The document's `reason` word.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::FeatureOff => "feature_off",
+            Self::ConfigUnset => "config_unset",
+            Self::NoWeightedLink => "no_weighted_link",
+            Self::NotAdvertised => "not_advertised",
+        }
+    }
+
+    /// Whether the `null` is the build's silence rather than the node's answer.
+    pub const fn is_silence(self) -> bool {
+        matches!(self, Self::FeatureOff)
+    }
+
+    /// The document's `null_is` word: `silence` or `answer`.
+    pub const fn kind_word(self) -> &'static str {
+        if self.is_silence() {
+            "silence"
+        } else {
+            "answer"
+        }
+    }
+}
+
+/// One path of the root document at which this build can write `null`, and
+/// what that `null` means. Paths are written as in [`admin_unspoken_fields`]:
+/// dotted, `[]` for every element of an array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdminNullable {
+    /// The dotted path.
+    pub path: &'static str,
+    /// What a `null` there means.
+    pub meaning: AdminNullMeaning,
+}
+
+/// Every path of the root document at which THIS build can write `null`, in
+/// the order the document writes them, each with its one meaning.
+///
+/// Complete by test, not by care: `nulls_declares_every_null_the_root_document_can_emit`
+/// builds the document with each optional value present and absent and
+/// requires the paths it saw `null` to be exactly these, and
+/// `unspoken_is_the_silences_of_nulls` requires [`admin_unspoken_fields`] to be
+/// the silences here. A key that starts to be written `null` therefore cannot
+/// land without a meaning.
+///
+/// The paths are the document's own; a `null` INSIDE the value of `metadata`
+/// is the config's content, not a path of this document.
+pub fn admin_nullable_fields() -> &'static [AdminNullable] {
+    use AdminNullMeaning::{ConfigUnset, NoWeightedLink, NotAdvertised};
+    const fn at(path: &'static str, meaning: AdminNullMeaning) -> AdminNullable {
+        AdminNullable { path, meaning }
+    }
+    // Spelled out per build for the reason `admin_unspoken_fields` is: only
+    // `plugins` depends on the build, and two literals say so in full.
+    #[cfg(feature = "adminspace-plugins-handlers")]
+    const FIELDS: &[AdminNullable] = &[
+        at("metadata", ConfigUnset),
+        at("sessions[].weight", NoWeightedLink),
+        at("sessions[].weight.dst_weight", NotAdvertised),
+        at("sessions[].weight.src_weight", NotAdvertised),
+    ];
+    #[cfg(not(feature = "adminspace-plugins-handlers"))]
+    const FIELDS: &[AdminNullable] = &[
+        at("metadata", ConfigUnset),
+        at("plugins", AdminNullMeaning::FeatureOff),
+        at("sessions[].weight", NoWeightedLink),
+        at("sessions[].weight.dst_weight", NotAdvertised),
+        at("sessions[].weight.src_weight", NotAdvertised),
+    ];
+    FIELDS
+}
+
 /// R2413 (open-debt item 676) — the adminspace surface document: the body this
 /// node replies under [`admin_surface_key`].
 ///
 /// ```json
 /// {"revision":3,
 ///  "legs":[{"key":"@/<zid>/peer","encoding":"application/json","cardinality":"single"}, …],
-///  "unspoken":["plugins"]}
+///  "unspoken":["plugins"],
+///  "nulls":[{"path":"metadata","null_is":"answer","reason":"config_unset"},
+///           {"path":"plugins","null_is":"silence","reason":"feature_off"}, …]}
 /// ```
+///
+/// `nulls` ([`admin_nullable_fields`]) names EVERY path of the root document at
+/// which this build can write `null`, with what that `null` means: `null_is` is
+/// `silence` (the build never says it) or `answer` (the node has nothing there
+/// now), and `reason` is the word for which ([`AdminNullMeaning`]). A path the
+/// list does not name is never `null` in this build. `unspoken` is the
+/// `silence` entries' paths, kept for a consumer that read it first. `nulls`
+/// came after `unspoken` without moving `revision`: a consumer of the shape
+/// without it reads every key it knew the same way, and a consumer that finds
+/// the key has the whole declaration.
 ///
 /// `revision` is the document's own contract number, the convention
 /// `wz-capture`'s `doc_revision` established for the dissect-side self-reports: it
@@ -1643,7 +1772,20 @@ pub fn write_admin_surface_json<W: TextOut + ?Sized, K: AdminBuffer>(
     )?;
     out.push_str("],\"unspoken\":");
     wz_session_core::json::push_str_array(admin_unspoken_fields(), &mut out);
-    out.push('}');
+    out.push_str(",\"nulls\":[");
+    for (i, nullable) in admin_nullable_fields().iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"path\":");
+        push_json_str(nullable.path, &mut out);
+        out.push_str(",\"null_is\":");
+        push_json_str(nullable.meaning.kind_word(), &mut out);
+        out.push_str(",\"reason\":");
+        push_json_str(nullable.meaning.word(), &mut out);
+        out.push('}');
+    }
+    out.push_str("]}");
     Ok(())
 }
 
@@ -2820,7 +2962,7 @@ where
 
     // `wz/surface` (`@/<zid>/<whatami>/wz/surface`) — the node's description of
     // its OWN adminspace: which keys this build answers, in which encoding, and
-    // which `local_data` nulls are silence rather than emptiness. R2413
+    // what every `local_data` null means, silence or answer. R2413
     // (open-debt item 676). Ungated within `adminspace-core`, deliberately: a
     // build that has an adminspace but cannot say what is in it puts the consumer
     // straight back to guessing, which is the whole defect. Emitted LAST so it
@@ -6356,6 +6498,173 @@ mod tests {
                 unspoken.contains(&"plugins"),
                 "the `null` this build emits is silence, and only `unspoken` can say so"
             );
+        }
+    }
+
+    /// Every path at which `value` holds `null`, written the way
+    /// `admin_nullable_fields` writes them: dotted, `[]` for every element of an
+    /// array. The value of `metadata` is the config's content and not a path of
+    /// the document, so a non-null `metadata` is not walked into.
+    fn null_paths(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Null => out.push(String::from(prefix)),
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    if prefix.is_empty() && k == "metadata" && !v.is_null() {
+                        continue;
+                    }
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    null_paths(v, &path, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                let path = format!("{prefix}[]");
+                for v in items {
+                    null_paths(v, &path, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A root document with one unicast session holding `weight`, one multicast
+    /// member, `metadata` as given and the fixture's plugins.
+    fn root_with(weight: Option<AdminLinkWeight>, metadata_json: &str) -> serde_json::Value {
+        let data = AdminLocalData {
+            zid_hex: String::from("a1b2"),
+            version: String::from("0.1.0"),
+            locators: alloc::vec![String::from("tcp/127.0.0.1:7447")],
+            sessions: alloc::vec![AdminSession {
+                peer_zid_hex: String::from("c3d4"),
+                whatami: None,
+                links: alloc::vec![AdminLink {
+                    src: String::from("tcp/127.0.0.1:7447"),
+                    dst: String::from("tcp/127.0.0.1:50000"),
+                }],
+                shm: false,
+                weight,
+                region: None,
+            }],
+            multicast_peers: alloc::vec![AdminMulticastPeer {
+                peer_zid_hex: String::from("e5f6"),
+                whatami: None,
+                group: None,
+                links: alloc::vec![],
+            }],
+            plugins: fixture_plugins(),
+            metadata_json: String::from(metadata_json),
+        };
+        serde_json::from_str(&data.to_json()).expect("local_data is JSON")
+    }
+
+    /// `nulls` declares EVERY path at which the root document can be `null`.
+    ///
+    /// The document is built with each optional value present and absent, and
+    /// the union of the paths it held `null` at must be exactly the declared
+    /// ones: a path that turns `null` without a meaning, and a declared path the
+    /// document can no longer write `null`, both fail. With every value present
+    /// the only `null`s left are the silences.
+    #[test]
+    fn nulls_declares_every_null_the_root_document_can_emit() {
+        let weighted = |dst, src| {
+            Some(AdminLinkWeight {
+                actual_weight: 100,
+                dst_weight: dst,
+                src_weight: src,
+            })
+        };
+        let filled = root_with(weighted(Some(10), Some(20)), r#"{"name":"strawberry"}"#);
+        let documents = [
+            filled.clone(),
+            root_with(None, "null"),
+            root_with(weighted(None, None), r#"{"name":null}"#),
+        ];
+        let mut observed: Vec<String> = Vec::new();
+        for doc in &documents {
+            null_paths(doc, "", &mut observed);
+        }
+        observed.sort();
+        observed.dedup();
+        let mut declared: Vec<String> = admin_nullable_fields()
+            .iter()
+            .map(|n| String::from(n.path))
+            .collect();
+        declared.sort();
+        assert_eq!(
+            observed, declared,
+            "`nulls` must name exactly the paths the root document can write `null` at"
+        );
+
+        let mut silent: Vec<String> = Vec::new();
+        null_paths(&filled, "", &mut silent);
+        silent.sort();
+        let mut silences: Vec<String> = admin_nullable_fields()
+            .iter()
+            .filter(|n| n.meaning.is_silence())
+            .map(|n| String::from(n.path))
+            .collect();
+        silences.sort();
+        assert_eq!(
+            silent, silences,
+            "with every value present only the build's silences are `null`"
+        );
+    }
+
+    /// `unspoken` is the silences of `nulls`, and the surface document writes
+    /// both as declared, so the two lists cannot tell a consumer different things.
+    #[test]
+    fn unspoken_is_the_silences_of_nulls() {
+        let silences: Vec<&str> = admin_nullable_fields()
+            .iter()
+            .filter(|n| n.meaning.is_silence())
+            .map(|n| n.path)
+            .collect();
+        assert_eq!(admin_unspoken_fields(), silences.as_slice());
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&admin_surface_json("a1b2", "peer")).expect("JSON");
+        let written: Vec<(String, String, String)> = doc["nulls"]
+            .as_array()
+            .expect("`nulls` is an array")
+            .iter()
+            .map(|entry| {
+                let word = |k: &str| String::from(entry[k].as_str().expect("a string"));
+                (word("path"), word("null_is"), word("reason"))
+            })
+            .collect();
+        let declared: Vec<(String, String, String)> = admin_nullable_fields()
+            .iter()
+            .map(|n| {
+                (
+                    String::from(n.path),
+                    String::from(n.meaning.kind_word()),
+                    String::from(n.meaning.word()),
+                )
+            })
+            .collect();
+        assert_eq!(written, declared);
+        assert_eq!(
+            doc["unspoken"],
+            serde_json::Value::from(silences),
+            "`unspoken` in the document is the silences"
+        );
+    }
+
+    /// Each meaning has its own word, and exactly one kind of meaning is silence.
+    #[test]
+    fn every_null_meaning_has_its_own_word() {
+        let mut words: Vec<&str> = AdminNullMeaning::ALL.iter().map(|m| m.word()).collect();
+        words.sort_unstable();
+        words.dedup();
+        assert_eq!(words.len(), AdminNullMeaning::ALL.len());
+        for m in AdminNullMeaning::ALL {
+            assert_eq!(m.is_silence(), m == AdminNullMeaning::FeatureOff, "{m:?}");
+            let kind = m.kind_word();
+            assert!(kind == "silence" || kind == "answer", "{m:?} {kind}");
         }
     }
 
