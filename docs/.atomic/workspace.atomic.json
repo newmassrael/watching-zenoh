@@ -13498,6 +13498,21 @@
       "carry_forward_bullets": [
         "Open: read the hosted run of this head at the start of the next round: the five repaid jobs, the size lane (the two C budgets) and Layer E6h; Z8 regions order2 is the debt item filed here, closed by a stress run with the peer trace lines read for the face that delivered the second copy."
       ]
+    },
+    "Round 4480": {
+      "decision_summary": "The link-restriction slices of the last days left five things open, and each is now a registered debt in the store's inventory instead of a line in a hand-over: the C door for the liveliness get with a set of links (it moves the C ABI revision), the engines other than the tokio registry that read no set (the router refuses it, the cooperative engine, the lwIP session and the pico ABI do not mention it), the reservation of the all-or-none publish that is held across the send of an earlier face, the question whether the reliable-gap-reconnect policy wants a door at all, and the hosted checkout that has no retry although the package install now has one. No new gate and no code: the names were checked against the active debts first and none repeats another, and the count of active debts moves from 42 to 47. A per-session policy was considered and is not registered: the build-time policy has about forty call sites on purpose, one build per firmware.",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json: five inventory entries, debt-link-restriction-c-abi-liveliness-get, debt-link-restriction-engines-without-a-set, debt-atomic-tx-reservation-held-across-the-send, debt-reliable-gap-reconnect-without-a-door and debt-hosted-checkout-without-a-retry, added through the typed primitive."
+      ],
+      "verification_bullets": [
+        "The inventory was read before and after with the CLI from the workspace root: 321 entries before and 326 after, active debts 42 before and 47 after (the entries were first added on an older tip, found in conflict when another session's rounds landed first, and added again from the same text on the new tip through the same primitive, so the numbers are those of the new tip), the five names present and none of them present before. The claims in the reasons were checked in the tree on the day: the cooperative, lwIP and pico crates do not name the restriction, the public API and the C library name the reliable-gap policy nowhere, and the registry door of the liveliness get is the one the ledger round 4466 landed. The reservation entry is marked as recorded at landing and not re-measured, which is what it is."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The hosted results of the heads pushed in this stretch (the C doors of the liveliness entities, the install retry, the liveliness get with a set of links) were superseded by later heads before a verdict, so they are read as part of the newest head's run at the start of the next round, with the per-job view. Another session paid the stamp pin and the admin-space counts of the newest red head while this round waited for the push lock, and registered the regions duplicate-delivery debt, so this round does not repeat any of them."
+      ]
     }
   },
   "inventory_entries": {
