@@ -14162,6 +14162,16 @@
       "source": "open-debt register",
       "reason": "OPEN, UNREPRODUCED: Layer E6h test wz_storage_host_plugins_section_from_a_config_file_serves_via_pico read an empty answer once on a hosted run (the key boot/a was not served) and passed on the next head. Commits between the passing and the failing head touched none of the runtime, session-core, demo and storage crates, so the cause is a race inside the host: the storage host applies the config file's plugins section on the FIRST client session and serves ONE client session at a time, so either the put reached the first session before the storage started on it, or the second session was bound after the query was answered. Round 4444 made the final assertion print the host's whole log; the item closes when a failing run's log names which order occurred and the order is fixed in the host (not in the test), or when a stress run on the build machine shows it cannot happen."
     },
+    "debt-field-values-window": {
+      "status": "active",
+      "source": "carry of Round 4385",
+      "reason": "OPEN: wz_dissect_live_field_values_since (ABI 53, document field_values) has no max_rows window. One call writes every record the selector picks after the cursor, so on a large capture the first call returns one document for the whole capture, where wz_dissect_live_fields_since_window bounds a call by its max_rows work ceiling and hands the next cursor back as window.through_seq. The window and the cursor are already in the document (window.after_seq, window.through_seq), so a bounded door adds the ceiling and leaves the reading unchanged; it is a new C symbol and an ABI revision."
+    },
+    "debt-host-slot-node-let-unit-value": {
+      "status": "active",
+      "source": "carry of the lifecycle door rounds (4390)",
+      "reason": "OPEN: deploy/host-slot-node/src/main.rs binds 'let app = ();' when the get feature is off and then rebinds app under control, which clippy reports as let_unit_value in a node built without get. Clippy of the declared nodes runs per feature set (wz_node.py --env <id> with WZ_LIMIT), so the lint stands only in the combinations without get. The fix is to give the no-get arm a named unit application rather than a bound unit value, and to clippy that combination."
+    },
     "debt-hosted-checkout-without-a-retry": {
       "status": "active",
       "source": "open-debt register",
@@ -14181,6 +14191,11 @@
       "status": "active",
       "source": "open-debt register",
       "reason": "OPEN: only the tokio registry reads a set of links (policy entity-link-restriction, off by default). The router engine of the Rust API refuses a stated set; a router-node session of the C library answers Z_EUNAVAILABLE for one; the cooperative engine (wz-capi-coop), the lwIP session and the pico ABI do not mention LinkRestriction at all and have no door (a search of those crates at 2026-11-13 finds none). So a build on those engines cannot state a set, and the Rust and C doors say so only where an engine arm exists. The long-term shape is one of two: the port trait takes the set and every engine decides, or each engine states by name that it refuses; a silent ignore is not allowed because it would make a limited entity unrestricted without saying so. A per-session policy was judged not worth doing (SessionPolicy::from_build has about forty call sites by design, one build per firmware) and is not part of this item."
+    },
+    "debt-memory-document-values-door": {
+      "status": "active",
+      "source": "carry of Round 4385",
+      "reason": "OPEN: wz_dissect_live_memory does not count what the field-values door keeps. The handle holds the payloads the selector picked past the cursor in its ValuesMemory (live.rs values_memory) until a cursor passes them, and the memory document lists lists.rows, the reassembled bytes and the selection memories, not these. A consumer that keeps a cursor behind on a busy capture therefore sees memory the document does not name. The figure belongs in the memory document as its own member, read from ValuesMemory, with the document's revision moved."
     },
     "debt-packet-edit-after-build": {
       "status": "deprecated",
