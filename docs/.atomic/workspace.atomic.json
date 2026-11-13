@@ -13410,6 +13410,25 @@
       "carry_forward_bullets": [
         "None from this round."
       ]
+    },
+    "Round 4475": {
+      "decision_summary": "A consumer claim, forwarded by a peer session: a participant that sends to a deployment which splits its large messages into pieces on the message's own key must write those pieces, and wz knew the declared segment profile only as a reader. The writer takes the same profile text and writes each piece by the reader's own field layout and CRC feeder, so the two cannot disagree. A field fixed by equals is the profile's, the transfer number is the sender's, total, offset and CRC are the mechanism's, and every other field is the caller's, stated once. The transfer number follows the end-to-end counter's rule: a refused message uses none, a message whose first piece went out has used it, and it does not wrap unless the caller names a restart. The C doors are a capability that is off by default: one puts the pieces on a publisher with one timestamp, the other hands them to a callback, for a deployment that answers its history queries with pieces.",
+      "changes_bullets": [
+        "wz-capture: segment_sender writes the pieces of one message by a declared segment profile; segment_profile gains Field::write and one CRC feeder shared by the reader and the writer.",
+        "wz-capi-c: capability segment-sender (off by default), doors wz_capi_c_segment_sender_{new,put,split,next,set,loan,drop}, the put options default and the internal pair; ABI revision 14; a C consumer in Layer C1cc.",
+        "Declaration, generated capability files, ABI pin, census, nondefault-tests row and archive arm name the capability; a rustdoc link to a dissect-only type in doc_revision is named instead."
+      ],
+      "verification_bullets": [
+        "On a build machine: wz-capture segment tests 42 passed, 11 of them the writer's (pieces byte-for-byte the independently built ones, the reader joins every chunk size, refusals use no number, restart and refuse at the end, a failed emit uses the number).",
+        "wz-capi-c with segment-sender: 4 door tests passed, the put door's pieces arriving on a real subscriber in order with the one timestamp and joined by the reader; the C consumer compiled with -Werror and printed ok; clippy of both crates clean.",
+        "Layer C1ch passed with the revision 14 pin; the hook's 139 static gates and the upstream citation gate pass. Layer C1cc stopped earlier on a stale pico command-line oracle on that machine, before this round's step."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "carry_forward_bullets": [
+        "The consumer is told the commit, the revision and that the library must be built with segment-sender on; it builds the history responder itself on the queryable door."
+      ]
     }
   },
   "inventory_entries": {
