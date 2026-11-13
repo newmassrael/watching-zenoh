@@ -25121,7 +25121,8 @@ pub const FIELDS_R64_CARRIES: &[KeyCarries] = &[
 ];
 
 /// How a `carried` entry's `WireExpr` carried its key, at field revision 65:
-/// [`crate::payload_decode::KeyCarriage`]'s words, sorted.
+/// `payload_decode::KeyCarriage`'s words, sorted. Named and not linked: this module is in every
+/// build and `payload_decode` only in one with `dissect`, so a link breaks the default rustdoc.
 pub const KEYEXPR_CARRIAGE_R65: &[&str] = &["id", "id_and_suffix", "whole_key"];
 
 /// The field document's key set at revision 65: revision 64's and
