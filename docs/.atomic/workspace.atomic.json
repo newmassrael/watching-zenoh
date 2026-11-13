@@ -13513,6 +13513,21 @@
       "carry_forward_bullets": [
         "The hosted results of the heads pushed in this stretch (the C doors of the liveliness entities, the install retry, the liveliness get with a set of links) were superseded by later heads before a verdict, so they are read as part of the newest head's run at the start of the next round, with the per-job view. Another session paid the stamp pin and the admin-space counts of the newest red head while this round waited for the push lock, and registered the regions duplicate-delivery debt, so this round does not repeat any of them."
       ]
+    },
+    "Round 4481": {
+      "decision_summary": "Three carries that stood only in round prose are registered as debt, each read against the tree before it was written. The field-values door (ABI 53) writes every record after the cursor in one call and has no max_rows window, where the field door has one. The memory document does not count the payloads the field-values door keeps past the cursor. The declared host node binds a unit value when it is built without get, which clippy reports in that combination. None of them changes what a door writes today, so each is a debt and not a red.",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json: inventory entries debt-field-values-window, debt-memory-document-values-door and debt-host-slot-node-let-unit-value, status active."
+      ],
+      "verification_bullets": [
+        "Each entry was checked against the tree at origin/main dcaed6aeed, and origin/main 4710509327 changes none of crates/wz-capi-dissect or deploy/host-slot-node since: the field-values declaration in crates/wz-capi-dissect/include/wz_dissect.h takes no max_rows, the memory document's members name no values memory while crates/wz-capi-dissect/src/live.rs keeps one, and deploy/host-slot-node/src/main.rs binds let app = () under not(feature = \"get\"). The inventory was read before the add and no entry named any of the three. mnemosyne-cli validate-workspace after the adds on 4710509327: inventory 326 -> 329 entries, no new T1 orphan."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The three entries are open; the first two belong together, since a bounded field-values door changes what its memory holds."
+      ]
     }
   },
   "inventory_entries": {
