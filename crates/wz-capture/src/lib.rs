@@ -149,8 +149,9 @@ mod exit;
 #[cfg(feature = "dissect")]
 pub mod fields_json;
 // A message an application split over several samples on one key: the header
-// a deployment declares for its pieces, and the state that joins them. Each is
-// documented by its own `//!` text, as the end-to-end modules above are.
+// a deployment declares for its pieces, the state that joins them, and the
+// writer of the pieces. Each is documented by its own `//!` text, as the
+// end-to-end modules above are.
 pub mod segment_chain;
 #[cfg(test)]
 mod segment_chain_tests;
@@ -159,6 +160,9 @@ pub mod segment_profile;
 mod segment_profile_tests;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod segment_row_tests;
+pub mod segment_sender;
+#[cfg(test)]
+mod segment_sender_tests;
 // Open-debt item 924, step 5 -- the field walk's per-row digests, kept as one
 // word a row. Private: the memory in `fields_json` is the only holder.
 #[cfg(feature = "dissect")]

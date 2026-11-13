@@ -147,6 +147,27 @@ impl Field {
                 .fold(0u64, |v, b| (v << 8) | u64::from(*b)),
         }
     }
+
+    /// The largest value the field's bytes hold.
+    pub fn max_value(&self) -> u64 {
+        width_mask((self.bytes * 8) as u8)
+    }
+
+    /// Write `value` into the field's bytes of `header`, which holds at least
+    /// the whole header: the inverse of [`Self::read`]. Bits past the field's
+    /// width are not written, so a caller that must not lose them checks
+    /// [`Self::max_value`] first.
+    pub fn write(&self, header: &mut [u8], value: u64) {
+        let width = self.bytes;
+        let bytes = &mut header[self.offset..self.offset + width];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            let shift = match self.order {
+                Order::Big => 8 * (width - 1 - i),
+                Order::Little => 8 * i,
+            };
+            *byte = (value >> shift) as u8;
+        }
+    }
 }
 
 /// What the CRC is taken over, in feeding order.
@@ -395,27 +416,32 @@ impl SegmentProfile {
             values.push(value);
         }
         let chunk = &payload[self.header_bytes..];
-        let crc = self.crc.as_ref().map(|spec| {
-            let mut digest = spec.engine.start();
-            for cover in &spec.cover {
-                match cover {
-                    Cover::Field(i) => {
-                        let f = &self.fields[*i];
-                        digest.update(&header[f.offset..f.offset + f.bytes]);
-                    }
-                    Cover::Chunk => digest.update(chunk),
-                }
-            }
-            CrcReading {
-                stated: values[spec.field],
-                computed: digest.finish(),
-            }
+        let crc = self.crc.as_ref().map(|spec| CrcReading {
+            stated: values[spec.field],
+            computed: self.crc_over(spec, header, chunk),
         });
         let fixed = self.fields.iter().any(|f| f.equals.is_some());
         if !fixed && !crc.is_some_and(|c| c.matches()) {
             return None;
         }
         Some(Piece { values, chunk, crc })
+    }
+
+    /// The CRC `spec` computes over `header` and `chunk`, fed in the order its
+    /// `cover` lists. The one place that order is applied: a reader checks a
+    /// piece with it and [`crate::segment_sender`] writes a piece's CRC with it.
+    pub(crate) fn crc_over(&self, spec: &CrcSpec, header: &[u8], chunk: &[u8]) -> u64 {
+        let mut digest = spec.engine.start();
+        for cover in &spec.cover {
+            match cover {
+                Cover::Field(i) => {
+                    let f = &self.fields[*i];
+                    digest.update(&header[f.offset..f.offset + f.bytes]);
+                }
+                Cover::Chunk => digest.update(chunk),
+            }
+        }
+        digest.finish()
     }
 
     /// Where `piece` sits in its whole: `(total, offset)`, or why it cannot sit
