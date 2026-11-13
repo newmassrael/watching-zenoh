@@ -11434,8 +11434,9 @@ layer_c1ch_capi_c_config_surface() {
     # the reference is, and the door set the gates below grade is the library's with them on: a
     # door behind a feature that no lane turned on would be graded by nothing. `identity-make` (the
     # identity a client makes, off by default for its size) is one more such door, and so are the
-    # lifecycle doors (`lifecycle-doors`) and the statement doors (`switch-doors`).
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors"
+    # lifecycle doors (`lifecycle-doors`), the statement doors (`switch-doors`) and the segment
+    # sender (`segment-sender`).
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender"
     (cd crates && cargo build -p wz-capi-c --quiet --features "$plane") || return 1
     python3 scripts/lib/capi_c_config_surface.py \
         "$WZ_ARTIFACTS/crates/target/debug/libwz_capi_c.so" || return 1
@@ -24443,8 +24444,9 @@ _runci_build_capi_c_for_oracle() {
     # of the doors (`c_observation_plane_consumer.c`) links the very library the arm selected.
     # `identity-make`, `lifecycle-doors` and `switch-doors` likewise: their C consumers
     # (`c_identity_consumer.c`, `c_lifecycle_consumer.c`, `c_switch_doors_consumer.c`) link this
-    # library.
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors"
+    # library. `segment-sender` is in the plane for the same reason, so its doors are in the
+    # library the arm graded.
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender"
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-c $capi_c_args --features "$plane" --quiet)
 }
@@ -24566,6 +24568,26 @@ layer_c1cc_api_compat_c() {
     grep -q '^c_lifecycle_consumer: ok$' <<<"$c_life_out" || {
         echo "  C1cc FAIL: the lifecycle C consumer printed no verdict"
         echo "$c_life_out"; return 1; }
+    # The sender of a declared segment profile, driven from C the same way: the handle, the
+    # result struct and the callback type across the boundary, with every byte of every piece
+    # written out in the consumer and not taken from the library. The build above carries
+    # `segment-sender` (`_runci_build_capi_c_for_oracle`).
+    local c_seg_bin c_seg_out
+    c_seg_bin="$(mktemp -d)/c_segment_sender_consumer"
+    c_seg_out="$("${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -I crates/wz-capi-c/include \
+        -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
+        crates/wz-capi-c/tests/c_segment_sender_consumer.c \
+        -L "$WZ_ARTIFACTS/crates/target/debug" -lwz_capi_c -o "$c_seg_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the segment sender C consumer did not compile or link"
+        echo "$c_seg_out"; return 1; }
+    c_seg_out="$(LD_LIBRARY_PATH="$WZ_ARTIFACTS/crates/target/debug" "$c_seg_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the segment sender C consumer failed"
+        echo "$c_seg_out"; rm -rf "$(dirname "$c_seg_bin")"; return 1; }
+    rm -rf "$(dirname "$c_seg_bin")"
+    grep -q '^c_segment_sender_consumer: ok$' <<<"$c_seg_out" || {
+        echo "  C1cc FAIL: the segment sender C consumer printed no verdict"
+        echo "$c_seg_out"; return 1; }
     # The identity a client presents, made from C the same way: the struct's layout, the key's
     # mode as C reads it, made once and kept, and half an identity refused.
     local c_id_bin c_id_out

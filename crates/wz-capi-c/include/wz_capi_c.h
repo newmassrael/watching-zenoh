@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 13
+#define WZ_CAPI_C_ABI_REVISION 14
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -565,6 +565,136 @@ void wz_capi_c_e2e_sender_drop(wz_capi_c_moved_e2e_sender_t *this_);
 void wz_capi_c_internal_e2e_sender_null(wz_capi_c_owned_e2e_sender_t *this_);
 bool wz_capi_c_internal_e2e_sender_check(
     const wz_capi_c_owned_e2e_sender_t *this_);
+
+/* ------------------------------------------------------------------ *
+ * The sender of a declared segment profile (revision 14).
+ *
+ * In builds with the `segment-sender` feature, which is OFF by default
+ * (zenoh-c has no such doors): a participant that sends to a deployment
+ * which splits its large messages builds the library with it on.
+ *
+ * WHAT IT IS FOR. Some deployments cut a message larger than they put in
+ * one sample into pieces, each an ordinary sample on the message's own
+ * key whose payload is a small header (where the chunk sits, how large
+ * the whole is, which transfer it belongs to, a check value) and the
+ * chunk. The dissect library joins such pieces by a segment profile the
+ * caller declares (wz_dissect.h). This sender writes them, from the SAME
+ * profile text, by the reader's own field layout and CRC rule, so the
+ * two cannot disagree about a header.
+ *
+ * WHO WRITES WHICH FIELD. A field with "equals" holds that value; the
+ * transfer field is the sender's number; the total and offset fields are
+ * the message's length and where each chunk starts; the crc field is the
+ * CRC the profile's "cover" list describes. Every other field (the
+ * "stream" fields among them) is the caller's, stated once in
+ * `values_json` as a JSON object keyed by field name, e.g.
+ * {"session": 305419896} or {"session": "0x12345678"}. Leaving one out,
+ * or stating one the profile or the mechanism writes, is refused. A
+ * deployment that draws its stream value at random expects the caller to
+ * draw it.
+ *
+ * THE TRANSFER NUMBER. The first message carries `first_transfer`, each
+ * after it the next value. A message refused before any piece consumes no
+ * number; a message whose first piece went out has used its number, even
+ * if a later piece did not. The number does NOT wrap by default: after
+ * the largest value the field holds, the next message is refused.
+ * WZ_CAPI_C_SEGMENT_ROLLOVER_RESTART goes back to `first_transfer`
+ * instead, which states "never 0, wrap to 1" (first value 1, restarting).
+ *
+ * ONE SENDER PER STREAM. A message's pieces are written and handed on
+ * under one lock, so two messages on one sender never interleave. Two
+ * senders that share the caller's stream values on one key do interleave,
+ * and a reader drops a transfer whose pieces interleave with another's.
+ * A split callback must not call its own sender.
+ * ------------------------------------------------------------------ */
+
+typedef int32_t wz_capi_c_segment_rollover_t;
+#define WZ_CAPI_C_SEGMENT_ROLLOVER_REFUSE 0
+#define WZ_CAPI_C_SEGMENT_ROLLOVER_RESTART 1
+
+typedef struct wz_capi_c_owned_segment_sender_t { void *_handle; } wz_capi_c_owned_segment_sender_t;
+typedef struct wz_capi_c_loaned_segment_sender_t { void *_handle; } wz_capi_c_loaned_segment_sender_t;
+typedef struct wz_capi_c_moved_segment_sender_t { wz_capi_c_owned_segment_sender_t _this; } wz_capi_c_moved_segment_sender_t;
+
+/* How far one put or split went: the transfer number the pieces carried
+ * (0 when the message was refused), how many pieces the message was cut
+ * into (0 when refused), and how many went out. */
+typedef struct wz_capi_c_segment_result_t {
+  uint64_t transfer;
+  size_t pieces;
+  size_t sent;
+} wz_capi_c_segment_result_t;
+
+/* The timestamp every piece of a put carries, BORROWED for the call;
+ * NULL for none. */
+typedef struct wz_capi_c_segment_put_options_t {
+  const z_timestamp_t *timestamp;
+} wz_capi_c_segment_put_options_t;
+
+/* What a split hands each piece to. Anything but Z_OK stops the split,
+ * which returns it. `piece` is valid only during the call. */
+typedef z_result_t (*wz_capi_c_segment_piece_fn)(void *context,
+                                                 const uint8_t *piece,
+                                                 size_t len);
+
+/* A sender for the profile `profile_json` describes, with the caller's
+ * fields in `values_json`, whose first message carries `first_transfer`.
+ * `this_` holds a gravestone on every error. `refusal` may be NULL; when
+ * it is not, it is empty on success and on Z_EPARSE says why, beginning
+ * "profile" or "values" and naming the place. Z_ENULL for a null
+ * argument, Z_EINVAL for text that is not UTF-8 or an unknown
+ * `rollover`, Z_EPARSE for a profile or values text that is refused. */
+z_result_t wz_capi_c_segment_sender_new(
+    wz_capi_c_owned_segment_sender_t *this_, const char *profile_json,
+    const char *values_json, uint64_t first_transfer,
+    wz_capi_c_segment_rollover_t rollover, z_owned_string_t *refusal);
+
+void wz_capi_c_segment_put_options_default(
+    wz_capi_c_segment_put_options_t *this_);
+
+/* Cut `message` into chunks of `chunk_bytes` and put each piece on
+ * `publisher`, in order (`options` may be NULL). `result` and `refusal`
+ * may be NULL. Z_OK when every piece was put; Z_EINVAL when the message
+ * was refused before any piece (`refusal` says why, no number used); the
+ * failing put's code, after `result->sent` pieces, when one failed (the
+ * number is used); Z_ENULL for a null sender, publisher, or message with
+ * a length. */
+z_result_t wz_capi_c_segment_sender_put(
+    const wz_capi_c_loaned_segment_sender_t *this_,
+    const z_loaned_publisher_t *publisher, const uint8_t *message,
+    size_t len, size_t chunk_bytes,
+    const wz_capi_c_segment_put_options_t *options,
+    wz_capi_c_segment_result_t *result, z_owned_string_t *refusal);
+
+/* As wz_capi_c_segment_sender_put, but each piece is handed to `emit`
+ * with `context` instead of put: for a caller that sends the pieces some
+ * other way, as the replies of a query for instance. Returns what `emit`
+ * returned when it stopped the split; Z_ENULL for a null `emit`. */
+z_result_t wz_capi_c_segment_sender_split(
+    const wz_capi_c_loaned_segment_sender_t *this_, const uint8_t *message,
+    size_t len, size_t chunk_bytes, wz_capi_c_segment_piece_fn emit,
+    void *context, wz_capi_c_segment_result_t *result,
+    z_owned_string_t *refusal);
+
+/* The number the next message carries. false, and nothing written, when
+ * the largest was sent and the sender does not restart, or when an
+ * argument is null. */
+bool wz_capi_c_segment_sender_next(
+    const wz_capi_c_loaned_segment_sender_t *this_, uint64_t *out);
+
+/* Make `value` the number the next message carries. A value past the
+ * transfer field's width is refused by the next message, as a first
+ * number is. Z_ENULL for a null or empty handle. */
+z_result_t wz_capi_c_segment_sender_set(
+    const wz_capi_c_loaned_segment_sender_t *this_, uint64_t value);
+
+const wz_capi_c_loaned_segment_sender_t *wz_capi_c_segment_sender_loan(
+    const wz_capi_c_owned_segment_sender_t *this_);
+void wz_capi_c_segment_sender_drop(wz_capi_c_moved_segment_sender_t *this_);
+void wz_capi_c_internal_segment_sender_null(
+    wz_capi_c_owned_segment_sender_t *this_);
+bool wz_capi_c_internal_segment_sender_check(
+    const wz_capi_c_owned_segment_sender_t *this_);
 
 /* ------------------------------------------------------------------ *
  * What one message may weigh (revision 6).

@@ -179,6 +179,11 @@ identity-make = ["transport_tls", "wz-capi-core/identity-make"]
 # verbs from a client. OFF by default: zenoh-c has no such doors, and they cost every build about
 # 19 KB (hosted C1cs); a client that asks a node's verbs turns it on.
 lifecycle-doors = ["wz-capi-core/lifecycle-doors"]
+# `wz_capi_c_segment_sender_*` (`src/segment_sender.rs`): one message of the application's own cut
+# into the pieces a declared segment profile describes, put on a publisher or handed to a callback.
+# OFF by default: zenoh-c has no such doors, and they link the piece writer of `wz-capture`; a
+# participant that sends to a deployment which splits its large messages turns it on.
+segment-sender = ["dep:wz-capture", "wz-capi-core/segment-sender"]
 # The seven `wz_capi_c_*_ext` doors and the three statement structs they take
 # (`src/switch_doors.rs`): the links an entity may use, a publish's retry and all-or-none form, and
 # the node a query is addressed to, stated beside the arguments of `z_put`, `z_delete`,

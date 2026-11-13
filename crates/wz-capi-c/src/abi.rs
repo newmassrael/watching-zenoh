@@ -1623,7 +1623,11 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// (`wz_capi_c_liveliness_declare_token_ext`, `wz_capi_c_liveliness_declare_subscriber_ext`), two
 /// new symbols taking the revision-12 `wz_capi_c_entity_ext_t`, in a build with `switch-doors`,
 /// which now names the liveliness capability as it names query and queryable.
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 13;
+///
+/// It moves to 14 for the sender of a declared segment profile (`crate::segment_sender`): ten new
+/// symbols (seven `wz_capi_c_segment_sender_*`, `wz_capi_c_segment_put_options_default` and the two
+/// internal doors) and the structs they take, in a build with `segment-sender` (off by default).
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 14;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;

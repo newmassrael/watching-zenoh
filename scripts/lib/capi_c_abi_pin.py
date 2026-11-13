@@ -139,10 +139,23 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # in `wz_capi_c.h` can change on its own -- and still has to be a deliberate
 # edit here, because a revision that moves for a reason nobody wrote down is a
 # revision nobody can reason about.
-EXPECTED_REVISION = 13
+EXPECTED_REVISION = 14
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",
+    # Revision 14 — the sender of a declared segment profile (`segment-sender`, off by default and
+    # on in the lane's build): the owned handle's set, the put options' default, the two doors that
+    # hand the pieces on (to a publisher, to a callback), and the internal pair.
+    "wz_capi_c_segment_sender_new",
+    "wz_capi_c_segment_put_options_default",
+    "wz_capi_c_segment_sender_put",
+    "wz_capi_c_segment_sender_split",
+    "wz_capi_c_segment_sender_next",
+    "wz_capi_c_segment_sender_set",
+    "wz_capi_c_segment_sender_loan",
+    "wz_capi_c_segment_sender_drop",
+    "wz_capi_c_internal_segment_sender_null",
+    "wz_capi_c_internal_segment_sender_check",
     # Revision 13 — the links of a liveliness token and a liveliness subscriber (`switch-doors`).
     "wz_capi_c_liveliness_declare_token_ext",
     "wz_capi_c_liveliness_declare_subscriber_ext",

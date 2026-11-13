@@ -1217,6 +1217,18 @@ implies = []
 help = "A node's lifecycle verbs from a client: the key a verb is asked by and the answer read back (wz_capi_c_lifecycle_key, wz_capi_c_lifecycle_read, wz-own doors over lifecycle_wire)."
 
 [[capability]]
+id = "segment-sender"
+kconfig = "WZ_CAP_SEGMENT_SENDER"
+# Off by default: zenoh-c has no such doors, and they link the piece writer of wz-capture into a
+# library that only a participant sending to a deployment which splits its large messages needs.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh", "zenoh-c"]
+abis = ["core", "c"]
+implies = []
+help = "The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz-own doors)."
+
+[[capability]]
 id = "switch-doors"
 kconfig = "WZ_CAP_SWITCH_DOORS"
 # Off by default: zenoh-c has no such statements, and the doors are for a client that states the

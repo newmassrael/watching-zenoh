@@ -220,6 +220,10 @@ identity-make = ["transport_tls", "wz-runtime-tokio/tls-identity-make"]
 # ABI's own (`wz-capi-c/lifecycle-doors`) over `wz_session_core::lifecycle_wire`, which every build
 # has, so this feature only carries the capability's name, as `e2e-sender`'s does.
 lifecycle-doors = []
+# The sending side of a declared segment profile. The model has nothing behind it: the doors and the
+# piece writer they use are the zenoh-c ABI's own (`wz-capi-c/segment-sender`), so this feature only
+# carries the capability's name, as `e2e-sender`'s does.
+segment-sender = []
 # The statements of a call that the zenoh-c ABI's `wz_capi_c_*_ext` doors make (the links an entity
 # may use, a publish's retry and all-or-none form, a query's target node). The model has them
 # unconditionally (`SharedSession`'s `*_on_links`, the options of a publish and a query), so this

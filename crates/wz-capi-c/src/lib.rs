@@ -148,6 +148,11 @@ pub mod keyexpr;
 // observation plane is (`lifecycle-doors`): a build that names it pays for it, and no other does.
 #[cfg(feature = "lifecycle-doors")]
 pub mod lifecycle;
+// The SENDING side of a declared segment profile: one message cut into the pieces the profile's
+// header describes, put on a publisher or handed to a callback. A wz-own door upstream has no
+// counterpart of, so it is a capability that is off by default, as `lifecycle-doors` is.
+#[cfg(feature = "segment-sender")]
+pub mod segment_sender;
 // The identity a client presents over TLS, made on the computer it runs on by the contract of a
 // declared node's `--make-identity`. A wz-own door, behind `identity-make` (the maker links a
 // certificate writer a TLS build given its identity does not need); unix only, which the module

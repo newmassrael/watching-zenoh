@@ -284,6 +284,9 @@ CAPABILITY_FEATURES = frozenset({
     # The statements of a call beyond the zenoh-c options (`wz_capi_c_*_ext`): seven wz-own doors
     # and the structs they take, no zenoh-c type; off in the default and in every arm.
     "switch-doors",
+    # The sender of a declared segment profile (`wz_capi_c_segment_*`): wz-own doors and the
+    # structs they take, no zenoh-c type; off in the default and in every arm.
+    "segment-sender",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"

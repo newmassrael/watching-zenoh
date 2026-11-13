@@ -437,6 +437,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `switch-doors` the same: it gates `pub mod switch_doors`, whose public items are the
         # nine `wz_capi_c_*_ext` doors, the three `_default` functions and the three statement
         # structs, declared in `wz_capi_c.h`; off by default, as upstream has no such statements.
+        # `segment-sender` the same: it gates `pub mod segment_sender`, whose public items are the
+        # `wz_capi_c_segment_*` doors and the structs and constants they take, declared in
+        # `wz_capi_c.h`; off by default, as upstream has no such doors.
         frozenset(
             {
                 "clock-source",
@@ -444,6 +447,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "identity-make",
                 "lifecycle-doors",
                 "resource-snapshot",
+                "segment-sender",
                 "supervision",
                 "switch-doors",
                 "zenoh-c-no-unstable-api",

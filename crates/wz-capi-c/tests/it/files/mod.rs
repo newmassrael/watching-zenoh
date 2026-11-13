@@ -36,6 +36,7 @@ mod router_node_zenohd_interop;
 mod scouting_autoconnect;
 mod scouting_open;
 mod scouting_ttl;
+mod segment_sender_roundtrip;
 mod session_roles;
 mod source_info_roundtrip;
 mod switch_doors;

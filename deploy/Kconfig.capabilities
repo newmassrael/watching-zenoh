@@ -318,6 +318,13 @@ config WZ_CAP_LIFECYCLE_DOORS
 	  A node's lifecycle verbs from a client: the key a verb is asked by and the answer read back (wz_capi_c_lifecycle_key, wz_capi_c_lifecycle_read, wz-own doors over lifecycle_wire).
 	  Exported by: c.
 
+config WZ_CAP_SEGMENT_SENDER
+	bool "segment-sender"
+	default n
+	help
+	  The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz-own doors).
+	  Exported by: c.
+
 config WZ_CAP_SWITCH_DOORS
 	bool "switch-doors"
 	default n
