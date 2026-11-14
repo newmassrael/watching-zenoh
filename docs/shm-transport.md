@@ -36,8 +36,18 @@ receiver counts them back as it maps them
 A group negotiates nothing. Upstream builds its Join with no shared-memory extension
 (`io/zenoh-transport/src/multicast/link.rs` @ `ext_shm: None,`) and treats every member as able to
 read any protocol (`io/zenoh-transport/src/common/shm/interop.rs` @
-`pub struct MulticastTransportShmConfig;`): a member with a reader maps the descriptor, one without
-cannot read the message.
+`pub struct MulticastTransportShmConfig;`). A member whose session has a shared-memory context (its
+configuration enables shared memory) maps every message it sends for that partner, a buffer to its
+descriptor and a large payload to a copy, with the handoff counters disabled
+(`io/zenoh-transport/src/multicast/tx.rs` @ `&TxHandoffStorage::new_disabled(),`), and maps every
+descriptor it receives back into a buffer
+(`io/zenoh-transport/src/multicast/rx.rs` @
+`&RxHandoffChannel::Disabled, // Multicast transport is unreliable, so it don't support SHM handoff`).
+A member with no context maps nothing on either side: it sends a buffer as its bytes, and a
+descriptor it receives is handed up unmapped, in the place of the data. wz's member refuses such a
+message instead, as it refuses a descriptor on any link that did not negotiate shared memory
+(section 4, rule 5): neither crate hands the data to that member, and wz does not hand it the
+descriptor as data either. This is the one difference the differential holds by name.
 
 ### 1.3 The wire
 
@@ -249,6 +259,7 @@ memory are measured again in the step that moves them.
 | S4 | the implicit optimisation of a query's value and of a reply, by `messages` (`Promoter::lists`), with the copy the transport's so that a receiver of the session itself is handed the bytes (section 4); a put takes the same path, in one publication where it took two | landed |
 | S5 | an error reply in shared memory | decided: its bytes, section 4, rule 7 |
 | S6 | one shared-memory system per process (section 6) | owed |
-| S7 | the cross-implementation differential over TCP (`conformance/differential-shm/tests/zenoh_transport_shm.rs`): sessions of both crates in one process, each pair of crates with either one listening (a wz listener is a node, a wz dialler the registry), each direction, for a put, the value of a get and a reply, held equal to what two upstream sessions hand each other, with shared memory off on the dialler as the control (the bytes) | landed |
-| S7g | the same differential over a multicast group, which needs upstream's UDP link in that package (and the QUIC datagram crate it brings) | owed |
-| S8 | a session in router mode with shared memory: the top crate opens it offering none and reading no descriptor (`Engine::open`, `offer_shm` and `shm_clients`), where upstream's transport manager makes its shared-memory context whatever the mode (`io/zenoh-transport/src/manager.rs` @ `let shm_context = ShmContext::new(self.shm, self.shm_reader)?;`) | owed |
+| S7 | the cross-implementation differential over TCP (`conformance/differential-shm/tests/zenoh_transport_shm.rs`): sessions of both crates in one process, each pair of crates with either one listening, as a peer and as a router (a wz listener is a node, a wz dialler the registry), each direction, for a put, the value of a get and a reply, held equal to what two upstream sessions hand each other, with shared memory off on the dialler as the control (the bytes) | landed |
+| S7g | the same differential over a multicast group, for a put between two peers that join it: each pair of crates held equal to two upstream members with the sender's shared memory on and off, and the member without shared memory (section 1.2) held by name, upstream's handed no data and wz's handed nothing | landed |
+| S8 | a session in router mode with shared memory: it offers shared memory and reads a descriptor as its configuration says, as every other session of the top crate does (`Engine::open`), since upstream's transport manager makes its shared-memory context whatever the mode (`io/zenoh-transport/src/manager.rs` @ `let shm_context = ShmContext::new(self.shm, self.shm_reader)?;`) | landed |
+| S8g | a router node that joins a multicast group: its group is not reported as a shared-memory one (`groups_report_shm` is off for a node in `Engine::open`), so it sends a descriptor it holds to the group as the bytes and refuses one it receives there, where an upstream router with a context maps both ways (section 1.2); the node's group face has no relay of its own (`broadcast_to_mcast_groups`) | owed |

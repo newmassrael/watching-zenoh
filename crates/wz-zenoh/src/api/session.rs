@@ -665,20 +665,19 @@ impl Engine {
             // Each face of the session has a thread of its own, so a callback that blocks
             // holds up its link and no other.
             face_drive: tokio_engine::FaceDrive::PerFace,
-            // A router carries no shared memory; any other session, a peer that forwards
-            // included, reads a received descriptor with this crate's reader and offers shared
-            // memory as its configuration says (`transport/shared_memory/enabled`).
+            // Every session, a router and a peer that forwards included, reads a received
+            // descriptor with this crate's reader and offers shared memory as its configuration
+            // says (`transport/shared_memory/enabled`): upstream's transport manager makes its
+            // shared-memory context from that section whatever the mode
+            // (`io/zenoh-transport/src/manager.rs` @
+            // `let shm_context = ShmContext::new(self.shm, self.shm_reader)?;`).
             #[cfg(feature = "shared-memory")]
-            shm_clients: if router {
-                tokio_engine::no_shm_clients()
-            } else {
-                Some(wz_capi_core::faces::ShmReader::Host(
-                    crate::api::shm::transport::resolver_factory(shm_clients),
-                ))
-            },
+            shm_clients: Some(wz_capi_core::faces::ShmReader::Host(
+                crate::api::shm::transport::resolver_factory(shm_clients),
+            )),
             #[cfg(not(feature = "shared-memory"))]
             shm_clients: tokio_engine::no_shm_clients(),
-            offer_shm: cfg!(feature = "shared-memory") && !router,
+            offer_shm: cfg!(feature = "shared-memory"),
             // The multicast groups of a session that holds a shared-memory context are
             // shared-memory ones, and what a member of one sends it reads through that reader.
             groups_report_shm: cfg!(feature = "shared-memory") && !node,
@@ -1755,6 +1754,7 @@ impl Engine {
 /// plan is made from, and the words an open that cannot be carried out is refused in.
 #[cfg(feature = "engine-tokio")]
 mod tokio_engine {
+    pub(super) use wz_capi_core::drive::{FaceDrive, NodeRole};
     use wz_capi_core::runtime::declare::{LivelinessSample, LivelinessSampleKind};
     #[cfg(feature = "unstable")]
     use wz_capi_core::runtime::sample::SourceInfo as EngineSourceInfo;
@@ -1766,10 +1766,9 @@ mod tokio_engine {
         open_plan::{key_state, KeyState, OpenRefusal},
         runtime::session_glue::WhatAmI as EngineWhatAmI,
     };
-    pub(super) use wz_capi_core::{
-        drive::{FaceDrive, NodeRole},
-        faces::no_shm_clients,
-    };
+    // A build with shared memory gives every session a reader.
+    #[cfg(not(feature = "shared-memory"))]
+    pub(super) use wz_capi_core::faces::no_shm_clients;
     use wz_capi_core::{
         faces::{FanoutError, SubscriberSink, WireKey},
         runtime::{
@@ -7498,6 +7497,77 @@ mod tests {
                     (big.clone(), false),
                     "{who}'s own getter"
                 );
+            }
+        }
+
+        /// A session in router mode carries shared memory as its configuration says, as a peer
+        /// does: a put of a buffer of shared memory crosses the link to and from a registry that
+        /// dials it as one, and with the router's shared memory disabled the link negotiates none
+        /// and each side is handed the bytes.
+        #[test]
+        fn a_session_in_router_mode_carries_shared_memory_as_its_configuration_says() {
+            const BODY: &[u8] = b"a put through a router";
+            let provider =
+                zenoh_shm::api::provider::shm_provider::ShmProviderBuilder::default_backend(
+                    1usize << 16,
+                )
+                .wait()
+                .expect("a provider");
+            for (enabled, ids) in [(true, ["a1b3a8", "a1b3a9"]), (false, ["a1b3aa", "a1b3ab"])] {
+                let open_as = |id: &str, mode: &str, listen: &str, connect: &str, shm: bool| {
+                    open(
+                        Config::from_json5(&format!(
+                            r#"{{ id: "{id}", mode: "{mode}",
+                                  listen: {{ endpoints: [{listen}] }},
+                                  connect: {{ endpoints: [{connect}] }},
+                                  scouting: {{ multicast: {{ enabled: false }} }},
+                                  transport: {{ shared_memory: {{ enabled: {shm} }} }} }}"#
+                        ))
+                        .expect("a configuration zenoh reads"),
+                    )
+                    .wait()
+                    .expect("opens")
+                };
+                let endpoint = format!(r#""tcp/127.0.0.1:{}""#, unautoselected_port());
+                let router = open_as(ids[0], "router", &endpoint, "", enabled);
+                let peer = open_as(ids[1], "peer", "", &endpoint, true);
+                assert!(matches!(&*router.0.engine, Engine::Router(_)), "a node");
+                assert_eq!(connected(&peer, 1).0.len(), 1, "the peer sees the router");
+
+                for (who, from, to, key) in [
+                    ("to the router", &peer, &router, "demo/shm/router/in"),
+                    ("from the router", &router, &peer, "demo/shm/router/out"),
+                ] {
+                    let (sender, told) = std::sync::mpsc::channel();
+                    let sender = std::sync::Mutex::new(sender);
+                    let _subscriber = to
+                        .declare_subscriber(key)
+                        .callback(move |sample| {
+                            let _ = sender.lock().unwrap().send(seen(sample.payload()));
+                        })
+                        .wait()
+                        .expect("declares");
+                    // The subscription reaches the sender over the link; until it has, a put has
+                    // nobody to go to, so it is put again.
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    let handed = loop {
+                        let mut buffer = provider.alloc(BODY.len()).wait().expect("a buffer");
+                        buffer.copy_from_slice(BODY);
+                        from.put(key, ZBytes::from(buffer)).wait().expect("puts");
+                        match told.recv_timeout(Duration::from_millis(100)) {
+                            Ok(handed) => break handed,
+                            Err(_) => assert!(
+                                Instant::now() < deadline,
+                                "{who}: nothing was handed over (shared memory {enabled})"
+                            ),
+                        }
+                    };
+                    assert_eq!(
+                        handed,
+                        (BODY.to_vec(), enabled),
+                        "{who}, the router's shared memory {enabled}"
+                    );
+                }
             }
         }
     }
