@@ -7115,11 +7115,13 @@ mod tests {
             }
         }
 
-        /// A reply whose payload is a buffer of shared memory, made by a queryable of the registry
-        /// of faces, reaches the getter of the other session as one, whether that getter is
-        /// another registry or a router node: the registry stages the reply as the buffer and
-        /// sends its descriptor over the link that negotiated shared memory, and the getter reads
-        /// it with this crate's reader (a node reads it as it routes the reply to its own get).
+        /// A reply whose payload is a buffer of shared memory reaches the getter of the other
+        /// session as one, made by a queryable of the registry of faces for another registry and
+        /// for a router node, and by a queryable a router node hosts for a registry: the replier
+        /// stages the reply as the buffer and sends its descriptor over the link that negotiated
+        /// shared memory (a node through the pass that holds the chunk, as for a publication),
+        /// and the getter reads it with this crate's reader (a node reads it as it routes the
+        /// reply to its own get).
         #[test]
         fn a_reply_whose_payload_is_a_buffer_of_shared_memory_reaches_the_getter_as_one() {
             const BODY: &[u8] = b"a reply in shared memory";
@@ -7161,6 +7163,12 @@ mod tests {
             for (who, asker, answerer, key) in [
                 ("a registry", &listening, &dialling, "demo/shm/reply/a"),
                 ("a node", &node, &answering, "demo/shm/reply/b"),
+                (
+                    "a registry of a node",
+                    &answering,
+                    &node,
+                    "demo/shm/reply/c",
+                ),
             ] {
                 let provider = answerer
                     .get_shm_provider()

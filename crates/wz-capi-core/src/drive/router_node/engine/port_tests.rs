@@ -997,4 +997,101 @@ mod shared_memory {
         shared.close();
         node.close();
     }
+
+    /// Ask `ASKED` through `engine`'s port, keeping in `got` each Put reply's payload and
+    /// whether it was handed as a chunk of shared memory rather than as bytes.
+    fn ask_keeping_replies(engine: &Arc<dyn SessionEngine>, got: &Got) {
+        let sink = Arc::clone(got);
+        engine.get_on_wire(
+            ASKED,
+            &WireKey::literal(),
+            &QueryOptions::default(),
+            None,
+            &mut || {
+                let sink = Arc::clone(&sink);
+                Box::new(move |reply: &dyn ReplyView| {
+                    if reply.kind() == ReplyKind::Put {
+                        let shared = reply
+                            .payload_shared()
+                            .and_then(|bytes| bytes.shm_chunk())
+                            .is_some();
+                        sink.lock()
+                            .unwrap()
+                            .push((reply.payload().to_vec(), shared));
+                    }
+                })
+            },
+        );
+    }
+
+    /// A reply the node's own queryable makes with a chunk goes to a client that negotiated
+    /// shared memory as the chunk, to a client that did not as its bytes, and to a get of the
+    /// node's own session as the chunk: the node holds the chunk for the faces it sends the reply
+    /// to, as it holds the chunk of a publication of its own.
+    #[test]
+    fn a_reply_of_the_nodes_queryable_in_a_chunk_reaches_a_shm_peer_as_the_chunk_and_another_as_bytes(
+    ) {
+        let node = open_node_offering_shm();
+        let engine = node.as_engine();
+        let locator = node.listen_locators()[0].clone();
+        let plain = Client::open(vec![locator.clone()]);
+        let shared = client_offering_shm(vec![locator]);
+        assert!(eventually(|| engine.has_shm_peer()));
+
+        let replied = chunk();
+        let _queryable = engine
+            .declare_queryable_on_wire(
+                ASKED.to_owned(),
+                WireKey::literal(),
+                false,
+                Locality::Any,
+                None,
+                Arc::new(move |_holder| {
+                    let replied = Arc::clone(&replied);
+                    Box::new(move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                        let handle = replied.send_handle();
+                        let _ = out.reply_keyed_meta(
+                            ASKED,
+                            BODY,
+                            wz_session_core::query_sink::ReplyMeta::new()
+                                .with_shared(Some(&handle)),
+                        );
+                    })
+                }),
+            )
+            .expect("a node has queryables");
+
+        let (on_shared, on_plain, on_node): (Got, Got, Got) = Default::default();
+        let (shared_engine, plain_engine) = (shared.as_engine(), plain.as_engine());
+        until_each_is_told(&[&on_shared, &on_plain, &on_node], || {
+            for (asker, got) in [
+                (&shared_engine, &on_shared),
+                (&plain_engine, &on_plain),
+                (&engine, &on_node),
+            ] {
+                if got.lock().unwrap().is_empty() {
+                    ask_keeping_replies(asker, got);
+                }
+            }
+        });
+
+        assert_eq!(
+            first(&on_shared, "the get of the client of shared memory"),
+            (BODY.to_vec(), true),
+            "the client that negotiated shared memory was not handed the chunk"
+        );
+        assert_eq!(
+            first(&on_plain, "the get of the client without shared memory"),
+            (BODY.to_vec(), false),
+            "the client that negotiated no shared memory was not handed the bytes"
+        );
+        assert_eq!(
+            first(&on_node, "the node's own get"),
+            (BODY.to_vec(), true),
+            "the node's own get was not handed the chunk its own queryable replied with"
+        );
+        shared.close();
+        plain.close();
+        node.close();
+    }
 }

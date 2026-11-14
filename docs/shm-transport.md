@@ -107,9 +107,8 @@ What crosses a link without a copy, by path (registry = the registry of faces, n
 | put, unicast | registry and node | registry and node |
 | put, multicast group | registry (`publish_shm_on_group`) | registry |
 | value of a get | registry and node | registry and node |
-| reply (this branch, section 7) | registry | registry, and a node's own get |
-| reply of a queryable a node hosts | bytes (`QueryReply::into_response` does not know the face) | - |
-| error reply | bytes | its inline bytes |
+| reply | registry and node | registry and node |
+| error reply | its bytes (section 4, rule 7) | its inline bytes |
 | implicit optimisation | put | - |
 
 Upstream's own `shm` test file passes 10 of 10 against the patched graph (`docs/z8-expected.tsv`).
@@ -167,6 +166,15 @@ The rules, each of which is a copy and never a loss:
 6. A subscriber or a getter of the same session is handed the buffer the application gave, and for
    a payload the implicit optimisation copied, the bytes it was given, as upstream (which maps at the
    link) does.
+7. An error reply goes as its bytes, whatever its payload is. Upstream's codec writes the payload of
+   an Err flat (`commons/zenoh-codec/src/zenoh/err.rs` @ `let bodec = Zenoh080Bounded::<u32>::new();`),
+   so a buffer that upstream maps into an Err leaves as its data in line, with the marker set and
+   the buffer counted on the sender's handoff
+   (`io/zenoh-transport/src/common/shm/interop.rs` @ `handoff_transaction.on_tx(shmb.into());`),
+   and the receiver, which reads a slice in line, maps nothing and counts nothing back
+   (`io/zenoh-transport/src/common/shm/interop.rs` @ `if zs.kind == ZSliceKind::ShmPtr {`). wz
+   sends the bytes without the marker: the receiver reads the same value, upstream's or wz's, and no
+   count is left owed on the ledger of the link. An Err that arrives with the marker is read in line.
 
 wz promotes per session and not per link: `Promoter` copies a put into the provider when some peer
 of the session could read it (`has_shm_peer`), and the engine then sends the descriptor to each face
@@ -229,9 +237,9 @@ memory are measured again in the step that moves them.
 | stage | what | state |
 |---|---|---|
 | S1 | establishment, put (unicast and group), value of a get, a router node's session, the implicit optimisation of a put | landed (seam note, Z7t) |
-| S2 | a reply in shared memory through the Rust API: the registry stages a reply whose payload is a buffer as the buffer (`ReplyMeta::with_shared`), and a getter is handed it as one (`payload_shared`); a router node reads the chunk of a reply to its own get as it routes it (`LocalFaceEvent::ReplyRead`, `ReplyRegistry::dispatch_response_read`), where its face, which negotiates nothing, used to refuse the descriptor | this branch |
-| S3 | a reply of a queryable a node hosts as the buffer: adopt the chunk into the relay pass and build the response with its descriptor, as `publish_shm_with` does for a put, so that each face gets the descriptor or the bytes; the node's own get is handed the chunk | owed |
+| S2 | a reply in shared memory through the Rust API: the registry stages a reply whose payload is a buffer as the buffer (`ReplyMeta::with_shared`), and a getter is handed it as one (`payload_shared`); a router node reads the chunk of a reply to its own get as it routes it (`LocalFaceEvent::ReplyRead`, `ReplyRegistry::dispatch_response_read`), where its face, which negotiates nothing, used to refuse the descriptor | landed |
+| S3 | a reply of a queryable a node hosts as the buffer (`send_hosted_replies`): the chunk is adopted into the relay pass and the response names its descriptor (`QueryReply::into_response_naming`), as `publish_shm_with` does for a put, so that each face is sent the descriptor or the bytes; the node's own get is handed the buffer (`ReplyRead`) | landed |
 | S4 | the implicit optimisation of a query's value and of a reply, by `messages`: the value goes as a descriptor on the legs to faces that negotiated shared memory and as the bytes on the session-local leg; a reply is promoted only for a query that came over a link whose face admits the provider's protocol | owed |
-| S5 | an error reply in shared memory: an Err whose payload is a buffer goes as its descriptor, and an Err is promoted under `reply`, as upstream maps an Err | owed |
+| S5 | an error reply in shared memory | decided: its bytes, section 4, rule 7 |
 | S6 | one shared-memory system per process (section 6) | owed |
 | S7 | the cross-implementation differential: an upstream session and a wz session in one process over TCP and over a group, each direction, for a put, the value of a get and a reply, with shared memory off on one side as the control (the bytes); in `conformance/differential-shm`, which needs the TCP link of upstream's crate there | owed |
