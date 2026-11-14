@@ -131,10 +131,10 @@ config WZ_OS
 	select THREAD_NAME
 	help
 	  An image whose Rust half builds `wz-capi-port` without `std` (the pico C ABI on the
-	  cooperative engine, docs/upstream-parity.md section 5a) links the mutex, the thread
-	  identity, the threads and the sleep its `os` module names from
-	  deploy/zephyr-common/wz_os_zephyr.c: a `k_mutex` from the kernel heap, `k_current_get`,
-	  a dynamic thread, `k_msleep`.
+	  cooperative engine, docs/upstream-parity.md section 5a) links the mutex, the condition
+	  variable, the thread identity, the threads and the sleep its `os` module names from
+	  deploy/zephyr-common/wz_os_zephyr.c: a `k_mutex` and a `k_condvar` from the kernel heap,
+	  `k_current_get`, a dynamic thread, `k_msleep`.
 
 config WZ_OS_THREAD_STACK_SIZE
 	int "The stack of a thread the engine starts, in bytes"
