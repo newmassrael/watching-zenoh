@@ -2988,20 +2988,20 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":12},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":13},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
         "\"frames\":3,\"bytes\":3,\"zenoh\":\"undecided\","
         "\"announced_version\":\"none\","
         "\"zenoh_evidence\":{\"log2_lr_millibits\":362,"
-        "\"log2_lr_no_millibits\":11045,"
-        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":6,"
+        "\"log2_lr_no_millibits\":11433,"
+        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":7,"
         "\"crossed_at_packet\":null,"
         "\"log2_lr_max_millibits\":363,\"log2_lr_min_millibits\":-2,"
-        "\"log2_lr_no_max_millibits\":11045,\"log2_lr_no_min_millibits\":0,"
+        "\"log2_lr_no_max_millibits\":11433,\"log2_lr_no_min_millibits\":0,"
         "\"checks\":[{\"check\":\"unit_reading\",\"strength\":\"unit\","
-        "\"confirmed\":3,\"violated\":0,\"millibits\":365,\"no_millibits\":9504,"
+        "\"confirmed\":3,\"violated\":0,\"millibits\":365,\"no_millibits\":9892,"
         "\"q_basis\":\"measured\",\"eps_basis\":\"measured\"},"
         "{\"check\":\"wire_front\",\"strength\":\"header\","
         "\"confirmed\":3,\"violated\":0,\"millibits\":-3,\"no_millibits\":1541,"
@@ -4483,8 +4483,12 @@ int main(void) {
      * nothing retires.
      * 67: a payload whose encoding's schema is not UTF-8 carries the schema as
      * `schema_hex` (its bytes in lowercase hex) and leaves it out of the
-     * `encoding` string. A key arrives; nothing retires. */
-    revisioned[2].revision = 67;
+     * `encoding` string. A key arrives; nothing retires.
+     * 68: model 7 of the zenoh test: a Frame's records end where the
+     * batch's next transport message begins, a record that does not decode
+     * fails the batch, and the parameters the corpus gives under that
+     * reading. Values move under stationary keys. */
+    revisioned[2].revision = 68;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4648,9 +4652,10 @@ int main(void) {
      * two families gain a word; nothing retires.
      * 12: `no_matching_key`, the reason a row's cells are unstated when key
      * material was handed in and named no secret of this flow's connection.
-     * One family gains a word; nothing retires. */
+     * One family gains a word; nothing retires.
+     * 13: model 7, as the field document's 68. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 12;
+    revisioned[12].revision = 13;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,

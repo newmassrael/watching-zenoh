@@ -3,12 +3,13 @@
 
 //! GENERATED FROM `captures/corpus/` -- DO NOT EDIT.
 //!
-//! The counts of the corpus and model 6's parameters computed from them
-//! (`docs/flow-zenoh-verdict.md` sections 6.8 to 6.11), written by
+//! The counts of the corpus and model 7's parameters computed from them
+//! (`docs/flow-zenoh-verdict.md` sections 6.8 to 6.14), written by
 //! `zenoh_calibration_tests::the_generated_calibration_is_current`, which
 //! fails when this file is not what the corpus gives. Regenerate with
 //! `scripts/regen-calibration.sh` and commit the result with the capture
-//! that moved it. The counts are those of a build that opens lz4.
+//! or the reader change that moved it. The counts are those of a build
+//! that opens lz4.
 //!
 //! The corpus: 140 zenoh files in 22 groups, 18 null files in 18 groups.
 
@@ -438,7 +439,7 @@ pub const ROLES_CELLS: [u64; 80] = [
     210_068_428_946_615,
 ];
 
-/// Model 6's parameters.
+/// Model 7's parameters.
 pub const PARAMS: Params = Params {
     units: Measured {
         zenoh: Prior {
@@ -457,8 +458,8 @@ pub const PARAMS: Params = Params {
             -2_724_252_758_297_012_736,
         ],
         log2_null_mean: [
-            -58_435_973_103_104_688_128,
-            -18_821_106_475_409_842_176,
+            -60_822_676_194_733_793_280,
+            -18_310_801_834_381_033_472,
             -24_672_175_692_875_108_352,
         ],
     },
@@ -501,7 +502,7 @@ pub const PARAMS: Params = Params {
         },
     },
     sn: Prior {
-        num: [19_911, 89],
+        num: [19_926, 74],
         den: 10_000,
     },
     front: Front {
@@ -517,7 +518,7 @@ pub const PARAMS: Params = Params {
 pub const NULL: [Member; 18] = [
     Member {
         file: "lan-dns.pcap",
-        units: [26, 32, 116],
+        units: [16, 42, 116],
         framing: [0, 0],
         front: [174, 204],
     },
@@ -565,7 +566,7 @@ pub const NULL: [Member; 18] = [
     },
     Member {
         file: "busylan-dhcp.pcap",
-        units: [16, 98, 133],
+        units: [6, 108, 133],
         framing: [0, 0],
         front: [247, 0],
     },
@@ -577,7 +578,7 @@ pub const NULL: [Member; 18] = [
     },
     Member {
         file: "busylan-wsd.pcap",
-        units: [5, 12, 97],
+        units: [3, 14, 97],
         framing: [0, 0],
         front: [105, 58],
     },
