@@ -7665,8 +7665,7 @@ impl Dissection {
             MessageListOrigin::Datagram => {
                 let own = self
                     .datagram_flows
-                    .iter()
-                    .find(|f| f.flow == flow)
+                    .find(&flow)
                     .and_then(|f| f.frames().get(index))
                     .and_then(|frame| frame.decompressed.clone());
                 match own {
@@ -7703,8 +7702,7 @@ impl Dissection {
             MessageListOrigin::QuicStream(id) => {
                 let Some(stream) = self
                     .datagram_flows
-                    .iter()
-                    .find(|f| f.flow == flow)
+                    .find(&flow)
                     .and_then(|f| f.quic_streams.iter().find(|s| s.id == id))
                 else {
                     return MessageBytes::Retired(alloc::string::String::from(
@@ -8307,8 +8305,7 @@ impl Dissection {
         dg.residue.fed += bytes.len() as u64;
         let idx = self
             .datagram_flows
-            .iter()
-            .position(|f| f.flow == flow)
+            .position(&flow)
             .expect("the flow found above");
         self.enforce_datagram_message_cap(idx);
         feed
@@ -8515,13 +8512,11 @@ impl Dissection {
             let pending = match *t {
                 Touched::Stream(key) => self
                     .flows
-                    .iter()
-                    .find(|f| f.flow == key)
+                    .find(&key)
                     .map(|f| (&f.ingest, f.session_observations())),
                 Touched::Datagram(key) => self
                     .datagram_flows
-                    .iter()
-                    .find(|f| f.flow == key)
+                    .find(&key)
                     .map(|f| (&f.ingest, f.session_observations())),
                 Touched::Serial => Some((&self.serial_ingest, self.serial_session_observations())),
             };
