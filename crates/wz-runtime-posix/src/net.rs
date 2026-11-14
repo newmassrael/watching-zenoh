@@ -18,8 +18,12 @@
 use core::ffi::c_int;
 use core::mem::size_of;
 
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use wz_runtime_coop::session_drive::LinkReadiness;
+// The heap profile's readiness seam is compiled where the runtime declares it, whatever this crate's
+// own features are (`wz_runtime_coop::with_heap_link_seams!`), as is every implementation of it here.
+wz_runtime_coop::with_heap_link_seams! {
+    #[cfg(feature = "alloc")]
+    use wz_runtime_coop::session_drive::LinkReadiness;
+}
 use wz_runtime_coop::udp_link::{DatagramSocket, Received, SERVICE_WAIT_MS};
 
 /// Why a socket call failed: the call, and the `errno` it left.
@@ -67,14 +71,15 @@ pub enum PosixNetError {
     Write(c_int),
 }
 
+wz_runtime_coop::with_heap_link_seams! {
 /// A wait on a socket that a thread other than its link's makes ([`LinkReadiness`]): `poll` on a
 /// duplicate of the socket's descriptor, which this owns and closes. A duplicate and not the
 /// number itself, so a wait that outlives the socket never reaches a descriptor number its close
 /// has freed for another file.
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(feature = "alloc")]
 pub(crate) struct FdReadiness(c_int);
 
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(feature = "alloc")]
 impl FdReadiness {
     /// A wait on `fd`, or `None` when the descriptor cannot be duplicated.
     pub(crate) fn of(fd: c_int) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
@@ -87,7 +92,7 @@ impl FdReadiness {
     }
 }
 
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(feature = "alloc")]
 impl LinkReadiness for FdReadiness {
     fn wait_readable(&self, timeout_ms: u32) {
         let mut pfd = libc::pollfd {
@@ -135,12 +140,13 @@ impl LinkReadiness for FdReadiness {
     }
 }
 
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(feature = "alloc")]
 impl Drop for FdReadiness {
     fn drop(&mut self) {
         // SAFETY: the duplicate is this value's own descriptor, closed exactly once.
         unsafe { libc::close(self.0) };
     }
+}
 }
 
 /// The calling thread's `errno`.
@@ -518,9 +524,11 @@ impl DatagramSocket for PosixUdpSocket {
         self.receive(buf, libc::MSG_DONTWAIT)
     }
 
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        FdReadiness::of(self.fd)
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(feature = "alloc")]
+        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+            FdReadiness::of(self.fd)
+        }
     }
 }
 

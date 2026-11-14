@@ -19,8 +19,12 @@ use core::ffi::c_int;
 use core::mem::size_of;
 
 use wz_runtime_coop::session_drive::LinkOpenError;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use wz_runtime_coop::session_drive::LinkReadiness;
+// Compiled where the runtime declares the heap profile's seams (`with_heap_link_seams!`), as every
+// implementation of them below is.
+wz_runtime_coop::with_heap_link_seams! {
+    #[cfg(feature = "alloc")]
+    use wz_runtime_coop::session_drive::LinkReadiness;
+}
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 
 use crate::net::{errno, set_close_on_exec, set_flag, set_nonblocking, sockaddr, PosixNetError};
@@ -102,23 +106,26 @@ impl StreamDial for PosixTcpDial {
         })
     }
 
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn listen(
-        &self,
-        addr: [u8; 4],
-        port: u16,
-    ) -> Result<alloc::boxed::Box<dyn StreamListen<Stream = PosixTcpSocket>>, LinkOpenError> {
-        PosixTcpListener::bind(addr, port)
-            .map(|listener| {
-                alloc::boxed::Box::new(listener)
-                    as alloc::boxed::Box<dyn StreamListen<Stream = PosixTcpSocket>>
-            })
-            .map_err(|e| match e {
-                // No descriptor left: worth a later try, as a dial's is.
-                PosixNetError::Socket(_) => LinkOpenError::Exhausted,
-                // The port is taken or not the host's to bind: the same answer a retry meets.
-                _ => LinkOpenError::Refused,
-            })
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(feature = "alloc")]
+        fn listen(
+            &self,
+            addr: [u8; 4],
+            port: u16,
+        ) -> Result<alloc::boxed::Box<dyn StreamListen<Stream = PosixTcpSocket>>, LinkOpenError>
+        {
+            PosixTcpListener::bind(addr, port)
+                .map(|listener| {
+                    alloc::boxed::Box::new(listener)
+                        as alloc::boxed::Box<dyn StreamListen<Stream = PosixTcpSocket>>
+                })
+                .map_err(|e| match e {
+                    // No descriptor left: worth a later try, as a dial's is.
+                    PosixNetError::Socket(_) => LinkOpenError::Exhausted,
+                    // The port is taken or not the host's to bind: the same answer a retry meets.
+                    _ => LinkOpenError::Refused,
+                })
+        }
     }
 }
 
@@ -182,10 +189,12 @@ impl StreamListen for PosixTcpListener {
         self.local
     }
 
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        // A listening descriptor polls readable while a connection is queued on it.
-        crate::net::FdReadiness::of(self.fd)
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(feature = "alloc")]
+        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+            // A listening descriptor polls readable while a connection is queued on it.
+            crate::net::FdReadiness::of(self.fd)
+        }
     }
 
     fn accept(&self) -> Result<Option<PosixTcpSocket>, LinkOpenError> {
@@ -347,9 +356,11 @@ impl StreamSocket for PosixTcpSocket {
         unsafe { libc::shutdown(self.fd, libc::SHUT_RDWR) };
     }
 
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        crate::net::FdReadiness::of(self.fd)
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(feature = "alloc")]
+        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+            crate::net::FdReadiness::of(self.fd)
+        }
     }
 }
 

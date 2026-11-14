@@ -34,7 +34,8 @@ impl Drop for Closer {
     target_has_atomic = "ptr"
 ))]
 pub(crate) struct FdClose {
-    held: alloc::sync::Arc<Closer>,
+    // Read by the wait, where the runtime declares one (below); held for the drop otherwise.
+    _held: alloc::sync::Arc<Closer>,
 }
 
 /// The share of a descriptor's close that a socket holds: all of it, on a profile with no wait
@@ -58,7 +59,7 @@ impl FdClose {
         ))]
         {
             Self {
-                held: alloc::sync::Arc::new(Closer(fd)),
+                _held: alloc::sync::Arc::new(Closer(fd)),
             }
         }
         #[cfg(not(all(
@@ -70,18 +71,23 @@ impl FdClose {
             Self { _held: Closer(fd) }
         }
     }
+}
 
+// The wait, where the runtime declares the seam it implements (`with_heap_link_seams!`) and this
+// crate's descriptor is shared.
+wz_runtime_coop::with_heap_link_seams! {
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+impl FdClose {
     /// A wait for the descriptor's input that another thread may make, holding the descriptor
     /// open for as long as it is held.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
     pub(crate) fn readiness(
         &self,
     ) -> alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkReadiness> {
-        alloc::boxed::Box::new(readiness::FdReadiness(self.held.clone()))
+        alloc::boxed::Box::new(readiness::FdReadiness(self._held.clone()))
     }
 }
 
@@ -151,9 +157,11 @@ mod readiness {
         }
     }
 }
+}
 
 // On a host the socket calls bind to the C library's of the same names, so the holding is tested
 // over a host socket's descriptor.
+wz_runtime_coop::with_heap_link_seams! {
 #[cfg(all(
     test,
     unix,
@@ -189,4 +197,5 @@ mod tests {
         );
         drop(wait);
     }
+}
 }

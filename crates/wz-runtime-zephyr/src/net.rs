@@ -37,8 +37,10 @@ use core::mem::size_of;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_runtime_coop::group_transport::GroupTransport;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use wz_runtime_coop::link_storage::HeapTx;
+wz_runtime_coop::with_heap_link_seams! {
+    #[cfg(feature = "alloc")]
+    pub use wz_runtime_coop::link_storage::HeapTx;
+}
 pub use wz_runtime_coop::link_storage::TxStore;
 pub use wz_runtime_coop::udp_link::{DatagramSocket, SERVICE_WAIT_MS, UDP_RX_CAPACITY};
 use wz_session_core::byte_cells::ByteBuf;
@@ -490,15 +492,17 @@ impl DatagramSocket for ZephyrUdpSocket {
     // Zephyr's `poll` is a call any thread may make on a descriptor, so the owner of a session
     // waits for this socket outside its lock (the pico C ABI's read task) and the link never waits
     // in its own loop.
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        target_has_atomic = "ptr"
-    ))]
-    fn readiness(
-        &self,
-    ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkReadiness>> {
-        Some(self._close.readiness())
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(all(
+            feature = "alloc",
+            not(feature = "session-slot"),
+            target_has_atomic = "ptr"
+        ))]
+        fn readiness(
+            &self,
+        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkReadiness>> {
+            Some(self._close.readiness())
+        }
     }
 }
 
@@ -510,8 +514,10 @@ pub type UdpDriver<B, T> = wz_runtime_coop::udp_link::UdpDriver<ZephyrUdpSocket,
 
 /// The heap profile's driver: its receive buffer is a `Vec<u8>` of the capacity the link was
 /// given, and its frames are encoded into a [`HeapTx`] of the capacity it was given, if any.
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub type ZephyrUdpDriver = UdpDriver<Vec<u8>, HeapTx>;
+wz_runtime_coop::with_heap_link_seams! {
+    #[cfg(feature = "alloc")]
+    pub type ZephyrUdpDriver = UdpDriver<Vec<u8>, HeapTx>;
+}
 
 /// The fixed-memory profile's driver: its receive buffer and the buffer its frames are built in
 /// are each lent by a table the image declares
