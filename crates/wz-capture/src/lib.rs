@@ -3030,6 +3030,18 @@ const STREAM_RELEASE_DIVISOR: usize = 8;
 const STREAM_RELEASE_SCAN: usize = 64;
 
 impl FlowDissection {
+    /// Whether a continuing decryption pass has work on this flow: an
+    /// encrypted flow no pass has begun, or one a pass accepted that keeps a
+    /// record no pass opened. The one test [`Dissection::decrypt_continuing`]
+    /// visits a flow on and the one its settling marks the dissection by, so the
+    /// two cannot disagree about which flows wait.
+    pub(crate) fn wants_decryption(&self) -> bool {
+        let Framing::Encrypted(state) = &self.framing else {
+            return false;
+        };
+        state.outcome.is_none() || (state.accepted && state.has_unopened_records())
+    }
+
     /// Decoded transport messages, in the order the observer produced them.
     ///
     /// Open-debt item 924, step 4b — a flow whose bytes are the zenoh session
@@ -5148,6 +5160,8 @@ mod message_list_census {
             // and counts, not messages.
             row_evidence: _,
             touched: _,
+            // Whether a decryption pass has work waiting: one flag.
+            decryption_wanted: _,
             next_row_link: _,
         } = &d;
 
@@ -6473,6 +6487,12 @@ pub struct Dissection {
     /// The flows the packet just read touched, whose observations are settled
     /// before the next packet is read ([`Self::settle_touched`]).
     touched: Vec<Touched>,
+    /// Some settled flow has records a continuing decryption pass has not
+    /// opened, or keys arrived that put a flow back in front of it
+    /// ([`FlowDissection::wants_decryption`]). [`Self::decrypt_continuing`]
+    /// visits the flows only when this is set or the last packet touched such a
+    /// flow, and clears it.
+    decryption_wanted: bool,
     /// The next number a flow's link is known by in a row's evidence.
     next_row_link: u64,
 }
@@ -6524,6 +6544,7 @@ impl Default for Dissection {
             next_packet_index: 0,
             row_evidence: alloc::collections::BTreeMap::new(),
             touched: Vec::new(),
+            decryption_wanted: false,
             next_row_link: 0,
         }
     }
@@ -7417,7 +7438,7 @@ impl Dissection {
                 .flows
                 .get(list)
                 .filter(|f| f.flow == flow)
-                .or_else(|| self.flows.iter().find(|f| f.flow == flow));
+                .or_else(|| self.flows.find(&flow));
             let mut last = 0usize;
             // Heads, not rows: a key is read off what a row says about itself,
             // so ordering the capture decodes nothing.
@@ -7546,7 +7567,7 @@ impl Dissection {
                 .flows
                 .get(list)
                 .filter(|f| f.flow == flow)
-                .or_else(|| self.flows.iter().find(|f| f.flow == flow));
+                .or_else(|| self.flows.find(&flow));
             for (position, frame) in frames.heads_from(start).enumerate() {
                 let position = start + position;
                 let packet = match frame.offset_space {
@@ -7620,7 +7641,7 @@ impl Dissection {
     ) -> MessageBytes<'_> {
         match origin {
             MessageListOrigin::Stream => {
-                let Some(dissection) = self.flows.iter().find(|f| f.flow == flow) else {
+                let Some(dissection) = self.flows.find(&flow) else {
                     return MessageBytes::Retired(alloc::string::String::from(
                         "the flow this message came out of is no longer held",
                     ));
@@ -7658,7 +7679,7 @@ impl Dissection {
             // the call that handed it in, and the list logged it there (open-debt
             // item 924, D8). Its message's bytes are read from that log.
             MessageListOrigin::QuicDatagram => {
-                let Some(dg) = self.datagram_flows.iter().find(|f| f.flow == flow) else {
+                let Some(dg) = self.datagram_flows.find(&flow) else {
                     return MessageBytes::Retired(alloc::string::String::from(
                         "the flow this message came out of is no longer held",
                     ));
@@ -7847,17 +7868,34 @@ impl Dissection {
     /// stays zero: continuing a flow is what this pass is for.
     pub fn decrypt_continuing(&mut self, openers: &mut dyn tls::FlowOpeners) -> DecryptionSummary {
         let mut summary = DecryptionSummary::default();
+        // Nothing to open is the common case of a handle that holds keys and
+        // carries cleartext: a pass that visited every flow anyway cost each
+        // push a step per flow held (`live_keys_cost`, pc2, 2026-11-14: +976 ns
+        // a push at 2048 flows). The flows the last packet touched are not
+        // settled yet, so they are asked here; every earlier one said so when
+        // it was settled.
+        let touched_wants = self.touched.iter().any(|t| match t {
+            Touched::Stream(key) => self
+                .flows
+                .find(key)
+                .is_some_and(FlowDissection::wants_decryption),
+            _ => false,
+        });
+        if !core::mem::take(&mut self.decryption_wanted) && !touched_wants {
+            return summary;
+        }
         let mut changed: Vec<FlowKey> = Vec::new();
         for flow in &mut self.flows {
+            if !flow.wants_decryption() {
+                continue;
+            }
             let Framing::Encrypted(state) = &flow.framing else {
                 continue;
             };
             let fresh = state.outcome.is_none();
-            if fresh || (state.accepted && state.has_unopened_records()) {
-                let opener = openers.opener(flow.flow, fresh);
-                if flow.open_kept_records(opener, &mut (), &mut summary) {
-                    changed.push(flow.flow);
-                }
+            let opener = openers.opener(flow.flow, fresh);
+            if flow.open_kept_records(opener, &mut (), &mut summary) {
+                changed.push(flow.flow);
             }
         }
         for key in changed {
@@ -7888,6 +7926,9 @@ impl Dissection {
                 state.opened_records = Default::default();
                 reopened += 1;
             }
+        }
+        if reopened > 0 {
+            self.decryption_wanted = true;
         }
         reopened
     }
@@ -7989,7 +8030,7 @@ impl Dissection {
         self.settle_touched();
         self.touch(Touched::Datagram(flow));
         let cap = self.limits.quic_streams_per_flow;
-        let Some(dg) = self.datagram_flows.iter_mut().find(|f| f.flow == flow) else {
+        let Some(dg) = self.datagram_flows.find_mut(&flow) else {
             feed.flow_absent += 1;
             return feed;
         };
@@ -8216,7 +8257,7 @@ impl Dissection {
         // before is settled, and this one is observed at its own packet.
         self.settle_touched();
         self.touch(Touched::Datagram(flow));
-        let Some(dg) = self.datagram_flows.iter_mut().find(|f| f.flow == flow) else {
+        let Some(dg) = self.datagram_flows.find_mut(&flow) else {
             feed.flow_absent += 1;
             return feed;
         };
@@ -8338,7 +8379,7 @@ impl Dissection {
 
     /// The flow matching `key`, if the capture carried one.
     pub fn flow(&self, key: &FlowKey) -> Option<&FlowDissection> {
-        self.flows.iter().find(|f| &f.flow == key)
+        self.flows.find(key)
     }
 
     /// R311y610 — no further packet is coming. Give up on every gap still open
@@ -8396,15 +8437,18 @@ impl Dissection {
     fn settle_flow(&mut self, t: Touched) {
         let forward = match t {
             Touched::Stream(key) => {
-                let Some(at) = self.flows.iter().position(|f| f.flow == key) else {
+                let Some(at) = self.flows.position(&key) else {
                     return;
                 };
+                if self.flows[at].wants_decryption() {
+                    self.decryption_wanted = true;
+                }
                 let sessions = self.flows[at].session_observations();
                 let ingest = &mut self.flows[at].ingest;
                 Self::number_link(ingest, &mut self.next_row_link, sessions)
             }
             Touched::Datagram(key) => {
-                let Some(at) = self.datagram_flows.iter().position(|f| f.flow == key) else {
+                let Some(at) = self.datagram_flows.position(&key) else {
                     return;
                 };
                 let sessions = self.datagram_flows[at].session_observations();
@@ -8879,7 +8923,7 @@ impl Dissection {
     fn push_segment(&mut self, segment: link::Segment, ts_nanos: Option<u64>, at: tcp::PayloadAt) {
         let packet_index = segment.packet_index;
         self.tally_checksums(&segment.checksums);
-        let idx = match self.flows.iter().position(|f| f.flow == segment.flow) {
+        let idx = match self.flows.position(&segment.flow) {
             Some(i) => i,
             None => {
                 let mut flow = FlowDissection::new(
@@ -9182,7 +9226,7 @@ impl Dissection {
     /// rather than wrong — there is nothing to repair — and the offset map they
     /// come with is the reason to use them anyway.
     fn push_vsock(&mut self, record: link::VsockRecord, ts_nanos: Option<u64>) {
-        let idx = match self.flows.iter().position(|f| f.flow == record.flow) {
+        let idx = match self.flows.position(&record.flow) {
             Some(i) => i,
             None => {
                 let mut flow = FlowDissection::new(
@@ -9285,7 +9329,7 @@ impl Dissection {
         in_container: Option<usize>,
     ) {
         self.tally_checksums(&d.checksums);
-        let idx = match self.datagram_flows.iter().position(|f| f.flow == d.flow) {
+        let idx = match self.datagram_flows.position(&d.flow) {
             Some(i) => i,
             None => {
                 self.datagram_flows.push(DatagramDissection::new(
