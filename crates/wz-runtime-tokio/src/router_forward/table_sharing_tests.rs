@@ -647,3 +647,65 @@ fn the_readers_under_a_busy_writer_measured_by_what_the_writes_change() {
         }
     }
 }
+
+/// The totals the declaration throughput instrument runs, one after the other on one router.
+const CHURN_TOTALS: [u64; 3] = [1_000, 10_000, 100_000];
+
+/// One client face declares a queryable and withdraws it, again and again, each time with an id
+/// it has not used, as a session does that declares and undeclares beside its own traffic; each
+/// declaration reaches the router as a frame of its own, as a client's control message leaves.
+/// Prints what one declaration costs the face's thread for each total, run one after the other on
+/// the same router, so a later total is measured behind every declaration that came before it.
+///
+/// A MEASUREMENT, with one bound: the last total's cost a declaration stays within four times the
+/// first's, which a cost that grows with the declarations already taken (a log, a memo or a map
+/// that keeps one entry per id) breaks by far, and a host's noise does not. The population is
+/// asserted too: every queryable declared was withdrawn.
+#[test]
+#[ignore = "a measurement of the declarations one face can bring the router a second; run with \
+            --release --ignored --nocapture on a build host"]
+fn the_declarations_of_one_face_measured_against_their_count() {
+    let fwd = RouterForwarder::new(zid(0x01));
+    let face = FaceId(1);
+    let (actions, _sink) = client(zid(0xC1));
+    fwd.register(face, &actions);
+    let mut last_id = 0u64;
+    let mut costs = Vec::new();
+    for total in CHURN_TOTALS {
+        let began = Instant::now();
+        for _ in 0..total / 2 {
+            last_id += 1;
+            let declare = build_declare_queryable_with_id_info(
+                last_id,
+                "demo/beside/admin",
+                QueryableInfo::local(false),
+            )
+            .expect("build queryable");
+            bring(&fwd, face, NetworkMessage::Declare(Box::new(declare)));
+            let undeclare = build_undeclare_queryable(last_id);
+            bring(&fwd, face, NetworkMessage::Declare(Box::new(undeclare)));
+        }
+        let cost = began.elapsed() / u32::try_from(total).expect("a total fits");
+        println!(
+            "declaration-churn: structure={} declarations={total} per_declaration={}ns \
+             per_second={:.0}",
+            fwd.table_sharing().id(),
+            cost.as_nanos(),
+            1e9 / cost.as_nanos().max(1) as f64,
+        );
+        assert_eq!(
+            fwd.client_queryables_seen(),
+            0,
+            "every queryable declared was withdrawn"
+        );
+        costs.push(cost);
+    }
+    let (first, last) = (costs[0], costs[costs.len() - 1]);
+    assert!(
+        last <= first * 4,
+        "a declaration costs {last:?} after {} of them and {first:?} after {}: the cost grows \
+         with the declarations already taken",
+        CHURN_TOTALS.iter().sum::<u64>(),
+        CHURN_TOTALS[0],
+    );
+}
