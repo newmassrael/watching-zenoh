@@ -7310,7 +7310,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminAnswerOutcome,
             SessionAdminRow,
         };
-        use wz_codecs::whatami::WhatAmI;
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
         let zid_hex = zid_to_zenoh_hex(&self.actions().params.zid);
@@ -7353,27 +7352,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // adminspace.rs:664). A routing peer would enumerate its faces instead —
             // the forwarder-hosted §5.23 admin (R311y45) currently passes an EMPTY
             // `sessions[]` (the live forwarder-faces enumeration is a deferral).
-            let mut sessions = Vec::new();
-            if let Some(peer) = actions.peer_zid() {
-                let peer_whatami = actions
-                    .peer_whatami_wire()
-                    .and_then(WhatAmI::from_wire)
-                    .map(|w| String::from(w.to_str()));
-                // R311y473 / R2415 / R2858 / R2860 — the session's REAL links
-                // (one entry per physical link of an aggregating session), its
-                // negotiated `shm` and its `region`, all resolved live per query
-                // off the same captured bundle the peer zid comes from, inside
-                // the one row constructor every admin host shares.
-                sessions.push(actions.admin_session(
-                    zid_to_zenoh_hex(&peer),
-                    peer_whatami,
-                    // R2637 — `None` on the Session-hosted path for the same reason
-                    // the forwarder-hosted peer reports none: a link weight is a
-                    // ROUTER-tier graph value, and a Session holds no such graph.
-                    // Reporting none is the answer, not a gap.
-                    None,
-                ));
-            }
+            // R311y473 / R2415 / R2858 / R2860 — the session's REAL links (one
+            // entry per physical link of an aggregating session), its negotiated
+            // `shm` and its `region`, all resolved live per query off the same
+            // captured bundle the peer zid comes from, by the one row reading every
+            // host that lists its own sessions shares. R2637 — no link weight: a
+            // weight is a ROUTER-tier graph value, and a Session holds no such graph.
+            let sessions: Vec<_> = actions.admin_session_of_peer().into_iter().collect();
             // The match+reply SSOT (root local_data / metrics / config + the read
             // gate) — the SAME answerer the §5.23 routing-peer forwarder host calls
             // (R311y45), so both emit byte-identical admin replies.

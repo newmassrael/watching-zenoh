@@ -4372,6 +4372,50 @@ fn declare_adminspace_with_config_announces_a_clients_queryable_on_the_wire() {
     );
 }
 
+/// The `sessions[]` row a host that holds this session as one of its transports
+/// lists: none before a handshake has named the peer, as upstream lists only
+/// transports that exist; then one filed under the peer's zid in zenoh's form,
+/// with the role the peer announced once it arrives and no link weight, which
+/// only a router graph holds. The Session host and the `zenoh` preset's
+/// registry of faces both list their sessions through this one reading.
+#[cfg(feature = "adminspace-core")]
+#[test]
+fn admin_session_of_peer_files_the_row_under_the_named_peer() {
+    use wz_admin::adminspace::SessionAdminRow;
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (actions, _driver) = recording_actions();
+    assert!(
+        actions.admin_session_of_peer().is_none(),
+        "no peer has been named, so there is no transport to list"
+    );
+
+    let peer = vec![0xA1, 0x00, 0x31];
+    *actions
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(peer.clone());
+    let row = actions
+        .admin_session_of_peer()
+        .expect("a named peer is a transport");
+    assert_eq!(row.peer_zid_hex, zid_to_zenoh_hex(&peer));
+    assert_eq!(
+        row.whatami, None,
+        "a role that has not arrived stays unnamed"
+    );
+    assert!(row.weight.is_none(), "a session holds no router graph");
+
+    *actions
+        .peer_whatami
+        .lock()
+        .expect("peer_whatami poisoned in test fixture") =
+        Some(wz_codecs::whatami::WhatAmI::Router.to_wire());
+    let row = actions
+        .admin_session_of_peer()
+        .expect("a named peer is a transport");
+    assert_eq!(row.whatami.as_deref(), Some("router"));
+}
+
 #[cfg(all(
     feature = "query-get",
     feature = "query-queryable",

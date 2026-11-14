@@ -256,6 +256,17 @@ pub trait SessionAdminRow {
         weight: Option<AdminLinkWeight>,
     ) -> AdminSession;
 
+    /// This session as the row a node that holds it as one of its own transports
+    /// reports: filed under the zid and role the peer's handshake named, with no
+    /// link weight (a node holds one only in a router graph), or `None` while no
+    /// peer has been named, as upstream lists only transports that exist.
+    ///
+    /// The one place that reading is written, for every host that lists its
+    /// sessions this way: a Session-hosted admin space, which holds one, and an API
+    /// session over a registry of faces, which holds one per face.
+    #[cfg(feature = "adminspace-core")]
+    fn admin_session_of_peer(&self) -> Option<AdminSession>;
+
     /// `admin_session` lent instead of built (fixed-memory step S9c): this session as
     /// one `sessions[]` row, handed to `f` as a BORROWED row ([`AdminSessionRef`]),
     /// with nothing allocated. `None` while the session is not established, as
@@ -308,6 +319,20 @@ where
             weight,
             region: Some(self.admin_region()),
         }
+    }
+
+    #[cfg(feature = "adminspace-core")]
+    fn admin_session_of_peer(&self) -> Option<AdminSession> {
+        let peer = self.peer_zid()?;
+        let whatami = self
+            .peer_whatami_wire()
+            .and_then(wz_session_core::WhatAmI::from_wire)
+            .map(|role| String::from(role.to_str()));
+        Some(self.admin_session(
+            wz_session_core::zid_hex::zid_to_zenoh_hex(&peer),
+            whatami,
+            None,
+        ))
     }
 
     fn with_admin_session<X>(&self, f: impl FnOnce(AdminSessionRef<'_>) -> X) -> Option<X> {
