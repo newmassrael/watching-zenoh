@@ -782,14 +782,49 @@ fn zid_text(zid: &[u8]) -> String {
     wz_runtime_tokio::zid_hex::zid_to_zenoh_hex(zid)
 }
 
+/// The two nodes a face's subscriber names in its reception lines: this node and the node
+/// behind the face. A face with no remote zid is the local plane, `local`: a link's handshake
+/// always names the node (zenoh's `InitSyn` and `InitAck` carry the zid).
+struct FaceEnds {
+    node: String,
+    remote: String,
+}
+
+impl FaceEnds {
+    fn new(node: &[u8], remote: Option<&[u8]>) -> Self {
+        FaceEnds {
+            node: zid_text(node),
+            remote: remote.map_or_else(|| "local".to_owned(), zid_text),
+        }
+    }
+}
+
 /// Declare a subscriber on one face in `wire`'s form.
+///
+/// Each sample the face hands the subscriber is a `wz::routing` line naming this node, the node
+/// the sample came from and its timestamp (`peer <zid> receives from <zid>: key=<key>
+/// ts=<time>/<zid>`), the form the router writes its sends and boundary decisions in: a
+/// subscriber that was handed one message twice (debt item 934, upstream's
+/// `unique_timestamps`) is read back to the faces, and through them to the routers, that
+/// delivered each copy. A run that does not log `wz::routing` at debug pays a level check.
 fn declare_subscriber_on(
     session: &TokioSession,
     keyexpr: &str,
     wire: &WireKey,
     options: SubscribeOptions,
-    callback: impl FnMut(&dyn SampleView) + Send + 'static,
+    ends: FaceEnds,
+    mut callback: impl FnMut(&dyn SampleView) + Send + 'static,
 ) -> Option<Subscriber<TokioRuntime>> {
+    let callback = move |sample: &dyn SampleView| {
+        wz_runtime_tokio::route_trace(format_args!(
+            "peer {} receives from {}: key={} ts={}",
+            ends.node,
+            ends.remote,
+            sample.keyexpr(),
+            wz_runtime_tokio::TimestampText(sample.timestamp()),
+        ));
+        callback(sample);
+    };
     if wire.is_literal() {
         session
             .declare_subscriber(keyexpr.to_string(), options, callback)
@@ -2883,6 +2918,7 @@ impl SharedSession {
                 SubscribeOptions::default()
                     .with_allowed_origin(entry.allowed_origin)
                     .with_retraction_naming(entry.retraction.clone()),
+                FaceEnds::new(&self.zid, held.peer_zid.as_deref()),
                 (entry.sink)(),
             ) {
                 subs.insert(entry.id, sub);
@@ -5276,6 +5312,7 @@ impl SharedSession {
                 SubscribeOptions::default()
                     .with_allowed_origin(allowed_origin)
                     .with_retraction_naming(retraction.clone()),
+                FaceEnds::new(&self.zid, face.peer_zid.as_deref()),
                 sink(),
             ) {
                 face.subs.insert(id, sub);

@@ -1071,6 +1071,35 @@ impl<T: std::ops::Deref<Target = Tables>> GatewayView<Zid> for OnTables<'_, T> {
     }
 }
 
+/// What a decision at a region boundary (`OnTables::crosses`) is about,
+/// as its trace line names it: a data message by the timestamp it carries, which
+/// is the identity upstream's tests judge a duplicate by (`unique_timestamps`).
+#[derive(Clone, Copy)]
+enum Crossing<'a> {
+    /// A data `Push`.
+    Push(&'a PushOwned),
+    /// A liveliness token's advertisement, by key.
+    Token(&'a str),
+    /// A query.
+    Query,
+}
+
+impl core::fmt::Display for Crossing<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Crossing::Push(push) => write!(
+                f,
+                "push ts={}",
+                crate::TimestampText(
+                    wz_session_core::push_build::read_push_timestamp(push).as_ref()
+                )
+            ),
+            Crossing::Token(keyexpr) => write!(f, "token key={keyexpr}"),
+            Crossing::Query => f.write_str("query"),
+        }
+    }
+}
+
 /// R2874 (step 3e) — one holder of a declaration, as the cross-region
 /// propagate sees it: the unit a register adds a contribution to, or a
 /// withdrawal removes one from.
@@ -5987,13 +6016,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // A declaration for a face that keeps declarations by id is numbered first: the gate then
         // reads the message that goes out.
         let msg = self.number_declaration(state, msg);
-        if matches!(msg, NetworkMessage::Declare(_)) {
-            route_event!(
+        match &msg {
+            NetworkMessage::Declare(_) => route_event!(
                 "node {} sends to face {:?}: {}",
                 self.own_zid,
                 id,
                 declaration_ids::declare_digest(&msg)
-            );
+            ),
+            // A data message by the timestamp it carries, and the node behind the face: which
+            // gateways delivered one message to one node, read beside the boundary decisions
+            // ([`Self::crosses`]) and the node's own receptions (debt item 934).
+            NetworkMessage::Push(push) => route_event!(
+                "node {} sends to face {:?} (remote {:?}): {}",
+                self.own_zid,
+                id,
+                state.peer_zid,
+                Crossing::Push(push)
+            ),
+            _ => {}
         }
         let verdict = self.admit_outbound(id, state, &msg, known);
         if let Some(kind) = verdict.dropped_by() {
@@ -7929,6 +7969,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return;
         };
         let push: &PushOwned = &stamped;
+        // The arrival of a data message, by the timestamp it is routed with (the stamp above
+        // included): the start of the lines [`Self::crosses`] and [`Self::egress_to_face`] write
+        // for it (debt item 934).
+        route_event!(
+            "node {} receives from face {:?} (remote {:?}, region {:?}): {}",
+            self.own_zid,
+            inbound,
+            self.tables.faces.get(&inbound).and_then(|s| s.peer_zid),
+            tier,
+            Crossing::Push(push)
+        );
         // R2879 (open-debt item 751, step 5) — the origin and the forwarder, as
         // the inbound region's net names them: what the inter-region filter
         // decides every crossing below on, in place of the per-keyexpr master
@@ -7981,7 +8032,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // a QoS-negotiated client observes the mesh legs' band.
         let defer = tier != NORTH_REGION
             && !is_leaf(tier, self.tables.node_mode)
-            && !self.crosses(tier, NORTH_REGION, origin.0, origin.1, None);
+            && !self.crosses(
+                Crossing::Push(push),
+                tier,
+                NORTH_REGION,
+                origin.0,
+                origin.1,
+                None,
+            );
         self.deliver_to_client_subscribers(
             inbound,
             tier,
@@ -8275,8 +8333,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// R2879 (open-debt item 751, step 5) — whether a data message crosses from
     /// region `src` to an egress in region `dst`: the pin's inter-region filter
     /// ([`InterRegionFilter`]) resolved against this router's hats.
+    ///
+    /// Every decision at a boundary is a `wz::routing` line naming the message,
+    /// the zids the filter was handed and the arm that decided
+    /// ([`CrossVerdict`](crate::routing_region::CrossVerdict)): two gateways that
+    /// both carry one message across (debt item 934) are told apart from an
+    /// election only by that arm, and a test's run log holds nothing else that
+    /// says which gateways a router saw for a node at that moment.
     fn crosses(
         &self,
+        about: Crossing<'_>,
         src: Region,
         dst: Region,
         src_zid: Option<&Zid>,
@@ -8284,14 +8350,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         dst_zid: Option<&Zid>,
     ) -> bool {
         let self_zid = *self.north_net().self_zid();
-        InterRegionFilter {
+        let verdict = InterRegionFilter {
             src,
             dst,
             src_zid,
             fwd_zid,
             dst_zid,
         }
-        .resolve(&self_zid, self)
+        .verdict(&self_zid, self);
+        if verdict != crate::routing_region::CrossVerdict::SameSide {
+            route_event!(
+                "node {} crossing {} {:?} -> {:?} src={:?} fwd={:?} dst={:?}: {:?}",
+                self_zid,
+                about,
+                src,
+                dst,
+                src_zid,
+                fwd_zid,
+                dst_zid,
+                verdict
+            );
+        }
+        verdict.passes()
     }
 
     /// The node that originated a mesh-inbound `Push` and the neighbour it came
@@ -8391,7 +8471,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 push,
                 keyexpr,
                 &gateways,
-                |dst| self.crosses(inbound_tier, target_tier, src_zid, fwd_zid, Some(dst)),
+                |dst| {
+                    self.crosses(
+                        Crossing::Push(push),
+                        inbound_tier,
+                        target_tier,
+                        src_zid,
+                        fwd_zid,
+                        Some(dst),
+                    )
+                },
             );
         }
     }
@@ -8655,7 +8744,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // R2901 — and, on a peer node, every gateway of the hat: the source is south.
             let gateways = self.gateways_owed(tier, keyexpr, false);
             self.self_publish_into_tier(tier, egress, push, keyexpr, &gateways, |dst| {
-                self.crosses(source_tier, tier, None, None, Some(dst))
+                self.crosses(
+                    Crossing::Push(push),
+                    source_tier,
+                    tier,
+                    None,
+                    None,
+                    Some(dst),
+                )
             });
         }
     }
@@ -9525,7 +9621,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                         let sources = hat.tokens.sources_of(keyexpr);
                         sources.iter().any(|source| {
                             let forwarder = self.token_forwarder(region, source);
-                            self.crosses(region, target, Some(source), forwarder.as_ref(), None)
+                            self.crosses(
+                                Crossing::Token(keyexpr),
+                                region,
+                                target,
+                                Some(source),
+                                forwarder.as_ref(),
+                                None,
+                            )
                         })
                     }
                     Some(Hat::Broker(_)) => self.token_contributions(holder, keyexpr) > 0,
@@ -11419,6 +11522,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let client_gate = tier == NORTH_REGION
             || is_leaf(tier, self.tables.node_mode)
             || self.crosses(
+                Crossing::Query,
                 tier,
                 NORTH_REGION,
                 within.map(|(zid, _psid)| zid).or(member).as_ref(),
@@ -11660,6 +11764,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // `map_or(true, ..)`: `is_none_or` postdates the workspace MSRV.
         block.crossing.map_or(true, |c| {
             self.crosses(
+                Crossing::Query,
                 c.src,
                 block.tier,
                 c.src_zid.as_ref(),

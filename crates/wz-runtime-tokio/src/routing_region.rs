@@ -256,13 +256,70 @@ pub struct InterRegionFilter<'a, Z> {
     pub dst_zid: Option<&'a Z>,
 }
 
+/// What [`InterRegionFilter::verdict`] decided, and the arm that decided it.
+///
+/// The pin lets a message through on three arms that hold no election (no
+/// boundary, no gateway view, an unnamed source), and two gateways that both take
+/// such an arm for one message deliver it twice. A trace of the bare `bool`
+/// cannot tell those arms from an election, so the router traces this instead
+/// (`router_forward::OnTables::crosses`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrossVerdict<Z> {
+    /// Both regions are on one side of the boundary: nothing crosses. Passes.
+    SameSide,
+    /// The hat has no gateway view of the node asked about: a broker hat, or a
+    /// mesh hat that does not know the node. Passes.
+    NoView,
+    /// The hat knows the node, and the node links to no gateway. Passes.
+    NoGateway,
+    /// The message names no source, which the pin reports as a bug. Passes.
+    UnnamedSource {
+        /// The gateways the node asked about links to.
+        gateways: Vec<Z>,
+    },
+    /// One of the gateways originated the message and carried it itself. Dropped.
+    GatewaySource {
+        /// The gateways the node asked about links to.
+        gateways: Vec<Z>,
+    },
+    /// This node is the largest of the gateways: it carries the message. Passes.
+    Primary {
+        /// The gateways the node asked about links to.
+        gateways: Vec<Z>,
+    },
+    /// A larger gateway carries the message. Dropped.
+    NotPrimary {
+        /// The gateways the node asked about links to.
+        gateways: Vec<Z>,
+    },
+}
+
+impl<Z> CrossVerdict<Z> {
+    /// Whether the message takes the egress.
+    pub fn passes(&self) -> bool {
+        match self {
+            CrossVerdict::SameSide
+            | CrossVerdict::NoView
+            | CrossVerdict::NoGateway
+            | CrossVerdict::UnnamedSource { .. }
+            | CrossVerdict::Primary { .. } => true,
+            CrossVerdict::GatewaySource { .. } | CrossVerdict::NotPrimary { .. } => false,
+        }
+    }
+}
+
 impl<Z: Ord> InterRegionFilter<'_, Z> {
     /// `false` when the message must not take this egress, as the pin's
     /// `InterRegionFilter::resolve` decides it, arm for arm.
     pub fn resolve(&self, self_zid: &Z, view: &impl GatewayView<Z>) -> bool {
+        self.verdict(self_zid, view).passes()
+    }
+
+    /// [`resolve`](Self::resolve), with the arm that decided it.
+    pub fn verdict(&self, self_zid: &Z, view: &impl GatewayView<Z>) -> CrossVerdict<Z> {
         // Same side of the boundary: nothing crosses, nothing to filter.
         if self.src.bound() == self.dst.bound() {
-            return true;
+            return CrossVerdict::SameSide;
         }
         // Down from the north the candidates are the DESTINATION's gateways;
         // up from the south they are the FORWARDER's, since a gateway source
@@ -278,16 +335,27 @@ impl<Z: Ord> InterRegionFilter<'_, Z> {
                 None => view.gateways(self.src),
             },
         };
-        let Some(gwys) = gwys.filter(|g| !g.is_empty()) else {
-            return true;
+        // The pin passes both of these on one arm (`gwys.filter(|g| !g.is_empty())`);
+        // they are told apart for the trace only.
+        let Some(gateways) = gwys else {
+            return CrossVerdict::NoView;
         };
+        if gateways.is_empty() {
+            return CrossVerdict::NoGateway;
+        }
         // The pin reports an unnamed source as a bug and lets the message
         // through; so does this.
         let Some(src_zid) = self.src_zid else {
             log::error!("inter-region filter: the message's source is unknown");
-            return true;
+            return CrossVerdict::UnnamedSource { gateways };
         };
-        is_primary_gateway(self_zid, &gwys, Some(src_zid))
+        if is_primary_gateway(self_zid, &gateways, Some(src_zid)) {
+            CrossVerdict::Primary { gateways }
+        } else if gateways.contains(src_zid) {
+            CrossVerdict::GatewaySource { gateways }
+        } else {
+            CrossVerdict::NotPrimary { gateways }
+        }
     }
 }
 
@@ -560,6 +628,63 @@ mod tests {
             regions: vec![(PEERS, vec![(9, vec![])], vec![])],
         };
         assert!(filter(PEERS, Region::North, Some(&9), Some(&9), None).resolve(&1, &empty));
+    }
+
+    /// Each arm is named: the three that pass without an election are told
+    /// apart from one another and from the election, which is what a trace of
+    /// two gateways that both carried one message needs.
+    #[test]
+    fn the_verdict_names_the_arm_that_decided() {
+        let view = two_gateways();
+        assert_eq!(
+            filter(PEERS, CLIENTS, Some(&9), Some(&9), None).verdict(&1, &view),
+            CrossVerdict::SameSide
+        );
+        assert_eq!(
+            filter(PEERS, Region::North, Some(&9), Some(&3), None).verdict(&1, &view),
+            CrossVerdict::NoView,
+            "a forwarder the hat does not know"
+        );
+        let empty = View {
+            regions: vec![(PEERS, vec![(9, vec![])], vec![])],
+        };
+        assert_eq!(
+            filter(PEERS, Region::North, Some(&9), Some(&9), None).verdict(&1, &empty),
+            CrossVerdict::NoGateway
+        );
+        assert_eq!(
+            filter(PEERS, Region::North, None, Some(&9), None).verdict(&1, &view),
+            CrossVerdict::UnnamedSource {
+                gateways: vec![1, 2]
+            }
+        );
+        let up = filter(PEERS, Region::North, Some(&9), Some(&9), None);
+        assert_eq!(
+            up.verdict(&2, &view),
+            CrossVerdict::Primary {
+                gateways: vec![1, 2]
+            }
+        );
+        assert_eq!(
+            up.verdict(&1, &view),
+            CrossVerdict::NotPrimary {
+                gateways: vec![1, 2]
+            }
+        );
+        assert_eq!(
+            filter(PEERS, Region::North, Some(&2), Some(&9), None).verdict(&2, &view),
+            CrossVerdict::GatewaySource {
+                gateways: vec![1, 2]
+            },
+            "the largest gateway originated it"
+        );
+        for verdict in [
+            CrossVerdict::<u8>::SameSide,
+            CrossVerdict::NoView,
+            CrossVerdict::NoGateway,
+        ] {
+            assert!(verdict.passes(), "{verdict:?}");
+        }
     }
 
     /// No named neighbour falls back to the region's whole gateway set, and an
