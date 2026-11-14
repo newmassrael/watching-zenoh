@@ -13564,6 +13564,25 @@
       "carry_forward_bullets": [
         "Open: read the hosted Layer C0 of this head at the start of the next round."
       ]
+    },
+    "Round 4484": {
+      "decision_summary": "An analyst asks which connection is retransmitting, and the session table could not say: the stream reassembler already counts retransmissions, out-of-order and partially overlapping segments per direction of every TCP flow, but only their sum over the whole capture left the library, through the health document. The session table's flow objects now carry those counts per direction of the flow key (low to high, high to low), read from the same assembler fields the health sum adds up, so there is one count and two views of it. A flow that has no sequence numbers (UDP and QUIC over it, raw Ethernet, serial, vsock, whose reader numbers bytes itself) states null with the reason no_sequence instead of zeros, because zero would claim a measurement that was never possible. The rows carry no sum, since the flows of one session do not share a low end. Flows the table's ceiling evicted have no row, so the document states their share beside dropped_by_limits, and the flows plus that share equal the health counters exactly.",
+      "changes_bullets": [
+        "session_table revision 11: stream_anomalies per direction on each flow object with a per-flow unstated list; evicted_stream_anomalies at the top level; reason no_sequence and cell stream_anomalies join the closed vocabularies.",
+        "The C header documents the cells, the equation with the health counters and the live-handle caveat; the C consumer reads revision 11 and the new keys."
+      ],
+      "verification_bullets": [
+        "On the build machine: wz-capture with dissect, lib tests 1799 passed (the new per-direction, UDP null, eviction equation and retention tests among them); wz-capi-dissect 235 passed plus the handle memory gate 4 passed; Layer C1bo passed (the C consumer linked the library and read revision 11); clippy of the two crates, each alone, with warnings as errors, clean.",
+        "doc_revision_consumer_pin agrees with the document history (22 pins, 28 documents).",
+        "Not run: the hosted lanes on this head, including the size lane."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the hosted run of this head at the start of the next round (C1bo, the size lane C1cs for the emitter's growth).",
+        "Open: no vsock fixture asserts that a vsock assembler's counts are structurally zero, which the equation with the health counters relies on for vsock flows."
+      ]
     }
   },
   "inventory_entries": {
