@@ -224,7 +224,7 @@ fn a_zenohd_client_answers_its_client_key_through_a_zenohd_router() {
 
 // wz-proves: adminspace-core wz->zenohd partial
 #[test]
-#[ignore = "binary-dep e2e: needs zenohd + wz-ap-demo[adminspace-core]; Layer Z runs via --ignored"]
+#[ignore = "binary-dep e2e (zenohd + wz-ap-demo --features adminspace-core); Layer Z runs via --ignored"]
 fn a_wz_client_answers_its_client_key_through_a_zenohd_router() {
     assert_demo_binary_newer_than_sources(&wz_ap_demo_binary());
     let (mut router, port) = spawn_zenohd_on_ephemeral_tcp(probe_stderr);
@@ -243,8 +243,9 @@ fn a_wz_client_answers_its_client_key_through_a_zenohd_router() {
     assert_client_root_reply(&log, &zid_of(&root));
 }
 
+// wz-proves: none -- every process is wz's; the zenohd legs above adjudicate
 #[test]
-#[ignore = "binary-dep e2e: needs wz-ap-demo[router-hat-router, adminspace-core]; Layer Z runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,adminspace-core); Layer Z runs via --ignored"]
 fn a_wz_client_answers_its_client_key_through_a_wz_router() {
     assert_demo_binary_newer_than_sources(&wz_ap_demo_binary());
     let (mut router, _router_log, port) = spawn_on_ephemeral_port(
