@@ -459,6 +459,124 @@ pub(crate) mod transport {
             );
         }
     }
+
+    /// What the implicit optimisation copies: a message the list names, from the threshold up,
+    /// when some peer could read the copy; and the copy is the transport's, whose bytes a receiver
+    /// of the session itself is handed, where a buffer the application gave is handed as itself.
+    #[cfg(all(test, feature = "unstable"))]
+    mod promoter_tests {
+        use std::{
+            cell::Cell,
+            time::{Duration, Instant},
+        };
+
+        use zenoh_config::DataMessage;
+        use zenoh_core::Wait;
+        use zenoh_shm::api::provider::shm_provider::ShmProviderBuilder;
+
+        use super::*;
+
+        /// A promoter of the configuration whose `transport_optimization` section is
+        /// `optimisation`, its provider made.
+        fn promoter(optimisation: &str) -> Promoter {
+            let config = crate::config::Config::from_json5(&format!(
+                r#"{{ transport: {{ shared_memory: {{
+                      transport_optimization: {{ {optimisation} }} }} }} }}"#
+            ))
+            .expect("a configuration zenoh reads")
+            .0
+            .expanded();
+            let provider = super::super::provider_of(&config).expect("a provider");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !matches!(
+                provider.state(),
+                crate::net::runtime::ShmProviderState::Ready(_)
+            ) {
+                assert!(Instant::now() < deadline, "the provider was never made");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Promoter::new(&config, Some(&provider)).expect("a promoter")
+        }
+
+        /// The default threshold, 3072 bytes, and one byte past it.
+        fn large() -> ZBytes {
+            ZBytes::from(vec![7u8; 3073])
+        }
+
+        #[test]
+        fn by_default_a_large_put_value_and_reply_are_copied_for_a_peer_that_reads_them() {
+            let promoter = promoter("");
+            for message in [DataMessage::Put, DataMessage::Query, DataMessage::Reply] {
+                let handle = promoter
+                    .promote(message, &large(), || true)
+                    .unwrap_or_else(|| panic!("{message:?} is copied"));
+                assert_eq!(handle.bytes(), large().to_bytes().as_ref());
+                assert!(
+                    handle.receiver_view().is_none(),
+                    "the copy of a {message:?} is the transport's: the session itself is \
+                     handed its bytes"
+                );
+            }
+            assert!(
+                promoter
+                    .promote(DataMessage::Delete, &large(), || true)
+                    .is_none(),
+                "a delete has no payload to copy"
+            );
+        }
+
+        #[test]
+        fn a_message_the_list_leaves_out_is_not_copied_and_no_peer_is_asked_about() {
+            let promoter = promoter(r#"messages: ["put"]"#);
+            let asked = Cell::new(0);
+            let peer = || {
+                asked.set(asked.get() + 1);
+                true
+            };
+            assert!(promoter.promote(DataMessage::Put, &large(), peer).is_some());
+            for message in [DataMessage::Query, DataMessage::Reply] {
+                assert!(
+                    promoter.promote(message, &large(), peer).is_none(),
+                    "{message:?}"
+                );
+            }
+            assert_eq!(asked.get(), 1, "only the listed put asked about a peer");
+        }
+
+        #[test]
+        fn a_small_payload_or_one_no_peer_could_read_is_not_copied() {
+            let promoter = promoter("");
+            let small = ZBytes::from(vec![7u8; 3071]);
+            assert!(promoter
+                .promote(DataMessage::Put, &small, || true)
+                .is_none());
+            assert!(promoter
+                .promote(DataMessage::Put, &large(), || false)
+                .is_none());
+        }
+
+        #[test]
+        fn a_buffer_the_application_gave_is_not_copied_and_is_handed_as_itself() {
+            let promoter = promoter("");
+            let provider = ShmProviderBuilder::default_backend(1usize << 16)
+                .wait()
+                .expect("a provider");
+            let mut buffer = provider.alloc(4096usize).wait().expect("a buffer");
+            buffer.as_mut().copy_from_slice(&[9u8; 4096]);
+            let payload = ZBytes::from_shm_slice(buffer.into());
+            assert!(
+                promoter
+                    .promote(DataMessage::Put, &payload, || true)
+                    .is_none(),
+                "a buffer goes as itself"
+            );
+            let handle = send_handle_of(&payload).expect("a handle of the buffer");
+            assert!(
+                handle.receiver_view().is_some(),
+                "the session itself is handed the application's buffer"
+            );
+        }
+    }
 }
 
 #[cfg(feature = "unstable")]
