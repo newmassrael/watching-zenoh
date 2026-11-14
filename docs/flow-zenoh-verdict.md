@@ -1623,10 +1623,13 @@ The repository's raweth sample held one such unit, and it was the sample's: its
 `Frame` carried the two bytes `0xDE 0xAD` as its records, written by hand, and
 `0xDE` is a `Declare` header whose body those bytes cannot be, so upstream drops
 that batch. The sample's `Frame` now carries an OAM record built by its codec.
-mDNS flows generated with a fixed id read whole half as often as they did
-(`structured_datagrams_of_other_protocols_read_by_their_first_byte`), for the
-same reason: their records come to bytes upstream reads as neither a network
-message nor a transport one.
+The generated flows of other protocols
+(`structured_datagrams_of_other_protocols_read_by_their_first_byte`, 54600
+datagrams each) read whole far less often, for the same reason: their records
+come to bytes upstream reads as neither a network message nor a transport one.
+mDNS reads 4151 units whole where it read 8847, DNS 1978 where 3926, CoAP 348
+where 6929 and NTP 310 where 575. No flow of ten or more of them reaches half
+read whole, where mDNS, DNS and CoAP flows of ten did.
 
 A lowlatency unit is not part of this rule: upstream reads such a unit as a
 run of messages until it ends

@@ -3685,40 +3685,42 @@ fn read_structured_flow(
 ///
 /// | n | mDNS | DNS | CoAP | NTP | SSDP, syslog |
 /// |---|---|---|---|---|---|
-/// | 1 | 0.088 / 1.00 / 1.00 / 1.00 / 53 | 0.060 / 1.00 / 1.00 / 1.00 / 36 | 0.002 / 0 / 0 / 1.00 / 1 | 0 / 0 / 0 / 0 / 0 | 0 |
-/// | 2 | 0.067 / 0.50 / 0.50 / 1.00 / 74 | 0.066 / 1.00 / 1.00 / 1.00 / 42 | 0.120 / 0.50 / 0.50 / 0.50 / 144 | 0.012 / 0 / 0.50 / 0.50 / 14 | 0 |
-/// | 3 | 0.078 / 0.33 / 0.67 / 1.00 / 9 | 0.067 / 0.67 / 0.67 / 1.00 / 39 | 0.082 / 0.33 / 0.33 / 0.33 / 0 | 0.010 / 0 / 0.33 / 0.33 / 0 | 0 |
-/// | 5 | 0.077 / 0.40 / 0.40 / 0.40 / 0 | 0.081 / 0.40 / 0.40 / 0.80 / 6 | 0.103 / 0.40 / 0.40 / 0.40 / 0 | 0.008 / 0 / 0.20 / 0.20 / 0 | 0 |
-/// | 10 | 0.081 / 0.20 / 0.30 / 0.40 / 0 | 0.078 / 0.40 / 0.40 / 0.60 / 2 | 0.135 / 0.30 / 0.40 / 0.50 / 1 | 0.012 / 0.10 / 0.10 / 0.20 / 0 | 0 |
-/// | 20 | 0.077 / 0.20 / 0.25 / 0.30 / 0 | 0.070 / 0.20 / 0.30 / 0.30 / 0 | 0.129 / 0.25 / 0.30 / 0.40 / 0 | 0.011 / 0.05 / 0.10 / 0.15 / 0 | 0 |
-/// | 50 | 0.074 / 0.14 / 0.16 / 0.20 / 0 | 0.071 / 0.16 / 0.20 / 0.28 / 0 | 0.132 / 0.20 / 0.24 / 0.26 / 0 | 0.010 / 0.04 / 0.06 / 0.06 / 0 | 0 |
+/// | 1 | 0.088 / 1.00 / 1.00 / 1.00 / 53 | 0.027 / 0 / 1.00 / 1.00 / 16 | 0.002 / 0 / 0 / 1.00 / 1 | 0 / 0 / 0 / 0 / 0 | 0 |
+/// | 2 | 0.067 / 0.50 / 0.50 / 1.00 / 74 | 0.030 / 0 / 1.00 / 1.00 / 20 | 0.004 / 0 / 0 / 0.50 / 5 | 0.006 / 0 / 0.50 / 0.50 / 7 | 0 |
+/// | 3 | 0.078 / 0.33 / 0.67 / 1.00 / 9 | 0.025 / 0.33 / 0.67 / 0.67 / 11 | 0.008 / 0 / 0.33 / 0.33 / 0 | 0.007 / 0 / 0.33 / 0.33 / 0 | 0 |
+/// | 5 | 0.077 / 0.40 / 0.40 / 0.40 / 0 | 0.045 / 0.40 / 0.40 / 0.80 / 4 | 0.005 / 0 / 0.20 / 0.20 / 0 | 0.004 / 0 / 0.20 / 0.20 / 0 | 0 |
+/// | 10 | 0.081 / 0.20 / 0.30 / 0.40 / 0 | 0.042 / 0.20 / 0.40 / 0.40 / 0 | 0.005 / 0 / 0.10 / 0.20 / 0 | 0.006 / 0.10 / 0.10 / 0.20 / 0 | 0 |
+/// | 20 | 0.077 / 0.20 / 0.25 / 0.30 / 0 | 0.034 / 0.10 / 0.20 / 0.30 / 0 | 0.006 / 0.05 / 0.05 / 0.10 / 0 | 0.006 / 0.05 / 0.05 / 0.10 / 0 | 0 |
+/// | 50 | 0.074 / 0.14 / 0.16 / 0.20 / 0 | 0.036 / 0.12 / 0.14 / 0.20 / 0 | 0.007 / 0.04 / 0.04 / 0.06 / 0 | 0.006 / 0.02 / 0.04 / 0.06 / 0 | 0 |
 ///
 /// Each cell reads mean / p95 / p99 / max / flows at or above 0.5 (SSDP and
 /// syslog read every unit `undecoded`, 54600 of 54600 each, so their cell is
 /// zero throughout). Over all 54600 datagrams of a protocol the three classes
 /// split `explained` / `residual` / `undecoded` as: mDNS 4151 / 50449 / 0, DNS
-/// 3926 / 5927 / 44747, CoAP 6929 / 11796 / 35875, NTP 575 / 38160 / 15865.
+/// 1978 / 7869 / 44753, CoAP 348 / 18377 / 35875, NTP 310 / 38425 / 15865.
 ///
-/// The mDNS column is measured with a `Frame`'s records read as upstream
-/// reads a batch (`docs/flow-zenoh-verdict.md` §6.14): its records end at a
-/// transport id, and a record that does not decode, or whose id is in neither
-/// space, fails the batch. The DNS, CoAP and NTP columns were measured before
-/// that reading. It can only move a unit from `explained` to `residual`, never
-/// back, so their `explained` shares are bounds from above until they are
-/// measured again (the test prints every protocol's rows).
+/// Measured with a `Frame`'s records read as upstream reads a batch
+/// (`docs/flow-zenoh-verdict.md` §6.14, measured 2026-11-14): its records end
+/// at a transport id, and a record that does not decode, or whose id is in
+/// neither space, fails the batch. Under the earlier reading (2026-10-26) the
+/// same flows read `explained` 8847 times for mDNS, 3926 for DNS, 6929 for
+/// CoAP and 575 for NTP: the difference is batches upstream drops, a `Frame`
+/// whose records come to bytes of the names, the counts or the options that
+/// upstream reads as neither a network message nor a transport one. The random
+/// table above was measured under the earlier reading, and that reading can
+/// only have counted more units `explained` than this one.
 ///
 /// What it says against the random table (n = 10: mean 0.061, max 0.40):
 ///
-/// * Under the earlier reading a flow of ten datagrams could reach a share of
-///   0.5 on structured bytes that are not zenoh: DNS in 2 of 600 (up to 0.60)
-///   and CoAP in 1. mDNS reached it in 5 of 600 then and reaches it in none
-///   now (at most 0.40 at ten): of the 8847 units the earlier reading took
-///   for whole, 4696 are batches upstream drops, a `Frame` whose records come
-///   to bytes of the names or the counts that upstream reads as neither a
-///   network message nor a transport one. None reaches 0.5 at twenty or more.
-/// * The mean share is no better than random: mDNS and CoAP sit at 0.08 and
-///   0.13 against random's 0.06. The mDNS id is always 0, so every datagram
-///   starts with the same byte pair: 92% `residual`, 8% `explained`, never
+/// * No flow of ten or more structured datagrams that are not zenoh reaches a
+///   share of 0.5: the widest at ten are mDNS and DNS at 0.40, at twenty 0.30
+///   and at fifty 0.20. Under the earlier reading mDNS reached it in 5 of 600
+///   flows of ten, DNS in 2 (up to 0.60) and CoAP in 1, all of them on units
+///   upstream drops. Shorter flows still do: DNS in 4 of 600 flows of five,
+///   mDNS in 9 of three.
+/// * mDNS alone sits above random's mean (0.08 against 0.06; DNS 0.04, CoAP
+///   and NTP under 0.01). The mDNS id is always 0, so every datagram starts
+///   with the same byte pair: 92% `residual`, 8% `explained`, never
 ///   `undecoded`. The unit count does not separate it from zenoh as well as it
 ///   separates random bytes.
 /// * The share alone is no verdict, and the sequential test does not read it as
@@ -3749,28 +3751,21 @@ fn structured_datagrams_of_other_protocols_read_by_their_first_byte() {
         let rows_text = alloc::format!("{name}: {all:?}: {rows:?}");
         std::println!("{rows_text}");
         for (n, mean, _, _, max, over) in &rows {
-            if *n >= 20 {
+            if *n >= 10 {
                 assert!(
-                    *max < 0.5,
-                    "{name} reached a share of {max} at {n} datagrams: {rows_text}"
+                    *max < 0.5 && *over == 0,
+                    "{name} reached a share of {max} at {n} datagrams, which only a unit \
+                     read whole where upstream drops its batch can do: {rows_text}"
                 );
             }
             assert!(*max <= 1.0 && *mean < 0.25, "{rows_text}");
-            if *n == 10 {
-                assert!(*max <= 0.7 && *over <= 30, "{rows_text}");
-            }
         }
         match name {
             "ssdp" | "syslog" => assert_eq!(all.0 + all.1, 0, "text reads undecoded: {rows_text}"),
-            "mdns" => {
-                let ten = rows.iter().find(|r| r.0 == 10).unwrap();
-                assert_eq!(
-                    ten.5, 0,
-                    "an mDNS flow of ten reaches 0.5 again, which only a unit read whole \
-                     where upstream drops its batch can do: {rows_text}"
-                );
-                assert_eq!(all, (4151, 50449, 0), "{rows_text}");
-            }
+            "mdns" => assert_eq!(all, (4151, 50449, 0), "{rows_text}"),
+            "dns" => assert_eq!(all, (1978, 7869, 44753), "{rows_text}"),
+            "ntp" => assert_eq!(all, (310, 38425, 15865), "{rows_text}"),
+            "coap" => assert_eq!(all, (348, 18377, 35875), "{rows_text}"),
             _ => {}
         }
     }
