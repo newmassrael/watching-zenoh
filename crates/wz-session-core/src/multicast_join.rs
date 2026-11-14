@@ -733,6 +733,51 @@ mod tests {
         }
     }
 
+    /// The beacon a fresh announcer sends, laid out byte by byte in the order
+    /// both references write a Join (`commons/zenoh-codec/src/transport/join.rs`
+    /// @ `impl<W> WCodec<&Join, &mut W> for Zenoh080`, zenoh-pico
+    /// `_z_join_encode`): an oracle that is neither this encoder nor the
+    /// document it writes through. The chain is the one this build emits: the
+    /// QoS SNs where it offers per-priority conduits, then the patch level where
+    /// it emits fragment chains with their markers.
+    #[test]
+    fn a_beacon_is_the_bytes_both_references_lay_out() {
+        let qos = cfg!(feature = "transport-qos");
+        let patch = cfg!(feature = "transport-fragmentation");
+        let mut p = params(&[0x01, 0x02, 0x03, 0x04]);
+        p.is_qos = qos;
+        let tx = MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res));
+        let mut expected = std::vec![
+            // mid 0x07; T, a lease of whole seconds; S, a batch size off the
+            // protocol's; Z, when a chain follows
+            0x07 | 0x20 | 0x40 | if qos || patch { 0x80 } else { 0x00 },
+            0x09, // the protocol version
+            0x31, // whatami peer, and the zid length less one in the high nibble
+            0x01,
+            0x02,
+            0x03,
+            0x04,
+            0x0a, // the SN resolution 2, the request id resolution 2 above it
+            0x00,
+            0x08, // the batch size 2048, little endian
+            0x05, // the lease, 5 s
+            0x00, // next reliable SN; under QoS the decoy upstream writes
+            0x00, // next best-effort SN, likewise
+        ];
+        if qos {
+            // id 1, mandatory, a ZBuf, chained when the patch level follows; a
+            // length of 16; eight priorities of two one-byte SNs, all 0
+            expected.push(if patch { 0xd1 } else { 0x51 });
+            expected.push(16);
+            expected.extend_from_slice(&[0x00; 16]);
+        }
+        if patch {
+            // id 7, a z64, not mandatory, the last entry; level 1
+            expected.extend_from_slice(&[0x27, 0x01]);
+        }
+        assert_eq!(encode_join(&p, &tx), expected);
+    }
+
     /// `encode_join` frames a JOIN whose MID is `T_MID_JOIN` and whose
     /// body round-trips back to the announcer zid through
     /// `decode_join_zid` (the fixture batch 2048 is non-default, so the
