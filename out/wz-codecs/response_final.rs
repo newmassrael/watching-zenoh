@@ -62,7 +62,7 @@ impl<'f, S: ResponseFinalStorage + super::ext_entry::ExtEntryFrom<'f>> ResponseF
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResponseFinalIn<S: ResponseFinalStorage> {
     pub header: u8,
-    pub request_id: u64,
+    pub request_id: u32,
     pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<ResponseFinalExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>>,
 }
 
@@ -148,7 +148,7 @@ impl<S: ResponseFinalStorage> ResponseFinalIn<S> {
             cursor.advance(1)?;
             _v
         };
-        let request_id = cursor.read_vle_u64()?;
+        let request_id = cursor.read_vle_u32()?;
         if (header & 0x80u8) != 0 {
             ::sce_forge_runtime::codec::note_capacity(_out.extensions.insert(Default::default()).refill(|_vec| {
                 let mut _full = false;
@@ -243,7 +243,7 @@ pub trait ResponseFinalSource {
     /// The `header` field.
     fn header(&self) -> u8;
     /// The `request_id` field.
-    fn request_id(&self) -> u64;
+    fn request_id(&self) -> u32;
     /// The `extensions` field.
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>;
 }
@@ -252,7 +252,7 @@ impl<T: ResponseFinalSource + ?Sized> ResponseFinalSource for &T {
     fn header(&self) -> u8 {
         (**self).header()
     }
-    fn request_id(&self) -> u64 {
+    fn request_id(&self) -> u32 {
         (**self).request_id()
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -269,7 +269,7 @@ pub struct ResponseFinalParts<'a> {
     /// The `header` field.
     pub header: u8,
     /// The `request_id` field.
-    pub request_id: u64,
+    pub request_id: u32,
     /// The `extensions` field.
     pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], { usize::MAX }, 1>>,
 }
@@ -278,7 +278,7 @@ impl<'a> ResponseFinalSource for ResponseFinalParts<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn request_id(&self) -> u64 {
+    fn request_id(&self) -> u32 {
         self.request_id
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -290,7 +290,7 @@ impl<S: ResponseFinalStorage> ResponseFinalSource for ResponseFinalOwned<S> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn request_id(&self) -> u64 {
+    fn request_id(&self) -> u32 {
         self.request_id
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -302,7 +302,7 @@ impl<'a> ResponseFinalSource for ResponseFinalView<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn request_id(&self) -> u64 {
+    fn request_id(&self) -> u32 {
         self.request_id
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -335,7 +335,7 @@ impl ResponseFinalWire {
         let _p_header_z_0: bool = src.extensions().is_some();
         let _c_header: u8 = (src.header() & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
-        w.write_vle_u64(src.request_id())?;
+        w.write_vle_u32(src.request_id())?;
         if let Some(_v) = src.extensions() {
             for (_i, _e) in _v.enumerate() {
                 super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
@@ -411,7 +411,7 @@ impl ListWalk<0> for ResponseFinalExtensionsWalk {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResponseFinalView<'a> {
     pub header: u8,
-    pub request_id: u64,
+    pub request_id: u32,
     pub extensions: Option<Bounded<ListView<'a, ResponseFinalExtensionsWalk, 0>, { usize::MAX }, 1>>,
 }
 
@@ -464,7 +464,7 @@ impl<'a> ResponseFinalView<'a> {
             cursor.advance(1)?;
             _v
         };
-        let request_id = cursor.read_vle_u64()?;
+        let request_id = cursor.read_vle_u32()?;
         if (header & 0x80u8) != 0 {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;

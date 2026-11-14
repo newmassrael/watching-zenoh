@@ -107,7 +107,7 @@ impl<'f, S: ResponseStorage + super::wireexpr::WireexprFrom<'f> + super::ext_ent
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResponseIn<S: ResponseStorage> {
     pub header: u8,
-    pub request_id: u64,
+    pub request_id: u32,
     pub keyexpr: WireexprOwned<S>,
     pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<ResponseExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>>,
     pub body: ResponseVariantIn<S>,
@@ -230,7 +230,7 @@ impl<S: ResponseStorage> ResponseIn<S> {
             cursor.advance(1)?;
             _v
         };
-        let request_id = cursor.read_vle_u64()?;
+        let request_id = cursor.read_vle_u32()?;
         ::sce_forge_runtime::codec::note_capacity(WireexprOwned::<S>::decode_into(cursor, &mut _out.keyexpr, (header >> 5) & 0x1, (header >> 6) & 0x1), &mut _over)?;
         if (header & 0x80u8) != 0 {
             ::sce_forge_runtime::codec::note_capacity(_out.extensions.insert(Default::default()).refill(|_vec| {
@@ -408,7 +408,7 @@ pub trait ResponseSource {
     /// The `header` field.
     fn header(&self) -> u8;
     /// The `request_id` field.
-    fn request_id(&self) -> u64;
+    fn request_id(&self) -> u32;
     /// The `keyexpr` field.
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource;
     /// The `extensions` field.
@@ -421,7 +421,7 @@ impl<T: ResponseSource + ?Sized> ResponseSource for &T {
     fn header(&self) -> u8 {
         (**self).header()
     }
-    fn request_id(&self) -> u64 {
+    fn request_id(&self) -> u32 {
         (**self).request_id()
     }
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
@@ -454,7 +454,7 @@ pub struct ResponseParts<'a> {
     /// The `header` field.
     pub header: u8,
     /// The `request_id` field.
-    pub request_id: u64,
+    pub request_id: u32,
     /// The `keyexpr` field.
     pub keyexpr: &'a super::wireexpr::WireexprParts<'a>,
     /// The `extensions` field.
@@ -467,7 +467,7 @@ impl<'a> ResponseSource for ResponseParts<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn request_id(&self) -> u64 {
+    fn request_id(&self) -> u32 {
         self.request_id
     }
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
@@ -489,7 +489,7 @@ impl<S: ResponseStorage> ResponseSource for ResponseOwned<S> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn request_id(&self) -> u64 {
+    fn request_id(&self) -> u32 {
         self.request_id
     }
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
@@ -511,7 +511,7 @@ impl<'a> ResponseSource for ResponseView<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn request_id(&self) -> u64 {
+    fn request_id(&self) -> u32 {
         self.request_id
     }
     fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
@@ -562,7 +562,7 @@ impl ResponseWire {
         let _v_header_n: u8 = _n_d_header_n_0 as u8;
         let _c_header: u8 = (((((src.header() & !0x20) | (_v_header_n << 5)) & !0x40) | (_d_header_m << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
-        w.write_vle_u64(src.request_id())?;
+        w.write_vle_u32(src.request_id())?;
         super::wireexpr::WireexprWire::write_source(src.keyexpr(), w)?;
         if let Some(_v) = src.extensions() {
             for (_i, _e) in _v.enumerate() {
@@ -661,7 +661,7 @@ impl ListWalk<0> for ResponseExtensionsWalk {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResponseView<'a> {
     pub header: u8,
-    pub request_id: u64,
+    pub request_id: u32,
     pub keyexpr: WireexprView<'a>,
     pub extensions: Option<Bounded<ListView<'a, ResponseExtensionsWalk, 0>, { usize::MAX }, 1>>,
     pub body: ResponseViewVariant<'a>,
@@ -713,7 +713,7 @@ impl<'a> ResponseView<'a> {
             cursor.advance(1)?;
             _v
         };
-        let request_id = cursor.read_vle_u64()?;
+        let request_id = cursor.read_vle_u32()?;
         WireexprView::decode_into(cursor, &mut _out.keyexpr, (header >> 5) & 0x1, (header >> 6) & 0x1)?;
         if (header & 0x80u8) != 0 {
             let _rest = cursor.peek_slice(cursor.remaining())?;

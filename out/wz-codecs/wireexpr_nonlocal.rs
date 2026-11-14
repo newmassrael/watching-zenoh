@@ -58,7 +58,7 @@ impl<'f, S: WireexprNonlocalStorage + ::sce_forge_runtime::codec::StoresStr<'f, 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WireexprNonlocalIn<S: WireexprNonlocalStorage> {
-    pub id: u64,
+    pub id: u16,
     pub suffix_len: Option<u64>,
     pub suffix: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsStr<WireexprNonlocalSuffixField>>::Str, 65535>>,
 }
@@ -141,7 +141,7 @@ impl<S: WireexprNonlocalStorage> WireexprNonlocalIn<S> {
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let id = cursor.read_vle_u64()?;
+        let id = cursor.read_vle_u16()?;
         let suffix_len = if (n & 0x01u8) != 0 {
             let _v = cursor.read_vle_u64()?;
             Some(_v)
@@ -177,7 +177,7 @@ impl<S: WireexprNonlocalStorage> WireexprNonlocalIn<S> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 65553;
+    pub const MAX_ENCODED_BYTES: usize = 65547;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
@@ -214,13 +214,13 @@ impl<S: WireexprNonlocalStorage> WireexprNonlocalIn<S> {
 /// encode computes those from what is ([`WireexprNonlocalWire::encode_source`]).
 pub trait WireexprNonlocalSource {
     /// The `id` field.
-    fn id(&self) -> u64;
+    fn id(&self) -> u16;
     /// The `suffix` field.
     fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>>;
 }
 
 impl<T: WireexprNonlocalSource + ?Sized> WireexprNonlocalSource for &T {
-    fn id(&self) -> u64 {
+    fn id(&self) -> u16 {
         (**self).id()
     }
     fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>> {
@@ -235,13 +235,13 @@ impl<T: WireexprNonlocalSource + ?Sized> WireexprNonlocalSource for &T {
 #[derive(Debug, Clone, Copy)]
 pub struct WireexprNonlocalParts<'a> {
     /// The `id` field.
-    pub id: u64,
+    pub id: u16,
     /// The `suffix` field.
     pub suffix: Option<::sce_forge_runtime::codec::Text<'a, 65535>>,
 }
 
 impl<'a> WireexprNonlocalSource for WireexprNonlocalParts<'a> {
-    fn id(&self) -> u64 {
+    fn id(&self) -> u16 {
         self.id
     }
     fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>> {
@@ -250,7 +250,7 @@ impl<'a> WireexprNonlocalSource for WireexprNonlocalParts<'a> {
 }
 
 impl<S: WireexprNonlocalStorage> WireexprNonlocalSource for WireexprNonlocalOwned<S> {
-    fn id(&self) -> u64 {
+    fn id(&self) -> u16 {
         self.id
     }
     fn suffix(&self) -> Option<::sce_forge_runtime::codec::Text<'_, 65535>> {
@@ -293,7 +293,7 @@ impl WireexprNonlocalWire {
         };
         let _f_d_suffix_len: Option<usize> = if src.suffix().is_some() { Some(_n_d_suffix_len_0) } else { None };
         let _d_suffix_len: u64 = ::sce_forge_runtime::codec::widen_usize(_f_d_suffix_len.unwrap_or(0));
-        w.write_vle_u64(src.id())?;
+        w.write_vle_u16(src.id())?;
         if (n & 0x1) != 0 {
             w.write_vle_u64(_d_suffix_len)?;
         }
