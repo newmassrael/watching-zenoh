@@ -382,8 +382,13 @@ wz-ext-pubsub = { path = "../wz-ext-pubsub", optional = true }
 # `peer`, ...), which forwards to the core's, and `query-reply-err` with them: the core's
 # `queryable` and `query` features name it, so the R311y568 hazard (a reply that links and
 # answers nothing) is closed where the capability is chosen and not here.
+#
+# Accepting (`routing-accept`) is not named here for the same reason: it is the listening roles'
+# (`peer`, `scout`) and the credential methods' (`auth_pubkey`, `auth_usrpwd`), and each of them
+# forwards it through the core. Named here, it turned on the acceptor half of the session machine
+# (`session-unicast-accept`: the InitAck cookie, the OpenAck, the receive of every message kind)
+# and the Request codec in a client build that opens no listener and answers no query.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, features = [
-    "routing-accept",
     "transport-fragmentation",
     # R2172 (open-debt item 548) — `zenoh_config`, which is where
     # `HONOURED_CONFIG_KEYS` lives. Named UNCONDITIONALLY on purpose: the door
