@@ -148,6 +148,63 @@ impl<T, const N: usize> PeerRows<T, N> {
     }
 }
 
+/// The rows of a table that grows, found by a key without walking them: the member a datagram
+/// came from is looked up for every datagram, and a table that grows to a configuration's cap
+/// (a thousand members by upstream's default) cannot answer that by a scan. A table that does
+/// not grow keeps no index, and allocates nothing for one: its rows are few, and its host may
+/// have no heap.
+///
+/// The index is exact, not a hint: the table enters a key when a row takes a member
+/// ([`Self::admitted`]), leaves it when the member leaves ([`Self::left`]) and empties it when the
+/// whole table is reset ([`Self::cleared`]), so [`Self::lookup`] answers what a scan of the rows
+/// would.
+#[cfg(feature = "alloc")]
+pub(crate) struct RowIndex<K> {
+    by_key: Option<hashbrown::HashMap<K, usize>>,
+}
+
+#[cfg(feature = "alloc")]
+impl<K: core::hash::Hash + Eq> RowIndex<K> {
+    /// An index for a table that grows, or none for one that does not.
+    pub(crate) fn for_table(grows: bool) -> Self {
+        Self {
+            by_key: grows.then(hashbrown::HashMap::new),
+        }
+    }
+
+    /// Row `row` took the member keyed `key`.
+    pub(crate) fn admitted(&mut self, key: K, row: usize) {
+        if let Some(by_key) = &mut self.by_key {
+            by_key.insert(key, row);
+        }
+    }
+
+    /// The member keyed `key` left its row.
+    pub(crate) fn left(&mut self, key: &K) {
+        if let Some(by_key) = &mut self.by_key {
+            by_key.remove(key);
+        }
+    }
+
+    /// Every member left with the table's reset, and the storage goes with them.
+    pub(crate) fn cleared(&mut self) {
+        if let Some(by_key) = &mut self.by_key {
+            *by_key = hashbrown::HashMap::new();
+        }
+    }
+
+    /// `None` when the table keeps no index and must be scanned; otherwise the row of the member
+    /// keyed `key`, or `Some(None)` when no member is.
+    pub(crate) fn lookup(&self, key: &K) -> Option<Option<usize>> {
+        self.by_key.as_ref().map(|by_key| by_key.get(key).copied())
+    }
+
+    /// How many members the index holds, `None` when it keeps none.
+    pub(crate) fn members(&self) -> Option<usize> {
+        self.by_key.as_ref().map(hashbrown::HashMap::len)
+    }
+}
+
 impl<T, const N: usize> Index<usize> for PeerRows<T, N> {
     type Output = T;
 
@@ -239,5 +296,28 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows.get(2), None);
         assert!(rows.iter().copied().eq([10, 11]));
+    }
+
+    /// A table that does not grow keeps no index and is told to scan; one that grows answers by
+    /// key, through admission, departure and reset.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_index_answers_only_for_a_table_that_grows() {
+        let mut none = RowIndex::<u16>::for_table(false);
+        none.admitted(7, 0);
+        assert_eq!(none.lookup(&7), None, "no index: the caller scans");
+        assert_eq!(none.members(), None);
+
+        let mut index = RowIndex::<u16>::for_table(true);
+        index.admitted(7, 2);
+        index.admitted(9, 3);
+        assert_eq!(index.lookup(&7), Some(Some(2)));
+        assert_eq!(index.lookup(&8), Some(None));
+        index.left(&7);
+        assert_eq!(index.lookup(&7), Some(None));
+        assert_eq!(index.members(), Some(1));
+        index.cleared();
+        assert_eq!(index.lookup(&9), Some(None));
+        assert_eq!(index.members(), Some(0));
     }
 }

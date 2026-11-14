@@ -514,3 +514,30 @@ of `deploy/upstream_parity.json` takes `rows` from `rows.json` unchanged and its
   derivation (M2) takes the planes the wz image actually links, read from the image's own
   declaration, and the pico image is built with exactly those. Single-threaded and
   multi-threaded pico are both measured and the stronger one is the reference.
+
+## 7. Where a preset departs from its original by decision
+
+A preset follows its original's behaviour, and a difference is a debt (section 4, D5) unless it
+is decided here, with the rule that decides it and the test that holds it. A row here is not a
+cell of the matrix: it is behaviour, not a figure, and it stays until the rule that justifies it
+stops holding.
+
+| preset | behaviour | the original | wz | rule | held by |
+|---|---|---|---|---|---|
+| pico, on a host with a heap | how many members a group holds | no cap: the member list grows while the allocator gives (`vendor/zenoh-pico/src/transport/multicast/rx.c` @ `ztm->_peers = _z_transport_peer_multicast_slist_push_empty(ztm->_peers);`) | the rows of the group face's table, `GROUP_FACE_ROWS` (32) in `crates/wz-runtime-tokio/src/multicast_glue.rs`; the Join of a member past them is refused and counted | a group grows only to a cap a configuration states | `a_face_with_no_stated_cap_holds_its_rows_where_pico_would_grow` (`multicast_glue.rs`), `the_pico_group_states_no_member_cap` (`crates/wz-capi-pico/src/session.rs`) |
+
+The rule, and why it is the pico preset's alone. A group admits a member on an unauthenticated
+Join, keyed by the source address of the datagram, and a single host on the segment can send
+Joins from as many source addresses as it likes. Each member is a row of the table, a kilobyte
+and more with its state machine, its sequence numbers and its declaration tables, so a table that
+grew to whatever it heard is a table any host on the link can grow until the process is out of
+memory. zenoh bounds the same table by `transport/multicast/max_sessions`, 1000 unless the
+configuration states another, and a wz group of the zenoh and zenoh-c presets is held to that
+number and grows to it. pico has no such key, so its preset states no cap, and the bound is the
+table's own rows. The other per-member tables wz keeps on a group are bounded for the same reason
+(`MAX_ALIASES_PER_PEER` and `MAX_SUBS_PER_PEER` in `crates/wz-session-core/src/multicast_dispatch.rs`).
+
+What the row costs, stated: a pico group past 32 members is a group whose 33rd member is not heard
+by a wz host, where a pico host would hear it. An MCU image is not in the row: its table is the
+one the image declares, as pico's is bounded by the heap the image gives it, and pico on the same
+image would refuse the member it had no memory for.
