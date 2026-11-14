@@ -31,9 +31,10 @@ test files are run against that graph. It is a workspace of its own so that a cr
 resolve or compile against the family stops none of the files of `zenoh/tests`; it shares their
 build directory, so the family is compiled once.
 
-The EXAMPLES BRIDGE runs every program of upstream's `examples` package, in the scenarios
+The EXAMPLES BRIDGE runs every program of upstream's `examples` package and of the ecosystem crate's
+own `zenoh-ext/examples` (a member of the same generated workspace), in the scenarios
 `docs/z8-examples-expected.tsv` declares (a subscriber and the put it receives, a queryable and the
-get it answers, ...). The package is generated twice, against upstream's own crates (`stock`, the
+get it answers, ...). The workspace is generated twice, against upstream's own crates (`stock`, the
 control) and with the family patched in (`wz`); each program is compiled on its own, each scenario
 runs on both arms, and a scenario is `same` when the wz arm shows what the stock arm shows: the
 lines each observation counts, their shape, and how each program ended. The verdicts are graded by
@@ -85,6 +86,7 @@ FAMILY = {
     "zenoh-result": "wz-zenoh-result",
     "zenoh-runtime": "wz-zenoh-runtime",
     "zenoh-shm": "wz-zenoh-shm",
+    "zenoh-sync": "wz-zenoh-sync",
     "zenoh-task": "wz-zenoh-task",
     "zenoh-util": "wz-zenoh-util",
 }
@@ -459,12 +461,17 @@ def resolved(name: str, rhs: str, deps: dict[str, str], paths: dict[str, str]) -
     return "{ " + ", ".join(f"{key} = {value}" for key, value in out.items()) + " }"
 
 
-def resolved_manifest(text: str, deps: dict[str, str], paths: dict[str, str]) -> str:
+def resolved_manifest(
+    text: str, deps: dict[str, str], paths: dict[str, str], programs: dict[str, list[str]] | None = None
+) -> str:
     """A manifest of upstream's tree for a crate copied out of its workspace: the package's name at the
     pin's version, its features as they are, and each dependency `resolved`. A table this function
-    does not know is refused, so a pinned manifest that grows one is read before it is built."""
+    does not know is refused, so a pinned manifest that grows one is read before it is built. With
+    `programs` (`program -> required features`, from `example_requirements`) the package's example
+    programs are declared, each with what it requires, and none is discovered."""
     tables = re.findall(r"(?m)^\[+([^\]]+)\]+\s*$", text)
-    unknown = [t for t in tables if t not in KNOWN_TABLES and not t.startswith("package.metadata")]
+    known = (*KNOWN_TABLES, "example") if programs is not None else KNOWN_TABLES
+    unknown = [t for t in tables if t not in known and not t.startswith("package.metadata")]
     if unknown:
         raise SystemExit(f"z8: the pinned manifest has the table(s) {unknown}, which the harness does not carry")
     name = re.search(r'(?m)^name\s*=\s*"([^"]+)"', section(text, "package"))
@@ -478,6 +485,8 @@ def resolved_manifest(text: str, deps: dict[str, str], paths: dict[str, str]) ->
         'edition = "2021"',
         "publish = false",
     ]
+    if programs is not None:
+        lines.append("autoexamples = false")
     features = section(text, "features")
     if features:
         lines += ["", features.rstrip()]
@@ -485,8 +494,19 @@ def resolved_manifest(text: str, deps: dict[str, str], paths: dict[str, str]) ->
         entries = table_entries(text, table)
         if entries:
             lines += ["", f"[{table}]", *(f"{dep} = {resolved(dep, rhs, deps, paths)}" for dep, rhs in entries)]
+    lines += example_blocks(programs or {})
     lines.append("")
     return "\n".join(lines)
+
+
+def example_blocks(programs: dict[str, list[str]]) -> list[str]:
+    """The `[[example]]` tables of `programs`, in name order, each with the features it requires."""
+    lines: list[str] = []
+    for name, required in sorted(programs.items()):
+        lines += ["", "[[example]]", f'name = "{name}"', f'path = "examples/{name}.rs"']
+        if required:
+            lines.append(f"required-features = {toml_list(required)}")
+    return lines
 
 
 def ext_workspace_manifest(patched: bool) -> str:
@@ -725,6 +745,11 @@ EXAMPLES_FEATURES = ("shared-memory", "unstable")
 #: not must not be hidden by that crate's compile, as a test file must not be hidden by another that
 #: does not compile, so the crate is optional here and the programs that name it require the feature.
 ECOSYSTEM_FEATURE = "ecosystem"
+#: Upstream's second examples package, the ecosystem crate's own programs (the advanced publisher and
+#: subscriber, the group), which depends on the first for its arguments (`zenoh_examples::CommonArgs`).
+#: It is generated as a member of the first's workspace, in a directory of this name, so both are
+#: built in one graph, over one lock and one build directory.
+EXT_EXAMPLES = "zenoh-ext-examples"
 #: The seconds a `stand` role is given to come up before the next role starts.
 SETTLE_S = 2.0
 #: The seconds a scenario waits after its last role, for what is in flight to arrive.
@@ -733,11 +758,13 @@ DRAIN_S = 2.0
 STOP_GRACE_S = 3.0
 
 
-def example_requirements(text: str, sources: dict[str, str]) -> dict[str, list[str]]:
-    """`program -> required features` of upstream's examples package: what its `[[example]]` table
-    declares, and the ecosystem feature for a program whose source names the crate. `sources` is
-    `program -> source` of every file of `examples/`; the package discovers the one file it does not
-    declare (`z_bytes`), so the generated package declares every program and discovers none."""
+def example_requirements(text: str, sources: dict[str, str], ecosystem: bool = True) -> dict[str, list[str]]:
+    """`program -> required features` of one of upstream's examples packages: what its `[[example]]`
+    table declares and, with `ecosystem`, the ecosystem feature for a program whose source names the
+    crate (the first package, where the crate is optional; the second depends on it outright).
+    `sources` is `program -> source` of every file of `examples/`; the first package discovers the
+    one file it does not declare (`z_bytes`), so the generated package declares every program and
+    discovers none."""
     declared: dict[str, list[str]] = {}
     for block in re.findall(r"(?ms)^\[\[example\]\]\n(.*?)(?=^\[|\Z)", text):
         name = re.search(r'(?m)^name\s*=\s*"([^"]+)"', block)
@@ -753,21 +780,29 @@ def example_requirements(text: str, sources: dict[str, str]) -> dict[str, list[s
     out: dict[str, list[str]] = {}
     for name, source in sorted(sources.items()):
         required = list(declared.get(name, []))
-        if re.search(r"\bzenoh_ext\b", source):
+        if ecosystem and re.search(r"\bzenoh_ext\b", source):
             required.append(ECOSYSTEM_FEATURE)
         out[name] = required
     return out
 
 
-def z8_examples_manifest(examples_text: str, deps: dict[str, str], arm: str, programs: dict[str, list[str]]) -> str:
-    """The manifest of the examples package of one arm of the examples bridge.
+def z8_examples_manifest(
+    examples_text: str,
+    deps: dict[str, str],
+    arm: str,
+    programs: dict[str, list[str]],
+    members: tuple[str, ...] = (),
+) -> str:
+    """The manifest of the examples package of one arm of the examples bridge, the root of a workspace
+    whose other `members` are generated beside it.
 
     It is upstream's package with three things changed: the dependencies are resolved against
     upstream's workspace (`resolved`), the ecosystem crate is optional behind `ECOSYSTEM_FEATURE`
     (upstream's `default` asks for its defaults, which the feature does instead), and every program is
     declared with what it requires (`example_requirements`). The `wz` arm patches the family in; the
     `stock` arm is upstream's graph. Nothing else differs between the two, so a difference of what
-    the programs do is a difference of the crates under them."""
+    the programs do is a difference of the crates under them. The version is the pin's, which the
+    second package asks of it."""
     names = [name for name, _rhs in table_entries(examples_text, "features")]
     if ECOSYSTEM_FEATURE in names:
         raise SystemExit(f"z8 examples: the pinned package has a feature named {ECOSYSTEM_FEATURE}")
@@ -788,10 +823,11 @@ def z8_examples_manifest(examples_text: str, deps: dict[str, str], arm: str, pro
     lines = [
         "# GENERATED by scripts/lib/z8_upstream_suite.py examples-run -- never committed.",
         "[workspace]",
+        f"members = {toml_list(list(members))}",
         "",
         "[package]",
         'name = "zenoh-examples"',
-        'version = "0.0.0"',
+        f'version = "{TAG}"',
         'edition = "2021"',
         "publish = false",
         "autoexamples = false",
@@ -808,28 +844,43 @@ def z8_examples_manifest(examples_text: str, deps: dict[str, str], arm: str, pro
                     raise SystemExit(f"z8 examples: {EXT_PACKAGE} = {rhs} is not the dependency the harness makes optional")
                 value = value[:-1].rstrip() + ", optional = true }"
             lines.append(f"{name} = {value}")
-    for name, required in sorted(programs.items()):
-        lines += ["", "[[example]]", f'name = "{name}"', f'path = "examples/{name}.rs"']
-        if required:
-            lines.append(f"required-features = {toml_list(required)}")
+    lines += example_blocks(programs)
     if arm == "wz":
         lines += ["", "[patch.crates-io]", *family_patch()]
     lines.append("")
     return "\n".join(lines)
 
 
-def generate_z8_examples(src: pathlib.Path, out: pathlib.Path, arm: str) -> dict[str, list[str]]:
-    """The examples package of one arm under `out`, and `program -> required features` of it.
+class Program(NamedTuple):
+    """A program of the examples bridge: the package that holds it (`None` for the root package,
+    `zenoh-examples`) and the features it requires."""
 
-    Upstream's sources, its library and its build script are copied byte for byte and its lock is
+    package: str | None
+    required: list[str]
+
+
+def program_sources(pkg: pathlib.Path) -> dict[str, str]:
+    return {p.stem: p.read_text(encoding="utf-8") for p in sorted((pkg / "examples").glob("*.rs"))}
+
+
+def generate_z8_examples(src: pathlib.Path, out: pathlib.Path, arm: str) -> dict[str, Program]:
+    """The examples workspace of one arm under `out`, and its programs: upstream's examples package as
+    the root and upstream's ecosystem examples package (`EXT_EXAMPLES`) as a member beside it.
+
+    Upstream's sources, its libraries and its build script are copied byte for byte and its lock is
     the starting lock of both arms, as the host parity package does. A build directory left by an
-    earlier run is kept: each arm's graph is a long compile and only the package's own files change."""
+    earlier run is kept: each arm's graph is a long compile and only the packages' own files change."""
     provision(src)
     deps = workspace_dependencies((src / "Cargo.toml").read_text(encoding="utf-8"))
     pkg = src / "examples"
     text = (pkg / "Cargo.toml").read_text(encoding="utf-8")
-    sources = {p.stem: p.read_text(encoding="utf-8") for p in sorted((pkg / "examples").glob("*.rs"))}
-    programs = example_requirements(text, sources)
+    root_programs = example_requirements(text, program_sources(pkg))
+    ext_pkg = src / EXT_PACKAGE / "examples"
+    ext_text = (ext_pkg / "Cargo.toml").read_text(encoding="utf-8")
+    ext_programs = example_requirements(ext_text, program_sources(ext_pkg), ecosystem=False)
+    clash = sorted(set(root_programs) & set(ext_programs))
+    if clash:
+        raise SystemExit(f"z8 examples: both examples packages hold the programs {clash}")
     out.mkdir(parents=True, exist_ok=True)
     for child in out.iterdir():
         if child.name == "target":
@@ -841,11 +892,22 @@ def generate_z8_examples(src: pathlib.Path, out: pathlib.Path, arm: str) -> dict
     shutil.copytree(pkg / "src", out / "src")
     shutil.copyfile(pkg / "build.rs", out / "build.rs")
     shutil.copytree(pkg / "examples", out / "examples")
-    (out / "Cargo.toml").write_text(z8_examples_manifest(text, deps, arm, programs), encoding="utf-8")
+    (out / "Cargo.toml").write_text(
+        z8_examples_manifest(text, deps, arm, root_programs, members=(EXT_EXAMPLES,)), encoding="utf-8"
+    )
+    member = out / EXT_EXAMPLES
+    shutil.copytree(ext_pkg / "src", member / "src")
+    shutil.copytree(ext_pkg / "examples", member / "examples")
+    # The second package asks for the first by upstream's workspace path; here the first is the root.
+    (member / "Cargo.toml").write_text(
+        resolved_manifest(ext_text, deps, {"zenoh-examples": ".."}, ext_programs), encoding="utf-8"
+    )
     shutil.copyfile(src / "Cargo.lock", out / "Cargo.lock")
     pin = ROOT / "rust-toolchain.toml"
     if pin.is_file():
         shutil.copyfile(pin, out / "rust-toolchain.toml")
+    programs = {name: Program(None, required) for name, required in root_programs.items()}
+    programs.update({name: Program(EXT_EXAMPLES, required) for name, required in ext_programs.items()})
     return programs
 
 
@@ -869,23 +931,41 @@ def executable_of(text: str, name: str) -> pathlib.Path | None:
     return None
 
 
+def build_command(name: str, program: Program) -> list[str]:
+    """The `cargo build` of one program. A program of the root package is built with
+    `EXAMPLES_FEATURES` and what it requires; one of the second package with what it requires
+    only, because the features of the root are not that package's."""
+    if program.package is None:
+        selection: list[str] = []
+        features = [*EXAMPLES_FEATURES, *(f for f in program.required if f not in EXAMPLES_FEATURES)]
+    else:
+        selection, features = ["-p", program.package], list(program.required)
+    return [
+        "cargo", "build", *selection, "--example", name,
+        *(["--features", ",".join(features)] if features else []),
+        "--message-format", "json-render-diagnostics",
+    ]
+
+
+def build_order(name: str, program: Program) -> tuple[int, str]:
+    """The root's programs without the ecosystem crate first, then the root's that need it, then the
+    second package's, which needs it too: the feature changes the root's library, and a build that
+    turned it on and off between programs would rebuild that each time."""
+    if program.package is not None:
+        return (2, name)
+    return (1 if ECOSYSTEM_FEATURE in program.required else 0, name)
+
+
 def build_examples(
-    pkg: pathlib.Path, programs: dict[str, list[str]], wanted: list[str], logs: pathlib.Path
+    pkg: pathlib.Path, programs: dict[str, Program], wanted: list[str], logs: pathlib.Path
 ) -> dict[str, pathlib.Path | list[str]]:
     """`program -> its executable`, or the first errors of its compile, for each of `wanted`. Each is
     compiled on its own, so a program that does not compile hides no other."""
     logs.mkdir(parents=True, exist_ok=True)
     built: dict[str, pathlib.Path | list[str]] = {}
-    # The programs that need the ecosystem crate last: its feature changes the package's own
-    # library, and a build that turned it on and off between programs would rebuild that each time.
-    for name in sorted(wanted, key=lambda n: (ECOSYSTEM_FEATURE in programs[n], n)):
-        features = [*EXAMPLES_FEATURES, *(f for f in programs[name] if f not in EXAMPLES_FEATURES)]
+    for name in sorted(wanted, key=lambda n: build_order(n, programs[n])):
         log = logs / f"{name}.log"
-        rc = run(
-            ["cargo", "build", "--example", name, "--features", ",".join(features),
-             "--message-format", "json-render-diagnostics"],
-            pkg, log, COMPILE_BOUND_S,
-        )
+        rc = run(build_command(name, programs[name]), pkg, log, COMPILE_BOUND_S)
         exe = executable_of(log.read_text(encoding="utf-8", errors="replace"), name) if rc == 0 else None
         if exe is not None:
             built[name] = exe
@@ -1094,7 +1174,7 @@ def examples_run(names: list[str], src: pathlib.Path, root: pathlib.Path) -> int
     if report.exists():
         shutil.rmtree(report)
     built: dict[str, dict[str, pathlib.Path | list[str]]] = {}
-    programs: dict[str, list[str]] = {}
+    programs: dict[str, Program] = {}
     for arm in EXAMPLES_ARMS:
         pkg = root / arm
         programs = generate_z8_examples(src, pkg, arm)
@@ -1525,6 +1605,46 @@ def selftest_examples_bridge() -> None:
         pass
     else:
         raise AssertionError("a package that already has the ecosystem feature must be refused")
+    # The root of a workspace whose member is the second package, at the pin's version it asks for.
+    rooted = z8_examples_manifest(text, deps, "wz", programs, members=(EXT_EXAMPLES,))
+    assert f'[workspace]\nmembers = ["{EXT_EXAMPLES}"]' in rooted and f'version = "{TAG}"' in rooted, rooted
+    assert 'members = []' in wz, wz
+    # The second package: its programs need the crate outright, so none requires the feature.
+    ext_text = (
+        '[package]\nname = "zenoh-ext-examples"\nversion = { workspace = true }\n\n'
+        '[features]\ndefault = ["zenoh-examples/default", "zenoh-ext/default", "zenoh/default"]\nunstable = []\n\n'
+        '[dependencies]\nzenoh = { workspace = true, default-features = false }\n'
+        'zenoh-examples = { workspace = true, default-features = false }\n\n'
+        '[[example]]\nname = "z_member"\npath = "examples/z_member.rs"\n\n'
+        '[package.metadata.docs.rs]\nfeatures = ["unstable"]\n'
+    )
+    ext_programs = example_requirements(ext_text, {"z_member": "use zenoh_ext::group::*;"}, ecosystem=False)
+    assert ext_programs == {"z_member": []}, ext_programs
+    ext_deps = dict(deps, **{"zenoh-examples": f'{{ version = "={TAG}", path = "examples", default-features = false }}'})
+    ext_manifest = resolved_manifest(ext_text, ext_deps, {"zenoh-examples": ".."}, ext_programs)
+    assert f'zenoh-examples = {{ version = "={TAG}", default-features = false, path = ".." }}' in ext_manifest, ext_manifest
+    assert "autoexamples = false" in ext_manifest and 'name = "z_member"\npath = "examples/z_member.rs"' in ext_manifest
+    assert '"zenoh-examples/default"' in ext_manifest, ext_manifest
+    try:
+        resolved_manifest(ext_text, ext_deps, {"zenoh-examples": ".."})
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("an [[example]] table is carried only when the programs are given")
+    assert build_command("z_put", Program(None, [])) == [
+        "cargo", "build", "--example", "z_put", "--features", "shared-memory,unstable",
+        "--message-format", "json-render-diagnostics"]
+    assert build_command("z_bytes", Program(None, [ECOSYSTEM_FEATURE]))[4:6] == [
+        "--features", f"shared-memory,unstable,{ECOSYSTEM_FEATURE}"]
+    assert build_command("z_member", Program(EXT_EXAMPLES, [])) == [
+        "cargo", "build", "-p", EXT_EXAMPLES, "--example", "z_member",
+        "--message-format", "json-render-diagnostics"]
+    order = sorted(
+        {"z_member": Program(EXT_EXAMPLES, []), "z_bytes": Program(None, [ECOSYSTEM_FEATURE]),
+         "z_put": Program(None, [])}.items(),
+        key=lambda item: build_order(*item),
+    )
+    assert [name for name, _ in order] == ["z_put", "z_bytes", "z_member"], order
     log = (
         "   Compiling zenoh v1.10.2\n"
         '{"reason":"compiler-artifact","target":{"name":"zenoh_examples","kind":["lib"]},"executable":null}\n'
