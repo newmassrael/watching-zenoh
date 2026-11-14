@@ -8574,6 +8574,46 @@ mod tests {
         );
     }
 
+    /// `aggregation/*` opens on the registry of faces, which declares under the aggregates, and a
+    /// session that runs as a node, which does not carry them, is refused by the keys' names: a
+    /// router always, a peer that fits the node when the node is wanted. The CONTROL is the same
+    /// peer stating no aggregate, which opens as the node.
+    #[test]
+    fn an_aggregate_opens_on_the_registry_and_is_refused_by_a_node() {
+        let aggregated = || peer_with("aggregation/subscribers", r#"["demo/**"]"#);
+        let session = open(aggregated())
+            .wait()
+            .expect("the registry of faces declares under an aggregate");
+        drop(session);
+        let refused = |text: String| {
+            assert!(
+                text.contains("`aggregation/subscribers` or `aggregation/publishers`"),
+                "{text}"
+            );
+        };
+        refused(
+            with_the_node(|| open(aggregated()).wait())
+                .expect_err("a peer node given an aggregate")
+                .to_string(),
+        );
+        let control = with_the_node(|| open(peer("a1b2cb")).wait());
+        assert!(control.is_ok(), "CONTROL: the node opens with no aggregate");
+        let mut router = Config::from_json5(
+            r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                 scouting: { multicast: { enabled: false } } }"#,
+        )
+        .expect("a configuration zenoh reads");
+        router
+            .insert_json5("aggregation/publishers", r#"["demo/**"]"#)
+            .expect("a key zenoh reads");
+        refused(
+            open(router)
+                .wait()
+                .expect_err("a router given an aggregate")
+                .to_string(),
+        );
+    }
+
     #[test]
     fn an_endpoint_group_with_a_strategy_is_refused_by_its_key() {
         let config = Config::from_json5(

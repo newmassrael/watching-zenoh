@@ -61,6 +61,7 @@ use crate::scouting_node::ScoutingPlan;
 use crate::session_defaults::{
     PromotedMessages, PublicationDefaults, PublicationQos, SessionDefaults, ShmInit, ShmPromotion,
 };
+use wz_runtime_tokio::declaration_aggregation::DeclarationAggregation;
 
 /// The mode a node dials as, from the `mode` key it states.
 ///
@@ -155,18 +156,16 @@ pub fn key_state(path: &str, reach: SessionReach) -> Option<KeyState> {
 
 /// Keys the runtime's reader honours for a wz NODE whose effect lives in a part of that node this
 /// engine does not have: the plugin plane of the storage host searches
-/// `plugins_loading/search_dirs`, the runtime's session and the peer node's local declarations
-/// declare under `aggregation/*`, where this engine's registry of faces declares each entity as
-/// its own key, and the node's stats registry hands `stats/filters` to the sessions it counts,
-/// which this engine does not install. Stating one here asks for something that will not happen,
-/// so it is [`KeyState::Unmapped`] and reported among [`OpenPlan::ignored`] although the reader
-/// read it.
-pub const NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON: &[&str] = &[
-    "plugins_loading/search_dirs",
-    "aggregation/subscribers",
-    "aggregation/publishers",
-    "stats/filters",
-];
+/// `plugins_loading/search_dirs`, and the node's stats registry hands `stats/filters` to the
+/// sessions it counts, which this engine does not install. Stating one here asks for something
+/// that will not happen, so it is [`KeyState::Unmapped`] and reported among [`OpenPlan::ignored`]
+/// although the reader read it.
+///
+/// `aggregation/*` is not here: the registry of faces gives every session it holds the
+/// aggregates ([`SessionDefaults::aggregation`]), and an open that runs as a node, which does not
+/// carry them, is refused by name (`OpenArguments::router_refusal`).
+pub const NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON: &[&str] =
+    &["plugins_loading/search_dirs", "stats/filters"];
 
 /// The state of `path` for a session that reaches `reach` when it is a key only a session applies
 /// ([`SESSION_HONOURED_KEYS`](wz_runtime_tokio::zenoh_config::SESSION_HONOURED_KEYS)), and `None`
@@ -204,10 +203,20 @@ pub fn session_key_state(path: &str, reach: SessionReach) -> Option<KeyState> {
     })
 }
 
-/// What a session applies itself above its links (`SESSION_HONOURED_KEYS`), compiled from the
-/// reading of its document: the one place the C ABI and the Rust API take it from, carried into
-/// the session by [`OpenPlan::into_arguments`].
-pub fn session_defaults_of(node: &ZenohNodeConfig) -> SessionDefaults {
+/// What a session applies itself above its links (`SESSION_HONOURED_KEYS` and `aggregation/*`),
+/// compiled from the reading of its document: the one place the C ABI and the Rust API take it
+/// from, carried into the session by [`OpenPlan::into_arguments`].
+///
+/// An aggregate that is not a key expression, or one stated in a build without the inclusion test
+/// that applies it, is [`OpenRefusal::Aggregation`]. The reader refuses both first, so only a
+/// reading built by hand reaches it; a session that declared each entity as its own key instead
+/// would put on the wire what it was told not to.
+pub fn session_defaults_of(node: &ZenohNodeConfig) -> Result<SessionDefaults, OpenRefusal> {
+    let aggregation = DeclarationAggregation::new(
+        node.aggregation_subscribers.clone(),
+        node.aggregation_publishers.clone(),
+    )
+    .map_err(|_| OpenRefusal::Aggregation)?;
     let publication_qos = PublicationQos::new(node.publication_qos.iter().map(|item| {
         let conf = item.config;
         (
@@ -228,7 +237,7 @@ pub fn session_defaults_of(node: &ZenohNodeConfig) -> SessionDefaults {
             .iter()
             .any(|named| named == message)
     };
-    SessionDefaults {
+    Ok(SessionDefaults {
         publication_qos,
         shm_init: match node.shm_init_mode {
             ShmInitMode::Lazy => ShmInit::Lazy,
@@ -242,7 +251,8 @@ pub fn session_defaults_of(node: &ZenohNodeConfig) -> SessionDefaults {
                 reply: listed("reply"),
             },
         },
-    }
+        aggregation,
+    })
 }
 
 /// The five keys that give a certificate or a key of the `tls/` and `quic/` links inline, base64
@@ -365,6 +375,12 @@ pub enum OpenRefusal {
     /// build with no plugin host to look one up in. A node told to load the plugins its
     /// section names that opens and loads none would be doing less than it was told.
     PluginHostNotInBuild,
+    /// An aggregate of `aggregation/subscribers` or `aggregation/publishers` is not a key
+    /// expression, or the build has no inclusion test to tell which entities an aggregate holds.
+    Aggregation,
+    /// The document lists `stats/filters` in a build without `transport-stats`, which keeps no
+    /// counter to count a payload under a filter in.
+    StatsNotInBuild,
 }
 
 impl OpenRefusal {
@@ -390,6 +406,8 @@ impl OpenRefusal {
             Self::GatewayNotCarried => "gateway/south",
             Self::LinkNotInBuild => "transport/link/unixpipe, transport/link/rx/buffer_size",
             Self::PluginHostNotInBuild => "plugins_loading/enabled",
+            Self::Aggregation => "aggregation/subscribers, aggregation/publishers",
+            Self::StatsNotInBuild => "stats/filters",
         }
     }
 }
@@ -640,7 +658,9 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePol
 /// [`OpenRefusal::TlsMaterial`]; a south kept apart in a build with no region hat is
 /// [`OpenRefusal::GatewayNotCarried`], as [`OpenPlan::refuse_uncarried_south`] refuses it; the
 /// configuration of a part of the links the build does not have is
-/// [`OpenRefusal::LinkNotInBuild`].
+/// [`OpenRefusal::LinkNotInBuild`]; an aggregate in a build with no inclusion test is
+/// [`OpenRefusal::Aggregation`], as [`session_defaults_of`] refuses it; a statistics filter in a
+/// build with no counters is [`OpenRefusal::StatsNotInBuild`].
 fn refusal_of_unbuilt_key(path: &str) -> OpenRefusal {
     match path {
         "low_pass_filter" | "downsampling" | "qos/network" => OpenRefusal::Security,
@@ -650,6 +670,8 @@ fn refusal_of_unbuilt_key(path: &str) -> OpenRefusal {
         "transport/link/rx/buffer_size" => OpenRefusal::LinkNotInBuild,
         "plugins_loading/enabled" => OpenRefusal::PluginHostNotInBuild,
         "gateway/south" => OpenRefusal::GatewayNotCarried,
+        "aggregation/subscribers" | "aggregation/publishers" => OpenRefusal::Aggregation,
+        "stats/filters" => OpenRefusal::StatsNotInBuild,
         _ => OpenRefusal::DocumentUnreadable,
     }
 }
@@ -1280,7 +1302,9 @@ impl OpenPlan {
         });
         let session = node
             .as_ref()
-            .map_or_else(SessionDefaults::default, session_defaults_of);
+            .map(session_defaults_of)
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(Self {
             role,
@@ -1624,6 +1648,9 @@ mod tests {
             ("transport/link/rx/buffer_size", OpenRefusal::LinkNotInBuild),
             ("plugins_loading/enabled", OpenRefusal::PluginHostNotInBuild),
             ("gateway/south", OpenRefusal::GatewayNotCarried),
+            ("aggregation/subscribers", OpenRefusal::Aggregation),
+            ("aggregation/publishers", OpenRefusal::Aggregation),
+            ("stats/filters", OpenRefusal::StatsNotInBuild),
             ("transport/link/protocols", OpenRefusal::DocumentUnreadable),
         ] {
             assert_eq!(refusal_of_unbuilt_key(key), refusal, "{key}");
@@ -2733,19 +2760,105 @@ mod tests {
             &[],
             r#"{ scouting: { multicast: { enabled: false } },
                  plugins_loading: { search_dirs: ["/opt/wz/plugins"] },
-                 aggregation: { subscribers: [], publishers: [] },
                  stats: { filters: [] } }"#,
         )
         .expect("opens");
         assert_eq!(
             plan.ignored,
-            [
-                "aggregation/publishers",
-                "aggregation/subscribers",
-                "plugins_loading/search_dirs",
-                "stats/filters"
-            ]
+            ["plugins_loading/search_dirs", "stats/filters"]
         );
+    }
+
+    /// `aggregation/*` is acted on by the registry of faces: the plan compiles the aggregates into
+    /// what the session applies itself, carries them to the open, and does not report them among
+    /// the keys it ignores. A list built by hand that holds no key expression is refused by the
+    /// keys' name, as a build without the inclusion test refuses one.
+    #[test]
+    fn the_plan_carries_the_aggregates_to_the_open() {
+        for key in ["aggregation/subscribers", "aggregation/publishers"] {
+            assert!(
+                !NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON.contains(&key),
+                "{key}"
+            );
+            assert_eq!(
+                key_state(key, SessionReach::default()),
+                Some(KeyState::Mapped),
+                "{key}: the engine's runtime is built with the inclusion test"
+            );
+        }
+        let plan = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ scouting: { multicast: { enabled: false } },
+                 aggregation: { subscribers: ["demo/**"], publishers: ["demo/pub/**"] } }"#,
+        )
+        .expect("opens");
+        assert!(plan.ignored.is_empty(), "{:?}", plan.ignored);
+        let expected =
+            DeclarationAggregation::new(vec!["demo/**".to_owned()], vec!["demo/pub/**".to_owned()])
+                .expect("key expressions");
+        assert_eq!(plan.session.aggregation, expected);
+        let arguments = plan.into_arguments(AbiChoices {
+            tx_queue: TxQueueConf::default(),
+            start_read_task: true,
+            local_delivery: LocalDeliveryDrain::Caller,
+            liveliness_to_self: true,
+            initial_interest: true,
+            face_drive: FaceDrive::PerFace,
+            shm_clients: crate::faces::no_shm_clients(),
+            offer_shm: false,
+            groups_report_shm: false,
+        });
+        assert_eq!(arguments.stance.session_defaults.aggregation, expected);
+
+        let mut node = ZenohNodeConfig::from_json5("{}")
+            .expect("an empty document")
+            .config;
+        node.aggregation_subscribers = vec!["demo//double".to_owned()];
+        assert_eq!(
+            session_defaults_of(&node).err(),
+            Some(OpenRefusal::Aggregation)
+        );
+        assert_eq!(
+            OpenRefusal::Aggregation.key(),
+            "aggregation/subscribers, aggregation/publishers"
+        );
+    }
+
+    /// A node holds its own entities as entries of its tables, so it does not carry an aggregate
+    /// and an open that would run as one names the keys it was given; a node given none opens.
+    #[cfg(feature = "router-node")]
+    #[test]
+    fn a_node_refuses_the_aggregates_by_their_keys() {
+        let arguments = |document: &str| {
+            plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:0"], document)
+                .expect("opens")
+                .into_arguments(AbiChoices {
+                    tx_queue: TxQueueConf::default(),
+                    start_read_task: true,
+                    local_delivery: LocalDeliveryDrain::Caller,
+                    liveliness_to_self: true,
+                    initial_interest: true,
+                    face_drive: FaceDrive::PerFace,
+                    shm_clients: crate::faces::no_shm_clients(),
+                    offer_shm: false,
+                    groups_report_shm: false,
+                })
+        };
+        let silent = arguments(r#"{ scouting: { multicast: { enabled: false } } }"#);
+        assert_eq!(silent.router_refusal(), None, "CONTROL: nothing asked");
+        for list in ["subscribers", "publishers"] {
+            let stated = arguments(&format!(
+                r#"{{ scouting: {{ multicast: {{ enabled: false }} }},
+                      aggregation: {{ {list}: ["demo/**"] }} }}"#
+            ));
+            assert_eq!(
+                stated.router_refusal(),
+                Some("`aggregation/subscribers` or `aggregation/publishers`"),
+                "{list}"
+            );
+        }
     }
 
     /// `transport/link/protocols` is a whitelist of the unicast links the node makes: an endpoint

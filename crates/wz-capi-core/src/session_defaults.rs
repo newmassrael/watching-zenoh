@@ -15,6 +15,12 @@
 //!   and `messages`: which plain payloads are copied into the session's provider so that they
 //!   cross a link that negotiated shared memory as a descriptor
 //!   (`io/zenoh-transport/src/common/shm/interop.rs` @ `fn wrap_in_place<const ID: u8>(`).
+//! * [`DeclarationAggregation`], `aggregation/subscribers` and `aggregation/publishers`: the keys
+//!   the session declares its subscribers and asks for its publishers' subscribers under, one
+//!   declaration per aggregate (`zenoh/src/api/session.rs` @ `.aggregated_subscribers`). The
+//!   registry of faces gives it to every session it holds, and a node, whose own entities are
+//!   entries of its tables and not declarations of a session, refuses it by name
+//!   (`crate::drive::router_refused_ask`).
 //!
 //! One value, [`SessionDefaults`], is compiled from the configuration by the open plan, carried by
 //! the open into the session it makes (the registry of faces or a node), and read from there by
@@ -23,6 +29,7 @@
 //! them is only the provider a promoted payload is copied into, which is each ABI's own until the
 //! process holds one shared-memory system (`docs/shm-transport.md`, section 6).
 
+use wz_runtime_tokio::declaration_aggregation::DeclarationAggregation;
 use wz_runtime_tokio::keyexpr_match::keyexpr_includes_target;
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::qos::{CongestionControl, Priority};
@@ -38,6 +45,8 @@ pub struct SessionDefaults {
     pub shm_init: ShmInit,
     /// `transport/shared_memory/transport_optimization/{message_size_threshold,messages}`.
     pub shm_promotion: ShmPromotion,
+    /// `aggregation/{subscribers,publishers}`.
+    pub aggregation: DeclarationAggregation,
 }
 
 /// What a `qos/publication` rule sets on a publication: each field stated replaces what the
