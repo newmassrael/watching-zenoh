@@ -2115,8 +2115,9 @@ pub const OPENS_LZ4_BATCHES: bool = cfg!(feature = "transport-compression");
 /// Whether `unit` reads WHOLE as a run of transport messages, the way
 /// [`walk_unit`] decides it for a unit with no header and no lean framing:
 /// every message decodes, carries a length and is of this reader's protocol
-/// version, and the last one ends where the unit ends. No state is read or
-/// written, so it can be asked of a unit before the walk reads it.
+/// version, a `Frame` reaches as far as [`frame_reach`] says, and the last one
+/// ends where the unit ends. No state is read or written, so it can be asked of
+/// a unit before the walk reads it.
 fn unit_reads_whole(unit: &[u8]) -> bool {
     let mut pos = 0;
     while pos < unit.len() {
@@ -2127,12 +2128,39 @@ fn unit_reads_whole(unit: &[u8]) -> bool {
                         .announced_version()
                         .map_or(true, |v| v == wz_codecs::wire_const::PROTOCOL_VERSION) =>
             {
-                pos += consumed;
+                match frame_reach(&frame, consumed) {
+                    Some(reach) => pos += reach,
+                    None => return false,
+                }
             }
             _ => return false,
         }
     }
     !unit.is_empty()
+}
+
+/// How much of its unit a message that took `consumed` bytes of it reaches,
+/// read as upstream's batch reader reads it, or `None` where that reader fails
+/// the batch.
+///
+/// Only a `Frame` differs from `consumed`: it is read as the tail of its unit,
+/// so its records end where the batch's next transport message begins
+/// ([`end_frame_at_next_message`]), and a record that halts the walk fails the
+/// batch ([`BatchParse::fails_the_frames_batch`]). The walk and this probe
+/// answer from the same two facts, so a unit cannot read whole in one and not
+/// in the other.
+fn frame_reach(frame: &InboundFrame, consumed: usize) -> Option<usize> {
+    let InboundFrame::Frame { payload, .. } = frame else {
+        return Some(consumed);
+    };
+    let records = parse_frame_payload_best_effort(payload);
+    if records.fails_the_frames_batch() {
+        return None;
+    }
+    Some(match records.next_message_at {
+        Some(end) => consumed - (payload.len() - end),
+        None => consumed,
+    })
 }
 
 /// Whether `unit` reads whole behind a `BatchHeader`: its first byte is the
@@ -3907,6 +3935,10 @@ fn walk_unit(
     // Whether any byte of the unit went unaccounted for, which with every
     // message decoded is what "read whole" means.
     let mut unaccounted = false;
+    // Whether a Frame's records failed the batch as upstream's batch reader
+    // reads it. Those bytes are the record walk's unparsed tail, which the
+    // capture report counts already, so they are not counted unaccounted too.
+    let mut batch_failed = false;
     // The unit's own first byte, past the prefix: the instant of a unit that is
     // not read message by message (one that failed to decompress, and the lz4
     // arm below, whose messages sit in a buffer this reader made and have no
@@ -4097,6 +4129,7 @@ fn walk_unit(
         // reliability. The Frame keeps the payload before it, and the walk reads the rest as
         // that message.
         let (frame, consumed) = end_frame_at_next_message(frame, consumed, &carried);
+        batch_failed |= frame_fails_its_batch(&frame, &carried);
         // R311y630 — the per-frame verdict and the counter bump that goes with
         // it, in ONE place because both ingestion paths need both and a fact
         // recorded at one site and counted at another is how the two drift.
@@ -4174,7 +4207,7 @@ fn walk_unit(
         pos += consumed;
     }
     // Whether the unit was read whole is known only once its walk has ended.
-    let whole = !unaccounted && out.iter().all(|f| f.frame.is_ok());
+    let whole = !unaccounted && !batch_failed && out.iter().all(|f| f.frame.is_ok());
     for frame in &mut out {
         frame.unit_read_whole = whole;
     }
@@ -4308,6 +4341,18 @@ fn end_frame_at_next_message(
         }
     }
     (frame, consumed)
+}
+
+/// Whether `frame` is a `Frame` whose records, as `carried` holds them, fail
+/// the batch they were read from ([`BatchParse::fails_the_frames_batch`]).
+/// Upstream drops such a batch, so the unit it came in does not read whole,
+/// whatever was read of it before the failing record.
+fn frame_fails_its_batch(
+    frame: &Result<InboundFrame, InboundParseError>,
+    carried: &Carried,
+) -> bool {
+    matches!(frame, Ok(InboundFrame::Frame { .. }))
+        && matches!(carried, Carried::Batch(b) if b.fails_the_frames_batch())
 }
 
 /// R311y645 (§1.1n / §4.37) — where a `Frame`'s payload begins within the
@@ -5763,6 +5808,80 @@ mod tests {
         assert_eq!(second.unit_offset, reliable.len());
         assert_eq!(second.batch_offset, Some(2));
         assert!(second.unit_read_whole);
+    }
+
+    /// The datagram `frame_wire(4, records)` read on an established session,
+    /// with how its unit read.
+    fn one_frame_unit(records: &[u8]) -> (Vec<PassiveFrame>, Option<UnitReading>) {
+        let mut s = established(vec![]);
+        let unit = s.next_datagram(Direction::A, &frame_wire(4, records), 0);
+        let reading = UnitReading::of_frames(&unit);
+        (unit, reading)
+    }
+
+    /// A RECORD OF NEITHER SPACE FAILS THE BATCH. A reliable `Frame` whose
+    /// first record is an OAM and whose next record's id is `0x18`, in neither
+    /// the transport nor the network space: upstream's `Frame` reader rewinds
+    /// to it, its batch loop cannot read it as a transport message either, and
+    /// the batch is dropped. The unit is residual, the OAM before it is still
+    /// read, and the walk says where it stopped.
+    #[test]
+    fn a_frame_record_of_neither_space_leaves_its_unit_residual() {
+        let records = [oam_record(7), vec![0x18, 0xAB, 0xCD]].concat();
+        let (unit, reading) = one_frame_unit(&records);
+        assert_eq!(unit.len(), 1, "{unit:?}");
+        let Carried::Batch(batch) = &unit[0].carried else {
+            panic!("missing batch: {unit:?}")
+        };
+        assert!(matches!(
+            batch.halt,
+            Some(crate::network_message::BatchHalt::UnknownMid { mid: 0x18, .. })
+        ));
+        assert!(batch.fails_the_frames_batch());
+        assert!(!unit[0].unit_read_whole, "{unit:?}");
+        assert_eq!(reading, Some(UnitReading::Residual));
+        assert!(!unit_reads_whole(&frame_wire(4, &records)));
+    }
+
+    /// A RECORD THAT DOES NOT DECODE FAILS THE BATCH. The second record keeps
+    /// only its header byte, so it cannot be decoded: upstream rewinds to it,
+    /// an OAM header is no transport message, and the batch is dropped.
+    #[test]
+    fn a_frame_record_that_does_not_decode_leaves_its_unit_residual() {
+        let records = [oam_record(7), vec![oam_record(8)[0]]].concat();
+        let (unit, reading) = one_frame_unit(&records);
+        let Carried::Batch(batch) = &unit[0].carried else {
+            panic!("missing batch: {unit:?}")
+        };
+        assert!(matches!(
+            batch.halt,
+            Some(crate::network_message::BatchHalt::CodecError { .. })
+        ));
+        assert!(!unit[0].unit_read_whole, "{unit:?}");
+        assert_eq!(reading, Some(UnitReading::Residual));
+        assert!(!unit_reads_whole(&frame_wire(4, &records)));
+    }
+
+    /// A TRANSPORT MESSAGE THAT DECODES behind a `Frame`'s records is the next
+    /// message of the batch, as upstream's loop reads it after the rewind: a
+    /// `Frame` of one OAM and a `KeepAlive` in one datagram read whole, in the
+    /// walk and in the probe alike.
+    #[test]
+    fn a_keep_alive_behind_a_frames_records_is_read_and_the_unit_is_whole() {
+        let mut wire = frame_wire(4, &oam_record(7));
+        wire.push(wz_codecs::wire_const::T_MID_KEEP_ALIVE);
+        let mut s = established(vec![]);
+        let unit = s.next_datagram(Direction::A, &wire, 0);
+        assert_eq!(unit.len(), 2, "{unit:?}");
+        assert!(unit[1].frame.is_ok(), "{unit:?}");
+        assert_eq!(
+            unit[1].unit_offset,
+            wire.len() - 1,
+            "the KeepAlive's own byte"
+        );
+        assert!(unit.iter().all(|f| f.unit_read_whole), "{unit:?}");
+        assert_eq!(UnitReading::of_frames(&unit), Some(UnitReading::Explained));
+        assert!(unit_reads_whole(&wire));
     }
 
     #[test]

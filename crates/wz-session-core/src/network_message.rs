@@ -1957,6 +1957,35 @@ impl BatchParse {
         self.halt.is_none()
     }
 
+    /// Whether upstream's batch reader fails the batch these records of a
+    /// `Frame` were read from ([`parse_frame_payload_best_effort`]).
+    ///
+    /// Upstream's `Frame` reader rewinds to a record that does not decode as a
+    /// network message and ends the `Frame` there
+    /// (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`),
+    /// and the batch's loop reads the bytes from that record on as a transport
+    /// message, failing the whole batch when they are not one
+    /// (`io/zenoh-transport/src/unicast/universal/rx.rs` @
+    /// `.map_err(|_| zerror!("{}: decoding error", link.link))?;`). A transport
+    /// id ends this walk before it halts ([`Self::next_message_at`]), so every
+    /// halt stands at a byte no transport message begins with:
+    ///
+    /// - a record that failed to decode fails the batch;
+    /// - an id in neither the transport nor the network space (`0x08` to
+    ///   `0x18`) is refused by both of upstream's dispatches
+    ///   (`commons/zenoh-codec/src/network/mod.rs` @
+    ///   `_ => return Err(DidntRead),`) and fails the batch;
+    /// - a network id this build has no decoder for is a limit of the build's
+    ///   `codec-*` selection and not of the bytes, which upstream decodes, so
+    ///   it does not.
+    pub fn fails_the_frames_batch(&self) -> bool {
+        match &self.halt {
+            None => false,
+            Some(BatchHalt::CodecError { .. }) => true,
+            Some(BatchHalt::UnknownMid { mid, .. }) => !wz_codecs::wire_const::is_wire_front(*mid),
+        }
+    }
+
     /// R311y641 (§1.1n) — `(offset, len)` of the `i`th message within the
     /// payload this batch was parsed from.
     ///
@@ -3713,6 +3742,43 @@ mod best_effort_batch_tests {
         );
         let (seven, eight) = (oam_record(7).len(), oam_record(8).len());
         assert_eq!(best.spans, vec![(0, seven), (seven, eight)]);
+    }
+
+    /// WHAT FAILS A FRAME'S BATCH, as upstream's batch reader reads it: a
+    /// record that does not decode, and an id of neither space. A network id
+    /// this build has no decoder for does not (upstream decodes it), nor does
+    /// a second `Frame` header, which ends the records and is read as the next
+    /// message.
+    #[test]
+    fn only_a_failed_record_or_an_id_of_neither_space_fails_a_frames_batch() {
+        for mid in 0u8..32 {
+            let absorbed = BatchParse {
+                messages: vec![],
+                spans: vec![],
+                halt: Some(BatchHalt::UnknownMid { mid, offset: 0 }),
+                unparsed_bytes: 1,
+                next_message_at: None,
+            };
+            let of_neither_space = (0x08..=0x18).contains(&mid);
+            assert_eq!(
+                absorbed.fails_the_frames_batch(),
+                of_neither_space,
+                "mid {mid:#04x}"
+            );
+        }
+        let first = oam_record(7);
+        assert!(!parse_frame_payload_best_effort(&first).fails_the_frames_batch());
+        let truncated = [first.clone(), vec![oam_record(8)[0]]].concat();
+        assert!(parse_frame_payload_best_effort(&truncated).fails_the_frames_batch());
+        let unknown = [first.clone(), vec![0x18, 0xAB]].concat();
+        assert!(parse_frame_payload_best_effort(&unknown).fails_the_frames_batch());
+        let second_frame = [
+            first,
+            vec![wz_codecs::wire_const::T_MID_FRAME, 0x03],
+            oam_record(9),
+        ]
+        .concat();
+        assert!(!parse_frame_payload_best_effort(&second_frame).fails_the_frames_batch());
     }
 
     /// Every transport MID ends a `Frame`'s records, the first byte of a
