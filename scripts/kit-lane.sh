@@ -1531,6 +1531,38 @@ build_responder() {
     fi
 }
 
+# The pico C ABI image over wz compiles the comparison image's program against zenoh-pico's header
+# with switches of its own (the `foreach(on` and `foreach(off` lists of its CMakeLists.txt), and the
+# comparison image builds zenoh-pico from its prj.conf's CONFIG_ZENOH_PICO_* (docs/upstream-parity.md
+# M2): the two are compared on the same planes only when every switch the first states is on in both
+# or off in both. A switch on in one and off in the other is refused, and so is a list read empty.
+pico_planes_agree() {
+    local cmake="$ROOT/deploy/zephyr-capi-pico/CMakeLists.txt"
+    local conf="$ROOT/deploy/zephyr-pico-compare/prj.conf"
+    local list switch name state seen=0 differ=0
+    for list in on off; do
+        while read -r switch; do
+            seen=$((seen + 1))
+            name="CONFIG_ZENOH_PICO_${switch#Z_FEATURE_}"
+            if grep -qx "${name}=y" "$conf"; then state=on; else state=off; fi
+            if [[ "$state" != "$list" ]]; then
+                bad selftest "$switch is $list in deploy/zephyr-capi-pico and $state in deploy/zephyr-pico-compare: the two images are not on the same planes"
+                differ=$((differ + 1))
+            fi
+        done < <(awk -v l="$list" '
+            $0 ~ "foreach\\(" l "$" { f = 1; next }
+            f {
+                for (i = 1; i <= NF; i++) { t = $i; sub(/\)$/, "", t); if (t ~ /^Z_FEATURE_/) print t }
+                if ($0 ~ /\)[[:space:]]*$/) f = 0
+            }' "$cmake")
+    done
+    if [[ "$seen" -eq 0 ]]; then
+        bad selftest "no pico switch was read from deploy/zephyr-capi-pico/CMakeLists.txt: the plane check has nothing to hold"
+    elif [[ "$differ" -eq 0 ]]; then
+        ok selftest "the pico images are on the same planes ($seen switches, each on or off in both)"
+    fi
+}
+
 # ── selftest ────────────────────────────────────────────────────────────────────────────────────
 selftest() {
     local key population
@@ -1597,6 +1629,7 @@ PY
             bad selftest "$key is both a compare image and a gated one"
         fi
     done
+    pico_planes_agree
     for key in "${ADMIN_IMAGES[@]}"; do
         if ! image_spec "$key" || [[ "$KIND" != admin ]]; then
             bad selftest "$key is listed as an admin image and the table does not say so"

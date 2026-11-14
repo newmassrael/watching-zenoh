@@ -408,8 +408,12 @@ engine for the MCU would copy that logic. So the pico C ABI on the MCU runs on t
   (`poll`, the descriptor held open by every wait, as Zephyr cannot duplicate one), so the read
   task waits outside the session's lock; and `scout-mcu` scouts over one datagram socket of the
   stack, as zenoh-pico does on Zephyr, so the image's empty locator scouts as upstream's example
-  does. Open: an IPv6 group on that window; the comparison image is built without scouting, which
-  this image has on by default (`CONFIG_WZ_PICO_ABI_SCOUTING`).
+  does. Both pico images carry scouting, as pico's default build does, and the kit lane's selftest
+  refuses a switch on in one and off in the other. Open: an IPv6 scouting group. zenoh-pico on
+  Zephyr opens one (`udp_zephyr.c` resolves the locator with `PF_UNSPEC` and opens the socket of
+  the family it gets), and wz's datagram seam names an IPv4 address in every signature
+  (`DatagramSocket::bind` and `send_to` take `[u8; 4]`), so it waits on the step that takes the
+  peer address out of the datagram signatures (docs/build-configuration.md, step 6).
 
 ## 6. Open
 

@@ -15,19 +15,9 @@ config PICO_COMPARE_LOCATOR
 	help
 	  The program runs as a client of a router on the bench host, over UDP unicast, as the
 	  comparison image does. The router listens on this locator. Empty, the program leaves
-	  the open to scout for a router, as upstream's z_queryable.c does with an empty LOCATOR
-	  (CONFIG_WZ_PICO_ABI_SCOUTING).
-
-config WZ_PICO_ABI_SCOUTING
-	bool "Scouting (Z_FEATURE_SCOUTING) in the header and the library"
-	default y
-	help
-	  The header the program compiles against declares pico's scouting and the library
-	  carries it (`wz-capi-pico`'s `scout-mcu`): an open whose config names no locator scouts
-	  the group for the first router that answers, over one datagram socket of Zephyr's
-	  stack, as zenoh-pico scouts on Zephyr. On by default as in upstream's own build; the
-	  comparison image is built with it off, so a comparison that wants the two images to
-	  carry the same planes builds this one with it off too.
+	  the open to scout for a router, as upstream's z_queryable.c does with an empty LOCATOR:
+	  both images carry scouting (Z_FEATURE_SCOUTING), as zenoh-pico's default build does, and
+	  this one scouts over one datagram socket of Zephyr's stack, as zenoh-pico does on Zephyr.
 
 config WZ_PICO_ABI_MULTI_THREAD
 	bool "zenoh-pico's multi-threaded arm (Z_FEATURE_MULTI_THREAD)"
