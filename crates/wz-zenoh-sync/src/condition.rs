@@ -91,12 +91,16 @@ mod tests {
         let state = Arc::new(tokio::sync::Mutex::new(false));
         let condition = Arc::new(Condition::new());
         let (seen, waited) = (state.clone(), condition.clone());
+        // The guard is held across the check and given up only by `wait` or by the end of the
+        // task: a waiter that found the flag already set and then locked again would wait on its
+        // own guard, which is what happens whenever the notifier takes the lock first.
         let waiter = tokio::spawn(async move {
-            let guard = seen.lock().await;
-            if !*guard {
+            let mut guard = seen.lock().await;
+            while !*guard {
                 waited.wait(guard).await;
+                guard = seen.lock().await;
             }
-            *seen.lock().await
+            *guard
         });
         *state.lock().await = true;
         condition.notify_all();
