@@ -659,6 +659,11 @@ pub(crate) fn metadata_flag(
 /// own session (`--config-queryable`): the read and write permits it starts
 /// with and the `metadata` its `local_data` serves. The role in its keys is not
 /// here: it is the session's, read off the handshake params by the library.
+///
+/// Read only where the build compiles the host (`adminspace-core`); a build
+/// without it parses the flag so it can refuse it by name, and never reaches a
+/// reader of the fields.
+#[cfg_attr(not(feature = "adminspace-core"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionAdminSpec {
     /// `permissions.read`; `--no-admin-read` clears it.
