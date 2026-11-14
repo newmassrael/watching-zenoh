@@ -392,8 +392,13 @@ impl keyexpr {
                                         // "**" is not allowed to match @verbatim chunks
                                         return None;
                                     } else {
-                                        // search for the beginning of the next chunk from the end
-                                        p -= 2;
+                                        // search for the beginning of the next chunk from the end.
+                                        // The search above finds any `@`, and one that is the second
+                                        // byte of the first chunk leaves no chunk to back off to: the
+                                        // `**` then takes none of the prefix, where upstream's
+                                        // `p -= 2` overflows (a panic in a build that checks, an
+                                        // out-of-bounds index in one that wraps).
+                                        p = p.saturating_sub(2);
                                         while p > 0 && remaining_prefix[p - 1] != b'/' {
                                             p -= 1;
                                         }
