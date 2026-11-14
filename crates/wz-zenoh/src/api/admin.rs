@@ -309,9 +309,11 @@ pub(crate) fn init(session: WeakSession) {
                 e
             );
         }
-        // A router node answers the rest of the runtime's admin space too.
+        // The rest of the runtime's admin space, in every mode, as upstream's runtime starts it
+        // whatever the mode (`zenoh/src/net/runtime/mod.rs` @
+        // `let start_admin_space = *config.adminspace.enabled();`).
         #[cfg(feature = "engine-tokio")]
-        host_router_admin(&session);
+        host_admin_space(&session, whatami);
     }
 
     // Queryable simulating advanced publisher to allow advanced subscriber to receive historical data
@@ -387,25 +389,29 @@ pub(crate) fn init(session: WeakSession) {
     }
 }
 
-/// Host the admin space a router node answers on `@/<own_zid>/router/**`: the root with the
-/// sessions and locators it holds, its configuration and metrics, what the faces declared by kind,
-/// and the successor routes of its graph (`zenoh/src/net/runtime/adminspace.rs` @
-/// `add_handler!(local_data);`). The answers are the library's, the ones the demo's router host
-/// gives, built per query from views of the router's tables, so an entity declared a moment ago is
-/// listed and one undeclared is not. The `linkstate` space has its own queryable, by region.
+/// Host the admin space of the session on `@/<own_zid>/<whatami>/**`, rooted at the session's own
+/// mode as upstream roots it in every mode (`zenoh/src/net/runtime/adminspace.rs` @
+/// `let whatami_str = runtime.state.whatami.to_str();`): the root with the sessions and locators
+/// it holds, its configuration and metrics, and, for a node, what the faces declared by kind
+/// (`zenoh/src/net/runtime/adminspace.rs` @ `add_handler!(local_data);`). Only a router answers
+/// the successor routes of its graph, which upstream reads off the router hats alone
+/// (`zenoh/src/net/runtime/adminspace.rs` @
+/// `fn route_successor(prefix: &keyexpr, context: &AdminContext, query: Query) {`). The answers
+/// are the library's, the ones every wz admin host gives, built per query from views of what the
+/// session holds, so a face or an entity that came a moment ago is listed and one that went is
+/// not. The `linkstate` space has its own queryable, by region.
 #[cfg(feature = "engine-tokio")]
-fn host_router_admin(session: &WeakSession) {
+fn host_admin_space(session: &WeakSession, whatami: WhatAmI) {
     use wz_runtime_tokio::adminspace::{
         admin_queryable_key, answer_admin_query, answer_router_admin_query, AdminAnswerCtx,
         AdminAnswerOutcome, AdminDeclaration, AdminEntityKind, AdminPlugin, AdminRouterCtx,
     };
     use wz_session_core::query_sink::{QueryView, ReplyOut};
 
-    let Some(views) = session.router_admin_views() else {
-        return;
-    };
+    let views = session.admin_views();
     let zid_hex = session.zid().to_string();
-    let whatami = WhatAmI::Router.to_str();
+    let is_router = whatami == WhatAmI::Router;
+    let whatami = whatami.to_str();
     let key = admin_queryable_key(&zid_hex, whatami);
     let config = session.config_notifier();
     let version = env!("CARGO_PKG_VERSION").to_owned();
@@ -424,36 +430,38 @@ fn host_router_admin(session: &WeakSession) {
             zid_hex: &zid_hex,
             whatami,
             version: &version,
-            locators: &views.locators,
+            locators: views.locators(),
             metadata_json: &metadata_json,
             read,
             stats: None,
             multicast_peers: &[],
         };
-        let kinds = [
-            (
-                AdminEntityKind::Subscriber,
-                views.declarations.subscribers(),
-            ),
-            (AdminEntityKind::Publisher, views.declarations.publishers()),
-            (AdminEntityKind::Queryable, views.declarations.queryables()),
-            (AdminEntityKind::Querier, views.declarations.queriers()),
-            (AdminEntityKind::Token, views.declarations.tokens()),
-        ];
-        let declarations: Vec<AdminDeclaration> = kinds
-            .into_iter()
-            .flat_map(|(kind, entries)| {
-                entries
+        let declarations: Vec<AdminDeclaration> = views
+            .node()
+            .map(|node| {
+                let kinds = [
+                    (AdminEntityKind::Subscriber, node.declarations.subscribers()),
+                    (AdminEntityKind::Publisher, node.declarations.publishers()),
+                    (AdminEntityKind::Queryable, node.declarations.queryables()),
+                    (AdminEntityKind::Querier, node.declarations.queriers()),
+                    (AdminEntityKind::Token, node.declarations.tokens()),
+                ];
+                kinds
                     .into_iter()
-                    .map(move |(keyexpr, sources)| AdminDeclaration {
-                        kind,
-                        keyexpr,
-                        sources,
+                    .flat_map(|(kind, entries)| {
+                        entries
+                            .into_iter()
+                            .map(move |(keyexpr, sources)| AdminDeclaration {
+                                kind,
+                                keyexpr,
+                                sources,
+                            })
                     })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
         let plugins: Vec<AdminPlugin> = Vec::new();
-        let sessions = views.sessions.admin_sessions();
+        let sessions = views.admin_sessions();
         if answer_admin_query(
             view,
             out,
@@ -469,20 +477,23 @@ fn host_router_admin(session: &WeakSession) {
                 wz_runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
             );
         }
-        let successors = views.routers.route_successors_hex();
-        let routes = AdminRouterCtx {
-            zid_hex: &zid_hex,
-            whatami,
-            routers_dot: None,
-            peers_dot: None,
-            successors: &successors,
-            read,
-        };
-        let _ = answer_router_admin_query(view, out, &routes);
+        if !is_router {
+            return;
+        }
+        if let Some(node) = views.node() {
+            let successors = node.routers.route_successors_hex();
+            let routes = AdminRouterCtx {
+                zid_hex: &zid_hex,
+                whatami,
+                routers_dot: None,
+                peers_dot: None,
+                successors: &successors,
+                read,
+            };
+            let _ = answer_router_admin_query(view, out, &routes);
+        }
     };
-    if !session.host_router_queryable(&key, Box::new(handler)) {
-        tracing::error!("Unable to serve the admin space of the router node");
-    }
+    session.host_admin_queryable(&key, std::sync::Arc::new(handler));
 }
 
 fn reply<T: serde::Serialize>(
@@ -569,6 +580,23 @@ mod tests {
             auth_identifier: None,
             priorities: None,
             reliability: None,
+        }
+    }
+
+    /// A session hosts no runtime admin space unless its configuration enables one, and one it
+    /// enables answers a read and refuses a write: upstream's defaults
+    /// (`commons/zenoh-config/src/lib.rs` @ `impl Default for PermissionsConf {`, and the
+    /// `enabled` field's `#[serde(default = "set_false")]`), for a configuration built in code and
+    /// for one read from a document that names none of the three keys.
+    #[test]
+    fn the_admin_space_is_off_and_read_only_by_default() {
+        for config in [
+            zenoh_config::Config::default(),
+            zenoh_config::Config::from_json5("{ mode: \"client\" }").expect("a document"),
+        ] {
+            assert!(!*config.adminspace.enabled());
+            assert!(config.adminspace.permissions().read);
+            assert!(!config.adminspace.permissions().write);
         }
     }
 

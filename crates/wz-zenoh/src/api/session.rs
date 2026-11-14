@@ -451,14 +451,76 @@ impl RouterKeys {
     }
 }
 
-/// The handler a queryable hosted on the router node runs for each query it is asked.
+/// The handler the admin space of a session runs for each query it is asked. Shared, because a
+/// registry of faces answers on each face it holds and every face is handed the same one.
 #[cfg(feature = "unstable")]
-pub(crate) type RouterQueryHandler = Box<
-    dyn FnMut(
+pub(crate) type AdminQueryHandler = Arc<
+    dyn Fn(
             &dyn wz_session_core::query_sink::QueryView,
             &mut dyn wz_session_core::query_sink::ReplyOut,
-        ) + Send,
+        ) + Send
+        + Sync,
 >;
+
+/// What the admin space of a session answers from, by the engine it runs on: a node holds the
+/// router's tables, and a registry of faces holds a session for each node it is linked to.
+#[cfg(feature = "unstable")]
+#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+pub(crate) enum AdminViews {
+    /// A node, router, peer or client: the views of its tables.
+    Node(RouterAdminViews),
+    /// A registry of faces: a client, or a peer that fits no node. Its transports are its faces,
+    /// and it holds no router graph.
+    #[cfg(feature = "engine-tokio")]
+    Faces {
+        /// The registry, read when a query asks, so a face that came up a moment ago is listed.
+        /// Weak, because the registry holds the admin queryable whose handler holds this.
+        registry: std::sync::Weak<wz_capi_core::faces::SharedSession>,
+        /// Where the session's listeners can be reached: none for a client, which binds nothing.
+        locators: Vec<String>,
+    },
+}
+
+#[cfg(all(feature = "unstable", feature = "engine-tokio"))]
+impl AdminViews {
+    /// Where the session's listeners can be reached.
+    pub(crate) fn locators(&self) -> &[String] {
+        match self {
+            AdminViews::Node(views) => &views.locators,
+            AdminViews::Faces { locators, .. } => locators,
+        }
+    }
+
+    /// The `sessions[]` rows of the root document: one for each transport the session holds.
+    /// A face is filed under the peer its handshake named, as the Session host files its one
+    /// (`SessionAdminRow::admin_session_of_peer`).
+    pub(crate) fn admin_sessions(&self) -> Vec<wz_runtime_tokio::adminspace::AdminSession> {
+        use wz_runtime_tokio::adminspace::SessionAdminRow;
+
+        match self {
+            AdminViews::Node(views) => views.sessions.admin_sessions(),
+            AdminViews::Faces { registry, .. } => registry
+                .upgrade()
+                .map(|registry| {
+                    registry
+                        .face_sessions()
+                        .iter()
+                        .filter_map(|face| face.actions().admin_session_of_peer())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The router-tier views, `None` for a registry of faces, which holds no router graph and
+    /// lists no declarations of its own.
+    pub(crate) fn node(&self) -> Option<&RouterAdminViews> {
+        match self {
+            AdminViews::Node(views) => Some(views),
+            AdminViews::Faces { .. } => None,
+        }
+    }
+}
 
 /// What the admin space of a router node answers from: views of the router's tables, which show
 /// them as they are when a query asks, and the locators its listeners got.
@@ -851,37 +913,70 @@ impl Engine {
         }
     }
 
-    /// The views the admin space of a router node answers from, or `None` for a session that is
-    /// no router node.
+    /// The views the admin space of the session answers from, whatever its mode.
     #[cfg(feature = "unstable")]
-    fn router_admin_views(&self) -> Option<RouterAdminViews> {
+    fn admin_views(&self) -> AdminViews {
         match self {
             Engine::Router(router) => {
                 let forwarder = router.node.forwarder();
-                Some(RouterAdminViews {
+                AdminViews::Node(RouterAdminViews {
                     sessions: forwarder.sessions_view(),
                     declarations: forwarder.declarations_view(),
                     routers: forwarder.routers_net_view(),
                     locators: router.node.listen_locators().to_vec(),
                 })
             }
-            Engine::Tokio(_) => None,
+            Engine::Tokio(state) => AdminViews::Faces {
+                registry: Arc::downgrade(&state.shared),
+                locators: state.shared.as_engine().listen_locators(),
+            },
         }
     }
 
-    /// Host `handler` as a queryable of the router node on `key`, answered from the router's
-    /// own thread, or say that the session is no router node.
+    /// Host `handler` as the queryable of the session's admin space on `key`, routed: it is
+    /// declared to every node the session is linked to, as upstream's runtime declares it through
+    /// a face of its routing tables in every mode
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `let primitives = runtime.state.router.new_session(admin.clone());`).
+    /// A registry of faces answers on the face the query came in on and declares the queryable
+    /// as upstream does, not complete (`zenoh/src/net/runtime/adminspace.rs` @
+    /// `ext_info: QueryableInfoType::DEFAULT,`). A node answers from the router's own thread and
+    /// declares it complete, as the router hosts of the demo do: docs/adminspace-client-mode.md
+    /// records that difference.
     #[cfg(feature = "unstable")]
-    fn host_router_queryable(&self, key: &str, handler: RouterQueryHandler) -> bool {
+    fn host_admin_queryable(&self, key: &str, handler: AdminQueryHandler) {
+        use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
+        use wz_session_core::query_sink::{QueryView, ReplyOut};
+
         match self {
             Engine::Router(router) => {
-                router
-                    .node
-                    .forwarder()
-                    .register_local_queryable(key, true, handler);
-                true
+                router.node.forwarder().register_local_queryable(
+                    key,
+                    true,
+                    Box::new(move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                        handler(view, out)
+                    }),
+                );
             }
-            Engine::Tokio(_) => false,
+            Engine::Tokio(state) => {
+                // One callback for each face, every one answering through the same handler: the
+                // answer is made inside the call, so the face's own query is never kept.
+                let sink: QueryableSink =
+                    Arc::new(move |_holder: Arc<dyn QueryHolder>| -> QueryCallback {
+                        let handler = Arc::clone(&handler);
+                        Box::new(move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                            handler(view, out)
+                        })
+                    });
+                let _ = state.shared.declare_port_queryable_on_links(
+                    key.to_owned(),
+                    tokio_engine::wire_key_of(0, None),
+                    false,
+                    tokio_engine::engine_locality(Locality::Any),
+                    ANY_LINKS,
+                    None,
+                    sink,
+                );
+            }
         }
     }
 
@@ -1627,21 +1722,12 @@ impl Engine {
     }
 
     #[cfg(feature = "unstable")]
-    fn router_admin_views(&self) -> Option<RouterAdminViews> {
+    fn admin_views(&self) -> AdminViews {
         match *self {}
     }
 
     #[cfg(feature = "unstable")]
-    fn host_router_queryable(
-        &self,
-        _key: &str,
-        _handler: Box<
-            dyn FnMut(
-                    &dyn wz_session_core::query_sink::QueryView,
-                    &mut dyn wz_session_core::query_sink::ReplyOut,
-                ) + Send,
-        >,
-    ) -> bool {
+    fn host_admin_queryable(&self, _key: &str, _handler: AdminQueryHandler) {
         match *self {}
     }
 
@@ -5208,18 +5294,16 @@ impl WeakSession {
         self.0.engine.linkstate_regions()
     }
 
-    /// The views the admin space of a router node answers from, or `None` for a session that is
-    /// no router node.
+    /// The views the admin space of the session answers from, whatever its mode.
     #[cfg(feature = "unstable")]
-    pub(crate) fn router_admin_views(&self) -> Option<RouterAdminViews> {
-        self.0.engine.router_admin_views()
+    pub(crate) fn admin_views(&self) -> AdminViews {
+        self.0.engine.admin_views()
     }
 
-    /// Host `handler` as a queryable of the router node on `key`; `false` for a session that is
-    /// no router node.
+    /// Host `handler` as the routed queryable of the session's admin space on `key`.
     #[cfg(feature = "unstable")]
-    pub(crate) fn host_router_queryable(&self, key: &str, handler: RouterQueryHandler) -> bool {
-        self.0.engine.host_router_queryable(key, handler)
+    pub(crate) fn host_admin_queryable(&self, key: &str, handler: AdminQueryHandler) {
+        self.0.engine.host_admin_queryable(key, handler)
     }
 
     /// Declare a transport events listener. The id of the engine's watch, released at undeclare or
@@ -14694,6 +14778,147 @@ mod tests {
             );
             assert!(keys("@/**").len() > 1, "nothing under @/**");
             drop(second);
+        }
+
+        /// The replies a GET of `selector` from `session` gets within a couple of seconds, as
+        /// `(key, payload)`.
+        #[cfg(feature = "unstable")]
+        fn answers(session: &Session, selector: &str) -> Vec<(String, String)> {
+            let replies = session.get(selector).wait().expect("asks");
+            let mut found = Vec::new();
+            while let Ok(Some(reply)) = replies.recv_timeout(Duration::from_secs(2)) {
+                if let Ok(sample) = reply.result() {
+                    found.push((
+                        sample.key_expr().to_string(),
+                        sample
+                            .payload()
+                            .try_to_string()
+                            .expect("a text payload")
+                            .into_owned(),
+                    ));
+                }
+            }
+            found
+        }
+
+        /// A client that enables its admin space roots it at its own mode and declares it routed:
+        /// another client of the same router asks `@/<zid>/client` and is answered over the first
+        /// client's own link, with that client's zid, its metadata, no locator (a client binds
+        /// nothing) and its router as its one session. Nothing answers under another role, and a
+        /// client that leaves the admin space off answers nothing, as upstream's default
+        /// (`adminspace.enabled: false`) does. A client of this crate is the registry of faces, so
+        /// this is the host of that engine.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_client_answers_its_admin_space_through_its_router() {
+            use std::time::{Duration, Instant};
+
+            let port = unautoselected_port();
+            let router = router("a1b2e9", port);
+            let client = |id: &str, admin: bool| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "client",
+                              connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                              scouting: {{ multicast: {{ enabled: false }} }},
+                              metadata: {{ name: "client-{id}" }},
+                              adminspace: {{ enabled: {admin} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("a client dials its router")
+            };
+            let a = client("c1a2", true);
+            let b = client("c1b2", false);
+            assert!(
+                matches!(*a.0.engine, Engine::Tokio(_)),
+                "a client of this crate is the registry of faces"
+            );
+            let zid_a = a.zid().to_string();
+            let root = format!("@/{zid_a}/client");
+
+            // Nothing on the router's side says when it has learned the queryable: ask until the
+            // answer comes.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut got = answers(&b, &root);
+            while got.is_empty() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(200));
+                got = answers(&b, &root);
+            }
+            assert_eq!(got.len(), 1, "one answer under the client's root: {got:?}");
+            let (key, body) = &got[0];
+            assert_eq!(key, &root);
+            let document: serde_json::Value = serde_json::from_str(body).expect("a JSON document");
+            assert_eq!(document["zid"], serde_json::json!(zid_a), "{body}");
+            assert_eq!(
+                document["metadata"],
+                serde_json::json!({ "name": "client-c1a2" }),
+                "{body}"
+            );
+            assert_eq!(document["locators"], serde_json::json!([]), "{body}");
+            let sessions = document["sessions"].as_array().expect("a list of sessions");
+            assert_eq!(sessions.len(), 1, "the router alone: {body}");
+            assert_eq!(
+                sessions[0]["peer"],
+                serde_json::json!(router.zid().to_string()),
+                "{body}"
+            );
+            assert_eq!(
+                sessions[0]["whatami"],
+                serde_json::json!("router"),
+                "{body}"
+            );
+
+            assert_eq!(
+                answers(&b, &format!("@/{zid_a}/router/**")),
+                Vec::<(String, String)>::new(),
+                "a client answers under its own role alone"
+            );
+            assert_eq!(
+                answers(&a, &format!("@/{}/client/**", b.zid())),
+                Vec::<(String, String)>::new(),
+                "a client that leaves its admin space off answers nothing"
+            );
+        }
+
+        /// A peer that runs as a node roots its admin space at `peer`, its own mode, and answers
+        /// none of the router-tier legs, as upstream's peer reads no router hat. Until the role
+        /// was read off the mode, every node answered under `router` whatever it was opened as.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_peer_node_answers_its_admin_space_under_its_own_role() {
+            let port = unautoselected_port();
+            let peer = with_the_node(|| {
+                let mut config = Config::from_json5(&format!(
+                    r#"{{ id: "a1b2ea", mode: "peer",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }},
+                          adminspace: {{ enabled: true }} }}"#
+                ))
+                .expect("a configuration zenoh reads");
+                config
+                    .insert_json5("scouting/gossip/enabled", "false")
+                    .expect("a key zenoh reads");
+                open(config).wait().expect("a peer node opens")
+            });
+            assert!(
+                matches!(*peer.0.engine, Engine::Router(_)),
+                "the peer runs as a node"
+            );
+            let zid = peer.zid();
+            let roots = answers(&peer, &format!("@/{zid}/peer"));
+            assert_eq!(roots.len(), 1, "the peer's root: {roots:?}");
+            assert_eq!(
+                answers(&peer, &format!("@/{zid}/router/**")),
+                Vec::<(String, String)>::new(),
+                "nothing under the router role"
+            );
+            assert_eq!(
+                answers(&peer, &format!("@/{zid}/peer/route/successor/**")),
+                Vec::<(String, String)>::new(),
+                "a peer answers no successor route"
+            );
         }
 
         /// A router node that listens on a multicast group joins it at the open, and says the
