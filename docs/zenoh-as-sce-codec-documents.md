@@ -17,10 +17,9 @@ language as it stands: header flags, fields gated on a flag, a flag the parent
 passes in, lengths and `length-1` lengths, VLE integers with zenoh's 9-byte
 form, the Z-bit continuation of an extension chain, and the payload whose shape
 depends on whether a shared-memory marker is in the chain. Where wz still
-writes a skeleton by hand (the transport messages past the handshake, the
-scouting messages, the dispatch by message id, their extension chains), the
-reason is on the wz side; the handshake messages and the Join are whole
-documents (rows 6-11, 14).
+writes a skeleton by hand (the end of a Frame's network messages, the
+dispatch by message id), the reason is on the wz side; every transport and
+scouting message but the Frame is a whole document (rows 6-11, 13-17).
 The language blocks at five places, all on the extension and refusal side:
 (L1) choosing an extension's body codec by its identity (`id | M | enc`) while
 an unknown identity is still read by its encoding, which every one of the 41
@@ -124,11 +123,18 @@ rest of the unit. The Join is a whole document as the handshake messages are
 the session writes a beacon through it (`multicast_join.rs` `encode_join_into`)
 and every reader of a received Join starts from its view (`join_decode.rs`
 `read_join`, the Join arm of `inbound.rs`), so where the body ends and the chain
-starts is the document's answer. The transport OAM has a document for the body
-and none for the header byte or the extension chain: the body codec takes the
-header's flags as flag-inputs, and wz reads the header and the chain by hand.
-The network messages (§5.4) show the whole shape is expressible
-(`sources/codecs/push.scxml:92`).
+starts is the document's answer. The transport OAM is a whole document too
+(`transport_oam.scxml`: the header with the body's encoding, the id, the
+chain, the body by that encoding), read by the OAM arm of `inbound.rs`
+`decode_oam`, which refuses the reserved encoding the document's default arm
+reads (L2, row 101).
+
+The scouting messages are another layer, with ids that collide with the
+transport ones, and are whole documents of their own (`scouting_scout.scxml`,
+`scouting_hello.scxml` with L bound to the body's locator list): read by
+`scouting_message.rs` `parse_scouting` and `scouting_host.rs`
+`decode_scouted_hello`, written by `scouting_host.rs` `scout_emit` and
+`scout_responder.rs` `hello_datagram`.
 
 Two places of the moved rows stay hand-written, both on the wz side. The
 lend-only Open writes its head and its chain under two session mutexes, one
@@ -148,15 +154,15 @@ extension and of the reserved encoding stay where they are judged (L2, rows
 | 11 | KeepAlive | `commons/zenoh-codec/src/transport/keepalive.rs` @ `impl<W> WCodec<&KeepAlive, &mut W> for Zenoh080` | A | `transport_keep_alive.scxml` | |
 | 12 | Frame | `commons/zenoh-codec/src/transport/frame.rs` @ `impl<W> WCodec<&FrameHeader, &mut W> for Zenoh080` | B | header, SN and chain `transport_frame_header.scxml`; the end of its network messages by hand, `network_message.rs` `RecordsEnd::AtTransportMessage` | L5 (the payload is not the batch's tail, row 25) |
 | 13 | Fragment | `commons/zenoh-codec/src/transport/fragment.rs` @ `impl<W> WCodec<&FragmentHeader, &mut W> for Zenoh080` | A | header, SN and chain `transport_fragment_header.scxml`; the payload is the rest of the unit | S (reassembly is state across messages) |
-| 14 | Join | `commons/zenoh-codec/src/transport/join.rs` @ `impl<W> WCodec<&Join, &mut W> for Zenoh080` | A | `transport_join.scxml` (body `join.scxml`); read by `join_decode.rs:40` `read_join` and `inbound.rs:1204`, written by `multicast_join.rs` `encode_join_into` | S (the T flag's lease unit: `commons/zenoh-codec/src/transport/join.rs` @ `if lease.as_millis() % 1_000 == 0 {`) |
-| 15 | Transport OAM | `commons/zenoh-codec/src/transport/oam.rs` @ `impl<W> WCodec<&Oam, &mut W> for Zenoh080` | B | `inbound.rs:1561` by hand; `oam.scxml` has the same layout with the network id as its default | W |
+| 14 | Join | `commons/zenoh-codec/src/transport/join.rs` @ `impl<W> WCodec<&Join, &mut W> for Zenoh080` | A | `transport_join.scxml` (body `join.scxml`); read by `join_decode.rs:40` `read_join` and `inbound.rs:1202`, written by `multicast_join.rs` `encode_join_into` | S (the T flag's lease unit: `commons/zenoh-codec/src/transport/join.rs` @ `if lease.as_millis() % 1_000 == 0 {`) |
+| 15 | Transport OAM | `commons/zenoh-codec/src/transport/oam.rs` @ `impl<W> WCodec<&Oam, &mut W> for Zenoh080` | A | `transport_oam.scxml`; read by `inbound.rs` `decode_oam` | (L2: the reserved encoding is refused by the reader, row 101) |
 
 ### 5.3 Scouting messages
 
 | # | Item | Upstream | Class | wz | Cause |
 |---|---|---|---|---|---|
-| 16 | Scout | `commons/zenoh-codec/src/scouting/scout.rs` @ `impl<W> WCodec<&Scout, &mut W> for Zenoh080` | B | body `scout.scxml`; header and chain `scouting_message.rs:123-126` | W |
-| 17 | Hello | `commons/zenoh-codec/src/scouting/hello.rs` @ `impl<W> WCodec<&HelloProto, &mut W> for Zenoh080` | B | body `hello.scxml` (L as flag-input); header and chain `scouting_message.rs:146-150` | W |
+| 16 | Scout | `commons/zenoh-codec/src/scouting/scout.rs` @ `impl<W> WCodec<&Scout, &mut W> for Zenoh080` | A | `scouting_scout.scxml` (body `scout.scxml`); read by `scouting_message.rs` `parse_scouting`, written by `scouting_host.rs` `scout_emit` | |
+| 17 | Hello | `commons/zenoh-codec/src/scouting/hello.rs` @ `impl<W> WCodec<&HelloProto, &mut W> for Zenoh080` | A | `scouting_hello.scxml` (body `hello.scxml`, L bound); read by `scouting_message.rs` `parse_scouting` and `scouting_host.rs` `decode_scouted_hello`, written by `scout_responder.rs` `hello_datagram` | |
 
 ### 5.4 Network messages and the list a Frame holds
 
@@ -214,7 +220,7 @@ extension and of the reserved encoding stay where they are judged (L2, rows
 | 52 | PrioritySn (reliable, best-effort) | `commons/zenoh-codec/src/transport/join.rs` @ `impl<W> WCodec<&PrioritySn, &mut W> for Zenoh080` | A | `join.scxml` (the base pair) | |
 | 53 | Extension entry: header, then unit, z64 or zbuf by `enc` | `commons/zenoh-protocol/src/common/extension.rs` @ `pub mod iext {` | A | `ext_entry.scxml`, `ext_unit.scxml`, `ext_zint.scxml`, `ext_zbuf.scxml` | (accepts `0b11`, row 101) |
 | 54 | Extension chain of a network or zenoh message (Z continuation) | `commons/zenoh-codec/src/common/extension.rs` @ `pub fn skip_all<R>(reader: &mut R, s: &str) -> Result<(), DidntRead>` | A | `<sce:tlv-chain terminate-on="entry-flag" entry-flag-name="Z">` in every network and zenoh document | |
-| 55 | Extension chain of a transport or scouting message | as 54 | B | in the documents of rows 6-14; transport OAM and the scouting messages `ext_chain.rs` `decode_ext_chain` | W |
+| 55 | Extension chain of a transport or scouting message | as 54 | A | in the documents of rows 6-17 (the Frame's header included) | |
 
 ### 5.8 Extensions of transport messages
 
@@ -289,7 +295,7 @@ falls under §5.11.
 |---|---|---|---|---|---|
 | 99 | Unknown identity, M clear: kept, body read by `enc` | `commons/zenoh-codec/src/common/extension.rs` @ `impl<R> RCodec<(ZExtUnknown, bool), &mut R> for Zenoh080Header` | A | `ext_entry.scxml` default arm | |
 | 100 | Unknown identity, M set: the whole message is refused | `commons/zenoh-codec/src/common/extension.rs` @ `if u.is_mandatory() {` | B | `ext_admit.rs:329`, one layer above the decode by design (`ext_admit.rs:31`) | L2 |
-| 101 | Encoding `0b11`, reserved: refused | `commons/zenoh-codec/src/common/extension.rs` @ `let body = match self.header & iext::ENC_MASK {` | C | refused only in the transport OAM body (`inbound.rs:1605`); a chain entry reads it as unit (`ext_entry.scxml:77`) | L2 |
+| 101 | Encoding `0b11`, reserved: refused | `commons/zenoh-codec/src/common/extension.rs` @ `let body = match self.header & iext::ENC_MASK {` | C | refused only in the transport OAM body, read by `transport_oam.scxml`'s default arm (`inbound.rs:1530`); a chain entry reads it as unit (`ext_entry.scxml:77`) | L2 |
 
 wz also carries an extension upstream does not have, a hop limit
 (`push_routing_context.rs:80`); it is outside this census.
@@ -299,19 +305,19 @@ wz also carries an extension upstream does not have, a hop limit
 | Section | Rows | A | B | C |
 |---|---|---|---|---|
 | 5.1 framing and batch | 5 | 2 | 3 | 0 |
-| 5.2 transport messages | 10 | 8 | 2 | 0 |
-| 5.3 scouting | 2 | 0 | 2 | 0 |
+| 5.2 transport messages | 10 | 9 | 1 | 0 |
+| 5.3 scouting | 2 | 2 | 0 | 0 |
 | 5.4 network messages | 9 | 7 | 2 | 0 |
 | 5.5 declaration bodies | 9 | 9 | 0 | 0 |
 | 5.6 zenoh and OAM bodies | 6 | 6 | 0 | 0 |
-| 5.7 common types | 14 | 11 | 3 | 0 |
+| 5.7 common types | 14 | 12 | 2 | 0 |
 | 5.8 transport extensions | 27 | 0 | 26 | 1 |
 | 5.9 network extensions | 10 | 0 | 10 | 0 |
 | 5.10 zenoh body extensions | 6 | 2 | 4 | 0 |
 | 5.11 unknown extensions | 3 | 1 | 1 | 1 |
-| **Total** | **101** | **46** | **53** | **2** |
+| **Total** | **101** | **50** | **49** | **2** |
 
-By cause, over the 55 rows of (B) and (C) (a row may have more than one):
+By cause, over the 51 rows of (B) and (C) (a row may have more than one):
 
 | Cause | Rows | Which |
 |---|---|---|
@@ -321,7 +327,7 @@ By cause, over the 55 rows of (B) and (C) (a row may have more than one):
 | L5 | 2 | 12, 25 |
 | L6 | 4 | 49, 84, 86, 88 (and row 45 among the (A) rows) |
 | L7 | 1 | 73 |
-| W | 10 | 3, 4, 5, 15-17, 26, 49, 51, 55 |
+| W | 6 | 3, 4, 5, 26, 49, 51 |
 | S | 1 | 3 (and rows 8, 9, 13, 14 among the (A) rows) |
 
 L3 is the cause of no (B) row: it shows on the encode side of 21 (A) rows
@@ -463,9 +469,9 @@ scouting message is the same shape as a network message (flags carrier, body,
 Z-gated chain); a batch is an `until-eof` repeat of a peek-byte variant; the
 low-latency unit is a peek-byte variant with a network-message default; a
 compressed batch's header byte is a flag-input of the batch codec. wz's
-transport documents predate the chain and peek-byte elements, and only the
-handshake messages, the Frame and Fragment headers and the Join have been
-extended into whole documents since (rows 6-14); the hand code that replaced
+transport documents predate the chain and peek-byte elements, and every
+transport and scouting message has been extended into a whole document since
+(rows 6-17), the Frame as far as its header; the hand code that replaced
 them is also where the in-place receive path lends
 records (`network_message.rs:1490`). Moving them into documents is a wz task
 and asks nothing of SCE, except L2 for the exact refusal of an unknown id.
