@@ -4,12 +4,11 @@
 #
 # The number a ledger round takes, read from the store and nowhere else.
 #
-# R4392 (no register item) -- one read of the number for land.sh and file-round.sh.
+# R4392 (no register item) -- one read of the number a round takes.
 #
-# Two callers take a number: `scripts/land.sh`, inside its push lock, and
-# `scripts/file-round.sh`, on a queue candidate. They must read the same fact the same
-# way, or a round filed by one could be numbered differently by the other, so the read
-# is written once here and both source it.
+# `scripts/file-round.sh` takes it on a queue candidate, the one place a round is
+# filed; the read stays its own file so that any later reader of "the last round"
+# reads the store the same way instead of a commit subject.
 
 # The highest `Round N` the store holds, or nothing when the store lists none.
 # `mnemosyne-cli` must be on PATH; the caller has already checked that it is.
