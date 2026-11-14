@@ -1317,7 +1317,11 @@ Each lands whole with its surface lines, tests and faults in one round.
     each sample with `z_timestamp_new`, and the session's node clock learns every time given
     (`NodeHlc::absorb_word`): a program's stamps and the samples' are one order, and the node
     clock's own proposal is that order wherever it could learn the time before it. The other
-    planes (the runtime's, zenoh-c's) carry the node clock's proposal as it is.
+    planes (the runtime's, zenoh-c's) carry the node clock's proposal as it is. A sample that
+    cannot be given a time is refused on every plane and nothing is sent: a pico session with
+    no time left (`PublishError::TimestampExhausted`), and a `trusted-only` node whose clock is
+    not trusted (`PublishError::ClockUntrusted`); pico's doors answer both with
+    `Z_ERR_TIMESTAMP_GENERATION_FAILED`, as pico's put answers a failed `z_timestamp_new`.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

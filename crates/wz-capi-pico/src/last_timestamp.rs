@@ -80,13 +80,15 @@ impl SessionTime {
 
     /// The time word a sample of the session's advanced publisher carries, for the word its node
     /// clock proposes: the next time the session gives, as pico's sample takes the session's
-    /// `z_timestamp_new`.
-    ///
-    /// Where pico refuses the put of a session with no greater time left, this stamps it with the
-    /// greatest time there is: the composite that asks has no refusal to give for a stamp.
+    /// `z_timestamp_new`. A session with no greater time left refuses the sample, as pico refuses
+    /// the put.
     #[cfg(feature = "advanced")]
-    pub(crate) fn order_data_stamp(&self, proposed: u64) -> u64 {
-        self.give(proposed).unwrap_or(u64::MAX)
+    pub(crate) fn order_data_stamp(
+        &self,
+        proposed: u64,
+    ) -> Result<u64, wz_session_core::publish_options::PublishError> {
+        self.give(proposed)
+            .ok_or(wz_session_core::publish_options::PublishError::TimestampExhausted)
     }
 }
 

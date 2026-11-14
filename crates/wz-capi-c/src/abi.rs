@@ -1637,6 +1637,9 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// registers changed. `z_timestamp_new` gives a program the node clock's time (the registered
 /// clock where one is), whatever the clock's standing, and the `clock-quality-stamping` policy
 /// holds back only the data the node stamps; before it, `z_timestamp_new` read the system clock.
+/// Under that policy an advanced publisher, every sample of which carries a time, refuses its put
+/// (`Z_EGENERIC`) and its delete until the clock is reported synchronised, and sends nothing;
+/// before it, the sample went out stamped with the system clock.
 pub const WZ_CAPI_C_ABI_REVISION: i32 = 16;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
