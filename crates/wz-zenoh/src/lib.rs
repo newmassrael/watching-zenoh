@@ -404,14 +404,21 @@ pub mod timestamp_stack {
     };
 }
 
-/// What zenoh's own crates and the language bindings reach into. Of it the traits of the builders
-/// are here, which the builders of a sample implement; the rest (the runtime, the plugins, the
-/// helpers re-exported from the family's crates) arrives with the slices that give them a body.
+/// What zenoh's own crates and the language bindings reach into: the traits of the builders, which
+/// the builders of a sample implement, the node sessions share, and the helpers of the family's own
+/// crates, which the ecosystem crate `zenoh-ext` names through this module. The rest of upstream's
+/// module (the task controller and the condition of crates the family does not have, the plugins,
+/// the buffers and the timers) arrives with the slices that give them a body.
 #[zenoh_macros::internal]
 pub mod internal {
+    pub use zenoh_core::{zasynclock, zerror, zlock, zread, ztimeout, zwrite, ResolveFuture};
+    pub use zenoh_result::{bail, ErrNo};
+
     /// The node several sessions share, and the session that is made on it
-    /// ([`session::init`](crate::session::init)).
+    /// ([`session::init`](crate::session::init)), and the roles of the family's runtime pool.
     pub mod runtime {
+        pub use zenoh_runtime::ZRuntime;
+
         pub use crate::api::runtime::{DynamicRuntime, Runtime, RuntimeBuilder};
     }
     #[zenoh_macros::unstable]
@@ -817,4 +824,60 @@ pub mod config {
     pub use crate::api::config::Config;
     #[zenoh_macros::unstable]
     pub use crate::api::config::Notifier;
+}
+
+/// The helpers `internal` re-exports reach a caller by the paths the ecosystem crate names, and they
+/// are the family's own: the error of `bail!` is the family's, the runtime roles are its pool's.
+#[cfg(all(test, feature = "internal"))]
+mod internal_tests {
+    use std::{
+        sync::{Mutex, RwLock},
+        time::Duration,
+    };
+
+    use crate::internal::runtime::ZRuntime;
+
+    // `ztimeout!` reads its bound from the caller's scope, as upstream's does.
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn refuse_above_one(value: u8) -> crate::Result<u8> {
+        if value > 1 {
+            crate::internal::bail!("refused {value}");
+        }
+        Ok(value)
+    }
+
+    #[test]
+    fn bail_and_zerror_build_the_family_error() {
+        assert_eq!(refuse_above_one(1).unwrap(), 1);
+        let refused = refuse_above_one(2).unwrap_err().to_string();
+        assert!(refused.starts_with("refused 2 at "), "{refused}");
+        let made = crate::internal::zerror!("made {}", 3).to_string();
+        assert!(made.starts_with("made 3 at "), "{made}");
+    }
+
+    #[test]
+    fn the_lock_helpers_lock_what_they_are_given() {
+        let held = Mutex::new(4);
+        *crate::internal::zlock!(held) += 1;
+        assert_eq!(*crate::internal::zlock!(held), 5);
+        let shared = RwLock::new(6);
+        *crate::internal::zwrite!(shared) += 1;
+        assert_eq!(*crate::internal::zread!(shared), 7);
+    }
+
+    #[tokio::test]
+    async fn ztimeout_and_the_resolvable_future_await_what_they_are_given() {
+        assert_eq!(crate::internal::ztimeout!(async { 8 }), 8);
+        let resolvable = crate::internal::ResolveFuture::new(async { 9 });
+        assert_eq!(crate::internal::ztimeout!(resolvable), 9);
+        let held = tokio::sync::Mutex::new(10);
+        assert_eq!(*crate::internal::zasynclock!(held), 10);
+    }
+
+    #[test]
+    fn the_runtime_roles_are_the_family_pool() {
+        let role: ZRuntime = zenoh_runtime::ZRuntime::Application;
+        assert!(matches!(role, ZRuntime::Application));
+    }
 }

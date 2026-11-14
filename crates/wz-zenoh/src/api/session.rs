@@ -4817,7 +4817,16 @@ pub struct Session(Arc<SessionInner>);
 impl Session {
     /// A reference to the session that does not keep it open: what the entities of a session hold,
     /// and what a close is run through.
+    #[cfg(not(feature = "internal"))]
     pub(crate) fn downgrade(&self) -> WeakSession {
+        WeakSession(self.0.clone())
+    }
+
+    /// A reference to the session that does not keep it open: what the entities of a session hold,
+    /// and what a close is run through. Public with `internal`, as upstream's is, for the crates
+    /// that hold a session's entities beside it (`zenoh-ext`).
+    #[zenoh_macros::internal]
+    pub fn downgrade(&self) -> WeakSession {
         WeakSession(self.0.clone())
     }
 
