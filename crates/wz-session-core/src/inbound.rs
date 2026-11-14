@@ -1495,7 +1495,8 @@ fn decode_keep_alive(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, Inbo
 /// — `id:z16`, then the ext chain, then a body whose ENCODING came from header
 /// bits 5..6 — and it binds its own cursor because the shared one is bound
 /// only under the `codec-*` union, which this arm does not join. That is the
-/// same separation the JOIN arm's `decode_join_body` delegate already has.
+/// same separation the JOIN arm, which reads its message on a cursor of its
+/// own through the message's document, already has.
 ///
 /// # Why `#[inline(never)]`, which is the MEASURED half
 ///

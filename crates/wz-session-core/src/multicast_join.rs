@@ -23,12 +23,6 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-// R311y605 — the cursor is now `decode_join_qos`'s alone: the base-body decode
-// that used to need it here moved to `crate::join_decode`. Gated, or the
-// `transport-qos`-off subset build fails on an unused import under
-// `-D warnings` (measured by `--features alloc,session-multicast,codec-join`).
-#[cfg(feature = "transport-qos")]
-use sce_forge_runtime::codec::SceCursor;
 #[cfg(feature = "transport-qos")]
 use sce_forge_runtime::codec::SliceSink;
 #[cfg(feature = "alloc")]
@@ -59,10 +53,6 @@ use crate::sn::MulticastTxConduits;
 // `_Z_MSG_EXT_ID_JOIN_PATCH`); the chain-MORE bit (`0x80`) it then carries, and the
 // header's `Z`, are the document's, from where the entry stands ([`join_chain`]).
 const JOIN_QOS_EXT_HEADER: u8 = crate::join_decode::JOIN_QOS_EXT_EID;
-/// The ext-id mask (`_Z_EXT_FULL_ID_MASK`, ext.h:30) — strips the chain-MORE bit
-/// so a chained (`0xD1`) and an un-chained (`0x51`) QoS ext compare equal.
-#[cfg(feature = "transport-qos")]
-const EXT_FULL_ID_MASK: u8 = 0x7F;
 
 /// The JOIN Patch extension header byte — id `0x7`, Z64/ZINT encoding, NOT
 /// mandatory, built from the SAME named constants the Init half reads
@@ -349,96 +339,64 @@ fn join_chain<'e>(
 ///
 /// ## Why this walks the whole chain rather than peeking one ext
 ///
-/// [`decode_join_qos`] reads only the LEADING ext, which is correct for its own
-/// question because a qos beacon puts the QoS ext first. The Patch ext has no
-/// such fixed position: pico emits it after the QoS ext on a qos beacon and as
-/// the ONLY ext on a non-qos one, and it sets the `Z` header flag in both cases
-/// (`_z_t_msg_make_join`: `next_sn._is_qos || has_patch`). A reader that
-/// assumed a position would therefore see a patch level from exactly one of the
-/// two beacon shapes.
+/// The Patch ext has no fixed position: pico emits it after the QoS ext on a qos
+/// beacon and as the ONLY ext on a non-qos one, and it sets the `Z` header flag
+/// in both cases (`_z_t_msg_make_join`: `next_sn._is_qos || has_patch`). A reader
+/// that assumed a position would therefore see a patch level from exactly one of
+/// the two beacon shapes.
 ///
-/// So this reuses the SSOTs that already exist for the unicast half rather
-/// than hand-rolling a third walker: the generated entry decoder for the Z-bit
-/// continuation loop (depth-bounded by `MAX_EXT_CHAIN_DEPTH`, as the owned decode
-/// is, so a malformed peer cannot pin the decoder) and
-/// [`crate::extpatch::patch_of_entry`] for the id / encoding match and the level
-/// projection, which [`crate::extpatch::peer_patch`] applies to an owned chain. The
-/// chain is read entry by entry where it lies and never owned, so a build with no
-/// allocator reads it too. The Init and Join halves of one wire fact are read by one
-/// rule each way.
+/// So the chain is the one the message's document reads
+/// ([`crate::join_decode::read_join`], under the depth bound a node reads of a
+/// transport chain), walked entry by entry where it lies and never owned, so a
+/// build with no allocator reads it too; each entry is matched by
+/// [`crate::extpatch::patch_of_entry`], the rule [`crate::extpatch::peer_patch`]
+/// applies to an owned Init chain. The Init and Join halves of one wire fact are
+/// read by one rule each way.
 #[cfg(feature = "reassembly")]
 pub fn decode_join_patch(bytes: &[u8]) -> u8 {
-    let Some(&header) = bytes.first() else {
+    let Some((join, _)) = crate::join_decode::read_join(bytes) else {
         return crate::extpatch::NO_PATCH;
     };
-    if header & 0x1f != wire_const::T_MID_JOIN {
-        return crate::extpatch::NO_PATCH;
-    }
-    if header & wire_const::FLAG_T_Z == 0 {
-        return crate::extpatch::NO_PATCH; // no extension chain -> no patch level
-    }
-    // The base body's width comes from the SHARED decode, exactly as
-    // `decode_join_qos` takes it (R311y605): the S-flag bit that selects two
-    // optional body fields is read in ONE place.
-    let Ok((_, consumed)) = crate::join_decode::decode_join_body(header, &bytes[1..]) else {
-        return crate::extpatch::NO_PATCH;
-    };
-    let mut cursor = sce_forge_runtime::codec::SceCursor::new(&bytes[1 + consumed..]);
-    // An unparseable chain, or one deeper than the bound the owned decode refuses,
-    // announces nothing: it reads as the owned decode's `Err` read.
-    let mut announced = None;
-    for _ in 0..crate::parse_error::MAX_EXT_CHAIN_DEPTH {
-        let Ok(entry) = wz_codecs::lent::ExtEntry::decode(&mut cursor) else {
-            return crate::extpatch::NO_PATCH;
-        };
-        if announced.is_none() {
-            announced = crate::extpatch::patch_of_entry(&entry);
-        }
-        if !entry.z() {
-            return announced.unwrap_or(crate::extpatch::NO_PATCH);
-        }
-    }
-    crate::extpatch::NO_PATCH
+    crate::ext_view::walked(join.extensions.as_ref())
+        .find_map(|entry| crate::extpatch::patch_of_entry(&entry))
+        .unwrap_or(crate::extpatch::NO_PATCH)
 }
 
-/// R311y227 — decode the JOIN QoS-SN extension into the announcer's per-priority
-/// next-SN pairs, or `None` when the JOIN is non-qos (no `Z` header flag, or the
-/// first ext is not `JOIN_QOS_EXT_HEADER`). The base body is re-decoded to
-/// position the cursor at the ext chain (cheap; the SCXML `Join` codec has no ext
-/// awareness, so the trailer is hand-parsed here — the multicast twin of the
-/// frame/fragment `ext_qos` hand-roll in `frame_encode`, mesh-path-B: no new
-/// `sce:*`). Only the leading QoS ext is honoured (pico emits it before any Patch
-/// ext, transport.c:71/90); a chained Patch ext after it is not needed here.
+/// R311y227 — the announcer's per-priority next-SN pairs from a JOIN's QoS-SN
+/// extension, or `None` when the JOIN carries none (a non-qos beacon) or does
+/// not read ([`crate::join_decode::read_join`]).
+///
+/// The extension is found in the chain the message's document reads by its
+/// identity, wherever it stands, as upstream finds it
+/// (`commons/zenoh-codec/src/transport/join.rs` @ `match iext::eid(ext) {`) and
+/// as the passive observer finds it in the same chain owned; its body is read by
+/// the one reader both use ([`crate::join_decode::qos_next_sns`]).
 #[cfg(feature = "transport-qos")]
 pub fn decode_join_qos(
     bytes: &[u8],
 ) -> Option<[crate::sn::MulticastRxPair; crate::qos::Priority::NUM]> {
-    let header = *bytes.first()?;
-    if header & 0x1f != wire_const::T_MID_JOIN {
-        return None;
-    }
-    if header & wire_const::FLAG_T_Z == 0 {
-        return None; // no extension chain -> non-qos JOIN
-    }
-    // R311y605 — the base body's width comes from the SHARED decode
-    // ([`crate::join_decode::decode_join_body`]) rather than from a second
-    // S-flag projection here. It used to re-decode with its own `s`, which
-    // meant the bit that selects two optional body fields was read in two
-    // places; the hoist that gave `parse_inbound` a JOIN arm made that three,
-    // so it became one.
-    let (_, consumed) = crate::join_decode::decode_join_body(header, &bytes[1..]).ok()?;
-    let mut cursor = SceCursor::new(&bytes[1 + consumed..]);
-    let ext_header = *cursor.peek_slice(1).ok()?.first()?;
-    cursor.advance(1).ok()?;
-    if ext_header & EXT_FULL_ID_MASK != JOIN_QOS_EXT_HEADER {
-        return None; // leading ext is not the QoS-SN advertisement
-    }
-    // The ZBuf is a VLE length and that many bytes; its body is read where it lies
-    // (`crate::vle::read_zbuf` copies it onto the heap, which a build with no
-    // allocator does not have).
-    let ext_len = usize::try_from(cursor.read_vle_u64().ok()?).ok()?;
-    let ext_body = cursor.peek_slice(ext_len).ok()?;
-    crate::join_decode::qos_next_sns(ext_body)
+    use crate::ext_view::ExtEntryView as _;
+    let (join, _) = crate::join_decode::read_join(bytes)?;
+    let qos = crate::ext_view::find_by_eid_in(
+        crate::ext_view::walked(join.extensions.as_ref()),
+        crate::join_decode::JOIN_QOS_EXT_EID,
+    )?;
+    crate::join_decode::qos_next_sns(qos.plain_zbuf()?)
+}
+
+/// The JOIN `dgram` holds with its extension chain taken away, written back by its
+/// document, which clears `Z` for a chain that is not there: the beacon of a peer
+/// that announces nothing, with this beacon's header and body.
+#[cfg(test)]
+pub(crate) fn join_without_chain(dgram: &[u8]) -> std::vec::Vec<u8> {
+    let (join, _) = crate::join_decode::read_join(dgram).expect("a JOIN");
+    let silent = wz_codecs::transport_join::TransportJoinView {
+        extensions: None,
+        ..join
+    };
+    let mut slot = [0u8; JOIN_MAX_BYTES];
+    let len = TransportJoinWire::write_window(&silent, &mut slot).expect("a JOIN fits its bound");
+    slot[..len].to_vec()
 }
 
 // R311y605 — the DECODE half now lives in [`crate::join_decode`], gated on
@@ -928,10 +886,12 @@ mod tests {
         let mut p = params(&[0x01, 0x02, 0x03, 0x04]);
         p.is_qos = true;
         let dgram = join0(&p);
-        let (_, consumed) =
-            crate::join_decode::decode_join_body(dgram[0], &dgram[1..]).expect("body decodes");
+        let (join, _) = crate::join_decode::read_join(&dgram).expect("a JOIN");
+        let first = crate::ext_view::walked(join.extensions.as_ref())
+            .next()
+            .expect("a chain");
         assert_eq!(
-            dgram[1 + consumed],
+            first.header,
             JOIN_QOS_EXT_HEADER | crate::ext_header::EXT_FLAG_Z,
             "the QoS ext chains to the Patch ext behind it -- pico's \
              `_Z_MSG_EXT_ID_JOIN_QOS | _Z_MSG_EXT_MORE(has_patch)`"
@@ -962,10 +922,8 @@ mod tests {
     fn a_beacon_that_announces_nothing_reads_as_no_patch() {
         let p = protocol_default_params(&[0x01, 0x02, 0x03, 0x04]);
         let dgram = join0(&p);
-        let (_, consumed) =
-            crate::join_decode::decode_join_body(dgram[0], &dgram[1..]).expect("body decodes");
-        let mut silent = dgram[..1 + consumed].to_vec();
-        silent[0] &= !wire_const::FLAG_T_Z;
+        let silent = join_without_chain(&dgram);
+        assert_eq!(silent[0] & wire_const::FLAG_T_Z, 0, "no chain, no Z");
         assert_eq!(
             decode_join_patch(&silent),
             crate::extpatch::NO_PATCH,
@@ -974,12 +932,84 @@ mod tests {
         // And the SAME truncation with `Z` still set is a chain that is not
         // there: a decoder that walked past the body would read body-adjacent
         // bytes as an ext header. It must refuse, not invent.
-        let mut lying = dgram[..1 + consumed].to_vec();
+        let mut lying = silent;
         lying[0] |= wire_const::FLAG_T_Z;
         assert_eq!(
             decode_join_patch(&lying),
             crate::extpatch::NO_PATCH,
             "an unparseable chain is an absent announcement, never a level"
+        );
+    }
+
+    /// Every reader of a received JOIN reads the chain its document reads, so a
+    /// JOIN whose `Z` announces a chain that is not there, or whose chain runs
+    /// past the bound a node holds of one, is no JOIN to any of them, its body
+    /// included; a chain at the bound is read.
+    #[test]
+    fn every_reader_refuses_a_join_whose_chain_does_not_read() {
+        use crate::ext_header::EXT_FLAG_Z;
+        use crate::join_decode::join_message_len;
+        use crate::parse_error::MAX_EXT_CHAIN_DEPTH;
+        let silent = join_without_chain(&join0(&protocol_default_params(&[0x01, 0x02])));
+        // The body, then `entries` unit extensions of id 0xf, chained.
+        let with_units = |entries: usize| {
+            let mut bytes = silent.clone();
+            bytes[0] |= wire_const::FLAG_T_Z;
+            for i in 0..entries {
+                bytes.push(if i + 1 < entries {
+                    0x0f | EXT_FLAG_Z
+                } else {
+                    0x0f
+                });
+            }
+            bytes
+        };
+        let at_bound = with_units(MAX_EXT_CHAIN_DEPTH);
+        assert_eq!(join_message_len(&at_bound), Some(at_bound.len()));
+        assert_eq!(decode_join_zid(&at_bound), Some(&[0x01u8, 0x02][..]));
+        let past_bound = with_units(MAX_EXT_CHAIN_DEPTH + 1);
+        let not_there = with_units(0);
+        for (refused, what) in [(&past_bound, "past the bound"), (&not_there, "not there")] {
+            assert_eq!(join_message_len(refused), None, "{what}");
+            assert!(decode_join(refused).is_none(), "{what}");
+            #[cfg(feature = "transport-qos")]
+            assert!(decode_join_qos(refused).is_none(), "{what}");
+            #[cfg(feature = "reassembly")]
+            assert_eq!(
+                decode_join_patch(refused),
+                crate::extpatch::NO_PATCH,
+                "{what}"
+            );
+        }
+    }
+
+    /// The QoS SNs and the patch level are found by their extensions' identity
+    /// wherever the chain holds them, as upstream finds them: the beacon's own
+    /// chain behind an entry of another id reads as the beacon does.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn a_joins_extensions_are_read_wherever_the_chain_holds_them() {
+        use crate::qos::Priority;
+        let mut p = params(&[0x01, 0x02, 0x03, 0x04]);
+        p.is_qos = true;
+        let mut tx = MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res));
+        for _ in 0..3 {
+            tx.mint(Priority::Data, true);
+        }
+        let dgram = encode_join(&p, &tx);
+        let silent = join_without_chain(&dgram);
+        let mut behind = silent.clone();
+        behind[0] |= wire_const::FLAG_T_Z;
+        behind.push(0x0f | crate::ext_header::EXT_FLAG_Z);
+        behind.extend_from_slice(&dgram[silent.len()..]);
+        let read = decode_join_qos(&behind).expect("the QoS SNs, second in the chain");
+        assert_eq!(Some(read), decode_join_qos(&dgram));
+        assert_eq!(read[Priority::Data as usize].reliable, 3);
+        #[cfg(all(feature = "transport-fragmentation", feature = "reassembly"))]
+        assert_eq!(
+            decode_join_patch(&behind),
+            crate::extpatch::CURRENT_PATCH,
+            "the patch level, third"
         );
     }
 
