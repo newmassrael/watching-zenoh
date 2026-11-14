@@ -124,6 +124,23 @@ fn park_the_batch_after_the_frame<R: SessionRuntime, T: TimeSource>(
         actions.park_pending_unit(crate::link::RxBytes::from(body));
     }
 }
+
+/// [`park_the_batch_after_the_frame`] for a frame the SN gate refused: its records are read to
+/// find where they end and handed to nobody, and what follows them is parked as the next unit
+/// of the batch. Upstream drops a refused frame by draining its reader and reads the batch on
+/// (`commons/zenoh-codec/src/transport/frame.rs` @
+/// `impl<R: BacktrackableReader> Drop for FrameReader<'_, R> {`), so a frame of the other
+/// reliability behind a stale one is still delivered. A payload whose records do not decode says
+/// nowhere, and nothing is parked.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+fn park_the_batch_after_a_refused_frame<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    payload: &[u8],
+) {
+    if let Ok(mut messages) = crate::network_message::parse_frame_payload(payload) {
+        park_the_batch_after_the_frame(actions, &mut messages);
+    }
+}
 // transport-lowlatency — the lean rx branch reads the leading message id
 // (wire_const) and synthesizes an empty ext list (Vec); transport-compression's
 // rx un-wrap holds the decompressed batch in a Vec too.
@@ -1247,6 +1264,11 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                     // Both gates are [`refuse_frame`], which the in-place
                     // receive path ([`dispatch_datagram`]) runs too.
                     if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
+                        // The frame's records are dropped and the batch goes on behind them,
+                        // unless the refusal ended the link.
+                        if matches!(refused, DriverLoopOutcome::RxSnRejected { .. }) {
+                            park_the_batch_after_a_refused_frame(actions, &payload);
+                        }
                         return refused;
                     }
                     // The lane of a data stream: a frame every record of which is a plain
@@ -2099,6 +2121,16 @@ fn unit_after_in_place_frame<R: SessionRuntime, T: TimeSource>(
     read
 }
 
+/// How many bytes of a `Frame`'s `payload` its records take, read and handed to nobody: all of
+/// it, or the bytes before the batch's next transport message. A walk that fails cannot say where
+/// the records end, and answers all of it, as a frame whose records do not decode is read no
+/// further.
+#[cfg(feature = "codec-frame")]
+fn frame_records_extent(payload: &[u8], record: &mut crate::network_message::RecordBuf) -> usize {
+    crate::network_message::try_for_each_record(payload, record, RECORD_FORM, |_| Ok(()))
+        .unwrap_or(payload.len())
+}
+
 /// The admissible `Frame` at the front of a unit, read where it lies.
 #[cfg(feature = "codec-frame")]
 fn frame_in_place<R: SessionRuntime, T: TimeSource>(
@@ -2128,8 +2160,18 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     let _ = chain;
     if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
         on_event.event(IterationEvent::Poll(&refused));
-        // A refused frame is dropped with what it carried; where its records end is not read.
-        return (DatagramPath::InPlace, unit.len());
+        // A frame the SN gate refused is dropped with its records, and the batch goes on behind
+        // them: a frame of the other reliability may follow it in the same batch. Upstream drains
+        // the refused frame's reader and reads on (`commons/zenoh-codec/src/transport/frame.rs` @
+        // `impl<R: BacktrackableReader> Drop for FrameReader<'_, R> {`). A refusal that ends
+        // the link reads nothing more.
+        let end = match refused {
+            DriverLoopOutcome::RxSnRejected { .. } => {
+                payload_at + frame_records_extent(&unit[payload_at..], record)
+            }
+            _ => unit.len(),
+        };
+        return (DatagramPath::InPlace, end);
     }
     let carrier = RecordCarrier {
         reliable,
