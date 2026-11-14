@@ -13625,6 +13625,29 @@
         "Open: a live handle keeps no QUIC packets, so QUIC is decrypted only by the file doors; a lent replay handle could decrypt QUIC from its container and does not yet.",
         "Open: keys a handle holds are not counted in wz_dissect_live_memory; while keys are held the pass runs after every push over every flow, a per-push cost not measured yet."
       ]
+    },
+    "Round 4487": {
+      "decision_summary": "The carries of rounds 4484 and 4486 are paid, and the hosted red of the last pushed head is paid with them. A live or replay handle now decrypts QUIC as it does TLS. Every packet a handle takes in is offered to the decryptor's opener for its flow. The Initial space opens without keys. Packets that arrive before their key are kept, bounded per flow and direction, and when keys arrive a flow that has not opened its application data is passed again through a fresh opener. What comes out is framed per call, and a message that spans two offers is walked from the plaintext the stream keeps. The file pass and the live path share one implementation of the QUIC opening. The memory document counts the kept packets and says why a handle's keys stay outside its row scope. A vsock flow's anomaly counts are now held to zero by a test, which the equation with the health counters relies on.\n\nMeasurement found that a handle holding keys paid a step per flow on every push, even with no TLS in the capture (+976 ns a push at 2048 flows on pc2). It also found that every packet located its flow by scanning the flow list twice. The flow table now keeps each key's position, and the continuing decryption pass returns at once unless some flow has work for it. The QUIC path finds its flows by key in the same way. Measured on the same capture on pc2, the keys' cost per push is now within noise at every flow count, and a push with 2048 flows held costs about 10 percent less. The largest remaining share of a push is the zenoh evidence model's logarithms, which is a separate question.\n\nThe hosted red came from round 4485 itself. It gave the segment ledger's receive a carrier argument, and a capi-c test built only with a non-default feature still passed the old five arguments. The test now names the carrier, and every crate that depends on the changed crates was test-built with all its features.",
+      "changes_bullets": [
+        "Live, follow and replay handles decrypt QUIC: a packet tap, kept packets with a bound, a reopen when keys grow, framing per call, one shared QUIC pass; the memory document goes to revision 2 with quic_packets.",
+        "FlowTable finds flows by key; decrypt_continuing returns unless a flow wants decryption; the QUIC offer and feed find flows by key; the live_keys_cost bench and interleaved_flows_capture fixture measure it.",
+        "A vsock anomaly test, the memory sentence about keys, and the capi-c segment sender test naming its carrier (the hosted red of d77c093ea2)."
+      ],
+      "verification_bullets": [
+        "On the build machine, on the merged branch: wz-capture with dissect and fixtures 1823 passed and with default features 1358 (the vsock, straddler and tap tests among them); wz-tls-record 67 plus 18 (the live QUIC tests: keys first, keys late, no key, follow owned and lent, the bound); wz-analyze 70 plus 73; wz-capi-dissect 244 plus the handle memory gate 4 (QUIC pushed with keys first and late, replay and replay-lent); Layer C1bo passed (the C consumer at memory 2); clippy of the four crates, each alone, clean; cargo doc of wz-capture with no features clean; doc_revision_consumer_pin agrees.",
+        "The red: wz-capi-c with all features, the segment sender tests, 4 passed; cargo check with all features and tests of wz-capi-replay, wz-replay, wz-runtime-tokio, wz-packet-socket, wz-workload, wz-integration-tests, wz-analyze, wz-capi-dissect, wz-tls-record and wz-capture, each alone, clean.",
+        "On pc2, live_keys_cost, ns a push, no key against a held key: before, 512 flows 6115 against 6363 and 2048 flows 12665 against 13895; after, over three runs, 512 flows 5888 to 6070 against 5938 to 6302 and 2048 flows 11303 to 11765 against 11291 to 11823. Fuzz regress of pcap (194 inputs) and live (195) passed, and 120 s of live found nothing.",
+        "Not run: the hosted lanes on this head."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the hosted run of this head at the start of the next round; 31 jobs of the run of d77c093ea2 were still queued when this was filed and graded nothing.",
+        "Open: a handle has no short connection id length, so a QUIC flow whose capture began after its handshake does not open on a handle; packets past the per-flow bound are counted by the decryptor and not stated in a document.",
+        "Open: the zenoh evidence model's logarithms are about two thirds of a push's time on pc2 (perf, live_keys_cost); not measured against an alternative yet."
+      ]
     }
   },
   "inventory_entries": {
