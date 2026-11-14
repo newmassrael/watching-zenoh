@@ -69,6 +69,13 @@ pub const Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION: ZResult = -70;
 /// see this rather than a generic failure or a success.
 pub const Z_ERR_CANCELLED: ZResult = -69;
 
+/// `z_timestamp_new` has no time left to give: the session already gave the greatest one there
+/// is, and every time it gives is greater than the last. Matches pico
+/// (`vendor/zenoh-pico/include/zenoh-pico/utils/result.h` @
+/// `_Z_ERR_TIMESTAMP_GENERATION_FAILED = -68,`) EXACTLY, the code pico's own `z_timestamp_new`
+/// returns for it.
+pub const Z_ERR_TIMESTAMP_GENERATION_FAILED: ZResult = -68;
+
 /// The session this call names is closed, or is not a session at all. Matches
 /// pico `_Z_ERR_SESSION_CLOSED` (`utils/result.h`) EXACTLY: a caller declaring a
 /// listener branches on it to learn the declaration was refused for want of a

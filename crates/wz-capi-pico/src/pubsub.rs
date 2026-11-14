@@ -47,7 +47,8 @@ use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::option_fields::unstable_option_fields;
 use crate::prelude::*;
 use crate::result::{
-    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
+    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
+    Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_OK,
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
@@ -664,13 +665,21 @@ fn wall_clock_ntp64() -> u64 {
 
 /// Mint a timestamp from a session's clock and zid (pico `z_timestamp_new`).
 ///
-/// pico's reads the time since the epoch, makes it strictly greater than the session's last
-/// (`vendor/zenoh-pico/src/api/api.c` @ `z_result_t z_timestamp_new(`), and pairs it with the
-/// session's zid; it applies no policy and fails only when the time cannot be read. With a
-/// registered clock this gives the session's node clock's time, which reads that clock and is
-/// strictly increasing too, whatever the clock's standing: the `clock-quality-stamping` policy is
-/// the stamper's (the data the node stamps), not a program's that asks for the time. With nothing
-/// registered it gives the wall clock with the session's zid, without pico's per-session ordering.
+/// pico's reads the time since the epoch, gives it when it is later than the last time the session
+/// gave and the last plus one otherwise, and pairs it with the session's zid
+/// (`vendor/zenoh-pico/src/api/api.c` @ `z_result_t z_timestamp_new(`); it applies no policy, and
+/// fails only when the time cannot be read or the session already gave the greatest time there is
+/// (`Z_ERR_TIMESTAMP_GENERATION_FAILED`). This reads one of two clocks and then applies pico's rule
+/// through the session's last time given:
+///
+/// - with a registered clock, the session's node clock, which reads that clock and applies no
+///   stamping policy: the `clock-quality-stamping` policy is the stamper's (the data the node
+///   stamps), not a program's that asks for the time;
+/// - with nothing registered, the wall clock.
+///
+/// A program may register a clock and remove it while the session is open, so one session's stamps
+/// can come from both; the one last time given is what keeps them strictly increasing across that,
+/// as pico's keeps them across a clock that steps back.
 #[no_mangle]
 pub unsafe extern "C" fn z_timestamp_new(
     ts: *mut z_timestamp_t,
@@ -684,69 +693,138 @@ pub unsafe extern "C" fn z_timestamp_new(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        // A program that registered a clock (`wz_ext_clock_source_register`) is given its time,
-        // through the session's node clock, so successive stamps strictly increase whatever the
-        // clock does. A registered clock that cannot say what time it is leaves no stamp to give:
-        // pico's own answer to a time it cannot read, and the system clock is not the fallback of
-        // a clock the program chose. With nothing registered the stamp is the wall clock, below.
-        #[cfg(feature = "clock-source")]
-        if !wz_node_time::clock_registry::GLOBAL.is_empty() {
-            return match clock_timestamp(&state.ext.hlc, state.drive.zid()) {
-                Some(given) => {
-                    *ts = given;
-                    Z_OK
-                }
-                None => Z_ERR_GENERIC,
-            };
-        }
+        // pico clears the timestamp before it reads the clock, so one it refuses is not valid.
         *ts = z_timestamp_t {
-            valid: true,
-            id: crate::zid::z_id_t {
-                id: state.drive.zid(),
-            },
-            // R311y569 — the WALL CLOCK, through wz's own NTP64 SSOT.
-            //
-            // This was `ntp64_from_millis(shared.now_monotonic_ms())`, the same
-            // defect the debt ledger had carried on the zenoh-c ABI since y557
-            // and the same fix. `now_monotonic_ms` is `Instant::elapsed()` from
-            // the moment the session was CONSTRUCTED, so the seconds half of the
-            // word counted session uptime rather than time — measured on the
-            // sibling ABI as `ntp_secs=0` where the real library printed
-            // `time(NULL)`.
-            //
-            // Found by looking: the zenoh-c fix names its own mechanism, and the
-            // mechanism is shared, so the question "does the other ABI do this
-            // too" answers itself. Both now read the wall clock through session-core's
-            // `EpochSource`, the source the storage stack stamps with.
-            time: wall_clock_ntp64(),
+            valid: false,
+            id: crate::zid::z_id_t::empty(),
+            time: 0,
         };
-        Z_OK
+        // A registered clock that cannot say what time it is leaves no time to give: pico's own
+        // answer to a time it cannot read, and the system clock is not the fallback of a clock the
+        // program chose.
+        #[cfg(feature = "clock-source")]
+        let reading = if wz_node_time::clock_registry::GLOBAL.is_empty() {
+            Some(wall_clock_ntp64())
+        } else {
+            clock_reading(&state.ext.hlc)
+        };
+        #[cfg(not(feature = "clock-source"))]
+        let reading = Some(wall_clock_ntp64());
+        match session_timestamp(reading, &state.ext.last_timestamp, state.drive.zid()) {
+            Ok(given) => {
+                *ts = given;
+                Z_OK
+            }
+            Err(code) => code,
+        }
     })
 }
 
-/// What [`z_timestamp_new`] gives a session whose node clock is `hlc` and whose id is `zid`, when a
-/// clock is registered: the clock's next time, with no stamping policy applied, or `None` when the
-/// clock cannot say what time it is.
-#[cfg(feature = "clock-source")]
-fn clock_timestamp(
-    hlc: &wz_node_time::node_clock::NodeHlc,
+/// What [`z_timestamp_new`] gives a session whose last time given is `last` and whose id is
+/// `zid`, for a clock that reads `reading` (`None` when it cannot say what time it is): pico's rule
+/// (`vendor/zenoh-pico/src/api/api.c` @ `if (time > s->_last_timestamp) {`), with pico's codes for
+/// a time that cannot be read and for a session with no greater time left to give.
+fn session_timestamp(
+    reading: Option<u64>,
+    last: &crate::last_timestamp::LastTimestamp,
     zid: [u8; crate::zid::Z_ID_SIZE],
-) -> Option<z_timestamp_t> {
-    let stamp = hlc.clock_stamp()?;
-    Some(z_timestamp_t {
+) -> Result<z_timestamp_t, ZResult> {
+    let reading = reading.ok_or(Z_ERR_GENERIC)?;
+    let time = last
+        .give(reading)
+        .ok_or(Z_ERR_TIMESTAMP_GENERATION_FAILED)?;
+    Ok(z_timestamp_t {
         valid: true,
         id: crate::zid::z_id_t { id: zid },
-        time: stamp.time,
+        time,
     })
+}
+
+#[cfg(test)]
+mod session_timestamp_tests {
+    use super::session_timestamp;
+    use crate::last_timestamp::LastTimestamp;
+    use crate::result::{Z_ERR_GENERIC, Z_ERR_TIMESTAMP_GENERATION_FAILED};
+
+    const ZID: [u8; crate::zid::Z_ID_SIZE] = [0x3a; crate::zid::Z_ID_SIZE];
+
+    fn time_of(reading: Option<u64>, last: &LastTimestamp) -> u64 {
+        match session_timestamp(reading, last, ZID) {
+            Ok(given) => {
+                assert!(given.valid, "a given timestamp is valid");
+                assert_eq!(given.id.id, ZID, "and carries the session's zid");
+                given.time
+            }
+            Err(code) => panic!("refused with {code}"),
+        }
+    }
+
+    /// The wall clock reads the same word twice (two calls within its resolution): the second
+    /// stamp is the first plus one, not a duplicate.
+    #[test]
+    fn a_wall_clock_that_reads_the_same_twice_gives_strictly_increasing_stamps() {
+        let last = LastTimestamp::new();
+        let wall = 0x6900_0000_8000_0000;
+        let first = time_of(Some(wall), &last);
+        let second = time_of(Some(wall), &last);
+        assert_eq!(first, wall);
+        assert_eq!(second, wall + 1);
+    }
+
+    /// A registered clock ahead of the wall clock is removed while the session is open: the wall
+    /// clock's next reading is behind the last stamp, and the stamp goes on from the last one
+    /// given rather than back to the wall clock.
+    #[test]
+    fn a_stamp_after_a_clock_ahead_is_removed_does_not_go_back() {
+        let last = LastTimestamp::new();
+        let wall = 0x6900_0000_0000_0000;
+        let registered = 0xEE6B_2800_0000_0010;
+        assert_eq!(time_of(Some(wall), &last), wall);
+        assert_eq!(time_of(Some(registered), &last), registered);
+        assert_eq!(time_of(Some(wall + 5), &last), registered + 1);
+    }
+
+    /// A clock that cannot say what time it is gives no stamp, with pico's generic code, and
+    /// leaves the last time given as it was.
+    #[test]
+    fn a_clock_that_cannot_be_read_is_refused_and_moves_nothing() {
+        let last = LastTimestamp::new();
+        assert_eq!(time_of(Some(50), &last), 50);
+        assert_eq!(
+            session_timestamp(None, &last, ZID).err(),
+            Some(Z_ERR_GENERIC)
+        );
+        assert_eq!(time_of(Some(50), &last), 51);
+    }
+
+    /// A session that gave the greatest time there is has none greater to give, and says so with
+    /// pico's own code.
+    #[test]
+    fn a_session_with_no_greater_time_left_is_refused_with_picos_code() {
+        let last = LastTimestamp::new();
+        assert_eq!(time_of(Some(u64::MAX), &last), u64::MAX);
+        assert_eq!(
+            session_timestamp(Some(u64::MAX), &last, ZID).err(),
+            Some(Z_ERR_TIMESTAMP_GENERATION_FAILED)
+        );
+    }
+}
+
+/// What [`z_timestamp_new`] reads, before the session's last time given is applied, when a clock is
+/// registered: the session's node clock's next time, with no stamping policy applied, or `None`
+/// when the clock cannot say what time it is.
+#[cfg(feature = "clock-source")]
+fn clock_reading(hlc: &wz_node_time::node_clock::NodeHlc) -> Option<u64> {
+    hlc.clock_stamp().map(|stamp| stamp.time)
 }
 
 #[cfg(all(test, feature = "clock-source"))]
-mod clock_timestamp_tests {
+mod clock_reading_tests {
     use wz_node_time::node_clock::{NodeHlc, TimestampingEnabled};
     use wz_node_time::timestamp_source::SystemEpoch;
     use wz_session_core::WhatAmI;
 
-    use super::clock_timestamp;
+    use super::clock_reading;
 
     /// A node whose clock is not trusted stamps none of its data under `trusted-only`, and a
     /// program that asks for the time is given the clock's all the same: one clock, so what the
@@ -765,24 +843,20 @@ mod clock_timestamp_tests {
             hlc.stamp().is_none(),
             "no reference reported: no data is stamped"
         );
-        let first = clock_timestamp(&hlc, zid).expect("the program is given the time");
-        assert!(first.valid);
-        assert_eq!(first.id.id, zid);
+        let first = clock_reading(&hlc).expect("the program is given the time");
         assert!(hlc.report_sync_acquired());
         let stamped = hlc.stamp().expect("a trusted clock stamps data").time;
-        let second = clock_timestamp(&hlc, zid).expect("and given it again");
+        let second = clock_reading(&hlc).expect("and given it again");
         assert!(
-            first.time < stamped && stamped < second.time,
-            "one clock: {} {stamped} {}",
-            first.time,
-            second.time
+            first < stamped && stamped < second,
+            "one clock: {first} {stamped} {second}"
         );
     }
 
     /// A node that holds no clock has no time to give from it.
     #[test]
     fn a_session_with_no_clock_gives_no_time_from_it() {
-        assert!(clock_timestamp(&NodeHlc::disabled(), [0x5d; crate::zid::Z_ID_SIZE]).is_none());
+        assert!(clock_reading(&NodeHlc::disabled()).is_none());
     }
 }
 
