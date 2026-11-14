@@ -507,5 +507,20 @@ required-features = [
 name = "static_link_handle"
 required-features = ["session-slot"]
 
+# The receive of the slot profile built with NO allocator (`--no-default-features`): a
+# datagram of several transport messages read where it lies, by the process-wide
+# observer of closed sinks, at zero allocations. A pair needs both handshake halves,
+# and the declaration it counts needs `declare-subscriber`. With `alloc` the file is
+# empty (its own `cfg`): what a heap build does with the same datagram is
+# `slot_control_records`'.
+[[test]]
+name = "slot_frames_without_alloc"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "declare-subscriber",
+    "session-slot",
+]
+
 [lints]
 workspace = true

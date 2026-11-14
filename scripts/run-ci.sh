@@ -12953,10 +12953,22 @@ layer_c1m_session_lwip() {
     # ZERO allocations (the one interest that asks for the current subscribers owns
     # one allocation, the answer's owned build, which the file names), a frame that
     # carries a chain of its own costing the same, and the owned builders of the sends
-    # bounded: 3 = what that command PRINTED.
+    # bounded: 3 = what that command PRINTED. The fourth reads a datagram of two Frames, then
+    # one whose first Frame the SN gate refuses: each admitted Frame's record is told, the
+    # second Frame from the unit parked behind the first, as this build has `alloc`.
     wz_test_args wz-session-lwip slot_control_records
-    _runci_guarded_test "C1m slot control records" 3 \
+    _runci_guarded_test "C1m slot control records" 4 \
         cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,codec-response-final,session-slot \
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    # The same two datagrams on the slot profile built with NO allocator (`--no-default-features`,
+    # so no crate of the session tier links `alloc`): the walk that reads a datagram on where it
+    # lies, which no build with `alloc` compiles, both Frames' records told in the one iteration
+    # through the slot observer of closed sinks, at zero allocations. Every other leg of this
+    # crate keeps the default `alloc`. 1 test.
+    wz_test_args wz-session-lwip slot_frames_without_alloc
+    _runci_guarded_test "C1m slot frames without alloc" 1 \
+        cargo test -p wz-session-lwip --no-default-features \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,codec-response-final,session-slot \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # Fixed-memory step S6 -- the PUMP and the RUNTIME under it, counted
@@ -26071,6 +26083,12 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh push put chain)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_push_put_chain || return 1
+    # A batch of several transport messages (Frames of both reliabilities, a KeepAlive behind a
+    # Frame), written by upstream's codec: the observer's reader and the participant's read the
+    # same messages, in the same Frames and order, as upstream's reader. Two tests, one a reader.
+    _runci_guarded_test "Layer E18 (differential, zenoh rx batch)" 2 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_rx_batch || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-config files)" 4 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_config_file || return 1
