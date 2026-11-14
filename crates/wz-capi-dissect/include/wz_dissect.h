@@ -2599,7 +2599,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":10},"ok":true,
+ *     {"document":{"name":"session_table","revision":11},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
@@ -2630,10 +2630,18 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                             "encrypted":"clear","bytes":64,
  *                             "zenoh":"yes","announced_version":"own",
  *                             "zenoh_evidence":{...},
- *                             "unit_readings":{...}}]}],
+ *                             "unit_readings":{...},
+ *                             "stream_anomalies":{
+ *                               "low_to_high":{"retransmits":0,
+ *                                 "out_of_order":0,"partial_overlaps":0},
+ *                               "high_to_low":{"retransmits":0,
+ *                                 "out_of_order":0,"partial_overlaps":0}},
+ *                             "unstated":[]}]}],
  *      "excluded":[{"why":"multicast_group","count":0},
  *                  {"why":"scouting_only","count":0}],
- *      "dropped_by_limits":{...}}
+ *      "dropped_by_limits":{...},
+ *      "evicted_stream_anomalies":{"retransmits":0,"out_of_order":0,
+ *                                  "partial_overlaps":0}}
  *
  * A SESSION IS A PAIR OF ZIDS. The flows whose handshake named the same two
  * nodes (an Init in each direction, naming two different nodes: the node plane's
@@ -2700,8 +2708,49 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                below.
  *   `flows`      the flows the row is made of, each with the flow object every
  *                other document carries (so a consumer can join), its `encrypted`
- *                finding, its own `bytes`, its own three zenoh keys and its own
- *                `unit_readings`.
+ *                finding, its own `bytes`, its own three zenoh keys, its own
+ *                `unit_readings`, its `stream_anomalies` (session_table revision
+ *                11; see STREAM ANOMALIES below) and its own `unstated`, which
+ *                names a null cell of the flow as the row's names one of the row.
+ *
+ * STREAM ANOMALIES. A TCP flow's `stream_anomalies` holds, for each direction
+ * of its flow key, what that direction's reassembler counted:
+ *
+ *   {"low_to_high":{"retransmits":R,"out_of_order":O,"partial_overlaps":P},
+ *    "high_to_low":{"retransmits":R,"out_of_order":O,"partial_overlaps":P}}
+ *
+ *   `low_to_high`       segments sent from the flow object's `low` endpoint;
+ *   `high_to_low`       from its `high` endpoint;
+ *   `retransmits`       segments that carried only bytes already delivered;
+ *   `out_of_order`      segments that arrived ahead of the expected sequence
+ *                       number and were held until the gap filled or was given
+ *                       up on;
+ *   `partial_overlaps`  segments that repeated some delivered bytes and carried
+ *                       new ones as well.
+ *
+ * They count EVENTS, not segments: a segment held out of order and later
+ * absorbed with an overlap is counted under both, so the three are not a
+ * partition and their sum is not a segment count. They are the counters the
+ * health document's `streams` group sums (wz_dissect_live_health,
+ * `health.streams` in wz_dissect_pcap_summary), read from the same
+ * reassemblers, and a retention ceiling moves none of them. A TLS flow is a
+ * TCP flow and states them whatever its encryption. A link that numbers no
+ * bytes on the wire cannot show a segment repeated or early, so `udp` (QUIC
+ * included), `raweth` and `serial` flows, and `vsock` flows (whose stream this
+ * reader numbers itself as it arrives), are null with the reason
+ * `no_sequence`, never zeros. A row has no sum of them: the flows of one
+ * session need not share a `low` end.
+ *
+ * `evicted_stream_anomalies` is the same three counts, both directions
+ * together, over every flow the table's ceiling evicted (counted in
+ * `dropped_by_limits.flows`): an evicted flow has no row, and its counts are
+ * kept rather than lost. So within one document
+ *
+ *   the sum over every flow of both directions + evicted_stream_anomalies
+ *     = the health counters `retransmits`, `out_of_order`, `partial_overlaps`
+ *
+ * of the same dissection, counter by counter. A live handle's health document
+ * agrees with the table when no packet was pushed between the two calls.
  *
  * WHETHER A FLOW IS ZENOH. Arbitrary bytes decode as zenoh transport messages:
  * a datagram on any port is read as one, and a few bytes make a KeepAlive or a
@@ -2862,25 +2911,28 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * the `unit_reading` check, beside the others; a consumer must not draw its own
  * verdict from the tallies.
  *
- * EVERY CELL IS PRESENT ON EVERY ROW. A value this reader cannot state is `null`
- * and the row's `unstated` names it with a REASON, so a cell is null exactly when
- * it is named there:
+ * EVERY CELL IS PRESENT ON EVERY ROW AND EVERY FLOW. A value this reader cannot
+ * state is `null` and the `unstated` of the row or flow it sits in names it with
+ * a REASON, so a cell is null exactly when it is named there:
  *
  *   `not_in_capture`  the message that would state it is not in what was read (a
  *                     capture that began after the handshake);
  *   `encrypted`       the flow is an encrypted transport and no key was applied;
  *   `no_clock`        no packet of the session carried a timestamp;
  *   `mixed`           the evidence disagrees: the row's flows differ, or one
- *                     flow's own Inits do (two InitSyns and no InitAck).
+ *                     flow's own Inits do (two InitSyns and no InitAck);
+ *   `no_sequence`     the link numbers no bytes on the wire (session_table
+ *                     revision 11): see STREAM ANOMALIES.
  *
  * The reasons a cell can carry:
  *   `initiator`, `acceptor`            `not_in_capture`, `encrypted`, `mixed`
  *   `link`                             `mixed`
  *   `phase`, `frames`                  `encrypted`
  *   `first_seen_ts_ns`, `last_seen_ts_ns`   `no_clock`
+ *   `stream_anomalies` (a flow's)      `no_sequence`
  * An `evicted` reason does not exist: a flow the table's ceiling evicted has no
  * row, so no cell could say it. That loss is stated for the whole document, by
- * dropped_by_limits.
+ * dropped_by_limits, and its anomaly counts by `evicted_stream_anomalies`.
  *
  * `encrypted` is `clear` (zenoh messages of a kind this reader knows were
  * decoded from the flow's own bytes), `encrypted_unreadable` (a TLS or QUIC

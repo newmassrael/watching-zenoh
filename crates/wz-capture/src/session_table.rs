@@ -35,12 +35,16 @@
 //! * `frames` is the count of messages EVER produced for the flow's lists
 //!   ([`crate::messages::MessageList::produced`]);
 //! * `bytes` is the flow's recovered byte count (`ByteResidue::recovered`), taken
-//!   at the point the flow's bytes are recovered, before anything reads them.
+//!   at the point the flow's bytes are recovered, before anything reads them;
+//! * a TCP flow's `stream_anomalies` are its two assemblers' counters
+//!   ([`crate::tcp::StreamAssembler::anomalies`]), counted as segments arrive
+//!   and the fields the dissection's health sums.
 //!
 //! # What a cell that cannot be stated looks like
 //!
 //! A value this reader cannot state is an explicit `null`, never an omitted key,
-//! and the row's `unstated` list carries one entry for it naming the cell and a
+//! and the `unstated` list of the row or flow object it sits in carries one
+//! entry for it naming the cell and a
 //! REASON WORD: a consumer shows an unknown as "not read" and must not have to
 //! test for a key to learn that. The reasons are the closed set [`Unstated`],
 //! declared beside the document and held to this walk by a test, and which of
@@ -66,8 +70,9 @@ use wz_session_core::passive::{
 use wz_session_core::scouting_message::ScoutingFrame;
 
 use crate::link::{FlowKey, Integrity, LinkKind};
+use crate::tcp::StreamAnomalies;
 use crate::zenoh_evidence::{Observation, ZenohEvidence};
-use crate::{Dissection, Framing};
+use crate::{Dissection, FlowDissection, Framing};
 
 /// What the ingest path keeps about one flow that no retention bound may take
 /// away.
@@ -729,9 +734,10 @@ impl LinkIngest {
     }
 }
 
-/// WHY a cell of a row is `null`: the closed set of reasons, one word each.
+/// WHY a cell of a row or of a flow object is `null`: the closed set of
+/// reasons, one word each.
 ///
-/// Four, and each one is something the code can distinguish rather than a word a
+/// Five, and each one is something the code can distinguish rather than a word a
 /// consumer might like to read:
 ///
 /// * `not_in_capture` -- the message that would state the value is not among
@@ -741,11 +747,16 @@ impl LinkIngest {
 /// * `no_clock` -- no packet of the flow carried a timestamp;
 /// * `mixed` -- the evidence does not agree on one value: the row groups several
 ///   flows and they disagree, or one flow's own Inits do (both directions sent an
-///   InitSyn), so no one value is the session's.
+///   InitSyn), so no one value is the session's;
+/// * `no_sequence` -- the link numbers no bytes on the wire, so a segment cannot
+///   be seen to repeat or to arrive early: a datagram link (UDP, raweth), the
+///   serial line, and AF_VSOCK, whose stream this reader numbers itself as it
+///   arrives.
 ///
 /// An `evicted` reason is deliberately absent. A flow the table's ceiling evicts
 /// has no row at all, so no cell can say it; the loss is stated once for the
-/// document, by `dropped_by_limits`.
+/// document, by `dropped_by_limits`, and the flow's stream anomaly counts by
+/// `evicted_stream_anomalies` ([`Dissection::evicted_stream_anomalies`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unstated {
     /// The handshake that would state it is not in the capture.
@@ -756,6 +767,8 @@ pub enum Unstated {
     NoClock,
     /// The flows of the row disagree.
     Mixed,
+    /// The link numbers no bytes on the wire.
+    NoSequence,
 }
 
 impl Unstated {
@@ -766,23 +779,26 @@ impl Unstated {
             Unstated::Encrypted => "encrypted",
             Unstated::NoClock => "no_clock",
             Unstated::Mixed => "mixed",
+            Unstated::NoSequence => "no_sequence",
         }
     }
 
     /// Every reason, from an exhaustive match so the array cannot fall behind
     /// the enum.
-    pub fn all() -> [Unstated; 4] {
+    pub fn all() -> [Unstated; 5] {
         let one = |u: Unstated| match u {
             Unstated::NotInCapture => Unstated::NotInCapture,
             Unstated::Encrypted => Unstated::Encrypted,
             Unstated::NoClock => Unstated::NoClock,
             Unstated::Mixed => Unstated::Mixed,
+            Unstated::NoSequence => Unstated::NoSequence,
         };
         [
             one(Unstated::NotInCapture),
             one(Unstated::Encrypted),
             one(Unstated::NoClock),
             one(Unstated::Mixed),
+            one(Unstated::NoSequence),
         ]
     }
 
@@ -794,8 +810,9 @@ impl Unstated {
     }
 }
 
-/// The cells of a row that can be `null`. A cell that is `null` is named, with
-/// its reason, in the row's `unstated` list.
+/// The cells that can be `null`: a row's, and one of each flow object of a row
+/// ([`Self::on_flow`]). A cell that is `null` is named, with its reason, in the
+/// `unstated` list of the object it sits in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cell {
     /// `initiator`, the zid of the InitSyn's sender.
@@ -812,12 +829,14 @@ pub enum Cell {
     LastSeen,
     /// `frames`.
     Frames,
+    /// `stream_anomalies`, a cell of a flow object.
+    StreamAnomalies,
 }
 
 impl Cell {
     /// Every cell, from an exhaustive match so the array cannot fall behind the
     /// enum: a cell added later fails to compile here.
-    pub fn all() -> [Cell; 7] {
+    pub fn all() -> [Cell; 8] {
         let one = |c: Cell| match c {
             Cell::Initiator => Cell::Initiator,
             Cell::Acceptor => Cell::Acceptor,
@@ -826,6 +845,7 @@ impl Cell {
             Cell::FirstSeen => Cell::FirstSeen,
             Cell::LastSeen => Cell::LastSeen,
             Cell::Frames => Cell::Frames,
+            Cell::StreamAnomalies => Cell::StreamAnomalies,
         };
         [
             one(Cell::Initiator),
@@ -835,6 +855,7 @@ impl Cell {
             one(Cell::FirstSeen),
             one(Cell::LastSeen),
             one(Cell::Frames),
+            one(Cell::StreamAnomalies),
         ]
     }
 
@@ -848,6 +869,24 @@ impl Cell {
             Cell::FirstSeen => "first_seen_ts_ns",
             Cell::LastSeen => "last_seen_ts_ns",
             Cell::Frames => "frames",
+            Cell::StreamAnomalies => "stream_anomalies",
+        }
+    }
+
+    /// Whether the cell sits on each flow object of a row rather than on the
+    /// row. A cell of the flow has no row-level twin when its value is a
+    /// statement about one direction of one flow: the rows of a session over
+    /// several links have no one `low` end to orient a sum by.
+    pub const fn on_flow(self) -> bool {
+        match self {
+            Cell::StreamAnomalies => true,
+            Cell::Initiator
+            | Cell::Acceptor
+            | Cell::Link
+            | Cell::Phase
+            | Cell::FirstSeen
+            | Cell::LastSeen
+            | Cell::Frames => false,
         }
     }
 
@@ -876,7 +915,44 @@ impl Cell {
             Cell::Link => &[Unstated::Mixed],
             Cell::Phase | Cell::Frames => &[Unstated::Encrypted],
             Cell::FirstSeen | Cell::LastSeen => &[Unstated::NoClock],
+            Cell::StreamAnomalies => &[Unstated::NoSequence],
         }
+    }
+}
+
+/// A stream flow's anomaly counters, one set per direction of its flow key.
+///
+/// Read off the flow's two assemblers when the table is built, the fields
+/// [`crate::DissectionHealth`] sums: what an assembler counted it keeps for the
+/// flow's life, so a retention ceiling moves none of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirectedAnomalies {
+    /// From the flow key's `low` endpoint toward `high` ([`Direction::A`]).
+    pub low_to_high: StreamAnomalies,
+    /// From `high` toward `low` ([`Direction::B`]).
+    pub high_to_low: StreamAnomalies,
+}
+
+impl DirectedAnomalies {
+    /// One stream flow's, from its two assemblers, where its link numbers its
+    /// bytes: TCP. An AF_VSOCK flow is a stream as well, and its assemblers
+    /// are fed a sequence this reader writes as the bytes arrive, so a repeat
+    /// or an early segment cannot occur on it and a zero would be no reading.
+    pub fn of(flow: &FlowDissection) -> Stated<Self> {
+        match flow.flow.link() {
+            LinkKind::Tcp => Ok(Self {
+                low_to_high: flow.low_to_high.anomalies(),
+                high_to_low: flow.high_to_low.anomalies(),
+            }),
+            LinkKind::Vsock | LinkKind::Udp | LinkKind::RawEth | LinkKind::Serial => {
+                Err(Unstated::NoSequence)
+            }
+        }
+    }
+
+    /// Both directions together.
+    pub fn both(self) -> StreamAnomalies {
+        self.low_to_high.and(self.high_to_low)
     }
 }
 
@@ -1048,6 +1124,9 @@ pub struct Link {
     pub evidence: ZenohEvidence,
     /// How the flow's framing units read.
     pub readings: ReadingEvidence,
+    /// The flow's stream anomaly counters per direction, or why the link has
+    /// none ([`DirectedAnomalies::of`]).
+    pub stream_anomalies: Stated<DirectedAnomalies>,
 }
 
 /// One row: a session, or a flow whose session is not known.
@@ -1230,6 +1309,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             f.residue().recovered,
             &f.ingest,
             f.session_observations(),
+            DirectedAnomalies::of(f),
         ));
     }
 
@@ -1272,6 +1352,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             f.residue().recovered,
             &f.ingest,
             f.session_observations(),
+            Err(Unstated::NoSequence),
         ));
     }
 
@@ -1290,6 +1371,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             census.bytes as u64,
             &d.serial_ingest,
             d.serial_session_observations(),
+            Err(Unstated::NoSequence),
         ));
     }
     (links, excluded)
@@ -1355,6 +1437,10 @@ impl SessionObservations {
 
 /// One flow's link, the cells that depend on whether it could be read decided
 /// in ONE place.
+///
+/// `stream_anomalies` does not depend on that: the counters are of the
+/// transport under any encryption, so an unreadable TLS flow states them.
+#[allow(clippy::too_many_arguments)]
 fn link_of(
     flow: FlowKey,
     encryption: Encryption,
@@ -1363,6 +1449,7 @@ fn link_of(
     bytes: u64,
     ingest: &LinkIngest,
     sessions: SessionObservations,
+    stream_anomalies: Stated<DirectedAnomalies>,
 ) -> Link {
     let unreadable = encryption == Encryption::EncryptedUnreadable;
     // The role cells. A zid the Inits do not give is absent for the reason that
@@ -1417,6 +1504,7 @@ fn link_of(
         versions: ingest.versions(),
         evidence: ingest.evidence(sessions),
         readings: ingest.readings(),
+        stream_anomalies,
     }
 }
 

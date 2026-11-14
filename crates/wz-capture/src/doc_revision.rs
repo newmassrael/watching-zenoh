@@ -3672,6 +3672,27 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SESSION_TABLE_R5_CARRIES,
     },
+    // Revision 11 ADDS `stream_anomalies` and `unstated` to every flow of a
+    // row, and `evicted_stream_anomalies` to the document, and retires nothing.
+    // A TCP flow's `stream_anomalies` is `low_to_high` and `high_to_low`, each
+    // `retransmits`, `out_of_order` and `partial_overlaps`: the event counts of
+    // that direction's assembler, the fields the health document's `streams`
+    // sums. Any other link is `null`, named in the flow's `unstated` with the
+    // reason `no_sequence`, which joins the `reason` family as
+    // `stream_anomalies` joins the `cell` family. `evicted_stream_anomalies` is
+    // the same three counts over the flows the table's ceiling evicted, both
+    // directions together, so the flows' counts and it add up to the health
+    // counters of the same dissection. No `carries` row moves. A cached
+    // document of revision 10 lacks the keys and should be read again.
+    DocumentShape {
+        document: SESSION_TABLE,
+        revision: 11,
+        keys: SESSION_TABLE_R11_KEYS,
+        retiring: &[],
+        families: SESSION_TABLE_R11_FAMILIES,
+        planes: &[],
+        carries: SESSION_TABLE_R5_CARRIES,
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -27408,6 +27429,173 @@ pub const FIELDS_R46_FAMILIES: &[ValueFamily] = &[
     },
 ];
 
+/// The keys the `session_table` document carries at revision 11: revision 7's
+/// PLUS a flow's `stream_anomalies` (`low_to_high`, `high_to_low`, each
+/// `retransmits`, `out_of_order` and `partial_overlaps`) and
+/// `evicted_stream_anomalies`. A flow's `unstated` is a key revision 7 already
+/// had on a row.
+pub const SESSION_TABLE_R11_KEYS: &[&str] = &[
+    "acceptor",
+    "addr",
+    "announced_version",
+    "bytes",
+    "caps",
+    "cell",
+    "check",
+    "checks",
+    "confirmed",
+    "count",
+    "crossed_at_packet",
+    "document",
+    "dropped_by_limits",
+    "encrypted",
+    "eps_basis",
+    "evicted_stream_anomalies",
+    "excluded",
+    "explained",
+    "family",
+    "first_seen_ts_ns",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "high",
+    "high_to_low",
+    "initiator",
+    "last_seen_ts_ns",
+    "link",
+    "log2_lr_max_millibits",
+    "log2_lr_millibits",
+    "log2_lr_min_millibits",
+    "log2_lr_no_max_millibits",
+    "log2_lr_no_millibits",
+    "log2_lr_no_min_millibits",
+    "low",
+    "low_to_high",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "millibits",
+    "model",
+    "name",
+    "no_at_millibits",
+    "no_millibits",
+    "ok",
+    "out_of_order",
+    "partial_overlaps",
+    "phase",
+    "port",
+    "q_basis",
+    "reason",
+    "refusal",
+    "residual",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sessions",
+    "skipped",
+    "skipped_packets",
+    "stream_anomalies",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "strength",
+    "undecoded",
+    "unit_readings",
+    "units",
+    "unstated",
+    "violated",
+    "why",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+];
+
+/// The value families the `session_table` document declares at revision 11:
+/// revision 8's, with `stream_anomalies` in `cell` and `no_sequence` in
+/// `reason`.
+pub const SESSION_TABLE_R11_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "cell",
+        values: &[
+            "acceptor",
+            "first_seen_ts_ns",
+            "frames",
+            "initiator",
+            "last_seen_ts_ns",
+            "link",
+            "phase",
+            "stream_anomalies",
+        ],
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R50,
+    },
+    ValueFamily {
+        key: "encrypted",
+        values: &[
+            "clear",
+            "decrypted_quic",
+            "decrypted_tls",
+            "encrypted_unreadable",
+            "mixed",
+            "unknown",
+        ],
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_EPS_BASIS_R50,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "reason",
+        values: &[
+            "encrypted",
+            "mixed",
+            "no_clock",
+            "no_sequence",
+            "not_in_capture",
+        ],
+    },
+    ValueFamily {
+        key: "refusal",
+        values: &["damaged", "not_a_capture", "truncated"],
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "why",
+        values: &["multicast_group", "scouting_only"],
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
 /// The keys the `session_table` document carries at revision 7: revision 6's
 /// PLUS the field document's revision 49 keys, on every row and on every flow
 /// of a row.
@@ -31550,7 +31738,11 @@ mod tests {
             // To 7 with model 3, as the field document's 49, and a row of a
             // pair a test of its own. To 8, 9 and 10 with models 4, 5 and 6,
             // as the field document's 50, 53 and 54.
-            (SESSION_TABLE, 10),
+            // To 11 when every flow carried `stream_anomalies` and its own
+            // `unstated`, and the document `evicted_stream_anomalies`: keys
+            // arrive, `no_sequence` and `stream_anomalies` join two families,
+            // nothing retires.
+            (SESSION_TABLE, 11),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.

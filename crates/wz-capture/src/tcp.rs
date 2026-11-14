@@ -427,6 +427,33 @@ pub enum SegmentOutcome {
 /// [`StreamAssembler::bytes_missing`].
 pub const DEFAULT_GAP_PATIENCE: usize = 64;
 
+/// The three anomaly counters of one direction's assembler, read together
+/// ([`StreamAssembler::anomalies`]).
+///
+/// EVENT counts, with the caveat [`StreamAssembler::retransmits`] gives: one
+/// segment can be counted under two of them, so the three are not a partition of
+/// anything and their sum is not a segment count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamAnomalies {
+    /// [`StreamAssembler::retransmits`].
+    pub retransmits: usize,
+    /// [`StreamAssembler::out_of_order`].
+    pub out_of_order: usize,
+    /// [`StreamAssembler::partial_overlaps`].
+    pub partial_overlaps: usize,
+}
+
+impl StreamAnomalies {
+    /// Two sets of counters added, each counter on its own.
+    pub fn and(self, other: Self) -> Self {
+        Self {
+            retransmits: self.retransmits.saturating_add(other.retransmits),
+            out_of_order: self.out_of_order.saturating_add(other.out_of_order),
+            partial_overlaps: self.partial_overlaps.saturating_add(other.partial_overlaps),
+        }
+    }
+}
+
 /// One DIRECTION of one TCP connection, reassembled.
 #[derive(Debug)]
 pub struct StreamAssembler {
@@ -1070,6 +1097,17 @@ impl StreamAssembler {
     /// on [`Self::retransmits`].
     pub fn partial_overlaps(&self) -> usize {
         self.partial_overlaps
+    }
+
+    /// The three counters above as one value: what the session table states
+    /// per direction, read from the same fields [`crate::DissectionHealth`]
+    /// sums over every direction.
+    pub fn anomalies(&self) -> StreamAnomalies {
+        StreamAnomalies {
+            retransmits: self.retransmits,
+            out_of_order: self.out_of_order,
+            partial_overlaps: self.partial_overlaps,
+        }
     }
 
     /// Absorb one payload against the current `next_seq`, handling the

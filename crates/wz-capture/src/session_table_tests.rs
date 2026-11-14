@@ -31,9 +31,11 @@ use wz_session_core::wire_const;
 use crate::datagram_tests::{fill_ipv4_checksum, fill_tcp_checksum, udp_packet, udp_packet_v6};
 use crate::link::LINKTYPE_ETHERNET;
 use crate::session_table::{
-    session_table, AnnouncedVersion, Cell, Encryption, SessionRow, Unstated, Why, ZenohVerdict,
+    session_table, AnnouncedVersion, Cell, DirectedAnomalies, Encryption, SessionRow, Unstated,
+    Why, ZenohVerdict,
 };
 use crate::session_table_json::{refusal_json, session_table_json, Refusal};
+use crate::tcp::StreamAnomalies;
 use crate::{Dissection, DissectionLimits};
 
 /// What a door that reads a container under a ceiling writes: the table, or the
@@ -821,6 +823,274 @@ fn an_out_of_order_segment_is_reassembled_and_counted_once() {
     assert_eq!(row.bytes, tcp.wire_bytes);
 }
 
+// ── stream anomalies ───────────────────────────────────────────────────────
+
+/// One segment of `tcp`, laid by hand at `seq` from the dialler or the
+/// acceptor, without moving the connection's own sequence numbers.
+fn raw_segment(tcp: &Tcp, from_dialer: bool, seq: u32, payload: &[u8]) -> Vec<u8> {
+    if from_dialer {
+        tcp_segment(
+            tcp.dialer,
+            tcp.sport,
+            tcp.acceptor,
+            SERVER_PORT,
+            seq,
+            payload,
+        )
+    } else {
+        tcp_segment(
+            tcp.acceptor,
+            SERVER_PORT,
+            tcp.dialer,
+            tcp.sport,
+            seq,
+            payload,
+        )
+    }
+}
+
+/// A TCP session from its start on `sport`, laid into `out` from `at_ns`, whose
+/// two directions misbehave differently, so a reader that swapped them or
+/// summed them could not pass:
+///
+/// * the DIALLER repeats one keep-alive's segment and sends the next two out
+///   of order: one retransmit, one segment held out of order;
+/// * the ACCEPTOR repeats one keep-alive's segment and then sends the last byte
+///   of it again in front of the next keep-alive: one retransmit, one partial
+///   overlap.
+fn anomalous_tcp(out: &mut Packets, dialer_low: bool, sport: u16, at_ns: u64) -> Tcp {
+    let mut tcp = Tcp::new(dialer_low, sport);
+    tcp.handshake(out, at_ns, &ZID_A, &ZID_B);
+    let unit = stream_unit(&keepalive());
+    let len = unit.len() as u32;
+
+    let repeated = tcp.seq[0];
+    tcp.send(out, at_ns + 10_000, true, &keepalive());
+    out.push(at_ns + 11_000, raw_segment(&tcp, true, repeated, &unit));
+    let first = tcp.seq[0];
+    out.push(at_ns + 12_000, raw_segment(&tcp, true, first + len, &unit));
+    out.push(at_ns + 13_000, raw_segment(&tcp, true, first, &unit));
+    tcp.seq[0] += 2 * len;
+    tcp.messages += 2;
+    tcp.wire_bytes += 2 * u64::from(len);
+
+    let repeated = tcp.seq[1];
+    tcp.send(out, at_ns + 14_000, false, &keepalive());
+    out.push(at_ns + 15_000, raw_segment(&tcp, false, repeated, &unit));
+    let next = tcp.seq[1];
+    let mut overlapping = unit[unit.len() - 1..].to_vec();
+    overlapping.extend_from_slice(&unit);
+    out.push(
+        at_ns + 16_000,
+        raw_segment(&tcp, false, next - 1, &overlapping),
+    );
+    tcp.seq[1] += len;
+    tcp.messages += 1;
+    tcp.wire_bytes += u64::from(len);
+    tcp
+}
+
+/// What [`anomalous_tcp`] lays in the dialler's direction.
+const DIALLER_ANOMALIES: StreamAnomalies = StreamAnomalies {
+    retransmits: 1,
+    out_of_order: 1,
+    partial_overlaps: 0,
+};
+
+/// And in the acceptor's.
+const ACCEPTOR_ANOMALIES: StreamAnomalies = StreamAnomalies {
+    retransmits: 1,
+    out_of_order: 0,
+    partial_overlaps: 1,
+};
+
+/// EACH DIRECTION'S ANOMALIES ARE ITS OWN, oriented by the flow key and not by
+/// who dialled: with the dialler on the low endpoint its counts are
+/// `low_to_high`, with it on the high endpoint they are `high_to_low`.
+#[test]
+fn a_tcp_flow_states_its_anomalies_per_direction_of_its_flow_key() {
+    for dialer_low in [true, false] {
+        let mut packets = Packets::default();
+        anomalous_tcp(&mut packets, dialer_low, 43210, T0);
+        let d = packets.dissect();
+        let table = session_table(&d);
+        let row = only(&table);
+        assert_eq!(row.links.len(), 1);
+        let (low, high) = if dialer_low {
+            (DIALLER_ANOMALIES, ACCEPTOR_ANOMALIES)
+        } else {
+            (ACCEPTOR_ANOMALIES, DIALLER_ANOMALIES)
+        };
+        assert_eq!(
+            row.links[0].stream_anomalies,
+            Ok(DirectedAnomalies {
+                low_to_high: low,
+                high_to_low: high,
+            }),
+            "dialer_low={dialer_low}"
+        );
+        // The same fields the assemblers keep, read through the flow.
+        let flow = &d.flows()[0];
+        assert_eq!(flow.low_to_high.retransmits(), 1);
+        assert_eq!(flow.high_to_low.retransmits(), 1);
+    }
+}
+
+/// A FLOW THAT NUMBERS NO BYTES STATES NO ANOMALIES: a UDP flow's
+/// `stream_anomalies` is `null`, named in that flow's `unstated` with
+/// `no_sequence`, and never a zero; a TCP flow beside it in the same capture
+/// states its counts, and its own `unstated` is empty.
+#[test]
+fn a_udp_flow_states_no_anomalies_and_says_why_beside_a_tcp_flow_that_does() {
+    let mut packets = Packets::default();
+    anomalous_tcp(&mut packets, true, 43210, T0);
+    let mut udp = Udp::new(true, 43220);
+    udp.handshake(&mut packets, T0 + 100_000, &ZID_C, &ZID_D);
+    let doc = session_table_json(&packets.dissect());
+    let v = parse(&doc);
+    let flows: Vec<&Json5Value> = array(&v, "sessions")
+        .iter()
+        .flat_map(|row| array(row, "flows").iter())
+        .collect();
+    assert_eq!(flows.len(), 2, "{doc}");
+    let of_link = |word: &str| flows.iter().copied().find(|f| text(f, "flow/link") == word);
+
+    let tcp = of_link("tcp").unwrap_or_else(|| panic!("a tcp flow: {doc}"));
+    let count = |path: &str| tcp.get(path).cloned();
+    let number = |n: usize| Some(Json5Value::Number(n.to_string()));
+    assert_eq!(count("stream_anomalies/low_to_high/retransmits"), number(1));
+    assert_eq!(
+        count("stream_anomalies/low_to_high/out_of_order"),
+        number(1)
+    );
+    assert_eq!(
+        count("stream_anomalies/low_to_high/partial_overlaps"),
+        number(0)
+    );
+    assert_eq!(count("stream_anomalies/high_to_low/retransmits"), number(1));
+    assert_eq!(
+        count("stream_anomalies/high_to_low/out_of_order"),
+        number(0)
+    );
+    assert_eq!(
+        count("stream_anomalies/high_to_low/partial_overlaps"),
+        number(1)
+    );
+    assert!(array(tcp, "unstated").is_empty(), "{doc}");
+
+    let udp = of_link("udp").unwrap_or_else(|| panic!("a udp flow: {doc}"));
+    assert!(is_null(udp, "stream_anomalies"), "{doc}");
+    let unstated = array(udp, "unstated");
+    assert_eq!(unstated.len(), 1, "{doc}");
+    assert_eq!(text(&unstated[0], "cell"), "stream_anomalies");
+    assert_eq!(text(&unstated[0], "reason"), "no_sequence");
+}
+
+/// The table's anomaly counters, over every flow and both directions.
+fn table_anomalies(d: &Dissection) -> StreamAnomalies {
+    session_table(d)
+        .rows
+        .iter()
+        .flat_map(|row| row.links.iter())
+        .filter_map(|link| link.stream_anomalies.ok())
+        .fold(StreamAnomalies::default(), |sum, a| sum.and(a.both()))
+}
+
+/// The health counters the table's are held to.
+fn health_anomalies(d: &Dissection) -> StreamAnomalies {
+    let h = d.health();
+    StreamAnomalies {
+        retransmits: h.retransmits,
+        out_of_order: h.out_of_order,
+        partial_overlaps: h.partial_overlaps,
+    }
+}
+
+/// THE FLOWS' COUNTS AND THE EVICTED SHARE ARE THE HEALTH COUNTERS, exactly.
+///
+/// Two misbehaving TCP sessions, read without a ceiling and under a flow
+/// ceiling of one, which evicts the first when the second arrives. Unbounded,
+/// nothing is evicted and the flows alone are the total. Bounded, the first
+/// flow has no row, its counts are the document's `evicted_stream_anomalies`,
+/// and the remaining flow's and those add up to the same total: the table
+/// reads the assemblers and the carry the health sums, not a second count.
+#[test]
+fn the_flows_and_the_evicted_share_add_up_to_the_health_counters() {
+    let mut packets = Packets::default();
+    anomalous_tcp(&mut packets, true, 43210, T0);
+    anomalous_tcp(&mut packets, false, 43211, T0 + 50_000_000);
+    let file = packets.file();
+    let one_flow = DissectionLimits {
+        max_flows_per_table: Some(1),
+        ..DissectionLimits::default()
+    };
+    let per_flow = DIALLER_ANOMALIES.and(ACCEPTOR_ANOMALIES);
+
+    let unbounded = Dissection::from_capture(&file).expect("reads");
+    assert_eq!(
+        unbounded.evicted_stream_anomalies(),
+        StreamAnomalies::default()
+    );
+    assert_eq!(table_anomalies(&unbounded), per_flow.and(per_flow));
+    assert_eq!(table_anomalies(&unbounded), health_anomalies(&unbounded));
+
+    let bounded = Dissection::from_capture_bounded(&file, one_flow).expect("reads");
+    assert_eq!(bounded.drops().flows, 1, "the ceiling must bite");
+    assert_eq!(
+        bounded.evicted_stream_anomalies(),
+        per_flow,
+        "the evicted flow's counts are carried, not lost"
+    );
+    assert_eq!(table_anomalies(&bounded), per_flow, "one flow is left");
+    assert_eq!(
+        table_anomalies(&bounded).and(bounded.evicted_stream_anomalies()),
+        health_anomalies(&bounded)
+    );
+
+    // The document says the same, in the key beside `dropped_by_limits`.
+    let v = parse(&session_table_json(&bounded));
+    let number = |n: usize| Some(Json5Value::Number(n.to_string()));
+    assert_eq!(
+        v.get("evicted_stream_anomalies/retransmits").cloned(),
+        number(per_flow.retransmits)
+    );
+    assert_eq!(
+        v.get("evicted_stream_anomalies/out_of_order").cloned(),
+        number(per_flow.out_of_order)
+    );
+    assert_eq!(
+        v.get("evicted_stream_anomalies/partial_overlaps").cloned(),
+        number(per_flow.partial_overlaps)
+    );
+}
+
+/// A CEILING ON WHAT IS RETAINED MOVES NO ANOMALY COUNT: the counters live on
+/// the assemblers for the flow's life, so trimming the bytes and the messages
+/// they hold leaves the flow's counts what an unbounded read states.
+#[test]
+fn a_retention_ceiling_moves_no_anomaly_count() {
+    let mut packets = Packets::default();
+    anomalous_tcp(&mut packets, true, 43210, T0);
+    let file = packets.file();
+    let limits = DissectionLimits {
+        frames_per_flow: Some(4),
+        stream_bytes_per_direction: Some(16),
+        ..DissectionLimits::default()
+    };
+    let unbounded = Dissection::from_capture(&file).expect("reads");
+    let bounded = Dissection::from_capture_bounded(&file, limits).expect("reads");
+    assert!(bounded.drops().frames > 0, "the ceiling must bite");
+    let flow_of = |d: &Dissection| only(&session_table(d)).links[0].stream_anomalies;
+    assert_eq!(flow_of(&bounded), flow_of(&unbounded));
+    assert_eq!(
+        flow_of(&unbounded),
+        Ok(DirectedAnomalies {
+            low_to_high: DIALLER_ANOMALIES,
+            high_to_low: ACCEPTOR_ANOMALIES,
+        })
+    );
+}
+
 // ── the clock ──────────────────────────────────────────────────────────────
 
 /// THE INSTANTS ARE THE MINIMUM AND THE MAXIMUM, not the first and the last in
@@ -1223,42 +1493,76 @@ fn a_row_carries_every_key_and_the_cells_a_consumer_maps() {
     assert_eq!(whys, want);
 }
 
-/// A cell is `null` EXACTLY WHEN `unstated` names it, in every row of every
-/// fixture, and the reason it gives is one that cell can carry.
+/// The cells of `object` that sit on it (`on_flow` says which object), each
+/// held to the object's own `unstated` list: `null` exactly when named there,
+/// and with a reason that cell can carry. Every reason met is pushed onto
+/// `reasons_seen`; the number of cells checked is returned.
+fn check_unstated(
+    name: &str,
+    object: &Json5Value,
+    on_flow: bool,
+    reasons_seen: &mut Vec<String>,
+) -> usize {
+    let named: BTreeMap<&str, &str> = array(object, "unstated")
+        .iter()
+        .map(|u| (text(u, "cell"), text(u, "reason")))
+        .collect();
+    let mut checked = 0usize;
+    for cell in Cell::all().into_iter().filter(|c| c.on_flow() == on_flow) {
+        assert!(
+            object.get(cell.key()).is_some(),
+            "{name}: {} is absent, and a cell is never omitted",
+            cell.key()
+        );
+        let null = is_null(object, cell.key());
+        match named.get(cell.key()) {
+            Some(reason) => {
+                assert!(
+                    null,
+                    "{name}: {} is named unstated but carries a value",
+                    cell.key()
+                );
+                assert!(
+                    cell.reasons().iter().any(|r| r.name() == *reason),
+                    "{name}: {} cannot carry {reason}",
+                    cell.key()
+                );
+                reasons_seen.push((*reason).to_string());
+            }
+            None => assert!(
+                !null,
+                "{name}: {} is null and no unstated entry names it",
+                cell.key()
+            ),
+        }
+        checked += 1;
+    }
+    // An entry naming a cell of the other object is a cell in the wrong list.
+    for cell in named.keys() {
+        assert!(
+            Cell::all()
+                .iter()
+                .any(|c| c.key() == *cell && c.on_flow() == on_flow),
+            "{name}: `unstated` names {cell}, which is not a cell of this object"
+        );
+    }
+    checked
+}
+
+/// A cell is `null` EXACTLY WHEN `unstated` names it, in every row and every
+/// flow object of every fixture, and the reason it gives is one that cell can
+/// carry.
 #[test]
 fn a_cell_is_null_exactly_when_unstated_names_it_and_the_reason_is_one_it_can_carry() {
     let mut checked = 0usize;
+    let mut flow_cells_checked = 0usize;
     let mut reasons_seen: Vec<String> = Vec::new();
     for (name, doc) in every_fixture_document() {
         let v = parse(&doc);
         for row in array(&v, "sessions") {
-            let named: BTreeMap<&str, &str> = array(row, "unstated")
-                .iter()
-                .map(|u| (text(u, "cell"), text(u, "reason")))
-                .collect();
-            for cell in Cell::all() {
-                let null = is_null(row, cell.key());
-                match named.get(cell.key()) {
-                    Some(reason) => {
-                        assert!(
-                            null,
-                            "{name}: {} is named unstated but carries a value",
-                            cell.key()
-                        );
-                        assert!(
-                            cell.reasons().iter().any(|r| r.name() == *reason),
-                            "{name}: {} cannot carry {reason}",
-                            cell.key()
-                        );
-                        reasons_seen.push((*reason).to_string());
-                    }
-                    None => assert!(
-                        !null,
-                        "{name}: {} is null and no unstated entry names it",
-                        cell.key()
-                    ),
-                }
-                checked += 1;
+            checked += check_unstated(&name, row, false, &mut reasons_seen);
+            for flow in array(row, "flows") {
+                flow_cells_checked += check_unstated(&name, flow, true, &mut reasons_seen);
             }
             // Every key is present on every row, null or not.
             for key in [
@@ -1282,6 +1586,7 @@ fn a_cell_is_null_exactly_when_unstated_names_it_and_the_reason_is_one_it_can_ca
         checked >= 7 * 10,
         "the population must be rows and not an empty loop: {checked}"
     );
+    assert!(flow_cells_checked >= 10, "and flows: {flow_cells_checked}");
     reasons_seen.sort();
     reasons_seen.dedup();
     assert_eq!(
@@ -1927,7 +2232,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
                 \"confirmed\":10,\"violated\":0,\"millibits\":365,\"no_millibits\":31679,\
                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
-        "{{\"document\":{{\"name\":\"session_table\",\"revision\":10}},\"ok\":true,\
+        "{{\"document\":{{\"name\":\"session_table\",\"revision\":11}},\"ok\":true,\
          \"sessions\":[{{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
          \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
          \"first_seen_ts_ns\":\"1700000000000000000\",\
@@ -1944,11 +2249,22 @@ fn the_headers_example_is_the_document_of_a_real_session() {
             "\"link\":\"tcp\"}},\"encrypted\":\"clear\",\"bytes\":64,{flow},\
              \"unit_readings\":{{\"explained\":{{\"units\":10,\"bytes\":44}},\
              \"residual\":{{\"units\":0,\"bytes\":0}},\
-             \"undecoded\":{{\"units\":0,\"bytes\":0}}}}}}]}}],\
+             \"undecoded\":{{\"units\":0,\"bytes\":0}}}},\
+             \"stream_anomalies\":{{\
+             \"low_to_high\":{{\"retransmits\":0,\"out_of_order\":0,\"partial_overlaps\":0}},\
+             \"high_to_low\":{{\"retransmits\":0,\"out_of_order\":0,\"partial_overlaps\":0}}}},\
+             \"unstated\":[]}}]}}],\
              \"excluded\":\
              [{{\"why\":\"multicast_group\",\"count\":0}},{{\"why\":\"scouting_only\",\"count\":0}}],\
              \"dropped_by_limits\":{{"
         )),
+        "{doc}"
+    );
+    assert!(
+        doc.ends_with(
+            "}},\"evicted_stream_anomalies\":\
+             {\"retransmits\":0,\"out_of_order\":0,\"partial_overlaps\":0}}"
+        ),
         "{doc}"
     );
 }

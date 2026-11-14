@@ -2919,7 +2919,7 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":10},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":11},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
@@ -2967,6 +2967,15 @@ static int check_session_table_doors(void) {
                             "\"count\":0},{\"why\":\"scouting_only\","
                             "\"count\":0}]") != NULL,
           "both exclusions are always named: %s", from_file);
+    /* A UDP flow numbers no bytes: its stream anomalies are null, and its own
+     * `unstated` says why. Nothing was evicted, and that is stated too. */
+    CHECK(strstr(from_file, "\"stream_anomalies\":null,\"unstated\":"
+                            "[{\"cell\":\"stream_anomalies\","
+                            "\"reason\":\"no_sequence\"}]") != NULL,
+          "a udp flow states no stream anomalies: %s", from_file);
+    CHECK(strstr(from_file, "\"evicted_stream_anomalies\":{\"retransmits\":0,"
+                            "\"out_of_order\":0,\"partial_overlaps\":0}") != NULL,
+          "the evicted share is stated: %s", from_file);
 
     /* THE HANDLE'S HALF, fed the same three frames at the same instants. */
     rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
@@ -4496,9 +4505,13 @@ int main(void) {
      * of its own over what its flows observed after each named the pair.
      * 8: model 4, as the field document's 50.
      * 9: model 5, as the field document's 53.
-     * 10: model 6, as the field document's 54. */
+     * 10: model 6, as the field document's 54.
+     * 11: every flow of a row carries `stream_anomalies` (per direction of a
+     * TCP flow, null with `no_sequence` on any other link) and its own
+     * `unstated`, and the document `evicted_stream_anomalies`. Keys arrive and
+     * two families gain a word; nothing retires. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 10;
+    revisioned[12].revision = 11;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,

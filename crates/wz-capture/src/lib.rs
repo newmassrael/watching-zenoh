@@ -6863,6 +6863,21 @@ impl Dissection {
         self.carry.chains()
     }
 
+    /// The anomaly counters of every stream flow the cap evicted, both
+    /// directions together, as the exit left them: the share of
+    /// [`Self::health`]'s three stream counters that no live flow holds any
+    /// more. Added to every live flow's ([`tcp::StreamAssembler::anomalies`],
+    /// both directions) it is exactly those three, because `health` sums the
+    /// same carry and the same assemblers.
+    pub fn evicted_stream_anomalies(&self) -> tcp::StreamAnomalies {
+        let carried = self.carry.streams();
+        tcp::StreamAnomalies {
+            retransmits: carried.retransmits,
+            out_of_order: carried.out_of_order,
+            partial_overlaps: carried.partial_overlaps,
+        }
+    }
+
     /// Every TCP flow seen, in first-appearance order.
     pub fn flows(&self) -> &[FlowDissection] {
         &self.flows

@@ -104,9 +104,31 @@ fn midstream(n: usize) -> Vec<u8> {
     udp_capture(43210, &messages)
 }
 
+/// A TCP flow joined after its handshake whose two directions misbehave
+/// differently: from the low endpoint a keep-alive's segment arrives twice (one
+/// retransmit), from the high endpoint the second of two keep-alives arrives
+/// first (one segment held out of order).
+fn anomalous_tcp() -> Vec<u8> {
+    let unit = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+    let len = unit.len() as u32;
+    let packets = [
+        tcp_packet(1000, &unit),
+        tcp_packet(1000, &unit),
+        tcp_packet_reverse(5000, &unit),
+        tcp_packet_reverse(5000 + 2 * len, &unit),
+        tcp_packet_reverse(5000 + len, &unit),
+    ];
+    let rows: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (EPOCH_S, (i as u32 + 1) * 1_000, p.as_slice()))
+        .collect();
+    wz_capture::pcap::write(LINKTYPE_ETHERNET, &rows)
+}
+
 /// One document of each shape the doors write: a session, a flow joined after
-/// its handshake, a QUIC flow nobody decrypted, and a refusal of each kind the
-/// bytes can earn.
+/// its handshake, a QUIC flow nobody decrypted, a TCP flow that states its
+/// anomalies per direction, and a refusal of each kind the bytes can earn.
 pub(super) fn documents() -> Vec<String> {
     let quic = {
         let mut initial = vec![
@@ -122,6 +144,7 @@ pub(super) fn documents() -> Vec<String> {
         call_pcap(&full, WZ_DISSECT_LIMITS_NONE),
         call_pcap(&midstream(2), WZ_DISSECT_LIMITS_NONE),
         call_pcap(&quic, WZ_DISSECT_LIMITS_NONE),
+        call_pcap(&anomalous_tcp(), WZ_DISSECT_LIMITS_NONE),
         call_pcap(
             b"this is not a capture, and not close to one",
             WZ_DISSECT_LIMITS_NONE,
@@ -142,7 +165,7 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
     let b = wz_session_core::zid_hex::zid_to_zenoh_hex(&ZID_B);
     assert!(
         doc.starts_with(&format!(
-            "{{\"document\":{{\"name\":\"session_table\",\"revision\":10}},\"ok\":true,\
+            "{{\"document\":{{\"name\":\"session_table\",\"revision\":11}},\"ok\":true,\
              \"sessions\":[{{\"initiator\":\"{a}\",\"acceptor\":\"{b}\",\"link\":\"udp\",\
              \"phase\":\"init_complete\",\"encrypted\":\"clear\","
         )),
@@ -182,6 +205,39 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
         doc.contains("\"first_seen_ts_ns\":\"1700000000001000000\",\"last_seen_ts_ns\":\"1700000000006000000\""),
         "an instant on a real clock is a string: {doc}"
     );
+    // A UDP flow numbers no bytes, so it states no stream anomalies and its
+    // own `unstated` says why.
+    assert!(
+        doc.contains(
+            "\"stream_anomalies\":null,\
+             \"unstated\":[{\"cell\":\"stream_anomalies\",\"reason\":\"no_sequence\"}]}]"
+        ),
+        "{doc}"
+    );
+}
+
+/// A TCP FLOW STATES ITS ANOMALIES PER DIRECTION across the boundary, oriented
+/// by the flow key, and the document states the share of the flows the ceiling
+/// evicted, which here is none.
+#[test]
+fn a_tcp_flow_crosses_the_boundary_with_its_anomalies_per_direction() {
+    let doc = call_pcap(&anomalous_tcp(), WZ_DISSECT_LIMITS_NONE).expect("answers");
+    assert!(
+        doc.contains(
+            "\"stream_anomalies\":{\
+             \"low_to_high\":{\"retransmits\":1,\"out_of_order\":0,\"partial_overlaps\":0},\
+             \"high_to_low\":{\"retransmits\":0,\"out_of_order\":1,\"partial_overlaps\":0}},\
+             \"unstated\":[]}]"
+        ),
+        "{doc}"
+    );
+    assert!(
+        doc.ends_with(
+            ",\"evicted_stream_anomalies\":\
+             {\"retransmits\":0,\"out_of_order\":0,\"partial_overlaps\":0}}"
+        ),
+        "{doc}"
+    );
 }
 
 /// THE TWO HALVES WRITE ONE DOCUMENT, for the same packets at the same instants,
@@ -189,7 +245,7 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
 /// dissection, and anything else would be a second reader of the same facts.
 #[test]
 fn the_two_halves_write_one_document() {
-    for file in [session(5), midstream(3)] {
+    for file in [session(5), midstream(3), anomalous_tcp()] {
         for limits in [WZ_DISSECT_LIMITS_NONE, WZ_DISSECT_LIMITS_LIVE_TAP] {
             let from_container = call_pcap(&file, limits).expect("answers");
             let handle = replay(&file, limits).expect("the capture reads");
@@ -316,6 +372,17 @@ fn a_session_table_can_be_bounded_and_says_what_the_bound_cost() {
         OVER_TAP_CAP - 1,
         "the flow the ceiling evicted has no row, and dropped_by_limits is where that is said"
     );
+    // The evicted flow's anomaly counts are stated beside the group, under the
+    // ceiling and without one: none of these flows repeated a segment.
+    for doc in [&unbounded, &bounded] {
+        assert!(
+            doc.ends_with(
+                ",\"evicted_stream_anomalies\":\
+                 {\"retransmits\":0,\"out_of_order\":0,\"partial_overlaps\":0}}"
+            ),
+            "{doc}"
+        );
+    }
 }
 
 /// A container that does not read is a DOCUMENT, a refusal by name, and never an
@@ -335,7 +402,7 @@ fn a_bad_container_is_a_refusal_and_a_callers_bug_is_a_code() {
         let doc = call_pcap(bytes, WZ_DISSECT_LIMITS_NONE).expect("a refusal is answered");
         assert!(
             doc.starts_with(&format!(
-                "{{\"document\":{{\"name\":\"session_table\",\"revision\":10}},\"ok\":false,\
+                "{{\"document\":{{\"name\":\"session_table\",\"revision\":11}},\"ok\":false,\
                  \"refusal\":\"{word}\",\"message\":"
             )),
             "{doc}"

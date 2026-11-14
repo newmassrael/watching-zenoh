@@ -30,14 +30,27 @@
 //!   The same counts weigh in `zenoh_evidence` as the `unit_reading` check;
 //! * `flows` -- the flows the row is made of, each with the flow object every
 //!   other document carries and its own `encrypted`, `bytes`, the three zenoh
-//!   keys and `unit_readings`, for a consumer that joins.
+//!   keys, `unit_readings`, `stream_anomalies` and `unstated`, for a consumer
+//!   that joins.
+//!
+//! # Stream anomalies
+//!
+//! A flow's `stream_anomalies` is `{"low_to_high":D,"high_to_low":D}`, each `D`
+//! `{"retransmits":R,"out_of_order":O,"partial_overlaps":P}`: the event counts
+//! of the direction's TCP assembler, the directions those of the flow key. A
+//! link that numbers no bytes states `null` with the reason `no_sequence`. A
+//! row has no sum of them, because the flows of one session need not share a
+//! `low` end. `evicted_stream_anomalies`, beside `dropped_by_limits`, is the
+//! same three counts over every flow the table's ceiling evicted, both
+//! directions together, so that the flows' counts and it add up to the
+//! dissection's health counters.
 //!
 //! # EVERY KEY IS PRESENT, ALWAYS
 //!
-//! A cell that cannot be stated is `null`, and the row's `unstated` list holds
-//! one `{"cell":...,"reason":...}` for it, so a cell is `null` exactly when it is
-//! named there. The words a cell can carry are
-//! [`crate::session_table::Cell::reasons`].
+//! A cell that cannot be stated is `null`, and the `unstated` list of the row
+//! or flow object it sits in holds one `{"cell":...,"reason":...}` for it, so a
+//! cell is `null` exactly when it is named there. The words a cell can carry
+//! are [`crate::session_table::Cell::reasons`].
 //!
 //! # A refusal is a value
 //!
@@ -50,7 +63,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use crate::session_table::{session_table, Cell, SessionRow, Stated, Unstated, Why};
+use crate::session_table::{session_table, Cell, Link, SessionRow, Stated, Unstated, Why};
+use crate::tcp::StreamAnomalies;
 use crate::{CaptureError, Dissection};
 
 /// Why a container was refused, the closed set.
@@ -171,6 +185,64 @@ fn push_zid(zid: &[u8], out: &mut String) {
     out.push('"');
 }
 
+/// An `unstated` list: one `{"cell":...,"reason":...}` per cell written `null`.
+fn push_unstated(unstated: &[(Cell, Unstated)], out: &mut String) {
+    out.push_str(",\"unstated\":[");
+    for (i, (cell, reason)) in unstated.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"cell\":\"{}\",\"reason\":\"{}\"}}",
+            cell.key(),
+            reason.name()
+        );
+    }
+    out.push(']');
+}
+
+/// One set of stream anomaly counters, as bare numbers: they count events this
+/// library measured.
+fn push_anomalies(a: &StreamAnomalies, out: &mut String) {
+    let _ = write!(
+        out,
+        "{{\"retransmits\":{},\"out_of_order\":{},\"partial_overlaps\":{}}}",
+        a.retransmits, a.out_of_order, a.partial_overlaps
+    );
+}
+
+/// One flow object of a row.
+fn push_link(link: &Link, out: &mut String) {
+    let mut unstated: Vec<(Cell, Unstated)> = Vec::new();
+    out.push_str("{\"flow\":");
+    crate::census_json::push_flow(&link.flow, out);
+    let _ = write!(
+        out,
+        ",\"encrypted\":\"{}\",\"bytes\":{}",
+        link.encryption.name(),
+        link.bytes,
+    );
+    crate::fields_json::push_zenoh(link.versions, &link.evidence, out);
+    crate::fields_json::push_unit_readings(link.readings, out);
+    out.push(',');
+    push_cell(
+        out,
+        &mut unstated,
+        Cell::StreamAnomalies,
+        &link.stream_anomalies,
+        |a, o| {
+            o.push_str("{\"low_to_high\":");
+            push_anomalies(&a.low_to_high, o);
+            o.push_str(",\"high_to_low\":");
+            push_anomalies(&a.high_to_low, o);
+            o.push('}');
+        },
+    );
+    push_unstated(&unstated, out);
+    out.push('}');
+}
+
 fn push_row(row: &SessionRow, out: &mut String) {
     let mut unstated: Vec<(Cell, Unstated)> = Vec::new();
     out.push('{');
@@ -218,34 +290,13 @@ fn push_row(row: &SessionRow, out: &mut String) {
     let _ = write!(out, ",\"bytes\":{}", row.bytes);
     crate::fields_json::push_zenoh(row.versions, &row.evidence, out);
     crate::fields_json::push_unit_readings(row.readings, out);
-    out.push_str(",\"unstated\":[");
-    for (i, (cell, reason)) in unstated.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        let _ = write!(
-            out,
-            "{{\"cell\":\"{}\",\"reason\":\"{}\"}}",
-            cell.key(),
-            reason.name()
-        );
-    }
-    out.push_str("],\"flows\":[");
+    push_unstated(&unstated, out);
+    out.push_str(",\"flows\":[");
     for (i, link) in row.links.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
-        out.push_str("{\"flow\":");
-        crate::census_json::push_flow(&link.flow, out);
-        let _ = write!(
-            out,
-            ",\"encrypted\":\"{}\",\"bytes\":{}",
-            link.encryption.name(),
-            link.bytes,
-        );
-        crate::fields_json::push_zenoh(link.versions, &link.evidence, out);
-        crate::fields_json::push_unit_readings(link.readings, out);
-        out.push('}');
+        push_link(link, out);
     }
     out.push_str("]}");
 }
@@ -280,6 +331,11 @@ pub fn session_table_json(d: &Dissection) -> String {
     }
     out.push_str("],\"dropped_by_limits\":");
     out.push_str(&crate::report::dropped_by_limits_json(d));
+    // The flows the ceiling evicted have no row, so their counters are stated
+    // once for the document: with every TCP flow's two directions they add up
+    // to the dissection's health counters, read here at the same instant.
+    out.push_str(",\"evicted_stream_anomalies\":");
+    push_anomalies(&d.evicted_stream_anomalies(), &mut out);
     out.push('}');
     out
 }
