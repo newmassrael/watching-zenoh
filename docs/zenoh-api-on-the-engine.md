@@ -1291,8 +1291,20 @@ Each lands whole with its surface lines, tests and faults in one round.
     bound, not the reading `uhlc`'s also prints, which the engine's clock does not hand out. What
     remains different is the type's name and path; the surface gate does not read the `internal`
     arm (its arms are the default, `unstable` and `unstable` with `shared-memory`), so there is no
-    data of it to declare the difference in, and this paragraph is where it is declared. A router
-    node lends no clock yet, as it stamps nothing through the API yet (`node_timestamp`).
+    data of it to declare the difference in, and this paragraph is where it is declared. A node of
+    any kind lends its clock: the registry of faces the one it holds (`SharedSession::node_hlc`),
+    the router data plane, which a router and a peer that accepts sessions are, the one it stamps
+    with (`RouterState::node_hlc`, by the role and `timestamping/enabled`, so a router lends one by
+    default, as upstream's router has an HLC by default), and `Session::new_timestamp` reads the
+    same clock on either. The `clock-quality-stamping` policy (`trusted-only`) is applied where the
+    node stamps data it passes on and not in the clock, because that is where upstream decides:
+    `uhlc`'s `HLC::new_timestamp` always gives a time, and each stamper chooses whether to take
+    one (`treat_timestamp!` in the dispatcher for what it forwards, `resolve_put` for a publication
+    of the session, `Session::new_timestamp` for a program that asks). So `NodeHlc::stamp`, which
+    the forward path, the publication of the session, the reply and the caches take, holds the
+    policy, and `NodeHlc::clock_stamp` and the lent clock, which a program reads for itself, do
+    not; until this was settled `Session::new_timestamp` of a `trusted-only` node answered the wall
+    clock where the clock it lends answered the node's time.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.
