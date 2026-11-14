@@ -1160,4 +1160,54 @@ mod tests {
         dgram.extend_from_slice(&body);
         assert_eq!(decode_join_zid(&dgram), Some(&zid[..]));
     }
+
+    /// Every Join written here is the Join its document
+    /// (`sources/codecs/transport_join.scxml`) reads: the view reads the datagram
+    /// whole and writes it back byte for byte, and the readers here read the same
+    /// flags, body, lease (projected to milliseconds) and length out of it,
+    /// across the settings that change its shape.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn every_join_written_here_is_the_join_the_document_reads() {
+        use wz_codecs::transport_join::TransportJoinView;
+        let mut compared = 0usize;
+        for zid_len in [1usize, 4, 16] {
+            let zid = std::vec![0x5a; zid_len];
+            for config in [protocol_default_params(&zid), params(&zid)] {
+                for lease_ms in [10_000u64, 5_001] {
+                    for is_qos in [false, true] {
+                        let p = MulticastParams {
+                            lease_ms,
+                            is_qos,
+                            ..config.clone()
+                        };
+                        let tx = MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res));
+                        let dgram = encode_join(&p, &tx);
+                        let mut cursor = sce_forge_runtime::codec::SceCursor::new(&dgram);
+                        let view = TransportJoinView::decode(&mut cursor).expect("decodes");
+                        assert_eq!(cursor.remaining(), 0, "the view reads the Join whole");
+                        assert_eq!(view.encode_to_vec(), dgram, "and writes it back");
+                        assert_eq!(
+                            crate::join_decode::join_message_len(&dgram),
+                            Some(dgram.len())
+                        );
+                        let join = crate::join_decode::decode_join(&dgram).expect("decodes");
+                        assert_eq!(join.zid.into_inner(), view.body.zid.into_inner());
+                        assert_eq!(
+                            join.lease,
+                            crate::lease::lease_from_wire(
+                                view.header & wire_const::FLAG_T_JOIN_T != 0,
+                                view.body.lease
+                            )
+                        );
+                        assert_eq!(join.next_sn_reliable, view.body.next_sn_reliable);
+                        assert_eq!(join.next_sn_best_effort, view.body.next_sn_best_effort);
+                        assert_eq!(join.s.is_some(), view.body.s.is_some());
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 3 * 2 * 2 * 2);
+    }
 }
