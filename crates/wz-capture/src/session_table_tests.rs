@@ -986,6 +986,76 @@ fn a_udp_flow_states_no_anomalies_and_says_why_beside_a_tcp_flow_that_does() {
     assert_eq!(text(&unstated[0], "reason"), "no_sequence");
 }
 
+/// AN AF_VSOCK FLOW STATES NO ANOMALIES, and its share of the health counters is
+/// zero by construction: vsockmon carries no sequence number, so this reader
+/// numbers each record's bytes itself as they arrive, and a record sent twice is
+/// new bytes to it and never a repeat. A record a TCP reader would count as a
+/// retransmit is read here as one more message, which is what the frame count
+/// below holds.
+///
+/// So the flow reads `null` with `no_sequence`, as a UDP flow does, and the
+/// equation the table's counts are held to (theirs and the evicted share are
+/// the health counters) still closes over a capture that has one.
+#[test]
+fn a_vsock_flow_states_no_anomalies_and_adds_nothing_to_the_health_counters() {
+    use crate::link::LINKTYPE_VSOCK;
+    use crate::vsock_flow_tests::{vsockmon, OP_PAYLOAD};
+
+    let dialer = |wire: &[u8]| vsockmon(3, 40000, 2, 7447, OP_PAYLOAD, &[], &stream_unit(wire));
+    let acceptor = |wire: &[u8]| vsockmon(2, 7447, 3, 40000, OP_PAYLOAD, &[], &stream_unit(wire));
+    let repeated = dialer(&keepalive());
+    let records = [
+        dialer(&init(&ZID_A, false)),
+        acceptor(&init(&ZID_B, true)),
+        dialer(&open(false)),
+        acceptor(&open(true)),
+        repeated.clone(),
+        // The same record again: on TCP, the same sequence number twice.
+        repeated,
+        acceptor(&keepalive()),
+    ];
+    let mut d = Dissection::new();
+    for (i, record) in records.iter().enumerate() {
+        d.push_packet_at_nanos(LINKTYPE_VSOCK, i, Some(T0 + i as u64 * 1_000), record);
+    }
+    d.finish();
+
+    assert!(d.skipped().is_empty(), "every record reads");
+    assert_eq!(d.flows().len(), 1, "both directions are one flow");
+    let flow = &d.flows()[0];
+    assert_eq!(
+        flow.frames.len(),
+        records.len(),
+        "the repeated record is a message of its own, not a retransmit"
+    );
+    for assembler in [&flow.low_to_high, &flow.high_to_low] {
+        assert_eq!(assembler.anomalies(), StreamAnomalies::default());
+    }
+
+    let doc = session_table_json(&d);
+    let v = parse(&doc);
+    let flows: Vec<&Json5Value> = array(&v, "sessions")
+        .iter()
+        .flat_map(|row| array(row, "flows").iter())
+        .collect();
+    assert_eq!(flows.len(), 1, "{doc}");
+    let vsock = flows[0];
+    assert_eq!(text(vsock, "flow/link"), "vsock", "{doc}");
+    assert!(is_null(vsock, "stream_anomalies"), "{doc}");
+    let why = array(vsock, "unstated")
+        .iter()
+        .find(|cell| text(cell, "cell") == "stream_anomalies")
+        .unwrap_or_else(|| panic!("the null cell is named: {doc}"));
+    assert_eq!(text(why, "reason"), "no_sequence", "{doc}");
+
+    assert_eq!(health_anomalies(&d), StreamAnomalies::default());
+    assert_eq!(
+        table_anomalies(&d).and(d.evicted_stream_anomalies()),
+        health_anomalies(&d),
+        "the flows and the evicted share are the health counters"
+    );
+}
+
 /// The table's anomaly counters, over every flow and both directions.
 fn table_anomalies(d: &Dissection) -> StreamAnomalies {
     session_table(d)

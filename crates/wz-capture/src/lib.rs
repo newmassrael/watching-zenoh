@@ -18529,13 +18529,16 @@ mod vsock_flow_tests {
     use crate::link::LINKTYPE_VSOCK;
     use wz_session_core::inbound::InboundFrame;
 
-    const OP_PAYLOAD: u16 = 4;
+    pub(crate) const OP_PAYLOAD: u16 = 4;
     const OP_CONNECT: u16 = 1;
 
     /// One vsockmon record. `transport_hdr` is whatever the transport put
     /// between the header and the payload — its LENGTH is what the reader
     /// skips by, which is the field this fixture exists to exercise.
-    fn vsockmon(
+    ///
+    /// Shared with the session table's tests, which lay a whole vsock session
+    /// with it.
+    pub(crate) fn vsockmon(
         src_cid: u64,
         src_port: u32,
         dst_cid: u64,
