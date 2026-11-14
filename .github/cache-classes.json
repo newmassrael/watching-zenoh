@@ -104,6 +104,7 @@
         "ci.yml:e2e-demo",
         "ci.yml:e2e-demo-pico",
         "ci.yml:e2e-router-scale",
+        "ci.yml:offline-build",
         "release.yml:release"
       ],
       "budget_mb": 950,
