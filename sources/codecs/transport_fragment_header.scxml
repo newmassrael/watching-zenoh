@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- The header of a transport Fragment: everything before its payload.
+     Upstream codes it as a message of its own
+     (`commons/zenoh-codec/src/transport/fragment.rs` @
+     `impl<W> WCodec<&FragmentHeader, &mut W> for Zenoh080`): the header
+     byte, the SN, and the extension chain the Z flag announces, with the
+     flags of `commons/zenoh-protocol/src/transport/fragment.rs` @
+     `pub mod flag {`:
+
+       bit 0..4 : mid  0x06
+       bit 5    : R    reliable
+       bit 6    : M    another fragment of the message follows
+       bit 7    : Z    an extension chain follows the SN
+
+     The payload after it is the rest of the unit, and what a fragment's
+     payload is part of is reassembly, state across messages; neither is part
+     of this document. R and M are presented by the value; Z is derived from
+     whether the chain is present. The chain is the generic transport chain;
+     see `transport_init.scxml`. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="transport_fragment_header">
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x06"/>
+      <sce:flag name="R"   bit="5"/>
+      <sce:flag name="M"   bit="6"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:field id="sn" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+  </datamodel>
+</scxml>

@@ -332,13 +332,41 @@ pub(crate) fn collect_handshake_ext_chain<'a>(
     Ok(())
 }
 
-/// One entry of a received handshake chain, from the view the document read it as to the
+/// The chain of a received Frame, Fragment or Join as its document read it, owned: the heap
+/// profile's form of the chain those messages report. The document's view reads a chain of any
+/// length, so the bound a node reads of a transport chain
+/// ([`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)) is kept here, as
+/// `collect_handshake_ext_chain` keeps it.
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "codec-frame", feature = "codec-join")
+))]
+pub(crate) fn collect_ext_chain<'a>(
+    walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+) -> Result<Vec<ExtEntryOwned>, crate::parse_error::InboundParseError> {
+    use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
+
+    let mut entries = Vec::new();
+    for (at, entry) in walked.enumerate() {
+        if at == MAX_EXT_CHAIN_DEPTH {
+            return Err(InboundParseError::ExtChainOverflow);
+        }
+        entries.push(received_entry(&entry)?);
+    }
+    Ok(entries)
+}
+
+/// One entry of a received transport chain, from the view the document read it as to the
 /// lifetime-free owned form the message keeps.
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
     feature = "codec-close",
-    feature = "codec-keep-alive"
+    feature = "codec-keep-alive",
+    all(
+        feature = "alloc",
+        any(feature = "codec-frame", feature = "codec-join")
+    )
 ))]
 fn received_entry(
     entry: &wz_codecs::ext_entry::ExtEntryView<'_>,
@@ -398,14 +426,14 @@ pub const NETWORK_EXT_CHAIN_DEPTH: usize = 8;
 ///
 /// The vector form: its consumers are the ones that want the chain as bytes of
 /// their own (the auth ext's inner method chain, which is then wrapped in an
-/// outer ext; the transport composer). The handshake messages are written whole
+/// outer ext; the tests that build a message's chain by hand). The handshake
+/// messages, the transport composer's included, are written whole
 /// by their documents, and the lend-only Open writes its chain straight after
 /// its head through [`encode_ext_chain_into`]; none of them calls this.
 #[cfg(all(
     feature = "alloc",
     any(
         feature = "session-extauth",
-        feature = "transport-compose",
         // The unit tests of `passive` (which builds the same wire from the same
         // entries) and of the lend-only chain writer below, under the feature sets
         // their own modules are compiled at.
@@ -458,7 +486,6 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
         feature = "alloc",
         any(
             feature = "session-extauth",
-            feature = "transport-compose",
             all(
                 test,
                 feature = "codec-init-body",

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- The header of a transport Frame: everything before its network messages.
+     Upstream codes it as a message of its own
+     (`commons/zenoh-codec/src/transport/frame.rs` @
+     `impl<W> WCodec<&FrameHeader, &mut W> for Zenoh080`): the header byte,
+     the SN, and the extension chain the Z flag announces, with the flags of
+     `commons/zenoh-protocol/src/transport/frame.rs` @ `pub mod flag {`:
+
+       bit 0..4 : mid  0x05
+       bit 5    : R    reliable
+       bit 6    : reserved
+       bit 7    : Z    an extension chain follows the SN
+
+     The network messages after it are not part of this document. They run
+     until a byte that is not a network message (`reader.rewind(mark);` in the
+     same upstream file), a list the language cannot end today (L5 of
+     `docs/zenoh-as-sce-codec-documents.md`); the reader of the batch ends it.
+
+     R is presented by the value; Z is derived from whether the chain is
+     present. The chain is the generic transport chain; see
+     `transport_init.scxml`. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="transport_frame_header">
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x05"/>
+      <sce:flag name="R"   bit="5"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:field id="sn" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+  </datamodel>
+</scxml>
