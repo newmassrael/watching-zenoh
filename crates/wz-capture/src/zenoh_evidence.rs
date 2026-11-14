@@ -37,6 +37,7 @@
 //! protocols the corpus holds and no others, and the document carries the basis
 //! so that a consumer can say so.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::zenoh_eprocess::{
@@ -626,6 +627,69 @@ impl SnLink {
     }
 }
 
+/// The SN links of one flow or row, with what [`Check::SnFollows`] reads of
+/// them kept as running sums.
+///
+/// A row of the zenoh test is a host pair, and every flow between the two hosts
+/// is a link of it, so a row can hold thousands. The sums were taken over every
+/// link after each observation (to settle the extremes and the crossing), and a
+/// link was found by a scan: two steps per link on every observation the row
+/// took. Measured on a live handle holding 2048 flows of one host pair
+/// (`live_keys_cost`, pc2, 2026-11-14), those loops were about a third of a
+/// push. A link is now found by its number, and the sums move by what the step
+/// changed. They are integer sums, so the order they are taken in moves nothing:
+/// a link's values stay under `2^105` (at most [`MAX_COUNT`] steps of a bounded
+/// size), so no sum of them reaches the saturation the old loop was written
+/// against.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SnLinks {
+    links: Vec<SnLink>,
+    /// Where each link number sits in `links`.
+    at: BTreeMap<u64, usize>,
+    /// The sums over `links` of their `yes` values, `no` values, and steps that
+    /// followed and broke.
+    yes: Value,
+    no: Value,
+    follows: u64,
+    breaks: u64,
+}
+
+impl SnLinks {
+    /// `follows` and `breaks` more steps on `link`.
+    fn steps(&mut self, link: u64, prior: &Prior<2>, follows: u64, breaks: u64) {
+        let at = match self.at.get(&link) {
+            Some(&at) => at,
+            None => {
+                self.links.push(SnLink {
+                    link,
+                    counts: [0; 2],
+                    yes: Value::default(),
+                    no: Value::default(),
+                });
+                self.at.insert(link, self.links.len() - 1);
+                self.links.len() - 1
+            }
+        };
+        let l = &mut self.links[at];
+        let (yes, no, counts) = (l.yes, l.no, l.counts);
+        l.steps(prior, follows, breaks);
+        self.yes.add(l.yes.q - yes.q, l.yes.err - yes.err);
+        self.no.add(l.no.q - no.q, l.no.err - no.err);
+        self.follows = self.follows.saturating_add(l.counts[0] - counts[0]);
+        self.breaks = self.breaks.saturating_add(l.counts[1] - counts[1]);
+    }
+
+    /// What [`Check::SnFollows`] reads: the links taken together.
+    fn tally(&self) -> CheckTally {
+        CheckTally {
+            confirmed: self.follows,
+            violated: self.breaks,
+            millibits: self.yes.yes(),
+            no_millibits: self.no.no(),
+        }
+    }
+}
+
 /// The first crossing of a threshold, and what the sums read there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Crossing {
@@ -648,7 +712,7 @@ pub struct ZenohEvidence {
     roles: RateCheck<2>,
     versions: WireCheck,
     front: WireCheck,
-    sn: Vec<SnLink>,
+    sn: SnLinks,
     crossing: Option<Crossing>,
     /// The largest and the smallest `yes` sum, then `no` sum, so far (the
     /// starting zero included).
@@ -767,19 +831,7 @@ impl ZenohEvidence {
                 if follows == 0 && breaks == 0 {
                     return;
                 }
-                let at = match self.sn.iter().position(|l| l.link == link) {
-                    Some(at) => at,
-                    None => {
-                        self.sn.push(SnLink {
-                            link,
-                            counts: [0; 2],
-                            yes: Value::default(),
-                            no: Value::default(),
-                        });
-                        self.sn.len() - 1
-                    }
-                };
-                self.sn[at].steps(&params.sn, follows, breaks);
+                self.sn.steps(link, &params.sn, follows, breaks);
             }
         }
         self.settle(packet);
@@ -813,23 +865,7 @@ impl ZenohEvidence {
             Check::UnitReading => self.units.tally(),
             Check::StreamFraming => self.framing.tally(),
             Check::WireFront => self.front.tally(),
-            Check::SnFollows => {
-                let mut yes = Value::default();
-                let mut no = Value::default();
-                let (mut follows, mut breaks) = (0u64, 0u64);
-                for l in &self.sn {
-                    yes.add(l.yes.q, l.yes.err);
-                    no.add(l.no.q, l.no.err);
-                    follows = follows.saturating_add(l.counts[0]);
-                    breaks = breaks.saturating_add(l.counts[1]);
-                }
-                CheckTally {
-                    confirmed: follows,
-                    violated: breaks,
-                    millibits: yes.yes(),
-                    no_millibits: no.no(),
-                }
-            }
+            Check::SnFollows => self.sn.tally(),
         }
     }
 
