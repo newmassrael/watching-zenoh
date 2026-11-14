@@ -6347,8 +6347,8 @@ jobs:
       # host tests (excluded since R2940, laneless) run here.
       - name: Layer C1ns — no_std-forcing members, isolated (R2948)
         run: bash scripts/run-ci.sh --layer C1ns
-      # The MATRIX half of this genre (C4c, C4d, C1bf) runs in `tokio-matrices`
-      # below, on a runner of its own; that job states why.
+      # The MATRIX half of this genre (C4c, C4d) runs in `tokio-matrices` below,
+      # and C1bf in `allfeat-clippy`, each on runners of its own; they state why.
 
   # ─────────────────────────────────────────────────────────────────
   # The wz-runtime-tokio feature MATRICES, out of `isolated-crates`. That job
@@ -6359,22 +6359,20 @@ jobs:
   # cold, and a cold run does not fit 30 minutes: in 42929004554 Layer C1bf
   # passed (903 s) one second before the limit cancelled the step.
   #
-  # Two causes, one per half of this split. C1bf clippies wz-runtime-tokio at
-  # --all-features, which turns on its `rocksdb` feature, and that job never
-  # restored the native engine, so every cold run compiled RocksDB from source
-  # inside the clippy step. And the job held two subjects: the isolated crates
-  # (C3, C1m, C1n, C1ns) and these three matrices over the workspace's own
-  # crates. Here the engine comes from its protected cache and the rest from
-  # the `ci` job's entry, so this job adds no cache class; each job now fits its
-  # limit cold, which is the state the pruner leaves it in.
+  # The job held two subjects: the isolated crates (C3, C1m, C1n, C1ns) and the
+  # matrices over the workspace's own crates. Its dependencies come from the `ci`
+  # job's entry, so this job adds no cache class. Layer C1bf, which was here,
+  # clippies every member now and runs in `allfeat-clippy`; the two subset
+  # matrices build wz-runtime-tokio without its defaults and never turn on
+  # `rocksdb`, so this job restores no native engine.
   #
-  # R311y420 hosted these three and hardened them first: all three matrices
-  # read their subset list through a process substitution whose exit status
-  # the reading loop cannot see, so an empty SSOT would have passed as a green
-  # matrix over zero rows. A discovery floor reds that, verified by neutering
-  # the producer (0 subsets -> both lanes red).
+  # R311y420 hosted these and hardened them first: both matrices read their
+  # subset list through a process substitution whose exit status the reading
+  # loop cannot see, so an empty SSOT would have passed as a green matrix over
+  # zero rows. A discovery floor reds that, verified by neutering the producer
+  # (0 subsets -> both lanes red).
   tokio-matrices:
-    name: wz-runtime-tokio feature matrices (Layers C4c, C4d, C1bf)
+    name: wz-runtime-tokio feature matrices (Layers C4c, C4d)
     runs-on: ubuntu-22.04
     outputs:
       cache_spec: ${{ steps.cache-series.outputs.spec }}
@@ -6427,9 +6425,8 @@ jobs:
         run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
-        # The five codecs and cmake serve the RocksDB engine's build; clang and
-        # libclang serve bindgen (librocksdb-sys); perl and pkg-config are the
-        # sibling jobs' set.
+        # clang and libclang serve bindgen; perl and pkg-config are the sibling
+        # jobs' set.
         run: |
           bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
@@ -6455,9 +6452,6 @@ jobs:
             crates -> target
             vendor/sce -> target
 
-      - name: Reuse the RocksDB native engine across feature sets
-        uses: ./.github/actions/rocksdb-engine
-
       # C4c / C4d build and clippy wz-runtime-tokio under each of the 10
       # coherent consumer-plane subsets, which `--workspace` unification can
       # only ever evaluate as their union.
@@ -6467,10 +6461,129 @@ jobs:
       - name: Layer C4d — wz-runtime-tokio subset CLIPPY matrix (R311y420)
         run: bash scripts/run-ci.sh --layer C4d
 
-      # C1bf clippies each crate of its hazard class at --all-features, the
-      # combination Layer C2's default-feature run never composes.
-      - name: Layer C1bf — wz-runtime-tokio --all-features clippy (R311y420)
+  # ─────────────────────────────────────────────────────────────────
+  # Layer C1bf -- every workspace member clippied, all targets, in each of its largest feature
+  # configurations (every feature on, or each set a crate that refuses a combination declares
+  # under `[package.metadata.wz-docs]`); the lane's header in run-ci.sh says why every member.
+  #
+  # WHY A MATRIX. One `cargo clippy -p` per configuration, about a hundred, each its own feature
+  # set and so its own set of checked dependencies. Layer C1bz documents the same configurations
+  # and read 1,380 s alone in `analyzer-crates`, and a clippy of every target checks more than a
+  # doc of the library. The shards are balanced by `scripts/lib/allfeat_clippy_costs.txt`, which
+  # the lane's `C1bf cost:` lines refill. Each shard judges its own configurations and fails on
+  # its own, so no settle job is needed; `shard_matrix_binding.py` holds the list to the count.
+  #
+  # Its own job and not a step of another, for its clock and for what it restores: it is a
+  # reader of the `ci` job's entry, as `reduced-docs` is, and restores the RocksDB engine for
+  # wz-runtime-tokio's `rocksdb` and the crates above it. wz-capi-coop's `tls-mbedtls` builds
+  # Mbed TLS from the pinned submodules with cmake, which the job installs.
+  allfeat-clippy:
+    name: every member at its largest feature sets, clippy (Layer C1bf, shard ${{ matrix.shard }}/6)
+    runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    env:
+      WZ_ALLFEAT_SHARDS: "6"
+      WZ_ALLFEAT_SHARD: ${{ matrix.shard }}
+    steps:
+      - name: Budget stamp — start this job's own clock
+        # Same reason the `ci` job stamps: `timeout-minutes` measures from when
+        # the job is CREATED, and the margin gate needs elapsed RUN time.
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Free runner disk space (headroom for the feature sets)
+        # Every configuration is a distinct feature set, so a distinct set of checked
+        # dependencies in `crates/target`: the reason the `nondefault` job prunes.
+        run: |
+          echo "=== free space BEFORE prune ==="
+          df -h /
+          prune() {
+            local started=$SECONDS
+            "$@" || true
+            echo "prune: $* took $((SECONDS - started))s"
+          }
+          prune sudo rm -rf /usr/share/dotnet &
+          prune sudo rm -rf /usr/local/lib/android &
+          prune sudo rm -rf /opt/ghc &
+          prune sudo rm -rf /usr/local/share/boost &
+          prune sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          prune sudo docker image prune --all --force &
+          wait
+          echo "=== free space AFTER prune ==="
+          df -h /
+
+      - name: Checkout (with submodules)
+        # `recursive` is load-bearing: the members resolve vendor/sce path deps, and their
+        # build scripts build vendor/lwip, vendor/mbedtls and the RocksDB sources.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `verdict-legs` copy for the measurement and for why RESTORE
+        # and SAVE are split.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
+          restore-keys: |
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
+
+      - name: Install system dependencies
+        # The `reduced-docs` job's set: the same members in the same largest configurations
+        # run the same build scripts (bindgen for lwip-sys and librocksdb-sys, cmake for
+        # zenoh-pico-sys and Mbed TLS, the engine's five codecs).
+        run: |
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`), as `reduced-docs` is: the
+        # configurations differ per shard, so a private entry would hold little the next run
+        # asks for.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
+
+      - name: Layer C1bf — every member clippied at its largest feature sets (this shard)
         run: bash scripts/run-ci.sh --layer C1bf
+
+      - name: Budget margin — this job's own clock
+        # The floor is 20, as `reduced-docs`': a job holding one lane that falls under a fifth
+        # of its budget should hand the budget back (fewer shards).
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
   # R4245 -- the ANALYZER crates' lanes, out of `isolated-crates`. That job reached its
@@ -7992,6 +8105,7 @@ jobs:
       - transport-modes
       - isolated-crates
       - tokio-matrices
+      - allfeat-clippy
       - analyzer-crates
       - analyzer-docs
       - reduced-docs
