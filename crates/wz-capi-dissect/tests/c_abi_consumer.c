@@ -4573,9 +4573,12 @@ int main(void) {
      * 11: every flow of a row carries `stream_anomalies` (per direction of a
      * TCP flow, null with `no_sequence` on any other link) and its own
      * `unstated`, and the document `evicted_stream_anomalies`. Keys arrive and
-     * two families gain a word; nothing retires. */
+     * two families gain a word; nothing retires.
+     * 12: `no_matching_key`, the reason a row's cells are unstated when key
+     * material was handed in and named no secret of this flow's connection.
+     * One family gains a word; nothing retires. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 11;
+    revisioned[12].revision = 12;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,
