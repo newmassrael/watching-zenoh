@@ -13712,6 +13712,30 @@
       "carry_forward_bullets": [
         "Open: read the hosted run of this head and the rest of the last head's run at the start of the next round."
       ]
+    },
+    "Round 4491": {
+      "decision_summary": "A consumer reported a wz router that stopped answering an admin-space query and stopped opening links for half a minute while a client's transport was being opened, and started again only when it was told to stop. Its log says the face loop did not turn in that time: no query was counted, three links that connected ended as closed by their peer rather than on the accept timeout the same loop drives, and a client whose link broke was never logged as gone. Thirty-six attempts on a build host to reproduce it failed: the consumer's order as is, the same order on one CPU shared with four busy loops, and the same order with the client's handshake held two seconds so that the query arrives while that transport opens. The stop happens only in the consumer's environment and was seen once, so what it waits on can be read only there, while it lasts, and a debugger cannot be relied on in a container. The node therefore reports its own stop. Each long-running loop turns a heartbeat that says which step it is in, and says when it rests with nothing to do; a loop that awaits its sources is busy while a source is polled and resting once the poll returns pending, so a quiet node is never reported and a poll that does not return is. One watcher thread per process, outside every async runtime, reports a loop busy in one step for half a lease, with the step, its owner's probe and every thread's name, state and kernel wait channel; it reminds every four thresholds and says when the loop turns again. The face loop is wired, the router names its routing tables' lock (whether it is held and how long its oldest writer has waited), and the router-hat host loop beats once per pass. This is the first of four steps the owner chose: the self-report now, then machine-checked lock order, then the rule that nothing waits under the tables or on the loop's thread, and the snapshot tables as the default after their measurement.",
+      "changes_bullets": [
+        "New module `wz_runtime_tokio::liveness`: a heartbeat per loop (busy in a step, or resting), a watcher thread outside every runtime, the threshold set by the host (default half of the upstream lease).",
+        "The face loop registers a heartbeat named by its node and turns it for each source poll and each step; the forwarder seam gains `liveness_probe`, which the router fills with its tables' lock state.",
+        "`PlainRwLock::contention` reads how the lock is held and how long its oldest writer has waited, without taking it; `PlainMutex::is_held` likewise.",
+        "The router-hat host loop beats each pass and sets the threshold to half its lease; count guards C1v 14 -> 16 and C1y 22 -> 24 for the face loop's two heartbeat tests."
+      ],
+      "verification_bullets": [
+        "On a build host: the liveness unit tests 6 of 6 (the judgement on a synthetic clock, a watcher report with step, probe and threads, the polled future's busy and rest, the threshold floor), the sync tests 3 of 3 including the lock contention reading.",
+        "The face loop's two tests pass under both count guards' own commands, which printed 16 (C1v) and 24 (C1y); the router_forward tests still print 310, the count their guard holds.",
+        "clippy -D warnings clean for wz-runtime-tokio (routing-router-hat with routing-peer, and transport-link-ws) and for wz-ap-demo with preset-ap-full; the release demo builds.",
+        "Negative control on the release demo: the consumer's order six times on one CPU shared with four busy loops, every attempt answered, and the router logged no liveness line.",
+        "Not run: a stop of the real binary (the unit tests stop a face loop in its tick and read it from another thread); the hosted run of this head."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Open: the consumer's stall is not reproduced; once its pin carries this head, a recurrence logs the stopped step, the tables' lock and each thread's wait channel.",
+        "Open: the next steps the owner chose, in order: machine-checked lock order (deadlock detection in test builds, a lock hierarchy, model tests), then no wait under the tables or on the loop's thread, then the snapshot tables as default after measurement.",
+        "Open: the peer loop of the demo and the C ABI node have no host heartbeat of their own; their face loops beat."
+      ]
     }
   },
   "inventory_entries": {
