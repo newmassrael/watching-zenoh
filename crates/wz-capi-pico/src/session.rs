@@ -185,6 +185,8 @@ const fn pico_group(
     wz_capi_core::drive::GroupProfile {
         lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
         join_interval_ms: 2_500,
+        // pico has no cap on a group's members: its list grows while its allocator gives.
+        max_sessions: None,
         seq_num_res: sn_resolution.wire_code(),
         req_id_res: 0x02,
         batch_size: pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES),

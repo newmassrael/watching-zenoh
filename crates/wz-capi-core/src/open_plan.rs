@@ -525,7 +525,10 @@ const ZENOH_MULTICAST_BATCH: u16 = 8_192;
 /// `sn-resolution` policy, states another width of the sequence number), the session's batch size held to the multicast cap (the UDP link's own
 /// MTU is above it on every target zenoh names), per-priority conduits when
 /// `transport/multicast/qos/enabled` asks for them, and batch compression when
-/// `transport/multicast/compression/enabled` does.
+/// `transport/multicast/compression/enabled` does. Beside the beacon, the cap on the group's
+/// members of `transport/multicast/max_sessions`, which zenoh's multicast manager holds every
+/// group to (`io/zenoh-transport/src/multicast/manager.rs` @
+/// `self = self.max_sessions(config.transport().multicast().max_sessions().unwrap());`).
 fn zenoh_group_profile(
     node: &ZenohNodeConfig,
     batch_size: u16,
@@ -536,6 +539,9 @@ fn zenoh_group_profile(
     GroupProfile {
         lease_ms: node.lease_ms,
         join_interval_ms: node.multicast_join_interval_ms,
+        // zenoh holds every group to its multicast manager's cap, 1000 unless the document
+        // states another, so a zenoh session always has one.
+        max_sessions: Some(node.multicast_max_sessions),
         seq_num_res: sn_resolution.wire_code(),
         req_id_res: BITS_32,
         batch_size: batch_size.min(ZENOH_MULTICAST_BATCH),
@@ -2374,6 +2380,27 @@ mod tests {
         assert!(plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:7447"], &router).is_ok());
     }
 
+    /// `transport/multicast/max_sessions` reaches the profile of a group the node joins, and a
+    /// document that states none gives the group upstream's cap of 1000.
+    #[test]
+    fn the_member_cap_a_document_states_reaches_the_group_profile() {
+        let read = |document: &str| {
+            ZenohNodeConfig::from_json5(document)
+                .expect("the document reads")
+                .config
+        };
+        let stated = read(r#"{ transport: { multicast: { max_sessions: 9 } } }"#);
+        assert_eq!(
+            zenoh_group_profile(&stated, 65535, SnResolution::Bits32).max_sessions,
+            Some(9)
+        );
+        let silent = read("{}");
+        assert_eq!(
+            zenoh_group_profile(&silent, 65535, SnResolution::Bits32).max_sessions,
+            Some(1000)
+        );
+    }
+
     /// What three documents decide, held whole as goldens: the reading's one observable record.
     /// A field added to the plan, or a default that moves, shows here first, and the change is
     /// then looked at and not just accepted. Only the default build has the capabilities these
@@ -2467,7 +2494,8 @@ mod tests {
             golden(
                 "role: Router\nconnect: []\nlisten: [\"tcp/127.0.0.1:7447\"]\n\
                  groups: [\"udp/224.0.0.224:7446#iface=lo GroupProfile { lease_ms: 10000, \
-                 join_interval_ms: 2500, seq_num_res: 2, req_id_res: 2, batch_size: 8192, \
+                 join_interval_ms: 2500, max_sessions: Some(1000), seq_num_res: 2, \
+                 req_id_res: 2, batch_size: 8192, \
                  is_qos: false, compression: false, join_rule: Zenoh } shm=true Subscribers\"]",
                 "-1",
                 false,
@@ -2494,6 +2522,11 @@ mod tests {
         );
         assert_eq!(
             state("transport/unicast/open_timeout"),
+            Some(KeyState::Mapped)
+        );
+        // The cap on a group's members, which each group the engine joins is held to.
+        assert_eq!(
+            state("transport/multicast/max_sessions"),
             Some(KeyState::Mapped)
         );
         assert_eq!(

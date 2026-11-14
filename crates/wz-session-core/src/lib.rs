@@ -2219,6 +2219,11 @@ pub mod session_slot_pool_mcu {
 #[cfg(feature = "session-multicast")]
 pub mod multicast_dispatch;
 
+/// The rows of a multicast group's member table: fixed, and grown past them on a heap build whose
+/// host lets the table grow. Crate-private; the dispatcher's own storage.
+#[cfg(feature = "session-multicast")]
+mod multicast_peer_rows;
+
 /// Open-debt item 913 — each multicast member's declarations kept apart for the session's
 /// observer, which sees no member: the dispatcher scopes their ids by member and retracts what a
 /// departing member held. Crate-private; reached through

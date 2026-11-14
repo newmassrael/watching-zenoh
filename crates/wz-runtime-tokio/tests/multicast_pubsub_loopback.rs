@@ -96,6 +96,7 @@ fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroup
             batch_size: 2_048,
         },
         join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Pico,
+        max_sessions: None,
     }
 }
 
@@ -123,6 +124,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+        max_sessions: None,
     }
 }
 

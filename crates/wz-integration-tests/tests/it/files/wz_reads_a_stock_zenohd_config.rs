@@ -176,7 +176,8 @@ fn operator_config(port: u16) -> String {
       qos: {{ enabled: false }},
       compression: {{ enabled: true }},
     }},
-    multicast: {{ qos: {{ enabled: true }} }},
+    // 9, away from upstream's 1000, per this fixture's own rule.
+    multicast: {{ max_sessions: 9, qos: {{ enabled: true }} }},
     shared_memory: {{ enabled: false }},
     link: {{
       tls: {{
@@ -446,6 +447,10 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
         (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
+        ),
+        (
+            "transport/multicast/max_sessions",
+            wz.multicast_max_sessions.to_string(),
         ),
         (
             "transport/shared_memory/enabled",
@@ -947,6 +952,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
+        ),
+        (
+            "transport/multicast/max_sessions",
+            wz.multicast_max_sessions.to_string(),
         ),
         (
             "transport/shared_memory/enabled",
@@ -3648,7 +3657,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
       qos: {{ enabled: true }},
       compression: {{ enabled: true }},
     }},
-    multicast: {{ qos: {{ enabled: true }} }},
+    // 9, away from upstream's 1000, per this fixture's own rule.
+    multicast: {{ max_sessions: 9, qos: {{ enabled: true }} }},
     shared_memory: {{ enabled: false }},
     // R2627 — the pubkey identity, NAMED rather than excepted, and the contrast
     // with `usrpwd/dictionary_file` (excepted below) is the whole decision. That

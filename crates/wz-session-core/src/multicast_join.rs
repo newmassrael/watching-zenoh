@@ -538,6 +538,7 @@ mod tests {
             tx_queue: crate::session_init_params::TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 

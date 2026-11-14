@@ -639,6 +639,9 @@ fn group_params(
         link_rx: Default::default(),
         // The demo's group is zenoh-pico's, as its batch is.
         join_rule: wz::runtime_tokio::multicast_glue::GroupJoinRule::Pico,
+        // A sessions document states no cap on a group's members, as pico has none: the table's
+        // rows are the bound.
+        max_sessions: None,
     }
 }
 
@@ -749,8 +752,11 @@ where
     // each one is given it here rather than the first alone.
     let new_dispatcher = || {
         #[cfg_attr(not(feature = "access-acl-multicast"), allow(unused_mut))]
-        let mut dispatcher =
-            MulticastDispatcher::<GROUP_PEER_TABLE>::new(MulticastConfig::new(params.lease_ms));
+        let mut dispatcher = MulticastDispatcher::<GROUP_PEER_TABLE>::new(
+            MulticastConfig::new(params.lease_ms)
+                .with_max_sessions(params.max_sessions)
+                .growing(),
+        );
         #[cfg(feature = "access-acl-multicast")]
         session.install_ingress_gate(&mut dispatcher);
         dispatcher

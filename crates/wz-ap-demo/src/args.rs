@@ -539,6 +539,57 @@ pub(crate) fn parse_max_sessions(args: &[String]) -> usize {
         .unwrap_or(default)
 }
 
+/// `--multicast-max-sessions <N>`: how many members the router's group face holds at once, the
+/// flag a document's `transport/multicast/max_sessions` expands to. `None` when the flag is
+/// absent, which states no cap: the face's table rows are then the bound.
+///
+/// A value that is not a count is an error rather than a warning and a default, unlike
+/// `--max-sessions`: the face would otherwise hold a cap nobody stated. Zero is a count, as
+/// upstream's `usize` takes it, and a face under it admits no member.
+#[cfg(feature = "router-hat-router")]
+pub(crate) fn parse_multicast_max_sessions(args: &[String]) -> Result<Option<usize>, String> {
+    parse_pair(args, "--multicast-max-sessions")
+        .map(|s| {
+            s.trim().parse::<usize>().map_err(|_| {
+                format!("--multicast-max-sessions expects a count of members, got '{s}'")
+            })
+        })
+        .transpose()
+}
+
+#[cfg(all(test, feature = "router-hat-router"))]
+mod multicast_max_sessions_flag_tests {
+    use super::parse_multicast_max_sessions;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    /// Absent is no cap; any count is read, zero included; anything else is refused by the
+    /// flag's name rather than replaced by a default.
+    #[test]
+    fn the_flag_reads_a_count_zero_included_and_refuses_anything_else() {
+        assert_eq!(parse_multicast_max_sessions(&argv(&[])), Ok(None));
+        let flag = "--multicast-max-sessions";
+        assert_eq!(
+            parse_multicast_max_sessions(&argv(&[flag, "1000"])),
+            Ok(Some(1000))
+        );
+        assert_eq!(
+            parse_multicast_max_sessions(&argv(&[flag, "0"])),
+            Ok(Some(0))
+        );
+        for bad in ["-1", "ten", "1.5", ""] {
+            let err = parse_multicast_max_sessions(&argv(&[flag, bad]))
+                .expect_err("a value that is not a count is refused");
+            assert!(
+                err.contains("--multicast-max-sessions expects"),
+                "{bad}: {err}"
+            );
+        }
+    }
+}
+
 /// `--accept-pending <N>` and `--accept-timeout-ms <MS>`: how many inbound links may be
 /// mid-handshake at once and how long each gets, the two keys upstream keeps under
 /// `transport/unicast` (`accept_pending`, `accept_timeout`). Absent, upstream's own, a hundred and
@@ -2164,6 +2215,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             no_sink("transport/multicast/qos/enabled"),
         );
     }
+    // The cap on a group's members, which the router-hat's group face holds. Expanded at any
+    // value, upstream's 1000 included: the face grows its table to whatever cap it is given.
+    if named("transport/multicast/max_sessions") {
+        exp.pair(
+            "transport/multicast/max_sessions",
+            "--multicast-max-sessions",
+            cfg.multicast_max_sessions.to_string(),
+            no_sink("transport/multicast/max_sessions"),
+        );
+    }
     if named("transport/shared_memory/enabled") {
         exp.presence(
             "transport/shared_memory/enabled",
@@ -3622,6 +3683,19 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          bound` in accept_loop.rs. A refused peer sees its link close, which \
          no frame field distinguishes from any other close.",
     ),
+    // OFF-WIRE for its unicast twin's reason, more so: a member turned away is sent nothing at
+    // all, since upstream ignores the Join (`io/zenoh-transport/src/multicast/rx.rs` @
+    // `Ignoring Join on {} from peer: {}. Max sessions reached: {}.`), and so does wz.
+    (
+        "transport/multicast/max_sessions",
+        KIND_OFF_WIRE,
+        "expands to `--multicast-max-sessions`, which the router-hat's group face \
+         takes as its dispatcher's cap (multicast_glue.rs, `serve_group_face`). A \
+         local admission bound: the table grows to it and ignores the Join of a \
+         member past it, witnessed by `a_growing_table_admits_past_its_rows_to_the_\
+         stated_cap` in wz-session-core's multicast_dispatch.rs. The member turned \
+         away is sent nothing, so no frame carries the bound.",
+    ),
     (
         "transport/unicast/open_timeout",
         KIND_LEG_JUDGED,
@@ -4266,6 +4340,11 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     }
     if !cfg!(feature = "transport-qos") {
         out.push("transport/multicast/qos/enabled");
+    }
+    // `transport/multicast/max_sessions`'s sink is the router-hat's group face, which a build
+    // without `router-multicast-faces` does not spawn.
+    if !cfg!(feature = "router-multicast-faces") {
+        out.push("transport/multicast/max_sessions");
     }
     // The certificate material, which upstream hands to the `tls/` and the `quic/` link alike:
     // its sinks are this binary's plumbing for either link (`apply_tls_ca`/`apply_tls_accept`
@@ -5963,6 +6042,13 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { multicast: { qos: { enabled: true } } } }"#,
+            ),
+            // 9, away from upstream's 1000, so the delta is a value the file asked for.
+            (
+                "transport/multicast/max_sessions",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { multicast: { max_sessions: 9 } } }"#,
             ),
             // R2063 (open-debt item 214) — the non-default value, for the reason
             // the `scouting/multicast/listen` row above states: the delta this

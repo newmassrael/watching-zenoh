@@ -1442,6 +1442,7 @@ mod qos_emit_tests {
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 
@@ -1537,6 +1538,7 @@ mod push_tests {
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 
@@ -1929,6 +1931,7 @@ mod lend_tests {
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 
@@ -2136,6 +2139,7 @@ mod lent_emit_tests {
             tx_queue: TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 
