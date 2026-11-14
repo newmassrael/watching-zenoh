@@ -321,7 +321,9 @@ fn render_resolved(value: &Json5Value) -> String {
                 .iter()
                 .map(|i| match i {
                     Json5Value::String(s) => format!("\"{s}\""),
-                    other => format!("{other:?}"),
+                    // An object member (a `plugins_loading/search_dirs` spec) as its
+                    // JSON text, for the reason the object arm below gives.
+                    other => other.to_json5_text(),
                 })
                 .collect();
             format!("[{}]", joined.join(","))
@@ -912,6 +914,22 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // asserted below rather than rendered here, for the literal-in-a-row
         // reason the weights row gives.
         ("plugins", String::from("{}")),
+        // A silent file resolves to upstream's default search list, a `current_exe_parent`
+        // spec and five paths, and wz holds `None` for it, which searches that same list. The
+        // list wz searches is rendered here through the tree's own renderer, so the two are one
+        // spelling of one value.
+        (
+            "plugins_loading/search_dirs",
+            render_resolved(
+                &json5::parse(
+                    &wz.plugin_search_dirs
+                        .clone()
+                        .unwrap_or_default()
+                        .to_json5_text(),
+                )
+                .unwrap(),
+            ),
+        ),
     ];
     assert!(wz.connect.is_empty(), "the fixture states no connect list");
     assert!(
@@ -3847,6 +3865,9 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     // reason: only a region-hat node (`--peer` or `--router-hat`) places its
     // remotes by a partition, and a connecting client holds no hat, so its run is
     // told the key was withheld from it rather than handed `--gateway-south`.
+    // `plugins_loading/search_dirs` is the FIFTH, with `plugins`: only the storage
+    // host loads plugins, so a connecting client's run is told the list was
+    // withheld from it rather than handed `--plugin-search-dirs`.
     let mut every_honoured: Vec<&str> = HONOURED_CONFIG_KEYS
         .iter()
         .chain(WZ_EXTENSION_HONOURED_KEYS)
@@ -3855,6 +3876,7 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         .filter(|k| *k != "transport/auth/usrpwd/dictionary_file")
         .filter(|k| *k != "plugins")
         .filter(|k| *k != "gateway/south")
+        .filter(|k| *k != "plugins_loading/search_dirs")
         .collect();
     fixture_names.sort_unstable();
     every_honoured.sort_unstable();

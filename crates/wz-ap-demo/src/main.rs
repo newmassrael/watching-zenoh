@@ -1389,6 +1389,13 @@ fn demo_main() -> ExitCode {
                 period_ms: gc_ms("--storage-gc-period-ms"),
                 lifespan_ms: gc_ms("--storage-gc-lifespan-ms"),
             };
+            let plugin_search_dirs = match crate::args::plugin_search_dirs_flag(rest) {
+                Ok(dirs) => dirs,
+                Err(message) => {
+                    eprintln!("wz-ap-demo: {message}");
+                    return ExitCode::from(2);
+                }
+            };
             run_storage_host_mode(
                 storage_host_listen,
                 crate::runner::StorageHostOpts {
@@ -1408,6 +1415,7 @@ fn demo_main() -> ExitCode {
                     // R2788 — the `plugins` section as JSON5 text, which a
                     // `--config` file's `plugins` key expands to.
                     plugins: parse_pair(rest, "--plugins"),
+                    plugin_search_dirs,
                     // §5.23 `adminspace-core` — the one value read above.
                     metadata: metadata.clone(),
                     tuning,

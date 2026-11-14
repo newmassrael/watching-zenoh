@@ -223,6 +223,13 @@ pub(crate) fn print_usage() {
     eprintln!("    --metadata <json5>       free-form value this node's adminspace serves as");
     eprintln!("                             the `metadata` field of @/<zid>/<whatami>, in every");
     eprintln!("                             run-mode that hosts an adminspace. zenoh metadata");
+    eprintln!("    --plugin-search-dirs <json5>");
+    eprintln!("                             the directories a --storage-host searches, in order,");
+    eprintln!("                             for a plugin its plugins section names without a");
+    eprintln!("                             __path__ (libwz_plugin_<name>.so); a list of paths");
+    eprintln!("                             and kind specs (current_exe_parent, path).");
+    eprintln!("                             Default: upstream's list.");
+    eprintln!("                             zenoh plugins_loading/search_dirs");
     eprintln!("    --scout                  initiator mode with a DISCOVERED locator: emit a");
     eprintln!("                             multicast Scout on 224.0.0.224:7446 and dial the");
     eprintln!("                             locator the first peer Hello advertises. Mutually");

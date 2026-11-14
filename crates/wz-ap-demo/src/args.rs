@@ -655,6 +655,25 @@ pub(crate) fn metadata_flag(
     Ok(Some(value))
 }
 
+/// `--plugin-search-dirs <list>`: the node config's `plugins_loading/search_dirs`,
+/// a JSON5 list of paths and `{ kind, value }` specs, which a `--config` file's
+/// key expands to. Read by the storage host, the run-mode that loads plugins;
+/// `None` when not given, and the host then searches upstream's default list.
+/// A list upstream's parser refuses is refused here before the host starts.
+#[cfg(feature = "adminspace-config-hotreload")]
+pub(crate) fn plugin_search_dirs_flag(
+    args: &[String],
+) -> Result<Option<wz::runtime_tokio::plugin_search_dirs::LibSearchDirs>, String> {
+    let Some(text) = parse_pair(args, "--plugin-search-dirs") else {
+        return Ok(None);
+    };
+    let value = wz::runtime_tokio::json5::parse(&text)
+        .map_err(|e| format!("--plugin-search-dirs {text:?} is not a JSON5 value: {e}"))?;
+    wz::runtime_tokio::plugin_search_dirs::LibSearchDirs::from_json5(&value)
+        .map(Some)
+        .map_err(|shape| format!("--plugin-search-dirs {text:?} must be {shape}"))
+}
+
 /// §5.23 `adminspace-core` — the admin space a single-session run hosts on its
 /// own session (`--config-queryable`): the read and write permits it starts
 /// with and the `metadata` its `local_data` serves. The role in its keys is not
@@ -2269,6 +2288,30 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             .unwrap_or_default();
         exp.pair("plugins", "--plugins", section, blocked);
     }
+    // `plugins_loading/search_dirs`, onto `--plugin-search-dirs <list>`, taken
+    // verbatim like `--plugins` and read by the same run-mode, the one that
+    // loads plugins.
+    if named("plugins_loading/search_dirs") {
+        let run_flag = typed_role
+            .map(|(flag, _)| flag)
+            .or(selected.map(|s| s.flag));
+        let blocked = no_sink("plugins_loading/search_dirs").or_else(|| {
+            (run_flag != Some("--storage-host")).then_some(KeyEffect::WithheldFromThisRun(
+                "a plugin search (only --storage-host loads plugins)",
+            ))
+        });
+        let dirs = cfg
+            .plugin_search_dirs
+            .as_ref()
+            .map(|dirs| dirs.to_json5_text())
+            .unwrap_or_default();
+        exp.pair(
+            "plugins_loading/search_dirs",
+            "--plugin-search-dirs",
+            dirs,
+            blocked,
+        );
+    }
     // The run-mode the expanded argv runs, typed or selected by the file, and,
     // when it is a single-session run that cannot host the admin space a
     // document enables, the verdict its admin keys get instead of a flag it
@@ -3802,6 +3845,17 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          wz_storage_host_from_config_alone.rs, starts it on the file with no run \
          flag at all.",
     ),
+    // Which library a plugin named without a `__path__` loads from: a search of
+    // the file system, which no frame carries.
+    (
+        "plugins_loading/search_dirs",
+        KIND_OFF_WIRE,
+        "expands to `--plugin-search-dirs <list>` on a `--storage-host` run. The \
+         list decides which directory a plugin named without a path is loaded \
+         from, visible only as the plugin that starts; no frame field carries it. \
+         Judged by a_plugin_named_without_a_path_is_found_in_the_search_dirs in \
+         wz-runtime-tokio's plugin plane.",
+    ),
     // §5.23 `adminspace-core` — `metadata`. The value travels in the REPLY to an
     // admin GET of the node's root key, and that reply is what the leg reads.
     (
@@ -4005,6 +4059,11 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // compiles that run-mode at all: `--storage-host` exits(2) without it.
     if !cfg!(feature = "adminspace-config-hotreload") {
         out.push("plugins");
+    }
+    // `plugins_loading/search_dirs`' sink is the storage host's plugin plane,
+    // which a build loading no library plugin does not have.
+    if !cfg!(all(unix, feature = "plugin-dynamic-loading")) {
+        out.push("plugins_loading/search_dirs");
     }
     // §5.23 `adminspace-core` — `metadata`'s sink is an adminspace host's
     // `local_data`, and this binary has four: `--peer` (`routing-peer`),
@@ -5107,6 +5166,10 @@ mod stock_config_tests {
             // it), so the row types it, and the role-parity sweep below skips
             // this row by MEASURING that the file supplies a different role.
             "plugins" => &["--config", "z.json5", "--storage-host", "tcp/127.0.0.1:0"],
+            // The search list goes to the same run-mode, for the same reason.
+            "plugins_loading/search_dirs" => {
+                &["--config", "z.json5", "--storage-host", "tcp/127.0.0.1:0"]
+            }
             _ => &["--config", "z.json5"],
         }
     }
@@ -5765,6 +5828,12 @@ mod stock_config_tests {
                 "metadata",
                 r#"{ mode: "peer" }"#,
                 r#"{ mode: "peer", metadata: { name: "strawberry" } }"#,
+            ),
+            // One directory, on the storage host `cli_for` names.
+            (
+                "plugins_loading/search_dirs",
+                r#"{ mode: "peer" }"#,
+                r#"{ mode: "peer", plugins_loading: { search_dirs: ["/opt/wz/plugins"] } }"#,
             ),
         ]
     }
@@ -10234,6 +10303,44 @@ mod gateway_south_flag_tests {
         ] {
             let err = parse_gateway_south(&argv(Some(bad))).expect_err(bad);
             assert!(err.starts_with("--gateway-south "), "{bad} -> {err}");
+        }
+    }
+}
+
+/// `--plugin-search-dirs <list>`: absent is upstream's default list, a list is
+/// read in both spellings, and what upstream's parser refuses is refused with
+/// the flag named.
+#[cfg(all(test, feature = "adminspace-config-hotreload"))]
+mod plugin_search_dirs_flag_tests {
+    use super::*;
+    use wz::runtime_tokio::plugin_search_dirs::{LibSearchDir, LibSearchDirs};
+
+    fn argv(value: Option<&str>) -> Vec<String> {
+        let mut out = vec!["--storage-host".to_string(), "tcp/127.0.0.1:0".to_string()];
+        if let Some(v) = value {
+            out.push("--plugin-search-dirs".to_string());
+            out.push(v.to_string());
+        }
+        out
+    }
+
+    #[test]
+    fn absent_names_no_list_and_a_list_is_read_in_order() {
+        assert_eq!(plugin_search_dirs_flag(&argv(None)), Ok(None));
+        assert_eq!(
+            plugin_search_dirs_flag(&argv(Some(r#"["/a", { kind: "current_exe_parent" }]"#))),
+            Ok(Some(LibSearchDirs::new(vec![
+                LibSearchDir::Path(String::from("/a")),
+                LibSearchDir::CurrentExeParent,
+            ])))
+        );
+    }
+
+    #[test]
+    fn a_list_upstream_refuses_is_refused_by_the_flag() {
+        for bad in ["[ \"/a\"", r#""/a""#, r#"[{ kind: "nowhere" }]"#] {
+            let err = plugin_search_dirs_flag(&argv(Some(bad))).expect_err(bad);
+            assert!(err.starts_with("--plugin-search-dirs "), "{bad} -> {err}");
         }
     }
 }

@@ -1205,6 +1205,12 @@ pub mod plugins_config;
 ))]
 pub mod plugin_plane;
 
+/// `plugins_loading/search_dirs`: the directories a plugin named without a
+/// `__path__` is searched for in, and the file name it is searched for by. Plain
+/// data and file-system reads, so the config reader holds it in every build and
+/// the plugin plane searches with it where a build loads plugins.
+pub mod plugin_search_dirs;
+
 /// R311y786 — the connection-retry SCHEDULE (zenoh's `ConnectionRetryPeriod`):
 /// one transcription of the grow-then-clamp arithmetic, shared by the client
 /// reconnect supervisor and the router peer auto-reconnect so the two cannot

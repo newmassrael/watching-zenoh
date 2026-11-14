@@ -106,7 +106,9 @@ pub enum KeyState {
 /// runtime's reader knows: one a bump of the pinned upstream added, which has no state until it is
 /// given one, and which a test over the default configuration fails on until then.
 pub fn key_state(path: &str) -> Option<KeyState> {
-    if honours_config_key(path) {
+    if NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON.contains(&path) {
+        Some(KeyState::Unmapped)
+    } else if honours_config_key(path) {
         // A key whose reader is a capability this build was made without is acted on by a build
         // with it, and not by this one.
         Some(if config_key_in_build(path) {
@@ -126,6 +128,12 @@ pub fn key_state(path: &str) -> Option<KeyState> {
         None
     }
 }
+
+/// Keys the runtime's reader honours for a wz NODE whose effect lives in a part of that node this
+/// engine does not have: the plugin plane of the storage host searches
+/// `plugins_loading/search_dirs`. Stating one here asks for something that will not happen, so it
+/// is [`KeyState::Unmapped`] and reported among [`OpenPlan::ignored`] although the reader read it.
+pub const NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON: &[&str] = &["plugins_loading/search_dirs"];
 
 /// The five keys that give a certificate or a key of the `tls/` and `quic/` links inline, base64
 /// encoded, where the keys `tls_of` reads name a file.
@@ -818,9 +826,18 @@ impl OpenPlan {
             TimestampingEnabled::default,
             ZenohConfigIngest::timestamping_enabled,
         );
-        let ignored = ingest
-            .as_ref()
-            .map_or_else(Vec::new, |ingest| ingest.ignored.clone());
+        let ignored = ingest.as_ref().map_or_else(Vec::new, |ingest| {
+            let mut ignored = ingest.ignored.clone();
+            ignored.extend(
+                ingest
+                    .named
+                    .iter()
+                    .filter(|key| NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON.contains(key))
+                    .map(|key| String::from(*key)),
+            );
+            ignored.sort_unstable();
+            ignored
+        });
         let node = ingest.map(|ingest| ingest.config);
         let namespace_text = node.as_ref().and_then(|node| node.namespace.clone());
         // How the node keeps its south apart (`gateway/south`): the preset unless the document
@@ -2240,6 +2257,28 @@ mod tests {
         )
         .expect("opens");
         assert_eq!(plan.ignored, ["transport/unicast/open_timeout"]);
+    }
+
+    /// A key the reader honours for a wz node and this engine has no part to act on is unmapped
+    /// here, and a document that states it has it reported, as one the reader does not read is.
+    #[test]
+    fn a_node_key_the_engine_has_no_part_for_is_unmapped_and_reported() {
+        for key in NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON {
+            assert!(
+                wz_runtime_tokio::zenoh_config::HONOURED_CONFIG_KEYS.contains(key),
+                "{key} is not a node key, so the reader's own report already covers it"
+            );
+            assert_eq!(key_state(key), Some(KeyState::Unmapped), "{key}");
+        }
+        let plan = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ scouting: { multicast: { enabled: false } },
+                 plugins_loading: { search_dirs: ["/opt/wz/plugins"] } }"#,
+        )
+        .expect("opens");
+        assert_eq!(plan.ignored, ["plugins_loading/search_dirs"]);
     }
 
     /// `transport/link/protocols` is a whitelist of the unicast links the node makes: an endpoint

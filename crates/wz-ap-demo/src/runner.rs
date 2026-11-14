@@ -8474,6 +8474,9 @@ pub(crate) struct StorageHostOpts {
     /// text, which this host runs its storage manager from. A `--config` file
     /// naming `plugins` expands to it.
     pub plugins: Option<String>,
+    /// `--plugin-search-dirs <list>`: where a plugin the section names without
+    /// a `__path__` is searched for. `None` searches upstream's default list.
+    pub plugin_search_dirs: Option<wz::runtime_tokio::plugin_search_dirs::LibSearchDirs>,
     /// `--batch-size` / `--lease-ms`.
     pub tuning: TransportTuning,
 }
@@ -8492,6 +8495,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         no_admin_read,
         config_write_permit,
         plugins: startup_plugins,
+        plugin_search_dirs,
         metadata,
         tuning,
     } = opts;
@@ -8549,6 +8553,11 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
     let library_plane = {
         let mut plane = wz::runtime_tokio::plugin_plane::DynamicPluginPlane::new();
+        // `plugins_loading/search_dirs`: where a section entry naming no
+        // `__path__` is searched for, by this plane's every start.
+        if let Some(dirs) = plugin_search_dirs {
+            plane.set_search_dirs(dirs);
+        }
         let registry = plane.registry_mut();
         for path in plugin_paths {
             // R2673 — DECLARE before loading, so a load that fails leaves a
@@ -8621,6 +8630,12 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
             log::warn!(
                 "wz-ap-demo storage-host: --plugin given but this binary lacks the \
                  `plugin-dynamic-loading` feature — INERT, nothing was loaded"
+            );
+        }
+        if plugin_search_dirs.is_some() {
+            log::warn!(
+                "wz-ap-demo storage-host: --plugin-search-dirs given but this binary \
+                 lacks the `plugin-dynamic-loading` feature — INERT, nothing is searched"
             );
         }
         NoLibraryPlane

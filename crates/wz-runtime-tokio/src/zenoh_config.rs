@@ -1495,6 +1495,13 @@ pub struct ZenohNodeConfig {
     ///
     /// `None` = the document did not say, which upstream resolves to `null`.
     pub metadata: Option<Json5Value>,
+    /// `plugins_loading/search_dirs`, the directories a plugin named without a
+    /// `__path__` is searched for in, in the document's order.
+    ///
+    /// `None` = the document did not say, and a node searches upstream's
+    /// default list ([`crate::plugin_search_dirs::LibSearchDirs::default`]),
+    /// which is also what a running zenohd resolves a silent file to.
+    pub plugin_search_dirs: Option<crate::plugin_search_dirs::LibSearchDirs>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1641,6 +1648,7 @@ impl Default for ZenohNodeConfig {
             access_control: AclConfigInputs::default(),
             plugins: None,
             metadata: None,
+            plugin_search_dirs: None,
         }
     }
 }
@@ -2153,6 +2161,13 @@ impl ZenohNodeConfig {
                 admin.read, admin.write
             );
         }
+        if let Some(dirs) = &self.plugin_search_dirs {
+            let _ = write!(
+                out,
+                ",\n  \"plugins_loading\": {{ \"search_dirs\": {} }}",
+                dirs.to_json5_text()
+            );
+        }
         out.push_str("\n}\n");
         out
     }
@@ -2444,6 +2459,11 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // and announces each remote's bound. The group said wz had no
     // "gateway region-partitioning plane", and `region_partition` is one.
     "gateway/south",
+    // Where a plugin the `plugins` section names without a `__path__` is
+    // searched for: the storage host's plugin plane searches the list
+    // (`crate::plugin_search_dirs`). Moved from the unhonoured half, so the
+    // surface total is unchanged.
+    "plugins_loading/search_dirs",
 ];
 
 /// The keys of [`HONOURED_CONFIG_KEYS`] whose reader is a CAPABILITY of the build: the key, the
@@ -2815,10 +2835,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // its peers' initial declarations. Same partition, same total.
     // R2788 — `plugins` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader
     // carries the section and the storage host runs the storage manager from
-    // it. Its two `plugins_loading/*` siblings stay: they govern how a zenohd
-    // DISCOVERS plugin libraries, which is a different capability.
+    // it. `plugins_loading/search_dirs` followed it once the plugin plane
+    // searched by name; `plugins_loading/enabled` stays.
     "plugins_loading/enabled",
-    "plugins_loading/search_dirs",
     // `qos/network` LEFT this list for `HONOURED_CONFIG_KEYS`: the QoS overwrite interceptor is
     // built. Same partition, same total.
     "qos/publication",
@@ -2936,8 +2955,6 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   that a publisher takes from the first rule whose keys include its own. Its sibling
 ///   `qos/network` is the QoS overwrite interceptor, which wz has since `interceptor/` gained
 ///   `qos_overwrite`.
-/// * `plugins_loading/search_dirs` — plugin auto-discovery from a search path
-///   (`PluginSearchDirs`). wz loads a plugin by explicit path only.
 /// * `transport/auth/*` — a credential store (`CredentialStore`). wz has the
 ///   WIRE half (the auth-body codec has foreign witnesses) and nothing to
 ///   configure it from.
@@ -3036,7 +3053,7 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // value, so the capability the row named is one wz has.
     // R2950 — `connect_scouted` left for the honoured list, and `declares` followed it for
     // [`C_ABI_SESSION_HONOURED_KEYS`] once the open held on the end of the peers' declarations.
-    "plugins_loading/search_dirs",
+    // `plugins_loading/search_dirs` LEFT this list: the plugin plane searches by name.
     // `qos/network` LEFT this list as it left its sibling above: wz has the interceptor now.
     "qos/publication",
     // ⚠ R2539 — `region_name` LEFT THIS LIST for [`UNHONOURED_READER_GAP`],
@@ -3160,9 +3177,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 ///   claimed wz needed an interceptor chain, and wz has one.
 /// * `plugins_loading/enabled` — `PluginRegistry`, which loads, starts, stops
 ///   and admin-reports `DynamicPlugin`s, driven today by the demo's repeated
-///   `--plugin`. `plugins_loading/search_dirs` stays in
-///   [`UNHONOURED_BEYOND_WZ`]: wz loads by explicit path and has no discovery.
-///   (R2788: `plugins` itself left this list — the reader carries the section.)
+///   `--plugin`. (R2788: `plugins` itself left this list — the reader carries
+///   the section; `plugins_loading/search_dirs` is honoured beside it.)
 /// * (`transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
 ///   verify_name_on_connect}` LEFT this list: the reader reads them, [`HONOURED_CONFIG_KEYS`].)
 /// * `transport/link/rx/buffer_size` — the size of a link's RX pool, which
@@ -3294,11 +3310,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "PublisherQoSConfList",
         &["qos/publication"],
     ),
-    (
-        "plugin auto-discovery from a search path",
-        "PluginSearchDirs",
-        &["plugins_loading/search_dirs"],
-    ),
+    // The plugin auto-discovery group is GONE, not emptied: its one key is
+    // honoured, the plugin plane searching `plugins_loading/search_dirs` by name.
     // The "a credential store" group is GONE, not emptied: its history is that
     // `key_size` / `known_keys_file` left it for [`UPSTREAM_INERT_CONFIG_KEYS`] (R2336,
     // upstream reads neither), the usrpwd dictionary left with R2567, the four pubkey
@@ -3550,14 +3563,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // honours the key now, and `extbound.rs`'s "not this key" disclaimer went
     // with it.
     ("plugins_loading/enabled", "wz-has-it", "PluginRegistry"),
-    // The citing site is `PluginRegistry`'s doc, drawing the line at this key:
-    // the host is wz's, the DISCOVERY is not. A citation that says "not this
-    // one" is still a citation, and it needs a verdict like any other.
-    (
-        "plugins_loading/search_dirs",
-        "not-this-key",
-        "PluginRegistry",
-    ),
+    // `plugins_loading/search_dirs`' "not this key" row is GONE with the
+    // disclaimer beside `PluginRegistry`: the reader honours the key now.
     // R2200 (open-debt item 558) — wz's source spells `qos/publication` to
     // configure the GENUINE zenoh `z_pub` example, never itself. The key is the
     // only way any oracle this tree provisions can be told which PRIORITY to
@@ -3740,11 +3747,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "plugins_loading/enabled",
         "build",
         "reader gap: PluginRegistry loads plugins and the reader does not gate it on this",
-    ),
-    (
-        "plugins_loading/search_dirs",
-        "build",
-        "finding a plugin library by name in search directories; wz loads by path only",
     ),
     (
         "qos/publication",
@@ -8052,6 +8054,17 @@ impl ZenohNodeConfig {
                 }
             }
         }
+        if let Some(value) = honoured(&doc, "plugins_loading/search_dirs") {
+            out.plugin_search_dirs = Some(
+                crate::plugin_search_dirs::LibSearchDirs::from_json5(value).map_err(|_| {
+                    ConfigIngestError::WrongType {
+                        path: "plugins_loading/search_dirs",
+                        expected: crate::plugin_search_dirs::LIB_SEARCH_DIRS_SHAPE,
+                    }
+                })?,
+            );
+            named.push("plugins_loading/search_dirs");
+        }
         // `adminspace` is a block rather than a field: an absent block is not
         // `enabled: false`, which is why the struct models it as an Option and
         // why `enabled: false` here has to erase the block rather than record
@@ -9125,6 +9138,10 @@ mod tests {
                 scout_multicast_ttl: Some(4),
                 ..ZenohNodeConfig::default()
             },
+            ZenohNodeConfig {
+                plugin_search_dirs: Some(crate::plugin_search_dirs::LibSearchDirs::default()),
+                ..ZenohNodeConfig::default()
+            },
         ] {
             let ingest = ZenohNodeConfig::from_json5(&original.to_json5())
                 .unwrap_or_else(|e| panic!("{e} for {original:?}"));
@@ -9632,6 +9649,10 @@ mod tests {
                 "gateway/south",
                 r#"{ "gateway": { "south": [{ "filters": [{ "modes": ["peer"] }] }] } }"#,
             ),
+            (
+                "plugins_loading/search_dirs",
+                r#"{ "plugins_loading": { "search_dirs": ["/opt/wz/plugins"] } }"#,
+            ),
             // R2230 (items 579 / 582) — this row MOVED to the tail of the table
             // when the key left `HONOURED_CONFIG_KEYS` for
             // `WZ_EXTENSION_HONOURED_KEYS`. It is still driven, and driven the
@@ -9687,6 +9708,49 @@ mod tests {
                 ingest.config,
                 ZenohNodeConfig::default(),
                 "{key} parsed but changed nothing"
+            );
+        }
+    }
+
+    /// `plugins_loading/search_dirs` is read in both of upstream's spellings, in
+    /// order, and a member upstream's parser refuses is refused by the key.
+    #[test]
+    fn the_plugin_search_dirs_are_read_in_order_and_a_bad_member_is_refused() {
+        use crate::plugin_search_dirs::{LibSearchDir, LibSearchDirs};
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ plugins_loading: { search_dirs:
+                 ["/a", { kind: "current_exe_parent" }, { kind: "path", value: "~/b" }] } }"#,
+        )
+        .expect("both spellings");
+        assert_eq!(
+            ingest.config.plugin_search_dirs,
+            Some(LibSearchDirs::new(vec![
+                LibSearchDir::Path(String::from("/a")),
+                LibSearchDir::CurrentExeParent,
+                LibSearchDir::Path(String::from("~/b")),
+            ]))
+        );
+        assert!(ingest.named.contains(&"plugins_loading/search_dirs"));
+        assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
+
+        let silent = ZenohNodeConfig::from_json5("{}").unwrap();
+        assert_eq!(
+            silent.config.plugin_search_dirs, None,
+            "silence searches the default list, and says so by naming none"
+        );
+
+        for bad in [
+            r#"{ plugins_loading: { search_dirs: "/a" } }"#,
+            r#"{ plugins_loading: { search_dirs: [{ kind: "elsewhere" }] } }"#,
+            r#"{ plugins_loading: { search_dirs: [7] } }"#,
+        ] {
+            assert_eq!(
+                ZenohNodeConfig::from_json5(bad).err(),
+                Some(ConfigIngestError::WrongType {
+                    path: "plugins_loading/search_dirs",
+                    expected: crate::plugin_search_dirs::LIB_SEARCH_DIRS_SHAPE,
+                }),
+                "{bad}"
             );
         }
     }
