@@ -24,6 +24,14 @@ use wz_capture::{CaptureError, Dissection};
 use wz_tls_record::keylog::KeyLog;
 use wz_tls_record::quic::connection::SequenceKey;
 
+// The analyzer shows everything a capture carries, and the slot profile reads less of it: a
+// received extension chain keeps only the entries of the extensions the build reads (an unknown
+// one is judged by its header and dropped), and every bounded table stops at its cap. A build
+// that unified that profile into this one would list less than the wire held and say nothing,
+// so it is refused by name. The passive reader itself builds on every profile; the refusal is
+// this reader's.
+wz_session_core::heap_session_profile!("wz-analyze";);
+
 /// How the report should be rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Format {
