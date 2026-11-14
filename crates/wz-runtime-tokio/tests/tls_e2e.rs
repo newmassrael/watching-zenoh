@@ -663,6 +663,137 @@ async fn an_expiring_peer_chain_closes_only_the_tls_link_that_asked_for_it() {
     );
 }
 
+/// `transport/link/tls/close_link_on_expiration`, the key's own seam: the tls
+/// KIND's layer arms a link whose locator tail says nothing, as upstream renders
+/// the config key under every tls endpoint, and a tail that says `false` wins
+/// over the kind's `true`, as an endpoint's parameters win over its kind's.
+///
+/// The same production path as the tail witness above (dial, the flag reaching
+/// `DialedLink::Tls`, the watcher, `LostCause::CertificateExpired`), with the
+/// flag taken from `DialConfig::link_defaults` instead of the locator. The
+/// listener's half is read off the bound listener's policy, where the accept
+/// side carries the flag to its handshakes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expiring_peer_chain_closes_a_tls_link_whose_kind_asked_for_it() {
+    use wz_runtime_tokio::link_socket::{LinkDefaults, LinkKind};
+    use wz_runtime_tokio::session_open::{
+        bind_locator, dial_locator, AcceptConfig, BoundListener, DialedLink,
+    };
+    use wz_runtime_tokio::tls_pipeline::wire_tls_stream;
+    use wz_runtime_tokio::LinkDriver;
+    use wz_session_core::link::{LinkEvent, LostCause};
+
+    let lifetime = 3i64;
+    let deadline = time::OffsetDateTime::now_utc() + time::Duration::seconds(lifetime);
+    let key_pair = rcgen::KeyPair::generate().expect("generate key pair");
+    let mut params =
+        rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()]).expect("cert params");
+    params.not_after = deadline;
+    let issued = params
+        .self_signed(&key_pair)
+        .expect("self-signed loopback cert");
+    let cert_pem = issued.pem();
+    let key_pem = key_pair.serialize_pem();
+
+    let mut kind_arms = LinkDefaults::default();
+    kind_arms
+        .set(LinkKind::Tls, "close_link_on_expiration=true")
+        .expect("the tls kind carries the flag");
+
+    // The listen half: a tail that names no flag takes the kind's.
+    let listen_at = || {
+        parse_any_locator(&format!(
+            "tls/127.0.0.1:0#listen_certificate_raw={cert_pem};listen_private_key_raw={key_pem}"
+        ))
+        .expect("the listen locator parses")
+    };
+    let armed_listener = bind_locator(
+        listen_at(),
+        &AcceptConfig::default().with_link_defaults(kind_arms.clone()),
+    )
+    .await
+    .expect("the listen material binds a tls acceptor");
+    match &armed_listener {
+        BoundListener::Tls(_, _, policy) => assert!(
+            policy.closes_on_expiration,
+            "the tls kind's flag must reach a listener whose tail is silent"
+        ),
+        _ => panic!("expected a tls listener"),
+    }
+    drop(armed_listener);
+
+    let mut listener = bind_locator(listen_at(), &AcceptConfig::default())
+        .await
+        .expect("the listen material binds a tls acceptor");
+    let addr: std::net::SocketAddr = listener
+        .local_addr_display()
+        .expect("the bound address is readable")
+        .parse()
+        .expect("a tls listener's address is numeric");
+
+    let dial_at = |tail: &str| {
+        parse_any_locator(&format!(
+            "tls/127.0.0.1:{}#root_ca_certificate_raw={cert_pem}{tail}",
+            addr.port()
+        ))
+        .expect("the dial locator parses")
+    };
+    let dial_cfg = DialConfig::default().with_link_defaults(kind_arms);
+
+    let accepting = tokio::spawn(async move {
+        let a = wz_runtime_tokio::session_open::accept_bound_on(&mut listener).await;
+        let b = wz_runtime_tokio::session_open::accept_bound_on(&mut listener).await;
+        (a, b)
+    });
+    let armed = match dial_locator(dial_at(""), &dial_cfg).await {
+        Ok(DialedLink::Tls(stream, closes)) => {
+            assert!(
+                closes,
+                "the tls kind's flag must reach a silent tail's link"
+            );
+            wire_tls_stream(*stream, closes).0
+        }
+        Ok(_) => panic!("expected a tls link"),
+        Err(e) => panic!("the kind-armed dial must handshake inside the window: {e}"),
+    };
+    let disarmed = match dial_locator(dial_at(";close_link_on_expiration=false"), &dial_cfg).await {
+        Ok(DialedLink::Tls(stream, closes)) => {
+            assert!(
+                !closes,
+                "the tail's own false must win over the kind's true"
+            );
+            wire_tls_stream(*stream, closes).0
+        }
+        Ok(_) => panic!("expected a tls link"),
+        Err(e) => panic!("the disarmed dial must handshake inside the window: {e}"),
+    };
+    // HELD, for the reason the tail witness above gives: dropping the far ends
+    // would end both links for the ordinary reason before any certificate
+    // expires.
+    let _accepted = accepting.await;
+
+    let mut armed = armed;
+    let event = tokio::time::timeout(Duration::from_secs(30), armed.poll_event())
+        .await
+        .expect("the kind-armed link must be torn down once its chain expires");
+    match event {
+        LinkEvent::Lost { cause } => assert_eq!(
+            cause,
+            LostCause::CertificateExpired,
+            "the cause must name the certificate, not a generic OS error"
+        ),
+        other => panic!("the kind-armed link must be Lost; got {other:?}"),
+    }
+
+    let mut disarmed = disarmed;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), disarmed.poll_event())
+            .await
+            .is_err(),
+        "a link whose tail said false must survive its peer's expiry"
+    );
+}
+
 /// R2609 — `tls_handshake_timeout_ms` on a LISTEN tail drops a peer that
 /// connects and never finishes the TLS handshake, and a peer that handshakes
 /// normally is untouched.

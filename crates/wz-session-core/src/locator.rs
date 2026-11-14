@@ -506,7 +506,16 @@ impl LinkTlsMaterial {
     /// it. `false` means an expired peer identity keeps its link, which is
     /// upstream's default too and not a wz narrowing.
     pub fn closes_on_expiration(&self) -> bool {
-        self.close_link_on_expiration.unwrap_or(false)
+        self.closes_on_expiration_over(None)
+    }
+
+    /// `close_link_on_expiration` laid over `kind`, the value the link kind's own
+    /// configuration states (`transport/link/tls/close_link_on_expiration`, which
+    /// upstream renders under every tls and quic endpoint): the tail's key wins
+    /// when it names one, as an endpoint's parameters win over its kind's, and
+    /// upstream's `false` stands when neither does.
+    pub fn closes_on_expiration_over(&self, kind: Option<bool>) -> bool {
+        self.close_link_on_expiration.or(kind).unwrap_or(false)
     }
 
     /// R2609 — `tls_handshake_timeout_ms`, defaulted the way upstream defaults
@@ -3965,6 +3974,25 @@ mod tests {
         assert_eq!(p.tls, None);
         assert!(p.tls().is_empty());
         assert_eq!(p.tls(), &LinkTlsMaterial::NONE);
+    }
+
+    /// The tail's `close_link_on_expiration` is laid over the kind's: the tail's
+    /// own value wins in both directions, the kind's stands when the tail is
+    /// silent, and upstream's `false` when neither states one.
+    #[test]
+    fn the_tails_expiry_flag_is_laid_over_the_kinds() {
+        let at = |tail: &str| {
+            parse_locator(&alloc::format!("tls/1.2.3.4:7447#{tail}")).expect("addr parses")
+        };
+        let silent = at("iface=eth0");
+        assert!(silent.tls().closes_on_expiration_over(Some(true)));
+        assert!(!silent.tls().closes_on_expiration_over(Some(false)));
+        assert!(!silent.tls().closes_on_expiration_over(None));
+        let off = at("close_link_on_expiration=false");
+        assert!(!off.tls().closes_on_expiration_over(Some(true)));
+        let on = at("close_link_on_expiration=true");
+        assert!(on.tls().closes_on_expiration_over(Some(false)));
+        assert!(on.tls().closes_on_expiration_over(None));
     }
 
     /// R2600 — both tail booleans parse, default upstream's way, and refuse

@@ -636,6 +636,12 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // open applies the same two (`unwrap_or(false)` and `unwrap_or(true)`).
         "transport/link/tls/enable_mtls",
         "transport/link/tls/verify_name_on_connect",
+        // The expiry teardown is the third of those `Option` booleans, declared beside them
+        // (`commons/zenoh-config/src/lib.rs` @ `close_link_on_expiration: Option<bool>,`) with
+        // its `false` applied where it is read, so a silent file resolves it to null on the
+        // same reasoning. DERIVED from the declaration, not measured on a running zenohd: if a
+        // hosted run shows the tree answering `false`, move the key into `claims`.
+        "transport/link/tls/close_link_on_expiration",
         // R2593 — MEASURED on a running zenohd with no file key: its resolved
         // tree prints `"tcp":{"so_rcvbuf":null,"so_sndbuf":null}` and the same
         // two nulls inside `tls`. No buffer size is a kernel default, which the
@@ -3641,6 +3647,9 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         connect_certificate: "/etc/wz/client.pem",
         connect_private_key: "/etc/wz/client.key",
         verify_name_on_connect: false,
+        // Off its `false` default; it reaches each certificate kind's `--link-config` and
+        // waits unused, since nothing here dials tls or quic.
+        close_link_on_expiration: true,
         so_rcvbuf: 12288,
         so_sndbuf: 24576,
       }},

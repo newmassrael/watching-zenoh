@@ -101,7 +101,10 @@ pub enum LinkSide {
 /// The keys are exactly the ones upstream's inspectors put there, less the
 /// certificate material: `so_rcvbuf` and `so_sndbuf` for tcp
 /// (`io/zenoh-links/zenoh-link-tcp/src/utils.rs` @ `ps.push((TCP_SO_RCV_BUF, &rx_buffer_size));`)
-/// and for tls, and `file_mask` for unixpipe
+/// and for tls, `close_link_on_expiration` for tls, quic and quic-datagram, each
+/// of whose inspectors renders it from the one `transport/link/tls` section
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `true => ps.push((TLS_CLOSE_LINK_ON_EXPIRATION, "true")),`),
+/// and `file_mask` for unixpipe
 /// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs` @ `properties.push((config::FILE_ACCESS_MASK, &file_access_mask_));`).
 /// Any other key is refused by [`LinkDefaults::set`]: a key upstream never
 /// renders into this layer would make the layer a wz-only capability. The tls
@@ -111,6 +114,10 @@ pub enum LinkSide {
 pub struct LinkDefaults {
     tcp: LinkSocketOptions,
     tls: LinkSocketOptions,
+    /// `close_link_on_expiration` of the tls, quic and quic-datagram kinds, in
+    /// that order: whether a link of the kind whose locator states none closes
+    /// when its peer's certificate chain expires.
+    close_link_on_expiration: [Option<bool>; 3],
     /// `file_mask` of the unixpipe kind: the FIFO creation mode of every
     /// unixpipe link whose locator states none.
     unixpipe_file_mask: Option<u32>,
@@ -129,13 +136,25 @@ pub enum LinkKind {
     Tcp,
     /// `tls/...`.
     Tls,
+    /// `quic/...`.
+    Quic,
+    /// `quic-datagram/...`, which upstream selects on the `quic` scheme with
+    /// `rel=0` and renders a configuration of its own for
+    /// (`io/zenoh-link/src/lib.rs` @ `LinkKind::QuicDatagram,`).
+    QuicDatagram,
     /// `unixpipe/...`.
     Unixpipe,
 }
 
 impl LinkKind {
     /// Every kind, in declaration order.
-    pub const ALL: [LinkKind; 3] = [LinkKind::Tcp, LinkKind::Tls, LinkKind::Unixpipe];
+    pub const ALL: [LinkKind; 5] = [
+        LinkKind::Tcp,
+        LinkKind::Tls,
+        LinkKind::Quic,
+        LinkKind::QuicDatagram,
+        LinkKind::Unixpipe,
+    ];
 
     /// The kind whose endpoints carry `scheme`, or `None` for a scheme
     /// upstream renders no configuration for.
@@ -148,6 +167,8 @@ impl LinkKind {
         match self {
             Self::Tcp => "tcp",
             Self::Tls => "tls",
+            Self::Quic => "quic",
+            Self::QuicDatagram => "quic-datagram",
             Self::Unixpipe => "unixpipe",
         }
     }
@@ -155,8 +176,33 @@ impl LinkKind {
     /// The keys this kind's layer carries.
     pub fn keys(self) -> &'static [&'static str] {
         match self {
-            Self::Tcp | Self::Tls => &["so_rcvbuf", "so_sndbuf"],
+            Self::Tcp => &["so_rcvbuf", "so_sndbuf"],
+            Self::Tls => &["so_rcvbuf", "so_sndbuf", "close_link_on_expiration"],
+            Self::Quic | Self::QuicDatagram => &["close_link_on_expiration"],
             Self::Unixpipe => &["file_mask"],
+        }
+    }
+
+    /// Where this kind's `close_link_on_expiration` sits in
+    /// [`LinkDefaults`]'s table; `None` for a kind without the key.
+    fn expiry_slot(self) -> Option<usize> {
+        match self {
+            Self::Tls => Some(0),
+            Self::Quic => Some(1),
+            Self::QuicDatagram => Some(2),
+            Self::Tcp | Self::Unixpipe => None,
+        }
+    }
+
+    /// The kind a `proto` endpoint is, when upstream renders a configuration
+    /// for it.
+    pub fn of_proto(proto: Proto) -> Option<LinkKind> {
+        match proto {
+            Proto::Tcp => Some(Self::Tcp),
+            Proto::Tls => Some(Self::Tls),
+            Proto::Quic => Some(Self::Quic),
+            Proto::QuicDatagram => Some(Self::QuicDatagram),
+            Proto::Udp | Proto::Ws | Proto::UdpReliable => None,
         }
     }
 }
@@ -213,17 +259,49 @@ impl LinkDefaults {
                 key: key.to_string(),
             });
         }
+        // Every value is read before any is kept, so a span refused for one key keeps none.
+        let expiry = kind
+            .expiry_slot()
+            .map(|slot| {
+                wz_session_core::locator::LinkTlsMaterial::from_config_span(span)
+                    .map(|material| (slot, material.close_link_on_expiration))
+            })
+            .transpose()
+            .map_err(LinkDefaultsError::BadValue)?;
         match kind {
-            LinkKind::Tcp => Self::layer_buffers(&mut self.tcp, span),
-            LinkKind::Tls => Self::layer_buffers(&mut self.tls, span),
+            LinkKind::Tcp => Self::layer_buffers(&mut self.tcp, span)?,
+            LinkKind::Tls => Self::layer_buffers(&mut self.tls, span)?,
+            LinkKind::Quic | LinkKind::QuicDatagram => {}
             LinkKind::Unixpipe => {
                 let named =
                     wz_session_core::locator::UnixpipeEndpoint::file_mask_from_config_span(span)
                         .map_err(LinkDefaultsError::BadFileMask)?;
                 self.unixpipe_file_mask = named.or(self.unixpipe_file_mask);
-                Ok(())
             }
         }
+        if let Some((slot, named)) = expiry {
+            self.close_link_on_expiration[slot] = named.or(self.close_link_on_expiration[slot]);
+        }
+        Ok(())
+    }
+
+    /// The `close_link_on_expiration` the layer of `proto`'s kind names, `None`
+    /// when it names none or the kind has no such key.
+    pub fn close_link_on_expiration(&self, proto: Proto) -> Option<bool> {
+        LinkKind::of_proto(proto)
+            .and_then(LinkKind::expiry_slot)
+            .and_then(|slot| self.close_link_on_expiration[slot])
+    }
+
+    /// Whether a `proto` link whose locator tail carries `material` closes when
+    /// its peer's certificate chain expires: the tail's own key over its kind's,
+    /// as upstream merges an endpoint's parameters over its kind's configuration.
+    pub fn closes_on_expiration(
+        &self,
+        proto: Proto,
+        material: &wz_session_core::locator::LinkTlsMaterial,
+    ) -> bool {
+        material.closes_on_expiration_over(self.close_link_on_expiration(proto))
     }
 
     /// The two socket buffers of a span onto one kind's socket layer.
@@ -825,6 +903,73 @@ mod tests {
         defaults.set(LinkKind::Unixpipe, "file_mask=416").unwrap();
         assert_eq!(defaults.unixpipe_file_mask(), Some(416));
         assert_eq!(defaults.for_proto(Proto::Tcp), &LinkSocketOptions::NONE);
+    }
+
+    /// `close_link_on_expiration` is a layer of each certificate-bearing kind
+    /// apart: a kind that names it arms its own links and no other kind's, the
+    /// locator's own key wins over it either way, and a kind without the key
+    /// refuses it.
+    #[test]
+    fn each_certificate_kind_carries_its_own_expiry_flag() {
+        use wz_session_core::locator::LinkTlsMaterial;
+        let silent = LinkTlsMaterial::NONE;
+        let mut defaults = LinkDefaults::default();
+        for proto in [Proto::Tls, Proto::Quic, Proto::QuicDatagram] {
+            assert_eq!(defaults.close_link_on_expiration(proto), None);
+            assert!(!defaults.closes_on_expiration(proto, &silent));
+        }
+
+        defaults
+            .set(LinkKind::Quic, "close_link_on_expiration=true")
+            .unwrap();
+        assert!(defaults.closes_on_expiration(Proto::Quic, &silent));
+        assert!(!defaults.closes_on_expiration(Proto::Tls, &silent));
+        assert!(!defaults.closes_on_expiration(Proto::QuicDatagram, &silent));
+        // The reliable udp link is quic underneath and upstream's reader of it
+        // discards the key, so no kind's layer reaches it.
+        assert!(!defaults.closes_on_expiration(Proto::UdpReliable, &silent));
+
+        let own_off = LinkTlsMaterial {
+            close_link_on_expiration: Some(false),
+            ..LinkTlsMaterial::NONE
+        };
+        assert!(!defaults.closes_on_expiration(Proto::Quic, &own_off));
+        let own_on = LinkTlsMaterial {
+            close_link_on_expiration: Some(true),
+            ..LinkTlsMaterial::NONE
+        };
+        assert!(defaults.closes_on_expiration(Proto::Tls, &own_on));
+
+        // The tls kind carries the flag beside its buffers, in one span.
+        defaults
+            .set(
+                LinkKind::Tls,
+                "so_rcvbuf=4096;close_link_on_expiration=true",
+            )
+            .unwrap();
+        assert!(defaults.closes_on_expiration(Proto::Tls, &silent));
+        assert_eq!(defaults.for_proto(Proto::Tls).so_rcvbuf, Some(4096));
+
+        let before = defaults.clone();
+        assert!(matches!(
+            defaults.set(LinkKind::QuicDatagram, "close_link_on_expiration=yes"),
+            Err(LinkDefaultsError::BadValue(_))
+        ));
+        assert_eq!(
+            defaults.set(LinkKind::Tcp, "close_link_on_expiration=true"),
+            Err(LinkDefaultsError::KeyNotInLayer {
+                kind: LinkKind::Tcp,
+                key: "close_link_on_expiration".to_string(),
+            })
+        );
+        // A tls span whose buffer is refused keeps its flag out too.
+        assert!(defaults
+            .set(
+                LinkKind::Tls,
+                "so_rcvbuf=big;close_link_on_expiration=false",
+            )
+            .is_err());
+        assert_eq!(defaults, before, "a refused span changes nothing");
     }
 
     /// Every kind is named by its scheme and back, so a `--link-config` kind

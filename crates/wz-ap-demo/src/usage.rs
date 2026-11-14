@@ -211,6 +211,10 @@ pub(crate) fn print_usage() {
     eprintln!("                             transport/link/<kind>/so_rcvbuf and so_sndbuf");
     eprintln!("                             unixpipe carries file_mask, the FIFO mode, decimal:");
     eprintln!("                             zenoh transport/link/unixpipe/file_access_mask");
+    eprintln!("                             tls, quic and quic-datagram carry");
+    eprintln!("                             close_link_on_expiration: a link closes when");
+    eprintln!("                             its peer's certificate chain expires:");
+    eprintln!("                             zenoh transport/link/tls/close_link_on_expiration");
     eprintln!("    --timestamping <bool>    whether THIS node stamps the un-timestamped data");
     eprintln!("                             it relays. zenoh timestamping/enabled, which is a");
     eprintln!("                             PER-ROLE default: a router stamps, a peer and a");

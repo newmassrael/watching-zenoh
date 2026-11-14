@@ -134,9 +134,10 @@ pub async fn accept_tls(
 /// R2608 — `close_link_on_expiration` arrives as the second argument because
 /// the chain it needs is readable only before the split below, and the LOCATOR
 /// that asked for it is three frames up the stack. The file's
-/// `transport/link/tls/close_link_on_expiration` is upstream's per-link default
-/// for the same flag, and the reader does not render it onto an endpoint yet
-/// (`zenoh_config::UNHONOURED_READER_GAP`).
+/// `transport/link/tls/close_link_on_expiration` is the tls kind's default for
+/// the same flag, laid under the locator's by
+/// `crate::link_socket::LinkDefaults::closes_on_expiration` before the value
+/// arrives here.
 pub fn wire_tls_stream(
     stream: TlsStream<TcpStream>,
     closes_on_expiration: bool,

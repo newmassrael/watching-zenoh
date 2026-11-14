@@ -782,6 +782,7 @@ pub(crate) fn split_endpoint_list(raw: &str) -> Vec<String> {
 /// | `transport/link/tx/lease` | `--lease-ms <n>` |
 /// | `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` | `--link-config <kind>#<key>=<n>` (R2593) |
 /// | `transport/link/unixpipe/file_access_mask` | `--link-config unixpipe#file_mask=<n>` |
+/// | `transport/link/tls/close_link_on_expiration: true` | `--link-config <kind>#close_link_on_expiration=true` for tls, quic and quic-datagram |
 /// | an `adminspace` block at all | `--config-queryable` |
 /// | `adminspace/permissions/read: false` | `--no-admin-read` |
 /// | `adminspace/permissions/write: true` | `--config-writable` `--config-write-permit` |
@@ -1421,6 +1422,24 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                 Some(value) => exp.link_config(key, kind, span_key, value.to_string()),
                 None => exp.record(key, KeyEffect::AlreadyTheBehaviour),
             }
+        }
+    }
+    // The expiry teardown, onto `--link-config <kind>#close_link_on_expiration=true` for each
+    // kind upstream renders it under: the tls, quic and quic-datagram inspectors all read the one
+    // key. No precondition, for the reason the buffers take none. A named `false` is what an
+    // absent layer already means, as upstream's own default is `false`.
+    if named("transport/link/tls/close_link_on_expiration") {
+        match cfg.tls_close_link_on_expiration {
+            Some(true) => exp.link_config_kinds(
+                "transport/link/tls/close_link_on_expiration",
+                &["tls", "quic", "quic-datagram"],
+                "close_link_on_expiration",
+                String::from("true"),
+            ),
+            _ => exp.record(
+                "transport/link/tls/close_link_on_expiration",
+                KeyEffect::AlreadyTheBehaviour,
+            ),
         }
     }
     // The millisecond keys, each gated on the PRECONDITION its flag carries.
@@ -2803,22 +2822,49 @@ impl Expansion<'_> {
     /// after the typed argv, where a later span would win, which is exactly why
     /// a key the operator typed is never expanded over.
     fn link_config(&mut self, key: &'static str, kind: &str, span_key: &str, value: String) {
+        self.link_config_kinds(key, &[kind], span_key, value);
+    }
+
+    /// `link_config` for a key upstream renders under SEVERAL kinds at
+    /// once (`transport/link/tls/close_link_on_expiration` is the tls, quic and
+    /// quic-datagram inspectors' alike): each kind is decided as that function
+    /// decides one, and the key's one verdict is `Expanded` when any kind took
+    /// the file's value, else `OverriddenOnTheCommandLine` when any kind's typed
+    /// value differs, else `AlreadyOnTheCommandLine`.
+    fn link_config_kinds(
+        &mut self,
+        key: &'static str,
+        kinds: &[&str],
+        span_key: &str,
+        value: String,
+    ) {
         use wz::runtime_tokio::locator::{config_span_keys, config_span_value};
-        let typed: Option<Option<String>> = parse_pairs(self.rest, "--link-config")
-            .iter()
-            .filter_map(|v| v.split_once('#'))
-            .filter(|(k, span)| *k == kind && config_span_keys(span).any(|s| s == span_key))
-            .map(|(_, span)| config_span_value(span, span_key).map(str::to_string))
-            // The LAST typed span for the key is the one the binary keeps.
-            .next_back();
-        let effect = match typed {
-            Some(Some(typed)) if typed == value => KeyEffect::AlreadyOnTheCommandLine,
-            Some(_) => KeyEffect::OverriddenOnTheCommandLine,
-            None => {
-                self.added.push(String::from("--link-config"));
-                self.added.push(format!("{kind}#{span_key}={value}"));
-                KeyEffect::Expanded
+        let typed_spans = parse_pairs(self.rest, "--link-config");
+        let (mut expanded, mut overridden) = (false, false);
+        for kind in kinds {
+            let typed: Option<Option<String>> = typed_spans
+                .iter()
+                .filter_map(|v| v.split_once('#'))
+                .filter(|(k, span)| k == kind && config_span_keys(span).any(|s| s == span_key))
+                .map(|(_, span)| config_span_value(span, span_key).map(str::to_string))
+                // The LAST typed span for the key is the one the binary keeps.
+                .next_back();
+            match typed {
+                Some(Some(typed)) if typed == value => {}
+                Some(_) => overridden = true,
+                None => {
+                    self.added.push(String::from("--link-config"));
+                    self.added.push(format!("{kind}#{span_key}={value}"));
+                    expanded = true;
+                }
             }
+        }
+        let effect = if expanded {
+            KeyEffect::Expanded
+        } else if overridden {
+            KeyEffect::OverriddenOnTheCommandLine
+        } else {
+            KeyEffect::AlreadyOnTheCommandLine
         };
         self.record(key, effect);
     }
@@ -3686,6 +3732,15 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          not the endpoint's host, decided in the TLS handshake under every zenoh frame.",
     ),
     (
+        "transport/link/tls/close_link_on_expiration",
+        KIND_OFF_WIRE,
+        "expands to `--link-config <kind>#close_link_on_expiration=true` for tls, quic \
+         and quic-datagram. Its effect is the link ending when the peer's certificate \
+         chain expires, visible as the link lost with a certificate-expired cause, \
+         which an_expiring_peer_chain_closes_a_tls_link_whose_kind_asked_for_it reads; \
+         no zenoh frame carries the flag.",
+    ),
+    (
         "transport/link/protocols",
         KIND_OFF_WIRE,
         "expands to NO flag: the demo opens every link kind it was built with and \
@@ -4153,6 +4208,73 @@ mod stock_config_tests {
             (Some(2048), Some(8192)),
             "the typed key stands and the file's other key still arrives"
         );
+    }
+
+    /// The expiry teardown reaches the layers of all three certificate kinds
+    /// from the one key, a kind the operator typed keeps its own value, and a
+    /// named `false` adds nothing. Read back through `TransportTuning`, the
+    /// call `main` makes, so this judges what the node's links get.
+    #[test]
+    fn the_expiry_flag_expands_onto_every_certificate_kind() {
+        use wz::runtime_tokio::locator::{LinkTlsMaterial, Proto};
+        let key = "transport/link/tls/close_link_on_expiration";
+        let file = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                        transport: { link: { tls: { close_link_on_expiration: true } } } }"#;
+        if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
+            let refused = expand(&["--config", "z.json5"], file)
+                .expect_err("a build without tls or quic refuses the flag by its key");
+            assert!(refused.contains(key), "{refused}");
+            return;
+        }
+        let silent = LinkTlsMaterial::NONE;
+        let effect = |exp: &StockConfigExpansion| {
+            exp.effects
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, e)| *e)
+                .unwrap_or_else(|| panic!("{key}: no decision recorded"))
+        };
+
+        let alone = expand(&["--config", "z.json5"], file).expect("a valid file");
+        assert_eq!(effect(&alone), KeyEffect::Expanded);
+        let tuning = TransportTuning::from_argv(&alone.argv).expect("parseable argv");
+        for proto in [Proto::Tls, Proto::Quic, Proto::QuicDatagram] {
+            assert!(
+                tuning.link_defaults.closes_on_expiration(proto, &silent),
+                "{proto:?}"
+            );
+        }
+        assert!(!tuning
+            .link_defaults
+            .closes_on_expiration(Proto::Tcp, &silent));
+
+        let typed = expand(
+            &[
+                "--config",
+                "z.json5",
+                "--link-config",
+                "quic#close_link_on_expiration=false",
+            ],
+            file,
+        )
+        .expect("a valid file");
+        assert_eq!(effect(&typed), KeyEffect::Expanded);
+        let tuning = TransportTuning::from_argv(&typed.argv).expect("parseable argv");
+        assert!(!tuning
+            .link_defaults
+            .closes_on_expiration(Proto::Quic, &silent));
+        assert!(tuning
+            .link_defaults
+            .closes_on_expiration(Proto::Tls, &silent));
+
+        let off = expand(
+            &["--config", "z.json5"],
+            r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                 transport: { link: { tls: { close_link_on_expiration: false } } } }"#,
+        )
+        .expect("a valid file");
+        assert_eq!(effect(&off), KeyEffect::AlreadyTheBehaviour);
+        assert!(!off.argv.iter().any(|a| a == "--link-config"));
     }
 
     /// [`expand`] as a build that carries EVERY link zenoh does.
@@ -5572,6 +5694,14 @@ mod stock_config_tests {
                 CONNECT_TLS,
                 r#"{ connect: { endpoints: ["tls/r:7447"] },
                      transport: { link: { tls: { verify_name_on_connect: false } } } }"#,
+            ),
+            // The expiry teardown takes no tls endpoint: like the buffers, it is each kind's
+            // configuration whether or not the node opens a link of that kind.
+            (
+                "transport/link/tls/close_link_on_expiration",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tls: { close_link_on_expiration: true } } } }"#,
             ),
             (
                 "transport/link/protocols",
@@ -10220,6 +10350,30 @@ mod link_config_flag_tests {
         assert_eq!(
             tuning(&[]).unwrap().link_defaults.unixpipe_file_mask(),
             None
+        );
+    }
+
+    /// Each certificate kind takes `close_link_on_expiration` on its own
+    /// layer, and the flag on tcp is refused by name.
+    #[test]
+    fn link_config_carries_each_kinds_expiry_flag() {
+        let t = tuning(&[
+            "--link-config",
+            "quic-datagram#close_link_on_expiration=true",
+        ])
+        .expect("a valid span");
+        assert_eq!(
+            t.link_defaults
+                .close_link_on_expiration(Proto::QuicDatagram),
+            Some(true)
+        );
+        assert_eq!(t.link_defaults.close_link_on_expiration(Proto::Quic), None);
+        assert_eq!(t.link_defaults.close_link_on_expiration(Proto::Tls), None);
+        let err = tuning(&["--link-config", "tcp#close_link_on_expiration=true"])
+            .expect_err("tcp carries no expiry flag");
+        assert!(
+            err.contains("`close_link_on_expiration` is not a key"),
+            "{err}"
         );
     }
 }

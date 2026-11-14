@@ -1253,6 +1253,12 @@ pub struct ZenohNodeConfig {
     /// `transport/link/tls/verify_name_on_connect`: a dial checks the name it dials against the
     /// server's certificate. `None` is an unnamed key, which upstream resolves to `true`.
     pub tls_verify_name_on_connect: Option<bool>,
+    /// `transport/link/tls/close_link_on_expiration`: a tls, quic or quic-datagram link closes
+    /// when its peer's certificate chain expires, unless its locator states otherwise. wz's
+    /// `--link-config <kind>#close_link_on_expiration=<bool>` for each of the three kinds, which
+    /// is where upstream's inspectors render it. `None` is an unnamed key, which upstream
+    /// resolves to `false`.
+    pub tls_close_link_on_expiration: Option<bool>,
     /// `transport/link/protocols`: the whitelist of the link protocols this node makes. `None`
     /// is an unnamed key, which leaves every protocol the build carries open.
     pub link_protocols: Option<Vec<String>>,
@@ -1586,6 +1592,7 @@ impl Default for ZenohNodeConfig {
             tls_connect_private_key: None,
             tls_enable_mtls: None,
             tls_verify_name_on_connect: None,
+            tls_close_link_on_expiration: None,
             link_protocols: None,
             tls_listen_private_key: None,
             // R2593 — all four resolve to `null` on a running zenohd: no buffer
@@ -2129,6 +2136,10 @@ impl ZenohNodeConfig {
         for (key, value) in [
             ("enable_mtls", self.tls_enable_mtls),
             ("verify_name_on_connect", self.tls_verify_name_on_connect),
+            (
+                "close_link_on_expiration",
+                self.tls_close_link_on_expiration,
+            ),
         ] {
             if let Some(value) = value {
                 tls.push((key, value.to_string()));
@@ -2360,6 +2371,10 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/link/tls/connect_private_key",
     "transport/link/tls/enable_mtls",
     "transport/link/tls/verify_name_on_connect",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and `UNHONOURED_READER_GAP`, so the surface
+    // total is unchanged: the expiry teardown of the tls and quic links, which the layer of each
+    // of those kinds in `LinkDefaults` carries under the locator's own flag.
+    "transport/link/tls/close_link_on_expiration",
     "transport/link/protocols",
     // R2593 — the per-link-kind socket buffers. MOVED from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS` (and its beyond-wz group), so the
@@ -2531,6 +2546,12 @@ pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
     ),
     (
         "transport/link/tls/verify_name_on_connect",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    // Not material, and read by the same two links: each closes at its peer chain's expiry.
+    (
+        "transport/link/tls/close_link_on_expiration",
         TLS_MATERIAL_CAPABILITY,
         TLS_MATERIAL_BUILT,
     ),
@@ -2904,7 +2925,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // `HONOURED_CONFIG_KEYS`: a session's reassembly now ends a chain past it.
     // R2593 — `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` LEFT this list for
     // `HONOURED_CONFIG_KEYS`: `LinkDefaults` now carries them to every link.
-    "transport/link/tls/close_link_on_expiration",
+    // `transport/link/tls/close_link_on_expiration` LEFT this list for `HONOURED_CONFIG_KEYS`:
+    // `LinkDefaults` carries it to every tls and quic link.
     // `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
     // verify_name_on_connect}` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader reads them
     // and the open hands them to the tls links.
@@ -3197,10 +3219,9 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 ///   `crate::frame_arena::RecyclingArena::for_link` takes as a parameter and divides by the
 ///   link's mtu as upstream's RX task does. Every caller passes upstream's default, so the
 ///   reader change is "hand the parsed value to the arena", not "build a pool".
-/// * `transport/link/tls/close_link_on_expiration` — the tls and quic links' teardown at the
-///   peer chain's expiry (`crate::stream_link::ExpirySignal`, R2600 and R2608), armed today by
-///   the locator's `close_link_on_expiration`. The key is upstream's per-link default for that
-///   same flag, so the reader change is "render it onto the tls and quic endpoints".
+/// * (`transport/link/tls/close_link_on_expiration` LEFT this list: the reader renders it onto
+///   the tls, quic and quic-datagram layers of `crate::link_socket::LinkDefaults`,
+///   [`HONOURED_CONFIG_KEYS`].)
 /// * (`transport/link/unixpipe/file_access_mask` LEFT this list: the reader renders it onto the
 ///   unixpipe layer of `crate::link_socket::LinkDefaults`, [`HONOURED_CONFIG_KEYS`].)
 ///
@@ -3249,7 +3270,8 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // `close_link_on_expiration`. Upstream renders this key into each tls endpoint's config as
     // the per-link default (`io/zenoh-links/zenoh-link-tls/src/utils.rs`
     // @ `.close_link_on_expiration()`), which is the reader change left.
-    "transport/link/tls/close_link_on_expiration",
+    // It then LEFT for `HONOURED_CONFIG_KEYS` once the reader rendered the key onto the tls and
+    // quic layers of `LinkDefaults`.
     // R2363 — MOVED here from `UNHONOURED_BEYOND_WZ`, and the move is the
     // finding rather than the bookkeeping: that list's `LinkTxConf` group said
     // wz lacked "a configurable link-TX surface" for this key, which was true
@@ -3636,13 +3658,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "wz-has-it",
         "RecyclingArena",
     ),
-    // The expiry teardown. Its doc in `tls_pipeline.rs` names the key where the locator's flag
-    // is taken, and the anchor is the function that reads the deadline off the peer's chain.
-    (
-        "transport/link/tls/close_link_on_expiration",
-        "wz-has-it",
-        "peer_chain_deadline",
-    ),
+    // The `transport/link/tls/close_link_on_expiration` row is GONE: the reader honours the key
+    // now, and this ledger carries evidence for unhonoured keys only.
     // The `transport/link/unixpipe/file_access_mask` row is GONE: the reader honours the key
     // now, and this ledger carries evidence for unhonoured keys only.
     // R2925 — the `queue/size/data` row R2226 (open-debt item 575) kept here is
@@ -3771,11 +3788,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "transport/link/rx/buffer_size",
         "build",
         "reader gap: RecyclingArena sizes each link RX pool by it; nothing reads the file",
-    ),
-    (
-        "transport/link/tls/close_link_on_expiration",
-        "build",
-        "reader gap: tls and quic links close on expiry per locator; the file is unread",
     ),
     (
         "transport/link/tx/queue/allocation/mode",
@@ -4798,8 +4810,12 @@ fn is_empty_list(value: &Json5Value) -> bool {
 }
 
 /// The value of a key whose every spelling is an instruction: a path, a size. Only its absence,
-/// or `null`, states nothing, and those never reach the predicate.
-#[cfg(not(feature = "transport-link-tls"))]
+/// or `null`, states nothing, and those never reach the predicate. Compiled where some such
+/// key's capability is out of the build: the `tls/` link's, or the `unixpipe/` link's.
+#[cfg(any(
+    not(feature = "transport-link-tls"),
+    not(all(feature = "transport-link-unixpipe", unix))
+))]
 fn never_states_nothing(_: &Json5Value) -> bool {
     false
 }
@@ -7997,6 +8013,10 @@ impl ZenohNodeConfig {
                 out.tls_verify_name_on_connect = Some(v);
                 named.push("transport/link/tls/verify_name_on_connect");
             }
+            if let Some(v) = want_bool(&doc, "transport/link/tls/close_link_on_expiration")? {
+                out.tls_close_link_on_expiration = Some(v);
+                named.push("transport/link/tls/close_link_on_expiration");
+            }
         }
         // Upstream's defaults: no file named, no client certificate asked for, and the
         // dialled name verified.
@@ -8018,6 +8038,11 @@ impl ZenohNodeConfig {
                 &doc,
                 "transport/link/tls/verify_name_on_connect",
                 |value| matches!(value, Json5Value::Bool(true)),
+            )?;
+            refuse_unbuilt_instruction(
+                &doc,
+                "transport/link/tls/close_link_on_expiration",
+                |value| matches!(value, Json5Value::Bool(false)),
             )?;
         }
         // `transport/link/protocols` is `Option<Vec<String>>` upstream: absent is every protocol,
@@ -9509,6 +9534,11 @@ mod tests {
             (
                 "transport/link/tls/verify_name_on_connect",
                 r#"{ "transport": { "link": { "tls": { "verify_name_on_connect": false } } } }"#,
+            ),
+            // The expiry teardown, to `true`; upstream's default is `false`.
+            (
+                "transport/link/tls/close_link_on_expiration",
+                r#"{ "transport": { "link": { "tls": { "close_link_on_expiration": true } } } }"#,
             ),
             (
                 "transport/link/protocols",
@@ -12864,7 +12894,8 @@ mod tests {
             r#"{ low_pass_filter: [], downsampling: [], qos: { network: [] },
                  access_control: { enabled: false, default_permission: "deny",
                                    rules: [], subjects: [], policies: [] },
-                 transport: { link: { tls: { enable_mtls: false, verify_name_on_connect: true } } },
+                 transport: { link: { tls: { enable_mtls: false, verify_name_on_connect: true,
+                                             close_link_on_expiration: false } } },
                  gateway: { south: "auto" } }"#,
         )
         .expect("upstream's defaults state no instruction");
@@ -12880,6 +12911,7 @@ mod tests {
             "access_control/policies",
             "transport/link/tls/enable_mtls",
             "transport/link/tls/verify_name_on_connect",
+            "transport/link/tls/close_link_on_expiration",
             "gateway/south",
         ];
         for key in stated {

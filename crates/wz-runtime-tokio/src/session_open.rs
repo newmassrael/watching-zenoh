@@ -733,6 +733,7 @@ pub enum DialedLink {
     /// `DialedLink` value (incl. the small `Tcp` arm) to that size on the
     /// stack — boxing keeps the union compact (clippy `large_enum_variant`).
     /// R2608 — the `bool` is `close_link_on_expiration`, read off the LOCATOR
+    /// over its kind's layer in [`DialConfig::link_defaults`]
     /// at dial time and carried here because the peer's certificate chain is
     /// only reachable BEFORE `wire_tls_stream` splits the stream. The same
     /// shape [`BoundListener::Quic`] uses for the same key.
@@ -883,10 +884,12 @@ pub struct TlsAcceptPolicy {
 
 #[cfg(feature = "transport-link-tls")]
 impl TlsAcceptPolicy {
-    /// Read both policies off a locator tail's material.
-    pub fn from_material(material: &LinkTlsMaterial) -> Self {
+    /// Read both policies off a locator tail's material, the expiry flag laid
+    /// over the tls kind's in `defaults` (the handshake bound has no such layer:
+    /// upstream's tls inspector renders no `tls_handshake_timeout_ms`).
+    pub fn from_material(material: &LinkTlsMaterial, defaults: &LinkDefaults) -> Self {
         Self {
-            closes_on_expiration: material.closes_on_expiration(),
+            closes_on_expiration: defaults.closes_on_expiration(Proto::Tls, material),
             handshake_timeout: std::time::Duration::from_millis(material.handshake_timeout_ms()),
         }
     }
@@ -1011,7 +1014,8 @@ pub enum BoundListener {
     /// (via `accept_bound`), and pico's `z_open(listen=quic/)`. So a quic listen binds
     /// whenever a cert is supplied; only a cert-LESS bind (a direct-API caller passing
     /// [`AcceptConfig::default`]) hits `bind_locator`'s cert-absence `Unsupported`.
-    /// R2600 — the `bool` is `close_link_on_expiration`, read off the LOCATOR at
+    /// R2600 — the `bool` is `close_link_on_expiration`, read off the LOCATOR,
+    /// over its kind's layer in [`AcceptConfig::link_defaults`], at
     /// bind time and carried to accept time because that is the only place a
     /// peer chain exists to expire. Upstream does not have to thread it: it
     /// bundles the flag into its `TlsServerConfig` beside the crypto, and wz's
@@ -2206,8 +2210,9 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                         .await?,
                     ),
                     // R2608 — the dial tail decides whether this link watches
-                    // the PEER's chain, exactly as the quic arms read it.
-                    ip.tls().closes_on_expiration(),
+                    // the PEER's chain, exactly as the quic arms read it, over
+                    // the tls kind's own setting.
+                    cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()),
                 )),
                 None => Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -2265,7 +2270,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 // in scope. The peer's chain is only readable once the
                 // handshake has completed, which is why this follows the dial
                 // rather than riding the config.
-                if ip.tls().closes_on_expiration() {
+                if cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()) {
                     arm_expiry_close(&link.connection);
                 }
                 Ok(DialedLink::Quic(Box::new(link)))
@@ -2300,7 +2305,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 // R2600 — the datagram twin arms the same watcher: both schemes
                 // hold a `quinn::Connection`, and an expired peer identity is
                 // no more acceptable under datagrams than under streams.
-                if ip.tls().closes_on_expiration() {
+                if cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()) {
                     arm_expiry_close(&link.connection);
                 }
                 Ok(DialedLink::QuicDatagram(Box::new(link)))
@@ -2481,7 +2486,8 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                             ),
                             // R2608 — a NAMED tail carries the policy too, the
                             // twin of the numeric arm above.
-                            named_tls_material(&tls).closes_on_expiration(),
+                            cfg.link_defaults
+                                .closes_on_expiration(proto, named_tls_material(&tls)),
                         ))
                     }
                     None => Err(io::Error::new(
@@ -2518,7 +2524,10 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 // R2600 — a NAMED locator carries the policy exactly as a
                 // numeric one does; the walk over candidate addresses changes
                 // which address answered, not whose certificate it was.
-                if named_tls(&tls).closes_on_expiration() {
+                if cfg
+                    .link_defaults
+                    .closes_on_expiration(proto, named_tls(&tls))
+                {
                     arm_expiry_close(&link.connection);
                 }
                 Ok(DialedLink::Quic(Box::new(link)))
@@ -2543,7 +2552,10 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                     })
                     .await?;
                 // R2600 — the named datagram twin, same policy, same watcher.
-                if named_tls(&tls).closes_on_expiration() {
+                if cfg
+                    .link_defaults
+                    .closes_on_expiration(proto, named_tls(&tls))
+                {
                     arm_expiry_close(&link.connection);
                 }
                 Ok(DialedLink::QuicDatagram(Box::new(link)))
@@ -3314,7 +3326,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     server_config,
                     // R2608/R2609 — a listen tail carries BOTH policies, as the
                     // quic bind arms carry their one.
-                    TlsAcceptPolicy::from_material(ip.tls()),
+                    TlsAcceptPolicy::from_material(ip.tls(), &cfg.link_defaults),
                 )),
                 None => Err(unsupported(
                     "tls acceptor requires AcceptConfig.tls (a server cert + key), \
@@ -3368,7 +3380,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     .await?,
                     // R2600 — the policy is read HERE, where the locator is, and
                     // carried to accept time, where the chain to watch exists.
-                    ip.tls().closes_on_expiration(),
+                    cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic"))]
@@ -3398,7 +3410,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     )
                     .await?,
                     // R2600 — the datagram twin carries the same policy.
-                    ip.tls().closes_on_expiration(),
+                    cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic-datagram"))]
@@ -3479,7 +3491,10 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                         .await?,
                         server_config,
                         // R2608/R2609 — the named bind twin of the numeric arm.
-                        TlsAcceptPolicy::from_material(named_tls_material(&tls)),
+                        TlsAcceptPolicy::from_material(
+                            named_tls_material(&tls),
+                            &cfg.link_defaults,
+                        ),
                     )),
                     None => Err(unsupported(
                         "tls acceptor requires AcceptConfig.tls (a server cert + key), \
@@ -3524,7 +3539,8 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     })
                     .await?,
                     // R2600 — a NAMED listen tail carries the policy too.
-                    named_tls(&tls).closes_on_expiration(),
+                    cfg.link_defaults
+                        .closes_on_expiration(proto, named_tls(&tls)),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic"))]
@@ -3545,7 +3561,8 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     })
                     .await?,
                     // R2600 — the named datagram twin, same policy.
-                    named_tls(&tls).closes_on_expiration(),
+                    cfg.link_defaults
+                        .closes_on_expiration(proto, named_tls(&tls)),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic-datagram"))]
