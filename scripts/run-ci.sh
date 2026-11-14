@@ -26087,6 +26087,12 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh client admin space)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_api_client_admin_space || return 1
+    # A client asks its own admin key while it declares and withdraws a queryable without pause,
+    # upstream's router and client against wz's: the GETs end within a multiple of upstream's own
+    # times. Two tests, the comparison and the control that a slower subject fails the contract.
+    _runci_guarded_test "Layer E18 (differential, zenoh admin get beside declarations)" 2 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_api_admin_get_beside_declarations || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh timestamp stack stamp)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_ts_stack_stamp || return 1
