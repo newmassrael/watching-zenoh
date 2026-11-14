@@ -2394,10 +2394,12 @@ mod tokio_engine {
         if encoding == zenoh_protocol::core::Encoding::default() {
             return None;
         }
+        // The schema's bytes as they are: zenoh holds a schema as bytes, and one
+        // that is not UTF-8 crosses into the engine and onto the wire unchanged.
         let schema = encoding
             .schema
             .as_ref()
-            .map(|schema| String::from_utf8_lossy(schema.as_slice()).into_owned());
+            .map(|schema| schema.as_slice().to_vec());
         Some(EncodingHint {
             packed_id: (u32::from(encoding.id) << 1) | u32::from(schema.is_some()),
             schema,
@@ -2411,13 +2413,13 @@ mod tokio_engine {
 
     /// The encoding the parts of a hint say, as a view of a reply borrows them: the packed id and
     /// the schema; none is the default one.
-    fn encoding_of_parts(parts: Option<(u32, Option<&str>)>) -> Encoding {
+    fn encoding_of_parts(parts: Option<(u32, Option<&[u8]>)>) -> Encoding {
         parts
             .and_then(|(packed_id, schema)| {
                 let id = u16::try_from(packed_id >> 1).ok()?;
                 let schema = schema
                     .filter(|_| packed_id & 1 == 1)
-                    .map(|schema| zenoh_buffers::ZSlice::from(schema.as_bytes().to_vec()));
+                    .map(|schema| zenoh_buffers::ZSlice::from(schema.to_vec()));
                 Some(zenoh_protocol::core::Encoding { id, schema })
             })
             .map(Encoding::from)
@@ -3501,6 +3503,29 @@ mod tokio_engine {
                 sources.retain(|(source, _)| *source != leg);
                 !sources.is_empty()
             });
+        }
+    }
+
+    #[cfg(test)]
+    mod encoding_tests {
+        use super::*;
+
+        /// A schema that is not UTF-8 crosses from this API into the engine and
+        /// back as its bytes, and the API shows it as zenoh 1.10.2 does
+        /// (`zenoh/src/api/encoding.rs` @ `std::str::from_utf8(schema).unwrap_or("unknown(non-utf8)")`).
+        #[test]
+        fn a_schema_that_is_not_utf8_crosses_into_the_engine_and_back_as_its_bytes() {
+            let raw = vec![0xFFu8, 0xFE, b'x'];
+            let api = Encoding::from(zenoh_protocol::core::Encoding {
+                id: 4,
+                schema: Some(zenoh_buffers::ZSlice::from(raw.clone())),
+            });
+            let hint = encoding_hint_of(&api).expect("not the default encoding");
+            assert_eq!(hint.schema.as_deref(), Some(raw.as_slice()));
+            let back = encoding_from(Some(&hint));
+            assert_eq!(back.to_string(), "text/plain;unknown(non-utf8)");
+            let wire: zenoh_protocol::core::Encoding = back.into();
+            assert_eq!(wire.schema.map(|s| s.as_slice().to_vec()), Some(raw));
         }
     }
 

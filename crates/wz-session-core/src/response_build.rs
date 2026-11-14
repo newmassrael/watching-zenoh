@@ -2582,8 +2582,8 @@ mod tests {
                     let got = put.encoding.as_ref().expect("encoding field present");
                     assert_eq!(got.packed_id, 13);
                     assert_eq!(
-                        got.schema.as_ref().map(|s| s.as_text().into_inner()),
-                        Some("application/json")
+                        got.schema.as_ref().map(|s| s.as_bytes().into_inner()),
+                        Some(&b"application/json"[..])
                     );
                 }
                 _ => panic!("expected CodecZenohMsgPut inner body"),

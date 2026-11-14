@@ -2136,8 +2136,13 @@ pub fn walk_timestamp(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> 
     Ok(alloc::vec![time, zid_len, zid])
 }
 
-/// `Encoding` — a VLE `packed_id` whose bit 0 gates a length-prefixed schema
-/// string.
+/// `Encoding` — a VLE `packed_id` whose bit 0 gates a length-prefixed schema.
+///
+/// The schema is bytes on the wire and upstream reads it without a UTF-8 check
+/// (`commons/zenoh-protocol/src/core/encoding.rs` @ `pub schema: Option<ZSlice>,`):
+/// a UTF-8 schema is the `schema` text leaf, and any other the `schema_bytes`
+/// bytes leaf, so a frame upstream accepts is walked rather than declined and
+/// each path keeps one kind (`dissect_schema`).
 pub fn walk_encoding(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let (packed, packed_field) = c.vle_u32("packed_id")?;
     let carrier = packed_field.span;
@@ -2149,7 +2154,17 @@ pub fn walk_encoding(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     if (packed & 0x1) != 0 {
         let (n, len) = c.vle_u64("schema_len")?;
         out.push(len);
-        out.push(c.text("schema", n as usize)?);
+        let n = n as usize;
+        let utf8 = c
+            .peek_rest()
+            .ok()
+            .and_then(|rest| rest.get(..n))
+            .is_some_and(|raw| core::str::from_utf8(raw).is_ok());
+        out.push(if utf8 {
+            c.text("schema", n)?
+        } else {
+            c.bytes("schema_bytes", n)?
+        });
     }
     Ok(out)
 }
@@ -6215,7 +6230,7 @@ mod tests {
                 assert_eq!(m.timestamp.as_ref().unwrap().zid, &zid);
                 assert_eq!(
                     m.encoding.as_ref().unwrap().schema.map(|s| s.into_inner()),
-                    Some("json")
+                    Some(&b"json"[..])
                 );
                 b.len() - c.remaining()
             },

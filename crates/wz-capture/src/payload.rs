@@ -110,8 +110,10 @@ pub enum Encoding<'a> {
         id: u16,
         /// The table name, e.g. `application/json`.
         name: &'static str,
-        /// The schema after the `;`, when the packed word said one is present.
-        schema: Option<&'a str>,
+        /// The schema after the `;`, when the packed word said one is present:
+        /// its bytes, which need not be UTF-8 (upstream holds a schema as bytes,
+        /// `commons/zenoh-protocol/src/core/encoding.rs` @ `pub schema: Option<ZSlice>,`).
+        schema: Option<&'a [u8]>,
     },
     /// An id no table entry answers to.
     ///
@@ -130,7 +132,7 @@ pub enum Encoding<'a> {
 impl<'a> Encoding<'a> {
     /// Read the WIRE WORD — `(id << 1) | has_schema`, the packing
     /// `wz_capi_core::encoding_ids` documents — plus the schema it points at.
-    pub fn from_packed(packed_id: u32, schema: Option<&'a str>) -> Self {
+    pub fn from_packed(packed_id: u32, schema: Option<&'a [u8]>) -> Self {
         let id = (packed_id >> 1) as u16;
         match ENCODING_ID_TO_STR.get(id as usize) {
             Some(name) => Encoding::Known {
@@ -1541,7 +1543,7 @@ impl PayloadCensus {
         let encoding = match declared {
             Some(e) => Encoding::from_packed(
                 e.packed_id,
-                e.schema.as_ref().map(|s| s.as_text().into_inner()),
+                e.schema.as_ref().map(|s| s.as_bytes().into_inner()),
             ),
             None => Encoding::Absent,
         };
@@ -2127,6 +2129,21 @@ pub(crate) mod tests_support {
     pub(crate) fn push_with_encoding(
         keyexpr: &'static str,
         encoding: Option<(u16, Option<&str>)>,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        push_with_schema_bytes(
+            keyexpr,
+            encoding.map(|(id, schema)| (id, schema.map(str::as_bytes))),
+            payload,
+        )
+    }
+
+    /// [`push_with_encoding`] with the schema given as bytes, which need not be
+    /// UTF-8: upstream accepts any.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn push_with_schema_bytes(
+        keyexpr: &'static str,
+        encoding: Option<(u16, Option<&[u8]>)>,
         payload: &[u8],
     ) -> Vec<u8> {
         let (header, encoding) = match encoding {
@@ -6250,11 +6267,11 @@ mod tests {
             Some("application/json")
         );
         assert_eq!(
-            Encoding::from_packed((5 << 1) | 1, Some("v2")),
+            Encoding::from_packed((5 << 1) | 1, Some(&b"v2"[..])),
             Encoding::Known {
                 id: 5,
                 name: "application/json",
-                schema: Some("v2")
+                schema: Some(&b"v2"[..])
             }
         );
     }

@@ -98,6 +98,12 @@ impl EncodingState {
     pub(crate) fn to_string(hint: &EncodingHint) -> String {
         wz_session_core::encoding_hint::hint_to_string(hint)
     }
+
+    /// [`Self::to_string`] as the bytes pico hands out: a schema that is not
+    /// UTF-8 is copied as it is, as `_z_encoding_convert_into_string` copies it.
+    pub(crate) fn to_bytes(hint: &EncodingHint) -> Vec<u8> {
+        wz_session_core::encoding_hint::hint_to_bytes(hint)
+    }
 }
 
 /// Owned encoding (pico `z_owned_encoding_t`, 40 B measured).
@@ -222,14 +228,12 @@ pub unsafe extern "C" fn z_encoding_from_str(
         if s.is_null() {
             return Z_OK;
         }
-        let text = match CStr::from_ptr(s).to_str() {
-            Ok(t) => t,
-            // Non-UTF-8 cannot be a schema; pico would store the bytes, but wz's
-            // `EncodingHint::schema` is a `String`. Reported rather than
-            // lossily transcoded.
-            Err(_) => return crate::result::Z_ERR_INVALID,
-        };
-        store_encoding(encoding, EncodingState::from_str(text).hint);
+        // pico stores the bytes it is handed, UTF-8 or not, and so does this.
+        let bytes = CStr::from_ptr(s).to_bytes();
+        store_encoding(
+            encoding,
+            wz_session_core::encoding_hint::hint_from_bytes(bytes),
+        );
         Z_OK
     })
 }
@@ -251,11 +255,10 @@ pub unsafe extern "C" fn z_encoding_from_substr(
             return Z_OK;
         }
         let bytes = core::slice::from_raw_parts(s as *const u8, len);
-        let text = match core::str::from_utf8(bytes) {
-            Ok(t) => t,
-            Err(_) => return crate::result::Z_ERR_INVALID,
-        };
-        store_encoding(encoding, EncodingState::from_str(text).hint);
+        store_encoding(
+            encoding,
+            wz_session_core::encoding_hint::hint_from_bytes(bytes),
+        );
         Z_OK
     })
 }
@@ -276,10 +279,12 @@ pub unsafe extern "C" fn z_encoding_to_string(
             return Z_ERR_NULL;
         }
         let rendered = match encoding_hint(encoding) {
-            Some(hint) => EncodingState::to_string(hint),
-            None => ENCODING_ID_TO_STR[usize::from(ENCODING_ID_DEFAULT)].to_owned(),
+            Some(hint) => EncodingState::to_bytes(hint),
+            None => ENCODING_ID_TO_STR[usize::from(ENCODING_ID_DEFAULT)]
+                .as_bytes()
+                .to_vec(),
         };
-        store_owned_string(string, rendered.as_bytes());
+        store_owned_string(string, &rendered);
         Z_OK
     })
 }
@@ -330,19 +335,18 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
         // uniquely owned by this handle, and pico's own setter mutates in
         // place through a `z_loaned_*` pointer.
         let state = state as *const EncodingState as *mut EncodingState;
-        let text = if schema.is_null() || len == 0 {
-            String::new()
+        // pico copies the bytes it is handed and asks nothing of them
+        // (`src/api/encoding.c`, `z_encoding_set_schema_from_substr` ->
+        // `_z_string_copy_from_substr`), so a schema that is not UTF-8 is set.
+        let bytes: &[u8] = if schema.is_null() || len == 0 {
+            &[]
         } else {
-            let bytes = core::slice::from_raw_parts(schema as *const u8, len);
-            match core::str::from_utf8(bytes) {
-                Ok(t) => t.to_owned(),
-                Err(_) => return crate::result::Z_ERR_INVALID,
-            }
+            core::slice::from_raw_parts(schema as *const u8, len)
         };
         let id = (*state).hint.packed_id >> 1;
-        let has_schema = !text.is_empty();
+        let has_schema = !bytes.is_empty();
         (*state).hint.packed_id = (id << 1) | u32::from(has_schema);
-        (*state).hint.schema = has_schema.then_some(text);
+        (*state).hint.schema = has_schema.then(|| bytes.to_vec());
         Z_OK
     })
 }
@@ -643,7 +647,7 @@ mod tests {
                     .expect("moved")
                     .schema
                     .as_deref(),
-                Some("utf8")
+                Some(&b"utf8"[..])
             );
             z_encoding_drop(z_encoding_move(&mut dst));
         }
@@ -668,7 +672,7 @@ mod tests {
         let with = EncodingState::from_str("text/plain;utf8");
         assert_eq!(with.hint.packed_id & 1, 1, "schema present, flag set");
         assert_eq!(with.hint.packed_id >> 1, 4);
-        assert_eq!(with.hint.schema.as_deref(), Some("utf8"));
+        assert_eq!(with.hint.schema.as_deref(), Some(&b"utf8"[..]));
     }
 
     /// An UNRECOGNISED prefix is not an error — the whole string becomes the
@@ -680,8 +684,36 @@ mod tests {
         assert_eq!(e.hint.packed_id >> 1, u32::from(ENCODING_ID_DEFAULT));
         assert_eq!(
             e.hint.schema.as_deref(),
-            Some("application/x-made-up-thing-entirely")
+            Some(&b"application/x-made-up-thing-entirely"[..])
         );
+    }
+
+    /// zenoh-pico's contract for a schema that is not UTF-8: the setter copies
+    /// the bytes it is handed (`src/api/encoding.c`,
+    /// `z_encoding_set_schema_from_substr`), and `z_encoding_to_string` hands
+    /// them back as they are after the id's name and `;`.
+    #[test]
+    fn a_schema_that_is_not_utf8_is_set_and_rendered_as_its_bytes() {
+        let raw: &[u8] = &[0xFF, 0xFE, b'x'];
+        let mut owned = z_owned_encoding_t::null_value();
+        // SAFETY: live locals.
+        unsafe {
+            store_encoding(&mut owned, EncodingState::from_str("text/plain").hint);
+            assert_eq!(
+                z_encoding_set_schema_from_substr(
+                    z_encoding_loan_mut(&mut owned),
+                    raw.as_ptr().cast(),
+                    raw.len()
+                ),
+                Z_OK
+            );
+            let hint = encoding_hint(z_encoding_loan(&owned)).expect("set");
+            assert_eq!(hint.schema.as_deref(), Some(raw));
+            let mut want = b"text/plain;".to_vec();
+            want.extend_from_slice(raw);
+            assert_eq!(EncodingState::to_bytes(hint), want);
+            z_encoding_drop(z_encoding_move(&mut owned));
+        }
     }
 
     /// Round trip through the rendering, for the shapes the attachment

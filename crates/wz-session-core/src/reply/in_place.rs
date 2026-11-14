@@ -73,8 +73,8 @@ struct LentReply<'r, 'f> {
     keyexpr: &'r str,
     kind: ReplyKind,
     payload: &'r [u8],
-    err_encoding: Option<(u32, Option<&'r str>)>,
-    put_encoding: Option<(u32, Option<&'r str>)>,
+    err_encoding: Option<(u32, Option<&'r [u8]>)>,
+    put_encoding: Option<(u32, Option<&'r [u8]>)>,
     attachment: Option<&'r [u8]>,
     source_info: Option<SourceInfo>,
     timestamp: Option<&'r Timestamp<'f>>,
@@ -101,13 +101,13 @@ impl ReplyView for LentReply<'_, '_> {
     fn payload(&self) -> &[u8] {
         self.payload
     }
-    fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.err_encoding
     }
     fn attachment(&self) -> Option<&[u8]> {
         self.attachment
     }
-    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.put_encoding
     }
     fn source_info(&self) -> Option<&SourceInfo> {
@@ -149,8 +149,8 @@ impl ReplyView for LentReply<'_, '_> {
 struct LentBody<'r, 'f> {
     kind: ReplyKind,
     payload: &'r [u8],
-    err_encoding: Option<(u32, Option<&'r str>)>,
-    put_encoding: Option<(u32, Option<&'r str>)>,
+    err_encoding: Option<(u32, Option<&'r [u8]>)>,
+    put_encoding: Option<(u32, Option<&'r [u8]>)>,
     attachment: Option<&'r [u8]>,
     source_info: Option<SourceInfo>,
     timestamp: Option<&'r Timestamp<'f>>,
@@ -462,8 +462,8 @@ mod tests {
         keyexpr: String,
         kind: ReplyKind,
         payload: Vec<u8>,
-        err_encoding: Option<(u32, Option<String>)>,
-        put_encoding: Option<(u32, Option<String>)>,
+        err_encoding: Option<(u32, Option<Vec<u8>>)>,
+        put_encoding: Option<(u32, Option<Vec<u8>>)>,
         attachment: Option<Vec<u8>>,
         source_info: Option<SourceInfo>,
         timestamp: Option<TimestampHint>,

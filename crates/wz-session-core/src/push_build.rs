@@ -1850,8 +1850,8 @@ mod tests {
             let enc = put.encoding.as_ref().expect("encoding round-trips");
             assert_eq!(enc.packed_id, 5);
             assert_eq!(
-                enc.schema.as_ref().map(|s| s.as_text().into_inner()),
-                Some("text/plain")
+                enc.schema.as_ref().map(|s| s.as_bytes().into_inner()),
+                Some(&b"text/plain"[..])
             );
             let body_exts = crate::put_payload::chain(put);
             assert_eq!(body_exts.len(), 2, "source_info + attachment");

@@ -627,6 +627,7 @@ const F_ENCODING: &[SchemaNode] = &[
     leaf("id", B),
     leaf("schema_len", U),
     leaf("schema", T),
+    leaf("schema_bytes", BY),
 ];
 const F_WIREEXPR: &[SchemaNode] = &[
     leaf("id", U),

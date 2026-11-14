@@ -626,6 +626,12 @@
  * application data. The range is derived from the message's bytes and does not
  * change in an issued row.
  *
+ * AN ENCODING'S SCHEMA THAT IS NOT UTF-8, at field-document revision 67:
+ * `payload.schema_hex`, after `encoding`, written only then. The schema is
+ * bytes on the wire and zenoh accepts any; `encoding` names the id alone for
+ * such a schema, and `schema_hex` is its bytes in lower-case hex. Where there
+ * is no `schema_hex` the schema, if any, is the part of `encoding` after `;`.
+ *
  * AND WHAT THE RANGE IS THE SPAN OF, at field-document revision 64:
  * `payload.span_of`, the last key of the object.
  *
@@ -1688,7 +1694,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":66,"key":"kind","values":[...],
+ *     {"name":"fields","revision":67,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -5975,7 +5981,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":66,"key":"state",
+ *     "value_families":[{"name":"fields","revision":67,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

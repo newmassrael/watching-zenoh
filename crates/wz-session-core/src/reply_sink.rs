@@ -83,7 +83,7 @@ pub trait ReplyView {
     fn payload(&self) -> &[u8];
     /// Encoding hint carried by an Err reply (`packed_id` + optional
     /// `schema`), or `None` for Put / Del.
-    fn err_encoding(&self) -> Option<(u32, Option<&str>)>;
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)>;
     /// A8b — opaque attachment carried by a Put reply on its inner
     /// `MsgPut` body extension (push-body ext id 0x03 — the receive twin
     /// of the A8a emit seam), or `None` for Del / Err or a Put with no
@@ -98,7 +98,7 @@ pub trait ReplyView {
     /// Put-arm twin of [`Self::err_encoding`]; what a querier reconstructs
     /// a stored value's encoding from (the aligner's
     /// `RetrievedValue.encoding`). Default `None`.
-    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         None
     }
     /// R311y78 — the source identity `(zid, eid, sn)` a Put reply carried on
@@ -201,7 +201,7 @@ pub struct BorrowedReply<'a> {
     /// Payload bytes. Empty for a Del reply.
     pub payload: &'a [u8],
     /// Encoding hint for an Err reply, if any.
-    pub err_encoding: Option<(u32, Option<&'a str>)>,
+    pub err_encoding: Option<(u32, Option<&'a [u8]>)>,
     /// A8b — attachment carried by a Put reply (the inner-MsgPut push-body ext
     /// id 0x03), or `None`. Carried so `InboundReply::from_view` preserves the
     /// attachment for a `BorrowedReply` source too, not only for the wire
@@ -230,7 +230,7 @@ pub struct BorrowedReply<'a> {
     pub attachment: Option<&'a [u8]>,
     /// A8b — value encoding carried by a Put reply (`packed_id` + schema), or
     /// `None`. The Put-arm twin of [`Self::err_encoding`].
-    pub put_encoding: Option<(u32, Option<&'a str>)>,
+    pub put_encoding: Option<(u32, Option<&'a [u8]>)>,
 }
 
 impl ReplyView for BorrowedReply<'_> {
@@ -246,7 +246,7 @@ impl ReplyView for BorrowedReply<'_> {
     fn payload(&self) -> &[u8] {
         self.payload
     }
-    fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.err_encoding
             .as_ref()
             .map(|(id, schema)| (*id, schema.as_deref()))
@@ -254,7 +254,7 @@ impl ReplyView for BorrowedReply<'_> {
     fn attachment(&self) -> Option<&[u8]> {
         self.attachment
     }
-    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.put_encoding
             .as_ref()
             .map(|(id, schema)| (*id, schema.as_deref()))
@@ -355,13 +355,13 @@ impl ReplyView for ArrivedReply<'_> {
     fn payload(&self) -> &[u8] {
         self.inner.payload()
     }
-    fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.inner.err_encoding()
     }
     fn attachment(&self) -> Option<&[u8]> {
         self.inner.attachment()
     }
-    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.inner.put_encoding()
     }
     #[cfg(feature = "storage-profile")]
