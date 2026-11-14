@@ -1688,7 +1688,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":67,"key":"kind","values":[...],
+ *     {"name":"fields","revision":68,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -2863,7 +2863,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * version 0x09. `zenoh` is a SEQUENTIAL TEST over what the flow's messages keep
  * that other protocols rarely keep by chance, on every row and flow here and on
  * every flow object of the field document (revision 43). It keeps TWO sums in
- * millibits (model 7, field-document revision 67 and session_table revision
+ * millibits (model 7, field-document revision 68 and session_table revision
  * 13; model 6 was revisions 54 and 10, model 5 revisions 53 and 9, model 4
  * revisions 50 and 8, model 3 revisions 49 and 7):
  * the `yes` sum is the log2 of an e-process against "another protocol", the `no`
@@ -5975,7 +5975,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":67,"key":"state",
+ *     "value_families":[{"name":"fields","revision":68,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

@@ -4481,10 +4481,11 @@ int main(void) {
      * `unjudged_reason` (`reply`, `sender_unknown`, or null); a final's entry
      * gains `ended_transfers` and an ended transfer `ended_by`. Keys arrive;
      * nothing retires.
-     * 67: model 7 of the zenoh test: a Frame's records end where the
-     * batch's next transport message begins, and the priors the corpus gives
-     * under that reading. Values move under stationary keys. */
-    revisioned[2].revision = 67;
+     * 68: model 7 of the zenoh test: a Frame's records end where the
+     * batch's next transport message begins, a record that does not decode
+     * fails the batch, and the parameters the corpus gives under that
+     * reading. Values move under stationary keys. */
+    revisioned[2].revision = 68;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4649,7 +4650,7 @@ int main(void) {
      * 12: `no_matching_key`, the reason a row's cells are unstated when key
      * material was handed in and named no secret of this flow's connection.
      * One family gains a word; nothing retires.
-     * 13: model 7, as the field document's 67. */
+     * 13: model 7, as the field document's 68. */
     revisioned[12].name = "session_table";
     revisioned[12].revision = 13;
     revisioned[12].doc = NULL;
