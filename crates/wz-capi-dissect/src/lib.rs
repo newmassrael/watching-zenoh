@@ -15053,7 +15053,7 @@ mod tests {
             3,
             "the three requests are open: {first}"
         );
-        assert!(first.contains("\"revision\":4"), "{first}");
+        assert!(first.contains("\"revision\":5"), "{first}");
         let cursor = through_seq_of(&first);
         assert!(cursor > 3, "{first}");
 
