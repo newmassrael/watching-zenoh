@@ -4217,8 +4217,9 @@ pub(crate) struct SessionInner {
     /// How long a query waits for its replies when it does not say, from the configuration.
     queries_default_timeout: Duration,
     /// The configuration the session was opened with, as the application reads it
-    /// ([`Session::config`]).
-    #[cfg(feature = "unstable")]
+    /// ([`Session::config`]), and as the runtime admin space reads and writes it, which every
+    /// build on the engine hosts ([`WeakSession::config_notifier`]).
+    #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
     config: crate::api::config::Notifier<zenoh_config::ExpandedConfig>,
     /// What a node records on a message it intercepts: its role, the callback of the user if the
     /// session was opened with one, and the clock of a node that holds none.
@@ -5235,7 +5236,7 @@ impl Session {
             zid: core.zid,
             callbacks_drop_sync_group: SyncGroup::default(),
             queries_default_timeout: core.queries_default_timeout,
-            #[cfg(feature = "unstable")]
+            #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
             config: core.config,
             #[cfg(feature = "unstable")]
             timestamps: core.timestamps,
@@ -5274,7 +5275,7 @@ pub(crate) struct RuntimeCore {
     engine: Arc<Engine>,
     zid: ZenohId,
     queries_default_timeout: Duration,
-    #[cfg(feature = "unstable")]
+    #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
     config: crate::api::config::Notifier<zenoh_config::ExpandedConfig>,
     #[cfg(feature = "unstable")]
     timestamps: Arc<TimestampSource>,
@@ -5377,7 +5378,7 @@ impl RuntimeCore {
             engine: Arc::new(engine),
             zid,
             queries_default_timeout,
-            #[cfg(feature = "unstable")]
+            #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
             config: crate::api::config::Notifier::new(config.0.clone().expanded()),
             #[cfg(feature = "unstable")]
             timestamps,
