@@ -242,8 +242,11 @@ pub mod model {
     use crate::zenoh_eprocess::{Prior, Region};
 
     /// The model these sums are, written into the document so that a consumer
-    /// can tell two models apart.
-    pub const MODEL: u32 = 6;
+    /// can tell two models apart. Model 7 is model 6's rule with the priors
+    /// the corpus gives once a Frame's records end where the batch's next
+    /// transport message begins, as upstream reads a batch
+    /// (`docs/flow-zenoh-verdict.md` §6.14).
+    pub const MODEL: u32 = 7;
 
     /// `log2` of the largest chance that a packet whose transport checksum
     /// verified reaches the capture with a byte of its payload altered:
@@ -997,8 +1000,29 @@ pub(crate) mod freeze {
 
     /// Every number the sums are computed from, in one text, as a digest:
     /// the rule, the thresholds, the bounds, the fixed-point constants, every
-    /// check's strength and bases, and the parameters.
+    /// check's strength and bases, the parameters, and the development
+    /// corpus's counts the parameters were computed from.
+    ///
+    /// The counts are what the reader measured, so a change to how a unit,
+    /// a front or a version header is read moves the digest even where it
+    /// moves no parameter: the frozen object is the measurement as well as
+    /// the numbers fitted to it. A freeze registered before the counts joined
+    /// the text (model 6) keeps the digest its entry registered.
     pub(crate) fn digest() -> u64 {
+        use super::model::measured;
+        let null: Vec<alloc::string::String> = measured::NULL
+            .iter()
+            .map(|m| alloc::format!("{}:{:?}:{:?}:{:?}", m.file, m.units, m.framing, m.front))
+            .collect();
+        let zenoh = alloc::format!(
+            "units={:?} framing={:?} cookie={:?} roles={:?} versions={:?} front={:?}",
+            measured::ZENOH_UNITS,
+            measured::ZENOH_FRAMING,
+            measured::ZENOH_COOKIE,
+            measured::ZENOH_ROLES,
+            measured::ZENOH_VERSIONS,
+            measured::ZENOH_FRONT,
+        );
         let checks: Vec<alloc::string::String> = Check::ALL
             .iter()
             .map(|c| {
@@ -1013,7 +1037,7 @@ pub(crate) mod freeze {
             .collect();
         let text = alloc::format!(
             "model={} yes_at={} no_at={} cookie={}x{} altered={}/{} break={} \
-             one={} max={} err={} checks={:?} params={:?}",
+             one={} max={} err={} checks={:?} params={:?} null={:?} zenoh={}",
             model::MODEL,
             model::YES_AT,
             model::NO_AT,
@@ -1027,6 +1051,8 @@ pub(crate) mod freeze {
             LOG_ERR_Q64,
             checks,
             model::PARAMS,
+            null,
+            zenoh,
         );
         // FNV-1a, 64 bits: a change detector over a text this crate writes, not
         // a defence against anyone choosing the text.

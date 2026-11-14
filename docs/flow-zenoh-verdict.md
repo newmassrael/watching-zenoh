@@ -1474,3 +1474,142 @@ What the reading does not show, stated rather than dropped:
 With the report written, the validation files may join the development corpus;
 until a new freeze, they are held as they were read.
 
+### 6.14 Model 7: the measurement corrected under a frozen model (2026-11-14)
+
+Model 7 ships: `model` reads 7. Its rule is model 6's; what moves is two priors
+the development corpus gives once the reader reads a batch as upstream does. It
+is not frozen, and the validation corpus of section 6.13 is not read against
+it.
+
+**What the reader read wrongly.** A sender that has a `Frame` open in a batch
+and writes a message of the other reliability puts a second `Frame` header
+into the same batch. Upstream's `Frame` reader ends the first `Frame` where a
+record does not decode as a network message and rewinds to it, and the batch's
+loop reads the bytes from there as the next transport message, or fails the
+batch (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`,
+`io/zenoh-transport/src/unicast/universal/rx.rs` @ `while !batch.is_empty() {`).
+The reader that measured the development corpus for models 3 to 6 walked a
+`Frame`'s payload to the end of its unit and took a transport message inside it
+for an unknown network record of the `Frame`. It now ends the walk at a
+transport id (`0x00` to `0x07`) and reads what follows as the next message. Two
+measurements moved, and both were readings of bytes upstream never reads as a
+`Frame`'s records:
+
+- **A null unit read whole.** A datagram whose first byte reads as a `Frame`
+  header and whose payload holds a byte of a transport id at a record boundary
+  read whole, the bytes behind that byte counted as one unknown record. Read
+  as upstream reads it, the bytes from there are a transport message that does
+  not decode, and the unit is residual. Three null members move from whole to
+  residual: `lan-dns.pcap` from 26, 32, 116 to 16, 42, 116 (whole, residual,
+  undecoded), `busylan-dhcp.pcap` from 16, 98, 133 to 6, 108, 133 and
+  `busylan-wsd.pcap` from 5, 12, 97 to 3, 14, 97. No zenoh unit moves: the
+  zenoh files' 49505 units read whole under both readings, a batch of two
+  `Frame`s being one unit read whole.
+- **An SN step of a zenoh link.** The second `Frame` of such a batch was never
+  a message of its own, so its SN was not tracked, and the next `Frame` of its
+  conduit that was tracked read as a break. Read as upstream reads it, those
+  steps follow. The SN prior fitted on the zenoh flows moves from a mean break
+  rate of 0.0044 to 0.0037 at the same concentration of 2.
+
+| measured null | `yes` bound per outcome | `no` mean per outcome |
+|---|---|---|
+| unit readings | 7.7639e-1, 1.0000e0, 9.0270e-1 | 1.0173e-1, 5.0256e-1, 3.9571e-1 |
+
+SN prior: Beta(74/10000, 19926/10000), a mean break rate of 0.0037 at a
+concentration of 2.
+
+Nothing else in `zenoh_calibration_generated.rs` moves: the null bounds of the
+`yes` sum, the zenoh priors of the group-rate checks, every region and the
+front's null prior are what they were.
+
+**What the error does to model 6, by D1.** The two parameters that moved are
+both on the side a sum does NOT reject: the units' `no` mean is the null side
+of the `no` sum, which rejects zenoh, and the SN prior is the zenoh side of the
+`yes` sum, which rejects the null. Section 6.7 holds that such a prior moves
+only how soon a word is reached and never the chance that it is wrong. Every
+number on a rejected side (the null bounds, the regions, the derived chances
+and the alteration bounds) is the same under both readings. So model 6's error
+guarantee did not rest on the misreading; its operating characteristics and
+the observations its validation corpus was read with did.
+
+**D16. A model whose measurement was wrong is superseded, not amended.** The
+freeze of section 6.12 registered model 6 "as the reader at this entry
+computes it", and its validation corpus was read once against that reader. The
+corrected reader is another reader, so the frozen object no longer ships:
+
+- Model 6's freeze and its report stand as what they were, a reading of model
+  6 with the reader of that entry. Nothing refuted it, and nothing is
+  withdrawn from the record.
+- The corrected model is model 7, a number of its own. It is not frozen by
+  this entry: section 6.12's validation corpus was spent on model 6, and a
+  corpus whose report is known is not evidence about a model changed after it
+  (reading it again for model 7 is the reuse of a held-out set that section
+  6.4's "two corpora, one frozen" exists to prevent). Model 7, or the model
+  that follows it before a freeze, is frozen by a new entry and read against a
+  validation corpus collected after that entry.
+- The calibration is not held at the old reading. A judge that weighed
+  observations by the old walk while every other reader of the batch walks as
+  upstream does would hold two readings of one wire, and the parameters would
+  describe an observation the reader no longer makes.
+
+**D17. A validation corpus is read only under the digest it was registered
+for.** `zenoh_evidence::freeze` lists every freeze with its digest and its
+corpus. `the_validation_corpus_read_against_the_frozen_model` reads a corpus
+only when the reader's model number and digest are a registered pair; a model
+numbered after every freeze reads none, and a frozen number with another digest
+is refused. Before this, the test read the spent corpus on every build, so any
+change to the model was evaluated on it at once. The integration run that
+first carried the corrected reader read it once more, with the calibration
+above, and printed the report of section 6.13 unchanged. That is stated so that
+it is not taken for a validation of model 7: it was a reading of a spent corpus
+by a model nobody froze, and the seal now stops it.
+
+**D18. The frozen object includes the measurement.** The digest of a freeze now
+covers the development corpus's counts as well as the parameters
+(`freeze::digest`): every null member's units, framing and fronts, and the
+zenoh files' units, framing, cookie echoes, Init pairs, version headers and
+fronts. A change to how the reader reads moves the digest even where it moves
+no parameter (the zenoh files' fronts and version headers enter no parameter).
+Model 6's digest was registered over the earlier text and is kept as
+registered. What the counts cannot see is a reading the development corpus
+does not exercise (a WebSocket front, a lowlatency link), so the freezing entry
+also names the commit of the reader it freezes, and the reading entry names the
+commit it read on.
+
+**What the next freeze waits on.** The same seam is not closed. A unit reads
+whole when its transport messages decode and reach its end
+(`wz-session-core` `passive.rs`, `walk_unit`: `whole` is
+`!unaccounted && out.iter().all(|f| f.frame.is_ok())`); a `Frame` whose record
+walk halts on an unknown network id (`0x08` to `0x18`) or on a record that
+fails to decode is still read whole, its rest absorbed or counted unparsed.
+Upstream fails such a batch, by the same two citations. Until the reader
+counts such a unit residual, the units' counts rest on a reading upstream does
+not make, and a freeze would register them; the model that closes it takes the
+next number and is the one to freeze.
+
+**What a validation corpus for the next freeze must be** (registered by the
+freezing entry, before any of its files exists):
+
+- Collected after that entry, apart from `captures/corpus/` and
+  `captures/validation/`, with its groups and hypotheses in its manifest when
+  it is committed, and read once by the test above under the frozen digest.
+- New groups only: section 6.13's 58 groups are spent as validation, and a
+  group captured again by the same recipe is the same group. At least 29
+  groups a side (the interim level, D2); 59 a side reaches the first target.
+- Zenoh groups that exercise the corrected measurement and what 6.13 lacked:
+  one session publishing reliable and best-effort samples together under load
+  (two `Frame`s in one batch, on TCP and UDP), mixed priorities in one batch,
+  a loss and reordering link on the batching path, releases of the wire other
+  than the pin (an earlier 1.x line), and implementations and roles 6.13 held
+  once.
+- Null groups that put the corrected measurement under strain: protocols whose
+  first byte reads as a `Frame` header and whose payload carries bytes of the
+  transport ids (DNS-like ids, NetFlow and IPFIX headers, RTP), and protocols
+  whose first byte is a transport id (WireGuard's message types), none of
+  which a development or spent corpus holds.
+
+**Pins that move with model 7.** The examples of the session table
+(`session_table_tests`, `wz_dissect.h`, `wz-capi-dissect`'s session table test
+and the C consumer) state `model` 7 and the units' `no` part at 3.2972 bits a
+unit where it was 3.1678.
+
