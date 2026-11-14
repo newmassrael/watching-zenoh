@@ -8,13 +8,12 @@
 #
 # ## Why this exists
 #
-# `scripts/land.sh` files a round inside its push lock: the prose comes from four
-# files outside the repository and the number from the store after the rebase. A
-# queue integrator (`bx --land`, bx RFC 0024) cherry-picks a commit onto the remote
-# tip and runs the repository's declared actions on the result; it has no lock, no
-# files outside the commit and no `--round`. So the round has to be IN the commit,
-# as data without its number, and the number has to be taken after the cherry-pick,
-# on the candidate, where the store already holds every round that landed before it.
+# The queue integrator (`bx --land`, bx RFC 0024) cherry-picks a commit onto the
+# remote tip and runs the repository's declared actions on the result; it has no
+# files outside the commit and no say over the number. So the round has to be IN the
+# commit, as data without its number (`scripts/land.sh` writes it from the author's
+# append-round arguments), and the number has to be taken after the cherry-pick, on
+# the candidate, where the store already holds every round that landed before it.
 # That is a descriptor (`scripts/lib/round_descriptor.py` states its form) and this
 # script: read the store's last round, file the descriptor as the next one, delete
 # the descriptor. A candidate with no descriptor changes nothing.
