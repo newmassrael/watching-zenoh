@@ -185,6 +185,7 @@ const fn pico_group(
         batch_size: pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES),
         is_qos: false,
         compression: false,
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
     }
 }
 

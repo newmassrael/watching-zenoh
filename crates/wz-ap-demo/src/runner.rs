@@ -6802,6 +6802,7 @@ async fn run_router_hat_until(
                     req_id_res: 0x02,
                     batch_size: 2_048,
                 },
+                join_rule: wz::runtime_tokio::multicast_glue::GroupJoinRule::Pico,
             },
             mcast_opts.clone(),
             node_stats.clone(),

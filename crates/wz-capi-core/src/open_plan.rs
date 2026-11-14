@@ -425,6 +425,9 @@ fn zenoh_group_profile(
         batch_size: batch_size.min(ZENOH_MULTICAST_BATCH),
         is_qos: node.multicast_qos,
         compression: node.multicast_compression,
+        // A document of zenoh's configuration is read for the zenoh presets, whose group follows
+        // zenoh's rule.
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Zenoh,
     }
 }
 
@@ -2078,7 +2081,8 @@ mod tests {
         {
             let plan = plan_of(WhatAmI::Router, &[], &[group], &router).expect("opens");
             assert!(
-                plan.describe().contains("compression: true } shm="),
+                plan.describe()
+                    .contains("compression: true, join_rule: Zenoh } shm="),
                 "{}",
                 plan.describe()
             );
@@ -2189,7 +2193,7 @@ mod tests {
                 "role: Router\nconnect: []\nlisten: [\"tcp/127.0.0.1:7447\"]\n\
                  groups: [\"udp/224.0.0.224:7446#iface=lo GroupProfile { lease_ms: 10000, \
                  join_interval_ms: 2500, seq_num_res: 2, req_id_res: 2, batch_size: 8192, \
-                 is_qos: false, compression: false } shm=true Subscribers\"]",
+                 is_qos: false, compression: false, join_rule: Zenoh } shm=true Subscribers\"]",
                 "-1",
                 false,
                 0,

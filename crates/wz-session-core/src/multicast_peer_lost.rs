@@ -99,14 +99,11 @@ pub enum MulticastPeerLostReason {
     /// carrying traffic. Both are the exact conflation this enum's own doc
     /// calls load-bearing.
     ///
-    /// pico is the upstream here and the two disagree: its existing-peer JOIN
-    /// arm drops the peer when `_seq_num_res` / `_req_id_res` / `_batch_size`
-    /// differ from its own constants (`src/transport/multicast/rx.c`), while
-    /// zenoh's `handle_join_from_peer` IGNORES the inconsistent Join and keeps
-    /// the peer's first-announced parameters. wz follows pico, and the reason
-    /// is reachability rather than taste: a peer whose resolution or batch size
-    /// this node cannot decode produces frames it will mis-parse for as long as
-    /// the lease holds it, so continuing to hold it is worse than dropping it.
+    /// Given only under zenoh-pico's rule (`GroupJoinRule::Pico`): its
+    /// existing-peer JOIN arm drops the peer when `_seq_num_res` /
+    /// `_req_id_res` / `_batch_size` differ from its own constants
+    /// (`src/transport/multicast/rx.c`). Under zenoh's rule the Join is refused
+    /// and the member kept (see `GroupJoinRule`).
     CapabilitiesChanged,
 }
 

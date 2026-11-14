@@ -375,6 +375,8 @@ where
             compression: false,
             tx_queue: TxQueueConf::default(),
             link_rx: LinkRxConf::default(),
+            // The MCU session is zenoh-pico's.
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         }
     }
 

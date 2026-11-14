@@ -95,6 +95,7 @@ fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroup
             req_id_res: 0x02,
             batch_size: 2_048,
         },
+        join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Pico,
     }
 }
 
@@ -121,6 +122,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
         compression: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
     }
 }
 
@@ -452,16 +454,16 @@ async fn qos_group_publish_qos_reaches_subscriber() {
 /// R311y234 (the is_qos DISCRIMINATOR the positive arm lacks) — the group-agreed
 /// REFUSAL over REAL UDP: a qos publisher A (`is_qos=true`, so its JOIN carries the
 /// qos ext) meets a NON-qos subscriber B (`is_qos=false`). B REFUSES A's JOIN
-/// (`multicast_rx.rs:121`: admit iff `qos_next_sns.is_none() || params.is_qos`; here
-/// peer-qos AND !local-qos is the ONE refused case), so A is never admitted and its
+/// under zenoh's rule (`judge_join`: peer-qos AND !local-qos is the ONE refused case;
+/// zenoh-pico has no such rule, so B states `GroupJoinRule::Zenoh`), so A is never admitted and its
 /// prioritized Put is dropped as from-an-unknown-peer. `active_peers()==0` is the
 /// DETERMINISTIC discriminator — not timing-dependent: B never admits A no matter how
 /// many JOIN beacons arrive — and `fired==0` confirms no delivery. This is the ONLY
 /// configuration that exercises the is_qos WIRE gate, so together with the positive
 /// arm (delivery when both agree) + C1bc's band proof the activation is genuinely
 /// proven, not smoke-tested. Both nodes compile WITH transport-qos; the discrimination
-/// is B's RUNTIME `is_qos=false` (the pico-faithful default), exactly the mismatch a
-/// pico multicast peer (always non-qos) would present to a qos wz node.
+/// is B's RUNTIME `is_qos=false`, the mismatch a non-qos zenoh member presents to a
+/// qos one.
 #[cfg(feature = "transport-qos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "multicast loopback e2e; Layer M qos arm runs it via --ignored"]
@@ -473,7 +475,10 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
     let mut link_b =
         MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, REFUSE_PORT, loopback_on()));
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
-    let params_b = mc_params(0xBB);
+    let params_b = MulticastParams {
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Zenoh,
+        ..mc_params(0xBB)
+    };
     assert!(
         !params_b.is_qos,
         "node B must be non-qos for the refusal arm"
