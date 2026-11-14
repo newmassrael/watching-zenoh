@@ -420,14 +420,14 @@ pub const NETWORK_EXT_CHAIN_DEPTH: usize = 8;
 ///
 /// The vector form: its consumers are the ones that want the chain as bytes of
 /// their own (the auth ext's inner method chain, which is then wrapped in an
-/// outer ext; the transport composer). The handshake messages are written whole
+/// outer ext; the tests that build a message's chain by hand). The handshake
+/// messages, the transport composer's included, are written whole
 /// by their documents, and the lend-only Open writes its chain straight after
 /// its head through [`encode_ext_chain_into`]; none of them calls this.
 #[cfg(all(
     feature = "alloc",
     any(
         feature = "session-extauth",
-        feature = "transport-compose",
         // The unit tests of `passive` (which builds the same wire from the same
         // entries) and of the lend-only chain writer below, under the feature sets
         // their own modules are compiled at.
@@ -480,7 +480,6 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
         feature = "alloc",
         any(
             feature = "session-extauth",
-            feature = "transport-compose",
             all(
                 test,
                 feature = "codec-init-body",
