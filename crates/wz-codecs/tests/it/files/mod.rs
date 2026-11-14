@@ -5,6 +5,7 @@
 //! file of `files/` is named here by hand, in order.
 
 mod declared_bounds;
+mod declared_widths;
 mod linkstate;
 mod put_marker_identity;
 mod query_marker_identity;
