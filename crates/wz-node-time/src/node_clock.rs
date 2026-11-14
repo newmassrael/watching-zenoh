@@ -366,6 +366,25 @@ impl NodeHlc {
         )
     }
 
+    /// [`for_node`](Self::for_node) over `source`, a clock the application owns, in place of the
+    /// system clock: what `uhlc`'s `HLCBuilder::with_clock` gives upstream's node. Its standing is
+    /// its own, as a node over the system clock keeps.
+    #[cfg(feature = "time-hlc")]
+    pub fn for_node_over_source(
+        zid: &[u8],
+        whatami: WhatAmI,
+        enabled: TimestampingEnabled,
+        source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
+    ) -> Self {
+        Self::over_source(
+            zid,
+            whatami,
+            enabled,
+            source,
+            StandingHome::Own(Box::default()),
+        )
+    }
+
     /// The node over `source`, for the role gate `enabled` says, keeping its standing in
     /// `standing`.
     #[cfg(feature = "time-hlc")]
@@ -536,6 +555,88 @@ impl NodeHlc {
                 time,
                 zid: clock.zid.clone(),
             })
+        }
+        #[cfg(not(feature = "time-hlc"))]
+        {
+            None
+        }
+    }
+
+    /// The next stamp of this node's clock, as its time word, for a caller that holds the clock
+    /// itself as upstream's crates hold `uhlc`'s (`HLC::new_timestamp`), or `None` for a node that
+    /// holds no clock.
+    ///
+    /// It is the clock and not the policy over it: [`Self::stamp`] passes on unstamped what a
+    /// `trusted-only` node would not stamp, and a caller of the clock decides that for itself. A
+    /// source that cannot say what time it is reads as a time behind every stamp, so the stamp is
+    /// the last one plus one: what `uhlc` gives for a physical clock that reads behind.
+    pub fn next_word(&self) -> Option<u64> {
+        #[cfg(feature = "time-hlc")]
+        {
+            let clock = self.clock.as_deref()?;
+            let stamp = match clock.hlc.new_timestamp() {
+                Ok(stamp) => stamp,
+                Err(_) => clock
+                    .hlc
+                    .core()
+                    .new_timestamp(wz_session_core::ntp64::Ntp64::from_word(0)),
+            };
+            Some(stamp.as_word())
+        }
+        #[cfg(not(feature = "time-hlc"))]
+        {
+            None
+        }
+    }
+
+    /// Absorb a remote time word into this node's clock, as upstream's crates do with
+    /// `HLC::update_with_timestamp`: `Some(true)` when it is taken, `Some(false)` when it is more
+    /// than [`Self::max_delta_word`] ahead of the clock's reading and is refused (the clock is then
+    /// unchanged), `None` for a node that holds no clock. A source that cannot be read reads as a
+    /// time behind every stamp, as in [`Self::next_word`], so a remote time beyond the bound of
+    /// that is refused.
+    pub fn absorb_word(&self, remote: u64) -> Option<bool> {
+        #[cfg(feature = "time-hlc")]
+        {
+            let clock = self.clock.as_deref()?;
+            let remote = wz_session_core::ntp64::Ntp64::from_word(remote);
+            let verdict = match clock.hlc.update_with_timestamp(remote) {
+                Ok(verdict) => verdict,
+                Err(_) => clock.hlc.core().update_with_timestamp(
+                    wz_session_core::ntp64::Ntp64::from_word(0),
+                    remote,
+                    clock.hlc.max_delta(),
+                ),
+            };
+            Some(verdict.is_ok())
+        }
+        #[cfg(not(feature = "time-hlc"))]
+        {
+            let _ = remote;
+            None
+        }
+    }
+
+    /// How far ahead of the clock's reading a remote time word may be before
+    /// [`Self::absorb_word`] refuses it, as a word: `uhlc`'s `HLC::get_delta`. `None` for a node
+    /// that holds no clock.
+    pub fn max_delta_word(&self) -> Option<u64> {
+        #[cfg(feature = "time-hlc")]
+        {
+            Some(self.clock.as_deref()?.hlc.max_delta().as_word())
+        }
+        #[cfg(not(feature = "time-hlc"))]
+        {
+            None
+        }
+    }
+
+    /// The identity this node's stamps carry, the zid it was built with: the `uhlc::ID` of
+    /// upstream's clock. `None` for a node that holds no clock.
+    pub fn stamp_zid(&self) -> Option<&[u8]> {
+        #[cfg(feature = "time-hlc")]
+        {
+            Some(self.clock.as_deref()?.zid.as_slice())
         }
         #[cfg(not(feature = "time-hlc"))]
         {

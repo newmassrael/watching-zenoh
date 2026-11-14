@@ -22,6 +22,9 @@ pub(crate) type Id = u32;
 // The session's own part of the admin space, over the transports and links of the unstable API.
 #[cfg(feature = "unstable")]
 pub(crate) mod admin;
+// The chunks of the admin space's keys, which the root exposes with `internal` as upstream's does.
+#[cfg(any(feature = "internal", feature = "unstable"))]
+pub(crate) mod admin_keys;
 
 // R3706: `SampleBuilder::qos` and the timestamp instrumentation trait are used by the builders of a
 // reply and of the timestamp stack, which are slices Z3 and Z6b of docs/zenoh-api-on-the-engine.md.

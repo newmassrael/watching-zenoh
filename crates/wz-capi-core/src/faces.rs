@@ -2389,6 +2389,12 @@ impl SharedSession {
         self.node_hlc.stamp()
     }
 
+    /// This node's clock itself, for a host that lends it as upstream's runtime lends its
+    /// `Option<Arc<HLC>>`: the one every session and face of the node stamps with, never a copy.
+    pub fn node_hlc(&self) -> &NodeHlc {
+        &self.node_hlc
+    }
+
     /// Record where this node's listeners can be reached: the locators they actually got, without
     /// the loopback ones, as upstream's `get_locators_noloopback` lists them. Replaces the list,
     /// so a caller that adds a listener passes all of them.

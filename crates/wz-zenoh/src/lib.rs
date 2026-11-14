@@ -36,6 +36,21 @@ mod api;
 #[cfg(all(feature = "unstable", feature = "shared-memory"))]
 mod net;
 
+#[cfg(feature = "internal")]
+pub use api::admin_keys::KE_ADV_PREFIX;
+#[cfg(feature = "internal")]
+pub use api::admin_keys::KE_AT;
+#[cfg(feature = "internal")]
+pub use api::admin_keys::KE_EMPTY;
+#[cfg(feature = "internal")]
+pub use api::admin_keys::KE_PUB;
+#[cfg(feature = "internal")]
+pub use api::admin_keys::KE_STAR;
+#[cfg(feature = "internal")]
+pub use api::admin_keys::KE_STARSTAR;
+#[cfg(feature = "internal")]
+pub use api::admin_keys::KE_SUB;
+
 pub use zenoh_core::{Resolvable, Resolve, Wait};
 /// A Zenoh error.
 pub use zenoh_result::Error;
@@ -414,7 +429,11 @@ pub mod timestamp_stack {
 pub mod internal {
     pub use zenoh_core::{zasynclock, zerror, zlock, zread, ztimeout, zwrite, ResolveFuture};
     pub use zenoh_result::{bail, ErrNo};
+    pub use zenoh_sync::Condition;
     pub use zenoh_task::{TaskController, TerminatableTask};
+
+    /// The node's clock as a session lends it ([`Session::hlc`](crate::Session::hlc)).
+    pub use crate::api::session::NodeHlc;
 
     /// The node several sessions share, and the session that is made on it
     /// ([`session::init`](crate::session::init)), and the roles of the family's runtime pool.
