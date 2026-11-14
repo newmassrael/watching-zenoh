@@ -598,6 +598,36 @@ pub struct ShmKeys {
     pub pool_size: u64,
 }
 
+/// The keys of `transport/link/tx/queue` a document states with a value other than upstream's
+/// default, which the open lays over the transmit model its ABI chose
+/// ([`AbiChoices::tx_queue`]). A key at upstream's default is no instruction: a document
+/// rendered from a whole configuration states every key at its default, and the model then
+/// stands as the ABI chose it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StatedTxQueue {
+    /// `batching/enabled`.
+    pub batching: Option<bool>,
+}
+
+impl StatedTxQueue {
+    /// What `node` states away from upstream's defaults.
+    fn of(node: &ZenohNodeConfig) -> Self {
+        let upstream = ZenohNodeConfig::default().tx_queue;
+        let stated = node.tx_queue;
+        Self {
+            batching: (stated.batching != upstream.batching).then_some(stated.batching),
+        }
+    }
+
+    /// `model` with each stated key laid over it.
+    fn over(self, mut model: TxQueueConf) -> TxQueueConf {
+        if let Some(batching) = self.batching {
+            model.batching = batching;
+        }
+        model
+    }
+}
+
 /// What a configuration document means for an open. See the module documentation.
 pub struct OpenPlan {
     /// The role the node dials as. The roles are a set at run time (a peer that lists endpoints
@@ -636,6 +666,9 @@ pub struct OpenPlan {
     /// What the session's links rejoin from fragments: `transport/link/rx/max_message_size`. A
     /// config that states none is zenoh's default.
     pub link_rx: LinkRxConf,
+    /// The transmit-queue keys the document states away from upstream's defaults, laid over the
+    /// ABI's transmit model when the plan becomes the open's arguments.
+    pub tx_queue: StatedTxQueue,
     /// What the links offer at the handshake, without shared memory.
     pub offer: SessionOffer,
     /// The `transport/shared_memory` keys. Facts about the document; whether they reach the
@@ -850,6 +883,9 @@ impl OpenPlan {
         let link_rx = node
             .as_ref()
             .map_or_else(LinkRxConf::default, |node| node.link_rx);
+        let tx_queue = node
+            .as_ref()
+            .map_or_else(StatedTxQueue::default, StatedTxQueue::of);
         let accept = node
             .as_ref()
             .map_or_else(AcceptBounds::default, |node| AcceptBounds {
@@ -1089,6 +1125,7 @@ impl OpenPlan {
             sn_resolution,
             accept,
             link_rx,
+            tx_queue,
             offer,
             shm,
             zid,
@@ -1197,7 +1234,7 @@ impl OpenPlan {
             role: self.role,
             dial: self.dial,
             stance: OpenStance {
-                tx_queue: abi.tx_queue,
+                tx_queue: self.tx_queue.over(abi.tx_queue),
                 batch_size: self.batch_size,
                 lease_ms: self.lease_ms,
                 keep_alive: self.keep_alive,
@@ -1788,6 +1825,37 @@ mod tests {
         assert_eq!(silent.keep_alive, KeepAliveConf::ZENOH);
         assert_eq!(silent.link_rx, LinkRxConf::default());
         assert_eq!(silent.accept, AcceptBounds::default());
+    }
+
+    /// The transmit-queue keys a document states away from upstream's defaults are laid over the
+    /// ABI's transmit model, and a document that states them at upstream's defaults, or not at
+    /// all, leaves the model as the ABI chose it.
+    #[test]
+    fn the_queue_keys_a_document_states_are_laid_over_the_abis_model() {
+        let stance = |document: &str, model: TxQueueConf| {
+            plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
+                .expect("a client with an endpoint opens")
+                .into_arguments(AbiChoices {
+                    tx_queue: model,
+                    start_read_task: true,
+                    local_delivery: LocalDeliveryDrain::Caller,
+                    liveliness_to_self: true,
+                    initial_interest: true,
+                    face_drive: FaceDrive::PerFace,
+                    shm_clients: crate::faces::no_shm_clients(),
+                    offer_shm: false,
+                    groups_report_shm: false,
+                })
+                .stance
+                .tx_queue
+        };
+        let off = r#"{ transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#;
+        assert!(!stance(off, TxQueueConf::default()).batching);
+        assert!(!stance(off, TxQueueConf::pico()).batching);
+        // Upstream's own value is no instruction, and silence is none either.
+        let on = r#"{ transport: { link: { tx: { queue: { batching: { enabled: true } } } } } }"#;
+        assert_eq!(stance(on, TxQueueConf::pico()), TxQueueConf::pico());
+        assert_eq!(stance("{}", TxQueueConf::default()), TxQueueConf::default());
     }
 
     /// The width of the sequence numbers a group's Join states is the `sn-resolution` policy's,

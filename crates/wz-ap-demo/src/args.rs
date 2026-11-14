@@ -1323,6 +1323,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // Whether the sessions coalesce a burst into few frames, honoured at either value: the
+    // flag says which, so a named `true` is the behaviour already and a `false` turns it off.
+    if named("transport/link/tx/queue/batching/enabled") {
+        exp.pair(
+            "transport/link/tx/queue/batching/enabled",
+            "--tx-batching",
+            cfg.tx_queue.batching.to_string(),
+            None,
+        );
+    }
     // The largest message a session rejoins from fragments, honoured at any
     // value for the reason the sizes above are.
     if named("transport/link/rx/max_message_size") {
@@ -3359,6 +3369,14 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          deadline, visible only as the Close it ends in.",
     ),
     (
+        "transport/link/tx/queue/batching/enabled",
+        KIND_LEG_JUDGED,
+        "expands to `--tx-batching`. Its effect is how many messages a frame carries, and \
+         `a_session_without_batching_sends_each_message_as_a_frame_of_its_own` in the \
+         runtime's session_glue.rs reads it off the frames a link is handed: one frame of \
+         three with batching on, three frames of one with it off.",
+    ),
+    (
         "transport/link/rx/max_message_size",
         KIND_OFF_WIRE,
         "expands to `--rx-max-message-size`. The largest message a session \
@@ -5315,6 +5333,12 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: {
                        congestion_control: { block: { wait_before_close: 7000000 } } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/batching/enabled",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#,
             ),
             (
                 "transport/link/rx/max_message_size",
@@ -7504,7 +7528,8 @@ mod stock_config_tests {
                    queue: { size: { real_time: 5, data: 7 },
                             congestion_control: { drop: { wait_before_drop: 2500,
                                                           max_wait_before_drop_fragments: 40000 },
-                                                  block: { wait_before_close: 7000000 } } } },
+                                                  block: { wait_before_close: 7000000 } },
+                            batching: { enabled: false } } },
                                    rx: { max_message_size: 65536 } } } }"#,
         )
         .unwrap();
@@ -7530,6 +7555,7 @@ mod stock_config_tests {
                 wait_before_drop_us: 2_500,
                 max_wait_before_drop_fragments_us: 40_000,
                 wait_before_close_us: 7_000_000,
+                batching: false,
                 ..wz::runtime_tokio::session_glue::TxQueueConf::default()
             },
             "the file's queue section reaches the session the node opens"
@@ -7727,6 +7753,7 @@ mod stock_config_tests {
                 vec!["--wait-before-close-us", "-1"],
                 "--wait-before-close-us expects",
             ),
+            (vec!["--tx-batching", "off"], "--tx-batching expects"),
         ] {
             let err = TransportTuning::from_argv(&argv(&cli))
                 .expect_err("a value outside the type is not a tuning");
@@ -9357,6 +9384,13 @@ impl TransportTuning {
             out.tx_queue.wait_before_close_us = v
                 .parse::<u64>()
                 .map_err(|_| format!("--wait-before-close-us expects microseconds, got '{v}'"))?;
+        }
+        if let Some(v) = parse_pair(rest, "--tx-batching") {
+            out.tx_queue.batching = match v.as_str() {
+                "true" => true,
+                "false" => false,
+                _ => return Err(format!("--tx-batching expects true or false, got '{v}'")),
+            };
         }
         if let Some(v) = parse_pair(rest, "--rx-max-message-size") {
             out.link_rx.max_message_size = v

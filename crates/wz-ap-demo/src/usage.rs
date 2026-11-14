@@ -204,6 +204,12 @@ pub(crate) fn print_usage() {
     eprintln!("                             how long a blocking message waits before the session");
     eprintln!("                             closes (default 5000000).");
     eprintln!("                             zenoh transport/link/tx/queue/congestion_control/block/wait_before_close");
+    eprintln!("    --tx-batching <true|false>");
+    eprintln!("                             whether a session coalesces a burst into few frames");
+    eprintln!("                             (default true); false sends each message as a frame");
+    eprintln!(
+        "                             of its own. zenoh transport/link/tx/queue/batching/enabled"
+    );
     eprintln!("    --rx-max-message-size <bytes>");
     eprintln!("                             the largest message a session rejoins from fragments");
     eprintln!("                             (default 1073741824, read as at most the build's");

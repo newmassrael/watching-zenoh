@@ -363,6 +363,13 @@ pub struct TxQueueConf {
     /// ([`crate::tx_deadline::ExpiryRun`]). `0` never closes it. Read only when
     /// [`Self::expiry_keeps_session`] is `true`.
     pub expiry_close_after: u16,
+    /// `batching/enabled`: whether the session stages its messages into an open frame per
+    /// conduit that the link's writer flushes when it falls idle, so that a burst leaves in few
+    /// large frames. `false` sends every message as a frame of its own as soon as it is staged,
+    /// which is what upstream's pipeline does with batching off: it moves each serialized
+    /// batch out at once (`io/zenoh-transport/src/common/pipeline.rs` @
+    /// `if !self.batching || $msg.is_express() {`). Upstream's default is `true`.
+    pub batching: bool,
 }
 
 /// R2926 — upstream's default
@@ -419,6 +426,7 @@ impl Default for TxQueueConf {
             expiry_keeps_session: crate::policy::SessionPolicy::from_build()
                 .tx_expiry_keeps_session,
             expiry_close_after: build_expiry_close_after(),
+            batching: true,
         }
     }
 }
@@ -482,6 +490,7 @@ impl TxQueueConf {
             expiry_keeps_session: crate::policy::SessionPolicy::from_build()
                 .tx_expiry_keeps_session,
             expiry_close_after: build_expiry_close_after(),
+            batching: true,
         }
     }
 

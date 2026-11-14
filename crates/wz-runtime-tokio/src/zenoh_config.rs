@@ -2069,15 +2069,21 @@ impl ZenohNodeConfig {
                 self.tx_queue.sizes[*byte as usize]
             );
         }
-        let _ = writeln!(
+        let _ = write!(
             out,
             " }},\n          \"congestion_control\": {{ \"drop\": {{ \"wait_before_drop\": {}, \
              \"max_wait_before_drop_fragments\": {} }}, \
-             \"block\": {{ \"wait_before_close\": {} }} }}\n        }}",
+             \"block\": {{ \"wait_before_close\": {} }} }}",
             self.tx_queue.wait_before_drop_us,
             self.tx_queue.max_wait_before_drop_fragments_us,
             self.tx_queue.wait_before_close_us
         );
+        let _ = write!(
+            out,
+            ",\n          \"batching\": {{ \"enabled\": {} }}",
+            self.tx_queue.batching
+        );
+        out.push_str("\n        }\n");
         out.push_str("      }");
         let _ = write!(
             out,
@@ -2285,6 +2291,10 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // R2926 — the last queue key: the per-fragment deadline it bounds is built.
     "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
     "transport/link/tx/queue/congestion_control/block/wait_before_close",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, `UNHONOURED_BEYOND_WZ` and the `LinkTxConf`
+    // group, so the surface total is unchanged: a session configured without batching sends each
+    // message as a frame of its own, which upstream's pipeline does with batching off.
+    "transport/link/tx/queue/batching/enabled",
     // The largest message a session rejoins from fragments. It left
     // `UNHONOURED_BEYOND_WZ` and the `LinkTxConf` group because a session now
     // carries it (`LinkRxConf`) and its reassembly ends a chain past it, as
@@ -2906,7 +2916,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // `transport/link/tx/keep_alive` LEFT this list for [`C_ABI_SESSION_HONOURED_KEYS`]: the
     // zenoh-c session's keepalive speaks at its own lease divided by it.
     "transport/link/tx/queue/allocation/mode",
-    "transport/link/tx/queue/batching/enabled",
+    // `transport/link/tx/queue/batching/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: a
+    // session leaves its batching window shut when the file turns batching off.
     "transport/link/tx/queue/batching/time_limit",
     // `transport/link/tx/sequence_number_resolution` LEFT this list for `HONOURED_CONFIG_KEYS`:
     // the width a node offers comes from the file. Same partition, same total.
@@ -3123,7 +3134,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // `transport/link/tx/keep_alive` LEFT here, and its group below: the zenoh-c session reads
     // it ([`C_ABI_SESSION_HONOURED_KEYS`]).
     "transport/link/tx/queue/allocation/mode",
-    "transport/link/tx/queue/batching/enabled",
+    // `transport/link/tx/queue/batching/enabled` LEFT here and its group below: the session's
+    // batching window is the switch it names.
     "transport/link/tx/queue/batching/time_limit",
     // `transport/link/tx/sequence_number_resolution` LEFT here and its group below: the width
     // a node offers is a parameter of its sessions, which negotiate it with the peer.
@@ -3345,7 +3357,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // `transport/link/tx/keep_alive` LEFT this group: a keepalive's share of a lease is
             // a parameter of the session, as its lease is.
             "transport/link/tx/queue/allocation/mode",
-            "transport/link/tx/queue/batching/enabled",
+            // `transport/link/tx/queue/batching/enabled` LEFT this group: the session's
+            // batching window opens or stays shut by it.
             "transport/link/tx/queue/batching/time_limit",
             // R2925 — the eight sizes and the two waits LEFT this group: wz
             // now has the per-priority bounded queues and the drop-vs-block
@@ -3765,11 +3778,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "transport/link/tx/queue/allocation/mode",
         "build",
         "allocating queue batches at open rather than on demand; wz has no such switch",
-    ),
-    (
-        "transport/link/tx/queue/batching/enabled",
-        "build",
-        "turning back-pressure batching off; wz always coalesces staged frames",
     ),
     (
         "transport/link/tx/queue/batching/time_limit",
@@ -7738,6 +7746,10 @@ impl ZenohNodeConfig {
             out.tx_queue.wait_before_close_us = v;
             named.push("transport/link/tx/queue/congestion_control/block/wait_before_close");
         }
+        if let Some(v) = want_bool(&doc, "transport/link/tx/queue/batching/enabled")? {
+            out.tx_queue.batching = v;
+            named.push("transport/link/tx/queue/batching/enabled");
+        }
         // The largest message a session rejoins from fragments. Any `usize` is
         // accepted, as upstream's `usize` field accepts it; the build's
         // reassembly slot bounds what a session applies.
@@ -9113,6 +9125,10 @@ mod tests {
                 batch_size: 4096,
                 lease_ms: 7000,
                 sn_resolution: crate::policy::SnResolution::Bits8,
+                tx_queue: wz_session_core::session_init_params::TxQueueConf {
+                    batching: false,
+                    ..ZenohNodeConfig::default().tx_queue
+                },
                 max_links: 4,
                 qos: false,
                 lowlatency: true,
@@ -9355,6 +9371,11 @@ mod tests {
             (
                 "transport/link/tx/queue/congestion_control/block/wait_before_close",
                 r#"{ "transport": { "link": { "tx": { "queue": { "congestion_control": { "block": { "wait_before_close": 6000000 } } } } } } }"#,
+            ),
+            // `false` against upstream's `true`.
+            (
+                "transport/link/tx/queue/batching/enabled",
+                r#"{ "transport": { "link": { "tx": { "queue": { "batching": { "enabled": false } } } } } }"#,
             ),
             (
                 "transport/link/rx/max_message_size",
