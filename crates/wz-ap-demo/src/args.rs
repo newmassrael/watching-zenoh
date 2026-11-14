@@ -10824,8 +10824,9 @@ pub(crate) struct PublisherSpec {
     /// `--value <text>` (Put) or `--delete` (Del).
     pub(crate) operation: PushOperation,
     /// `--declare-id <id>` — when set, a DeclKexpr preamble maps `id -> keyexpr`
-    /// and the burst emits aliased Pushes carrying only the id.
-    pub(crate) declare_id: Option<u64>,
+    /// and the burst emits aliased Pushes carrying only the id. The id is the
+    /// wire's `ExprId`, sixteen bits.
+    pub(crate) declare_id: Option<u16>,
     /// `--publish-after-ms <ms>` — hold the burst this long AFTER Established,
     /// leaving the line idle. The ordering a foreign peer needs to witness
     /// `transport-keepalive`: past the adopted lease, a peer expires a silent

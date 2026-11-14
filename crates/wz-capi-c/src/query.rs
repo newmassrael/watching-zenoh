@@ -600,7 +600,7 @@ impl QueryView for QueryMarshal {
     fn payload(&self) -> Option<&[u8]> {
         self.payload.as_ref().map(|s| &s.payload[..])
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
         self.rid
     }
     fn is_local(&self) -> bool {
@@ -2095,7 +2095,7 @@ mod tests {
         fn source_info(&self) -> Option<&wz_runtime_tokio::sample::SourceInfo> {
             self.source_info.as_ref()
         }
-        fn rid(&self) -> u64 {
+        fn rid(&self) -> wz_session_core::wire_id::RequestId {
             11
         }
         fn is_local(&self) -> bool {

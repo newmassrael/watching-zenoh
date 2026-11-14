@@ -8171,7 +8171,7 @@ mod tests {
     #[test]
     fn a_node_that_has_no_id_left_for_the_wire_declares_nothing() {
         let mut keys = RouterKeys {
-            last: u64::from(u16::MAX),
+            last: ExprId::MAX,
             ..RouterKeys::default()
         };
         assert_eq!(keys.acquire("demo/a"), None);

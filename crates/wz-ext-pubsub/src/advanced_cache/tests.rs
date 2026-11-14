@@ -109,7 +109,7 @@ impl ReplyOut for Rec {
     fn reply_del(&mut self) {
         self.arms.push("bare-del");
     }
-    fn reply_err(&mut self, _: Option<u32>, _: Option<&str>, _: &[u8]) {}
+    fn reply_err(&mut self, _: Option<u32>, _: Option<&[u8]>, _: &[u8]) {}
     fn with_responder(&mut self, _: &[u8], _: u32) {}
     fn clear_responder(&mut self) {}
     fn responder(&self) -> Option<(&[u8], u32)> {

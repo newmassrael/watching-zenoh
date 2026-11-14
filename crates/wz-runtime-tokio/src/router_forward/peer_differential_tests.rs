@@ -1173,7 +1173,7 @@ fn what_a_querier_asks_for() -> Vec<Step> {
     for (n, asked) in asks.into_iter().enumerate() {
         let querier = if n % 2 == 0 { 0 } else { 3 };
         scene.extend([
-            Step::QueryWith(querier, 40 + n as u64, "demo/a", asked),
+            Step::QueryWith(querier, 40 + n as u32, "demo/a", asked),
             Step::Reply(1, "demo/a", b"one"),
             Step::Final(1),
             Step::Reply(2, "demo/a", b"two"),
@@ -1280,7 +1280,7 @@ fn two_replies_under_each_consolidation_mode() -> Vec<Step> {
         scene.extend([
             Step::QueryWith(
                 0,
-                60 + n as u64,
+                60 + n as u32,
                 "demo/k",
                 Asked {
                     consolidation: Some(mode),

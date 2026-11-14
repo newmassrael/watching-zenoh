@@ -522,7 +522,7 @@ impl QueryView for QueryMarshal {
     fn payload(&self) -> Option<&[u8]> {
         (!self.payload.is_empty()).then_some(self.payload.as_slice())
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
         self.rid
     }
     fn is_local(&self) -> bool {
@@ -1768,7 +1768,7 @@ mod tests {
         fn payload(&self) -> Option<&[u8]> {
             Some(&self.payload)
         }
-        fn rid(&self) -> u64 {
+        fn rid(&self) -> wz_session_core::wire_id::RequestId {
             7
         }
         fn qos(&self) -> wz_session_core::sample::QosLevel {

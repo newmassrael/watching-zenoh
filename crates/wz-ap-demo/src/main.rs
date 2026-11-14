@@ -2390,16 +2390,19 @@ fn demo_main() -> ExitCode {
         print_usage();
         return ExitCode::from(2);
     }
-    let declare_id_parsed: Option<u64> = match declare_id_opt {
+    let declare_id_parsed: Option<u16> = match declare_id_opt {
         Some(s) => {
-            match s.parse::<u64>() {
+            match s.parse::<u16>() {
                 Ok(0) => {
                     eprintln!("wz-ap-demo: --declare-id must be non-zero (0 is the literal-keyexpr sentinel)");
                     return ExitCode::from(2);
                 }
                 Ok(n) => Some(n),
                 Err(e) => {
-                    eprintln!("wz-ap-demo: --declare-id must be a positive integer ({e})");
+                    eprintln!(
+                        "wz-ap-demo: --declare-id must be a positive integer of at most 65535 \
+                         (an ExprId) ({e})"
+                    );
                     return ExitCode::from(2);
                 }
             }
