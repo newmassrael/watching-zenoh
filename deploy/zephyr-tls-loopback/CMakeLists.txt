@@ -30,6 +30,9 @@ wz_zephyr_rust_app(
   UNDEFINED
     socket bind getsockname sendto recvfrom poll close
     connect send recv getpeername shutdown setsockopt listen accept
+    # Its streams read the family refusal of a socket (the only socket hook a stream reads); it
+    # reads no board address.
+    wz_net_socket_family_refused
     wz_tls_start wz_tls_arena_peak wz_tls_arena_peak_reset
     wz_tls_identity_generate wz_tls_identity_zid wz_tls_identity_cert wz_tls_identity_free
     wz_tls_session_open wz_tls_session_set_io_ctx wz_tls_session_handshake
