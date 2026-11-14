@@ -900,6 +900,9 @@ crate::option_fields::unstable_option_fields!(z_query_reply_options_t {
 /// tree would have caught getting that wrong: a C caller passing the upstream
 /// struct into a wz build with a short one writes past the end of wz's view and
 /// reads garbage for every field after the mismatch, silently.
+///
+/// The numbers are the LP64 header's (the crate root says how a 32-bit image is pinned).
+#[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(core::mem::size_of::<z_query_reply_err_options_t>() == 8);
     // By OFFSET, not only by size — see `crate::get::z_get_options_t`, where the
@@ -914,7 +917,7 @@ const _: () = {
     assert!(core::mem::offset_of!(z_query_reply_del_options_t, attachment) == 24);
 };
 
-#[cfg(feature = "unstable-api")]
+#[cfg(all(feature = "unstable-api", target_pointer_width = "64"))]
 const _: () = {
     assert!(core::mem::size_of::<z_query_reply_options_t>() == 48);
     assert!(core::mem::size_of::<z_query_reply_del_options_t>() == 40);
@@ -922,7 +925,7 @@ const _: () = {
     assert!(core::mem::offset_of!(z_query_reply_del_options_t, source_info) == 32);
 };
 
-#[cfg(not(feature = "unstable-api"))]
+#[cfg(all(not(feature = "unstable-api"), target_pointer_width = "64"))]
 const _: () = {
     assert!(core::mem::size_of::<z_query_reply_options_t>() == 40);
     assert!(core::mem::size_of::<z_query_reply_del_options_t>() == 32);

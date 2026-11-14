@@ -495,6 +495,24 @@ macro_rules! impl_value_ownership {
 
 pub(crate) use impl_value_ownership;
 
+/// The bytes an owned element block (`impl_boxed_element!`) takes: `lp64`, pico's size as its
+/// header measures on a 64-bit host, on a 64-bit target; the handle alone on any other.
+///
+/// The block holds the handle in its first word and nothing this crate reads after it, so what a
+/// C program's storage must hold is the handle, and the padding exists only to make the block the
+/// size pico's header gives it. pico's element on a 32-bit core carries 64-bit fields (a
+/// timestamp's time) that do not halve with the word, so the 64-bit figure halved would be a guess
+/// at its size; the handle alone is never larger than pico's block, which is the one direction
+/// that would write past a program's storage. A 32-bit image pins that against pico's header
+/// (`csrc/pico_layout_pins.c`).
+pub(crate) const fn element_bytes(lp64: usize) -> usize {
+    if cfg!(target_pointer_width = "64") {
+        lp64
+    } else {
+        core::mem::size_of::<*mut core::ffi::c_void>()
+    }
+}
+
 /// Emit the OWNED-ELEMENT family for a plane whose LOANED form is a borrowed
 /// callback marshal (`sample`, `reply`, `query`).
 ///
@@ -527,11 +545,12 @@ macro_rules! impl_boxed_element {
      $null:ident, $check:ident, $loan:ident, $loan_mut:ident,
      $mv:ident, $take:ident, $drop:ident, $take_from_loaned:ident) => {
         /// Owned element: this crate's boxed marshal handle in slot 0, inert
-        /// padding to pico's measured size.
+        /// padding to pico's measured size ([`element_bytes`](crate::abi::element_bytes)).
         #[repr(C)]
         pub struct $Owned {
             pub(crate) handle: *mut ::core::ffi::c_void,
-            pub(crate) _pad: [u8; $size - ::core::mem::size_of::<*mut ::core::ffi::c_void>()],
+            pub(crate) _pad: [u8; $crate::abi::element_bytes($size)
+                - ::core::mem::size_of::<*mut ::core::ffi::c_void>()],
         }
 
         /// Moved element (pico `z_moved_*_t`).
@@ -545,7 +564,8 @@ macro_rules! impl_boxed_element {
             pub(crate) fn null_value() -> Self {
                 Self {
                     handle: ::core::ptr::null_mut(),
-                    _pad: [0u8; $size - ::core::mem::size_of::<*mut ::core::ffi::c_void>()],
+                    _pad: [0u8; $crate::abi::element_bytes($size)
+                        - ::core::mem::size_of::<*mut ::core::ffi::c_void>()],
                 }
             }
         }

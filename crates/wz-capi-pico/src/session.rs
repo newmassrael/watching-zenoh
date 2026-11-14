@@ -1889,6 +1889,8 @@ pub struct zp_task_lease_options_t {
     pub task_attributes: *mut crate::sync::z_task_attr_t,
 }
 
+// The LP64 header's numbers (the crate root says how a 32-bit image is pinned).
+#[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(
         core::mem::size_of::<z_subscriber_options_t>()
@@ -1912,7 +1914,7 @@ const _: () = {
     assert!(core::mem::size_of::<z_close_options_t>() == 1);
 };
 
-#[cfg(feature = "multi-thread")]
+#[cfg(all(feature = "multi-thread", target_pointer_width = "64"))]
 const _: () = {
     assert!(core::mem::size_of::<zp_task_read_options_t>() == 8);
     assert!(core::mem::size_of::<zp_task_lease_options_t>() == 8);

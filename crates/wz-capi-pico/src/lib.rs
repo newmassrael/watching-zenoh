@@ -209,6 +209,13 @@ pub use session::*;
 // Compile-time byte-compat guard: turn the "byte-match" size claims (see
 // [`abi`]) into an enforced gate, so a future field/padding drift fails the
 // build instead of silently diverging from zenoh-pico's LP64 layouts.
+//
+// Every number pinned this way in the crate is a measurement of pico's header on a 64-bit host,
+// so each such block holds on a 64-bit target only. The types are `repr(C)` over pointer-sized
+// words, as pico's are, and follow a 32-bit core by construction; what a 32-bit image's program
+// allocates is pinned by that image against pico's own header as it compiles it
+// (`csrc/pico_layout_pins.c`, which the tests of `layout_pins` below hold to these declarations).
+#[cfg(target_pointer_width = "64")]
 const _: () = {
     use core::mem::size_of;
     assert!(size_of::<session::z_owned_session_t>() == 16);
@@ -227,7 +234,7 @@ const _: () = {
 // closure_sample; `z_queryable_options_t` is `{ bool complete; }` in a
 // default pico build (`Z_FEATURE_LOCAL_QUERYABLE` = 0) and gains a 4-byte
 // `allowed_origin` with the switch.
-#[cfg(feature = "queryable")]
+#[cfg(all(feature = "queryable", target_pointer_width = "64"))]
 const _: () = {
     use core::mem::size_of;
     assert!(size_of::<query::z_owned_closure_query_t>() == 24);
@@ -273,7 +280,7 @@ const _: () = {
 };
 
 // The requesting end of a query.
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", target_pointer_width = "64"))]
 const _: () = {
     use core::mem::size_of;
     // R3b get plane. `z_owned_closure_reply_t` is the same
@@ -309,3 +316,68 @@ const _: () = {
     );
     assert!(core::mem::align_of::<get::z_get_options_t>() == 8);
 };
+
+// The pins a 32-bit image compiles against pico's header (`csrc/pico_layout_pins.c`), held to the
+// declarations they name: each count of words is the Rust type's size in words on this host, which
+// is the same count on any word size because the types are `repr(C)` over words.
+#[cfg(all(test, feature = "queryable"))]
+mod layout_pins {
+    use crate::prelude::Vec;
+    use core::mem::{offset_of, size_of};
+
+    const PINS: &str = include_str!("../csrc/pico_layout_pins.c");
+    const WORD: usize = size_of::<*const ()>();
+
+    /// The Rust type's size, by the C name a pin gives it.
+    fn rust_bytes(name: &str) -> Option<usize> {
+        Some(match name {
+            "z_owned_session_t" => size_of::<crate::session::z_owned_session_t>(),
+            "z_owned_config_t" => size_of::<crate::abi::z_owned_config_t>(),
+            "z_owned_bytes_t" => size_of::<crate::abi::z_owned_bytes_t>(),
+            "z_owned_string_t" => size_of::<crate::abi::z_owned_string_t>(),
+            "z_view_keyexpr_t" => size_of::<crate::abi::z_view_keyexpr_t>(),
+            "z_view_string_t" => size_of::<crate::abi::z_view_string_t>(),
+            "z_owned_encoding_t" => size_of::<crate::encoding::z_owned_encoding_t>(),
+            "z_owned_closure_query_t" => size_of::<crate::query::z_owned_closure_query_t>(),
+            "z_owned_queryable_t" => size_of::<crate::query::z_owned_queryable_t>(),
+            _ => return None,
+        })
+    }
+
+    /// The `(type, argument)` of every line of the file that opens with `pin`.
+    fn pins(pin: &str) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
+        PINS.lines().filter_map(move |line| {
+            let rest = line.trim().strip_prefix(pin)?.strip_suffix(");")?;
+            Some(rest.split_once(',').unwrap_or((rest, "")))
+        })
+    }
+
+    #[test]
+    fn every_pinned_count_is_the_rust_declarations_size_in_words() {
+        let mut checked = 0;
+        for (name, words) in pins("WZ_PIN_WORDS(") {
+            let words: usize = words.trim().parse().expect("a pin states a count of words");
+            let bytes = rust_bytes(name.trim()).unwrap_or_else(|| panic!("{name} names no type"));
+            assert_eq!(bytes % WORD, 0, "{name} is a whole number of words");
+            assert_eq!(bytes / WORD, words, "{name}");
+            checked += 1;
+        }
+        assert_eq!(checked, 9, "every pin of the file was read");
+    }
+
+    #[test]
+    fn an_element_pinned_by_its_handle_holds_the_handle_first() {
+        let named: Vec<&str> = pins("WZ_PIN_HANDLE(").map(|(name, _)| name).collect();
+        assert_eq!(named, ["z_owned_sample_t", "z_owned_query_t"]);
+        assert_eq!(offset_of!(crate::pubsub::z_owned_sample_t, handle), 0);
+        assert_eq!(offset_of!(crate::query::z_owned_query_t, handle), 0);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn an_element_block_is_picos_measured_size_on_a_64_bit_host() {
+        assert_eq!(crate::abi::element_bytes(224), 224);
+        assert_eq!(size_of::<crate::pubsub::z_owned_sample_t>(), 224);
+        assert_eq!(size_of::<crate::query::z_owned_query_t>(), 16);
+    }
+}
