@@ -9885,7 +9885,18 @@ impl Dissection {
         cursor: &mut CaptureCursor,
         bytes: &[u8],
     ) -> Result<usize, FollowError> {
-        self.follow_bytes(cursor, bytes, None)
+        self.follow_bytes(cursor, bytes, None, &mut ())
+    }
+
+    /// [`Self::follow_container`], showing `tap` each packet the moment this
+    /// dissection has read it: see [`PacketTap`].
+    pub fn follow_container_tapped(
+        &mut self,
+        cursor: &mut CaptureCursor,
+        bytes: &[u8],
+        tap: &mut dyn PacketTap,
+    ) -> Result<usize, FollowError> {
+        self.follow_bytes(cursor, bytes, None, tap)
     }
 
     /// [`Self::follow_container`] over a container this dissection is LENT
@@ -9915,7 +9926,18 @@ impl Dissection {
         cursor: &mut CaptureCursor,
         capture: alloc::sync::Arc<dyn LentCapture>,
     ) -> Result<usize, FollowError> {
-        self.follow_bytes(cursor, capture.bytes(), Some(&capture))
+        self.follow_bytes(cursor, capture.bytes(), Some(&capture), &mut ())
+    }
+
+    /// [`Self::follow_lent`], showing `tap` each packet the moment this
+    /// dissection has read it: see [`PacketTap`].
+    pub fn follow_lent_tapped(
+        &mut self,
+        cursor: &mut CaptureCursor,
+        capture: alloc::sync::Arc<dyn LentCapture>,
+        tap: &mut dyn PacketTap,
+    ) -> Result<usize, FollowError> {
+        self.follow_bytes(cursor, capture.bytes(), Some(&capture), tap)
     }
 
     /// Lend this dissection `capture`, for every flow it holds and every flow
@@ -9940,12 +9962,13 @@ impl Dissection {
     /// The walk both doors above share. `lent` is the container `bytes` are,
     /// when the dissection is lent it: it is lent only once the bytes are
     /// admitted, so a refusal leaves the dissection as it was, and a packet's
-    /// place in them is kept.
+    /// place in them is kept. `tap` is shown each packet after it is read.
     fn follow_bytes(
         &mut self,
         cursor: &mut CaptureCursor,
         bytes: &[u8],
         lent: Option<&alloc::sync::Arc<dyn LentCapture>>,
+        tap: &mut dyn PacketTap,
     ) -> Result<usize, FollowError> {
         if bytes.len() < cursor.consumed() {
             return Err(FollowError::Shrank {
@@ -9998,6 +10021,7 @@ impl Dissection {
                                 .then(|| link::offset_within(bytes, f.data))
                                 .flatten(),
                         );
+                        tap.on_packet(dissection, &f);
                     }
                     CaptureEvent::Secrets(s) => dissection.decryption_secrets.push(s),
                     CaptureEvent::Stats(s) => dissection
@@ -10047,6 +10071,26 @@ impl LentCapture for alloc::boxed::Box<[u8]> {
     fn bytes(&self) -> &[u8] {
         self
     }
+}
+
+/// What is shown each packet a followed container hands a [`Dissection`]
+/// ([`Dissection::follow_container_tapped`], [`Dissection::follow_lent_tapped`]),
+/// the moment the dissection has read it.
+///
+/// For a caller that needs a packet's bytes the dissection does not keep: a
+/// QUIC decryptor, which this crate cannot hold because it carries no cipher,
+/// and which must see every datagram of a QUIC flow while the container still
+/// lends them. The dissection is shown as it stands after the packet, so a
+/// question about the packet's flow ("is it QUIC") is answered by the reading
+/// that just took place and not by a second one.
+pub trait PacketTap {
+    /// `packet` has just been read into `dissection`.
+    fn on_packet(&mut self, dissection: &Dissection, packet: &CapturedFrame<'_>);
+}
+
+/// No tap: what the untapped doors pass.
+impl PacketTap for () {
+    fn on_packet(&mut self, _dissection: &Dissection, _packet: &CapturedFrame<'_>) {}
 }
 
 /// R2373 (open-debt item 661) — which container a [`CaptureCursor`] settled on.
@@ -10847,6 +10891,63 @@ mod captured_frame_tests {
                 partial: false
             })
         ));
+    }
+
+    /// A TAP is shown every packet a followed container hands the dissection,
+    /// once, in container order, and after the dissection has read it, through
+    /// the owned door and the lent one, across two windows.
+    #[test]
+    fn a_tap_is_shown_every_followed_packet_after_it_is_read() {
+        let packets: [NgPacket<'_>; 3] = [
+            (0, 1_000, &[1, 2, 3]),
+            (1, 2_000, &[4, 5, 6, 7, 8]),
+            (0, 3_000, &[9]),
+        ];
+        let file = pcapng::write(&[(1, 6), (101, 9)], &packets);
+        let (_, ends) = ng_layout(2, &packets);
+        // The first window ends inside the third packet.
+        let first_window = ends[2] - 1;
+        /// What the tap saw: the packet's number, link type and bytes, and the
+        /// next number the dissection would give, read while it was shown.
+        #[derive(Default)]
+        struct Seen(Vec<(usize, u32, Vec<u8>, usize)>);
+        impl PacketTap for Seen {
+            fn on_packet(&mut self, dissection: &Dissection, packet: &CapturedFrame<'_>) {
+                self.0.push((
+                    packet.index,
+                    packet.link_type,
+                    packet.data.to_vec(),
+                    dissection.next_packet_index(),
+                ));
+            }
+        }
+        let want = alloc::vec![
+            (0, 1, alloc::vec![1u8, 2, 3], 1),
+            (1, 101, alloc::vec![4u8, 5, 6, 7, 8], 2),
+            (2, 1, alloc::vec![9u8], 3),
+        ];
+
+        let mut owned = Seen::default();
+        let mut cursor = CaptureCursor::new();
+        let mut d = Dissection::new();
+        d.follow_container_tapped(&mut cursor, &file[..first_window], &mut owned)
+            .expect("the first window follows");
+        assert_eq!(owned.0.len(), 2, "the window holds two whole packets");
+        d.follow_container_tapped(&mut cursor, &file, &mut owned)
+            .expect("the second window follows");
+        assert_eq!(owned.0, want, "the owned door");
+
+        let mut lent = Seen::default();
+        let mut cursor = CaptureCursor::new();
+        let mut d = Dissection::new();
+        let first: alloc::sync::Arc<dyn LentCapture> =
+            alloc::sync::Arc::new(file[..first_window].to_vec());
+        d.follow_lent_tapped(&mut cursor, first, &mut lent)
+            .expect("the first window follows");
+        let whole: alloc::sync::Arc<dyn LentCapture> = alloc::sync::Arc::new(file.to_vec());
+        d.follow_lent_tapped(&mut cursor, whole, &mut lent)
+            .expect("the second window follows");
+        assert_eq!(lent.0, want, "the lent door");
     }
 
     /// The packets of ONE link type come out with the file's numbers, their
