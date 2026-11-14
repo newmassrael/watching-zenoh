@@ -8179,10 +8179,10 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  *     rows as entries or whole.
  *   - tls_records is the encrypted records an encrypted flow keeps for a
  *     decryptor. Those are bounded per flow, not per row: at most 4096 a
- *     direction. (ABI 57) A flow the decryption pass opened adds about 40 bytes per
- *     opened record whose plaintext it still holds, the map from that
- *     plaintext back to the records, which follows the plaintext as the lists'
- *     own bytes do. The keys a handle holds are not counted here.
+ *     direction. (ABI 57) A flow the decryption pass opened adds about 40
+ *     bytes for each record holding plaintext its session has not framed yet,
+ *     a message's worth, so this still stops growing with the capture. The
+ *     keys a handle holds are not counted here.
  *   - selection is what wz_dissect_live_selection_since keeps between calls: the
  *     word each selector said of each row, which is how a later call says which
  *     moved, a nibble a row, and the folds that decide the words (the verdict of

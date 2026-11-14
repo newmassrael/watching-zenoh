@@ -1045,9 +1045,13 @@ pub struct TlsFlowState {
 /// How far the decryption passes have opened one direction of a flow, kept so
 /// that a later pass continues the same plaintext rather than starting it again.
 ///
-/// The three lists run in step, one entry per opened `application_data` record,
-/// and start with the oldest record whose plaintext the flow still holds: a
-/// message decoded later can begin in it, and nothing earlier can be read again.
+/// The watermark is what a later pass needs; the three lists only serve the
+/// messages a later pass will frame. They run in step, one entry per opened
+/// `application_data` record, and start with the record holding the first
+/// plaintext byte the session has not framed yet: every message decoded later
+/// begins there or after, and a message already framed was moved to its
+/// record when it was. So between calls a direction keeps the few records of
+/// a message still arriving, and not one entry per record it ever opened.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct OpenedRecords {
     /// The index ([`EncryptedRecord::index`]) of the next record to open.
@@ -1076,6 +1080,11 @@ impl OpenedRecords {
         self.spans.drain(..cut);
         self.ends.drain(..cut.min(self.ends.len()));
         self.instants.drain(..cut.min(self.instants.len()));
+        // The memory figure counts capacity, so a list that once held a whole
+        // pass gives it back.
+        self.spans.shrink_to_fit();
+        self.ends.shrink_to_fit();
+        self.instants.shrink_to_fit();
     }
 
     /// Bytes these lists hold on the heap.
@@ -1123,7 +1132,8 @@ impl TlsFlowState {
     /// The kept records are bounded: [`MAX_KEPT_RECORDS_PER_DIRECTION`] a
     /// direction, so a flow holds at most that many however long it runs. The
     /// ciphertext they point at is the stream's, and the stream reports it. The
-    /// map follows the plaintext the flow still holds, and is let go of with it.
+    /// map covers only the records holding plaintext the session has not
+    /// framed yet ([`OpenedRecords`]), a message's worth.
     pub(crate) fn memory(&self) -> usize {
         self.kept
             .iter()

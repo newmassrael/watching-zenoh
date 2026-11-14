@@ -3917,8 +3917,13 @@ impl FlowDissection {
     /// R311y610 — and the run is cut at every discontinuity the push recorded,
     /// which is why this is one function both link layers call rather than the
     /// four lines each of them used to inline.
+    ///
+    /// The bytes are the ASSEMBLER's, read where it keeps them. Not this flow's
+    /// `UnitBytes` view: once a decryption pass opened the flow that view
+    /// answers from the PLAINTEXT, a different byte space, so every segment
+    /// delivered after the pass reached the record walk empty and a pass
+    /// continuing the flow found no record to open.
     fn deliver_from(&mut self, direction: Direction, before: usize) {
-        use messages::UnitBytes as _;
         let splices = match direction {
             Direction::A => self.low_to_high.take_splices(),
             Direction::B => self.high_to_low.take_splices(),
@@ -3929,8 +3934,12 @@ impl FlowDissection {
             before >= base,
             "trimming must not outrun delivery: base {base} > before {before}"
         );
-        let delivered: Vec<u8> = self
-            .stream_bytes(direction, before, assembler.len())
+        let delivered: Vec<u8> = assembler
+            .bytes(
+                before,
+                assembler.len(),
+                self.lent.as_deref().map(LentCapture::bytes),
+            )
             .map(alloc::borrow::Cow::into_owned)
             .unwrap_or_default();
         self.advance_spliced(direction, before, &delivered, &splices);
@@ -4596,6 +4605,7 @@ impl FlowDissection {
         // messages are read again from: appended before any message is read
         // from it, and moved rather than copied where the flow holds none yet.
         let appended: [usize; 2] = [fresh[0].len(), fresh[1].len()];
+        let plaintext_end: [usize; 2] = [produced[0] + appended[0], produced[1] + appended[1]];
         let held = self.plaintext.get_or_insert_with(Default::default);
         for (index, bytes) in fresh.iter_mut().enumerate() {
             if held[index].bytes.is_empty() {
@@ -4639,6 +4649,13 @@ impl FlowDissection {
                 });
             summary.frames += self.frames.len() - before;
             changed = true;
+        }
+        // What the session has not framed yet is the only plaintext a later
+        // message can begin in; the records before it are let go of, so a
+        // direction keeps a message's worth of entries and not a pass's.
+        for (index, opened) in carry.iter_mut().enumerate() {
+            let waiting = self.session.buffered(idx_direction(index));
+            opened.release_before(plaintext_end[index].saturating_sub(waiting));
         }
         if let Framing::Encrypted(state) = &mut self.framing {
             state.opened_records = carry;
