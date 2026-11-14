@@ -13648,6 +13648,29 @@
         "Open: a handle has no short connection id length, so a QUIC flow whose capture began after its handshake does not open on a handle; packets past the per-flow bound are counted by the decryptor and not stated in a document.",
         "Open: the zenoh evidence model's logarithms are about two thirds of a push's time on pc2 (perf, live_keys_cost); not measured against an alternative yet."
       ]
+    },
+    "Round 4488": {
+      "decision_summary": "A consumer that builds everything in one build graph with a shared action cache wraps wz as one hermetic action that runs cargo on the pinned source, with no .git and no network, the lockfile's crates vendored and a pinned toolchain as inputs. Two things kept that action from producing what a checkout build produces. The zenoh crate's build script asked git for the commit, so with no .git it composed v<version>-release where a checkout build composes the commit; it now takes the commit from WZ_SOURCE_COMMIT when that is set, held to what git describe can answer, and then neither asks nor watches git. And nothing stated what the action reads: deploy/offline-build.json is now that statement for the four consumer bundles (wz-capi-dissect, wz-capi-c with lifecycle-doors and identity-make, wz-capi-replay, wz-ap-demo with preset-ap-full), read by the consumer and not copied. It names the tracked source and the one submodule the bundles reach, the commit input, the toolchain, the cargo flags, the system tools with the commands each puts on PATH, every build script of the closures with the tools it calls, the variables that change a build script's output, and the zenoh-c oracle archive as NOT an input. A static check holds the entry to the crates graph, and a lane builds every bundle in a bwrap sandbox holding only what the entry declares, because what a build script runs cannot be read off a graph. The first sandboxed build proved the point: the entry had declared cc and not the as and ld gcc runs from PATH.",
+      "changes_bullets": [
+        "crates/wz-zenoh/build.rs reads WZ_SOURCE_COMMIT when set (a 40-digit commit, with -modified or not, or release; anything else fails the build), emits rerun-if-env-changed for it, and then asks and watches no git.",
+        "deploy/offline-build.json declares the offline build entry of the four consumer bundles; scripts/lib/offline_build.py --check derives each bundle's closure with cargo tree and compares build scripts (52, memoffset included), tools, submodules, channel, lockfile sources and variables; --build builds every bundle in a bwrap sandbox with no network, an empty home, the checkout covered, PATH holding only the toolchain, the declared commands and failing git/curl/wget stubs, and checks the version through cargo's build-script-executed message.",
+        "Layer C0 and the pre-push hook run --selftest and --check; Layer C1ob runs --build in a new hosted job (offline-build); runci_plan asks its commands, libclang-dev and userns-netns; apt_package_census names why the job installs each package; docs/target-build-contract.md section 5d states the design.",
+        "crates/wz-capture/src/reply_segment_tests.rs names its reply extension headers by network_eid::QOS and ::RESPONDER, clearing the literal-wire-flag lint red Layer C0 found on d77c093ea2."
+      ],
+      "verification_bullets": [
+        "offline_build.py --build on a build machine: all four bundles built in the sandbox, no stub called, every declared product present, and wz-ap-demo's zenoh build script handed rustc WZ_ZENOH_GIT_VERSION equal to the version a checkout build of the same tree composes. Two earlier runs failed and each changed the entry: cc cannot execute as (as and ld added to the cc tool), and ap-demo's binary does not hold the version string because it never reads GIT_VERSION (the check moved to cargo's own record).",
+        "offline_build.py --selftest (35 cases) and --check pass; cargo clippy -p zenoh --all-targets -D warnings is clean; cargo test -p wz-capture --features dissect,network-codecs --lib reply_segment ran 11 and passed 11.",
+        "Layer C0 failed only on the literal-wire-flag lint, which this round repairs and which then passes; apt_package_census, unwired_lane_lint, runci_plan --selftest and --check, gate_provenance_lint, prose_named_identifier_gate --check, prose_feature_gate --check, hook_gate_boundary_gate --check and actionlint on ci.yml pass.",
+        "Not run: the hosted offline-build job, whose first run is cold."
+      ],
+      "impact_refs": [
+        "watching-zenoh/build-and-verify",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the hosted offline-build job (Layer C1ob) and Layer C0 of this head at the start of the next round, and set the job's budget floor from its first timed run.",
+        "Open: byte identity with a checkout build also needs the build path remapped; the entry states this and leaves --remap-path-prefix to the consumer's action."
+      ]
     }
   },
   "inventory_entries": {
