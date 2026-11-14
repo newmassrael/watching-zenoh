@@ -96,6 +96,12 @@ impl<T> PlainMutex<T> {
     pub fn try_lock_guard(&self) -> Option<PlainGuard<'_, T>> {
         self.0.try_lock()
     }
+
+    /// Whether some thread holds the lock now. A reading for a report, never for a decision: the
+    /// answer can be stale by the time it is read.
+    pub fn is_held(&self) -> bool {
+        self.0.is_locked()
+    }
 }
 
 /// What [`PlainMutex::lock`] holds the lock with.
@@ -312,6 +318,78 @@ impl<T> PlainRwLock<T> {
         self.oldest_writer_since
             .store(oldest, core::sync::atomic::Ordering::Relaxed);
     }
+
+    /// How the lock is held and how long its oldest writer has waited, as of now: what a report
+    /// of a thread that stopped says about the lock it may be stopped on
+    /// ([`crate::liveness`]). Read without taking the lock, so it is never a decision: each
+    /// half can be stale by the time the other is read.
+    pub fn contention(&self) -> LockContention {
+        let since = self
+            .oldest_writer_since
+            .load(core::sync::atomic::Ordering::Relaxed);
+        let oldest_writer_waiting = (since != 0)
+            .then(|| std::time::Duration::from_nanos(wait_clock().saturating_sub(since)));
+        // A writer that waits for readers to leave has already claimed the lock's writer bit, to
+        // keep new readers out (`parking_lot`'s `lock_exclusive_slow`), so while one waits the bit
+        // no longer says who holds the lock: readers that have not left, or a writer before it.
+        let held = if !self.lock.is_locked() {
+            LockHeld::Free
+        } else if oldest_writer_waiting.is_some() {
+            LockHeld::HeldWithAWriterWaiting
+        } else if self.lock.is_locked_exclusive() {
+            LockHeld::Exclusive
+        } else {
+            LockHeld::Shared
+        };
+        LockContention {
+            held,
+            oldest_writer_waiting,
+        }
+    }
+}
+
+/// How a [`PlainRwLock`] is held at one moment ([`PlainRwLock::contention`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockHeld {
+    /// Nobody holds it.
+    Free,
+    /// One or more readers hold it, and no writer waits.
+    Shared,
+    /// A writer holds it, and no other writer waits.
+    Exclusive,
+    /// It is held and a writer waits for it. The waiting writer has claimed the lock's writer
+    /// bit, so whether readers or another writer hold it cannot be read without taking it.
+    HeldWithAWriterWaiting,
+}
+
+/// What [`PlainRwLock::contention`] reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LockContention {
+    /// How the lock is held.
+    pub held: LockHeld,
+    /// How long the writer that has waited longest has waited, or `None` when no writer waits.
+    /// Only a writer that found the lock taken waits, so a writer that got in at once is never
+    /// counted.
+    pub oldest_writer_waiting: Option<std::time::Duration>,
+}
+
+impl core::fmt::Display for LockContention {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let held = match self.held {
+            LockHeld::Free => "free",
+            LockHeld::Shared => "held for reading",
+            LockHeld::Exclusive => "held for writing",
+            LockHeld::HeldWithAWriterWaiting => "held",
+        };
+        match self.oldest_writer_waiting {
+            Some(waited) => write!(
+                f,
+                "{held}, a writer has waited {:.3} s",
+                waited.as_secs_f64()
+            ),
+            None => write!(f, "{held}, no writer waits"),
+        }
+    }
 }
 
 /// What [`PlainRwLock::read`] holds the lock with.
@@ -407,5 +485,51 @@ mod tests {
         assert_eq!(lock.oldest_writer_since.load(Ordering::Relaxed), 0);
         assert!(lock.waiting.lock().is_empty());
         assert_eq!(*lock.read_behind_a_writer_waiting(Duration::ZERO), 1);
+    }
+
+    /// What a report says of a lock is what the lock is doing: free; held for reading; held with
+    /// a writer queued behind the reader, whose wait grows while the reader holds on (the holder's
+    /// kind is not claimed then, as the waiting writer has taken the writer bit); and free again
+    /// with no writer once both have gone.
+    #[test]
+    fn contention_reads_the_holder_and_the_writer_that_waits() {
+        let lock = Arc::new(PlainRwLock::new(0u64));
+        assert_eq!(
+            lock.contention(),
+            LockContention {
+                held: LockHeld::Free,
+                oldest_writer_waiting: None,
+            }
+        );
+        let held = lock.read();
+        assert_eq!(lock.contention().held, LockHeld::Shared);
+        let writer = {
+            let lock = Arc::clone(&lock);
+            std::thread::spawn(move || *lock.write() = 1)
+        };
+        while lock.oldest_writer_since.load(Ordering::Relaxed) == 0 {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        let seen = lock.contention();
+        assert_eq!(seen.held, LockHeld::HeldWithAWriterWaiting);
+        let waited = seen
+            .oldest_writer_waiting
+            .expect("the writer queued behind the reader is counted");
+        assert!(waited >= Duration::from_millis(20), "waited {waited:?}");
+        assert!(
+            seen.to_string().starts_with("held, a writer has waited "),
+            "{seen}"
+        );
+        drop(held);
+        writer.join().expect("the writer finishes");
+        assert_eq!(
+            lock.contention(),
+            LockContention {
+                held: LockHeld::Free,
+                oldest_writer_waiting: None,
+            }
+        );
+        assert_eq!(lock.contention().to_string(), "free, no writer waits");
     }
 }

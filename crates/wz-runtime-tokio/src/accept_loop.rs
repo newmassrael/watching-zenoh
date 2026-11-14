@@ -912,6 +912,14 @@ pub trait FaceForwarder {
     /// `RefCell` held across an `.await`).
     fn tick(&self) {}
 
+    /// What the loop's report says about this forwarder when the loop stops turning
+    /// ([`crate::liveness`]), called on the watcher's thread while the loop may be stopped
+    /// inside one of this forwarder's calls: it reads, it never takes a lock the loop could
+    /// hold. Default `None`; a router names its routing tables' lock.
+    fn liveness_probe(&self) -> Option<crate::liveness::Probe> {
+        None
+    }
+
     /// Whether this forwarder requires AT MOST ONE held face per peer zid, so the
     /// loop drops a second face that establishes to an already-held zid (the wz
     /// analog of zenoh's transport manager `init_transport_unicast` keeping one
@@ -2109,6 +2117,45 @@ enum Step {
     PeerRetry(PeerRetryDue),
 }
 
+/// The steps a pass of the face loop enters, as its heartbeat names them ([`crate::liveness`]).
+/// The first is the `select!` itself: a loop stopped there is stopped inside the poll of one of
+/// its sources (an open, a drive, an accept), not between two of them.
+const LOOP_STEPS: &[&str] = &[
+    "polling its sources",
+    "shutdown",
+    "an open that ended",
+    "a drive that ended",
+    "an accept",
+    "the forwarder's tick",
+    "the forwarder's wake",
+    "a dial",
+    "a multicast ingress",
+    "the multicast members",
+    "the multicast group's subscriptions",
+    "a connect reconcile",
+    "a peer's retry",
+];
+
+impl Step {
+    /// This step's index in [`LOOP_STEPS`].
+    fn liveness_step(&self) -> usize {
+        match self {
+            Step::Shutdown => 1,
+            Step::Opened(_) => 2,
+            Step::Driven(_) => 3,
+            Step::Accepted(_) => 4,
+            Step::Tick => 5,
+            Step::Woken => 6,
+            Step::Dial(_) => 7,
+            Step::McastIngress(_) => 8,
+            Step::McastMembers(_) => 9,
+            Step::McastGroupSubs(_) => 10,
+            Step::Reconcile(_) => 11,
+            Step::PeerRetry(_) => 12,
+        }
+    }
+}
+
 /// Decision D5 — what a peer's retry timer yields: the peer, and which arming
 /// of its timer fired ([`crate::loop_peers::PeerAction::Retry`]).
 #[cfg(feature = "router-connect-reconcile")]
@@ -2966,6 +3013,16 @@ where
     )))]
     let _ = peer_board;
     tokio::pin!(shutdown);
+    // The loop serves every face of the node; one that stops here stops the node without a line,
+    // so it turns a heartbeat that a thread outside this runtime reads ([`crate::liveness`]).
+    let heartbeat = crate::liveness::Heartbeat::register(
+        format!(
+            "face loop {}",
+            wz_session_core::zid_hex::zid_to_zenoh_hex(&params.zid)
+        ),
+        LOOP_STEPS,
+        forwarder.liveness_probe(),
+    );
     // Item 751 — every face below is opened from this one template, so each
     // session announces from the partition the forwarder places it by.
     //
@@ -3260,28 +3317,38 @@ where
     }
 
     loop {
-        let step = tokio::select! {
-            _ = &mut shutdown => Step::Shutdown,
-            Some(opened) = opening.next() => Step::Opened(Box::new(opened)),
-            Some(due) = peer_retries.next() => Step::PeerRetry(due),
-            Some(driven) = driving.next() => Step::Driven(driven),
-            Some(driven) = next_spawned(&mut spawned_drives, &mut spawned_faces) => {
-                Step::Driven(driven)
-            }
-            // The fast, non-blocking accept: one raw connection per iteration
-            // (ws/tls SERVER handshake deferred to the spawned open future, so a
-            // slow handshake never stalls this arm). R311y376 (Stage 3) — was
-            // `accept_tcp_on(&listener)`; now scheme-keyed via `accept_raw`.
-            // R2099 (item 512) — over EVERY bound listener, not the first one.
-            accepted = accept_any(&mut listeners) => Step::Accepted(accepted),
-            _ = forwarder_tick(&mut tick_timer) => Step::Tick,
-            _ = forwarder_woken(&wake_signal) => Step::Woken,
-            intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
-            item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(Box::new(item)),
-            members = recv_mcast_members(&mut mcast_members) => Step::McastMembers(members),
-            subs = recv_mcast_group_subs(&mut mcast_group_subs) => Step::McastGroupSubs(subs),
-            set = recv_reconcile(&mut reconcile) => Step::Reconcile(set),
+        // Busy while the sources are polled, resting while they are all pending: a poll that does
+        // not return is what the heartbeat reports, a quiet node is not. In a block, so that what
+        // the sources lend the `select!` is given back before the step is handled.
+        let step = {
+            let next = async {
+                tokio::select! {
+                    _ = &mut shutdown => Step::Shutdown,
+                    Some(opened) = opening.next() => Step::Opened(Box::new(opened)),
+                    Some(due) = peer_retries.next() => Step::PeerRetry(due),
+                    Some(driven) = driving.next() => Step::Driven(driven),
+                    Some(driven) = next_spawned(&mut spawned_drives, &mut spawned_faces) => {
+                        Step::Driven(driven)
+                    }
+                    // The fast, non-blocking accept: one raw connection per iteration
+                    // (ws/tls SERVER handshake deferred to the spawned open future, so a
+                    // slow handshake never stalls this arm). R311y376 (Stage 3) — was
+                    // `accept_tcp_on(&listener)`; now scheme-keyed via `accept_raw`.
+                    // R2099 (item 512) — over EVERY bound listener, not the first one.
+                    accepted = accept_any(&mut listeners) => Step::Accepted(accepted),
+                    _ = forwarder_tick(&mut tick_timer) => Step::Tick,
+                    _ = forwarder_woken(&wake_signal) => Step::Woken,
+                    intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
+                    item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(Box::new(item)),
+                    members = recv_mcast_members(&mut mcast_members) => Step::McastMembers(members),
+                    subs = recv_mcast_group_subs(&mut mcast_group_subs) => Step::McastGroupSubs(subs),
+                    set = recv_reconcile(&mut reconcile) => Step::Reconcile(set),
+                }
+            };
+            tokio::pin!(next);
+            heartbeat.polled(0, next.as_mut()).await
         };
+        heartbeat.turn(step.liveness_step());
 
         match step {
             Step::Shutdown => break,
@@ -5288,6 +5355,125 @@ mod tests {
     /// `watch`, not edge-triggered `Notify` — a receiver cannot miss the wakeup).
     async fn shutdown_on(mut go: watch::Receiver<bool>) {
         let _ = go.wait_for(|&v| v).await;
+    }
+
+    /// The face loop turns a heartbeat named by its node, and a loop with nothing to do rests
+    /// rather than being busy, so that what [`crate::liveness`] reports is a step or a poll that
+    /// does not return and never a quiet node; once the loop has ended, its heartbeat is gone.
+    #[tokio::test]
+    async fn the_face_loop_turns_a_heartbeat_and_rests_when_idle() {
+        let (listener, _addr) = bind_loopback().await;
+        let mut params = acceptor_params();
+        params.zid = vec![0xA1, 0x5E, 0x77, 0x3C];
+        let name = format!(
+            "face loop {}",
+            crate::zid_hex::zid_to_zenoh_hex(&params.zid)
+        );
+        let mine = |name: &str| {
+            crate::liveness::loops_now()
+                .into_iter()
+                .filter(|(loop_name, _, _)| loop_name == name)
+                .collect::<Vec<_>>()
+        };
+        let (go_tx, go_rx) = watch::channel(false);
+        let acceptor = accept_loop(
+            listener,
+            params,
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx),
+            |_: &AcceptEvent| {},
+            &NoOpForwarder,
+        );
+        let observe = async {
+            // Long enough for the loop to have started and found nothing to do.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let seen = mine(&name);
+            let _ = go_tx.send(true);
+            seen
+        };
+        let (_, seen) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(acceptor, observe)
+        })
+        .await
+        .expect("the loop ends on its shutdown");
+        assert_eq!(seen.len(), 1, "one heartbeat for the loop: {seen:?}");
+        assert_eq!(seen[0].1, "waiting for an event", "an idle loop rests");
+        assert!(mine(&name).is_empty(), "an ended loop is forgotten");
+    }
+
+    /// A face loop stopped inside one step is seen busy in that step for as long as the step
+    /// lasts, by a thread outside its runtime: here the forwarder's tick blocks the loop's only
+    /// thread for 400 ms, which is the shape of a loop that waits for a lock on its own thread, and
+    /// a plain thread reads the heartbeat while it does. This is what the watcher turns into a
+    /// report.
+    #[tokio::test]
+    async fn a_face_loop_stopped_in_its_tick_is_seen_busy_in_the_tick() {
+        struct SlowTick(std::sync::atomic::AtomicBool);
+        impl FaceForwarder for SlowTick {
+            fn register(&self, _id: FaceId, _actions: &Arc<SessionLinkActions>) {}
+            fn deregister(&self, _id: FaceId) {}
+            fn forward(&self, _id: FaceId, _event: IterationEvent<'_, '_>) {}
+            fn tick_period(&self) -> Option<Duration> {
+                Some(Duration::from_millis(10))
+            }
+            fn tick(&self) {
+                if !self.0.swap(true, SeqCst) {
+                    std::thread::sleep(Duration::from_millis(400));
+                }
+            }
+        }
+        let (listener, _addr) = bind_loopback().await;
+        let mut params = acceptor_params();
+        params.zid = vec![0xB1, 0x0C, 0x7E, 0xD5];
+        let name = format!(
+            "face loop {}",
+            crate::zid_hex::zid_to_zenoh_hex(&params.zid)
+        );
+        // The reader is a thread of its own: the loop's runtime has one thread, and the tick
+        // holds it.
+        let reader = std::thread::spawn(move || {
+            let began = std::time::Instant::now();
+            let mut longest = Duration::ZERO;
+            while began.elapsed() < Duration::from_secs(5) {
+                for (loop_name, step, since) in crate::liveness::loops_now() {
+                    if loop_name == name && step == "the forwarder's tick" {
+                        longest = longest.max(since);
+                    }
+                }
+                if longest >= Duration::from_millis(300) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            longest
+        });
+        let (go_tx, go_rx) = watch::channel(false);
+        let forwarder = SlowTick(std::sync::atomic::AtomicBool::new(false));
+        let acceptor = accept_loop(
+            listener,
+            params,
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx),
+            |_: &AcceptEvent| {},
+            &forwarder,
+        );
+        let stop = async {
+            // Past the blocked tick, so that the loop has turned again before it is stopped.
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            let _ = go_tx.send(true);
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(acceptor, stop)
+        })
+        .await
+        .expect("the loop ends on its shutdown");
+        let longest = reader.join().expect("the reader finishes");
+        assert!(
+            longest >= Duration::from_millis(300),
+            "the loop was seen busy in its tick for {longest:?}, not for the 400 ms it was stopped"
+        );
     }
 
     /// R2233 (open-debt item 585) — this test's own name used to say

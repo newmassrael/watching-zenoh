@@ -5906,7 +5906,10 @@ layer_c1v_cargo_test_ws() {
     # Round 3798 -- 12 -> 14: the two accept-bound units that came with the accept bounds
     # (`accept_loop.rs`), present in this feature set and not in C1y's, which stays at 18. Read
     # off the run, not derived.
-    _runci_guarded_test C1v 14 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
+    # 14 -> 16: the face loop's two heartbeat tests (`wz_runtime_tokio::liveness`), the idle loop
+    # that rests and the loop stopped in its tick; ungated, so C1y moves by the same +2. Read off
+    # what the build host PRINTED (`16 passed; 702 filtered out`).
+    _runci_guarded_test C1v 16 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -9799,7 +9802,9 @@ layer_c1y_cargo_test_routing_peer() {
     # build host (`21 passed; 733 filtered out`).
     # 21 -> 22: the gossip re-dial test of fd2ff0a389, which landed without moving this guard
     # (hosted run 41192748568 printed `22 passed`; the build host read 22 at 925109f3ee).
-    _runci_guarded_test "C1y accept_loop" 22 \
+    # 22 -> 24: the C1v twin's same +2, the face loop's heartbeat tests. Read off what the build
+    # host PRINTED (`24 passed; 797 filtered out`).
+    _runci_guarded_test "C1y accept_loop" 24 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # The loop-level witness of the link admission (two `peer_loop`s that dial each other with
     # one link each, and no face of either goes up on a link that is then closed). It needs
