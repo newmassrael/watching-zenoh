@@ -13583,6 +13583,26 @@
         "Open: read the hosted run of this head at the start of the next round (C1bo, the size lane C1cs for the emitter's growth).",
         "Open: no vsock fixture asserts that a vsock assembler's counts are structurally zero, which the equation with the health counters relies on for vsock flows."
       ]
+    },
+    "Round 4485": {
+      "decision_summary": "A device that answers a history query sends the published split-message pieces again, one piece per query reply, so a reply carrying a put is the same payload a published sample is, on another carrier. The judging stopped at the first test, a Push with a put, so a split history answer showed only as piece rows and its body decoder read a piece header as an end-to-end header. A real capture of the device runtime's own history demo (1940 replies) showed the shape: one Response per batch whose Reply holds one Put with exactly one piece, the reply's key being the query's own string key, and a reply-side transfer counter that restarts per query, so a reply transfer id collides with other queries' and with the live publisher's on the same session. Reply pieces are therefore joined by the same profile and chain rules as published ones but in a stream of their own per request id, apart from the live stream and from each other; the rule that covers a reply is matched on its own wire key, verbatim, with no device convention in wz. A reply's frame, joined or whole, is read and its CRC and length judged, because those are properties of the bytes, but its counter and timeout are left unjudged with the stated reason reply, since a history answer is not the live counter stream, and no live slot moves. The selector plane reads replies the same way, so a document cannot say none where its own block says reply. A response final ends its query's reply streams: a completed transfer leaves, an unfinished one is stated as closed, and a long capture with many queries no longer keeps one ledger entry per query forever.",
+      "changes_bullets": [
+        "Segment streams are keyed by carrier as well (published, or the reply to one request id); the field document, row facts, the values door and the selector plane all hand a reply's put to the same judge.",
+        "fields 66 and row_facts 7 (unjudged_reason with sender_unknown and reply on every opened e2e block, ended_transfers and ended_by on a final's entry), field_values 3, selection 7, selection_since 5, census 23; the C header and the C consumer move with them.",
+        "A response final closes its query's reply streams; an unfinished transfer at the final is stated as closed beside the existing evicted and superseded endings."
+      ],
+      "verification_bullets": [
+        "The wire shape was read from a real capture of the device runtime's history demo (1940 replies over TCP loopback, decoded batch by batch): one piece per reply, a string key, a reply transfer counter that restarts per query; the capture stays outside the repository.",
+        "On the build machine: wz-capture with dissect, lib tests 1813 passed (the eleven reply tests among them); default-feature segment_chain 14 passed; wz-capi-dissect 235 passed plus the handle memory gate 4; Layer C1bo passed after two pins and one header comment were fixed; clippy of wz-capture (with and without dissect) and wz-capi-dissect, each alone, clean; cargo doc of wz-capture with no features clean; doc_revision_consumer_pin agrees (22 pins).",
+        "Not run: the hosted lanes on this head."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the hosted run of this head at the start of the next round (C1bo, the size lane, the reduced documentation shards).",
+        "Open: a final's entry-level ended_transfers is not in the revisable row cells; it is decided when the final is read and does not change after, which is why it is left out."
+      ]
     }
   },
   "inventory_entries": {
