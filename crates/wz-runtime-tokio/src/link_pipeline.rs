@@ -538,18 +538,13 @@ pub async fn resolve_locator_addrs(host: &str, port: u16) -> io::Result<Vec<Sock
 /// whole-walk clock cannot serve as a per-candidate bound: the first candidate
 /// that never answers would consume the entire budget and the reachable one
 /// behind it would never be tried, which is the outcome this bound exists to
-/// avoid. wz does not read that key (it sits in `UNHONOURED_BEYOND_WZ`), so
-/// there is no configured value to derive from, and a second knob for the same
-/// purpose is not added. What the constant IS tied to is the link-open window
-/// wz does carry, `SessionTimeouts::spec_defaults().link_open_ms`: a single
+/// avoid. wz honours that key as upstream does, around the whole open
+/// (`session_open::open_within`), and this bound runs INSIDE it: a non-final
+/// candidate gives way after this long, and the walk and the handshake together
+/// still end at the open's bound. What the constant IS tied to is the link-open
+/// window wz carries, `SessionTimeouts::spec_defaults().link_open_ms`: a single
 /// candidate may not be granted as long as the whole link is, and a unit test
 /// below pins that, so the two cannot drift into a bound that bounds nothing.
-///
-/// NOT-THIS-KEY: transport/unicast/open_timeout
-///
-/// The key is cited above to say why it is NOT the source of this value; this
-/// constant honours nothing of it, and the marker sits beside the mechanism so
-/// the citation cannot be read as "wz honours it".
 pub const CANDIDATE_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Try `dial` against each candidate address in turn and return the first
@@ -798,8 +793,13 @@ use crate::iface_bind::configure_tcp_stream;
 pub fn wire_tcp_stream(stream: TcpStream) -> (TcpReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // Universal framing: a fresh always-false lowlatency flag (the u16 batch
     // prefix). The lowlatency open helpers instead use the _with_lowlatency
-    // variant to share a flag they flip at Established.
-    wire_tcp_stream_with_lowlatency(stream, Arc::new(AtomicBool::new(false)))
+    // variant to share a flag they flip at Established. No session parameters
+    // reach this form, so the RX pool is upstream's default size.
+    wire_tcp_stream_with_lowlatency(
+        stream,
+        Arc::new(AtomicBool::new(false)),
+        wz_session_core::session_init_params::RX_BUFFER_SIZE,
+    )
 }
 
 /// transport-lowlatency — [`wire_tcp_stream`] sharing the link's lowlatency-wire
@@ -807,9 +807,13 @@ pub fn wire_tcp_stream(stream: TcpStream) -> (TcpReadDriver, Arc<StreamWriteDriv
 /// framing, so both switch to the 4-byte LE u32 prefix once the open helper flips
 /// it at Established. The flag stays false through the handshake and for every
 /// universal link, so those wires are byte-identical to before.
+///
+/// `rx_buffer_size` is the session's `transport/link/rx/buffer_size`: the read
+/// storage the link pools.
 pub fn wire_tcp_stream_with_lowlatency(
     stream: TcpStream,
     lowlatency: Arc<AtomicBool>,
+    rx_buffer_size: usize,
 ) -> (TcpReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject is resolved BEFORE the split, while the
     // stream still owns its socket and can report its local address.
@@ -827,7 +831,7 @@ pub fn wire_tcp_stream_with_lowlatency(
     #[cfg(unix)]
     let inline_write = crate::stream_link::inline_write_of(&stream);
     let (reader, writer) = stream.into_split();
-    let inbound = StreamReadDriver::new(TcpRead::new(reader), lowlatency.clone());
+    let inbound = StreamReadDriver::new(TcpRead::new(reader), lowlatency.clone(), rx_buffer_size);
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
     #[cfg(unix)]
     if let Some(sink) = inline_write {

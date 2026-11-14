@@ -310,8 +310,11 @@ pub async fn accept_unixsock_on(listener: &UnixsockListener) -> io::Result<UnixS
 /// [`crate::link_pipeline::wire_tcp_stream`] — a unix stream owns its split
 /// halves (`into_split`) exactly like a `TcpStream`, and the StreamEnvelope
 /// framing + write driver are the SAME shared [`crate::stream_link`] code.
+/// `rx_buffer_size` is the session's `transport/link/rx/buffer_size`: the read
+/// storage the link pools.
 pub fn wire_unixsock_stream(
     stream: UnixStream,
+    rx_buffer_size: usize,
 ) -> (UnixsockReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y473 — the adminspace `{src,dst}` pair. A unix stream is addressed by a
     // PATH, and only a BOUND end has one: an accepted server-side peer, and the
@@ -336,8 +339,11 @@ pub fn wire_unixsock_stream(
         _ => None,
     };
     let (reader, writer) = stream.into_split();
-    let inbound =
-        StreamReadDriver::new(reader, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let inbound = StreamReadDriver::new(
+        reader,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        rx_buffer_size,
+    );
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the

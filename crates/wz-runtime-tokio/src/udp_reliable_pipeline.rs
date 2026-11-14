@@ -76,9 +76,15 @@ pub async fn bind_udp_reliable(
 ///   (`io/zenoh-links/zenoh-link-udp/src/lib.rs` @ `Locator::new(UDP_LOCATOR_PREFIX, addr.to_string(), "").unwrap()`).
 ///   The advertised locator and the link's own ends are different strings
 ///   upstream, and this keeps them different here.
-pub fn wire_udp_reliable(link: QuicLink) -> (QuicReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
+///
+/// `rx_buffer_size` is the session's `transport/link/rx/buffer_size`: the read
+/// storage the link pools, as upstream's RX task pools it for every unicast link.
+pub fn wire_udp_reliable(
+    link: QuicLink,
+    rx_buffer_size: usize,
+) -> (QuicReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     let local = link.endpoint.local_addr().ok();
     let subject = ip_link_subject(LinkKind::UdpReliable, local);
     let endpoints = ip_link_endpoints(LinkKind::Udp, local, Some(link.connection.remote_address()));
-    wire_stream_over_quic(link, subject, endpoints)
+    wire_stream_over_quic(link, subject, endpoints, rx_buffer_size)
 }

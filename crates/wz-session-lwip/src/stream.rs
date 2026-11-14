@@ -458,7 +458,7 @@ mod tests {
         server(47_304);
         let stream = dial(&link)
             .with_service(count)
-            .dial([127, 0, 0, 1], 47_304)
+            .dial(SocketAddr::from(([127, 0, 0, 1], 47_304)))
             .expect("dial");
         let after_dial = RAN.load(Ordering::SeqCst);
         assert!(after_dial > 0, "the handshake polled through the service");
@@ -474,7 +474,9 @@ mod tests {
     fn a_peer_that_closes_reads_as_the_end_of_the_stream() {
         let (_gate, link) = lwip_test_link();
         server(47_302);
-        let stream = dial(&link).dial([127, 0, 0, 1], 47_302).expect("dial");
+        let stream = dial(&link)
+            .dial(SocketAddr::from(([127, 0, 0, 1], 47_302)))
+            .expect("dial");
         stream.send_parts(&[b"bye"]).unwrap();
         stream.wait_readable(2_000);
         assert_eq!(stream.try_read(&mut [0; 8]), Ok(Some(0)));
@@ -484,7 +486,7 @@ mod tests {
     #[test]
     fn a_dial_to_a_port_nobody_listens_on_is_refused() {
         let (_gate, link) = lwip_test_link();
-        let refused = dial(&link).dial([127, 0, 0, 1], 47_399);
+        let refused = dial(&link).dial(SocketAddr::from(([127, 0, 0, 1], 47_399)));
         assert!(matches!(refused, Err(LinkOpenError::Refused)));
     }
 
@@ -504,7 +506,9 @@ mod tests {
         // `'static` handle: the witness is a zero-sized value, leaked here.
         let link: &'static LwipLink = std::boxed::Box::leak(std::boxed::Box::new(link));
         server(47_303);
-        let stream = dial(link).dial([127, 0, 0, 1], 47_303).expect("dial");
+        let stream = dial(link)
+            .dial(SocketAddr::from(([127, 0, 0, 1], 47_303)))
+            .expect("dial");
         let driver = StreamDriver::with_buffers(stream, 2_048, HeapTx::new(2, 2_048));
 
         let batch = [7u8; 300];

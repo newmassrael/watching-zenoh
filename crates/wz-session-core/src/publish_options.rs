@@ -599,6 +599,19 @@ pub enum PublishError {
     /// same bytes once there is budget" (true here) from "this message can never be sent as-is"
     /// (true there).
     FragmentChainAbandoned,
+    /// A publication that carries a time of its session (an advanced publisher's sample) was
+    /// refused because the session has no time left to give: it already gave the greatest one
+    /// there is, and every time it gives is greater than the last. No wire bytes were emitted.
+    /// zenoh-pico refuses the same put with the error of the timestamp it could not make
+    /// (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+    /// `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`).
+    TimestampExhausted,
+    /// A publication that carries a time of its session (an advanced publisher's sample) was
+    /// refused because the `clock-quality-stamping` policy is `trusted-only` and the node's clock
+    /// is not trusted: the node stamps no data with that clock, and the publication cannot go out
+    /// without a time. No wire bytes were emitted; it may be sent once the host reports the clock
+    /// synchronised.
+    ClockUntrusted,
 }
 
 impl core::fmt::Display for PublishError {
@@ -627,6 +640,17 @@ impl core::fmt::Display for PublishError {
                  emitting this Push's chain, so it was abandoned — any \
                  fragments already on the wire were followed by a 0x3 Drop \
                  stop fragment; resend once the budget is refilled"
+            ),
+            PublishError::TimestampExhausted => write!(
+                f,
+                "PublishError: the session has no time left to give (it already \
+                 gave the greatest one); the Push was not emitted"
+            ),
+            PublishError::ClockUntrusted => write!(
+                f,
+                "PublishError: the trusted-only clock policy holds back the time \
+                 this publication carries until the clock is reported \
+                 synchronised; the Push was not emitted"
             ),
         }
     }

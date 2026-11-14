@@ -54,7 +54,10 @@
  * four more), and the room the host gives sessions (`HOST_ARENA` in `wz-capi-coop`, 4 MiB at about
  * 20 KB for a held session with an RSA-2048 certificate, so about 200) is what should bound a
  * program, not this count. The slots are static storage of the library, small beside an arena. The
- * kit image sizes the store by Kconfig and does not define this. */
+ * kit image sizes the store by Kconfig and does not define this. The Rust side states the same
+ * number (`HOST_KEY_SLOTS` in `src/channel.rs`), and a test of the crate holds this file's count
+ * and the store the library was compiled with to it (`key_store_slots`): the library and the
+ * channel's C side get WZ_TLS_HOST by two separate paths in `build.rs`. */
 #if defined(WZ_TLS_HOST)
 #define MBEDTLS_PSA_KEY_SLOT_COUNT 1024
 #endif

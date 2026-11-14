@@ -78,15 +78,17 @@ text = '''
 The QoS extension of a network message is id 0x1, a 64-bit integer, M = 0. Its value's bits 2 to
 0 are the priority; bit 3 (D) is the congestion control block, clear for drop; bit 4 (E) is
 express (do not batch); bit 5 (F) is block for the first message only; the other bits are
-reserved. A message without it has its kind's default: priority 5 (data) and drop for a Push;
-priority 5 and block for a Request; priority 0 (control) and block for a Declare, an Interest
-and an OAM.
+reserved. It is the message's own quality of service, carried by the message whatever Frame
+carries it; a Frame's QoS extension is the transport's priority channel (B-FRAME-2), not this.
+A sender writes it exactly when the message's QoS is other than priority 5 (data), drop and not
+express, and a receiver takes a message without it as that, whatever the message's kind.
 '''
 sources = [
     '`commons/zenoh-protocol/src/network/mod.rs` @ `const D_FLAG: u8 = 0b00001000;`',
     '`commons/zenoh-protocol/src/network/mod.rs` @ `const F_FLAG: u8 = 0b00100000;`',
-    '`commons/zenoh-protocol/src/network/mod.rs` @ `pub const PUSH: Self = Self::new(Priority::DEFAULT, CongestionControl::DEFAULT_PUSH, false);`',
-    '`commons/zenoh-protocol/src/core/mod.rs` @ `pub const DEFAULT_DECLARE: Self = Self::Block;`',
+    '`commons/zenoh-protocol/src/network/mod.rs` @ `pub const DEFAULT: Self = Self::new(Priority::DEFAULT, CongestionControl::DEFAULT, false);`',
+    '`commons/zenoh-codec/src/network/push.rs` @ `if ext_qos != &ext::QoSType::DEFAULT {`',
+    '`commons/zenoh-codec/src/network/push.rs` @ `let mut ext_qos = ext::QoSType::DEFAULT;`',
 ]
 
 [[requirement]]

@@ -125,8 +125,9 @@ impl AdvancedPublisherPlane for PicoPlane {
     /// The session's next time, as pico's advanced publisher stamps each sample with the
     /// session's `z_timestamp_new` (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
     /// `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`):
-    /// a sample's time and a program's are one strictly increasing sequence of the session.
-    fn order_stamp(&self, proposed: u64) -> u64 {
+    /// a sample's time and a program's are one strictly increasing sequence of the session, and a
+    /// session with no time left refuses the sample as pico refuses the put.
+    fn order_stamp(&self, proposed: u64) -> Result<u64, PublishError> {
         self.session.time.order_data_stamp(proposed)
     }
 
@@ -243,7 +244,12 @@ mod tests {
 
     use wz_capi_core::faces::SharedSession;
     use wz_capi_core::runtime::runtime_impl::TokioTime;
+    use wz_ext_pubsub::advanced_publisher::{AdvancedPublisherOn, AdvancedPublisherOptions};
+    use wz_node_time::node_clock::TimestampingEnabled;
+    use wz_node_time::timestamp_source::SystemEpoch;
     use wz_session_core::WhatAmI;
+
+    use crate::last_timestamp::SessionTime;
 
     /// The heartbeat's timer on this plane is the ENGINE's periodic job: the tick runs every
     /// period while the handle the plane returns is held, and the job ends with the handle. The
@@ -289,6 +295,100 @@ mod tests {
             ticks.load(Ordering::SeqCst),
             after,
             "six periods after the drop it had ticked no more"
+        );
+    }
+
+    const ZID: [u8; 16] = [0x11; 16];
+
+    /// The session's node clock, under the `trusted-only` policy (`true`) or `always` (`false`).
+    fn node_clock(trusted_only: bool) -> NodeHlc {
+        NodeHlc::for_node_over_source(
+            &ZID,
+            WhatAmI::Peer,
+            TimestampingEnabled::all(true),
+            SystemEpoch,
+        )
+        .with_trusted_only_stamping(trusted_only)
+    }
+
+    /// An advanced publisher with no cache and no detection on a pico plane of a session with no
+    /// peer, whose node clock is `hlc` and whose times are `time`. The session is returned so it
+    /// outlives the publisher.
+    fn publisher_over(
+        hlc: &NodeHlc,
+        time: &SessionTime,
+    ) -> (Arc<SharedSession>, AdvancedPublisherOn<PicoPlane>) {
+        let shared = Arc::new(
+            SharedSession::new(TokioTime::new(), ZID.to_vec()).expect("test host entropy"),
+        );
+        let plane = Arc::new(PicoPlane::new(
+            PicoSession {
+                engine: shared.as_engine(),
+                mode: WhatAmI::Peer,
+                hlc: hlc.clone(),
+                time: time.clone(),
+            },
+            PublisherQos::pico_default(),
+        ));
+        // The options are non-exhaustive, so they are built from their default and set.
+        let mut options = AdvancedPublisherOptions::default();
+        options.cache = None;
+        options.publisher_detection = false;
+        let publisher =
+            AdvancedPublisherOn::declare_on(plane, "demo/pico/ts", options, ZID.to_vec())
+                .expect("the declaration is accepted");
+        (shared, publisher)
+    }
+
+    /// With the policy off, the default and upstream's, a sample is stamped through the session's
+    /// last time given: the next time the session gives is after it.
+    #[test]
+    fn with_the_policy_off_a_sample_takes_the_sessions_next_time() {
+        let hlc = node_clock(false);
+        let time = SessionTime::new().learned_by(hlc.clone());
+        let (_shared, publisher) = publisher_over(&hlc, &time);
+        assert!(
+            publisher.put(b"x").is_ok(),
+            "a put with no peer is not refused"
+        );
+        let next = time.give(0).expect("time left");
+        assert!(
+            next >> 32 > 1_700_000_000,
+            "the sample's time, the node clock's over the system clock, is the last given: {}",
+            next >> 32
+        );
+    }
+
+    /// A session that already gave the greatest time there is refuses the sample.
+    #[test]
+    fn a_session_with_no_time_left_refuses_a_put_and_a_delete() {
+        let hlc = node_clock(false);
+        let time = SessionTime::new().learned_by(hlc.clone());
+        assert_eq!(time.give(u64::MAX), Some(u64::MAX));
+        let (_shared, publisher) = publisher_over(&hlc, &time);
+        assert_eq!(publisher.put(b"x"), Err(PublishError::TimestampExhausted));
+        assert_eq!(publisher.delete(), Err(PublishError::TimestampExhausted));
+    }
+
+    /// `trusted-only` refuses a sample until the host reports the clock synchronised, and takes
+    /// no time from the session for it; after the report the sample goes out.
+    #[test]
+    fn a_trusted_only_session_refuses_a_sample_until_its_clock_is_trusted() {
+        let hlc = node_clock(true);
+        let time = SessionTime::new().learned_by(hlc.clone());
+        let (_shared, publisher) = publisher_over(&hlc, &time);
+        assert_eq!(publisher.put(b"x"), Err(PublishError::ClockUntrusted));
+        assert_eq!(publisher.delete(), Err(PublishError::ClockUntrusted));
+        assert_eq!(time.give(0), Some(1), "the refused samples took no time");
+
+        assert!(hlc.report_sync_acquired());
+        assert!(
+            publisher.put(b"x").is_ok(),
+            "a trusted clock stamps the sample"
+        );
+        assert!(
+            time.give(0).expect("time left") > 2,
+            "the sample took a time"
         );
     }
 }

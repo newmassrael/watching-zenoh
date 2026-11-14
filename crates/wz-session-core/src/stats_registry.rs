@@ -72,7 +72,7 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::qos::Priority;
-use crate::stats::StatSpace;
+use crate::stats::{StatSpace, StatsKeyMatch};
 use crate::WhatAmI;
 
 /// Upstream's payload-size histogram bounds, in bytes
@@ -545,6 +545,92 @@ impl StatsMetric for PerKeyHistogram {
     }
 }
 
+/// `stats/filters`: the key expressions a transport counts payloads under, each in the per-key
+/// payload family under its own text.
+///
+/// A message counts under every filter its key expression INTERSECTS, as upstream finds them
+/// (`commons/zenoh-stats/src/keys.rs` @ `.intersecting_nodes(keyexpr)`); a message with no key
+/// expression, or one this list does not meet, counts under none. A key named twice is one
+/// series, so it counts once. At most [`StatsKeyMatch::CAPACITY`] keys, which is what lets a
+/// message's match travel with its class.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatsKeyFilters {
+    keys: Vec<String>,
+}
+
+/// Why a filter list was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatsKeyFiltersError {
+    /// More keys than [`StatsKeyMatch::CAPACITY`].
+    TooMany {
+        /// How many the list held.
+        count: usize,
+    },
+    /// A key was named to a session of a build without `transport-stats`, which counts nothing.
+    NotInBuild,
+}
+
+impl core::fmt::Display for StatsKeyFiltersError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            StatsKeyFiltersError::TooMany { count } => write!(
+                f,
+                "{count} stats filters; a transport counts under at most {}",
+                StatsKeyMatch::CAPACITY
+            ),
+            StatsKeyFiltersError::NotInBuild => write!(
+                f,
+                "stats filters need the `transport-stats` capability, which this build was \
+                 made without"
+            ),
+        }
+    }
+}
+
+impl StatsKeyFilters {
+    /// The filters `keys`, in order, a repeated key kept once.
+    pub fn new(keys: Vec<String>) -> Result<Self, StatsKeyFiltersError> {
+        if keys.len() > StatsKeyMatch::CAPACITY {
+            return Err(StatsKeyFiltersError::TooMany { count: keys.len() });
+        }
+        let mut distinct: Vec<String> = Vec::with_capacity(keys.len());
+        for key in keys {
+            if !distinct.contains(&key) {
+                distinct.push(key);
+            }
+        }
+        Ok(Self { keys: distinct })
+    }
+
+    /// The filter keys, in order.
+    pub fn keys(&self) -> &[String] {
+        &self.keys
+    }
+
+    /// Whether no filter is configured, so no message counts under a key.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// The filters `keyexpr` meets.
+    pub fn matching(&self, keyexpr: &str) -> StatsKeyMatch {
+        self.keys
+            .iter()
+            .enumerate()
+            .filter(|(_, key)| crate::keyexpr_match::keyexpr_intersects_text(key, keyexpr))
+            .fold(StatsKeyMatch::NONE, |set, (index, _)| set.with(index))
+    }
+
+    /// The keys of `matched`, in list order.
+    pub fn names(&self, matched: StatsKeyMatch) -> impl Iterator<Item = &str> {
+        self.keys
+            .iter()
+            .enumerate()
+            .filter(move |(index, _)| matched.contains(*index))
+            .map(|(_, key)| key.as_str())
+    }
+}
+
 /// A link of one transport, as its [`TransportMetrics`] numbers it — handed
 /// out by [`TransportMetrics::open_link`] and held by whoever records on that
 /// link, so recording is an index, never a string compare or an allocation.
@@ -717,9 +803,33 @@ fn payload_per_key_cells(
 pub struct TransportMetrics {
     links: Vec<LinkMetrics>,
     directions: [TransportDirection; 2],
+    /// The keys its per-key payload family names, as upstream's per-key family holds the key
+    /// list it resolves an index against.
+    key_filters: StatsKeyFilters,
 }
 
 impl TransportMetrics {
+    /// Count payloads under `filters` from here on. A list that differs from the one held drops
+    /// the per-key series counted so far, as upstream drops the series of a key list it has
+    /// replaced (`commons/zenoh-stats/src/keys.rs` @ `*generation += 1;`).
+    pub fn set_key_filters(&mut self, filters: StatsKeyFilters) {
+        if self.key_filters == filters {
+            return;
+        }
+        // The series stays, as the family's does upstream; what it held under the old keys goes.
+        for direction in &mut self.directions {
+            for per_key in direction.network_message_payload_per_key.values_mut() {
+                *per_key = PerKeyHistogram::default();
+            }
+        }
+        self.key_filters = filters;
+    }
+
+    /// The keys this transport counts payloads under.
+    pub fn key_filters(&self) -> &StatsKeyFilters {
+        &self.key_filters
+    }
+
     fn open_links(&self) -> impl Iterator<Item = &LinkMetrics> {
         self.links.iter().filter(|link| link.open)
     }
@@ -851,6 +961,34 @@ impl TransportMetrics {
             .entry(labels)
             .or_default()
             .observe(keys, size);
+    }
+
+    /// [`Self::observe_network_message_payload`] for a classified message: its payload, counted
+    /// again under the keys of this transport's [`StatsKeyFilters`] its class matched.
+    pub fn observe_payload_class(
+        &mut self,
+        direction: StatsDirection,
+        priority: Priority,
+        message: MessageLabel,
+        shm: bool,
+        payload: &crate::stats::PayloadClass,
+    ) {
+        let labels = NetworkMessagePayloadLabels {
+            space: payload.space,
+            priority,
+            message,
+            shm,
+        };
+        let size = payload.pl_bytes as u64;
+        let own = &mut self.directions[direction.index()];
+        own.network_message_payload
+            .entry(labels.clone())
+            .or_default()
+            .observe(size);
+        own.network_message_payload_per_key
+            .entry(labels)
+            .or_default()
+            .observe(self.key_filters.names(payload.keys), size);
     }
 
     /// Count one dropped network payload of `size` bytes. `link` names the link
@@ -1127,15 +1265,7 @@ fn observe_payload(
         return;
     };
     let shm = class.medium == crate::stats::StatMedium::Shm;
-    metrics.observe_network_message_payload(
-        direction,
-        payload.space,
-        priority,
-        kind,
-        shm,
-        payload.pl_bytes as u64,
-        [],
-    );
+    metrics.observe_payload_class(direction, priority, kind, shm, &payload);
 }
 
 /// A transport's identity in a [`StatsRegistry`]. Stable for the transport's

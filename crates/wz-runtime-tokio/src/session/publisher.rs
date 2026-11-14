@@ -79,6 +79,12 @@ pub struct Publisher<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime
     pub(super) session: Session<R, T, Unicast>,
     pub(super) keyexpr: String,
     pub(super) options: PublishOptions,
+    /// The key this publisher's subscribers interest stands on: [`Self::keyexpr`], or the
+    /// `aggregation/publishers` aggregate that includes it, as the session decided at declare.
+    /// Kept so the clone and the drop take and release the reference the declare took, whatever
+    /// the session's aggregation says later.
+    #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+    pub(super) interest_key: String,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
@@ -89,12 +95,16 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
         // without it, "retract when a handle drops" would cut a live
         // publisher's interest the moment any clone went out of scope.
         #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-        self.session
-            .acquire_matching_interest(crate::session::MatchingPlane::Subscribers, &self.keyexpr);
+        self.session.acquire_matching_interest(
+            crate::session::MatchingPlane::Subscribers,
+            &self.interest_key,
+        );
         Self {
             session: self.session.clone(),
             keyexpr: self.keyexpr.clone(),
             options: self.options.clone(),
+            #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+            interest_key: self.interest_key.clone(),
         }
     }
 }
@@ -108,8 +118,10 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
 impl<R: SessionRuntime, T: TimeSource> Drop for Publisher<R, T> {
     fn drop(&mut self) {
         #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-        self.session
-            .release_matching_interest(crate::session::MatchingPlane::Subscribers, &self.keyexpr);
+        self.session.release_matching_interest(
+            crate::session::MatchingPlane::Subscribers,
+            &self.interest_key,
+        );
     }
 }
 
@@ -624,6 +636,12 @@ pub enum PublishAliasError {
     /// Unlike every variant above, wire bytes MAY have been emitted (followed
     /// by a `0x3 Drop` stop fragment); resend once the budget is refilled.
     FragmentChainAbandoned,
+    /// The session had no time left to give the publication; projected from the underlying
+    /// [`PublishError::TimestampExhausted`]. No wire bytes were emitted.
+    TimestampExhausted,
+    /// The `trusted-only` clock policy held back the time the publication carries; projected
+    /// from the underlying [`PublishError::ClockUntrusted`]. No wire bytes were emitted.
+    ClockUntrusted,
 }
 
 impl std::fmt::Display for PublishAliasError {
@@ -658,6 +676,16 @@ impl std::fmt::Display for PublishAliasError {
                  fragment followed any fragments already sent); resend once the \
                  budget is refilled"
             ),
+            PublishAliasError::TimestampExhausted => write!(
+                f,
+                "PublishAliasError: the session has no time left to give; the Push \
+                 was not emitted"
+            ),
+            PublishAliasError::ClockUntrusted => write!(
+                f,
+                "PublishAliasError: the trusted-only clock policy holds back the \
+                 time this publication carries; the Push was not emitted"
+            ),
         }
     }
 }
@@ -671,6 +699,8 @@ impl From<PublishError> for PublishAliasError {
             PublishError::TransportUnavailable => PublishAliasError::TransportUnavailable,
             PublishError::RequiresUnicast => PublishAliasError::RequiresUnicast,
             PublishError::FragmentChainAbandoned => PublishAliasError::FragmentChainAbandoned,
+            PublishError::TimestampExhausted => PublishAliasError::TimestampExhausted,
+            PublishError::ClockUntrusted => PublishAliasError::ClockUntrusted,
         }
     }
 }

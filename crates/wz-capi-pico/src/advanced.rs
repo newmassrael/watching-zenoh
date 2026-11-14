@@ -58,6 +58,7 @@ use wz_ext_pubsub::advanced_subscriber::{
     AdvancedSubscriberOptions, EngineSubscriber, HistoryConfig, HostError, Miss, RecoveryConfig,
     SubscriberDetection,
 };
+use wz_session_core::publish_options::PublishError;
 use wz_session_core::sample::Sample;
 use wz_session_core::sink::SampleView;
 
@@ -71,7 +72,9 @@ use crate::pubsub::{
     z_closure_drop_callback_t, z_moved_closure_sample_t, z_owned_closure_sample_t,
     z_owned_subscriber_t, CClosure, SubscriberState,
 };
-use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
+use crate::result::{
+    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_OK,
+};
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 use crate::zid::z_id_t;
@@ -717,13 +720,27 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         let Some(state) = handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_) else {
             return Z_ERR_NULL;
         };
-        // Z_OK when the write filter held the sample back as well as when it
-        // went out: the publisher answers for the put, not for a recipient.
-        match state.publisher.put_with(&buf, put_options) {
-            Ok(_) => Z_OK,
-            Err(_) => Z_ERR_GENERIC,
-        }
+        advanced_publish_code(state.publisher.put_with(&buf, put_options))
     })
+}
+
+/// What an advanced put or delete answers for what the publisher did with the sample.
+///
+/// `Z_OK` when the write filter held the sample back as well as when it went out: the publisher
+/// answers for the put, not for a recipient. A sample refused for want of a time answers
+/// `Z_ERR_TIMESTAMP_GENERATION_FAILED`, the code pico's put returns when its `z_timestamp_new`
+/// fails (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+/// `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`):
+/// a session with no time left, and the `trusted-only` policy withholding an untrusted clock's
+/// stamp, which pico has no policy for and whose sample is as unmade.
+fn advanced_publish_code(sent: Result<usize, PublishError>) -> ZResult {
+    match sent {
+        Ok(_) => Z_OK,
+        Err(PublishError::TimestampExhausted | PublishError::ClockUntrusted) => {
+            Z_ERR_TIMESTAMP_GENERATION_FAILED
+        }
+        Err(_) => Z_ERR_GENERIC,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1521,10 +1538,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_delete(
         // `_z_publisher_*_impl` call each). A delete with no peer to hear it is
         // `Z_OK`, as a put with none is: the write filter holds it back and the
         // send that follows is not an error.
-        match state.publisher.delete() {
-            Ok(_) => Z_OK,
-            Err(_) => Z_ERR_GENERIC,
-        }
+        advanced_publish_code(state.publisher.delete())
     })
 }
 
@@ -1800,6 +1814,27 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sample refused for want of a time answers pico's code for a timestamp it could not
+    /// make (-68), whichever of the two reasons; a sample that went out, or that the write filter
+    /// held back, is `Z_OK`; any other refusal stays generic.
+    #[test]
+    fn a_sample_refused_for_want_of_a_time_answers_picos_timestamp_code() {
+        assert_eq!(advanced_publish_code(Ok(5)), Z_OK);
+        assert_eq!(advanced_publish_code(Ok(0)), Z_OK);
+        assert_eq!(
+            advanced_publish_code(Err(PublishError::TimestampExhausted)),
+            Z_ERR_TIMESTAMP_GENERATION_FAILED
+        );
+        assert_eq!(
+            advanced_publish_code(Err(PublishError::ClockUntrusted)),
+            Z_ERR_TIMESTAMP_GENERATION_FAILED
+        );
+        assert_eq!(
+            advanced_publish_code(Err(PublishError::ExceedsCapacity)),
+            Z_ERR_GENERIC
+        );
+    }
 
     /// R2596 — the cache's three reply-QoS fields REACH the config, through
     /// PICO's converters.

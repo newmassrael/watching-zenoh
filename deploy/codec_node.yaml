@@ -126,3 +126,17 @@ codecs:
   undecl_token:
     capacity:
       extensions: 8
+  # The transport messages: the eight entries `parse_error::MAX_EXT_CHAIN_DEPTH`
+  # reads of a transport chain.
+  transport_init:
+    capacity:
+      extensions: 8
+  transport_open:
+    capacity:
+      extensions: 8
+  transport_close:
+    capacity:
+      extensions: 8
+  transport_keep_alive:
+    capacity:
+      extensions: 8

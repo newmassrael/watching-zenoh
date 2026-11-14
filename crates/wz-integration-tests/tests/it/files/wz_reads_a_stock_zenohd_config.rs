@@ -176,7 +176,8 @@ fn operator_config(port: u16) -> String {
       qos: {{ enabled: false }},
       compression: {{ enabled: true }},
     }},
-    multicast: {{ qos: {{ enabled: true }} }},
+    // 9, away from upstream's 1000, per this fixture's own rule.
+    multicast: {{ max_sessions: 9, qos: {{ enabled: true }} }},
     shared_memory: {{ enabled: false }},
     link: {{
       tls: {{
@@ -321,7 +322,9 @@ fn render_resolved(value: &Json5Value) -> String {
                 .iter()
                 .map(|i| match i {
                     Json5Value::String(s) => format!("\"{s}\""),
-                    other => format!("{other:?}"),
+                    // An object member (a `plugins_loading/search_dirs` spec) as its
+                    // JSON text, for the reason the object arm below gives.
+                    other => other.to_json5_text(),
                 })
                 .collect();
             format!("[{}]", joined.join(","))
@@ -446,6 +449,10 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
         (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
+        ),
+        (
+            "transport/multicast/max_sessions",
+            wz.multicast_max_sessions.to_string(),
         ),
         (
             "transport/shared_memory/enabled",
@@ -636,6 +643,12 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // open applies the same two (`unwrap_or(false)` and `unwrap_or(true)`).
         "transport/link/tls/enable_mtls",
         "transport/link/tls/verify_name_on_connect",
+        // The expiry teardown is the third of those `Option` booleans, declared beside them
+        // (`commons/zenoh-config/src/lib.rs` @ `close_link_on_expiration: Option<bool>,`) with
+        // its `false` applied where it is read, so a silent file resolves it to null on the
+        // same reasoning. DERIVED from the declaration, not measured on a running zenohd: if a
+        // hosted run shows the tree answering `false`, move the key into `claims`.
+        "transport/link/tls/close_link_on_expiration",
         // R2593 — MEASURED on a running zenohd with no file key: its resolved
         // tree prints `"tcp":{"so_rcvbuf":null,"so_sndbuf":null}` and the same
         // two nulls inside `tls`. No buffer size is a kernel default, which the
@@ -644,6 +657,11 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "transport/link/tcp/so_sndbuf",
         "transport/link/tls/so_rcvbuf",
         "transport/link/tls/so_sndbuf",
+        // An `Option<u32>` with no default upstream
+        // (`commons/zenoh-config/src/lib.rs` @ `file_access_mask: Option<u32>`), so a silent file
+        // resolves it to null: the mode a unixpipe link takes is then the link's own default,
+        // which the resolved tree cannot show.
+        "transport/link/unixpipe/file_access_mask",
         // R2568 — honoured by R2567 and left unclassed, which this leg's own
         // gate caught. Upstream states no value for it either: DEFAULT_CONFIG
         // carries `dictionary_file: null` beside `user` and `password`, so the
@@ -752,6 +770,13 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "adminspace/permissions/write",
     ];
 
+    // Keys the zenohd BINARY sets over whatever its file says, so its resolved tree
+    // answers the binary's value and not the default a file gets from the library
+    // (`zenohd/src/main.rs` @ `config.plugins_loading.set_enabled(true).unwrap();`).
+    // wz's reader carries the document's value, `None` for silence, which a host the
+    // file configures reads as the library's `false`; both halves are asserted below.
+    const THE_ZENOHD_BINARY_SETS_IT: &[&str] = &["plugins_loading/enabled"];
+
     let reservation = PortReservation::pick();
     let port = reservation.port();
     let source = census_config(port);
@@ -837,6 +862,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "transport/unicast/max_sessions",
             wz.max_sessions.to_string(),
         ),
+        (
+            "transport/unicast/open_timeout",
+            wz.open_timeout_ms.to_string(),
+        ),
         ("transport/unicast/lowlatency", wz.lowlatency.to_string()),
         ("transport/unicast/qos/enabled", wz.qos.to_string()),
         (
@@ -845,6 +874,12 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         ),
         ("transport/link/tx/batch_size", wz.batch_size.to_string()),
         ("transport/link/tx/lease", wz.lease_ms.to_string()),
+        // Upstream serializes its `Bits` by name (32bit, quoted), so a silent file resolves to
+        // the name and wz's struct answers with its own width's.
+        (
+            "transport/link/tx/sequence_number_resolution",
+            quoted(wz.sn_resolution.zenoh_name()),
+        ),
         // R2925 — the queue sizes and the two congestion waits: zenohd resolves
         // a silent file to numbers (2 per priority, 1000 and 5000000
         // microseconds), so each is compared against wz's own default.
@@ -893,12 +928,36 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             wz.tx_queue.wait_before_close_us.to_string(),
         ),
         (
+            "transport/link/tx/queue/batching/enabled",
+            wz.tx_queue.batching.to_string(),
+        ),
+        // Milliseconds in the tree, microseconds in wz's struct.
+        (
+            "transport/link/tx/queue/batching/time_limit",
+            (wz.tx_queue.batching_time_limit_us / 1_000).to_string(),
+        ),
+        // A snake-case name in the tree, as upstream's serde spells it.
+        (
+            "transport/link/tx/queue/allocation/mode",
+            quoted(wz.tx_queue.allocation.zenoh_name()),
+        ),
+        (
             "transport/link/rx/max_message_size",
             wz.link_rx.max_message_size.to_string(),
+        ),
+        // A plain `usize` upstream with its default applied at declaration (one widest batch),
+        // so the tree answers it and wz's struct answers the same.
+        (
+            "transport/link/rx/buffer_size",
+            wz.link_rx.buffer_size.to_string(),
         ),
         (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
+        ),
+        (
+            "transport/multicast/max_sessions",
+            wz.multicast_max_sessions.to_string(),
         ),
         (
             "transport/shared_memory/enabled",
@@ -912,6 +971,30 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // asserted below rather than rendered here, for the literal-in-a-row
         // reason the weights row gives.
         ("plugins", String::from("{}")),
+        // The two aggregate lists resolve to `[]` for a silent file (upstream's
+        // aggregation block derives its default), and wz's two lists are empty, which is
+        // asserted below rather than rendered here.
+        ("aggregation/subscribers", String::from("[]")),
+        ("aggregation/publishers", String::from("[]")),
+        // The same for the stats filter list (upstream's stats block derives its default), and
+        // wz's list is empty, asserted below.
+        ("stats/filters", String::from("[]")),
+        // A silent file resolves to upstream's default search list, a `current_exe_parent`
+        // spec and five paths, and wz holds `None` for it, which searches that same list. The
+        // list wz searches is rendered here through the tree's own renderer, so the two are one
+        // spelling of one value.
+        (
+            "plugins_loading/search_dirs",
+            render_resolved(
+                &json5::parse(
+                    &wz.plugin_search_dirs
+                        .clone()
+                        .unwrap_or_default()
+                        .to_json5_text(),
+                )
+                .unwrap(),
+            ),
+        ),
     ];
     assert!(wz.connect.is_empty(), "the fixture states no connect list");
     assert!(
@@ -929,6 +1012,14 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
     assert!(
         wz.qos_network.is_empty(),
         "the fixture states no QoS overwrite rule"
+    );
+    assert!(
+        wz.aggregation_subscribers.is_empty() && wz.aggregation_publishers.is_empty(),
+        "the fixture states no aggregate"
+    );
+    assert!(
+        wz.stats_filters.is_empty(),
+        "the fixture states no stats filter"
     );
     // The key the tree cannot answer (`THE_TREE_ANSWERS_NULL`): a silent file leaves wz on the
     // `auto` preset, the one the pinned `DEFAULT_CONFIG.json5` documents.
@@ -1014,6 +1105,15 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         Some(&Json5Value::Bool(false)),
         "{captured}"
     );
+    assert_eq!(
+        resolved.get("plugins_loading/enabled"),
+        Some(&Json5Value::Bool(true)),
+        "zenohd turns by-name plugin loading on over a silent file\n{captured}"
+    );
+    assert_eq!(
+        wz.plugins_loading_enabled, None,
+        "wz's reader carries the silent document, not the zenohd binary's override"
+    );
 
     // EXHAUSTIVE: every honoured key is in exactly one class. A key added to
     // the surface without a decision about its silent default reds here, which
@@ -1024,6 +1124,7 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         .chain(claims.iter().map(|(k, _)| *k))
         .chain(THE_TREE_ANSWERS_NULL.iter().copied())
         .chain(A_BLOCK_ON_ONE_SIDE_AND_LEAVES_ON_THE_OTHER.iter().copied())
+        .chain(THE_ZENOHD_BINARY_SETS_IT.iter().copied())
         .collect();
     accounted.sort_unstable();
     let before = accounted.len();
@@ -3584,11 +3685,14 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
       // exercises. NON-DEFAULT on purpose (upstream's is 1000), so a wz that
       // ignored the document and kept its own default would differ.
       max_sessions: 7,
+      // Half upstream's ten seconds, and far above what a dial to the local router takes.
+      open_timeout: 5000,
       lowlatency: false,
       qos: {{ enabled: true }},
       compression: {{ enabled: true }},
     }},
-    multicast: {{ qos: {{ enabled: true }} }},
+    // 9, away from upstream's 1000, per this fixture's own rule.
+    multicast: {{ max_sessions: 9, qos: {{ enabled: true }} }},
     shared_memory: {{ enabled: false }},
     // R2627 — the pubkey identity, NAMED rather than excepted, and the contrast
     // with `usrpwd/dictionary_file` (excepted below) is the whole decision. That
@@ -3636,16 +3740,24 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         connect_certificate: "/etc/wz/client.pem",
         connect_private_key: "/etc/wz/client.key",
         verify_name_on_connect: false,
+        // Off its `false` default; it reaches each certificate kind's `--link-config` and
+        // waits unused, since nothing here dials tls or quic.
+        close_link_on_expiration: true,
         so_rcvbuf: 12288,
         so_sndbuf: 24576,
       }},
       tcp: {{ so_rcvbuf: 65536, so_sndbuf: 65536 }},
+      // The unixpipe kind's FIFO mode (0o660, decimal as upstream reads it), off its absent
+      // default; it reaches `--link-config` and waits unused, as the tls pair does.
+      unixpipe: {{ file_access_mask: 432 }},
       protocols: ["tcp", "tls"],
       // R2925 — the queue sizes and the two congestion waits, each off its
       // default so the demo has something to apply.
       tx: {{
         batch_size: 4096,
         lease: 3000,
+        // 16 bits against the router's 32: the session settles on the smaller, the file's.
+        sequence_number_resolution: "16bit",
         queue: {{
           size: {{
             control: 3, real_time: 3, interactive_high: 3, interactive_low: 3,
@@ -3655,11 +3767,17 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
             drop: {{ wait_before_drop: 2000, max_wait_before_drop_fragments: 40000 }},
             block: {{ wait_before_close: 6000000 }},
           }},
+          // Off, so each message leaves as a frame of its own: the one put still reaches. The
+          // bound is stated too, off upstream's 1 ms, and holds nothing back with batching off.
+          batching: {{ enabled: false, time_limit: 5 }},
+          // Off upstream's `lazy`: the queue takes its batches when the session is established.
+          allocation: {{ mode: "init" }},
         }},
       }},
       // The largest message a session rejoins from fragments, off its 1 GiB
-      // default and still far above anything this leg sends.
-      rx: {{ max_message_size: 65536 }},
+      // default and still far above anything this leg sends; and the read storage
+      // each stream link pools, two widest batches where the default is one.
+      rx: {{ buffer_size: 131070, max_message_size: 65536 }},
     }},
   }},
   // R311y844 — this file now names EVERY honoured key, which turns this leg
@@ -3798,6 +3916,11 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     ] }} }},
   }},
   adminspace: {{ enabled: true, permissions: {{ read: true, write: false }} }},
+  // The aggregates this client's session declares its subscribers and publishers
+  // under: one declaration each for everything below `dropin`.
+  aggregation: {{ subscribers: ["dropin/**"], publishers: ["dropin/**"] }},
+  // The key this client's session counts its payloads under.
+  stats: {{ filters: [{{ key: "dropin/**" }}] }},
 }}
 "#
     );
@@ -3847,6 +3970,13 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     // reason: only a region-hat node (`--peer` or `--router-hat`) places its
     // remotes by a partition, and a connecting client holds no hat, so its run is
     // told the key was withheld from it rather than handed `--gateway-south`.
+    // `plugins_loading/enabled` is the FIFTH, beside `plugins` and for its reason: only
+    // `--storage-host` runs a plugin plane, so a connecting client looks no plugin up and its
+    // run is told the key was withheld. This process's reader is also built with no plugin host,
+    // so the one value the file could state and still be read here is the library's `false`.
+    // `plugins_loading/search_dirs` is the SIXTH, with them: the list is where that plane's
+    // lookup searches, so a connecting client's run is told it was withheld rather than handed
+    // `--plugin-search-dirs`.
     let mut every_honoured: Vec<&str> = HONOURED_CONFIG_KEYS
         .iter()
         .chain(WZ_EXTENSION_HONOURED_KEYS)
@@ -3855,6 +3985,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         .filter(|k| *k != "transport/auth/usrpwd/dictionary_file")
         .filter(|k| *k != "plugins")
         .filter(|k| *k != "gateway/south")
+        .filter(|k| *k != "plugins_loading/enabled")
+        .filter(|k| *k != "plugins_loading/search_dirs")
         .collect();
     fixture_names.sort_unstable();
     every_honoured.sort_unstable();

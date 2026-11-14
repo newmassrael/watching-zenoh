@@ -99,7 +99,40 @@ pub fn check(suite: &Suite) -> Vec<String> {
     check_requirements(suite, &mut out);
     check_pics(suite, &mut out);
     check_pixit(suite, &mut out);
+    check_names(suite, &mut out);
     out
+}
+
+/// No two proforma items are spelled alike where the abstract test suite reads them: a support
+/// item's feature parameter, a value item's and a PIXIT item's module parameter, all in one set.
+fn check_names(suite: &Suite, out: &mut Vec<String>) {
+    let mut made: BTreeMap<String, String> = BTreeMap::new();
+    let spelled = suite
+        .pics
+        .items
+        .iter()
+        .map(|item| {
+            let name = match item.answer {
+                AnswerKind::Support => crate::names::feature_parameter(&item.id),
+                AnswerKind::Value => crate::names::module_parameter(&item.id),
+            };
+            (format!("pics.toml: {}", item.id), name)
+        })
+        .chain(suite.pixit.items.iter().map(|item| {
+            (
+                format!("pixit.toml: {}", item.id),
+                crate::names::module_parameter(&item.id),
+            )
+        }));
+    for (at, name) in spelled {
+        if let Some(first) = made.get(&name) {
+            out.push(format!(
+                "{at}: is spelled {name} in the suite, as {first} is"
+            ));
+        } else {
+            made.insert(name, at);
+        }
+    }
 }
 
 fn check_requirements(suite: &Suite, out: &mut Vec<String>) {
@@ -124,7 +157,7 @@ fn check_requirements(suite: &Suite, out: &mut Vec<String>) {
             let at = format!("{name}: {}", r.id);
             if !is_item_id(&r.id) {
                 out.push(format!(
-                    "{at}: the id is not upper-case letters, digits and hyphens"
+                    "{at}: the id is not upper-case words joined by single hyphens, the first not PICS"
                 ));
             }
             if !seen.insert(r.id.as_str()) {
@@ -266,7 +299,7 @@ fn check_pics(suite: &Suite, out: &mut Vec<String>) {
         let at = format!("pics.toml: {}", item.id);
         if !is_item_id(&item.id) {
             out.push(format!(
-                "{at}: the id is not upper-case letters, digits and hyphens"
+                "{at}: the id is not upper-case words joined by single hyphens, the first not PICS"
             ));
         }
         if !seen.insert(item.id.as_str()) {
@@ -377,7 +410,7 @@ fn check_pixit(suite: &Suite, out: &mut Vec<String>) {
         let at = format!("pixit.toml: {}", item.id);
         if !is_item_id(&item.id) {
             out.push(format!(
-                "{at}: the id is not upper-case letters, digits and hyphens"
+                "{at}: the id is not upper-case words joined by single hyphens, the first not PICS"
             ));
         }
         if !seen.insert(item.id.as_str()) {
@@ -807,14 +840,40 @@ distinct_from = "X-A"
 
     #[test]
     fn an_id_is_words_joined_by_single_hyphens() {
-        for bad in ["B--FIX", "B-FIX-", "1-FIX", "B-fix"] {
+        for bad in ["B--FIX", "B-FIX-", "1-FIX", "B-fix", "PICS-FIX"] {
             let text = edit(REQUIREMENTS, "id = \"B-FIX-1\"", &format!("id = \"{bad}\""));
             let found = violations(&[text.as_str()], PICS_FIXTURE, PIXIT_FIXTURE);
             refused(
                 &found,
-                "the id is not upper-case letters, digits and hyphens",
+                "the id is not upper-case words joined by single hyphens, the first not PICS",
             );
         }
+    }
+
+    #[test]
+    fn a_pics_value_item_named_after_a_feature_parameter_is_refused() {
+        let pics = edit(PICS_FIXTURE, "id = \"T-VAL\"", "id = \"PICS-T-ONE\"");
+        let found = violations(&[REQUIREMENTS], &pics, PIXIT_FIXTURE);
+        refused(
+            &found,
+            "PICS-T-ONE: the id is not upper-case words joined by single hyphens, the first not PICS",
+        );
+        refused(&found, "is spelled PICS_T_ONE in the suite");
+    }
+
+    #[test]
+    fn two_items_spelled_alike_are_refused_across_the_proformas() {
+        let pixit = edit(PIXIT_FIXTURE, "id = \"X-A\"", "id = \"T-VAL\"");
+        let pixit = edit(
+            &pixit,
+            "distinct_from = \"X-A\"",
+            "distinct_from = \"T-VAL\"",
+        );
+        let found = violations(&[REQUIREMENTS], PICS_FIXTURE, &pixit);
+        refused(
+            &found,
+            "pixit.toml: T-VAL: is spelled T_VAL in the suite, as pics.toml: T-VAL is",
+        );
     }
 
     #[test]

@@ -38,12 +38,13 @@ pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;
 /// Whether the node is a member of a multicast group.
 pub const GROUPS: usize = 1;
 /// The locator of the group, the address and port it names, the hop limit of what the node
-/// sends and how many members of the group it tracks at once.
+/// sends (`None`: the kernel's own, which zenoh leaves when no `ttl` is stated) and how many
+/// members of the group it tracks at once.
 pub const GROUP: &str = "udp/224.0.0.224:7490";
 pub const GROUP_ADDR: core::net::IpAddr =
     core::net::IpAddr::V4(core::net::Ipv4Addr::new(224, 0, 0, 224));
 pub const GROUP_PORT: u16 = 7490;
-pub const GROUP_TTL: u8 = 1;
+pub const GROUP_TTL: Option<u8> = None;
 pub const MEMBERS: usize = 8;
 /// The queryables the node declares, and the documents they answer with: (key, bytes).
 pub const DOCS: usize = 0;

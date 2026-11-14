@@ -86,9 +86,18 @@ pub struct RouterState {
     /// provider is one): the one place the shim attaches it, as it does on a
     /// [`SessionState`](super::SessionState). Set once, right after the open.
     abi_extension: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
+    /// What the node's own session applies itself above its faces, as the open was told
+    /// ([`OpenStance::session_defaults`]).
+    session_defaults: crate::session_defaults::SessionDefaults,
 }
 
 impl RouterState {
+    /// What the node's own session applies itself above its faces, which every ABI that
+    /// publishes through the node reads here, as it does on a [`SessionState`](super::SessionState).
+    pub fn session_defaults(&self) -> &crate::session_defaults::SessionDefaults {
+        &self.session_defaults
+    }
+
     /// Attach this ABI's per-node state. Once: a second call is refused and returns the value it
     /// was handed, so a shim cannot silently replace state a live handle already reads.
     pub fn set_abi_extension<E: std::any::Any + Send + Sync>(&self, ext: E) -> Result<(), E> {
@@ -421,6 +430,11 @@ pub(crate) fn refused_ask(stance: &OpenStance) -> Option<&'static str> {
     if stance.groups.len() > 1 {
         return Some("more than one multicast group");
     }
+    // The node's own subscribers and publishers are entries of its tables, each under its own
+    // key, and not declarations of a session that `aggregation/*` could name an aggregate for.
+    if !stance.session_defaults.aggregation.is_empty() {
+        return Some("`aggregation/subscribers` or `aggregation/publishers`");
+    }
     None
 }
 
@@ -487,6 +501,9 @@ async fn join_group(
                 req_id_res: join.profile.req_id_res,
                 batch_size: join.profile.batch_size,
             },
+            // The rule of the preset that opened the node.
+            join_rule: join.profile.join_rule,
+            max_sessions: join.profile.max_sessions,
         },
         opts,
         None,
@@ -541,6 +558,7 @@ pub(crate) fn open_router_blocking(
         namespace,
         gateway_south,
         groups,
+        session_defaults,
         ..
     } = stance;
     // The prefix as the forwarder takes it. The plan validated the text, so one that does not
@@ -772,6 +790,9 @@ pub(crate) fn open_router_blocking(
                 }
                 NodeRole::Peer | NodeRole::Client => {}
             }
+            // Upstream makes the subsystem at the end of an open that succeeded, whatever the
+            // mode of the runtime.
+            crate::session_defaults::init_shared_memory(session_defaults.shm_init);
             Ok(RouterState {
                 zid: wire_zid,
                 forwarder,
@@ -783,6 +804,7 @@ pub(crate) fn open_router_blocking(
                 stop,
                 driver: StdMutex::new(Some(handle)),
                 abi_extension: std::sync::OnceLock::new(),
+                session_defaults,
             })
         }
         Ok(Err(cause)) => {

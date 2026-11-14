@@ -383,6 +383,44 @@ pub mod ext_envelope {
     ));
 }
 
+// The whole transport messages, each the header, its body module above and the
+// extension chain, under the gate of the body it embeds.
+#[cfg(feature = "codec-init-body")]
+pub mod transport_init {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_init.rs"
+    ));
+}
+
+#[cfg(feature = "codec-open-body")]
+pub mod transport_open {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_open.rs"
+    ));
+}
+
+#[cfg(feature = "codec-close")]
+pub mod transport_close {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_close.rs"
+    ));
+}
+
+#[cfg(feature = "codec-keep-alive")]
+pub mod transport_keep_alive {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_keep_alive.rs"
+    ));
+}
+
 // The element of a sliced payload: what `msg_put` repeats when its extension
 // chain carries the shared-memory marker. A leaf, so it is declared before the
 // module that imports it.

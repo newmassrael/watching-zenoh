@@ -63,6 +63,15 @@ int wz_tls_arena_peak(size_t *bytes, size_t *blocks);
 /** Reset the arena's peak to its current use. */
 void wz_tls_arena_peak_reset(void);
 
+/**
+ * The PSA key store's size, read from both sides of the link: in `declared` the keys this file's
+ * configuration lets PSA hold at once (MBEDTLS_PSA_KEY_SLOT_COUNT as this file was compiled), in
+ * `built` the slots of the store the linked library has. The two differ when the library was
+ * compiled to another configuration than this file. -1, both 0, for a store that grows on demand
+ * (MBEDTLS_PSA_KEY_STORE_DYNAMIC) and so has no fixed size.
+ */
+int wz_tls_key_store_slots(size_t *declared, size_t *built);
+
 struct wz_tls_identity;
 
 /**

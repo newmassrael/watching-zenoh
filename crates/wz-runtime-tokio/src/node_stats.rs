@@ -55,6 +55,13 @@ use wz_session_core::WhatAmI;
 #[cfg(feature = "transport-unicast")]
 use crate::session_glue::SessionLinkActions;
 
+/// Whether this build counts transport stats (`transport-stats`): what a host that cannot name
+/// this crate's features asks before it takes a `stats/filters` list, which a build that counts
+/// nothing refuses.
+pub const fn stats_compiled() -> bool {
+    cfg!(feature = "transport-stats")
+}
+
 /// A cheap, cloneable handle on one node's stats registry. The code that
 /// drives the node's sessions records into it; the admin host reads a
 /// snapshot of it per GET.
@@ -95,6 +102,9 @@ struct Inner {
     /// that re-joins opens a NEW transport, so the registry hands the key out.
     #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
     next_group: u64,
+    /// `stats/filters`: the keys every transport of the node counts payloads under, installed on
+    /// each one as it opens, as upstream's tables hold one key list for every face of the node.
+    key_filters: wz_session_core::stats_registry::StatsKeyFilters,
 }
 
 /// R2849 — one group face as the registry holds it: the group's transport,
@@ -171,8 +181,26 @@ impl NodeStats {
                 groups: BTreeMap::new(),
                 #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
                 next_group: 0,
+                key_filters: wz_session_core::stats_registry::StatsKeyFilters::default(),
             })),
         }
+    }
+
+    /// `stats/filters`: count every transport of this node under `filters`, the ones open now
+    /// and each one that opens later.
+    pub fn set_key_filters(&self, filters: wz_session_core::stats_registry::StatsKeyFilters) {
+        self.with(|inner| {
+            #[cfg(all(feature = "transport-unicast", feature = "transport-stats"))]
+            for (_, actions) in inner.open.values() {
+                let _ = actions.set_stats_key_filters(filters.clone());
+            }
+            inner.key_filters = filters;
+        });
+    }
+
+    /// The keys this node's transports count payloads under.
+    pub fn key_filters(&self) -> wz_session_core::stats_registry::StatsKeyFilters {
+        self.with(|inner| inner.key_filters.clone())
     }
 
     /// The registry a node of this BUILD keeps: `Some` when it is built with
@@ -208,6 +236,8 @@ impl NodeStats {
     #[cfg(feature = "transport-unicast")]
     pub fn transport_opened(&self, key: u64, actions: &Arc<SessionLinkActions>) {
         self.with(|inner| {
+            // A build without `transport-stats` holds no key here: the reader refuses one.
+            let _ = actions.set_stats_key_filters(inner.key_filters.clone());
             if let Some(transport) = actions.open_stats_transport(&mut inner.registry) {
                 inner.open.insert(key, (transport, Arc::clone(actions)));
             }
@@ -374,6 +404,35 @@ mod tests {
             .find_map(|line| line.strip_prefix(prefix.as_str()))
             .unwrap_or_else(|| panic!("no transports gauge:\n{doc}"))
             .to_string()
+    }
+
+    /// `stats/filters`: the node's key list reaches each transport, the one open
+    /// when it is set and every one opened after it.
+    #[test]
+    fn the_nodes_stats_filters_reach_every_transport() {
+        use wz_session_core::stats_registry::StatsKeyFilters;
+        let stats = NodeStats::new("a1b2", WhatAmI::Router, "v1");
+        let early = named_session(0x11);
+        stats.transport_opened(1, &early);
+        assert!(
+            early.stats_metrics().key_filters().is_empty(),
+            "CONTROL: a node with no filter installs none"
+        );
+        let filters = StatsKeyFilters::new(vec![String::from("home/**")]).unwrap();
+        stats.set_key_filters(filters.clone());
+        assert_eq!(
+            early.stats_metrics().key_filters(),
+            &filters,
+            "the open transport"
+        );
+        let late = named_session(0x22);
+        stats.transport_opened(2, &late);
+        assert_eq!(
+            late.stats_metrics().key_filters(),
+            &filters,
+            "a later transport"
+        );
+        assert_eq!(stats.key_filters(), filters);
     }
 
     /// R2844 — a node's registry follows its transports through their whole

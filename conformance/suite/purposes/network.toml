@@ -24,7 +24,7 @@ configuration = "CF-UC-IUT-DIALS"
 primitives = ["SESSION-OPEN", "PUBLISHER-DECLARE", "PUBLISHER-PUT"]
 with = "A session is established, the LT has declared a subscriber on a/b, and the UT has declared a publisher on a/b with priority 2, block and express."
 when = "The UT puts through the publisher."
-then = "The Push the LT reads carries the QoS extension with priority 2, D set and E set, or the Frame that carries it is of priority 2 and the Push states D and E."
+then = "The Push the LT reads carries its own network QoS extension (id 0x1) whose value is priority 2 with D and E set (0x1a); the Frame's QoS extension, the transport's priority channel, is not what this purpose reads."
 
 [[purpose]]
 id = "TP-DECL-1"

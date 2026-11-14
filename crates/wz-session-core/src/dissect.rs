@@ -9110,6 +9110,8 @@ mod tests {
             compression: false,
             tx_queue: crate::session_init_params::TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
+            join_rule: crate::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
         };
 
         // BOTH configurations, because the extension is `is_qos`-gated and a

@@ -40,8 +40,8 @@ use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
 use wz_runtime_tokio::zenoh_config::{
     config_key_in_build, default_listen_endpoint, honours_config_key, ConfigIngestError,
-    ZenohConfigIngest, ZenohNodeConfig, UNHONOURED_READER_GAP, UNHONOURED_UPSTREAM_CONFIG_KEYS,
-    UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
+    ShmInitMode, ZenohConfigIngest, ZenohNodeConfig, UNHONOURED_READER_GAP,
+    UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
 };
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
@@ -58,6 +58,10 @@ use crate::node_auth::NodeAuth;
 use crate::node_policy::NodePolicy;
 #[cfg(feature = "scout")]
 use crate::scouting_node::ScoutingPlan;
+use crate::session_defaults::{
+    PromotedMessages, PublicationDefaults, PublicationQos, SessionDefaults, ShmInit, ShmPromotion,
+};
+use wz_runtime_tokio::declaration_aggregation::DeclarationAggregation;
 
 /// The mode a node dials as, from the `mode` key it states.
 ///
@@ -102,11 +106,34 @@ pub enum KeyState {
     Unmapped,
 }
 
-/// The state of the key `path` (`transport/link/tx/threads`), or `None` for a key no list of the
-/// runtime's reader knows: one a bump of the pinned upstream added, which has no state until it is
-/// given one, and which a test over the default configuration fails on until then.
-pub fn key_state(path: &str) -> Option<KeyState> {
-    if honours_config_key(path) {
+/// What a session applies itself of the keys only a session applies
+/// ([`SESSION_HONOURED_KEYS`](wz_runtime_tokio::zenoh_config::SESSION_HONOURED_KEYS)), which the
+/// reader of the engine cannot know: it is the build of the
+/// session's own crate that says whether it has shared memory and a provider to copy into. Each
+/// client of the engine states its own, so that [`key_state`] answers for the session asking and
+/// not for the best build of wz.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionReach {
+    /// The session gives its publications the QoS `qos/publication` names for their keys.
+    pub publication_qos: bool,
+    /// The session's build has shared memory. Upstream's built without it reads the three
+    /// shared-memory keys and does nothing with them, so they are inert in such a build.
+    pub shared_memory: bool,
+    /// The messages whose large payload the session copies into its provider.
+    pub promotion: PromotedMessages,
+}
+
+/// The state of the key `path` (`transport/link/tx/threads`) for a session that reaches `reach`,
+/// or `None` for a key no list of the runtime's reader knows: one a bump of the pinned upstream
+/// added, which has no state until it is given one, and which a test over the default
+/// configuration fails on until then.
+pub fn key_state(path: &str, reach: SessionReach) -> Option<KeyState> {
+    if let Some(state) = session_key_state(path, reach) {
+        return Some(state);
+    }
+    if NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON.contains(&path) {
+        Some(KeyState::Unmapped)
+    } else if honours_config_key(path) {
         // A key whose reader is a capability this build was made without is acted on by a build
         // with it, and not by this one.
         Some(if config_key_in_build(path) {
@@ -125,6 +152,107 @@ pub fn key_state(path: &str) -> Option<KeyState> {
     } else {
         None
     }
+}
+
+/// Keys the runtime's reader honours for a wz NODE whose effect lives in a part of that node this
+/// engine does not have: the plugin plane of the storage host searches
+/// `plugins_loading/search_dirs`, and the node's stats registry hands `stats/filters` to the
+/// sessions it counts, which this engine does not install. Stating one here asks for something
+/// that will not happen, so it is [`KeyState::Unmapped`] and reported among [`OpenPlan::ignored`]
+/// although the reader read it.
+///
+/// `aggregation/*` is not here: the registry of faces gives every session it holds the
+/// aggregates ([`SessionDefaults::aggregation`]), and an open that runs as a node, which does not
+/// carry them, is refused by name (`OpenArguments::router_refusal`).
+pub const NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON: &[&str] =
+    &["plugins_loading/search_dirs", "stats/filters"];
+
+/// The state of `path` for a session that reaches `reach` when it is a key only a session applies
+/// ([`SESSION_HONOURED_KEYS`](wz_runtime_tokio::zenoh_config::SESSION_HONOURED_KEYS)), and `None`
+/// for any other key.
+///
+/// A shared-memory key the session does not act on is [`KeyState::Inert`] in a build without
+/// shared memory, as upstream's built so ignores it, and [`KeyState::Unmapped`] in one with it,
+/// where upstream acts on it. `messages` is acted on only by a session that copies every kind of
+/// message it can name: one that copies some kinds and not others would leave a kind the
+/// document names uncopied.
+pub fn session_key_state(path: &str, reach: SessionReach) -> Option<KeyState> {
+    let acted_on = match path {
+        "qos/publication" => {
+            return Some(if reach.publication_qos {
+                KeyState::Mapped
+            } else {
+                KeyState::Unmapped
+            })
+        }
+        // The subsystem is made by this engine's open, which has it in a build with the
+        // shared-memory transport.
+        "transport/shared_memory/mode" => cfg!(feature = "transport-shm") && reach.shared_memory,
+        "transport/shared_memory/transport_optimization/message_size_threshold" => {
+            reach.promotion.any()
+        }
+        "transport/shared_memory/transport_optimization/messages" => reach.promotion.all(),
+        _ => return None,
+    };
+    Some(if acted_on {
+        KeyState::Mapped
+    } else if reach.shared_memory {
+        KeyState::Unmapped
+    } else {
+        KeyState::Inert
+    })
+}
+
+/// What a session applies itself above its links (`SESSION_HONOURED_KEYS` and `aggregation/*`),
+/// compiled from the reading of its document: the one place the C ABI and the Rust API take it
+/// from, carried into the session by [`OpenPlan::into_arguments`].
+///
+/// An aggregate that is not a key expression, or one stated in a build without the inclusion test
+/// that applies it, is [`OpenRefusal::Aggregation`]. The reader refuses both first, so only a
+/// reading built by hand reaches it; a session that declared each entity as its own key instead
+/// would put on the wire what it was told not to.
+pub fn session_defaults_of(node: &ZenohNodeConfig) -> Result<SessionDefaults, OpenRefusal> {
+    let aggregation = DeclarationAggregation::new(
+        node.aggregation_subscribers.clone(),
+        node.aggregation_publishers.clone(),
+    )
+    .map_err(|_| OpenRefusal::Aggregation)?;
+    let publication_qos = PublicationQos::new(node.publication_qos.iter().map(|item| {
+        let conf = item.config;
+        (
+            item.key_exprs.clone(),
+            PublicationDefaults {
+                congestion_control: conf.congestion_control,
+                priority: conf.priority,
+                express: conf.express,
+                reliability: conf
+                    .reliable
+                    .map(wz_runtime_tokio::Reliability::from_reliable_bool),
+                allowed_destination: conf.allowed_destination,
+            },
+        )
+    }));
+    let listed = |message: &str| {
+        node.shm_optimised_messages
+            .iter()
+            .any(|named| named == message)
+    };
+    Ok(SessionDefaults {
+        publication_qos,
+        shm_init: match node.shm_init_mode {
+            ShmInitMode::Lazy => ShmInit::Lazy,
+            ShmInitMode::Init => ShmInit::Init,
+        },
+        shm_promotion: ShmPromotion {
+            threshold: usize::try_from(node.shm_message_size_threshold).unwrap_or(usize::MAX),
+            messages: PromotedMessages {
+                put: listed("put"),
+                query: listed("query"),
+                reply: listed("reply"),
+            },
+        },
+        aggregation,
+    })
 }
 
 /// The five keys that give a certificate or a key of the `tls/` and `quic/` links inline, base64
@@ -237,6 +365,22 @@ pub enum OpenRefusal {
     /// its regions whatever links it holds; an open that accepted the key and ran as the registry
     /// of faces would hold a south it never partitions, and nothing would say so.
     GatewayNotCarried,
+    /// The document configures a part of the links this build does not have: the FIFO mode of
+    /// `transport/link/unixpipe` in a build without a `unixpipe/` link, or the per-link RX pool
+    /// of `transport/link/rx/buffer_size` in a build whose links read into the node's shared
+    /// table. Told how to make a link in a way it has no means of, the open refuses rather than
+    /// accept an instruction it could only drop.
+    LinkNotInBuild,
+    /// The document turns on `plugins_loading/enabled`, the by-name lookup of plugins, in a
+    /// build with no plugin host to look one up in. A node told to load the plugins its
+    /// section names that opens and loads none would be doing less than it was told.
+    PluginHostNotInBuild,
+    /// An aggregate of `aggregation/subscribers` or `aggregation/publishers` is not a key
+    /// expression, or the build has no inclusion test to tell which entities an aggregate holds.
+    Aggregation,
+    /// The document lists `stats/filters` in a build without `transport-stats`, which keeps no
+    /// counter to count a payload under a filter in.
+    StatsNotInBuild,
 }
 
 impl OpenRefusal {
@@ -260,6 +404,10 @@ impl OpenRefusal {
             Self::GroupInConnect | Self::NoDialableEndpoint => "connect/endpoints",
             Self::Namespace => "namespace",
             Self::GatewayNotCarried => "gateway/south",
+            Self::LinkNotInBuild => "transport/link/unixpipe, transport/link/rx/buffer_size",
+            Self::PluginHostNotInBuild => "plugins_loading/enabled",
+            Self::Aggregation => "aggregation/subscribers, aggregation/publishers",
+            Self::StatsNotInBuild => "stats/filters",
         }
     }
 }
@@ -317,6 +465,9 @@ fn dial_phase(node: &ZenohNodeConfig, whatami: WhatAmI) -> DialPhase {
         // `connect_scouted`: it waits for the initial declarations of the peers it met.
         // Upstream's default is true.
         wait_declares: node.open_declares.unwrap_or(true),
+        // `transport/unicast/open_timeout`, upstream's ten seconds unless the document states
+        // another.
+        open_timeout: std::time::Duration::from_millis(node.open_timeout_ms),
     }
 }
 
@@ -405,11 +556,14 @@ const ZENOH_MULTICAST_BATCH: u16 = 8_192;
 /// `join_interval: self.manager.config.multicast.join_interval,`, beside the batch capped at
 /// `batch_size::MULTICAST`): the link lease of `transport/link/tx/lease`, the beacon interval of
 /// `transport/multicast/join_interval`, the default resolution of both sequence numbers and
-/// request ids (32 bits; the build's `sn-resolution` policy states another width of the
-/// sequence number), the session's batch size held to the multicast cap (the UDP link's own
+/// request ids (32 bits; `transport/link/tx/sequence_number_resolution`, or the build's
+/// `sn-resolution` policy, states another width of the sequence number), the session's batch size held to the multicast cap (the UDP link's own
 /// MTU is above it on every target zenoh names), per-priority conduits when
 /// `transport/multicast/qos/enabled` asks for them, and batch compression when
-/// `transport/multicast/compression/enabled` does.
+/// `transport/multicast/compression/enabled` does. Beside the beacon, the cap on the group's
+/// members of `transport/multicast/max_sessions`, which zenoh's multicast manager holds every
+/// group to (`io/zenoh-transport/src/multicast/manager.rs` @
+/// `self = self.max_sessions(config.transport().multicast().max_sessions().unwrap());`).
 fn zenoh_group_profile(
     node: &ZenohNodeConfig,
     batch_size: u16,
@@ -420,11 +574,17 @@ fn zenoh_group_profile(
     GroupProfile {
         lease_ms: node.lease_ms,
         join_interval_ms: node.multicast_join_interval_ms,
+        // zenoh holds every group to its multicast manager's cap, 1000 unless the document
+        // states another, so a zenoh session always has one.
+        max_sessions: Some(node.multicast_max_sessions),
         seq_num_res: sn_resolution.wire_code(),
         req_id_res: BITS_32,
         batch_size: batch_size.min(ZENOH_MULTICAST_BATCH),
         is_qos: node.multicast_qos,
         compression: node.multicast_compression,
+        // A document of zenoh's configuration is read for the zenoh presets, whose group follows
+        // zenoh's rule.
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Zenoh,
     }
 }
 
@@ -502,13 +662,22 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePol
 /// The traffic policy's keys are [`OpenRefusal::Security`], as [`node_security_of`] refuses them;
 /// the certificate material of a build with no `tls/` or `quic/` link is
 /// [`OpenRefusal::TlsMaterial`]; a south kept apart in a build with no region hat is
-/// [`OpenRefusal::GatewayNotCarried`], as [`OpenPlan::refuse_uncarried_south`] refuses it.
+/// [`OpenRefusal::GatewayNotCarried`], as [`OpenPlan::refuse_uncarried_south`] refuses it; the
+/// configuration of a part of the links the build does not have is
+/// [`OpenRefusal::LinkNotInBuild`]; an aggregate in a build with no inclusion test is
+/// [`OpenRefusal::Aggregation`], as [`session_defaults_of`] refuses it; a statistics filter in a
+/// build with no counters is [`OpenRefusal::StatsNotInBuild`].
 fn refusal_of_unbuilt_key(path: &str) -> OpenRefusal {
     match path {
         "low_pass_filter" | "downsampling" | "qos/network" => OpenRefusal::Security,
         _ if path.starts_with("access_control/") => OpenRefusal::Security,
         _ if path.starts_with("transport/link/tls/") => OpenRefusal::TlsMaterial,
+        _ if path.starts_with("transport/link/unixpipe/") => OpenRefusal::LinkNotInBuild,
+        "transport/link/rx/buffer_size" => OpenRefusal::LinkNotInBuild,
+        "plugins_loading/enabled" => OpenRefusal::PluginHostNotInBuild,
         "gateway/south" => OpenRefusal::GatewayNotCarried,
+        "aggregation/subscribers" | "aggregation/publishers" => OpenRefusal::Aggregation,
+        "stats/filters" => OpenRefusal::StatsNotInBuild,
         _ => OpenRefusal::DocumentUnreadable,
     }
 }
@@ -598,6 +767,50 @@ pub struct ShmKeys {
     pub pool_size: u64,
 }
 
+/// The keys of `transport/link/tx/queue` a document states with a value other than upstream's
+/// default, which the open lays over the transmit model its ABI chose
+/// ([`AbiChoices::tx_queue`]). A key at upstream's default is no instruction: a document
+/// rendered from a whole configuration states every key at its default, and the model then
+/// stands as the ABI chose it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StatedTxQueue {
+    /// `batching/enabled`.
+    pub batching: Option<bool>,
+    /// `batching/time_limit`, in microseconds.
+    pub batching_time_limit_us: Option<u64>,
+    /// `allocation/mode`.
+    pub allocation: Option<wz_session_core::link::QueueAllocation>,
+}
+
+impl StatedTxQueue {
+    /// What `node` states away from upstream's defaults.
+    fn of(node: &ZenohNodeConfig) -> Self {
+        let upstream = ZenohNodeConfig::default().tx_queue;
+        let stated = node.tx_queue;
+        Self {
+            batching: (stated.batching != upstream.batching).then_some(stated.batching),
+            batching_time_limit_us: (stated.batching_time_limit_us
+                != upstream.batching_time_limit_us)
+                .then_some(stated.batching_time_limit_us),
+            allocation: (stated.allocation != upstream.allocation).then_some(stated.allocation),
+        }
+    }
+
+    /// `model` with each stated key laid over it.
+    fn over(self, mut model: TxQueueConf) -> TxQueueConf {
+        if let Some(batching) = self.batching {
+            model.batching = batching;
+        }
+        if let Some(limit_us) = self.batching_time_limit_us {
+            model.batching_time_limit_us = limit_us;
+        }
+        if let Some(allocation) = self.allocation {
+            model.allocation = allocation;
+        }
+        model
+    }
+}
+
 /// What a configuration document means for an open. See the module documentation.
 pub struct OpenPlan {
     /// The role the node dials as. The roles are a set at run time (a peer that lists endpoints
@@ -625,7 +838,9 @@ pub struct OpenPlan {
     /// is zenoh's default.
     pub keep_alive: KeepAliveConf,
     /// The width of the sequence numbers the session advertises, unicast and in a group's Join:
-    /// the build's `sn-resolution` policy, 32 bits unless it states another.
+    /// `transport/link/tx/sequence_number_resolution` when the document states a width other than
+    /// upstream's 32 bits, and the build's `sn-resolution` policy, 32 bits unless it states
+    /// another, when it does not.
     pub sn_resolution: SnResolution,
     /// How long an inbound link gets to complete its handshake and how many get it at once:
     /// `transport/unicast/accept_timeout` and `accept_pending`. A config that states none is
@@ -634,6 +849,9 @@ pub struct OpenPlan {
     /// What the session's links rejoin from fragments: `transport/link/rx/max_message_size`. A
     /// config that states none is zenoh's default.
     pub link_rx: LinkRxConf,
+    /// The transmit-queue keys the document states away from upstream's defaults, laid over the
+    /// ABI's transmit model when the plan becomes the open's arguments.
+    pub tx_queue: StatedTxQueue,
     /// What the links offer at the handshake, without shared memory.
     pub offer: SessionOffer,
     /// The `transport/shared_memory` keys. Facts about the document; whether they reach the
@@ -676,6 +894,9 @@ pub struct OpenPlan {
     /// reader reports ignored, whether or not the value is the default. What an open does about
     /// them is its client's (see [`KeyState`]).
     pub ignored: Vec<String>,
+    /// What the session applies itself above its links ([`session_defaults_of`]), which the open
+    /// carries into the session for every ABI that publishes through it to read.
+    pub session: SessionDefaults,
 }
 
 impl OpenPlan {
@@ -818,10 +1039,29 @@ impl OpenPlan {
             TimestampingEnabled::default,
             ZenohConfigIngest::timestamping_enabled,
         );
-        let ignored = ingest
-            .as_ref()
-            .map_or_else(Vec::new, |ingest| ingest.ignored.clone());
+        let ignored = ingest.as_ref().map_or_else(Vec::new, |ingest| {
+            let mut ignored = ingest.ignored.clone();
+            ignored.extend(
+                ingest
+                    .named
+                    .iter()
+                    .filter(|key| NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON.contains(key))
+                    .map(|key| String::from(*key)),
+            );
+            ignored.sort_unstable();
+            ignored
+        });
         let node = ingest.map(|ingest| ingest.config);
+        // The width of the sequence numbers the sessions offer, unicast and in a group's Join:
+        // `transport/link/tx/sequence_number_resolution` when the document states a width other
+        // than upstream's, the build's `sn-resolution` policy otherwise. A document rendered from
+        // a whole configuration states every key at its default, so upstream's own width there is
+        // no instruction, and the build's policy stands.
+        let upstream_width = ZenohNodeConfig::default().sn_resolution;
+        let sn_resolution = match node.as_ref().map(|node| node.sn_resolution) {
+            Some(stated) if stated != upstream_width => stated,
+            _ => SessionPolicy::from_build().sn_resolution,
+        };
         let namespace_text = node.as_ref().and_then(|node| node.namespace.clone());
         // How the node keeps its south apart (`gateway/south`): the preset unless the document
         // states subregions.
@@ -838,6 +1078,9 @@ impl OpenPlan {
         let link_rx = node
             .as_ref()
             .map_or_else(LinkRxConf::default, |node| node.link_rx);
+        let tx_queue = node
+            .as_ref()
+            .map_or_else(StatedTxQueue::default, StatedTxQueue::of);
         let accept = node
             .as_ref()
             .map_or_else(AcceptBounds::default, |node| AcceptBounds {
@@ -1040,9 +1283,6 @@ impl OpenPlan {
                 pool_size: node.shm_pool_size,
             },
         );
-        // The width of the sequence numbers the build advertises (`sn-resolution`); the document
-        // has no key for it, since neither zenoh nor zenoh-pico does.
-        let sn_resolution = SessionPolicy::from_build().sn_resolution;
         let groups = node.as_ref().map_or_else(Vec::new, |node| {
             let profile = zenoh_group_profile(node, batch_size, sn_resolution);
             // zenoh announces each subscriber on the groups it holds, on every target but
@@ -1066,6 +1306,11 @@ impl OpenPlan {
                 })
                 .collect()
         });
+        let session = node
+            .as_ref()
+            .map(session_defaults_of)
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(Self {
             role,
@@ -1080,6 +1325,7 @@ impl OpenPlan {
             sn_resolution,
             accept,
             link_rx,
+            tx_queue,
             offer,
             shm,
             zid,
@@ -1094,6 +1340,7 @@ impl OpenPlan {
             tls,
             read_files,
             ignored,
+            session,
         })
     }
 
@@ -1188,7 +1435,7 @@ impl OpenPlan {
             role: self.role,
             dial: self.dial,
             stance: OpenStance {
-                tx_queue: abi.tx_queue,
+                tx_queue: self.tx_queue.over(abi.tx_queue),
                 batch_size: self.batch_size,
                 lease_ms: self.lease_ms,
                 keep_alive: self.keep_alive,
@@ -1213,6 +1460,7 @@ impl OpenPlan {
                 namespace: self.namespace,
                 gateway_south: self.gateway_south,
                 groups,
+                session_defaults: self.session,
             },
         }
     }
@@ -1399,7 +1647,16 @@ mod tests {
                 OpenRefusal::TlsMaterial,
             ),
             ("transport/link/tls/so_rcvbuf", OpenRefusal::TlsMaterial),
+            (
+                "transport/link/unixpipe/file_access_mask",
+                OpenRefusal::LinkNotInBuild,
+            ),
+            ("transport/link/rx/buffer_size", OpenRefusal::LinkNotInBuild),
+            ("plugins_loading/enabled", OpenRefusal::PluginHostNotInBuild),
             ("gateway/south", OpenRefusal::GatewayNotCarried),
+            ("aggregation/subscribers", OpenRefusal::Aggregation),
+            ("aggregation/publishers", OpenRefusal::Aggregation),
+            ("stats/filters", OpenRefusal::StatsNotInBuild),
             ("transport/link/protocols", OpenRefusal::DocumentUnreadable),
         ] {
             assert_eq!(refusal_of_unbuilt_key(key), refusal, "{key}");
@@ -1781,6 +2038,52 @@ mod tests {
         assert_eq!(silent.accept, AcceptBounds::default());
     }
 
+    /// The transmit-queue keys a document states away from upstream's defaults are laid over the
+    /// ABI's transmit model, and a document that states them at upstream's defaults, or not at
+    /// all, leaves the model as the ABI chose it.
+    #[test]
+    fn the_queue_keys_a_document_states_are_laid_over_the_abis_model() {
+        let stance = |document: &str, model: TxQueueConf| {
+            plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
+                .expect("a client with an endpoint opens")
+                .into_arguments(AbiChoices {
+                    tx_queue: model,
+                    start_read_task: true,
+                    local_delivery: LocalDeliveryDrain::Caller,
+                    liveliness_to_self: true,
+                    initial_interest: true,
+                    face_drive: FaceDrive::PerFace,
+                    shm_clients: crate::faces::no_shm_clients(),
+                    offer_shm: false,
+                    groups_report_shm: false,
+                })
+                .stance
+                .tx_queue
+        };
+        let off = r#"{ transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#;
+        assert!(!stance(off, TxQueueConf::default()).batching);
+        assert!(!stance(off, TxQueueConf::pico()).batching);
+        let bound =
+            r#"{ transport: { link: { tx: { queue: { batching: { time_limit: 4 } } } } } }"#;
+        assert_eq!(
+            stance(bound, TxQueueConf::default()).batching_time_limit_us,
+            4_000
+        );
+        let init =
+            r#"{ transport: { link: { tx: { queue: { allocation: { mode: "init" } } } } } }"#;
+        assert_eq!(
+            stance(init, TxQueueConf::default()).allocation,
+            wz_session_core::link::QueueAllocation::Init
+        );
+        // Upstream's own value is no instruction, and silence is none either: the model keeps
+        // its writer's bound rather than taking upstream's millisecond.
+        let on = r#"{ transport: { link: { tx: { queue: { batching: { enabled: true,
+                                                                      time_limit: 1 },
+                                                          allocation: { mode: "lazy" } } } } } }"#;
+        assert_eq!(stance(on, TxQueueConf::pico()), TxQueueConf::pico());
+        assert_eq!(stance("{}", TxQueueConf::default()), TxQueueConf::default());
+    }
+
     /// The width of the sequence numbers a group's Join states is the `sn-resolution` policy's,
     /// each value its own code, and the request-id resolution is not moved by it: a member of a
     /// group built with another width refuses a Join that states a different one, so the
@@ -1798,6 +2101,39 @@ mod tests {
             assert_eq!(profile.seq_num_res, code, "{}", width.id());
             assert_eq!(profile.req_id_res, 0x02, "the request id is untouched");
         }
+    }
+
+    /// The width a document states is the one its sessions offer and its groups' Joins state,
+    /// and a document that states none, or states upstream's own, offers the build's
+    /// `sn-resolution` policy.
+    #[test]
+    fn the_width_a_document_states_is_the_one_its_sessions_offer() {
+        let plan = |document: &str| {
+            plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
+                .expect("a client with an endpoint opens")
+        };
+        let stated =
+            plan(r#"{ transport: { link: { tx: { sequence_number_resolution: "16bit" } } } }"#);
+        assert_eq!(stated.sn_resolution, SnResolution::Bits16);
+        // Control: silence is the build's policy, so the width above is the document's; and so
+        // is upstream's own width, which a rendered configuration states for every open.
+        let build = SessionPolicy::from_build().sn_resolution;
+        assert_eq!(plan("{}").sn_resolution, build);
+        assert_eq!(
+            plan(r#"{ transport: { link: { tx: { sequence_number_resolution: "32bit" } } } }"#)
+                .sn_resolution,
+            build
+        );
+        // A width zenoh has no name for is a document the reader refuses.
+        assert_eq!(
+            refusal_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:7447"],
+                &[],
+                r#"{ transport: { link: { tx: { sequence_number_resolution: "12bit" } } } }"#,
+            ),
+            OpenRefusal::DocumentUnreadable
+        );
     }
 
     /// The role is read from the `mode` key, and the default is the build's.
@@ -2078,7 +2414,8 @@ mod tests {
         {
             let plan = plan_of(WhatAmI::Router, &[], &[group], &router).expect("opens");
             assert!(
-                plan.describe().contains("compression: true } shm="),
+                plan.describe()
+                    .contains("compression: true, join_rule: Zenoh } shm="),
                 "{}",
                 plan.describe()
             );
@@ -2094,6 +2431,27 @@ mod tests {
         );
         // No group is joined, so the key governs nothing.
         assert!(plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:7447"], &router).is_ok());
+    }
+
+    /// `transport/multicast/max_sessions` reaches the profile of a group the node joins, and a
+    /// document that states none gives the group upstream's cap of 1000.
+    #[test]
+    fn the_member_cap_a_document_states_reaches_the_group_profile() {
+        let read = |document: &str| {
+            ZenohNodeConfig::from_json5(document)
+                .expect("the document reads")
+                .config
+        };
+        let stated = read(r#"{ transport: { multicast: { max_sessions: 9 } } }"#);
+        assert_eq!(
+            zenoh_group_profile(&stated, 65535, SnResolution::Bits32).max_sessions,
+            Some(9)
+        );
+        let silent = read("{}");
+        assert_eq!(
+            zenoh_group_profile(&silent, 65535, SnResolution::Bits32).max_sessions,
+            Some(1000)
+        );
     }
 
     /// What three documents decide, held whole as goldens: the reading's one observable record.
@@ -2131,7 +2489,8 @@ mod tests {
                 "{head}\n\
                  dial: DialPhase {{ policy: PhasePolicy {{ budget: PhaseBudget({budget}), \
                  exit_on_failure: {exit} }}, schedule: {SCHEDULE}, redial: Some({SCHEDULE}), \
-                 start_window: Some(500ms), router_hold: 500ms, wait_declares: true }}\n\
+                 start_window: Some(500ms), router_hold: 500ms, wait_declares: true, \
+                 open_timeout: 10s }}\n\
                  listen_phase: ListenPhase {{ policy: PhasePolicy {{ budget: PhaseBudget(0), \
                  exit_on_failure: true }}, schedule: {SCHEDULE} }}\n\
                  batch_size: 65535\n\
@@ -2188,8 +2547,9 @@ mod tests {
             golden(
                 "role: Router\nconnect: []\nlisten: [\"tcp/127.0.0.1:7447\"]\n\
                  groups: [\"udp/224.0.0.224:7446#iface=lo GroupProfile { lease_ms: 10000, \
-                 join_interval_ms: 2500, seq_num_res: 2, req_id_res: 2, batch_size: 8192, \
-                 is_qos: false, compression: false } shm=true Subscribers\"]",
+                 join_interval_ms: 2500, max_sessions: Some(1000), seq_num_res: 2, \
+                 req_id_res: 2, batch_size: 8192, \
+                 is_qos: false, compression: false, join_rule: Zenoh } shm=true Subscribers\"]",
                 "-1",
                 false,
                 0,
@@ -2201,29 +2561,193 @@ mod tests {
     /// Each key is mapped, inert or unmapped, and a key no list knows has no state.
     #[test]
     fn a_key_is_mapped_inert_or_unmapped_and_a_key_nobody_lists_has_none() {
-        assert_eq!(key_state("connect/timeout_ms"), Some(KeyState::Mapped));
+        let state = |path| key_state(path, SessionReach::default());
+        assert_eq!(state("connect/timeout_ms"), Some(KeyState::Mapped));
         assert_eq!(
-            key_state("transport/auth/pubkey/key_size"),
+            state("transport/auth/pubkey/key_size"),
             Some(KeyState::Inert)
         );
-        assert_eq!(
-            key_state("transport/unicast/open_timeout"),
-            Some(KeyState::Unmapped)
-        );
+        assert_eq!(state("transport/link/tx/threads"), Some(KeyState::Unmapped));
         // A key the C interface acts on is mapped, whichever list it left.
         assert_eq!(
-            key_state("transport/unicast/accept_timeout"),
+            state("transport/unicast/accept_timeout"),
             Some(KeyState::Mapped)
         );
         assert_eq!(
-            key_state("transport/link/tls/root_ca_certificate_base64"),
+            state("transport/unicast/open_timeout"),
+            Some(KeyState::Mapped)
+        );
+        // The cap on a group's members, which each group the engine joins is held to.
+        assert_eq!(
+            state("transport/multicast/max_sessions"),
+            Some(KeyState::Mapped)
+        );
+        assert_eq!(
+            state("transport/link/tls/root_ca_certificate_base64"),
             Some(KeyState::Unmapped)
         );
-        assert_eq!(key_state("a/key/nobody/lists"), None);
+        assert_eq!(state("a/key/nobody/lists"), None);
         assert!(is_section_of_keys_with_a_state("gateway"));
         assert!(!is_section_of_keys_with_a_state(
-            "transport/unicast/open_timeout"
+            "transport/link/tx/threads"
         ));
+    }
+
+    /// A key only a session applies is mapped for the session that applies it and for no other:
+    /// a session without shared memory leaves the shared-memory keys inert, as upstream's built
+    /// without it does, and one with shared memory that does not copy a kind of message leaves
+    /// the promotion's keys unmapped, where upstream acts on them.
+    #[test]
+    fn a_session_key_is_mapped_only_for_the_session_that_applies_it() {
+        use wz_runtime_tokio::zenoh_config::SESSION_HONOURED_KEYS;
+        const THRESHOLD: &str =
+            "transport/shared_memory/transport_optimization/message_size_threshold";
+        const MESSAGES: &str = "transport/shared_memory/transport_optimization/messages";
+        const MODE: &str = "transport/shared_memory/mode";
+
+        let everything = SessionReach {
+            publication_qos: true,
+            shared_memory: true,
+            promotion: PromotedMessages::ALL,
+        };
+        for key in SESSION_HONOURED_KEYS {
+            assert!(
+                session_key_state(key, SessionReach::default()).is_some(),
+                "{key} is a session's and has no session state"
+            );
+            assert_eq!(
+                key_state(key, everything),
+                if *key == MODE && !cfg!(feature = "transport-shm") {
+                    Some(KeyState::Unmapped)
+                } else {
+                    Some(KeyState::Mapped)
+                },
+                "{key}"
+            );
+        }
+        assert_eq!(session_key_state("connect/timeout_ms", everything), None);
+
+        let nothing = SessionReach::default();
+        assert_eq!(
+            key_state("qos/publication", nothing),
+            Some(KeyState::Unmapped)
+        );
+        for key in [MODE, THRESHOLD, MESSAGES] {
+            assert_eq!(key_state(key, nothing), Some(KeyState::Inert), "{key}");
+        }
+
+        // Shared memory and a provider that copies puts alone: the threshold is acted on, the
+        // list is not, since a kind it names is left uncopied.
+        let puts_only = SessionReach {
+            publication_qos: true,
+            shared_memory: true,
+            promotion: PromotedMessages {
+                put: true,
+                query: false,
+                reply: false,
+            },
+        };
+        assert_eq!(key_state(THRESHOLD, puts_only), Some(KeyState::Mapped));
+        assert_eq!(key_state(MESSAGES, puts_only), Some(KeyState::Unmapped));
+        // Shared memory and no provider to copy into.
+        let no_provider = SessionReach {
+            promotion: PromotedMessages::NONE,
+            ..puts_only
+        };
+        assert_eq!(key_state(THRESHOLD, no_provider), Some(KeyState::Unmapped));
+        assert_eq!(key_state(MESSAGES, no_provider), Some(KeyState::Unmapped));
+    }
+
+    /// The plan compiles what the session applies itself from the document, and carries it into
+    /// the open's arguments, from where the session holds it.
+    #[test]
+    fn the_plan_compiles_the_session_defaults_and_hands_them_to_the_open() {
+        use crate::session_defaults::PromotedMessage;
+
+        let plan = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ scouting: { multicast: { enabled: false } },
+                 qos: { publication: [ { key_exprs: ["demo/**"],
+                                         config: { priority: "background", express: true } } ] },
+                 transport: { shared_memory: { mode: "init", transport_optimization: {
+                     message_size_threshold: 128, messages: ["query", "delete"] } } } }"#,
+        )
+        .expect("opens");
+        assert!(plan.ignored.is_empty(), "{:?}", plan.ignored);
+        assert_eq!(plan.session.shm_init, ShmInit::Init);
+        assert_eq!(plan.session.shm_promotion.threshold, 128);
+        assert_eq!(
+            plan.session.shm_promotion.messages,
+            PromotedMessages {
+                put: false,
+                query: true,
+                reply: false,
+            },
+            "a delete names no kind a payload is copied for"
+        );
+        assert!(plan
+            .session
+            .shm_promotion
+            .admits(PromotedMessage::Query, 128));
+        assert!(!plan
+            .session
+            .shm_promotion
+            .admits(PromotedMessage::Put, 1 << 20));
+        let given = plan.session.publication_qos.defaults_for("demo/a");
+        assert_eq!(
+            given.priority,
+            Some(wz_runtime_tokio::qos::Priority::Background)
+        );
+        assert_eq!(given.express, Some(true));
+        assert_eq!(given.congestion_control, None);
+
+        let expected = plan.session.clone();
+        let arguments = plan.into_arguments(AbiChoices {
+            tx_queue: TxQueueConf::default(),
+            start_read_task: true,
+            local_delivery: LocalDeliveryDrain::Caller,
+            liveliness_to_self: true,
+            initial_interest: true,
+            face_drive: FaceDrive::PerFace,
+            shm_clients: crate::faces::no_shm_clients(),
+            offer_shm: false,
+            groups_report_shm: false,
+        });
+        assert_eq!(arguments.stance.session_defaults, expected);
+
+        // A document that states none of the keys gives upstream's defaults, which apply nothing
+        // to a publication.
+        let silent = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ scouting: { multicast: { enabled: false } } }"#,
+        )
+        .expect("opens");
+        assert_eq!(silent.session, SessionDefaults::default());
+    }
+
+    /// Every case the surfaces of `qos/publication` are held to is what the plan compiles: the
+    /// one reading the C ABI and the Rust API preset both take their defaults from.
+    #[test]
+    fn the_plan_gives_each_shared_publication_case_its_settings() {
+        for case in crate::session_defaults::PUBLICATION_QOS_CASES {
+            let document = format!(
+                "{{ scouting: {{ multicast: {{ enabled: false }} }}, qos: {{ publication: {} }} }}",
+                case.rules
+            );
+            let plan = plan_of(WhatAmI::Client, &["tcp/127.0.0.1:1"], &[], &document)
+                .unwrap_or_else(|refusal| panic!("{}: {refusal:?}", case.rules));
+            assert_eq!(
+                plan.session.publication_qos.defaults_for(case.key),
+                case.expected,
+                "{} on {}",
+                case.rules,
+                case.key
+            );
+        }
     }
 
     /// The plan reports every key the document states that the engine does not act on, and the
@@ -2236,10 +2760,138 @@ mod tests {
             &[],
             r#"{ connect: { timeout_ms: 500 },
                  scouting: { multicast: { enabled: false } },
-                 transport: { unicast: { open_timeout: 1234 } } }"#,
+                 transport: { unicast: { open_timeout: 1234 },
+                              link: { tx: { threads: 3 } } } }"#,
         )
         .expect("opens");
-        assert_eq!(plan.ignored, ["transport/unicast/open_timeout"]);
+        assert_eq!(plan.ignored, ["transport/link/tx/threads"]);
+        // The open bound is a key the engine acts on: it reaches the dial phase.
+        assert_eq!(
+            plan.dial.open_timeout,
+            std::time::Duration::from_millis(1234)
+        );
+    }
+
+    /// A key the reader honours for a wz node and this engine has no part to act on is unmapped
+    /// here, and a document that states it has it reported, as one the reader does not read is.
+    #[test]
+    fn a_node_key_the_engine_has_no_part_for_is_unmapped_and_reported() {
+        for key in NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON {
+            assert!(
+                wz_runtime_tokio::zenoh_config::HONOURED_CONFIG_KEYS.contains(key),
+                "{key} is not a node key, so the reader's own report already covers it"
+            );
+            assert_eq!(
+                key_state(key, SessionReach::default()),
+                Some(KeyState::Unmapped),
+                "{key}"
+            );
+        }
+        let plan = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ scouting: { multicast: { enabled: false } },
+                 plugins_loading: { search_dirs: ["/opt/wz/plugins"] },
+                 stats: { filters: [] } }"#,
+        )
+        .expect("opens");
+        assert_eq!(
+            plan.ignored,
+            ["plugins_loading/search_dirs", "stats/filters"]
+        );
+    }
+
+    /// `aggregation/*` is acted on by the registry of faces: the plan compiles the aggregates into
+    /// what the session applies itself, carries them to the open, and does not report them among
+    /// the keys it ignores. A list built by hand that holds no key expression is refused by the
+    /// keys' name, as a build without the inclusion test refuses one.
+    #[test]
+    fn the_plan_carries_the_aggregates_to_the_open() {
+        for key in ["aggregation/subscribers", "aggregation/publishers"] {
+            assert!(
+                !NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON.contains(&key),
+                "{key}"
+            );
+            assert_eq!(
+                key_state(key, SessionReach::default()),
+                Some(KeyState::Mapped),
+                "{key}: the engine's runtime is built with the inclusion test"
+            );
+        }
+        let plan = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ scouting: { multicast: { enabled: false } },
+                 aggregation: { subscribers: ["demo/**"], publishers: ["demo/pub/**"] } }"#,
+        )
+        .expect("opens");
+        assert!(plan.ignored.is_empty(), "{:?}", plan.ignored);
+        let expected =
+            DeclarationAggregation::new(vec!["demo/**".to_owned()], vec!["demo/pub/**".to_owned()])
+                .expect("key expressions");
+        assert_eq!(plan.session.aggregation, expected);
+        let arguments = plan.into_arguments(AbiChoices {
+            tx_queue: TxQueueConf::default(),
+            start_read_task: true,
+            local_delivery: LocalDeliveryDrain::Caller,
+            liveliness_to_self: true,
+            initial_interest: true,
+            face_drive: FaceDrive::PerFace,
+            shm_clients: crate::faces::no_shm_clients(),
+            offer_shm: false,
+            groups_report_shm: false,
+        });
+        assert_eq!(arguments.stance.session_defaults.aggregation, expected);
+
+        let mut node = ZenohNodeConfig::from_json5("{}")
+            .expect("an empty document")
+            .config;
+        node.aggregation_subscribers = vec!["demo//double".to_owned()];
+        assert_eq!(
+            session_defaults_of(&node).err(),
+            Some(OpenRefusal::Aggregation)
+        );
+        assert_eq!(
+            OpenRefusal::Aggregation.key(),
+            "aggregation/subscribers, aggregation/publishers"
+        );
+    }
+
+    /// A node holds its own entities as entries of its tables, so it does not carry an aggregate
+    /// and an open that would run as one names the keys it was given; a node given none opens.
+    #[cfg(feature = "router-node")]
+    #[test]
+    fn a_node_refuses_the_aggregates_by_their_keys() {
+        let arguments = |document: &str| {
+            plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:0"], document)
+                .expect("opens")
+                .into_arguments(AbiChoices {
+                    tx_queue: TxQueueConf::default(),
+                    start_read_task: true,
+                    local_delivery: LocalDeliveryDrain::Caller,
+                    liveliness_to_self: true,
+                    initial_interest: true,
+                    face_drive: FaceDrive::PerFace,
+                    shm_clients: crate::faces::no_shm_clients(),
+                    offer_shm: false,
+                    groups_report_shm: false,
+                })
+        };
+        let silent = arguments(r#"{ scouting: { multicast: { enabled: false } } }"#);
+        assert_eq!(silent.router_refusal(), None, "CONTROL: nothing asked");
+        for list in ["subscribers", "publishers"] {
+            let stated = arguments(&format!(
+                r#"{{ scouting: {{ multicast: {{ enabled: false }} }},
+                      aggregation: {{ {list}: ["demo/**"] }} }}"#
+            ));
+            assert_eq!(
+                stated.router_refusal(),
+                Some("`aggregation/subscribers` or `aggregation/publishers`"),
+                "{list}"
+            );
+        }
     }
 
     /// `transport/link/protocols` is a whitelist of the unicast links the node makes: an endpoint

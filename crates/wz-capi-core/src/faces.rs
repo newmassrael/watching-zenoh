@@ -73,6 +73,7 @@ use crate::cancellation::CancellableFan;
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::accept_loop::{DialIntentSender, FaceForwarder, FaceId};
+use wz_runtime_tokio::declaration_aggregation::DeclarationAggregation;
 use wz_runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 #[cfg(feature = "gossip")]
 use wz_runtime_tokio::gossip_plane::{FaceIdentity, GossipPlane, Outbound};
@@ -2047,6 +2048,9 @@ pub struct SharedSession {
     /// not inert the send and receive lanes that step around a per-message verdict are off for
     /// this node's sessions. See [`SessionResources::policy`].
     policy: crate::node_policy::NodePolicy,
+    /// The aggregates the node declares under, given to the plane and to every face session.
+    /// See [`SessionResources::aggregation`].
+    aggregation: DeclarationAggregation,
     /// The session's closed latch: set once by `SessionState::close` and never cleared. It lives
     /// HERE, and the drive loop races against this same `Arc`, so that an entity that outlives
     /// the session handle (a publisher, a querier, a query being answered) asks the one fact the
@@ -2161,6 +2165,15 @@ pub struct SessionResources {
     /// whose keys are the wire's, which every node was until the key reached a session.
     #[cfg(feature = "routing-namespace")]
     pub namespace: Option<wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr>,
+    /// The aggregates of `aggregation/subscribers` and `aggregation/publishers`: every session
+    /// of the node declares a subscriber, and asks for a publisher's subscribers, under the first
+    /// aggregate that includes its key, once per aggregate and per face, as upstream's session
+    /// declares once per aggregate to each face of its runtime
+    /// (`zenoh/src/api/session.rs` @ `.aggregated_subscribers`). Each face session keeps its own
+    /// count of the entities under an aggregate, so a face that comes up later is declared the
+    /// aggregate by the first entity replayed to it. None is a node that declares each entity
+    /// as its own key, which every node was until the keys reached a session.
+    pub aggregation: DeclarationAggregation,
 }
 
 /// What a node that gossips is given: the role it gossips as, how it gossips (whom it tells, whom
@@ -2190,6 +2203,7 @@ impl Default for SessionResources {
             policy: crate::node_policy::NodePolicy::default(),
             #[cfg(feature = "routing-namespace")]
             namespace: None,
+            aggregation: DeclarationAggregation::none(),
         }
     }
 }
@@ -2304,6 +2318,7 @@ impl SharedSession {
             policy,
             #[cfg(feature = "routing-namespace")]
             namespace,
+            aggregation,
         } = resources;
         // Built over the node's own wire zid, before `zid` is moved into the plane's params.
         // A zid the graph cannot hold (empty or all zero) leaves the node not gossiping rather
@@ -2359,6 +2374,10 @@ impl SharedSession {
         // R3065 -- a node opened over a client storage reads what its OWN peers send through it,
         // the plane included (a local get answered by a peer's queryable is read here).
         install_shm_reader(&local, &shm_clients);
+        // The plane's link is inert, so what it declares under an aggregate reaches nobody; it is
+        // given the aggregates all the same, so that every session of the node is one participant
+        // that declares alike.
+        local.set_declaration_aggregation(aggregation.clone());
         // R2580 — the plane's face-shaped entry. Its `session` is a CLONE of
         // the field above rather than a move: the two name one session, and the
         // field stays where it is because `local_session` / `drive_local_plane`
@@ -2413,6 +2432,7 @@ impl SharedSession {
             #[cfg(feature = "routing-namespace")]
             namespace,
             policy,
+            aggregation,
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "advanced")]
             tickers: StdMutex::new(BTreeMap::new()),
@@ -2850,6 +2870,9 @@ impl SharedSession {
         actions.set_plain_put_lane(!self.has_policy());
         // R3065 -- the face reads what its peer sends through the node's own clients.
         install_shm_reader(&session, &self.shm_clients);
+        // Before the replay below declares anything on the face: the entities it replays are
+        // declared to the peer under the node's aggregates, one declaration per aggregate.
+        session.set_declaration_aggregation(self.aggregation.clone());
 
         let peer_zid = actions.peer_zid();
         let mut guard = self.admit_under_lock(id, peer_zid.as_deref(), dialled)?;
@@ -9069,5 +9092,137 @@ mod face_up_order_tests {
             None
         });
         assert_eq!(faces, 0, "the first node's link is slot 1, outside the set");
+    }
+}
+
+/// `aggregation/subscribers` on the registry of faces: what each face is declared.
+#[cfg(test)]
+mod aggregation_tests {
+    use super::*;
+    use wz_runtime_tokio_test_support::{establish_capability_pair_between, EstablishedPair};
+    use wz_session_core::inbound::InboundFrame;
+    use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+
+    /// The declarations a link was sent after its `before`-th send: how many, and the bytes of
+    /// the frames that carried them, which the keys they name are read from.
+    fn declarations_since(pair: &EstablishedPair, before: usize) -> (usize, Vec<u8>) {
+        let (mut declarations, mut carried) = (0, Vec::new());
+        for (bytes, _) in pair.resp_driver.snapshot().sends.iter().skip(before) {
+            let Ok(InboundFrame::Frame { payload, .. }) = pair.init_actions.handle_inbound(bytes)
+            else {
+                continue;
+            };
+            let here = parse_frame_payload(&payload)
+                .expect("the frame decodes")
+                .iter()
+                .filter(|message| matches!(message, NetworkMessage::Declare(_)))
+                .count();
+            if here > 0 {
+                declarations += here;
+                carried.extend_from_slice(&payload);
+            }
+        }
+        (declarations, carried)
+    }
+
+    fn names(carried: &[u8], key: &str) -> bool {
+        carried
+            .windows(key.len())
+            .any(|window| window == key.as_bytes())
+    }
+
+    fn no_op() -> SubscriberSink {
+        Arc::new(|| Box::new(|_sample: &dyn SampleView| {}))
+    }
+
+    /// Two subscribers under one aggregate are ONE declaration of the aggregate on each face,
+    /// the face that was up when they were declared and the face that came up afterwards and was
+    /// replayed them, while a key no aggregate includes is declared itself. The declaration is
+    /// retracted with the last subscriber under it and not before. The CONTROL is the same two
+    /// subscribers on a node that states no aggregate: two declarations, each of its own key.
+    #[tokio::test]
+    async fn each_face_is_declared_an_aggregate_once_for_the_subscribers_it_includes() {
+        let control_link =
+            establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let control =
+            SharedSession::new(TokioTime::new(), vec![0x10; 16]).expect("test host entropy");
+        assert!(control.face_up(1, &control_link.resp_actions, false));
+        let before = control_link.resp_driver.snapshot().sends.len();
+        control.declare_subscriber("wz/agg/a".to_owned(), Locality::Any, no_op());
+        control.declare_subscriber("wz/agg/b".to_owned(), Locality::Any, no_op());
+        let (declared, carried) = declarations_since(&control_link, before);
+        assert_eq!(declared, 2, "CONTROL: one declaration per subscriber");
+        assert!(names(&carried, "wz/agg/a") && names(&carried, "wz/agg/b"));
+        assert!(!names(&carried, "wz/agg/**"));
+
+        let aggregation = DeclarationAggregation::new(vec!["wz/agg/**".to_owned()], Vec::new())
+            .expect("a key expression, in a build with the inclusion test");
+        let near = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let late = establish_capability_pair_between(0x05, 0x06, false, false, |_| {}).await;
+        let shared = SharedSession::new_with_resources(
+            TokioTime::new(),
+            vec![0x11; 16],
+            SessionResources {
+                aggregation: aggregation.clone(),
+                ..SessionResources::default()
+            },
+        )
+        .expect("test host entropy");
+        assert_eq!(
+            shared.local_session().declaration_aggregation(),
+            aggregation,
+            "the plane is given the aggregates the faces are"
+        );
+
+        assert!(shared.face_up(1, &near.resp_actions, false));
+        let before = near.resp_driver.snapshot().sends.len();
+        let first = shared.declare_subscriber("wz/agg/a".to_owned(), Locality::Any, no_op());
+        let second = shared.declare_subscriber("wz/agg/b".to_owned(), Locality::Any, no_op());
+        let (declared, carried) = declarations_since(&near, before);
+        assert_eq!(declared, 1, "one declaration for both subscribers");
+        assert!(names(&carried, "wz/agg/**"), "it names the aggregate");
+        assert!(!names(&carried, "wz/agg/a") && !names(&carried, "wz/agg/b"));
+
+        let before = near.resp_driver.snapshot().sends.len();
+        shared.declare_subscriber("wz/other".to_owned(), Locality::Any, no_op());
+        let (declared, carried) = declarations_since(&near, before);
+        assert_eq!(declared, 1);
+        assert!(
+            names(&carried, "wz/other"),
+            "a key no aggregate includes is itself"
+        );
+
+        let late_before = late.resp_driver.snapshot().sends.len();
+        assert!(shared.face_up(2, &late.resp_actions, false));
+        let (declared, carried) = declarations_since(&late, late_before);
+        assert_eq!(
+            declared, 2,
+            "the replay declares the aggregate once and the key outside it once"
+        );
+        assert!(names(&carried, "wz/agg/**") && names(&carried, "wz/other"));
+        assert!(!names(&carried, "wz/agg/a") && !names(&carried, "wz/agg/b"));
+
+        let near_before = near.resp_driver.snapshot().sends.len();
+        let late_before = late.resp_driver.snapshot().sends.len();
+        shared.undeclare_subscriber(first);
+        assert_eq!(
+            (
+                declarations_since(&near, near_before).0,
+                declarations_since(&late, late_before).0
+            ),
+            (0, 0),
+            "the aggregate stands while a subscriber under it does"
+        );
+        let near_before = near.resp_driver.snapshot().sends.len();
+        let late_before = late.resp_driver.snapshot().sends.len();
+        shared.undeclare_subscriber(second);
+        assert_eq!(
+            (
+                declarations_since(&near, near_before).0,
+                declarations_since(&late, late_before).0
+            ),
+            (1, 1),
+            "the last subscriber under the aggregate retracts it on every face"
+        );
     }
 }

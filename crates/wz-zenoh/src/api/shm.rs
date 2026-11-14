@@ -278,58 +278,47 @@ pub(crate) mod transport {
     #[cfg(feature = "unstable")]
     pub(crate) struct Promoter {
         provider: Arc<super::LazyShmProvider>,
-        threshold: usize,
-        put: bool,
-        query: bool,
-        reply: bool,
+        /// Which payloads are copied: the engine's one reading of the configuration, by which the
+        /// C ABI's session decides as well.
+        promotion: wz_capi_core::session_defaults::ShmPromotion,
     }
 
     #[cfg(feature = "unstable")]
     impl Promoter {
-        /// The promoter the configuration asks for, or `None` when it asks for none (shared memory
-        /// off, or its transport optimisation off).
+        /// The promoter of a session whose open compiled `promotion`, or `None` when the session
+        /// has no provider to copy into (shared memory off, or its transport optimisation off).
         pub(crate) fn new(
-            config: &zenoh_config::ExpandedConfig,
+            promotion: wz_capi_core::session_defaults::ShmPromotion,
             provider: Option<&Arc<super::LazyShmProvider>>,
         ) -> Option<Self> {
-            let provider = Arc::clone(provider?);
-            let optimisation = &config.transport().shared_memory().transport_optimization;
-            let listed =
-                |message: zenoh_config::DataMessage| optimisation.messages().contains(&message);
             Some(Self {
-                provider,
-                threshold: *optimisation.message_size_threshold(),
-                put: listed(zenoh_config::DataMessage::Put),
-                query: listed(zenoh_config::DataMessage::Query),
-                reply: listed(zenoh_config::DataMessage::Reply),
+                provider: Arc::clone(provider?),
+                promotion,
             })
         }
 
-        /// Whether the configuration lists `message` for the optimisation. A delete carries no
-        /// payload, and upstream's policy has no category for it.
-        fn lists(&self, message: zenoh_config::DataMessage) -> bool {
-            match message {
-                zenoh_config::DataMessage::Put => self.put,
-                zenoh_config::DataMessage::Query => self.query,
-                zenoh_config::DataMessage::Reply => self.reply,
-                zenoh_config::DataMessage::Delete => false,
-            }
-        }
-
         /// `payload` as a buffer of shared memory, when a `message` of it is to be promoted and
-        /// some peer could read the promoted buffer; `None` when it is to be sent as it is.
+        /// some peer could read the promoted buffer; `None` when it is to be sent as it is. A
+        /// delete carries no payload, and upstream's policy has no category for it.
         pub(crate) fn promote(
             &self,
             message: zenoh_config::DataMessage,
             payload: &ZBytes,
             peer_shares_memory: impl FnOnce() -> bool,
         ) -> Option<ShmSendHandle> {
+            use wz_capi_core::session_defaults::PromotedMessage;
             use zenoh_core::Wait;
             use zenoh_shm::api::provider::shm_provider::{
                 ConstBool, Defragment, GarbageCollect, JustAlloc,
             };
 
-            if !self.lists(message) || payload.is_empty() || payload.len() < self.threshold {
+            let message = match message {
+                zenoh_config::DataMessage::Put => PromotedMessage::Put,
+                zenoh_config::DataMessage::Query => PromotedMessage::Query,
+                zenoh_config::DataMessage::Reply => PromotedMessage::Reply,
+                zenoh_config::DataMessage::Delete => return None,
+            };
+            if !self.promotion.admits(message, payload.len()) {
                 return None;
             }
             if payload.single_shm_slice().is_some() || !peer_shares_memory() {
@@ -477,15 +466,23 @@ pub(crate) mod transport {
         use super::*;
 
         /// A promoter of the configuration whose `transport_optimization` section is
-        /// `optimisation`, its provider made.
+        /// `optimisation`, its provider made, deciding by what the engine's open compiles from
+        /// the same document.
         fn promoter(optimisation: &str) -> Promoter {
-            let config = crate::config::Config::from_json5(&format!(
+            let document = format!(
                 r#"{{ transport: {{ shared_memory: {{
                       transport_optimization: {{ {optimisation} }} }} }} }}"#
-            ))
-            .expect("a configuration zenoh reads")
-            .0
-            .expanded();
+            );
+            let config = crate::config::Config::from_json5(&document)
+                .expect("a configuration zenoh reads")
+                .0
+                .expanded();
+            let node = wz_capi_core::runtime::zenoh_config::ZenohNodeConfig::from_json5(&document)
+                .expect("a document the engine reads")
+                .config;
+            let promotion = wz_capi_core::open_plan::session_defaults_of(&node)
+                .expect("defaults the engine compiles")
+                .shm_promotion;
             let provider = super::super::provider_of(&config).expect("a provider");
             let deadline = Instant::now() + Duration::from_secs(5);
             while !matches!(
@@ -495,7 +492,7 @@ pub(crate) mod transport {
                 assert!(Instant::now() < deadline, "the provider was never made");
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Promoter::new(&config, Some(&provider)).expect("a promoter")
+            Promoter::new(promotion, Some(&provider)).expect("a promoter")
         }
 
         /// The default threshold, 3072 bytes, and one byte past it.

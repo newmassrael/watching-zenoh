@@ -2583,6 +2583,77 @@ where
     }
 }
 
+/// The key expression a data message addresses, an alias resolved through the caller's id space
+/// as [`stats_class`] resolves one: what the session's `stats/filters` are matched against. `None`
+/// for a message with no key expression, and for an alias the space does not hold, which counts
+/// under no filter as it counts in the user space.
+#[cfg(feature = "transport-stats")]
+pub fn stats_keyexpr<F>(msg: &NetworkMessage, resolve_alias: F) -> Option<alloc::string::String>
+where
+    F: Fn(u64) -> Option<alloc::string::String>,
+{
+    #[cfg(not(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )))]
+    let _ = &resolve_alias;
+    match msg {
+        #[cfg(feature = "codec-push")]
+        NetworkMessage::Push(p) => stats_keyexpr_of_wireexpr(&p.keyexpr, &resolve_alias),
+        #[cfg(feature = "codec-request")]
+        NetworkMessage::Request(r) => stats_keyexpr_of_wireexpr(&r.keyexpr, &resolve_alias),
+        #[cfg(feature = "codec-response")]
+        NetworkMessage::Response(r) => stats_keyexpr_of_wireexpr(&r.keyexpr, &resolve_alias),
+        _ => None,
+    }
+}
+
+/// [`stats_keyexpr`] for a Wireexpr a sender holds.
+#[cfg(all(
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+pub fn stats_keyexpr_of_wireexpr<F>(
+    keyexpr: &crate::wire::parts::WireexprOwned,
+    resolve_alias: &F,
+) -> Option<alloc::string::String>
+where
+    F: Fn(u64) -> Option<alloc::string::String>,
+{
+    use wz_codecs::wireexpr::WireexprOwnedVariant as V;
+    let (id, suffix) = match &keyexpr.body {
+        V::WireexprNonlocal(b) => (b.id, b.suffix.as_ref()),
+        V::WireexprLocal(b) => (b.id, b.suffix.as_ref()),
+    };
+    stats_keyexpr_of_key(id, suffix.map(|s| s.as_text().into_inner()), resolve_alias)
+}
+
+/// [`stats_keyexpr`] for a key given as its parts, the mapping `id` and the `suffix`: the literal
+/// when `id` is 0, else the alias's key with the suffix after it.
+#[cfg(feature = "transport-stats")]
+pub fn stats_keyexpr_of_key<F>(
+    id: u64,
+    suffix: Option<&str>,
+    resolve_alias: &F,
+) -> Option<alloc::string::String>
+where
+    F: Fn(u64) -> Option<alloc::string::String>,
+{
+    if id == 0 {
+        return suffix.map(alloc::string::String::from);
+    }
+    let mut keyexpr = resolve_alias(id)?;
+    if let Some(suffix) = suffix {
+        keyexpr.push_str(suffix);
+    }
+    Some(keyexpr)
+}
+
 /// [`push_stats_class`] for a plain `Put` a sender holds as borrowed parts (the key's mapping
 /// `id` and `suffix`, and a payload of `pl_bytes`), with no owned message to read: a plain Put
 /// has no attachment and no shared-memory marker, so its class is the one

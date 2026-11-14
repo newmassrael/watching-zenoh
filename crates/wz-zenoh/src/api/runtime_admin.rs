@@ -296,7 +296,9 @@ mod tests {
     fn the_admin_space_is_off_and_read_only_by_default() {
         for config in [
             zenoh_config::Config::default(),
-            zenoh_config::Config::from_json5("{ mode: \"client\" }").expect("a document"),
+            crate::config::Config::from_json5("{ mode: \"client\" }")
+                .expect("a document")
+                .0,
         ] {
             assert!(!*config.adminspace.enabled());
             assert!(config.adminspace.permissions().read);

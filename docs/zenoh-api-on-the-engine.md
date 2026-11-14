@@ -141,6 +141,19 @@ and the engine begins, what each side owns, which engine, and in what order the 
   with a table of pending declarations. wz has it only inside the tokio engine's transport
   (feature `routing-namespace`). It enters as an engine policy by the rule of section 5 of
   `build-configuration.md`, in its own slice, not as an operation of the port.
+  **Four keys are a session's and not the engine's** (`SESSION_HONOURED_KEYS` in the runtime's
+  reader): `qos/publication`, `transport/shared_memory/mode` and the promotion's
+  `message_size_threshold` and `messages`. Upstream applies each in its session or its runtime,
+  above the transport. The reader reads them once, the open plan compiles them once into the
+  session's `SessionDefaults` (`wz-capi-core/src/session_defaults.rs`), the open carries that
+  value into the registry or the node, and the C ABI and this crate apply it from there: the
+  QoS of a put, a delete and a publisher by `PublicationQos`, the subsystem made at the end of
+  the open by `init_shared_memory`, and the copy of a large payload decided by
+  `ShmPromotion::admits`. Whether a session acts on each is a fact of its own build, so the state
+  of these keys is asked with what the session reaches (`key_state(path, SessionReach)`): this
+  crate reaches all four with `shared-memory` and `unstable`, the zenoh-c ABI the QoS, the
+  subsystem and the copy of a put, and leaves the list of messages unmapped while its query
+  values and replies leave as bytes.
 - **D7. Where upstream and the engine differ, the difference is stated and held, and the default
   is upstream's (C2).** Each is a class of the differential test with the words of both
   behaviours. Known already: the engine's `interfaces` of a link is three-state where upstream's
@@ -1317,7 +1330,11 @@ Each lands whole with its surface lines, tests and faults in one round.
     each sample with `z_timestamp_new`, and the session's node clock learns every time given
     (`NodeHlc::absorb_word`): a program's stamps and the samples' are one order, and the node
     clock's own proposal is that order wherever it could learn the time before it. The other
-    planes (the runtime's, zenoh-c's) carry the node clock's proposal as it is.
+    planes (the runtime's, zenoh-c's) carry the node clock's proposal as it is. A sample that
+    cannot be given a time is refused on every plane and nothing is sent: a pico session with
+    no time left (`PublishError::TimestampExhausted`), and a `trusted-only` node whose clock is
+    not trusted (`PublishError::ClockUntrusted`); pico's doors answer both with
+    `Z_ERR_TIMESTAMP_GENERATION_FAILED`, as pico's put answers a failed `z_timestamp_new`.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

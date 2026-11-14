@@ -84,6 +84,8 @@ fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
         compression: false,
         tx_queue: TxQueueConf::default(),
         link_rx: LinkRxConf::default(),
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+        max_sessions: None,
     }
 }
 

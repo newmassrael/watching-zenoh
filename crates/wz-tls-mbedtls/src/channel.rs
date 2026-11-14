@@ -126,6 +126,34 @@ pub fn arena_peak_reset() {
     unsafe { ffi::wz_tls_arena_peak_reset() }
 }
 
+/// The size of PSA's key store, the bound on sessions held at once that is not the arena: an
+/// established session holds four keys of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyStoreSlots {
+    /// The keys the configuration the channel's C side was compiled with lets PSA hold at once.
+    pub declared: usize,
+    /// The slots of the store the linked library has, counted by the library itself.
+    pub built: usize,
+}
+
+/// The key store's size from both sides, or `None` when the store grows on demand and has no
+/// fixed size. The library and the channel's C side are compiled apart (`build.rs` hands each the
+/// same configuration), so the two counts differ exactly when that configuration did not reach
+/// one of them.
+pub fn key_store_slots() -> Option<KeyStoreSlots> {
+    let (mut declared, mut built) = (0, 0);
+    // SAFETY: both out-pointers are live.
+    let rc = unsafe { ffi::wz_tls_key_store_slots(&mut declared, &mut built) };
+    (rc == 0).then_some(KeyStoreSlots { declared, built })
+}
+
+/// The keys PSA holds at once in the host build: the count `config/wz_tls_crypto_config.h`
+/// declares under `WZ_TLS_HOST`, which `build.rs` defines for `host-lock`. A macro does not cross
+/// into Rust, so the number is stated twice and the crate's tests hold both to the library's own
+/// store ([`key_store_slots`]).
+#[cfg(all(feature = "vendored", feature = "host-lock"))]
+pub const HOST_KEY_SLOTS: usize = 1024;
+
 /// A device's identity: a P-256 key generated in the PSA key store (it never leaves it), a
 /// certificate self-signed over the key, and the zid the key names.
 pub struct Identity {

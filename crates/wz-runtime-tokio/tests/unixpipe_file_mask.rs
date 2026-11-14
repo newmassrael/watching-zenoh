@@ -35,6 +35,7 @@
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use wz_runtime_tokio::link_socket::{LinkDefaults, LinkKind};
 use wz_runtime_tokio::session_open::{bind_locator, AcceptConfig, BoundListener};
 use wz_runtime_tokio::unixpipe_pipeline::{bind_unixpipe, dial_unixpipe, DEFAULT_FILE_MASK};
 use wz_session_core::locator::parse_any_locator;
@@ -102,7 +103,7 @@ impl Drop for ZeroUmask {
 /// so it must not run beside anything else that creates a file.
 ///
 /// Each case RETURNS its complaints instead of panicking, and the test reports
-/// all four together. A case that panicked would hide every case after it, and
+/// all of them together. A case that panicked would hide every case after it, and
 /// what a control probe has to show is exactly WHICH claims it broke and which
 /// it left standing — an aggregate that stops at the first failure cannot say
 /// that.
@@ -122,6 +123,11 @@ fn the_file_mask_reaches_every_fifo_the_link_creates() {
             ("bind", a_bound_listener_carries_the_requested_mask().await),
             ("dedicated", the_dedicated_pair_carries_it_too().await),
             ("locator", the_locator_seam_carries_it().await),
+            ("kind", the_kinds_layer_reaches_a_silent_locator().await),
+            (
+                "kind-under-locator",
+                the_locators_own_mask_wins_over_the_kinds().await,
+            ),
         ] {
             all.extend(found.drain(..).map(|c| format!("[{case}] {c}")));
         }
@@ -255,6 +261,63 @@ async fn the_locator_seam_carries_it() -> Vec<String> {
     if nodes.first().map(|n| n.1) != Some(0o640) {
         out.push(format!(
             "the locator's own #file_mask=416 must reach mkfifo as 0o640: {nodes:?}"
+        ));
+    }
+    drop(bound);
+    out
+}
+
+/// The unixpipe kind's layer, where `transport/link/unixpipe/file_access_mask`
+/// lands: a locator that states no `file_mask` takes the kind's, as upstream
+/// renders the config key under every unixpipe endpoint.
+async fn the_kinds_layer_reaches_a_silent_locator() -> Vec<String> {
+    let dir = case_dir("kind");
+    let base = dir.join("p").to_string_lossy().into_owned();
+    let mut defaults = LinkDefaults::default();
+    // 0o660 in decimal, the spelling upstream's config key takes.
+    defaults
+        .set(LinkKind::Unixpipe, "file_mask=432")
+        .expect("a file_mask span is the unixpipe kind's");
+    let parsed = parse_any_locator(&format!("unixpipe/{base}")).expect("the locator parses");
+    let bound = bind_locator(
+        parsed,
+        &AcceptConfig::default().with_link_defaults(defaults),
+    )
+    .await
+    .expect("the locator binds");
+    let nodes = fifo_modes(&dir);
+    let mut out = Vec::new();
+    if nodes.first().map(|n| n.1) != Some(0o660) {
+        out.push(format!(
+            "the kind's file_mask=432 must reach a silent locator's mkfifo as 0o660: {nodes:?}"
+        ));
+    }
+    drop(bound);
+    out
+}
+
+/// The locator's own `file_mask` wins over the kind's, as an endpoint's
+/// parameters win over its kind's configuration upstream.
+async fn the_locators_own_mask_wins_over_the_kinds() -> Vec<String> {
+    let dir = case_dir("kind-under-locator");
+    let base = dir.join("p").to_string_lossy().into_owned();
+    let mut defaults = LinkDefaults::default();
+    defaults
+        .set(LinkKind::Unixpipe, "file_mask=432")
+        .expect("a file_mask span is the unixpipe kind's");
+    let parsed =
+        parse_any_locator(&format!("unixpipe/{base}#file_mask=416")).expect("the locator parses");
+    let bound = bind_locator(
+        parsed,
+        &AcceptConfig::default().with_link_defaults(defaults),
+    )
+    .await
+    .expect("the locator binds");
+    let nodes = fifo_modes(&dir);
+    let mut out = Vec::new();
+    if nodes.first().map(|n| n.1) != Some(0o640) {
+        out.push(format!(
+            "the locator's file_mask=416 must win over the kind's 432, reaching mkfifo as 0o640: {nodes:?}"
         ));
     }
     drop(bound);

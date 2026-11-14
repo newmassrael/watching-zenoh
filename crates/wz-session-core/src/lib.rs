@@ -1071,6 +1071,19 @@ pub mod frame_encode;
 ))]
 pub mod handshake_encode;
 
+/// The handshake's transport messages as `handshake_encode` writes them and
+/// `inbound` reads them, against the documents that state each whole message.
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive",
+    feature = "transport-keepalive"
+))]
+mod transport_message_parity;
+
 /// Item 895 — transport messages written from EXPLICIT fields (every semantic
 /// field set by the caller, every derived byte computed here) and the stream
 /// prefix a link puts in front of them. The session TX path's
@@ -2223,6 +2236,11 @@ pub mod session_slot_pool_mcu {
 // generated FSM engines).
 #[cfg(feature = "session-multicast")]
 pub mod multicast_dispatch;
+
+/// The rows of a multicast group's member table: fixed, and grown past them on a heap build whose
+/// host lets the table grow. Crate-private; the dispatcher's own storage.
+#[cfg(feature = "session-multicast")]
+mod multicast_peer_rows;
 
 /// Open-debt item 913 — each multicast member's declarations kept apart for the session's
 /// observer, which sees no member: the dispatcher scopes their ids by member and retracts what a

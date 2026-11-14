@@ -338,13 +338,12 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
     // lowlatency open helper flips at Established (the TCP dial/accept path
     // threads a shared one; every non-lowlatency stream link passes a fresh
     // always-false flag, keeping the universal u16 prefix).
-    pub(crate) fn new(reader: R, lowlatency: Arc<AtomicBool>) -> Self {
-        // R2740 — the arena is built HERE rather than taken as an argument,
-        // mirroring upstream's `rx_task_non_uring`, which constructs its own
-        // pool from the link it was handed. Nine `wire_*` call sites construct
-        // this driver and none of them has an opinion about RX buffering;
-        // making them pass one would put the same default in nine places.
-        Self::with_arena(reader, lowlatency, link_arena())
+    pub(crate) fn new(reader: R, lowlatency: Arc<AtomicBool>, rx_buffer_size: usize) -> Self {
+        // The arena is built HERE from the size the link's session reads
+        // (`transport/link/rx/buffer_size`), mirroring upstream's
+        // `rx_task_non_uring`, which constructs its own pool from the link it
+        // was handed and the manager's configured size.
+        Self::with_arena(reader, lowlatency, link_arena(rx_buffer_size))
     }
 
     /// R2742 — the same driver over an arena the CALLER owns.
@@ -376,6 +375,14 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
             ))]
             reactor: None,
         }
+    }
+
+    /// The buffers this link's RX pool holds while no frame is held: the count
+    /// its session's `transport/link/rx/buffer_size` sized it to. Only the
+    /// recycling arena pools per link; the pooled arm shares the node's table.
+    #[cfg(not(feature = "runtime-zero-copy"))]
+    pub fn pooled_rx_buffers(&self) -> usize {
+        self.arena.free_buffers()
     }
 
     /// R2750 — the same driver over a reactor the CALLER owns, for the reason
@@ -2064,7 +2071,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_fired_signal_loses_the_link_with_no_bytes() {
         let (near, _far) = tokio::io::duplex(64);
-        let mut driver = StreamReadDriver::new(near, Arc::new(AtomicBool::new(false)));
+        let mut driver = StreamReadDriver::new(
+            near,
+            Arc::new(AtomicBool::new(false)),
+            wz_session_core::session_init_params::RX_BUFFER_SIZE,
+        );
         let signal = Arc::new(ExpirySignal::default());
         signal.fire();
         driver.set_expiry(Arc::clone(&signal));
@@ -2082,7 +2093,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_signal_fired_while_parked_still_wakes_the_read() {
         let (near, _far) = tokio::io::duplex(64);
-        let mut driver = StreamReadDriver::new(near, Arc::new(AtomicBool::new(false)));
+        let mut driver = StreamReadDriver::new(
+            near,
+            Arc::new(AtomicBool::new(false)),
+            wz_session_core::session_init_params::RX_BUFFER_SIZE,
+        );
         let signal = Arc::new(ExpirySignal::default());
         driver.set_expiry(Arc::clone(&signal));
         let firing = tokio::spawn(async move {
@@ -2104,7 +2119,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_unarmed_driver_does_not_lose_a_silent_link() {
         let (near, _far) = tokio::io::duplex(64);
-        let mut driver = StreamReadDriver::new(near, Arc::new(AtomicBool::new(false)));
+        let mut driver = StreamReadDriver::new(
+            near,
+            Arc::new(AtomicBool::new(false)),
+            wz_session_core::session_init_params::RX_BUFFER_SIZE,
+        );
         let parked =
             tokio::time::timeout(std::time::Duration::from_secs(3600), driver.poll_event()).await;
         assert!(
@@ -2131,6 +2150,7 @@ mod ring_selection {
     use super::*;
     use crate::link_rx_arena::LinkRxArena;
     use crate::uring_reactor::UringReactor;
+    use wz_session_core::session_init_params::RX_BUFFER_SIZE;
 
     fn framed(payload: &[u8]) -> Vec<u8> {
         let mut wire = (payload.len() as u16).to_le_bytes().to_vec();
@@ -2211,7 +2231,8 @@ mod ring_selection {
     async fn a_descriptor_bearing_half_is_read_through_the_ring() {
         let (read, mut peer) = tcp_pair().await;
         let mut driver =
-            StreamReadDriver::new(read, Arc::new(AtomicBool::new(false))).on_reactor(own_reactor());
+            StreamReadDriver::new(read, Arc::new(AtomicBool::new(false)), RX_BUFFER_SIZE)
+                .on_reactor(own_reactor());
 
         peer.write_all(&framed(b"alpha")).await.expect("write");
         assert_eq!(payload_of(within(driver.poll_event()).await), b"alpha");
@@ -2232,7 +2253,8 @@ mod ring_selection {
     async fn a_half_with_no_descriptor_keeps_the_framed_body() {
         let (near, mut far) = tokio::io::duplex(64);
         let mut driver =
-            StreamReadDriver::new(near, Arc::new(AtomicBool::new(false))).on_reactor(own_reactor());
+            StreamReadDriver::new(near, Arc::new(AtomicBool::new(false)), RX_BUFFER_SIZE)
+                .on_reactor(own_reactor());
 
         far.write_all(&framed(b"beta")).await.expect("write");
         assert_eq!(payload_of(within(driver.poll_event()).await), b"beta");
@@ -2255,7 +2277,8 @@ mod ring_selection {
     #[tokio::test]
     async fn a_descriptor_alone_does_not_put_a_link_on_a_ring() {
         let (read, mut peer) = tcp_pair().await;
-        let mut driver = StreamReadDriver::new(read, Arc::new(AtomicBool::new(false)));
+        let mut driver =
+            StreamReadDriver::new(read, Arc::new(AtomicBool::new(false)), RX_BUFFER_SIZE);
 
         peer.write_all(&framed(b"gamma")).await.expect("write");
         assert_eq!(payload_of(within(driver.poll_event()).await), b"gamma");
@@ -2278,7 +2301,8 @@ mod ring_selection {
     async fn an_expiring_link_keeps_the_framed_body() {
         let (read, mut peer) = tcp_pair().await;
         let mut driver =
-            StreamReadDriver::new(read, Arc::new(AtomicBool::new(false))).on_reactor(own_reactor());
+            StreamReadDriver::new(read, Arc::new(AtomicBool::new(false)), RX_BUFFER_SIZE)
+                .on_reactor(own_reactor());
         driver.set_expiry(Arc::new(ExpirySignal::default()));
 
         peer.write_all(&framed(b"delta")).await.expect("write");

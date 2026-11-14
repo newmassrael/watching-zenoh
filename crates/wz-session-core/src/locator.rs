@@ -506,7 +506,16 @@ impl LinkTlsMaterial {
     /// it. `false` means an expired peer identity keeps its link, which is
     /// upstream's default too and not a wz narrowing.
     pub fn closes_on_expiration(&self) -> bool {
-        self.close_link_on_expiration.unwrap_or(false)
+        self.closes_on_expiration_over(None)
+    }
+
+    /// `close_link_on_expiration` laid over `kind`, the value the link kind's own
+    /// configuration states (`transport/link/tls/close_link_on_expiration`, which
+    /// upstream renders under every tls and quic endpoint): the tail's key wins
+    /// when it names one, as an endpoint's parameters win over its kind's, and
+    /// upstream's `false` stands when neither does.
+    pub fn closes_on_expiration_over(&self, kind: Option<bool>) -> bool {
+        self.close_link_on_expiration.or(kind).unwrap_or(false)
     }
 
     /// R2609 — `tls_handshake_timeout_ms`, defaulted the way upstream defaults
@@ -937,6 +946,13 @@ pub fn config_span_keys(params: &str) -> impl Iterator<Item = &str> {
         .split(LOCATOR_PARAM_LIST_SEPARATOR)
         .filter_map(|pair| pair.split_once(LOCATOR_PARAM_FIELD_SEPARATOR))
         .map(|(key, _)| key)
+}
+
+/// The value a `key=value` span gives `key`: the first one, as the private `lookup_param` reads
+/// it and as upstream's `Parameters::get` does. A consumer that reports what a span already
+/// states asks this rather than re-splitting the span.
+pub fn config_span_value<'a>(params: &'a str, key: &'a str) -> Option<&'a str> {
+    lookup_param(params, key)
 }
 
 fn lookup_param_all<'a>(params: &'a str, key: &'a str) -> impl Iterator<Item = &'a str> {
@@ -1866,6 +1882,18 @@ fn parse_file_mask(config: &str) -> Result<Option<u32>, UnixpipeLocatorError> {
                     value: value.to_string(),
                 })
         }
+    }
+}
+
+impl UnixpipeEndpoint {
+    /// The `file_mask` a bare `key=value;...` span names, read exactly as a locator's `#`-config
+    /// tail is: the unixpipe twin of [`LinkTlsMaterial::from_config_span`]. Upstream renders
+    /// `transport/link/unixpipe/file_access_mask` into a span of this shape and merges it under
+    /// every unixpipe endpoint's own parameters
+    /// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs` @ `properties.push((config::FILE_ACCESS_MASK, &file_access_mask_));`),
+    /// so one parser serves both, with the same refusal of a value that is not a `u32`.
+    pub fn file_mask_from_config_span(config: &str) -> Result<Option<u32>, UnixpipeLocatorError> {
+        parse_file_mask(config)
     }
 }
 
@@ -3591,6 +3619,37 @@ mod tests {
         );
     }
 
+    /// A bare span reads `file_mask` as a locator tail does: the value, nothing for a span
+    /// that names none, and the same refusal of a value that is not a `u32`.
+    #[test]
+    fn a_bare_span_reads_the_file_mask_as_a_locator_tail_does() {
+        assert_eq!(
+            UnixpipeEndpoint::file_mask_from_config_span("file_mask=416"),
+            Ok(Some(416))
+        );
+        assert_eq!(
+            UnixpipeEndpoint::file_mask_from_config_span("iface=eth0"),
+            Ok(None)
+        );
+        assert_eq!(
+            UnixpipeEndpoint::file_mask_from_config_span("file_mask=0o600"),
+            Err(UnixpipeLocatorError::BadConfigValue {
+                key: "file_mask",
+                value: "0o600".to_string(),
+            })
+        );
+    }
+
+    /// A span's value for a key is its first, as a locator tail's is.
+    #[test]
+    fn a_span_value_is_the_first_the_span_names() {
+        assert_eq!(
+            config_span_value("so_rcvbuf=1;so_sndbuf=2;so_rcvbuf=3", "so_rcvbuf"),
+            Some("1")
+        );
+        assert_eq!(config_span_value("so_sndbuf=2", "so_rcvbuf"), None);
+    }
+
     /// The refusal survives the `AnyLocator` dispatch rather than being
     /// flattened into "not a unixpipe locator" — the seam every caller uses.
     #[test]
@@ -3915,6 +3974,25 @@ mod tests {
         assert_eq!(p.tls, None);
         assert!(p.tls().is_empty());
         assert_eq!(p.tls(), &LinkTlsMaterial::NONE);
+    }
+
+    /// The tail's `close_link_on_expiration` is laid over the kind's: the tail's
+    /// own value wins in both directions, the kind's stands when the tail is
+    /// silent, and upstream's `false` when neither states one.
+    #[test]
+    fn the_tails_expiry_flag_is_laid_over_the_kinds() {
+        let at = |tail: &str| {
+            parse_locator(&alloc::format!("tls/1.2.3.4:7447#{tail}")).expect("addr parses")
+        };
+        let silent = at("iface=eth0");
+        assert!(silent.tls().closes_on_expiration_over(Some(true)));
+        assert!(!silent.tls().closes_on_expiration_over(Some(false)));
+        assert!(!silent.tls().closes_on_expiration_over(None));
+        let off = at("close_link_on_expiration=false");
+        assert!(!off.tls().closes_on_expiration_over(Some(true)));
+        let on = at("close_link_on_expiration=true");
+        assert!(on.tls().closes_on_expiration_over(Some(false)));
+        assert!(on.tls().closes_on_expiration_over(None));
     }
 
     /// R2600 — both tail booleans parse, default upstream's way, and refuse

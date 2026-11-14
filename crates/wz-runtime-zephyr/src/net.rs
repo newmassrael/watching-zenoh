@@ -62,13 +62,6 @@ extern "C" {
     /// through the same seam.
     fn wz_yield_ms(ms: i32);
 
-    /// The board's own IPv4 address on the interface the sessions run on: write
-    /// its four octets, most significant first, to `out[0..4]` and return 1, or
-    /// return 0 while it has none (a DHCP lease not yet granted, a link not up).
-    /// A board serves it from the net stack's interface, so the address is
-    /// whatever the interface really holds, never a constant of the firmware.
-    fn wzApplicationGetIpv4Address(out: *mut u8) -> i32;
-
     /// The node's zenoh id: write up to `cap` bytes to `out` and return how many
     /// (1 to 16), or return 0 when the board has no identity to give. A board
     /// serves it from the link-layer address of the interface its sessions run
@@ -90,6 +83,17 @@ extern "C" {
     /// (`subsys/net/ip/net_context.c`, "IPv6 disabled"), and `EAFNOSUPPORT` for a family it does
     /// not know. `errno` is a macro Rust cannot read, so the board answers it from C.
     fn wz_net_socket_family_refused() -> c_int;
+}
+
+#[cfg(wz_net_ipv4)]
+extern "C" {
+    /// The board's own IPv4 address on the interface the sessions run on: write
+    /// its four octets, most significant first, to `out[0..4]` and return 1, or
+    /// return 0 while it has none (a DHCP lease not yet granted, a link not up).
+    /// A board serves it from the net stack's interface, so the address is
+    /// whatever the interface really holds, never a constant of the firmware.
+    /// Defined by the board on an image with `CONFIG_NET_IPV4`.
+    fn wzApplicationGetIpv4Address(out: *mut u8) -> i32;
 }
 
 #[cfg(wz_net_ipv6)]
@@ -126,9 +130,15 @@ pub fn board_ip() -> Option<IpAddr> {
     {
         board_ipv6().map(IpAddr::V6)
     }
-    #[cfg(not(wz_node_ipv6))]
+    #[cfg(all(not(wz_node_ipv6), wz_net_ipv4))]
     {
         board_ipv4().map(IpAddr::from)
+    }
+    // A stack with neither family (an lwIP image, whose Zephyr has no networking) has no address
+    // of Zephyr's to give.
+    #[cfg(all(not(wz_node_ipv6), not(wz_net_ipv4)))]
+    {
+        None
     }
 }
 
@@ -160,7 +170,9 @@ fn await_board<T>(budget_ms: u32, read: fn() -> Option<T>) -> Option<T> {
 ///
 /// The board answering 1 with 0.0.0.0 is read as no address: an unspecified
 /// address is what a bound-to-nothing interface reports, and a link that names
-/// itself `udp/0.0.0.0:<port>` is not one a peer can reach.
+/// itself `udp/0.0.0.0:<port>` is not one a peer can reach. Only on an image whose stack has
+/// IPv4 (`CONFIG_NET_IPV4`).
+#[cfg(wz_net_ipv4)]
 pub fn board_ipv4() -> Option<[u8; 4]> {
     let mut octets = [0u8; 4];
     // SAFETY: the hook writes four bytes through a pointer to a live local.
@@ -189,6 +201,7 @@ pub fn board_zid_fixed() -> Option<([u8; ZID_MAX], usize)> {
 /// Wait up to `budget_ms` for the board to have an IPv4 address, as [`await_board_ip`] waits for
 /// the address of the node's family: what an image whose interface is configured in IPv4 by its
 /// own Kconfig reads.
+#[cfg(wz_net_ipv4)]
 pub fn await_board_ipv4(budget_ms: u32) -> Option<[u8; 4]> {
     await_board(budget_ms, board_ipv4)
 }
@@ -851,9 +864,9 @@ impl DatagramSocket for ZephyrUdpSocket {
 /// `wz_runtime_coop::udp_link::UdpDriver`; its constructors and its behaviour are documented there.
 pub type UdpDriver<B, T> = wz_runtime_coop::udp_link::UdpDriver<ZephyrUdpSocket, B, T>;
 
-/// The heap profile's driver: its receive buffer is a `Vec<u8>` of the capacity the link was
-/// given, and its frames are encoded into a [`HeapTx`] of the capacity it was given, if any.
 wz_runtime_coop::with_heap_link_seams! {
+    /// The heap profile's driver: its receive buffer is a `Vec<u8>` of the capacity the link was
+    /// given, and its frames are encoded into a [`HeapTx`] of the capacity it was given, if any.
     #[cfg(feature = "alloc")]
     pub type ZephyrUdpDriver = UdpDriver<Vec<u8>, HeapTx>;
 }
@@ -906,15 +919,16 @@ pub struct ZephyrGroupTransport<const RX: usize> {
 
 impl<const RX: usize> ZephyrGroupTransport<RX> {
     /// Bind the wildcard address of the group's family on the group's port, join `group` on
-    /// `interface` (for IPv4 the board's own address, see [`board_ipv4`]; for IPv6 an index, or
+    /// `interface` (for IPv4 the board's own address, see `board_ipv4`; for IPv6 an index, or
     /// the routing's choice, which is the default interface), and send to it with the hop limit
-    /// `hops`. An interface named in the other family is [`ZephyrNetError::InterfaceFamily`],
-    /// before a socket is opened, and an IPv6 group on an image without IPv6
-    /// [`ZephyrNetError::NoFamily`], from the bind.
+    /// `hops` when one is stated; `None` leaves the stack's own, as zenoh sets the TTL only when
+    /// its endpoint states `ttl` (the same rule as `wz_runtime_posix::group`). An interface named
+    /// in the other family is [`ZephyrNetError::InterfaceFamily`], before a socket is opened, and
+    /// an IPv6 group on an image without IPv6 [`ZephyrNetError::NoFamily`], from the bind.
     pub fn join(
         group: SocketAddr,
         interface: GroupInterface,
-        hops: u8,
+        hops: Option<u8>,
     ) -> Result<Self, ZephyrNetError> {
         if !interface.names_for(&group) {
             return Err(ZephyrNetError::InterfaceFamily);
@@ -936,7 +950,9 @@ impl<const RX: usize> ZephyrGroupTransport<RX> {
         };
         if let Some(socket) = &transport.socket {
             socket.set_multicast_interface(interface)?;
-            socket.set_multicast_hops(hops)?;
+            if let Some(hops) = hops {
+                socket.set_multicast_hops(hops)?;
+            }
         }
         Ok(transport)
     }
@@ -985,11 +1001,14 @@ impl<const RX: usize> GroupTransport for ZephyrGroupTransport<RX> {
     /// going down through events this thread does not wait on, and the address
     /// hook is the one read the profile already has: the one of the group's family.
     fn carrier_up(&self) -> bool {
+        // `join` makes no group of a family the image's stack has not: its bind is refused.
         match self.group {
+            #[cfg(wz_net_ipv4)]
             SocketAddr::V4(_) => board_ipv4().is_some(),
+            #[cfg(not(wz_net_ipv4))]
+            SocketAddr::V4(_) => false,
             #[cfg(wz_net_ipv6)]
             SocketAddr::V6(_) => board_ipv6().is_some(),
-            // `join` makes no IPv6 group on an image without IPv6.
             #[cfg(not(wz_net_ipv6))]
             SocketAddr::V6(_) => false,
         }

@@ -146,7 +146,7 @@ pub use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatch
 use wz_session_core::multicast_join::encode_join;
 /// Open-debt item 900 — the group profile a member advertises; see the
 /// re-export of [`MulticastDispatcher`] above for why it is public here.
-pub use wz_session_core::multicast_params::MulticastParams;
+pub use wz_session_core::multicast_params::{GroupJoinRule, MulticastParams};
 // R311mh — the RX dispatch SSOTs: a reassembly build drives the reassembly-aware
 // dispatch + sweep (the tail wiring lives in `multicast_rx`, not hand-mirrored
 // here); a non-reassembly build calls the bare classify + acts on Close only.
@@ -618,7 +618,11 @@ where
 ///
 /// The bind's or the open's error, after the machine has heard `link.lost`
 /// (the session is then Stopped and admits nothing); `NotConnected` when the
-/// session asked for no link and `link` holds none.
+/// session asked for no link and `link` holds none; `InvalidInput`, naming
+/// `transport/multicast/max_sessions`, when the dispatcher's config states a cap
+/// on the members that its table does not grow to hold
+/// ([`MulticastDispatcher::stated_cap_fits`]), before anything is bound and with
+/// the session left Idle.
 pub async fn open_multicast_session<'l, D, B, Fut, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     link: &'l mut MulticastLink<D, B>,
@@ -628,6 +632,9 @@ where
     B: FnMut() -> Fut,
     Fut: core::future::Future<Output = std::io::Result<D>>,
 {
+    dispatcher
+        .stated_cap_fits()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
     let created = dispatcher.create();
     perform_link_duties(dispatcher, link, created).await?;
     link.driver().ok_or_else(|| {
@@ -940,6 +947,12 @@ where
     // and opens the link here, so a link that cannot be bound ends the session
     // before anything is sent. A session already brought up (by
     // `open_multicast_session`, or by an earlier drive) asks for nothing.
+    // A table that cannot hold the cap its config states is never brought up
+    // (`MulticastDispatcher::create`); the loop says why rather than end quietly.
+    if let Err(refusal) = dispatcher.stated_cap_fits() {
+        log::error!("multicast group not opened: {refusal}");
+        return MulticastOutcome::Stopped;
+    }
     let created = dispatcher.create();
     if perform_link_duties(dispatcher, link, created)
         .await
@@ -1495,6 +1508,8 @@ fn router_group_params(
                 req_id_res,
                 batch_size,
             },
+        join_rule,
+        max_sessions,
     } = profile;
     wz_session_core::multicast_params::MulticastParams {
         whatami: wz_session_core::WhatAmI::Router,
@@ -1508,6 +1523,8 @@ fn router_group_params(
         compression,
         tx_queue,
         link_rx,
+        join_rule,
+        max_sessions,
     }
 }
 
@@ -1523,7 +1540,11 @@ pub struct GroupBeacon {
     pub lease_ms: u64,
     /// How often the router beacons, in milliseconds.
     pub join_interval_ms: u64,
-    /// The 2-bit wire code of the sequence number resolution.
+    /// The 2-bit wire code of the sequence number resolution: the node's
+    /// `transport/link/tx/sequence_number_resolution`, the one its unicast sessions offer, as
+    /// upstream's multicast transport states its manager's one resolution. A member whose JOIN
+    /// states another is ignored
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @ `if join.resolution != self.manager.config.resolution {`).
     pub seq_num_res: u8,
     /// The 2-bit wire code of the request id resolution.
     pub req_id_res: u8,
@@ -1558,6 +1579,12 @@ pub struct RouterGroupProfile {
     pub link_rx: wz_session_core::session_init_params::LinkRxConf,
     /// What the router's beacon states besides its identity.
     pub beacon: GroupBeacon,
+    /// Whose rule the router judges a member's Join by: its preset's upstream's.
+    pub join_rule: GroupJoinRule,
+    /// How many members the router holds on the group at once
+    /// (`transport/multicast/max_sessions`), or `None` for no cap of the node's own
+    /// ([`MulticastParams::max_sessions`]).
+    pub max_sessions: Option<usize>,
 }
 
 /// The future a group face's bind returns, borrowing the face's options.
@@ -1755,8 +1782,9 @@ where
 {
     use crate::runtime_impl::TokioTime;
 
-    // A group serves many members; the bound is the multicast dispatcher's fixed
-    // peer-table capacity.
+    // The table's fixed rows. A heap face grows past them to the cap the profile states
+    // (`transport/multicast/max_sessions`), so this is how many members it holds without
+    // allocating, and the bound only when no cap is stated.
     const MCAST_MAX_PEERS: usize = 32;
     let GroupFaceSpec {
         label,
@@ -1777,8 +1805,11 @@ where
     let clock = TokioTime::new();
     let new_dispatcher = || {
         #[cfg_attr(not(feature = "codec-declare"), allow(unused_mut))]
-        let mut dispatcher =
-            MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
+        let mut dispatcher = MulticastDispatcher::<MCAST_MAX_PEERS>::new(
+            MulticastConfig::new(params.lease_ms)
+                .with_max_sessions(params.max_sessions)
+                .growing(),
+        );
         #[cfg(feature = "codec-declare")]
         if scope_members {
             dispatcher.scope_member_declarations();
@@ -2665,6 +2696,8 @@ mod tests {
             compression: false,
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+            join_rule: GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 
@@ -2868,6 +2901,8 @@ mod tests {
                 req_id_res: 0x02,
                 batch_size: 2_048,
             },
+            join_rule: GroupJoinRule::Pico,
+            max_sessions: None,
         });
         assert_eq!(group.tx_queue, operator);
         assert!(group.is_qos);
@@ -2896,7 +2931,11 @@ mod tests {
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             beacon,
+            join_rule: GroupJoinRule::Zenoh,
+            max_sessions: Some(9),
         });
+        assert_eq!(group.join_rule, GroupJoinRule::Zenoh);
+        assert_eq!(group.max_sessions, Some(9), "the node's member cap");
         assert_eq!(
             (
                 group.lease_ms,
@@ -3549,10 +3588,9 @@ mod tests {
     /// pico's existing-peer branch (`src/transport/multicast/rx.c`) is the
     /// upstream: it compares `_seq_num_res` / `_req_id_res` / `_batch_size`
     /// against its own constants and removes the peer from the list when any
-    /// differs, updating SNs and lease only when they all match. zenoh does the
-    /// opposite (`handle_join_from_peer` ignores the Join and keeps the peer),
-    /// so this test pins WHICH upstream wz follows — a fact no compile can
-    /// carry and the one an interop reader needs.
+    /// differs, updating SNs and lease only when they all match. This is the
+    /// node of zenoh-pico's rule (`params` states it); under zenoh's rule the
+    /// member keeps its slot (the twin below).
     ///
     /// The reason is asserted, not just the eviction: `CapabilitiesChanged` is
     /// a third cause, and an implementation that reused `Closed` here would
@@ -3606,15 +3644,12 @@ mod tests {
         );
     }
 
-    /// An admitted peer whose re-JOIN announces another protocol version is
-    /// dropped as `CapabilitiesChanged`, as a changed batch size is above. The
-    /// version is one of the terms a group's members must share, and zenoh's
-    /// known-peer check lists it first among them
-    /// (`io/zenoh-transport/src/multicast/rx.rs` @
-    /// `if join.version != peer.version`); wz drops where zenoh ignores, for
-    /// the reason the test above gives.
+    /// An admitted peer whose re-JOIN announces another protocol version keeps its slot under
+    /// zenoh-pico's rule, which ignores such a Join before it looks the member up
+    /// (`src/transport/multicast/rx.c` @ `if (msg->_version != Z_PROTO_VERSION) {`), and the Join
+    /// is counted as refused. A changed batch size, above, is the case pico drops.
     #[tokio::test]
-    async fn a_rejoin_announcing_another_version_drops_the_admitted_peer() {
+    async fn a_rejoin_announcing_another_version_is_ignored_under_picos_rule() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
         let good = params(&peer_b);
         let mut link = FakeDriver::link_with([
@@ -3639,14 +3674,164 @@ mod tests {
         )
         .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
-        assert_eq!(dispatcher.active_peers(), 0);
-        let lost = departures(&seen);
-        assert_eq!(lost.len(), 1, "one departure, once; got {lost:?}");
-        assert_eq!(lost[0].peer.as_slice(), &peer_b);
-        assert_eq!(
-            lost[0].reason,
-            wz_session_core::driver_loop::MulticastPeerLostReason::CapabilitiesChanged,
+        assert_eq!(dispatcher.active_peers(), 1, "the member keeps its slot");
+        assert!(departures(&seen).is_empty(), "and nobody is told it left");
+        assert_eq!(dispatcher.incompatible_joins(), 1, "the Join was refused");
+    }
+
+    /// Under zenoh's rule a member whose re-JOIN changes its batch size keeps its slot: the Join
+    /// is refused and counted, and nothing it changed is taken
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @ `fn handle_join_from_peer(`). Upstream then
+    /// ends its whole transport, which wz does not (`GroupJoinRule`). The same Join under
+    /// zenoh-pico's rule drops the member (the test above).
+    #[tokio::test]
+    async fn a_rejoin_with_another_batch_size_keeps_the_member_under_zenohs_rule() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let good = params(&peer_b);
+        let mut changed = params(&peer_b);
+        changed.batch_size = good.batch_size / 2;
+        let mut link = FakeDriver::link_with([(join0(&good), src(2)), (join0(&changed), src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+        let (seen, sink) = departure_sink();
+        let ours = MulticastParams {
+            join_rule: GroupJoinRule::Zenoh,
+            ..params(&[0xAA, 0xBB, 0xCC, 0xDD])
+        };
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &ours,
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
+            &mut link,
+            &clock,
+            sink,
+            &MulticastTxProducer::new(),
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 1, "the member keeps its slot");
+        assert!(departures(&seen).is_empty(), "and nobody is told it left");
+        assert_eq!(dispatcher.incompatible_joins(), 1, "the Join was refused");
+    }
+
+    /// A member that announces a batch size not the node's own is never admitted, under either
+    /// rule, and its Join is counted: zenoh's 8,192-byte multicast batch and zenoh-pico's 2,048 are
+    /// not read by each other's members, which is the upstreams' own fact.
+    #[tokio::test]
+    async fn a_member_of_another_batch_size_is_not_admitted_under_either_rule() {
+        for rule in [GroupJoinRule::Zenoh, GroupJoinRule::Pico] {
+            let mut theirs = params(&[0x01, 0x02, 0x03, 0x04]);
+            theirs.batch_size = 8_192;
+            let mut link = FakeDriver::link_with([(join0(&theirs), src(2))]);
+            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+            let clock = TokioTime::new();
+            let (_seen, sink) = departure_sink();
+            let ours = MulticastParams {
+                join_rule: rule,
+                ..params(&[0xAA, 0xBB, 0xCC, 0xDD])
+            };
+            let outcome = drive_multicast_session(
+                &mut dispatcher,
+                MulticastDriveConfig {
+                    params: &ours,
+                    tick_ms: 5,
+                    max_iters: Some(4),
+                },
+                &mut link,
+                &clock,
+                sink,
+                &MulticastTxProducer::new(),
+            )
+            .await;
+            assert_eq!(outcome, MulticastOutcome::IterationLimit, "{rule:?}");
+            assert_eq!(dispatcher.active_peers(), 0, "{rule:?}: not admitted");
+            assert_eq!(dispatcher.incompatible_joins(), 1, "{rule:?}: counted");
+        }
+    }
+
+    /// zenoh asks whether its table has room for a new member before it reads the Join's terms
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @
+    /// `if zread!(self.peers).len() >= self.manager.config.multicast.max_sessions {`), so a Join of
+    /// another batch size that meets a full table is turned away as a refusal under its rule.
+    /// zenoh-pico reads the terms first, and counts the same Join incompatible.
+    #[tokio::test]
+    async fn a_full_table_turns_a_join_away_before_its_terms_under_zenohs_rule_only() {
+        for (rule, refusals, incompatible) in
+            [(GroupJoinRule::Zenoh, 1, 0), (GroupJoinRule::Pico, 0, 1)]
+        {
+            let member = params(&[0x01, 0x02, 0x03, 0x04]);
+            let mut other_batch = params(&[0x05, 0x06, 0x07, 0x08]);
+            other_batch.batch_size = 8_192;
+            let mut link =
+                FakeDriver::link_with([(join0(&member), src(2)), (join0(&other_batch), src(3))]);
+            let mut dispatcher = MulticastDispatcher::<4>::new(
+                MulticastConfig::new(5_000).with_max_sessions(Some(1)),
+            );
+            let clock = TokioTime::new();
+            let (_seen, sink) = departure_sink();
+            let ours = MulticastParams {
+                join_rule: rule,
+                ..params(&[0xAA, 0xBB, 0xCC, 0xDD])
+            };
+            let outcome = drive_multicast_session(
+                &mut dispatcher,
+                MulticastDriveConfig {
+                    params: &ours,
+                    tick_ms: 5,
+                    max_iters: Some(8),
+                },
+                &mut link,
+                &clock,
+                sink,
+                &MulticastTxProducer::new(),
+            )
+            .await;
+            assert_eq!(outcome, MulticastOutcome::IterationLimit, "{rule:?}");
+            assert_eq!(
+                dispatcher.active_peers(),
+                1,
+                "{rule:?}: the first member holds the one place"
+            );
+            assert_eq!(dispatcher.join_refusals(), refusals, "{rule:?}: refusals");
+            assert_eq!(
+                dispatcher.incompatible_joins(),
+                incompatible,
+                "{rule:?}: incompatible Joins"
+            );
+        }
+    }
+
+    /// A dispatcher whose table does not grow and whose config states more members than it has
+    /// rows is not opened: the error names the key, nothing is bound, and the session stays Idle.
+    #[tokio::test]
+    async fn an_open_refuses_a_stated_cap_its_table_cannot_hold() {
+        let (mut link, _sent) = FakeDriver::with([]).into_link();
+        let mut dispatcher =
+            MulticastDispatcher::<4>::new(MulticastConfig::new(5_000).with_max_sessions(Some(5)));
+        let err = match open_multicast_session(&mut dispatcher, &mut link).await {
+            Ok(_) => panic!("a cap of five on a table of four rows is not opened"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            err.to_string().contains("transport/multicast/max_sessions"),
+            "{err}"
         );
+        assert_eq!(dispatcher.session_state(), SessionFsmMulticastState::Idle);
+        assert!(link.driver().is_none(), "nothing was bound");
+
+        // The control: the same table under a cap it holds opens.
+        let (mut link, _sent) = FakeDriver::with([]).into_link();
+        let mut dispatcher =
+            MulticastDispatcher::<4>::new(MulticastConfig::new(5_000).with_max_sessions(Some(4)));
+        assert!(open_multicast_session(&mut dispatcher, &mut link)
+            .await
+            .is_ok());
+        assert!(dispatcher.is_running());
     }
 
     /// R2379 ANTI-VACUITY twin: a re-JOIN whose capabilities MATCH keeps the
@@ -3694,7 +3879,7 @@ mod tests {
     /// R2379 — an unspeakable JOIN from an address with NO admitted peer
     /// reports nothing.
     ///
-    /// The refusal itself is old behaviour (`validate_join` has always dropped
+    /// The refusal itself is old behaviour (`judge_join` has always dropped
     /// it); what is new is that the refusal path now reaches the dispatcher, so
     /// this pins that it cannot MANUFACTURE a departure for a peer that never
     /// existed — the same invariant `close_by_src_with` states for an

@@ -34,15 +34,15 @@ use alloc::vec::Vec;
 
 use crate::parse_error::InboundParseError;
 
-#[cfg(feature = "alloc")]
-use crate::ext_chain::decode_ext_chain;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
     feature = "codec-close",
     feature = "codec-keep-alive"
 ))]
-use crate::ext_chain::decode_handshake_ext_chain_into;
+use crate::ext_chain::collect_handshake_ext_chain;
+#[cfg(feature = "alloc")]
+use crate::ext_chain::decode_ext_chain;
 pub use crate::ext_chain::ExtChainOwned;
 #[cfg(feature = "alloc")]
 use crate::link::RxBytes;
@@ -57,6 +57,7 @@ use sce_forge_runtime::codec::CodecError;
     feature = "codec-init-body",
     feature = "codec-open-body",
     feature = "codec-close",
+    feature = "codec-keep-alive",
     all(
         feature = "codec-frame",
         feature = "storage-profile",
@@ -90,16 +91,20 @@ use crate::transport_profile::ExtEntryOwned;
 ))]
 use wz_codecs::wire_const;
 
-#[cfg(feature = "codec-close")]
-use wz_codecs::close::Close;
 #[cfg(feature = "codec-init-body")]
-use wz_codecs::init_body::{InitBody, InitBodyOwned};
+use wz_codecs::init_body::InitBodyOwned;
 #[cfg(all(feature = "alloc", feature = "codec-join"))]
 use wz_codecs::join::JoinOwned;
-#[cfg(feature = "codec-keep-alive")]
-use wz_codecs::keep_alive::KeepAlive;
 #[cfg(feature = "codec-open-body")]
-use wz_codecs::open_body::{OpenBody, OpenBodyOwned};
+use wz_codecs::open_body::OpenBodyOwned;
+#[cfg(feature = "codec-close")]
+use wz_codecs::transport_close::TransportCloseView;
+#[cfg(feature = "codec-init-body")]
+use wz_codecs::transport_init::TransportInitView;
+#[cfg(feature = "codec-keep-alive")]
+use wz_codecs::transport_keep_alive::TransportKeepAliveView;
+#[cfg(feature = "codec-open-body")]
+use wz_codecs::transport_open::TransportOpenView;
 
 /// The storage profile a handshake body is decoded into, chosen with the rest of
 /// the transport profile ([`crate::transport_profile::HandshakeStorage`]).
@@ -1092,7 +1097,7 @@ pub(crate) fn parse_fragment_in_place(
 /// through (the arm that builds it, this function, the one that decodes the unit, the one that
 /// judges it), and the handshake's parse is the deepest path of the fixed-memory client's stack.
 /// `out` is left as it was when the unit does not decode and as far decoded as it got when a
-/// chain does not.
+/// chain is not kept (a handshake chain past the bound, or a heap chain that does not decode).
 #[inline(never)]
 fn parse_unit_into(
     bytes: &[u8],
@@ -1106,48 +1111,22 @@ fn parse_unit_into(
     );
     let header = *bytes.first().ok_or(InboundParseError::Empty)?;
     let mid = header & 0x1F;
-    // R311g1 — `flags` extraction is gated on the same predicate as
-    // the dispatch arms that consume it; when every codec-* is off
-    // (minus-all-codecs lane) only the Unknown fall-through arm
-    // remains and `flags` would otherwise be unused.
-    #[cfg(any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
-        feature = "codec-close",
-        feature = "codec-keep-alive",
-        all(feature = "alloc", feature = "codec-frame")
-    ))]
+    // The header's flags, its chain flag and a cursor past it are the Frame and
+    // Fragment arms' alone: each handshake message is read whole, header
+    // included, by its document, in a function of its own.
+    #[cfg(all(feature = "alloc", feature = "codec-frame"))]
     let flags = header & 0xE0;
-    #[cfg(any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
-        feature = "codec-close",
-        feature = "codec-keep-alive",
-        all(feature = "alloc", feature = "codec-frame")
-    ))]
+    #[cfg(all(feature = "alloc", feature = "codec-frame"))]
     let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
-    // R311y879 — `codec-keep-alive` is DELIBERATELY absent from this third
-    // union while it stays in the two above. The KeepAlive arm reads `has_ext`
-    // but delegates the bytes to `decode_keep_alive`, which owns its own
-    // cursor (R311y878's `#[inline(never)]` split), so a build that selects
-    // only that codec binds an outer cursor nothing touches — and
-    // `-D unused-mut` makes that a compile ERROR, not a warning. The three
-    // unions are the same list minus one arm for that reason; they are not a
-    // copy that drifted.
-    #[cfg(any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
-        feature = "codec-close",
-        all(feature = "alloc", feature = "codec-frame")
-    ))]
+    #[cfg(all(feature = "alloc", feature = "codec-frame"))]
     let mut cursor = SceCursor::new(&bytes[1..]);
     match mid {
         #[cfg(feature = "codec-init-body")]
-        wire_const::T_MID_INIT => parse_init(bytes, flags, has_ext, &mut cursor, out),
+        wire_const::T_MID_INIT => parse_init(bytes, out),
         #[cfg(feature = "codec-open-body")]
-        wire_const::T_MID_OPEN => parse_open(bytes, flags, has_ext, &mut cursor, out),
+        wire_const::T_MID_OPEN => parse_open(bytes, out),
         #[cfg(feature = "codec-close")]
-        wire_const::T_MID_CLOSE => parse_close(bytes, flags, has_ext, &mut cursor, out),
+        wire_const::T_MID_CLOSE => parse_close(bytes, out),
         #[cfg(all(feature = "alloc", feature = "codec-frame"))]
         wire_const::T_MID_FRAME => {
             let head =
@@ -1229,7 +1208,7 @@ fn parse_unit_into(
             Ok(used)
         }
         #[cfg(feature = "codec-keep-alive")]
-        wire_const::T_MID_KEEP_ALIVE => decode_keep_alive(has_ext, bytes, out),
+        wire_const::T_MID_KEEP_ALIVE => decode_keep_alive(bytes, out),
         // R311y605 — the MULTICAST peer announcement. Self-contained rather
         // than riding the shared `cursor`: the generated `Join` codec has no
         // ext awareness, so the chain starts wherever the base body stopped
@@ -1295,19 +1274,20 @@ fn parse_unit(
 }
 
 /// The `Init` arm of [`parse_unit`], a function of its own for the reason `parse_unit` is one:
-/// its temporaries (the borrowed body, the owned body, the extension chain) are gone when it
+/// its temporaries (the message's view, the owned body, the extension chain) are gone when it
 /// returns, and what `parse_unit` keeps under it is the one arm that ran.
+///
+/// The whole message, header included, is read by its document
+/// (`sources/codecs/transport_init.scxml`) as a view: the body under the header's A and S
+/// flags, and the chain the Z flag announces, which the view checks and holds as the bytes it
+/// occupies. The body is then owned and the chain kept in the form the message holds.
 #[cfg(feature = "codec-init-body")]
 #[inline(never)]
-fn parse_init(
-    bytes: &[u8],
-    flags: u8,
-    has_ext: bool,
-    cursor: &mut SceCursor<'_>,
-    out: &mut InboundFrame,
-) -> Result<usize, InboundParseError> {
-    let body = InitBody::decode(cursor, (flags >> 6) & 1, (flags >> 5) & 1)?
-        .try_into_owned_in::<HandshakeStorage>()?;
+fn parse_init(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundParseError> {
+    let mut cursor = SceCursor::new(bytes);
+    let view = TransportInitView::decode(&mut cursor)?;
+    let header = view.header;
+    let body = view.body.try_into_owned_in::<HandshakeStorage>()?;
     // The M (mandatory) bit is judged at the participant seam like every
     // other transport message's ([`InboundFrame::ext_admission`]), by the
     // extension's identity: the decode reads the chain, so a capture
@@ -1320,76 +1300,71 @@ fn parse_init(
     // and moved in is 520 bytes beside the frame's 712, and a frame built in a local of this
     // function and handed back was a second one (the caller's slot for it being the first).
     *out = InboundFrame::Init {
-        is_ack: (flags & wire_const::FLAG_T_INIT_A) != 0,
-        has_ext,
+        is_ack: (header & wire_const::FLAG_T_INIT_A) != 0,
+        has_ext: (header & wire_const::FLAG_T_Z) != 0,
         body,
         extensions: ExtChainOwned::new(),
     };
-    if has_ext {
-        if let InboundFrame::Init { extensions, .. } = out {
-            decode_handshake_ext_chain_into(cursor, extensions)?;
-        }
+    if let InboundFrame::Init { extensions, .. } = out {
+        collect_handshake_ext_chain(
+            crate::ext_view::walked(view.extensions.as_ref()),
+            extensions,
+        )?;
     }
     Ok(bytes.len() - cursor.remaining())
 }
 
-/// The `Open` arm of [`parse_unit`], out of line (see [`parse_init`]).
+/// The `Open` arm of [`parse_unit`], out of line and read by its document
+/// (`sources/codecs/transport_open.scxml`) as [`parse_init`] is.
 #[cfg(feature = "codec-open-body")]
 #[inline(never)]
-fn parse_open(
-    bytes: &[u8],
-    flags: u8,
-    has_ext: bool,
-    cursor: &mut SceCursor<'_>,
-    out: &mut InboundFrame,
-) -> Result<usize, InboundParseError> {
-    let mut body =
-        OpenBody::decode(cursor, (flags >> 5) & 1)?.try_into_owned_in::<HandshakeStorage>()?;
+fn parse_open(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundParseError> {
+    let mut cursor = SceCursor::new(bytes);
+    let view = TransportOpenView::decode(&mut cursor)?;
+    let header = view.header;
+    let mut body = view.body.try_into_owned_in::<HandshakeStorage>()?;
     // R311ku — the `_Z_FLAG_T_OPEN_T` seconds form is projected
     // back to milliseconds AT the wire boundary
     // ([`crate::lease::lease_from_wire`], pico decode parity
     // codec/transport.c:314), so no consumer ever sees the wire
     // unit — the same boundary rule as `multicast_join::decode_join`.
     body.lease =
-        crate::lease::lease_from_wire((flags & wire_const::FLAG_T_OPEN_T) != 0, body.lease);
+        crate::lease::lease_from_wire((header & wire_const::FLAG_T_OPEN_T) != 0, body.lease);
     *out = InboundFrame::Open {
-        is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
-        has_ext,
+        is_ack: (header & wire_const::FLAG_T_OPEN_A) != 0,
+        has_ext: (header & wire_const::FLAG_T_Z) != 0,
         body,
         extensions: ExtChainOwned::new(),
     };
-    if has_ext {
-        if let InboundFrame::Open { extensions, .. } = out {
-            decode_handshake_ext_chain_into(cursor, extensions)?;
-        }
+    if let InboundFrame::Open { extensions, .. } = out {
+        collect_handshake_ext_chain(
+            crate::ext_view::walked(view.extensions.as_ref()),
+            extensions,
+        )?;
     }
     Ok(bytes.len() - cursor.remaining())
 }
 
-/// The `Close` arm of [`parse_unit`], out of line (see [`parse_init`]).
+/// The `Close` arm of [`parse_unit`], out of line and read by its document
+/// (`sources/codecs/transport_close.scxml`) as [`parse_init`] is.
 #[cfg(feature = "codec-close")]
 #[inline(never)]
-fn parse_close(
-    bytes: &[u8],
-    flags: u8,
-    has_ext: bool,
-    cursor: &mut SceCursor<'_>,
-    out: &mut InboundFrame,
-) -> Result<usize, InboundParseError> {
-    let body = Close::decode(cursor)?;
+fn parse_close(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundParseError> {
+    let mut cursor = SceCursor::new(bytes);
+    let view = TransportCloseView::decode(&mut cursor)?;
     *out = InboundFrame::Close {
-        reason: body.reason,
-        // R311y839 — the scope bit, read off the parent header exactly
-        // as the Open arm reads `FLAG_T_OPEN_A` and the Frame arm reads
-        // `FLAG_T_FRAME_R`.
-        session: (flags & wire_const::FLAG_T_CLOSE_S) != 0,
-        has_ext,
+        reason: view.body.reason,
+        // R311y839 — the scope bit, read off the header exactly as the Open
+        // arm reads `FLAG_T_OPEN_A` and the Frame arm reads `FLAG_T_FRAME_R`.
+        session: (view.header & wire_const::FLAG_T_CLOSE_S) != 0,
+        has_ext: (view.header & wire_const::FLAG_T_Z) != 0,
         extensions: ExtChainOwned::new(),
     };
-    if has_ext {
-        if let InboundFrame::Close { extensions, .. } = out {
-            decode_handshake_ext_chain_into(cursor, extensions)?;
-        }
+    if let InboundFrame::Close { extensions, .. } = out {
+        collect_handshake_ext_chain(
+            crate::ext_view::walked(view.extensions.as_ref()),
+            extensions,
+        )?;
     }
     Ok(bytes.len() - cursor.remaining())
 }
@@ -1489,10 +1464,10 @@ pub fn inbound_to_fsm_event(
     }
 }
 
-/// The KEEP_ALIVE body (`T_MID_KEEP_ALIVE`, 0x04): empty, so the only thing to
-/// read is the Z-gated ext chain behind it. The generated decoder is still
-/// called — a no-op that keeps the "every wire-mapped codec routes through its
-/// generated decoder" invariant.
+/// The KEEP_ALIVE message (`T_MID_KEEP_ALIVE`, 0x04): its body is empty, so the
+/// only thing to read past the header is the Z-gated ext chain behind it. The
+/// whole message is read by its document (`sources/codecs/transport_keep_alive.scxml`)
+/// as [`parse_init`] reads an Init.
 ///
 /// # Why this one is a function, and `#[inline(never)]`
 ///
@@ -1512,22 +1487,19 @@ pub fn inbound_to_fsm_event(
 /// makes. `CODEC_ELISION_WITNESS[codec-keep-alive]` names it.
 #[cfg(feature = "codec-keep-alive")]
 #[inline(never)]
-fn decode_keep_alive(
-    has_ext: bool,
-    bytes: &[u8],
-    out: &mut InboundFrame,
-) -> Result<usize, InboundParseError> {
-    let mut cursor = SceCursor::new(&bytes[1..]);
-    let _body = KeepAlive::decode(&mut cursor)?;
-    // The frame first, in `out`, its chain read where it lies (see `parse_init`).
+fn decode_keep_alive(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundParseError> {
+    let mut cursor = SceCursor::new(bytes);
+    let view = TransportKeepAliveView::decode(&mut cursor)?;
+    // The frame first, in `out`, its chain kept where it will stay (see `parse_init`).
     *out = InboundFrame::KeepAlive {
-        has_ext,
+        has_ext: (view.header & wire_const::FLAG_T_Z) != 0,
         extensions: ExtChainOwned::new(),
     };
-    if has_ext {
-        if let InboundFrame::KeepAlive { extensions, .. } = out {
-            decode_handshake_ext_chain_into(&mut cursor, extensions)?;
-        }
+    if let InboundFrame::KeepAlive { extensions, .. } = out {
+        collect_handshake_ext_chain(
+            crate::ext_view::walked(view.extensions.as_ref()),
+            extensions,
+        )?;
     }
     Ok(bytes.len() - cursor.remaining())
 }

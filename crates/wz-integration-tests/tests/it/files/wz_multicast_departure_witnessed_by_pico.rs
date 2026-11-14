@@ -143,6 +143,8 @@ fn wz_mc_params(zid: Vec<u8>, lease_ms: u64) -> MulticastParams {
         compression: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+        max_sessions: None,
     }
 }
 

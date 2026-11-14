@@ -994,7 +994,9 @@ bool wz_capi_c_internal_group_check(const wz_capi_c_owned_group_t *this_);
  * The library cannot tell whether the clock follows a reference. The
  * program can, and reports it; a build whose clock-quality-stamping
  * policy is trusted-only stamps no data until it has (a publication, a
- * reply, a put it forwards). `z_timestamp_new` is a program reading the
+ * reply, a put it forwards), and an advanced publisher, every sample of
+ * which carries a time, refuses its put (Z_EGENERIC) and its delete
+ * (Z_EINVAL) until then. `z_timestamp_new` is a program reading the
  * clock and is answered whatever the clock's standing: the policy is the
  * stamper's, and upstream's clock always gives a time. Since revision 16;
  * before it `z_timestamp_new` read the system clock. */
