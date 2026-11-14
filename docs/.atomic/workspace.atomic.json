@@ -13603,6 +13603,28 @@
         "Open: read the hosted run of this head at the start of the next round (C1bo, the size lane, the reduced documentation shards).",
         "Open: a final's entry-level ended_transfers is not in the revisable row cells; it is decided when the final is read and does not change after, which is why it is left out."
       ]
+    },
+    "Round 4486": {
+      "decision_summary": "The C dissect doors read zenoh only in the clear: zenoh over TLS or QUIC was a row that said encrypted_unreadable even when the capture carried its own keys in a Decryption Secrets Block, because the decryption pass existed only in the command line's composition root. That pass now lives in the TLS crate as one implementation both roots call, so the doors decrypt with the keys a capture carries and with a key log the caller hands in, and a consumer never parses TLS itself. File doors take the key log as an argument of new keyed entry points, and the older doors, which now return byte-identical documents, are marked as replaced by them. A live handle takes keys at any time: the pass continues across calls, opening only what arrived since, and a flow that opened nothing is reopened from its oldest kept record when keys arrive, so records the handle still holds are read again. Building the continuing pass exposed a defect: after a first pass, the bytes handed to a flow were read from its plaintext space, so nothing that arrived later reached the record walk; delivery now reads the stream itself. When key material was given and named none of a flow's connection, the row says no_matching_key instead of encrypted, so a consumer can tell a missing key from a wrong one. An opener's debug output printed raw secret bytes; it prints their count now, and a test searches every document, refusal and debug string the doors produce for the secret.",
+      "changes_bullets": [
+        "ABI 57: wz_dissect_pcap_summary_keyed, wz_dissect_pcap_session_table_keyed and wz_dissect_live_add_keylog; every door that dissects a capture uses its own secrets blocks; replay and follow handles decrypt as they are fed.",
+        "The decryption pass moves into wz-tls-record (open_tls, open_quic, decrypt_capture, LiveDecryptor) and wz-analyze calls it; wz-capture continues a pass across calls and delivers ciphertext to a flow already opened; per-flow state stays bounded.",
+        "session_table 12: no_matching_key; the pcap and live fuzz targets hand the new doors a key log."
+      ],
+      "verification_bullets": [
+        "On the build machine, on the tree merged with the reply round: wz-capture with dissect 1817 passed (the continuing-pass, delivery, no_matching_key and memory-matrix tests among them, the TLS row within its 75 B ceiling); wz-tls-record 61 plus 18; wz-analyze 70 plus 73; wz-capi-dissect 241 plus the handle memory gate 4 (six decryption tests with records sealed by rustls, the key-leak search among them); Layer C1bo passed (the ABI pin at 57 with 74 symbols, nine subsumed doors each marked, the C consumer at session_table 12).",
+        "clippy of wz-capture (with and without dissect), wz-tls-record, wz-analyze and wz-capi-dissect, each alone, clean; cargo doc of wz-capture with no features clean; the wz-fuzz lock resolves; fuzz regress of pcap (194 inputs) and live (195) passed, and 120 s of each found nothing.",
+        "Not run: the hosted lanes on this head."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the hosted run of this head at the start of the next round (C1bo, the size lane, the reduced documentation shards).",
+        "Open: a live handle keeps no QUIC packets, so QUIC is decrypted only by the file doors; a lent replay handle could decrypt QUIC from its container and does not yet.",
+        "Open: keys a handle holds are not counted in wz_dissect_live_memory; while keys are held the pass runs after every push over every flow, a per-push cost not measured yet."
+      ]
     }
   },
   "inventory_entries": {
