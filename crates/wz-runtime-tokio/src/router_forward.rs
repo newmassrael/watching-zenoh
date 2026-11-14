@@ -17681,6 +17681,57 @@ mod tests {
         assert_eq!(query(0xBB), 0, "a north peer's Query is transit");
     }
 
+    /// The gateways of a query belong to the north region alone. On a peer node whose partition
+    /// keeps a subregion of peers and clients, a query from a client of the subregion is routed
+    /// into the north and into the subregion's peer region, two regions of the peer hat, and the
+    /// router north of the node is asked once: upstream's peer hat adds its south-bound faces to
+    /// a query route in the hat of the north region only
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `if self.region().bound().is_north() && src_region.bound().is_south() {`),
+    /// and each hat routes to the faces it owns. A query from a peer of the subregion, which no
+    /// block of its own region routes, is the control: it was asked once under either rule.
+    #[test]
+    fn a_south_clients_query_asks_the_router_north_of_a_partitioned_peer_node_once() {
+        use wz_session_core::region_partition::{RegionFilter, SouthSubregion};
+        let requests = |sink: &RecordingLinkDriver| -> usize {
+            use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+            (0..sink.frame_count())
+                .filter_map(|i| match parse_inbound(&sink.frame_bytes(i)) {
+                    Ok(InboundFrame::Frame { payload, .. }) => parse_frame_payload(&payload).ok(),
+                    _ => None,
+                })
+                .flatten()
+                .filter(|m| matches!(m, NetworkMessage::Request(_)))
+                .count()
+        };
+        let partition = SouthPartition::Custom(vec![SouthSubregion {
+            filters: Some(vec![RegionFilter {
+                zids: Some(vec![
+                    zid(0xCC).as_slice().to_vec(),
+                    zid(0xDD).as_slice().to_vec(),
+                ]),
+                ..RegionFilter::default()
+            }]),
+        }]);
+        let fwd = RouterForwarder::peer(zid(0x05)).with_south_partition(partition);
+        let (router, sink_router) = face(zid(0xAA), WIRE_ROUTER);
+        let (peer, _sink_peer) = face(zid(0xCC), WIRE_PEER);
+        let (client, _sink_client) = face(zid(0xDD), WIRE_CLIENT);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &peer);
+        fwd.register(FaceId(2), &client);
+
+        sink_router.reset();
+        forward_one(&fwd, FaceId(2), request_best(3, "demo/q"));
+        assert_eq!(
+            requests(&sink_router),
+            1,
+            "a south client's query, routed into two regions of the peer hat"
+        );
+        sink_router.reset();
+        forward_one(&fwd, FaceId(1), request_best(4, "demo/q"));
+        assert_eq!(requests(&sink_router), 1, "a subregion peer's query");
+    }
+
     /// One Put on `keyexpr` from the client on face 1.
     #[cfg(feature = "routing-interest-pending-gc")]
     fn client_puts(fwd: &RouterForwarder, keyexpr: &str) {
