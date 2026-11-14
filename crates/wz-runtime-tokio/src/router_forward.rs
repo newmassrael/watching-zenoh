@@ -398,6 +398,7 @@ use wz_session_core::wireexpr_resolve::{
 
 use crate::accept_loop::{
     DialIntent, DialIntentOrigin, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId,
+    ReservedFace,
 };
 use crate::client_store;
 #[cfg(feature = "routing-token-tables")]
@@ -516,9 +517,10 @@ const PEERS_REGION: Region = Region::default_south(WhatAmI::Peer);
 /// The pin makes it a face like any other, with a client's mode and no wire
 /// (`zenoh/src/net/routing/gateway.rs` @ `.local(true)`); here it is only the
 /// name a message from the node itself is routed under, so that no other face
-/// is mistaken for its sender. It is never registered in `faces`, and no
-/// transport face is given this id, which counts up from zero.
-const LOCAL_FACE: FaceId = FaceId(u64::MAX);
+/// is mistaken for its sender. It is never registered in `faces`; its id is a
+/// reserved one, which no transport face is given and no other reserved face
+/// shares.
+const LOCAL_FACE: FaceId = ReservedFace::Local.id();
 
 /// How a data message leaves this node: the reliability of the frame that carries
 /// it, the band that frame is sent in, and whether it is sent express. The three
@@ -1844,23 +1846,21 @@ struct GroupEgressSource<'a> {
 /// The synthetic FaceId for the single multicast INGRESS face (the deferred
 /// `mcast_faces` plane's first slice, I1). A group ingress is folded under ONE
 /// face rather than zenoh's per-peer `mcast_faces` (per-peer is the deferred I3
-/// milestone). Drawn from the TOP of the u64 range so it can never alias a
-/// unicast FaceId, which the accept loop assigns densely from 0
-/// (`accept_loop.rs` `next_id`). It is deliberately NOT inserted into
+/// milestone). A reserved id, so it can never alias a unicast FaceId, which the
+/// accept loop mints below the reserved band ([`FaceId::mint`]), nor the node's
+/// own [`LOCAL_FACE`]: a group member's message is a remote one. It is
+/// deliberately NOT inserted into
 /// [`faces`](RouterForwarder#structfield.faces): a mcast ingress has no send seam
 /// and no graph link, which is upstream's shape too -- `new_peer_multicast`
 /// builds its per-peer face with `DummyPrimitives`, whose every send_* is an
 /// empty body, and never inserts it into the faces table either.
 ///
-/// R2734 — UNGATED, where it used to carry `#[cfg(router-multicast-faces)]`.
-/// The CONSTANT is now feature-independent so that
-/// [`classify_inbound`] is too: a gated sentinel would make
-/// [`InboundFace::SourceOnly`] unconstructible without the feature, and every
-/// one of the twelve matches on that enum would need a `#[cfg]` arm. That is
-/// the feature-skew argument `driver_loop::IterationEvent` already makes for
-/// its multicast variants -- the variant stays ungated and only the PRODUCER
-/// is gated. Defining one `u64` costs nothing; skewing twelve matches does.
-const MCAST_INGRESS_FACE: FaceId = FaceId(u64::MAX);
+/// Gated with its producers, the group ingress paths. [`classify_inbound`] does
+/// not name it: it asks [`FaceId::is_reserved`], so
+/// [`InboundFace::SourceOnly`] stays constructible in every build and no match
+/// on that enum needs a `#[cfg]` arm.
+#[cfg(feature = "router-multicast-faces")]
+const MCAST_INGRESS_FACE: FaceId = ReservedFace::McastIngress.id();
 
 /// R2734 — the face a message ARRIVED on, classified for routing.
 ///
@@ -1908,9 +1908,10 @@ enum InboundFace<'a> {
 /// A free function over the borrowed map rather than a `&self` method, so it
 /// drops into the existing scoped-borrow blocks without a second borrow.
 fn classify_inbound(faces: &FaceTable, inbound: FaceId) -> InboundFace<'_> {
-    // The node's own face asks with no routing identity of its own and no alias table, as a group
-    // peer does: its keys are literal.
-    if inbound == MCAST_INGRESS_FACE || inbound == LOCAL_FACE {
+    // Every reserved face sources with no routing identity of its own and no alias table, the
+    // node's own face as a group peer does: its keys are literal, and nothing is sent back to it
+    // over a link.
+    if inbound.is_reserved() {
         return InboundFace::SourceOnly;
     }
     match faces.get(&inbound) {
@@ -5397,7 +5398,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// route (see [`crate::shm_relay`]), acknowledging each of its shared-memory slices to the
     /// face that sent them. `None` is a Push that arrived on a face that never negotiated shared
     /// memory, which is counted and not routed. The multicast ingress negotiates nothing: it is
-    /// such a face exactly when the node's group is not a shared-memory one.
+    /// such a face exactly when the node's group is not a shared-memory one. The node's own face
+    /// is always one, whatever its groups read: its messages come over no link.
     #[cfg(feature = "transport-shm")]
     fn open_shm_relay_pass(
         &self,
@@ -5416,33 +5418,38 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         inbound: FaceId,
         message: crate::shm_relay::Routed<'_>,
     ) -> Option<crate::shm_relay::RelayPass<'_>> {
-        // A group negotiates nothing and keeps no handoff: a node whose group is a shared-memory
-        // one maps a descriptor a member sends there, as upstream's member with a shared-memory
-        // context does (`io/zenoh-transport/src/multicast/rx.rs` @
-        // `if let Some(shm_context) = &self.shm_context {`), and one whose group is not refuses
-        // it, with nothing to acknowledge either way.
-        #[cfg(feature = "router-multicast-faces")]
-        if inbound == MCAST_INGRESS_FACE {
-            let reads_shm = self.mcast_groups.read().iter().any(|group| group.reads_shm);
-            let pass = self.shm_relay.open_message(message, || reads_shm);
-            if pass.is_none() {
-                self.shm_unnegotiated_dropped.bump();
+        let pass = match inbound.reserved() {
+            // A group negotiates nothing and keeps no handoff: a node whose group is a
+            // shared-memory one maps a descriptor a member sends there, as upstream's member with
+            // a shared-memory context does (`io/zenoh-transport/src/multicast/rx.rs` @
+            // `if let Some(shm_context) = &self.shm_context {`), and one whose group is not
+            // refuses it, with nothing to acknowledge either way.
+            #[cfg(feature = "router-multicast-faces")]
+            Some(ReservedFace::McastIngress) => {
+                let reads_shm = self.mcast_groups.read().iter().any(|group| group.reads_shm);
+                self.shm_relay.open_message(message, || reads_shm)
             }
-            return pass;
-        }
-        // The session of the link the message arrived on: a joined link's own, else the face's.
-        // A slice is acknowledged through the handoff of THAT link, because its peer is the one
-        // that named the counters.
-        let arrived_on = RECEIVING_LINK.with(|slot| slot.borrow().clone());
-        let actions = arrived_on.or_else(|| {
-            self.tables
-                .faces
-                .get(&inbound)
-                .map(|state| Arc::clone(&state.runtime.actions))
-        });
-        let pass = self
-            .shm_relay
-            .open_inbound_message(actions.as_deref(), message);
+            // The node's own message arrived on no link, so nothing is acknowledged, and a
+            // descriptor in it carries no reference taken for this router to give back: the
+            // session's own chunk is adopted by `local_get_shm`, which routes without a pass. A
+            // reserved face negotiates nothing, so such a descriptor is refused, and so is one on
+            // the group ingress of a build without groups.
+            Some(_) => self.shm_relay.open_message(message, || false),
+            // The session of the link the message arrived on: a joined link's own, else the
+            // face's. A slice is acknowledged through the handoff of THAT link, because its peer
+            // is the one that named the counters.
+            None => {
+                let arrived_on = RECEIVING_LINK.with(|slot| slot.borrow().clone());
+                let actions = arrived_on.or_else(|| {
+                    self.tables
+                        .faces
+                        .get(&inbound)
+                        .map(|state| Arc::clone(&state.runtime.actions))
+                });
+                self.shm_relay
+                    .open_inbound_message(actions.as_deref(), message)
+            }
+        };
         if pass.is_none() {
             self.shm_unnegotiated_dropped.bump();
         }
@@ -27139,13 +27146,15 @@ mod tests {
             matches!(classify_inbound(faces, FaceId(0)), InboundFace::Held(_)),
             "a registered face is Held"
         );
-        assert!(
-            matches!(
-                classify_inbound(faces, MCAST_INGRESS_FACE),
-                InboundFace::SourceOnly
-            ),
-            "the multicast ingress sentinel is SourceOnly, not Gone"
-        );
+        for reserved in ReservedFace::ALL {
+            assert!(
+                matches!(
+                    classify_inbound(faces, reserved.id()),
+                    InboundFace::SourceOnly
+                ),
+                "the reserved face {reserved:?} is SourceOnly, not Gone"
+            );
+        }
         assert!(
             matches!(classify_inbound(faces, FaceId(7)), InboundFace::Gone),
             "an unregistered face is Gone, not SourceOnly"
@@ -27237,6 +27246,53 @@ mod tests {
         );
     }
 
+    /// A group member's query is a remote one and not the node's own: it asks only the hosted
+    /// queryables that admit a remote querier, and what they answer reaches nobody, the node's
+    /// own session included, because the group's face has no send seam.
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn a_group_query_is_neither_asked_nor_answered_as_the_nodes_own() {
+        use wz_session_core::locality::Locality;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for (keyexpr, origin) in [
+            ("demo/any", Locality::Any),
+            ("demo/own", Locality::SessionLocal),
+        ] {
+            let kept = asked.clone();
+            fwd.host_queryable_from(
+                keyexpr,
+                true,
+                origin,
+                Box::new(move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                    kept.lock().unwrap().push(view.keyexpr().to_owned());
+                    out.reply(b"answer");
+                }),
+            );
+        }
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = heard.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
+
+        for (rid, keyexpr) in [(9, "demo/any"), (10, "demo/own")] {
+            let NetworkMessage::Request(request) = request_best(rid, keyexpr) else {
+                unreachable!("request_best builds a Request")
+            };
+            fwd.route_mcast_ingress_request(true, &request, None);
+        }
+
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["demo/any"],
+            "a queryable the session keeps for itself is not asked a member's query"
+        );
+        let heard = heard.lock().unwrap();
+        assert!(
+            heard.is_empty(),
+            "the answer to a member is not told to the node's own session: {heard:?}"
+        );
+    }
+
     /// R2734 — the anti-vacuity half of the arm above: the group querier gets
     /// NOTHING back, so the test above cannot be passing because wz invented a
     /// reply path the reference does not have.
@@ -27244,7 +27300,9 @@ mod tests {
     /// The mechanism is already in the tree and needed no new code:
     /// `send_to_face` returns false for a face absent from `faces`, and the
     /// sentinel is deliberately absent. This pins that, so a later round that
-    /// inserts a real entry for the sentinel has to come and read this.
+    /// inserts a real entry for the sentinel has to come and read this. The
+    /// node's own face is attached, so a group face that were taken for it
+    /// would be sent to through its sink.
     #[test]
     fn a_group_query_gets_no_reply_because_its_face_has_no_send_seam() {
         let fwd = RouterForwarder::new(zid(0x01));
@@ -27253,6 +27311,9 @@ mod tests {
         fwd.tick();
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         sink_client.reset();
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = heard.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
 
         // An UNRESOLVABLE keyexpr is the case that would emit a ResponseFinal
         // straight back to the querier on a unicast face, so it is the sharpest
@@ -27261,10 +27322,16 @@ mod tests {
             unreachable!("request_best builds a Request")
         };
         assert!(
-            !fwd.on_tables().send_to_face(MCAST_INGRESS_FACE, true, || {
-                NetworkMessage::Request(request.clone())
-            }),
+            !fwd.on_tables()
+                .send_to_face(ReservedFace::McastIngress.id(), true, || {
+                    NetworkMessage::Request(request.clone())
+                }),
             "nothing can be sent to the group ingress face -- wz's DummyPrimitives"
+        );
+        let heard = heard.lock().unwrap();
+        assert!(
+            heard.is_empty(),
+            "nor is it told to the node's own face: {heard:?}"
         );
     }
 
@@ -29148,6 +29215,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A Put whose payload is a chunk of shared memory, its reference taken for the receiver as
+    /// a publisher takes it.
+    #[cfg(all(
+        feature = "router-multicast-faces",
+        feature = "transport-shm",
+        target_os = "linux"
+    ))]
+    fn a_put_naming_a_chunk() -> PushOwned {
+        let payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("a POSIX segment");
+        let wire = payload.wire_reference();
+        let descriptor = wire.descriptor();
+        wire.commit();
+        drop(payload);
+        wz_session_core::push_build::build_push_shm_literal(
+            "demo/own",
+            &descriptor,
+            &wz_session_core::metadata::PushMetadata::default(),
+        )
+        .expect("a Put in shared memory")
+    }
+
+    /// The node's own face is not the group ingress: with a group that reads shared memory
+    /// attached, a message on the group ingress that names a chunk is held, and the same message
+    /// of the node's own session is refused, because it came over no link that negotiated
+    /// anything and carries no reference taken for this router.
+    #[cfg(all(
+        feature = "router-multicast-faces",
+        feature = "transport-shm",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn the_nodes_own_message_is_not_judged_by_what_its_groups_read() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (tx, _rx) = group_tap();
+        fwd.attach_mcast_group(tx, true);
+        let on = fwd.on_tables();
+
+        let own = a_put_naming_a_chunk();
+        assert!(
+            on.open_shm_relay_pass(LOCAL_FACE, &own).is_none(),
+            "the node's own message is not taken down the group's path"
+        );
+        assert_eq!(
+            on.shm_unnegotiated_dropped(),
+            1,
+            "and is counted as a descriptor no negotiation admits"
+        );
+
+        let member = a_put_naming_a_chunk();
+        assert!(
+            on.open_shm_relay_pass(MCAST_INGRESS_FACE, &member)
+                .is_some(),
+            "a member's message on the group ingress is held: the group reads shared memory"
+        );
+        assert_eq!(on.shm_unnegotiated_dropped(), 1, "and refuses nothing");
     }
 
     /// R311y188 — router-multicast-faces slice 3: a REAL routed Push (driven

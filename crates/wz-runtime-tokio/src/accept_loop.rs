@@ -185,15 +185,89 @@ mod intake;
 /// `face_counter` (`tables.faces` key): a dial when it is made, an accept when its
 /// handshake has ended and the loop takes it from its intake. Stable for the
 /// lifetime of the face; not reused after the face leaves the table.
+///
+/// The counter stays below [`FaceId::RESERVED_FLOOR`]: the ids from there to the
+/// top of the range are the [`ReservedFace`]s, which a router routes a message
+/// under when it came from no link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FaceId(pub u64);
 
+/// A face a router routes a message under that is no link: a source with no
+/// transport face of its own, never registered in a face table and never sent
+/// to over a wire. Each has an id of its own in the reserved band, apart from
+/// every id the counter mints and from each other, so that no face is taken
+/// for another: with one id for two faces, every test for one of them is a
+/// test for both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ReservedFace {
+    /// The node's own session, a face of the `Local` region with no wire
+    /// (`zenoh/src/net/routing/gateway.rs` @ `.local(true)`).
+    Local = 0,
+    /// The multicast group ingress: what the node's groups carry in, folded
+    /// under one face where upstream builds one per group peer.
+    McastIngress = 1,
+}
+
+impl ReservedFace {
+    /// Every reserved face, in the order of their ids down from `u64::MAX`: the
+    /// one at index `n` has the discriminant `n` and the id `u64::MAX - n`.
+    pub const ALL: [Self; 2] = [Self::Local, Self::McastIngress];
+
+    /// This face's id.
+    pub const fn id(self) -> FaceId {
+        FaceId(u64::MAX - self as u64)
+    }
+}
+
+impl FaceId {
+    /// The lowest reserved id. The band from here to `u64::MAX` holds exactly
+    /// the [`ReservedFace`]s, one id each, so an id in it is always one of them.
+    pub const RESERVED_FLOOR: u64 = u64::MAX - (ReservedFace::ALL.len() as u64 - 1);
+
+    /// Mint the face the counter `next` names and move the counter past it. The
+    /// accept loop mints every face of a link it opens through this.
+    ///
+    /// # Panics
+    ///
+    /// When the counter has reached the reserved band, as the `From<u64>` impl does.
+    pub fn mint(next: &mut u64) -> Self {
+        let id = Self::from(*next);
+        *next += 1;
+        id
+    }
+
+    /// Whether this id is a [`ReservedFace`]'s and not a link's. The one test
+    /// every router path that sets a reserved face apart from the links asks.
+    pub const fn is_reserved(self) -> bool {
+        self.0 >= Self::RESERVED_FLOOR
+    }
+
+    /// The reserved face this id is, `None` for the id of a link.
+    pub fn reserved(self) -> Option<ReservedFace> {
+        if !self.is_reserved() {
+            return None;
+        }
+        let index = usize::try_from(u64::MAX - self.0).ok()?;
+        ReservedFace::ALL.get(index).copied()
+    }
+}
+
 /// The face a counter's value names, which is how the peer planner
 /// (`wz_session_core::peer_planner`, a module of the builds with `session-unicast`)
-/// mints the face of a dial it asks for.
+/// mints the face of a dial it asks for, and how [`FaceId::mint`] mints the rest.
+///
+/// # Panics
+///
+/// When `id` is in the reserved band: the counter is spent, and the face it
+/// would mint would be routed as a [`ReservedFace`].
 impl From<u64> for FaceId {
     fn from(id: u64) -> Self {
-        Self(id)
+        let face = Self(id);
+        assert!(
+            !face.is_reserved(),
+            "face id {id} is in the reserved band: the face counter is spent"
+        );
+        face
     }
 }
 
@@ -1849,8 +1923,7 @@ fn schedule_multilink_redial(
     clock: TokioTime,
     tick_interval_ms: u64,
 ) {
-    let id = FaceId(*next_id);
-    *next_id += 1;
+    let id = FaceId::mint(next_id);
     // Re-key the retained endpoint to the fresh id BEFORE the backoff, so the
     // re-add is tracked (a failed re-dial's Err arm finds it and retries).
     let addr = target.key.clone();
@@ -3301,8 +3374,7 @@ where
     }
     #[cfg(not(feature = "router-connect-reconcile"))]
     for target in dial_targets {
-        let id = FaceId(next_id);
-        next_id += 1;
+        let id = FaceId::mint(&mut next_id);
         summary.dialed += 1;
         // R311y205 (transport-multilink) — a `max_links > 1` node dials with the
         // 0x4-negotiating variant so its outbound links aggregate (the pref tags
@@ -3919,8 +3991,7 @@ where
                             };
                             match target {
                                 Some(target) => {
-                                    let again = FaceId(next_id);
-                                    next_id += 1;
+                                    let again = FaceId::mint(&mut next_id);
                                     let backoff_ms = node_redial.next_ms(&dial.zid, target.retry());
                                     log::info!(
                                         "autoconnect: dialling node {:02x?} again in {backoff_ms}ms \
@@ -4164,8 +4235,7 @@ where
                 let _ = learned;
                 match dial_decision(&faces, &intent, &directory, clock.now_monotonic_ms()) {
                     DialDecision::Dial(target) => {
-                        let id = FaceId(next_id);
-                        next_id += 1;
+                        let id = FaceId::mint(&mut next_id);
                         summary.dialed += 1;
                         // A dial that does not open is made again at the node's next locator
                         // (the Err arm). The aggregating dial of a multilink node has its own
@@ -4257,8 +4327,7 @@ where
                                 .unwrap_or(false);
                             if room {
                                 if let Some(target) = first_dialable_locator(&intent.locators) {
-                                    let id = FaceId(next_id);
-                                    next_id += 1;
+                                    let id = FaceId::mint(&mut next_id);
                                     summary.dialed += 1;
                                     // R311y212 — retain the aggregation-relax dial
                                     // endpoint for partial-loss re-add. R311y219 —
@@ -4485,8 +4554,7 @@ where
                     result,
                     pending,
                 } = *ended;
-                let id = FaceId(next_id);
-                next_id += 1;
+                let id = FaceId::mint(&mut next_id);
                 // R2951 — every open that is not an ACCEPT is one of this node's
                 // dials; this is the one arm accepts reach the loop by, so marking
                 // it here is what lets `Face::dialed` be answered in every build.
@@ -4928,6 +4996,58 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use wz_session_core::locator::Proto;
+
+    /// The reserved faces are a closed set in a band of their own: each has an
+    /// id apart from the others, every id of the band is one of them, and the
+    /// counter mints none of them.
+    #[test]
+    fn the_reserved_faces_are_a_closed_band_apart_from_every_minted_id() {
+        assert_ne!(
+            ReservedFace::Local.id(),
+            ReservedFace::McastIngress.id(),
+            "the node's own face and the group ingress are two faces"
+        );
+        let ids: std::collections::HashSet<FaceId> =
+            ReservedFace::ALL.iter().map(|face| face.id()).collect();
+        assert_eq!(ids.len(), ReservedFace::ALL.len(), "one id each");
+        for (n, face) in (0u64..).zip(ReservedFace::ALL) {
+            assert_eq!(
+                face.id(),
+                FaceId(u64::MAX - n),
+                "{face:?} is the {n}th down"
+            );
+            assert!(face.id().is_reserved(), "{face:?} is in the band");
+            assert_eq!(face.id().reserved(), Some(face), "{face:?} is named back");
+        }
+        for raw in FaceId::RESERVED_FLOOR..=u64::MAX {
+            assert!(
+                FaceId(raw).reserved().is_some(),
+                "id {raw} of the band is a reserved face"
+            );
+        }
+        let below = FaceId(FaceId::RESERVED_FLOOR - 1);
+        assert!(!below.is_reserved(), "the id under the band is a link's");
+        assert_eq!(below.reserved(), None);
+
+        let mut next = 0;
+        for expected in 0..1024 {
+            let id = FaceId::mint(&mut next);
+            assert_eq!(id, FaceId(expected), "the counter counts up from zero");
+            assert!(!id.is_reserved(), "a minted id is no reserved face's");
+        }
+        assert_eq!(next, 1024, "and moves past each id it mints");
+        let mut last = FaceId::RESERVED_FLOOR - 1;
+        assert_eq!(FaceId::mint(&mut last), below, "the last id below the band");
+    }
+
+    /// A counter that has reached the band mints nothing: the id would be routed
+    /// as a reserved face.
+    #[test]
+    #[should_panic(expected = "reserved band")]
+    fn the_counter_refuses_to_mint_a_reserved_id() {
+        let mut next = FaceId::RESERVED_FLOOR;
+        let _ = FaceId::mint(&mut next);
+    }
 
     /// R2233 — the dial-target currency is a LOCATOR; build the `tcp/<addr>` one
     /// through the locator SSOT so a fixture reads the grammar a configured
