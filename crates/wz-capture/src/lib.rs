@@ -5162,6 +5162,8 @@ mod message_list_census {
             touched: _,
             // Whether a decryption pass has work waiting: one flag.
             decryption_wanted: _,
+            // Whether any flow was read as QUIC: one flag.
+            quic_seen: _,
             next_row_link: _,
         } = &d;
 
@@ -6493,6 +6495,8 @@ pub struct Dissection {
     /// visits the flows only when this is set or the last packet touched such a
     /// flow, and clears it.
     decryption_wanted: bool,
+    /// A datagram flow has been read as QUIC ([`Self::quic_seen`]).
+    quic_seen: bool,
     /// The next number a flow's link is known by in a row's evidence.
     next_row_link: u64,
 }
@@ -6545,6 +6549,7 @@ impl Default for Dissection {
             row_evidence: alloc::collections::BTreeMap::new(),
             touched: Vec::new(),
             decryption_wanted: false,
+            quic_seen: false,
             next_row_link: 0,
         }
     }
@@ -8357,6 +8362,27 @@ impl Dissection {
         &self.datagram_flows
     }
 
+    /// The datagram flow matching `key`, if the capture carried one. Found by
+    /// key, not by a scan of [`Self::datagram_flows`]: a caller that asks once a
+    /// packet would otherwise pay a step per flow held.
+    pub fn datagram_flow(&self, key: &FlowKey) -> Option<&DatagramDissection> {
+        self.datagram_flows.find(key)
+    }
+
+    /// Where the datagram flow matching `key` sits in [`Self::datagram_flows`],
+    /// found by key: the order a caller that holds some flows by key must walk
+    /// them in to agree with a walk of the whole list.
+    pub fn datagram_flow_index(&self, key: &FlowKey) -> Option<usize> {
+        self.datagram_flows.position(key)
+    }
+
+    /// Whether any datagram flow has been read as QUIC since the dissection
+    /// began, even one an eviction has since taken. False is the answer a
+    /// per-packet QUIC consumer gates on before it looks at a single flow.
+    pub fn quic_seen(&self) -> bool {
+        self.quic_seen
+    }
+
     /// Packets that yielded no stream bytes, each with its reason.
     ///
     /// CAPPED by [`DissectionLimits::skipped_packets`]; the overflow is counted
@@ -9412,6 +9438,7 @@ impl Dissection {
                     let mut census = quic::QuicCensus::default();
                     census.add(p);
                     flow.quic = Some(census);
+                    self.quic_seen = true;
                     self.evict_datagram_flows_beyond_cap();
                     return;
                 }
@@ -9437,6 +9464,7 @@ impl Dissection {
                         None => census.add_unrecognised(d.payload.len()),
                     }
                     flow.quic = Some(census);
+                    self.quic_seen = true;
                     self.evict_datagram_flows_beyond_cap();
                     return;
                 }

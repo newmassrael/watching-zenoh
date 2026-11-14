@@ -611,7 +611,9 @@ impl LiveDecryptor {
         index: usize,
         data: &[u8],
     ) {
-        if self.quic.is_empty() && !dissection.datagram_flows().iter().any(|f| f.quic.is_some()) {
+        // Asked once a packet, so neither question scans the flows: a handle
+        // with no QUIC flow pays one flag here.
+        if self.quic.is_empty() && !dissection.quic_seen() {
             return;
         }
         self.absorb_secrets_blocks(dissection);
@@ -625,9 +627,8 @@ impl LiveDecryptor {
             Entry::Occupied(held) => held.into_mut(),
             Entry::Vacant(slot) => {
                 let marked = dissection
-                    .datagram_flows()
-                    .iter()
-                    .any(|f| f.flow == flow && f.quic.is_some());
+                    .datagram_flow(&flow)
+                    .is_some_and(|f| f.quic.is_some());
                 if !marked {
                     return;
                 }
@@ -706,18 +707,24 @@ impl LiveDecryptor {
         if core::mem::take(&mut self.quic_grew) {
             self.reopen_quic();
         }
-        let order = quic_flow_keys(dissection);
-        let mut fed = 0usize;
-        for flow in &order {
+        // The flows this decryptor holds, in the dissection's own order (the
+        // order the file pass frames them in), found by key: a scan of every
+        // datagram flow here would be a step per flow held on every push.
+        let mut order: Vec<(usize, FlowKey)> = self
+            .quic
+            .keys()
+            .filter_map(|flow| Some((dissection.datagram_flow_index(flow)?, *flow)))
+            .collect();
+        order.sort_unstable();
+        if order.len() < self.quic.len() {
+            let held: BTreeSet<FlowKey> = order.iter().map(|(_, flow)| *flow).collect();
+            self.quic.retain(|flow, _| held.contains(flow));
+        }
+        for (_, flow) in &order {
             if let Some(live) = self.quic.get_mut(flow) {
                 self.quic_framing
                     .absorb(live.pass.feed(dissection, &mut ()));
-                fed += 1;
             }
-        }
-        if fed < self.quic.len() {
-            let held: BTreeSet<FlowKey> = order.into_iter().collect();
-            self.quic.retain(|flow, _| held.contains(flow));
         }
     }
 
