@@ -8885,12 +8885,12 @@ mod tests {
             "a handle still waiting on its gap cannot already agree with a \
              reader that gave up on it"
         );
-        // One record per Frame: each unit of `hole_capture` is a Frame whose
-        // payload is one network OAM (`1F 00`) followed by a transport OAM
-        // (`00 00`), which ends the Frame and is the batch's next message, not
-        // a record of it. 16 units lie before the hole and 47 survive it.
+        // Two records per Frame: each unit of `hole_capture` is a Frame whose
+        // payload is two network OAMs (`numbered_frame`), both of which a Frame
+        // reader reads as records, as upstream's does. 16 units lie before the
+        // hole and 47 survive it, so 32 and 94 records are walked.
         assert!(
-            still_open.contains("\"walked_records\":16") && whole.contains("\"walked_records\":47"),
+            still_open.contains("\"walked_records\":32") && whole.contains("\"walked_records\":94"),
             "and the difference is the bytes BEHIND the hole:\n  open:  \
              {still_open}\n  whole: {whole}"
         );
