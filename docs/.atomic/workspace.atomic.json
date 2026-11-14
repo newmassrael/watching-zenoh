@@ -13528,6 +13528,24 @@
       "carry_forward_bullets": [
         "The three entries are open; the first two belong together, since a bounded field-values door changes what its memory holds."
       ]
+    },
+    "Round 4482": {
+      "decision_summary": "The last pushed head's hosted run was red in one job, Layer C0 gate provenance, and is paid before anything else is pushed. Round 4479 made the ABI stamp gate import the capi-c pin module instead of holding a second literal revision, and that import put the stamp gate in the round-fed population, which the round-fed reach gate requires to be either run by the pre-push hook or named in its deferred table with the cost. The stamp gate cannot run in the hook: its subject is the stamp note read out of built artifacts (both C libraries and both executables, debug and release, plus a stripped copy), which the hook never builds, so running it there would red every push or grade a stale artifact. It is deferred with that reason and Layer C1st named as its owner, the same reading its sibling, the capi-c pin, already carries.",
+      "changes_bullets": [
+        "The round-fed reach gate's deferred table gains a row for the ABI stamp gate, naming Layer C1st as its owner and the built artifacts as the reason it stays out of the hook.",
+        "One ack row for the red run of the last pushed head, paid by this push."
+      ],
+      "verification_bullets": [
+        "The red was read from its own job log, and the same C0 red on the head before it from that run's log; the other 52 jobs of the last run passed.",
+        "The round-fed reach gate passes with the row (169 gates accounted for) and fails without it with the same sentence the hosted log printed (control); its selftest passes 35 of 35 arms.",
+        "Not run: the hosted Layer C0 on this head."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the hosted Layer C0 of this head at the start of the next round."
+      ]
     }
   },
   "inventory_entries": {
