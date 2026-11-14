@@ -58,7 +58,11 @@
 //! sessions (`docs/parallel-faces-design.md`), and a routing node over
 //! `RouterForwarder` (its tables behind one reader-writer lock since round
 //! 3668) under the `routing-face-drive` policy (`peer_loop_shared`,
-//! `docs/router-task-per-face.md`).
+//! `docs/router-task-per-face.md`). When those drives run on the workers and
+//! nothing is put around them ([`FaceExecutor::spawns_intake`]), the listeners
+//! and the handshake of each link they yield are tasks of their own too
+//! (`intake`), since this task writes the node's tables synchronously and an
+//! accept must not wait for that.
 //!
 //! ## NON-goals (this atom)
 //!
@@ -175,18 +179,11 @@ use wz_session_core::transport_mode::SessionOffer;
 #[cfg(any(feature = "transport-multilink", feature = "codec-push"))]
 use wz_session_core::qos::Priority;
 
-/// Backoff applied after an `accept()` error before re-arming the accept —
-/// zenoh's `TCP_ACCEPT_THROTTLE_TIME` (100ms, `io/zenoh-links/zenoh-link-tcp/src/
-/// lib.rs`). The dominant accept-error cause is fd exhaustion (EMFILE/ENFILE):
-/// the pending connection stays in the kernel queue, so an un-throttled re-arm
-/// returns the same error immediately and hot-spins the task at full CPU until a
-/// fd frees (which it cannot while the loop monopolises the task). The sleep both
-/// yields (letting a fd free / shutdown win the next `select!`) and matches the
-/// upstream constant.
-const ACCEPT_ERROR_THROTTLE_MS: u64 = 100;
+mod intake;
 
-/// Monotonic identifier the accept loop assigns to each accepted peer, in
-/// accept order — zenoh's `face_counter` (`tables.faces` key). Stable for the
+/// Monotonic identifier the face loop assigns to each link it opens — zenoh's
+/// `face_counter` (`tables.faces` key): a dial when it is made, an accept when its
+/// handshake has ended and the loop takes it from its intake. Stable for the
 /// lifetime of the face; not reused after the face leaves the table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FaceId(pub u64);
@@ -705,9 +702,9 @@ pub enum AcceptEvent {
         peer_zid: Option<Vec<u8>>,
         held: usize,
     },
-    /// `accept()` itself returned a (typically transient) error; the loop logs
-    /// it (via this event), throttles (`ACCEPT_ERROR_THROTTLE_MS`), then keeps
-    /// accepting — zenoh's `accept_task` parity (log + `TCP_ACCEPT_THROTTLE_TIME`
+    /// `accept()` itself returned a (typically transient) error; the loop reports
+    /// it (via this event) and its intake waits a throttle before it asks the
+    /// listeners again — zenoh's `accept_task` parity (log + `TCP_ACCEPT_THROTTLE_TIME`
     /// sleep). Surfaced so the caller can log it rather than the loop swallowing
     /// it.
     AcceptError(io::Error),
@@ -1206,10 +1203,12 @@ pub struct AcceptLoopSummary {
 type OpenResult = (FaceId, AcceptedPeer, Result<OpenedSession, OpenError>);
 
 /// A boxed face-open future — the `opening` set's element type. Boxed `dyn
-/// Future` because the two open SOURCES, [`open_face`] (accept) and [`dial_face`]
-/// (dial), are distinct future types that must share one [`FuturesUnordered`];
-/// one heap alloc per open is negligible beside the handshake it wraps. No
-/// `Send` bound — the whole loop is single-task `!Send` (see the module doc).
+/// Future` because the open SOURCES, [`dial_face`] (dial), an accept the intake
+/// has finished (`intake`, which runs [`open_face`]) and a parked link
+/// ([`admit_parked`]), are distinct future types that must share one
+/// [`FuturesUnordered`]; one heap alloc per open is negligible beside the
+/// handshake it wraps. No `Send` bound — the loop itself is single-task `!Send`
+/// (see the module doc).
 type OpenFuture = Pin<Box<dyn Future<Output = OpenResult>>>;
 
 /// A link that completed its handshake to a node the loop holds a face to, is the link to keep
@@ -1340,31 +1339,27 @@ impl FaceTemplate {
 }
 
 /// Run the accepted link's deferred transport handshake, then bring it up to
-/// Established. Tagged with `(id, peer)` so the loop can route the result without
-/// threading state through [`FuturesUnordered`]. The transport (ws/tls) SERVER
-/// handshake ([`AcceptedLink::handshake`]) runs HERE, in the spawned per-face
-/// future — NOT in the loop's `select!` arm — so a slow/stalled handshake never
-/// blocks accepting the next peer (a failed handshake surfaces as
-/// [`OpenError::AcceptHandshake`], an isolated `FaceFailed`). Production
-/// semantics: `max_iters = None` (the accept-side open-deadline —
-/// `accepting.inactivity_timeout`, which is what is left of
+/// Established: the handshake the loop's intake (`intake`) runs for each link it
+/// accepts. The transport (ws/tls) SERVER handshake ([`AcceptedLink::handshake`])
+/// runs HERE, in the per-link handshake and NOT in the arm that accepts, so a
+/// slow/stalled handshake never blocks accepting the next peer (a failed
+/// handshake surfaces as [`OpenError::AcceptHandshake`], an isolated
+/// `FaceFailed`). Production semantics: `max_iters = None` (the accept-side
+/// open-deadline — `accepting.inactivity_timeout`, which is what is left of
 /// [`AcceptBounds::timeout_ms`] once the link's own handshake is done — bounds a silent peer;
 /// see
 /// [`accept_and_open_session_with_offer`](crate::session_open::accept_and_open_session_with_offer)).
-#[allow(clippy::too_many_arguments)]
 async fn open_face(
-    id: FaceId,
-    peer: AcceptedPeer,
     accepted: AcceptedLink,
     template: FaceTemplate,
     offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
     bounds: AcceptBounds,
-) -> OpenResult {
+) -> Result<OpenedSession, OpenError> {
     let (params, stage) = template.into_parts(AuthRole::Accept, None);
     let started = clock.now_monotonic_ms();
-    let result = match handshake_within(accepted, &bounds).await {
+    match handshake_within(accepted, &bounds).await {
         // R2095 — the loop's WHOLE capability offer rides the accept open, the
         // same value its dials carry. A declared QoS band still arms the
         // acceptor's subset containment against the initiator's `QoSLink`; what
@@ -1385,8 +1380,7 @@ async fn open_face(
             .await
         }
         Err(e) => Err(OpenError::AcceptHandshake(e)),
-    };
-    (id, peer, result)
+    }
 }
 
 /// The accepted link's own handshake (the ws or tls server side), given at most the accept
@@ -1497,7 +1491,15 @@ async fn dial_face(
 /// slice-5.
 #[cfg(feature = "transport-multilink")]
 fn multilink_priority_range(id: FaceId) -> (Priority, Priority) {
-    if id.0 % 2 == 0 {
+    band_by_parity(id.0)
+}
+
+/// The band of [`multilink_priority_range`] by the parity of `n`. A dial is banded by its
+/// [`FaceId`]; an accept by its place among the accepts of the loop's intake, since its face id is
+/// given only once its handshake, which the band is staged into, has ended.
+#[cfg(feature = "transport-multilink")]
+fn band_by_parity(n: u64) -> (Priority, Priority) {
+    if n % 2 == 0 {
         (Priority::Control, Priority::InteractiveLow)
     } else {
         (Priority::DataHigh, Priority::Background)
@@ -1510,10 +1512,7 @@ fn multilink_priority_range(id: FaceId) -> (Priority, Priority) {
 /// (the key a second link is bound to the logical session by). Byte-identical to
 /// [`open_face`] otherwise; the loop branches on `max_links` at the accept site.
 #[cfg(feature = "transport-multilink")]
-#[allow(clippy::too_many_arguments)]
 async fn open_face_multilink(
-    id: FaceId,
-    peer: AcceptedPeer,
     accepted: AcceptedLink,
     offer: SessionOffer,
     band: (Priority, Priority),
@@ -1521,13 +1520,13 @@ async fn open_face_multilink(
     clock: TokioTime,
     tick_interval_ms: u64,
     bounds: AcceptBounds,
-) -> OpenResult {
+) -> Result<OpenedSession, OpenError> {
     let (params, stage) = template.into_parts(AuthRole::Accept, None);
     let started = clock.now_monotonic_ms();
-    // The deferred transport handshake runs here in the spawned future (never the
-    // loop's `select!` arm), same as the single-link [`open_face`] — a failed
+    // The deferred transport handshake runs here in the per-link handshake (never the
+    // arm that accepts), same as the single-link [`open_face`] — a failed
     // ws/tls handshake is an isolated `FaceFailed`, not a loop stall.
-    let result = match handshake_within(accepted, &bounds).await {
+    match handshake_within(accepted, &bounds).await {
         Ok(link) => {
             let spent = clock.now_monotonic_ms().saturating_sub(started);
             accept_multilink_with_staging(
@@ -1544,10 +1543,50 @@ async fn open_face_multilink(
             .await
         }
         Err(e) => Err(OpenError::AcceptHandshake(e)),
-    };
-    // `peer` is already an `AcceptedPeer` (the accepted-peer tag threaded from the
-    // `Step::Accepted` arm — IP or mesh-capable non-IP); pass it through unchanged.
-    (id, peer, result)
+    }
+}
+
+/// What the loop's intake starts for each link it accepts: [`open_face`], or
+/// `open_face_multilink` on a loop that aggregates (`max_links > 1`), from the
+/// node's template, offer and accept bounds.
+fn accept_opener(
+    template: FaceTemplate,
+    offer: SessionOffer,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+    bounds: AcceptBounds,
+    #[cfg(feature = "transport-multilink")] max_links: usize,
+) -> intake::Opener {
+    Box::new(
+        move |accepted: AcceptedLink, seq: u64| -> intake::Handshake {
+            // A `max_links > 1` acceptor opens with the 0x4-negotiating variant so an
+            // inbound peer's second link can aggregate (the ext captures its ephemeral
+            // pubkey).
+            #[cfg(feature = "transport-multilink")]
+            if max_links > 1 {
+                return Box::pin(open_face_multilink(
+                    accepted,
+                    offer,
+                    band_by_parity(seq),
+                    template.clone(),
+                    clock,
+                    tick_interval_ms,
+                    bounds,
+                ));
+            }
+            // Only an aggregating loop bands its accepts.
+            #[cfg(not(feature = "transport-multilink"))]
+            let _ = seq;
+            Box::pin(open_face(
+                accepted,
+                template.clone(),
+                offer,
+                clock,
+                tick_interval_ms,
+                bounds,
+            ))
+        },
+    )
 }
 
 /// R311y205 (transport-multilink) — [`dial_face`] negotiating the 0x4
@@ -1982,6 +2021,17 @@ pub trait FaceExecutor: Send + Sync {
     fn wrap(&self, drive: SpawnedDrive) -> SpawnedDrive {
         drive
     }
+
+    /// Whether the loop's listeners and the handshakes of the links they yield may run as tasks
+    /// of their own beside the faces' drives, when the drives are spawned on the workers
+    /// ([`SpawnOn::Workers`]). An executor that puts a condition around the drives answers no,
+    /// the default: its intake stays one of the arms of the loop's task, which its condition
+    /// already covers. Answering yes keeps a write to the node's tables, which the loop's task
+    /// makes synchronously when it admits or drops a face, from holding up the accepts and the
+    /// handshakes in flight.
+    fn spawns_intake(&self) -> bool {
+        false
+    }
 }
 
 /// The boxed drive of a spawned face: `Send` (it runs on a worker thread) and `'static`
@@ -1991,7 +2041,12 @@ pub type SpawnedDrive = Pin<Box<dyn Future<Output = (Face, DriverOutcome)> + Sen
 /// The [`FaceExecutor`] that wraps nothing.
 pub struct PlainFaceExecutor;
 
-impl FaceExecutor for PlainFaceExecutor {}
+impl FaceExecutor for PlainFaceExecutor {
+    /// Nothing is put around the drives, so nothing is owed to the intake either.
+    fn spawns_intake(&self) -> bool {
+        true
+    }
+}
 
 /// Where a spawned face's drive runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2064,7 +2119,8 @@ enum Step {
     // `large_enum_variant`). One box per open event is negligible.
     Opened(Box<OpenResult>),
     Driven((Face, DriverOutcome)),
-    Accepted(io::Result<(AcceptedLink, AcceptedPeer)>),
+    /// The intake ended a handshake or saw a listener fail.
+    Intake(intake::IntakeEvent),
     /// The forwarder's periodic timer fired (its [`FaceForwarder::tick_period`]
     /// cadence) — call [`FaceForwarder::tick`]. Only ever produced when a timer
     /// is armed (a forwarder that returned `Some` from `tick_period`).
@@ -2240,7 +2296,7 @@ async fn forwarder_woken(signal: &Option<Arc<tokio::sync::Notify>>) {
 }
 
 /// Await the next inbound connection on ANY of the node's bound listeners — the
-/// accept arm of `face_drive_loop`'s `select!`, and the seam that makes
+/// accept arm of the loop's intake (`intake`), and the seam that makes
 /// `listen/endpoints` a LIST rather than a first-element (R2099, open-debt item
 /// 512).
 ///
@@ -2674,10 +2730,10 @@ pub use crate::config::{ACCEPT_PENDING, ACCEPT_TIMEOUT_MS};
 pub struct FaceSources {
     /// The bound listeners for inbound peers (accept source), each scheme-keyed
     /// ([`BoundListener`]) so a router/peer accepts the whole stream family
-    /// (tcp/ws/tls) — `face_drive_loop`'s `select!` arm accepts one raw
-    /// connection per iteration via `accept_any`, and the ws/tls SERVER
-    /// handshake is deferred to the spawned open future so a slow handshake never
-    /// blocks the loop. R311y376 (Stage 3) generalized this from a bare
+    /// (tcp/ws/tls) — the loop's intake accepts one raw connection at a time
+    /// via `accept_any`, and the ws/tls SERVER handshake is deferred to that
+    /// link's own handshake so a slow handshake never blocks the next accept.
+    /// R311y376 (Stage 3) generalized this from a bare
     /// [`tokio::net::TcpListener`].
     ///
     /// R2099 (open-debt item 512) — a LIST, because `listen/endpoints` is a list
@@ -2941,7 +2997,7 @@ where
 {
     let FaceDriving { forwarder, spawned } = driving;
     let FaceSources {
-        mut listeners,
+        listeners,
         dial_targets,
         dial_config,
         mut dial_intents,
@@ -2988,6 +3044,30 @@ where
         namespace: forwarder.session_namespace(),
         admission,
     };
+    // The listeners and the handshakes of what they yield. Off this task when the faces' drives
+    // are, since this task writes the node's tables synchronously (a face admitted or dropped, the
+    // forwarder's tick), and an accept or a handshake that waited for that write would leave a
+    // peer unanswered while the node holds the session of another.
+    let intake_on = match &spawned {
+        Some(spawn) if spawn.on == SpawnOn::Workers && spawn.executor.spawns_intake() => {
+            intake::IntakeOn::OwnTasks
+        }
+        _ => intake::IntakeOn::LoopTask,
+    };
+    let mut intake = intake::Intake::start(
+        listeners,
+        accept,
+        accept_opener(
+            params.clone(),
+            offer,
+            clock,
+            tick_interval_ms,
+            accept,
+            #[cfg(feature = "transport-multilink")]
+            max_links,
+        ),
+        intake_on,
+    );
 
     // R2233 (open-debt item 585) — fold the configured dial targets into their
     // dial PLANS at the seam, and REFUSE (loudly) any member with no
@@ -3029,9 +3109,10 @@ where
     // because a link that replaces it came up ([`crate::link_collision`]). Both are read at the
     // face-establishment dedup and written where a face is held and where one leaves.
     let mut collisions: LinkCollisions<ParkedOpen> = LinkCollisions::default();
-    // R2951 — the ids of opens the loop ACCEPTED, from the accept push until the
-    // open resolves either way. What is not in it is a dial, which is how
-    // `Face::dialed` is answered in every build, the loop's peers or not.
+    // R2951 — the ids of opens the loop ACCEPTED, from the moment it takes the
+    // handshake from its intake until the open resolves either way. What is not
+    // in it is a dial, which is how `Face::dialed` is answered in every build,
+    // the loop's peers or not.
     let mut accepted_ids: std::collections::BTreeSet<FaceId> = std::collections::BTreeSet::new();
     // Decision D3 — where the nodes this loop dials by zid may be reached: the
     // hints the discovery planes and the lifecycle opener give, read just after
@@ -3268,12 +3349,10 @@ where
             Some(driven) = next_spawned(&mut spawned_drives, &mut spawned_faces) => {
                 Step::Driven(driven)
             }
-            // The fast, non-blocking accept: one raw connection per iteration
-            // (ws/tls SERVER handshake deferred to the spawned open future, so a
-            // slow handshake never stalls this arm). R311y376 (Stage 3) — was
-            // `accept_tcp_on(&listener)`; now scheme-keyed via `accept_raw`.
-            // R2099 (item 512) — over EVERY bound listener, not the first one.
-            accepted = accept_any(&mut listeners) => Step::Accepted(accepted),
+            // What the intake has to tell: a link's handshake ended, or a
+            // listener failed to accept. The accepts themselves (over EVERY bound
+            // listener, R2099) and the handshakes run in the intake.
+            event = intake.next() => Step::Intake(event),
             _ = forwarder_tick(&mut tick_timer) => Step::Tick,
             _ = forwarder_woken(&wake_signal) => Step::Woken,
             intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
@@ -4343,12 +4422,12 @@ where
                 match _due {}
             }
 
-            Step::Accepted(Ok((accepted, peer))) => {
+            Step::Intake(intake::IntakeEvent::Handshaken(ended)) => {
                 // Slice B — the mesh accept loop holds a face per accepted peer
                 // keyed by its handshake zid, so an IP peer AND a mesh-capable
                 // non-IP peer (unixsock / vsock / unixpipe — each a genuine per-peer
                 // stream accept) are all held as faces; `peer` (an `AcceptedPeer`)
-                // is threaded straight into the open future as a log/event tag.
+                // is threaded straight through the handshake as a log/event tag.
                 //
                 // ⛔ R2723 — THE NON-MESH REJECT ARM IS GONE, and it is the CADENCE
                 // of an acceptor that made it obsolete rather than a decision to be
@@ -4369,75 +4448,29 @@ where
                 // admit every variant, leaving this arm a check that can never fire.
                 // The surviving consumer is the BIND-time one, which now reports the
                 // cadence to an operator rather than refusing the listen.
-                // Upstream's DoS guard, at the same place (`handle_new_link_unicast`): a link
-                // that arrives while `accept_pending` accepts are still mid-handshake is closed
-                // straight away and nothing is said to the peer, because either the bound is too
-                // small for the deployment or someone is filling it, and a reply costs the
-                // acceptor what the peer is spending. `accepted_ids` is exactly those accepts:
-                // inserted below, removed when the open resolves.
-                if accepted_ids.len() >= accept.pending {
-                    summary.refused_over_pending += 1;
-                    log::debug!(
-                        "closing {peer:?} unanswered: {} accepts are already mid-handshake",
-                        accepted_ids.len()
-                    );
-                    drop(accepted);
-                    continue;
-                }
+                let intake::Handshaken {
+                    peer,
+                    result,
+                    pending,
+                } = *ended;
                 let id = FaceId(next_id);
                 next_id += 1;
-                summary.accepted += 1;
                 // R2951 — every open that is not an ACCEPT is one of this node's
-                // dials; this is the one accept push, so marking it here is what
-                // lets `Face::dialed` be answered in every build.
+                // dials; this is the one arm accepts reach the loop by, so marking
+                // it here is what lets `Face::dialed` be answered in every build.
                 accepted_ids.insert(id);
-                // R311y205 (transport-multilink) — a `max_links > 1` acceptor opens
-                // with the 0x4-negotiating variant so an inbound peer's second link
-                // can aggregate (the ext captures its ephemeral pubkey); the
-                // `#[cfg(not)]` arm is the byte-identical single-link accept.
-                #[cfg(not(feature = "transport-multilink"))]
-                opening.push(Box::pin(open_face(
-                    id,
-                    peer,
-                    accepted,
-                    params.clone(),
-                    offer,
-                    clock,
-                    tick_interval_ms,
-                    accept,
-                )));
-                #[cfg(feature = "transport-multilink")]
-                opening.push(if max_links > 1 {
-                    Box::pin(open_face_multilink(
-                        id,
-                        peer,
-                        accepted,
-                        offer,
-                        multilink_priority_range(id),
-                        params.clone(),
-                        clock,
-                        tick_interval_ms,
-                        accept,
-                    )) as OpenFuture
-                } else {
-                    Box::pin(open_face(
-                        id,
-                        peer,
-                        accepted,
-                        params.clone(),
-                        offer,
-                        clock,
-                        tick_interval_ms,
-                        accept,
-                    )) as OpenFuture
-                });
+                // Taken through the arm every open ends in. The accept stays counted
+                // against `accept_pending` until then, as upstream counts it until
+                // its transport is up.
+                opening.push(Box::pin(async move {
+                    let opened = (id, peer, result);
+                    drop(pending);
+                    opened
+                }));
             }
 
-            Step::Accepted(Err(e)) => {
+            Step::Intake(intake::IntakeEvent::AcceptError(e)) => {
                 on_event(&AcceptEvent::AcceptError(e));
-                // Throttle before re-arming: a persistent accept error (EMFILE)
-                // would otherwise hot-spin the loop. zenoh's accept_task parity.
-                clock.sleep(ACCEPT_ERROR_THROTTLE_MS).await;
             }
 
             // The forwarder's periodic cadence elapsed — let it do its
@@ -4453,6 +4486,9 @@ where
     // Stop accepting; drop in-flight opens + drives (sockets close, writer tasks
     // drain). Faces table cleared — the summary already captured the high-water
     // mark.
+    intake.close().await;
+    summary.accepted = intake.accepted();
+    summary.refused_over_pending = intake.refused_over_pending();
     drop(opening);
     drop(driving);
     // Spawned drives are cancelled AND awaited: a task mid-poll finishes that poll on its
@@ -4552,10 +4588,12 @@ where
 /// per face, instead of held inside the loop's single task: the entry of a node whose
 /// forwarder is `Send + Sync`.
 ///
-/// The accept, the handshakes, the `max_sessions` bound, the zid dedup and every forwarder
-/// hook that is not the per-event one still run on THIS task, which is the control plane;
-/// what moves to the workers is the drive of each face, which is the data plane. So N peers
-/// are read, decoded and delivered by up to N threads, and a callback that does real work on
+/// The `max_sessions` bound, the zid dedup and every forwarder hook that is not the per-event
+/// one still run on THIS task, which is the control plane; what moves to the workers is the
+/// drive of each face, which is the data plane. The accept and the handshakes stay on this task
+/// too, unless `executor` answers [`FaceExecutor::spawns_intake`], when each is a task of its
+/// own. So N peers are read, decoded and delivered by up to N threads, and a callback that does
+/// real work on
 /// one link no longer holds up the others. `executor` wraps each spawned drive (the C ABI
 /// puts its read gate around it).
 ///
@@ -4795,9 +4833,13 @@ where
 ///
 /// [`RoutingFaceDrive::TaskPerFace`], upstream's: each face's drive is spawned on the runtime's
 /// workers, so the faces are read, decoded and routed by as many threads as the runtime has,
-/// and the accept, the dials, the tick and the multicast planes stay on THIS task, which is the
-/// control plane (as [`accept_loop_offering_spawned`] splits them). Upstream reads each link on
-/// a task of its own on its receive runtime and routes on that task
+/// and the dials, the tick and the multicast planes stay on THIS task, which is the control
+/// plane (as [`accept_loop_offering_spawned`] splits them). The listeners and the handshake of
+/// each accepted link are tasks of their own, as upstream accepts on a task per listener and
+/// spawns each link's accept (`io/zenoh-transport/src/unicast/manager.rs` @
+/// `pub(crate) async fn handle_new_link_unicast(`): a face admitted or dropped here writes the
+/// routing tables and waits for their readers, and no accept or handshake waits behind it.
+/// Upstream reads each link on a task of its own on its receive runtime and routes on that task
 /// (`io/zenoh-transport/src/unicast/universal/link.rs` @
 /// `.spawn_with_rt(zenoh_runtime::ZRuntime::RX, task);`). On a current-thread runtime the
 /// faces are still tasks of their own and run on its one thread.
@@ -7424,17 +7466,17 @@ mod tests {
         );
     }
 
-    /// Shutdown while a handshake is still in flight (the `opening` set is
-    /// non-empty) returns promptly and leaks nothing: `drop(opening)` cancels the
+    /// Shutdown while a handshake is still in flight (the intake holds it)
+    /// returns promptly and leaks nothing: closing the intake cancels the
     /// in-flight open, the socket closes. A silent peer (connects, never sends
-    /// InitSyn) sits in `opening`; a fixed-delay shutdown fires well inside the
+    /// InitSyn) sits in the intake; a fixed-delay shutdown fires well inside the
     /// 1s accept deadline, so the open is mid-flight when the loop tears down.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn accept_loop_shuts_down_cleanly_with_a_handshake_in_flight() {
         let (listener, addr) = bind_loopback().await;
 
         // Silent peer: connects and holds the socket open without sending InitSyn,
-        // so its open_face stays pending in `opening`.
+        // so its handshake stays in flight in the intake.
         let silent = async move {
             let s = TcpStream::connect(addr).await.expect("silent peer connect");
             tokio::time::sleep(Duration::from_millis(400)).await;
