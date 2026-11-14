@@ -1079,6 +1079,16 @@ pub mod handshake_encode;
 ))]
 mod transport_message_parity;
 
+/// The Frame and Fragment headers as `frame_encode` writes them and `inbound`
+/// reads them, against the documents that state each header.
+#[cfg(all(
+    test,
+    feature = "transport-qos",
+    feature = "reassembly",
+    feature = "codec-fragment"
+))]
+mod transport_header_parity;
+
 /// Item 895 — transport messages written from EXPLICIT fields (every semantic
 /// field set by the caller, every derived byte computed here) and the stream
 /// prefix a link puts in front of them. The session TX path's
