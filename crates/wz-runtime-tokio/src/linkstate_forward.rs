@@ -620,10 +620,7 @@ pub(crate) fn bring_client_routes<T: Clone, V: Held>(
         routes,
         client_inputs(store),
         |since, visit| store.changed_since(since, visit),
-        |changed, cached_key| {
-            let target: Vec<&str> = cached_key.split('/').collect();
-            keyexpr_intersects_target(changed, &target)
-        },
+        |changed, cached_chunks| keyexpr_intersects_target(changed, cached_chunks),
     );
 }
 

@@ -231,8 +231,10 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
     /// `changes(since, visit)` is asked, when only the declaration table's version moved, to call
     /// `visit` with every key declared or withdrawn after `since` (the table version `memo` is
     /// at), and to answer `false` when it can no longer say. `reaches(changed, cached)` is whether
-    /// a change of `changed` can alter the route kept for `cached`. A topology move (`net`), a
-    /// memo brought to no version yet, or a table that cannot answer starts the new memo empty.
+    /// a change of `changed` can alter the route kept for the keyexpr whose chunks are `cached`:
+    /// each kept keyexpr is split once and asked of every key that moved, not split once for each.
+    /// A topology move (`net`), a memo brought to no version yet, or a table that cannot answer
+    /// starts the new memo empty; a table that answers that nothing moved keeps every route.
     ///
     /// Safe by construction: it only ever leaves out more than it must, never fewer, because the
     /// caller supplies the keys the table's own mutators recorded and every mutation records its
@@ -242,7 +244,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
         memo: &mut Arc<Self>,
         inputs: RouteInputs,
         changes: impl FnOnce(u64, &mut dyn FnMut(&str)) -> bool,
-        reaches: impl Fn(&str, &str) -> bool,
+        reaches: impl Fn(&str, &[&str]) -> bool,
     ) {
         if memo.inputs == Some(inputs) {
             return;
@@ -252,17 +254,25 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
                 let mut moved: Vec<String> = Vec::new();
                 if changes(was.table, &mut |keyexpr| moved.push(keyexpr.to_owned())) {
                     let mut routes = Routes::clone(&memo.routes.read());
-                    let reached: Vec<RouteKey<S>> = routes
-                        .keys()
-                        .filter(|cached| {
-                            moved
-                                .iter()
-                                .any(|changed| reaches(changed, &cached.keyexpr))
-                        })
-                        .cloned()
-                        .collect();
-                    for cached in &reached {
-                        routes.remove(cached);
+                    if !moved.is_empty() {
+                        let reached: Vec<RouteKey<S>> = {
+                            // One buffer for the chunks of every kept keyexpr in turn.
+                            let mut chunks: Vec<&str> = Vec::new();
+                            routes
+                                .keys()
+                                .filter(|cached| {
+                                    // The key as the map lends it, which outlives the buffer.
+                                    let cached: &RouteKey<S> = *cached;
+                                    chunks.clear();
+                                    chunks.extend(cached.keyexpr.split('/'));
+                                    moved.iter().any(|changed| reaches(changed, &chunks))
+                                })
+                                .cloned()
+                                .collect()
+                        };
+                        for cached in &reached {
+                            routes.remove(cached);
+                        }
                     }
                     routes
                 } else {
@@ -467,9 +477,53 @@ mod tests {
                     None => false,
                 }
             },
-            |changed, cached| changed == cached,
+            |changed, cached| changed.split('/').eq(cached.iter().copied()),
         );
         (memo, moved)
+    }
+
+    #[test]
+    fn a_table_move_that_moved_no_key_keeps_every_route_and_asks_no_reach() {
+        let mut memo: Arc<RouteCache<Vec<Zid>>> = at(AT);
+        memo.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        RouteCache::bring_to_retiring(
+            &mut memo,
+            RouteInputs { table: 2, ..AT },
+            |_, _| true,
+            |_, _| unreachable!("nothing moved, so no route is asked about"),
+        );
+        assert_eq!(memo.len(), 1, "the route was kept");
+    }
+
+    #[test]
+    fn the_reach_is_asked_with_the_chunks_of_the_kept_keyexpr() {
+        let mut memo: Arc<RouteCache<Vec<Zid>>> = at(AT);
+        memo.get_or_compute(AT, &zid(1), "demo/a/b", || true, || vec![zid(9)]);
+        let asked = std::cell::RefCell::new(Vec::new());
+        RouteCache::bring_to_retiring(
+            &mut memo,
+            RouteInputs { table: 2, ..AT },
+            |_, visit| {
+                visit("other/x");
+                visit("other/y");
+                true
+            },
+            |changed, cached| {
+                asked
+                    .borrow_mut()
+                    .push((changed.to_owned(), cached.join("|")));
+                false
+            },
+        );
+        assert_eq!(
+            *asked.borrow(),
+            [
+                ("other/x".to_owned(), "demo|a|b".to_owned()),
+                ("other/y".to_owned(), "demo|a|b".to_owned())
+            ],
+            "each moved key is asked of the kept keyexpr's chunks"
+        );
+        assert_eq!(memo.len(), 1, "a route no moved key reaches is kept");
     }
 
     #[test]
