@@ -170,14 +170,13 @@ fn dedicated_channels(base: &str, suffix: u32) -> (String, String) {
 /// (`unixpipe//tmp/p#file_mask=438` = 0o666); as the same uid, the default
 /// suffices and is what run-ci's Layer Z unixpipe leg uses.
 ///
-/// This constant is also wz's answer for the zenoh CONFIG key
-/// `transport/link/unixpipe/file_access_mask`, which upstream renders into
-/// every unixpipe endpoint's config span as a per-link DEFAULT that the
-/// endpoint's own parameters then overwrite. wz has the endpoint half and not
-/// the rendering, so the key sits in `zenoh_config::UNHONOURED_READER_GAP` with
-/// this symbol as its anchor: the capability exists, the JSON5 reader was never
-/// told. (A code span, not an intra-doc link — that module is behind the
-/// `zenoh-config` feature and the link would not resolve in a default build.)
+/// The zenoh CONFIG key `transport/link/unixpipe/file_access_mask` sits one
+/// layer above this constant: upstream renders it into every unixpipe
+/// endpoint's config span as a per-link default that the endpoint's own
+/// parameters then overwrite, and wz carries it as the unixpipe layer of
+/// `crate::link_socket::LinkDefaults`, which the dial and bind arms lay under
+/// the locator's own `file_mask`. This constant answers only when neither
+/// states a mode.
 pub const DEFAULT_FILE_MASK: u32 = 0o600;
 
 /// Resolve a locator's optional `#file_mask=<n>` against [`DEFAULT_FILE_MASK`].

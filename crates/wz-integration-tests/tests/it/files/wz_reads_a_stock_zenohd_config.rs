@@ -644,6 +644,11 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "transport/link/tcp/so_sndbuf",
         "transport/link/tls/so_rcvbuf",
         "transport/link/tls/so_sndbuf",
+        // An `Option<u32>` with no default upstream
+        // (`commons/zenoh-config/src/lib.rs` @ `file_access_mask: Option<u32>`), so a silent file
+        // resolves it to null: the mode a unixpipe link takes is then the link's own default,
+        // which the resolved tree cannot show.
+        "transport/link/unixpipe/file_access_mask",
         // R2568 — honoured by R2567 and left unclassed, which this leg's own
         // gate caught. Upstream states no value for it either: DEFAULT_CONFIG
         // carries `dictionary_file: null` beside `user` and `password`, so the
@@ -3640,6 +3645,9 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         so_sndbuf: 24576,
       }},
       tcp: {{ so_rcvbuf: 65536, so_sndbuf: 65536 }},
+      // The unixpipe kind's FIFO mode (0o660, decimal as upstream reads it), off its absent
+      // default; it reaches `--link-config` and waits unused, as the tls pair does.
+      unixpipe: {{ file_access_mask: 432 }},
       protocols: ["tcp", "tls"],
       // R2925 — the queue sizes and the two congestion waits, each off its
       // default so the demo has something to apply.

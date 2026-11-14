@@ -2647,9 +2647,15 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // unixsock). ASYNC now (the invitation handshake awaits the peer), running
         // within the tokio runtime this async dial seam provides. No cert config
         // (like unixsock/udp).
+        // The locator's `file_mask` is laid over the unixpipe kind's, as upstream merges an
+        // endpoint's parameters over its kind's configuration.
         #[cfg(all(feature = "transport-link-unixpipe", unix))]
         AnyLocator::Unixpipe(ep) => Ok(DialedLink::Unixpipe(
-            dial_unixpipe(&ep.path, ep.file_mask).await?,
+            dial_unixpipe(
+                &ep.path,
+                ep.file_mask.or(cfg.link_defaults.unixpipe_file_mask()),
+            )
+            .await?,
         )),
         // R311y10 — `AnyLocator::Unixpipe` is an ALWAYS-present, PLATFORM-
         // INDEPENDENT variant (the unixpipe locator leaf is ungated in
@@ -3658,9 +3664,14 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
         // always-present `AnyLocator::Unixpipe` variant (ungated in
         // wz-session-core) stays exhaustive on every target. `udp` is the remaining
         // acceptor extension point.
+        // The locator's `file_mask` over the unixpipe kind's, as the dial arm lays it.
         #[cfg(all(feature = "transport-link-unixpipe", unix))]
         AnyLocator::Unixpipe(ep) => Ok(BoundListener::Unixpipe(
-            bind_unixpipe(&ep.path, ep.file_mask).await?,
+            bind_unixpipe(
+                &ep.path,
+                ep.file_mask.or(cfg.link_defaults.unixpipe_file_mask()),
+            )
+            .await?,
         )),
         #[cfg(not(all(feature = "transport-link-unixpipe", unix)))]
         AnyLocator::Unixpipe(_ep) => Err(unsupported(

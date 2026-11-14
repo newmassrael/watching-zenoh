@@ -1263,6 +1263,12 @@ pub struct ZenohNodeConfig {
     /// `--link-config <kind>#so_rcvbuf=<n>` / `so_sndbuf=<n>`. `None` is an
     /// unnamed key, which upstream resolves to "leave the kernel's default".
     pub link_socket_buffers: LinkSocketBuffers,
+    /// `transport/link/unixpipe/file_access_mask`: the FIFO creation mode
+    /// upstream's unixpipe inspector renders into every unixpipe endpoint as
+    /// `file_mask`, under the endpoint's own parameters. wz's
+    /// `--link-config unixpipe#file_mask=<n>`. `None` is an unnamed key, which
+    /// leaves the link's own default (`unixpipe_pipeline::DEFAULT_FILE_MASK`).
+    pub unixpipe_file_access_mask: Option<u32>,
     /// R311y845 — the three below say WHERE a node listens for its peers, and
     /// until this round wz's answer was a constant. `wz-ap-demo`'s `SCOUT_GROUP`
     /// was `224.0.0.224` compiled in, with a doc that named this very key as
@@ -1585,6 +1591,8 @@ impl Default for ZenohNodeConfig {
             // R2593 — all four resolve to `null` on a running zenohd: no buffer
             // size is set, and the kernel's defaults stand.
             link_socket_buffers: LinkSocketBuffers::default(),
+            // An `Option<u32>` upstream with no default, so a silent file resolves it to `null`.
+            unixpipe_file_access_mask: None,
             // R311y845 — all three resolve to `null` on a running zenohd (no
             // instruction), NOT to the values `DEFAULT_CONFIG.json5` documents
             // in its comments. Defaulting them to `224.0.0.224:7446` / `auto` /
@@ -2144,6 +2152,14 @@ impl ZenohNodeConfig {
             }
             out.push_str("\n      }");
         }
+        // The unixpipe block, only for a mode the caller set: an absent key is the link's own
+        // default, so emitting nothing is exact.
+        if let Some(mask) = self.unixpipe_file_access_mask {
+            let _ = write!(
+                out,
+                ",\n      \"unixpipe\": {{ \"file_access_mask\": {mask} }}"
+            );
+        }
         out.push_str("\n    }\n  }");
         if let Some(admin) = self.adminspace {
             out.push_str(",\n  \"adminspace\": { \"enabled\": true, \"permissions\": ");
@@ -2354,6 +2370,11 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/link/tcp/so_sndbuf",
     "transport/link/tls/so_rcvbuf",
     "transport/link/tls/so_sndbuf",
+    // The unixpipe link's FIFO mode. MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and
+    // `UNHONOURED_READER_GAP`, so the surface total is unchanged: it reaches every unixpipe link
+    // through the unixpipe layer of `LinkDefaults`, under the locator's own `file_mask`, as
+    // upstream's inspector renders it under the endpoint's parameters.
+    "transport/link/unixpipe/file_access_mask",
     // R311y845 — WHERE the node looks for its peers. These three MOVED from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS`, so the surface total below is
     // unchanged: they are resolved leaves of a real zenohd either way, and all
@@ -2523,6 +2544,12 @@ pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
         "transport/link/tls/so_sndbuf",
         "transport-link-tls",
         cfg!(feature = "transport-link-tls"),
+    ),
+    // The FIFO mode of a `unixpipe/` link, which a build has on a Unix target with the link.
+    (
+        "transport/link/unixpipe/file_access_mask",
+        "transport-link-unixpipe",
+        cfg!(all(feature = "transport-link-unixpipe", unix)),
     ),
     // The partition a node places its remotes by, which only the region hats hold
     // (`RouterForwarder::with_south_partition`).
@@ -2888,7 +2915,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/link/tx/queue/batching/time_limit",
     "transport/link/tx/sequence_number_resolution",
     "transport/link/tx/threads",
-    "transport/link/unixpipe/file_access_mask",
+    // `transport/link/unixpipe/file_access_mask` LEFT this list for `HONOURED_CONFIG_KEYS`: the
+    // unixpipe layer of `LinkDefaults` carries it to every unixpipe link.
     // `transport/multicast/compression/enabled` LEFT this list for
     // [`C_ABI_SESSION_HONOURED_KEYS`]: a group the zenoh-c session joins wraps its datagrams in
     // batches, as upstream's multicast manager does from 1.10.2.
@@ -3173,16 +3201,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 ///   peer chain's expiry (`crate::stream_link::ExpirySignal`, R2600 and R2608), armed today by
 ///   the locator's `close_link_on_expiration`. The key is upstream's per-link default for that
 ///   same flag, so the reader change is "render it onto the tls and quic endpoints".
-/// * `transport/link/unixpipe/file_access_mask` — the unixpipe link's FIFO
-///   creation mode, which R2363 made configurable:
-///   `crate::unixpipe_pipeline::DEFAULT_FILE_MASK` and the
-///   `wz_session_core::locator::UnixpipeEndpoint::file_mask` the locator's
-///   `#file_mask=<n>` fills, threaded into every `mkfifo` the bind and the dial
-///   perform. Upstream's own path from the CONFIG KEY to the link is the same
-///   shape: `UnixPipeConfigurator::inspect_config` renders it into the
-///   endpoint's config span as a per-link DEFAULT, which the endpoint's own
-///   parameters then overwrite. So the reader change is "render the key onto
-///   the unixpipe endpoints", not "build a mode".
+/// * (`transport/link/unixpipe/file_access_mask` LEFT this list: the reader renders it onto the
+///   unixpipe layer of `crate::link_socket::LinkDefaults`, [`HONOURED_CONFIG_KEYS`].)
 ///
 /// ⚠ Being here is NOT a claim that the move is mechanical. R311y844's ten were
 /// moved one at a time, and `scouting/multicast/autoconnect` needed R2141 to
@@ -3241,7 +3261,8 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // JSON5 reader has no field for it. This is the exact class the ledger's
     // own doc warns about — a beyond-wz row that becomes a reader gap because
     // wz grew the capability, and reds nothing on its own.
-    "transport/link/unixpipe/file_access_mask",
+    // It then LEFT for `HONOURED_CONFIG_KEYS` once the reader rendered the key onto the unixpipe
+    // layer of `LinkDefaults`.
 ];
 
 /// WHICH subsystem each [`UNHONOURED_BEYOND_WZ`] key would need, as data —
@@ -3622,18 +3643,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "wz-has-it",
         "peer_chain_deadline",
     ),
-    // R2363 — the unixpipe FIFO mode. The anchor is the DEFAULT rather than the
-    // parse, because the default is the whole of wz's declared divergence
-    // (0o600 where upstream defaults to 0o777) and it is what a reader
-    // rendering the key would have to override. `UnixpipeEndpoint::file_mask`
-    // is the other half and lives in `wz-session-core`; the anchor has to be a
-    // symbol in THIS crate's own sweep, so the one that is here is the one
-    // named.
-    (
-        "transport/link/unixpipe/file_access_mask",
-        "wz-has-it",
-        "DEFAULT_FILE_MASK",
-    ),
+    // The `transport/link/unixpipe/file_access_mask` row is GONE: the reader honours the key
+    // now, and this ledger carries evidence for unhonoured keys only.
     // R2925 — the `queue/size/data` row R2226 (open-debt item 575) kept here is
     // GONE, for the reason R2593's `so_sndbuf` row went: wz honours the key now,
     // and the ledger answers only for keys wz does not act on. The zenohd
@@ -3790,11 +3801,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "transport/link/tx/threads",
         "exclude",
         "upstream stores it on its transport manager config and nothing reads it back",
-    ),
-    (
-        "transport/link/unixpipe/file_access_mask",
-        "build",
-        "reader gap: a unixpipe link takes its FIFO mode from its locator only",
     ),
     (
         "transport/multicast/max_sessions",
@@ -8052,6 +8058,22 @@ impl ZenohNodeConfig {
                 }
             }
         }
+        // The unixpipe link's FIFO mode, a `u32` upstream, read where the build has the link.
+        #[cfg(all(feature = "transport-link-unixpipe", unix))]
+        if let Some(v) = want_u64(&doc, "transport/link/unixpipe/file_access_mask")? {
+            out.unixpipe_file_access_mask =
+                Some(u32::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                    path: "transport/link/unixpipe/file_access_mask",
+                    value: v.to_string(),
+                })?);
+            named.push("transport/link/unixpipe/file_access_mask");
+        }
+        #[cfg(not(all(feature = "transport-link-unixpipe", unix)))]
+        refuse_unbuilt_instruction(
+            &doc,
+            "transport/link/unixpipe/file_access_mask",
+            never_states_nothing,
+        )?;
         // `adminspace` is a block rather than a field: an absent block is not
         // `enabled: false`, which is why the struct models it as an Option and
         // why `enabled: false` here has to erase the block rather than record
@@ -9509,6 +9531,12 @@ mod tests {
             (
                 "transport/link/tls/so_sndbuf",
                 r#"{ "transport": { "link": { "tls": { "so_sndbuf": 8192 } } } }"#,
+            ),
+            // The unixpipe FIFO mode, to 0o660 (decimal, upstream's spelling); absent is the
+            // default.
+            (
+                "transport/link/unixpipe/file_access_mask",
+                r#"{ "transport": { "link": { "unixpipe": { "file_access_mask": 432 } } } }"#,
             ),
             // R311y845 — WHERE the node looks. Each is driven to a value that
             // is NOT the upstream default (`224.0.0.224:7446` / `auto` / `1`),
@@ -12908,6 +12936,10 @@ mod tests {
                 r#"{ transport: { link: { tls: { so_rcvbuf: 4096 } } } }"#,
             ),
             (
+                "transport/link/unixpipe/file_access_mask",
+                r#"{ transport: { link: { unixpipe: { file_access_mask: 432 } } } }"#,
+            ),
+            (
                 "gateway/south",
                 r#"{ gateway: { south: [{ filters: [{ modes: ["peer"] }] }] } }"#,
             ),
@@ -12933,6 +12965,51 @@ mod tests {
                 None => panic!("{key} is a capability's key"),
             }
         }
+    }
+
+    /// The unixpipe FIFO mode is a `u32` upstream: read as the number it is, absent when the
+    /// file is silent, and refused by the key's name past `u32` or as anything but a number.
+    #[cfg(all(feature = "transport-link-unixpipe", unix))]
+    #[test]
+    fn the_unixpipe_file_mask_is_read_as_a_u32() {
+        let read = |doc: &str| ZenohNodeConfig::from_json5(doc);
+        assert_eq!(
+            read(r#"{ transport: { link: { unixpipe: { file_access_mask: 432 } } } }"#)
+                .expect("a u32")
+                .config
+                .unixpipe_file_access_mask,
+            Some(432)
+        );
+        assert_eq!(
+            read("{}")
+                .expect("silence")
+                .config
+                .unixpipe_file_access_mask,
+            None
+        );
+        assert_eq!(
+            read(r#"{ transport: { link: { unixpipe: { file_access_mask: 4294967296 } } } }"#)
+                .err(),
+            Some(ConfigIngestError::OutOfRange {
+                path: "transport/link/unixpipe/file_access_mask",
+                value: String::from("4294967296"),
+            })
+        );
+        assert!(matches!(
+            read(r#"{ transport: { link: { unixpipe: { file_access_mask: "0o660" } } } }"#),
+            Err(ConfigIngestError::WrongType {
+                path: "transport/link/unixpipe/file_access_mask",
+                ..
+            })
+        ));
+        // The emitter writes the mode back where the reader finds it.
+        let stated = ZenohNodeConfig {
+            unixpipe_file_access_mask: Some(432),
+            ..ZenohNodeConfig::default()
+        };
+        let again = read(stated.to_json5().as_str()).expect("it round-trips");
+        assert_eq!(again.config, stated);
+        assert!(again.ignored.is_empty(), "{:?}", again.ignored);
     }
 
     /// R2797 — why the C door cannot be an ENUMERATION.

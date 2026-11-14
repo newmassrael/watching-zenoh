@@ -237,6 +237,11 @@ pub enum OpenRefusal {
     /// its regions whatever links it holds; an open that accepted the key and ran as the registry
     /// of faces would hold a south it never partitions, and nothing would say so.
     GatewayNotCarried,
+    /// The document configures a kind of link this build cannot make (the FIFO mode of
+    /// `transport/link/unixpipe` in a build without a `unixpipe/` link). Told how to make a
+    /// link it has no means of making, the open refuses rather than accept an instruction it
+    /// could only drop.
+    LinkNotInBuild,
 }
 
 impl OpenRefusal {
@@ -260,6 +265,7 @@ impl OpenRefusal {
             Self::GroupInConnect | Self::NoDialableEndpoint => "connect/endpoints",
             Self::Namespace => "namespace",
             Self::GatewayNotCarried => "gateway/south",
+            Self::LinkNotInBuild => "transport/link/unixpipe",
         }
     }
 }
@@ -502,12 +508,14 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePol
 /// The traffic policy's keys are [`OpenRefusal::Security`], as [`node_security_of`] refuses them;
 /// the certificate material of a build with no `tls/` or `quic/` link is
 /// [`OpenRefusal::TlsMaterial`]; a south kept apart in a build with no region hat is
-/// [`OpenRefusal::GatewayNotCarried`], as [`OpenPlan::refuse_uncarried_south`] refuses it.
+/// [`OpenRefusal::GatewayNotCarried`], as [`OpenPlan::refuse_uncarried_south`] refuses it; the
+/// configuration of a link kind the build has no link of is [`OpenRefusal::LinkNotInBuild`].
 fn refusal_of_unbuilt_key(path: &str) -> OpenRefusal {
     match path {
         "low_pass_filter" | "downsampling" | "qos/network" => OpenRefusal::Security,
         _ if path.starts_with("access_control/") => OpenRefusal::Security,
         _ if path.starts_with("transport/link/tls/") => OpenRefusal::TlsMaterial,
+        _ if path.starts_with("transport/link/unixpipe/") => OpenRefusal::LinkNotInBuild,
         "gateway/south" => OpenRefusal::GatewayNotCarried,
         _ => OpenRefusal::DocumentUnreadable,
     }
@@ -1399,6 +1407,10 @@ mod tests {
                 OpenRefusal::TlsMaterial,
             ),
             ("transport/link/tls/so_rcvbuf", OpenRefusal::TlsMaterial),
+            (
+                "transport/link/unixpipe/file_access_mask",
+                OpenRefusal::LinkNotInBuild,
+            ),
             ("gateway/south", OpenRefusal::GatewayNotCarried),
             ("transport/link/protocols", OpenRefusal::DocumentUnreadable),
         ] {

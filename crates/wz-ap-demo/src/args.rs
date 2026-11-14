@@ -781,6 +781,7 @@ pub(crate) fn split_endpoint_list(raw: &str) -> Vec<String> {
 /// | `transport/link/tx/batch_size` | `--batch-size <n>` |
 /// | `transport/link/tx/lease` | `--lease-ms <n>` |
 /// | `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` | `--link-config <kind>#<key>=<n>` (R2593) |
+/// | `transport/link/unixpipe/file_access_mask` | `--link-config unixpipe#file_mask=<n>` |
 /// | an `adminspace` block at all | `--config-queryable` |
 /// | `adminspace/permissions/read: false` | `--no-admin-read` |
 /// | `adminspace/permissions/write: true` | `--config-writable` `--config-write-permit` |
@@ -1406,10 +1407,18 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             "so_sndbuf",
             buffers.tls_so_sndbuf,
         ),
+        // The unixpipe kind's FIFO mode, onto the same flag for the same reason: upstream
+        // renders it whether or not the node opens a unixpipe link.
+        (
+            "transport/link/unixpipe/file_access_mask",
+            "unixpipe",
+            "file_mask",
+            cfg.unixpipe_file_access_mask,
+        ),
     ] {
         if named(key) {
             match value {
-                Some(value) => exp.link_config(key, kind, span_key, value),
+                Some(value) => exp.link_config(key, kind, span_key, value.to_string()),
                 None => exp.record(key, KeyEffect::AlreadyTheBehaviour),
             }
         }
@@ -2793,20 +2802,13 @@ impl Expansion<'_> {
     /// typed value for this same key decides the key. The expanded flag lands
     /// after the typed argv, where a later span would win, which is exactly why
     /// a key the operator typed is never expanded over.
-    fn link_config(&mut self, key: &'static str, kind: &str, span_key: &str, value: u32) {
-        use wz::runtime_tokio::locator::{config_span_keys, LinkSocketOptions};
-        let typed: Option<Option<u32>> = parse_pairs(self.rest, "--link-config")
+    fn link_config(&mut self, key: &'static str, kind: &str, span_key: &str, value: String) {
+        use wz::runtime_tokio::locator::{config_span_keys, config_span_value};
+        let typed: Option<Option<String>> = parse_pairs(self.rest, "--link-config")
             .iter()
             .filter_map(|v| v.split_once('#'))
             .filter(|(k, span)| *k == kind && config_span_keys(span).any(|s| s == span_key))
-            .map(|(_, span)| {
-                LinkSocketOptions::from_config_span(span)
-                    .ok()
-                    .and_then(|o| match span_key {
-                        "so_rcvbuf" => o.so_rcvbuf,
-                        _ => o.so_sndbuf,
-                    })
-            })
+            .map(|(_, span)| config_span_value(span, span_key).map(str::to_string))
             // The LAST typed span for the key is the one the binary keeps.
             .next_back();
         let effect = match typed {
@@ -3733,6 +3735,14 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          socket under a tls link, the same kernel-side effect as tcp's.",
     ),
     (
+        "transport/link/unixpipe/file_access_mask",
+        KIND_OFF_WIRE,
+        "expands to `--link-config unixpipe#file_mask=<n>`. The mode every FIFO of \
+         a unixpipe link is created with, visible as the permission bits of the \
+         nodes on disk, which the_file_mask_reaches_every_fifo_the_link_creates \
+         reads; no field in commons/zenoh-protocol carries a file mode.",
+    ),
+    (
         "namespace",
         KIND_OFF_WIRE,
         "expands to `--namespace`. MEASURED, and this is a search result \
@@ -4068,6 +4078,14 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         out.push("listen/retry");
         out.push("listen/timeout_ms");
         out.push("listen/exit_on_failure");
+    }
+    // A key whose reader is a capability this build was made without: the reader refuses a
+    // document that states it before any site here decides it, so it reaches nothing in this
+    // binary, whichever site would have carried it in a build with the capability.
+    for (key, _, built) in wz::runtime_tokio::zenoh_config::CAPABILITY_HONOURED_KEYS {
+        if !*built && !out.contains(key) {
+            out.push(*key);
+        }
     }
     out
 }
@@ -5592,6 +5610,13 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tls: { so_sndbuf: 8192 } } } }"#,
+            ),
+            // The unixpipe kind's FIFO mode, onto `--link-config unixpipe#file_mask=<n>`.
+            (
+                "transport/link/unixpipe/file_access_mask",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { unixpipe: { file_access_mask: 432 } } } }"#,
             ),
             // R311y845 — the scouting SOCKET. Both sides of each pair are a
             // `--scout` invocation (see `cli_for`), so the control expands to
@@ -9280,25 +9305,22 @@ impl TransportTuning {
         // configuration: a parameter span keyed by the kind. A refusal names the
         // flag occurrence, since several may be given.
         for value in parse_pairs(rest, "--link-config") {
-            use wz::runtime_tokio::link_socket::LinkDefaultsError;
-            use wz::runtime_tokio::locator::Proto;
+            use wz::runtime_tokio::link_socket::{LinkDefaultsError, LinkKind};
             let Some((kind, span)) = value.split_once('#') else {
                 return Err(format!(
                     "--link-config expects <kind>#<key=value;...>, got '{value}'"
                 ));
             };
-            let proto = match kind {
-                "tcp" => Proto::Tcp,
-                "tls" => Proto::Tls,
-                other => {
-                    return Err(format!(
-                        "--link-config '{value}': zenoh carries no per-link socket \
-                         configuration for `{other}` (tcp and tls have one)"
-                    ))
-                }
+            let Some(kind) = LinkKind::from_scheme(kind) else {
+                let carried: Vec<&str> = LinkKind::ALL.iter().map(|k| k.scheme()).collect();
+                return Err(format!(
+                    "--link-config '{value}': zenoh carries no per-link configuration for \
+                     `{kind}` (these kinds have one: {})",
+                    carried.join(", ")
+                ));
             };
             out.link_defaults
-                .set(proto, span)
+                .set(kind, span)
                 .map_err(|e: LinkDefaultsError| format!("--link-config '{value}': {e}"))?;
         }
         Ok(out)
@@ -10169,16 +10191,36 @@ mod link_config_flag_tests {
     fn a_link_config_the_layer_cannot_carry_is_refused() {
         for (value, needle) in [
             ("tcp", "expects <kind>#"),
-            (
-                "udp#so_rcvbuf=4096",
-                "no per-link socket configuration for `udp`",
-            ),
+            ("udp#so_rcvbuf=4096", "no per-link configuration for `udp`"),
             ("tcp#bind=127.0.0.1:0", "`bind` is not a key"),
             ("tls#so_rcvbuf=big", "--link-config 'tls#so_rcvbuf=big'"),
+            ("unixpipe#so_rcvbuf=4096", "`so_rcvbuf` is not a key"),
+            (
+                "unixpipe#file_mask=0o660",
+                "--link-config 'unixpipe#file_mask=0o660'",
+            ),
         ] {
             let err = tuning(&["--link-config", value]).expect_err(value);
             assert!(err.contains(needle), "{value} -> {err}");
         }
+    }
+
+    /// The unixpipe kind carries `file_mask`, layered like the socket kinds: the
+    /// last span that names it is the mode a silent locator gets.
+    #[test]
+    fn link_config_carries_the_unixpipe_file_mask() {
+        let t = tuning(&[
+            "--link-config",
+            "unixpipe#file_mask=438",
+            "--link-config",
+            "unixpipe#file_mask=432",
+        ])
+        .expect("two valid spans");
+        assert_eq!(t.link_defaults.unixpipe_file_mask(), Some(432));
+        assert_eq!(
+            tuning(&[]).unwrap().link_defaults.unixpipe_file_mask(),
+            None
+        );
     }
 }
 
