@@ -73,13 +73,13 @@ fn piece_of(message: &[u8], number: u8, range: core::ops::Range<usize>) -> Vec<u
 /// 64-bit one at id 1 and its own id, 18 bytes, at id 3).
 fn reply<'a>(request_id: u64, key: &'a str, payload: &'a [u8]) -> Vec<u8> {
     use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
-    use wz_session_core::ext_header::{EXT_ENC_Z64, EXT_ENC_ZBUF};
+    use wz_session_core::ext_header::network_eid;
     let qos = ExtEntry {
-        header: 0x01 | EXT_ENC_Z64,
+        header: network_eid::QOS,
         body: ExtEntryVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint { value: 5 }),
     };
     let responder = ExtEntry {
-        header: 0x03 | EXT_ENC_ZBUF,
+        header: network_eid::RESPONDER,
         body: ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::lent::ExtZbuf {
             value_len: RESPONDER.len() as u64,
             value: wz_codecs::Bounded::new(&RESPONDER[..]).unwrap(),
