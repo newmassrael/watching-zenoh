@@ -605,7 +605,7 @@ a second was not told apart from the hosts' load and is not claimed. A retired v
 holds lives until the next write or grace period: one version's own paths, as many as the readers
 held at the last publish.
 
-### 6.8 The route memos as part of each version (this round)
+### 6.8 The route memos as part of each version (round 4414)
 
 Section 6.7 left two of the readers' costs under a busy writer where they were: the route caches
 moved their inputs at every version, under a write lock a reader took, and a reader whose version
@@ -665,6 +665,112 @@ runs of each tree taken one after the other (host load 14 to 45):
   (107,000 to 195,000 writes a second against 103,000 to 139,000), on hosts too loaded for more to
   be said.
 
+### 6.9 What the writer routes, which routes a change reaches, and a delivery's face lookups
+
+Section 6.8 left three costs of the route memos unmeasured, each named in section 7. This section
+builds the instruments for all three, the change for the second, and the change for the first
+behind a switch that stays off until its reading is taken. No figure is recorded here yet: the
+readings are taken on pc2 and added below them.
+
+**What a writer routes through its draft.** A writer that routes while it writes (a replay, an
+interest answered while it declares, a query routed by a write) asks the memo at its draft's
+inputs, which no memo was brought to, and its route is computed and not kept. How often is the
+first question. The memo counts, in test builds only so that no reader pays for the count, the
+routes asked at inputs other than its version's and how many of those were computed
+(`RouteCache::asks_off_version`, summed over every hat by `Tables::routes_asked_off_version`). The
+phase 0 instrument prints them for its window with no writer and its window with the writer, and
+the busy-writer instrument of section 6.7 for every window. A count near zero closes the question:
+the writer does not route through its draft often enough for a memo of the draft to matter.
+
+If the count is not near zero, the prescription is the one read-copy-update gives for anything
+derived from the version being prepared: the draft carries its own memo, and the version it is
+published as keeps what that memo holds.
+
+- A write opens a memo of the draft where it first moves an input of a hat's memo, in the hat's
+  accessors that every write of an input goes through (`net_mut`, `subs_mut`, `qabls_mut` of either
+  kind of hat), with `RouteCache::open_draft`. Only the memos whose inputs a write moves are opened,
+  once a write.
+- A route asked at the inputs the memo was opened over (the draft before the write moved them) is
+  the published version's: served from its memo and added to it, as a reader's is. A route asked at
+  any other inputs is computed once and kept in the draft's memo, for those inputs only; the draft's
+  inputs only move forward, so the routes of inputs it moved past are dropped when it moves.
+- When the draft is published, the memo it was opened over is brought to the version's inputs as in
+  section 6.8, and the routes the draft kept at exactly those inputs join it: they were computed from
+  these very tables.
+- A draft that is abandoned takes its memo with it. This is why the draft's routes live in the
+  draft and not in the shared memo: the table versions are counters copied with the tables, so the
+  next draft, copied from the same published version, reaches the same numbers with other tables
+  and must not be served the abandoned draft's routes. Under `rwlock` a write that unwinds leaves
+  its draft memos in the tables; a reader then reads them at the tables' own inputs, which number
+  that one state of the tables uniquely, and the next publish closes them.
+
+The switch is `RouterForwarder::with_draft_route_memos`, in test builds; every hat is built with
+the tables' `keeps_draft_routes`. It is off, and is turned on, unconditionally and without a
+switch, only if the A/B below measures the writer's computes at its draft's inputs fall and the
+readers' instructions a Put not rise. Its cost when on is one memo allocated for each hat memo a
+write moves, and a lock of the draft's memo on each route the writer asks.
+
+**Which routes a change reaches.** A client leg's memo was brought to a new version by trying every
+route it kept against every key the write changed, splitting the route's keyexpr into a new vector
+for each try. The client legs' memos are now indexed (`RouteCache::indexed`): beside the routes,
+the memo keeps the routes' keys in the keyexpr index of section 6.4, by their keyexpr, written with
+the routes under the memo's one lock. The writer asks the index for the routes whose keyexpr may
+meet each changed key, and refines each with the exact intersection on the two texts
+(`keyexpr_intersects_text`, which splits nothing unless a wildcard makes the walk necessary). The
+cost follows the routes a change meets, not the routes kept. A key that meets every route
+(`mesh/**`) still leaves out every route, and now takes each out of the index as well. The mesh
+legs keep no index: a move of their inputs starts their memo empty, so they never ask which routes
+a key reaches. A memo built with no index still finds the routes by the scan, which is the form the
+instrument measures the index against.
+
+What the index costs is paid by a reader: a miss that keeps its route also inserts its key into the
+index, a walk of the key's chunks and a copy of the nodes on that path. A hit reads the routes
+alone, as before.
+
+**A delivery's face lookups.** A route names its faces by id and every delivery finds each in the
+version's face table (`fan_out_to_faces_qos`), the persistent map of section 6.6. A route that held
+each face's state would read it where the route holds it, as upstream's `Direction` holds its
+`Arc<FaceState>` (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) dst_face: Arc<FaceState>,`).
+Nothing is changed here: the instrument measures what the lookups cost a delivery first. If the
+reading asks for the change, a route that held face state outlives the version it was computed
+from, and one of these rules has to say when it is stale:
+
+- (a) The face table's version joins the route inputs: any face that comes, goes or changes empties
+  every memo whose routes name faces. Simplest, and it makes every face transition recompute every
+  route in use, which section 6.6 removed for declarations.
+- (b) The face table keeps a change log of face ids, as the client stores keep one of keys, and the
+  memos keep an index of their routes by face; a version leaves out the routes that name a face
+  that changed. Exact, at the cost of a second index kept by every miss.
+- (c) The route holds only what does not change while the face is up (its runtime and send seam,
+  which `deregister` closes), and reads the facts that can change (its tier) from that runtime at
+  delivery. No new invalidation: a face that leaves closes its runtime, which a delivery already
+  observes. It moves the tier, or whatever else a delivery reads, out of the version.
+- (d) Keep ids, as now, if the lookups are measured to cost a delivery nothing a run tells.
+
+**How the readings are taken.** On pc2, one build of `wz-runtime-tokio` with `--release`, each
+instrument in a process of its own, `uptime` recorded per run, two or three runs:
+
+- The writer's draft: `WZ_DRAFT_ROUTE_MEMOS=off,on cargo test -p wz-runtime-tokio --release
+  --features routing-router-hat --lib
+  the_readers_under_a_busy_writer_measured_by_what_the_writes_change -- --ignored --nocapture`,
+  with `WZ_WRITER_WINDOWS=none,declaring` for the two windows the question is about. The two values
+  take turns window by window in one process; `routes_asked_off_version` and
+  `routes_computed_off_version` are the count, and `perf record -e instructions:u,cycles:u
+  --comm wz-publisher`, one value to a process (`WZ_DRAFT_ROUTE_MEMOS=off`, then `on`), is the
+  readers' cost a Put. The same under `WZ_POLICY_ROUTING_TABLE_SHARING=snapshot`.
+- The routes a change reaches: `cargo test -p wz-runtime-tokio --release --features
+  routing-router-hat --lib the_routes_a_change_reaches_measured_found_by_the_index_and_by_a_scan
+  -- --ignored --nocapture`. 2,048 client faces, 256 to 65,536 keys kept (`WZ_MEMO_KEYS` names
+  others); the scan and the index take turns in one process. Its lines are the writer's bring of
+  the client leg's memo, the part of a publish this changes, for a key no route meets, a key one
+  route meets and a key every route meets, and a reader's miss and hit with and without the index.
+- A delivery's face lookups: `cargo test -p wz-runtime-tokio --release --features
+  routing-router-hat --lib the_face_lookups_of_a_delivery_measured_against_the_faces_held --
+  --ignored --nocapture`. 256 to 2,048 client faces, fan-outs 1 to 512; the lookups by id and the
+  held state take turns in one process. A `perf record --comm wz-publisher` of
+  `the_puts_routed_measured_against_the_faces_up` at 2,048 faces gives the share of a Put's cycles
+  in `PersistentMap::get` beside it.
+
 ## 7. What is not decided, and what could make this wrong
 
 - **The graph's copy.** `LinkstateNetwork` holds one shortest-path tree per node, O(N squared) for N nodes
@@ -675,17 +781,17 @@ runs of each tree taken one after the other (host load 14 to 45):
   instructions per Put, no time a run tells from its spread. A route names its faces by id and
   each message looks each one up; a route that held its faces' state would take the lookups off
   the message, but a route outlives the version it was computed from, so it would read a face's
-  facts as they were, and what may be read stale is not yet stated. Not done until a reading asks
-  for it.
+  facts as they were, and what may be read stale is not yet stated. Section 6.9 builds the
+  instrument that measures the lookups a delivery makes and lists the rules a route holding face
+  state would need; not done until its reading asks for it.
 - **The memo of a route a writer reads.** A writer that routes through its own draft (a replay,
   an interest answered while it declares) reads at inputs no memo has yet, and computes its route
-  without keeping it (section 6.8). How often a write does so, and whether the draft should carry a
-  memo of its own while it is written, is not measured.
-- **Which routes a change reaches.** A client leg's new memo leaves out the routes the changed
-  keys reach by trying every route kept against every changed key, the cost `refresh` had on the
-  first reader. On the writer now, it grows with the routes kept times the keys a write changes;
-  the keyexpr index of section 6.4 could find the reached routes instead. Not done until a reading
-  asks for it.
+  without keeping it (section 6.8). Section 6.9 counts how often, and builds the draft's own memo
+  behind a switch that stays off until that count and the A/B of the switch are read.
+- **Which routes a change reaches.** A client leg's new memo left out the routes the changed keys
+  reach by trying every route kept against every changed key. Section 6.9 indexes the client legs'
+  memos and finds the reached routes by the index; the writer's cost against the scan, and the
+  reader's miss with the index kept, are the reading its instrument takes.
 - **The tick.** Under B the tick that finds nothing dirty need not publish; whether to split it into a read
   that decides and a write that acts is decided in phase 4 by what it writes (queries and interests timed
   out, egress swept: the last is per-face runtime and needs no version).

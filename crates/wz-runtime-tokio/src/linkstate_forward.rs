@@ -35,7 +35,7 @@ use std::sync::Arc;
 use sce_forge_runtime::codec::CodecError;
 use wz_session_core::declare_build::{build_declare_queryable, set_declare_queryable_info};
 use wz_session_core::declare_routing_context::set_declare_source;
-use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_target};
+use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_text};
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::set_push_keyexpr_literal;
 use wz_session_core::push_routing_context::{
@@ -611,7 +611,9 @@ pub(crate) fn bring_mesh_routes<T: Clone, V>(
 /// intersects and keeps the rest, instead of every route in the memo, so a client that joins or
 /// leaves costs the keys it declares, not the keys in use. A query route is reached as a data
 /// route is: a queryable's key can make a client a candidate, or complete, only for a query whose
-/// keyexpr it intersects. Called by the writer before it publishes.
+/// keyexpr it intersects. The memos of the client legs are indexed, so the routes a changed key
+/// may meet are found by the index and each is then asked the exact question, on the two texts
+/// (`docs/router-table-snapshots.md`, section 6.9). Called by the writer before it publishes.
 pub(crate) fn bring_client_routes<T: Clone, V: Held>(
     routes: &mut Arc<RouteCache<T, ()>>,
     store: &ClientStore<V>,
@@ -620,10 +622,7 @@ pub(crate) fn bring_client_routes<T: Clone, V: Held>(
         routes,
         client_inputs(store),
         |since, visit| store.changed_since(since, visit),
-        |changed, cached_key| {
-            let target: Vec<&str> = cached_key.split('/').collect();
-            keyexpr_intersects_target(changed, &target)
-        },
+        keyexpr_intersects_text,
     );
 }
 
