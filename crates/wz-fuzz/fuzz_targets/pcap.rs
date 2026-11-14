@@ -4,8 +4,10 @@
 //! Every door that reads a whole capture file (`wz_dissect_pcap_*`), on one
 //! file.
 //!
-//! Input: eight bytes of arguments, then the file. A capture from `captures/`
-//! with eight bytes in front is a seed (`scripts/fuzz.sh seed`).
+//! Input: eight bytes of arguments, then the key log the keyed doors are
+//! handed, then the file. A capture from `captures/` with eight zero-led bytes
+//! in front is a seed (`scripts/fuzz.sh seed`): byte 7 is then 0, so the key
+//! log is empty and the file is the capture.
 //!
 //! | byte | argument |
 //! |------|----------|
@@ -15,7 +17,7 @@
 //! | 4    | the link type the packet and option doors are asked about |
 //! | 5    | the selector, from `SELECTORS` |
 //! | 6    | the declarations, from `DECLARATIONS` |
-//! | 7    | reserved |
+//! | 7    | how many bytes after the arguments are the key log (the keyed doors) |
 
 #![no_main]
 
@@ -36,8 +38,11 @@ fuzz_target!(|data: &[u8]| {
     let selector = CString::new(SELECTORS[usize::from(r.u8()) % SELECTORS.len()]).unwrap();
     let declarations =
         CString::new(DECLARATIONS[usize::from(r.u8()) % DECLARATIONS.len()]).unwrap();
-    let file = r.rest();
+    let keylog_len = usize::from(r.u8());
+    let rest = r.rest();
+    let (keylog, file) = rest.split_at(keylog_len.min(rest.len()));
     let (b, n) = (file.as_ptr(), file.len());
+    let (k, kn) = (keylog.as_ptr(), keylog.len());
     let (sel, dec) = (selector.as_ptr(), declarations.as_ptr());
 
     // SAFETY (every call below): `b` points at `n` readable bytes, every
@@ -75,6 +80,14 @@ fuzz_target!(|data: &[u8]| {
     });
     string_door("pcap_session_table", |o| unsafe {
         wz_dissect_pcap_session_table(b, n, limits, o)
+    });
+    // `k` points at `kn` readable bytes (possibly none): the key log is input
+    // the caller does not control either, so its parser is fuzzed with the file.
+    string_door("pcap_summary_keyed", |o| unsafe {
+        wz_dissect_pcap_summary_keyed(b, n, limits, k, kn, o)
+    });
+    string_door("pcap_session_table_keyed", |o| unsafe {
+        wz_dissect_pcap_session_table_keyed(b, n, limits, k, kn, o)
     });
 
     buffer_door::<u8>(

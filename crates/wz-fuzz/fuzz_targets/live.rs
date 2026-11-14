@@ -179,6 +179,22 @@ fuzz_target!(|data: &[u8]| {
         Feed::Replay | Feed::ReplayLent => {}
     }
 
+    // Keys handed to a handle that has already been fed: the file's own first
+    // `prefix` bytes, read as a key log. That reaches the key log parser and,
+    // when the bytes name a connection the handle kept, the pass that opens the
+    // records it kept, before every question below is asked again.
+    let keylog = &file[..prefix];
+    let mut connections = usize::MAX;
+    let rc = unsafe {
+        wz_dissect_live_add_keylog(handle, keylog.as_ptr(), keylog.len(), &mut connections)
+    };
+    assert!(is_dissect_code(rc), "add_keylog: answered {rc}");
+    assert!(
+        rc != WZ_DISSECT_OK || connections <= keylog.len(),
+        "add_keylog: {connections} connection(s) named by {} byte(s)",
+        keylog.len()
+    );
+
     let container = if feed.has_container() {
         (b, n)
     } else {
