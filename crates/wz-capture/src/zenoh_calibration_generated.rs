@@ -458,8 +458,8 @@ pub const PARAMS: Params = Params {
             -2_724_252_758_297_012_736,
         ],
         log2_null_mean: [
-            -60_822_676_194_733_793_280,
-            -18_310_801_834_381_033_472,
+            -74_738_314_044_186_148_864,
+            -16_202_961_445_616_295_936,
             -24_672_175_692_875_108_352,
         ],
     },
@@ -524,7 +524,7 @@ pub const NULL: [Member; 18] = [
     },
     Member {
         file: "lan-mdns.pcap",
-        units: [13, 8, 15],
+        units: [2, 19, 15],
         framing: [0, 0],
         front: [36, 0],
     },
@@ -566,13 +566,13 @@ pub const NULL: [Member; 18] = [
     },
     Member {
         file: "busylan-dhcp.pcap",
-        units: [6, 108, 133],
+        units: [4, 110, 133],
         framing: [0, 0],
         front: [247, 0],
     },
     Member {
         file: "busylan-ntp.pcap",
-        units: [5, 183, 0],
+        units: [0, 188, 0],
         framing: [0, 0],
         front: [188, 0],
     },
@@ -614,7 +614,7 @@ pub const NULL: [Member; 18] = [
     },
     Member {
         file: "stack-ssh.pcap",
-        units: [33, 20, 40],
+        units: [17, 36, 40],
         framing: [0, 0],
         front: [0, 34],
     },
