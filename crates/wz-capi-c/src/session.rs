@@ -332,7 +332,8 @@ fn stated_endpoints(cfg: &ConfigState) -> StatedEndpoints {
 }
 
 /// The plan an open of `cfg` runs: the one reading of a config that [`open_session`] opens and
-/// [`wz_capi_c_config_device_requires`] describes, so the two cannot read a document differently.
+/// `wz_capi_c_config_device_requires` describes (`config-verdict`), so the two cannot read a
+/// document differently.
 ///
 /// The document is read for the role the session DIALS as, because several keys are
 /// mode-dependent upstream ([`ConfigState::with_default_mode`]). It goes through wz's one reader
@@ -358,8 +359,11 @@ fn plan_of(cfg: &ConfigState) -> Result<OpenPlan, OpenRefusal> {
 /// A config the open would refuse returns that refusal's code, and the string names it with the
 /// keys at fault: no requirement is written for an open that would not happen.
 ///
+/// A door of `config-verdict`: the requirement table it reads is linked through it alone.
+///
 /// # Safety
 /// `config` must be null or a valid loaned config; `out_requirement` must be valid and writable.
+#[cfg(feature = "config-verdict")]
 #[no_mangle]
 pub unsafe extern "C" fn wz_capi_c_config_device_requires(
     config: *const crate::abi::z_loaned_config_t,
@@ -859,4 +863,36 @@ pub unsafe extern "C" fn z_session_is_closed(session: *const z_loaned_session_t)
         // SAFETY: the caller's contract, delegated.
         unsafe { session_handle(session) }.map_or(true, SessionHandle::is_closed)
     })
+}
+
+#[cfg(all(test, feature = "config-verdict"))]
+mod device_requires_tests {
+    use super::*;
+    use crate::config_verdict::tests::ask;
+
+    #[test]
+    fn a_client_that_dials_one_address_is_told_its_open_needs_a_tcp_socket() {
+        // SAFETY: the fixture builds the config through the C insert path.
+        let (rc, text) = unsafe {
+            ask(
+                wz_capi_c_config_device_requires,
+                &[
+                    ("mode", "\"client\""),
+                    ("connect/endpoints", "[\"tcp/192.0.2.1:7447\"]"),
+                    ("scouting/multicast/enabled", "false"),
+                ],
+            )
+        };
+        assert_eq!(rc, Z_OK, "{text}");
+        assert!(text.starts_with("{\"requires\": ["), "{text}");
+        assert!(text.contains("\"sockets-tcp\""), "{text}");
+    }
+
+    #[test]
+    fn a_null_out_slot_is_refused_before_the_config_is_read() {
+        // SAFETY: both pointers are null, which the door refuses before reading either.
+        let rc =
+            unsafe { wz_capi_c_config_device_requires(std::ptr::null(), std::ptr::null_mut()) };
+        assert_eq!(rc, Z_ENULL);
+    }
 }

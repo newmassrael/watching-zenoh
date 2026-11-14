@@ -1191,6 +1191,20 @@ implies = []
 help = "The sending side of an end-to-end protected message (wz_capi_c_e2e_sender_*, wz-own doors) and the frame writer behind it."
 
 [[capability]]
+id = "config-verdict"
+kconfig = "WZ_CAP_CONFIG_VERDICT"
+# On by default: a program that writes or checks configurations for other nodes links the default
+# library. A build that names its features, a client above all, leaves it out: the emitter of a
+# stock node's config, the per-node and topology validators and the device requirement of an open
+# are reached through these doors and nothing else (about 78 KB of symbols in a default release
+# build, read with nm), and an open reads its own config without any of them.
+os_needs = []
+upstream_off = ["zenoh", "zenoh-c"]
+abis = ["core", "c"]
+implies = []
+help = "A configuration judged, emitted and costed without opening it: the defects of one node and of a topology, the config a stock node would start with, the link schemes of the build, and what an open of it asks of the operating system (wz_capi_c_config_validate*, wz_capi_c_config_to_json5, wz_capi_c_config_*link_scheme*, wz_capi_c_config_verdict_*, wz_capi_c_config_device_requires, wz-own doors)."
+
+[[capability]]
 id = "identity-make"
 kconfig = "WZ_CAP_IDENTITY_MAKE"
 # Off by default: the certificate writer it links cost capic-default 147,929 B (hosted C1cs,

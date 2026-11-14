@@ -213,7 +213,8 @@ EXPECTED_SYMBOLS = {
     # three words. The two doors above enumerate, and the honoured set is
     # infinite, so an enumeration could never be the whole answer.
     "wz_capi_c_config_disposition",
-    # R2300 (item 631) — emitting a stock-zenoh config and judging one.
+    # R2300 (item 631) — emitting a stock-zenoh config and judging one (`config-verdict`, on by
+    # default, as are the rows doors and `wz_capi_c_config_device_requires` below).
     "wz_capi_c_config_to_json5",
     "wz_capi_c_config_validate",
     "wz_capi_c_config_validate_for_build",

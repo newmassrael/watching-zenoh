@@ -97,11 +97,16 @@ pub mod config;
 // A wz-own surface rather than a drop-in one, so it carries no
 // `zenoh-c-no-unstable-api` gate: upstream has no validator at all, and gating
 // wz's own doors on an upstream capability flag would key them to a question
-// about zenoh-c that has no bearing on whether they work.
+// about zenoh-c that has no bearing on whether they work. It is wz's own
+// capability instead (`config-verdict`, on by default): the emitter and the
+// validators are reached through these doors alone, so a build that names its
+// features, a client above all, leaves them out.
+#[cfg(feature = "config-verdict")]
 pub mod config_verdict;
 // The same verdicts as ROWS (variant, node, key path, endpoint) read
 // column by column from an owned handle, for a caller that attaches a reason to
-// the config field it is about. Ungated for the reason `config_verdict` is.
+// the config field it is about. Gated as `config_verdict` is.
+#[cfg(feature = "config-verdict")]
 pub mod config_verdict_rows;
 // The four sets of doors of the observation plane (`docs/observation-plane.md`), under wz's own
 // `wz_capi_c_` prefix: wz has them and zenoh-c has not, so they carry no upstream gate

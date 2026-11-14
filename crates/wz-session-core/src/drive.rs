@@ -422,12 +422,13 @@ fn dispatch_unit_borrowed<R: SessionRuntime, T: TimeSource>(
 ///
 /// It is three steps, and each one's frame is only as deep as its own work: the
 /// decode ([`decode_unit_in`]), the checks over the decoded message
-/// ([`decide_unit_in`]), and the engine taking the event of an admitted handshake
-/// message, here. Only the decoded message (720 bytes on the fixed profile) is
-/// held across them. In one function, the decode's own copies of it (the parse's
-/// result, the frame destructured out of it, a 702-byte value) were slots of the
-/// frame under the engine's answer to a handshake and under the parser's walk,
-/// the deepest paths a session's stack reaches on the fixed-memory client.
+/// ([`decide_unit_in`]), and the engine taking the event the checks decided (an
+/// admitted handshake message, or the refusal of one), here. Only the decoded
+/// message (720 bytes on the fixed profile) is held across the first two. In one
+/// function, the decode's own copies of it (the parse's result, the frame
+/// destructured out of it, a 702-byte value) were slots of the frame under the
+/// engine's answer to a handshake and under the parser's walk, the deepest paths a
+/// session's stack reaches on the fixed-memory client.
 ///
 /// Compiled where one of its two callers is: a build with the slot profile and no
 /// `Frame` codec has neither, and this and the reading it does would be code
@@ -448,25 +449,28 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
         return outcome;
     }
     #[cfg(feature = "alloc")]
-    let (outcome, admitted) = read_unit_in(bytes, shared, actions, engine);
+    let (outcome, decided) = read_unit_in(bytes, shared, actions, engine);
     #[cfg(not(feature = "alloc"))]
-    let (outcome, admitted) = read_unit_in(bytes, consumed_out, actions, engine);
-    // The engine takes the event of an admitted handshake message here, once the frame of the
-    // reading is gone: its answer (the next handshake message, written and sent) is the deepest
-    // path the receive reaches, and the decoded message was a slot under it that nothing read.
-    if let Some(event) = admitted {
+    let (outcome, decided) = read_unit_in(bytes, consumed_out, actions, engine);
+    // The engine takes the event the reading decided here, once the frame of the reading is
+    // gone: its answer (the next handshake message, or the Close of a refused one, written and
+    // sent) is the deepest path the receive reaches, and the decoded message was a slot under it
+    // that nothing read.
+    if let Some(event) = decided {
         engine.process_event(event);
     }
     outcome
 }
 
-/// The reading half of [`dispatch_unit_in`]: the unit decoded and judged, and the event of an
-/// admitted handshake message handed back for the caller to give the engine.
+/// The reading half of [`dispatch_unit_in`]: the unit decoded and judged, and the event the
+/// judgement decided handed back for the caller to give the engine.
 ///
 /// The one slot the decoded message lives in is here: the decode writes it, the judgement reads
 /// it, and neither is handed a copy. Handed on by value, the 720 bytes were a slot in each frame
 /// between the parser and here, and the handshake's parse is the deepest path of the stack. Out
-/// of line so that the slot is not part of the frame that gives the engine the event.
+/// of line so that the slot is not part of the frame that gives the engine the event. The engine
+/// is only read here (its state), never driven: a turn run under this frame would hold the slot
+/// beneath the socket send it ends in.
 #[cfg(any(
     feature = "alloc",
     all(feature = "codec-frame", feature = "session-slot")
@@ -477,7 +481,7 @@ fn read_unit_in<R: SessionRuntime, T: TimeSource>(
     #[cfg(feature = "alloc")] shared: Option<&crate::link::RxBytes>,
     #[cfg(not(feature = "alloc"))] consumed_out: &mut usize,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
 ) -> (
     DriverLoopOutcome,
     Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
@@ -487,9 +491,9 @@ fn read_unit_in<R: SessionRuntime, T: TimeSource>(
     let parsed = decode_unit_in(bytes, shared, actions, &mut frame);
     #[cfg(not(feature = "alloc"))]
     let parsed = decode_unit_in(bytes, consumed_out, actions, &mut frame);
-    let mut admitted = None;
-    let outcome = decide_unit_in(parsed, &mut frame, &mut admitted, actions, engine);
-    (outcome, admitted)
+    let mut decided = None;
+    let outcome = decide_unit_in(parsed, &mut frame, &mut decided, actions, engine);
+    (outcome, decided)
 }
 
 /// One transport message decoded off the front of a unit: where it ended (the message itself is
@@ -656,20 +660,26 @@ fn take_decoded(frame: &mut InboundFrame) -> &mut InboundFrame {
 
 /// [`dispatch_unit_in`]'s judgement of one decoded transport message: every check
 /// a handshake message must pass, and the dispatch of whatever is not a handshake
-/// event. A message the checks admit is handed back in `admitted` with
-/// [`DriverLoopOutcome::AdvancedFsm`], for the caller to give the engine once this
-/// frame is gone.
+/// event. The event the engine is to take is handed back in `to_engine`, for the
+/// caller to give the engine once this frame and the reading's are gone: a
+/// message the checks admit, with [`DriverLoopOutcome::AdvancedFsm`], and the
+/// refusal of one that fails them (`framing.error`, `establishment.ext_rejected`,
+/// a lost link), with the outcome that names why. The engine is read here, never
+/// driven.
 #[cfg(any(
     feature = "alloc",
     all(feature = "codec-frame", feature = "session-slot")
 ))]
 #[inline(never)]
+// The engine's state is read only by the handshake checks, which a build without the Init body
+// has none of.
+#[cfg_attr(not(feature = "codec-init-body"), allow(unused_variables))]
 fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
     parsed: DecodedUnit,
     frame: &mut InboundFrame,
-    admitted: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
+    to_engine: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
 ) -> DriverLoopOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // The message is read in the slot the caller decoded it into: taking it by value, or a
@@ -728,7 +738,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                             body.s.map(|s| s.sn_res),
                             body.s.map(|s| s.batch_size),
                         ) {
-                            engine.process_event(E::FramingError);
+                            *to_engine = Some(E::FramingError);
                             return DriverLoopOutcome::InitAckCapsRejected;
                         }
                         // R311y823 — the PATCH reject leaves through
@@ -745,7 +755,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                         if !actions
                             .init_ack_patch_acceptable(crate::extpatch::peer_patch(extensions))
                         {
-                            engine.process_event(E::EstablishmentExtRejected);
+                            *to_engine = Some(E::EstablishmentExtRejected);
                             return DriverLoopOutcome::InitAckPatchRejected;
                         }
                     }
@@ -801,7 +811,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                     if engine.get_current_state() == S::AwaitingInitSyn
                         && body.version != wz_codecs::wire_const::PROTOCOL_VERSION
                     {
-                        engine.process_event(E::FramingError);
+                        *to_engine = Some(E::FramingError);
                         return DriverLoopOutcome::InitSynVersionRejected {
                             version: body.version,
                         };
@@ -848,7 +858,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 #[cfg(feature = "codec-open-body")]
                 if let InboundFrame::Open { extensions, .. } = &frame {
                     if !actions.admit_peer_remote_bound(extensions) {
-                        engine.process_event(E::EstablishmentExtRejected);
+                        *to_engine = Some(E::EstablishmentExtRejected);
                         return DriverLoopOutcome::OpenRemoteBoundRejected;
                     }
                 }
@@ -893,7 +903,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 #[cfg(feature = "codec-init-body")]
                 if let InboundFrame::Init { extensions, .. } = &frame {
                     if !actions.admit_peer_region(extensions) {
-                        engine.process_event(E::EstablishmentExtRejected);
+                        *to_engine = Some(E::EstablishmentExtRejected);
                         return DriverLoopOutcome::InitRegionRejected;
                     }
                 }
@@ -905,7 +915,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 // the session capability on every admitted Init frame (zenoh
                 // `is_lowlatency &= other_ext.is_some()`, both the acceptor's
                 // recv_init_syn and the initiator's recv_init_ack). Runs
-                // BEFORE `engine.process_event` below, so the acceptor's merge
+                // BEFORE the engine is given the event, so the acceptor's merge
                 // lands before the InitSyn transition fires its InitAck send
                 // (which reflects the ext only if the merged flag still
                 // holds). Acceptor sees InitSyn (is_ack=false), initiator sees
@@ -944,7 +954,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 } = &frame
                 {
                     if let Err(err) = actions.negotiate_qos_link_against_peer(*is_ack, extensions) {
-                        engine.process_event(E::EstablishmentExtRejected);
+                        *to_engine = Some(E::EstablishmentExtRejected);
                         return DriverLoopOutcome::QosLinkRejected(err);
                     }
                 }
@@ -1013,7 +1023,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                         actions.shm_recv_open_syn(extensions)
                     };
                     if refused.is_err() {
-                        engine.process_event(E::EstablishmentExtRejected);
+                        *to_engine = Some(E::EstablishmentExtRejected);
                         return DriverLoopOutcome::ShmChallengeRejected;
                     }
                 }
@@ -1067,7 +1077,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                         _ => None,
                     };
                     if let Some(Err(e)) = auth {
-                        engine.process_event(E::EstablishmentExtRejected);
+                        *to_engine = Some(E::EstablishmentExtRejected);
                         return DriverLoopOutcome::AuthRejected(e);
                     }
                 }
@@ -1110,7 +1120,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                         _ => None,
                     };
                     if let Some(Err(e)) = ml {
-                        engine.process_event(E::EstablishmentExtRejected);
+                        *to_engine = Some(E::EstablishmentExtRejected);
                         return DriverLoopOutcome::AuthRejected(e);
                     }
                     // Latch the peer's captured ephemeral pubkey (no-op
@@ -1133,7 +1143,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                     if engine.get_current_state() == S::SentInitSyn
                         && !actions.init_ack_zid_acceptable(body.zid.as_slice())
                     {
-                        engine.process_event(E::FramingError);
+                        *to_engine = Some(E::FramingError);
                         return DriverLoopOutcome::InitAckPeerMismatch;
                     }
                 }
@@ -1204,7 +1214,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                     };
                     if sends_an_open {
                         if let Err(why) = actions.decide_local_remote_bound() {
-                            engine.process_event(E::EstablishmentExtRejected);
+                            *to_engine = Some(E::EstablishmentExtRejected);
                             return DriverLoopOutcome::OpenLocalBoundUnplaceable(why);
                         }
                     }
@@ -1224,10 +1234,10 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                         if *reason == crate::close_reason::CloseReason::MaxLinks as u8
                 ) && !actions.is_established()
                 {
-                    engine.process_event(event);
+                    *to_engine = Some(event);
                     return DriverLoopOutcome::LinkRefused;
                 }
-                *admitted = Some(event);
+                *to_engine = Some(event);
                 DriverLoopOutcome::AdvancedFsm
             }
             None => match take_decoded(frame) {
@@ -1263,7 +1273,8 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                     //
                     // Both gates are [`refuse_frame`], which the in-place
                     // receive path ([`dispatch_datagram`]) runs too.
-                    if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
+                    if let Some(refused) = refuse_frame(actions, to_engine, priority, reliable, sn)
+                    {
                         // The frame's records are dropped and the batch goes on behind them,
                         // unless the refusal ended the link.
                         if matches!(refused, DriverLoopOutcome::RxSnRejected { .. }) {
@@ -1311,7 +1322,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                             }
                         }
                         Err(parse_err) => {
-                            engine.process_event(E::FramingError);
+                            *to_engine = Some(E::FramingError);
                             DriverLoopOutcome::ParseError(parse_err)
                         }
                     }
@@ -1337,7 +1348,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                     // prioritized fragment on a non-QoS session is link-fatal
                     // (upstream's fragment arm bails the same way).
                     if !actions.negotiated_qos() && priority != crate::qos::Priority::DEFAULT {
-                        engine.process_event(E::LinkLost);
+                        *to_engine = Some(E::LinkLost);
                         return DriverLoopOutcome::LinkLost(
                             crate::link::LostCause::UnknownPriority,
                         );
@@ -1353,7 +1364,8 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                     // and aborts there, exactly pico's two-stage check),
                     // unless the `reliable-gap-reconnect` policy ends the
                     // link on it (`refuse_by_sn`).
-                    if let Some(refused) = refuse_by_sn(actions, engine, priority, reliable, sn) {
+                    if let Some(refused) = refuse_by_sn(actions, to_engine, priority, reliable, sn)
+                    {
                         return refused;
                     }
                     DriverLoopOutcome::Fragment {
@@ -1414,7 +1426,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
             },
         },
         Err(err) => {
-            engine.process_event(E::FramingError);
+            *to_engine = Some(E::FramingError);
             DriverLoopOutcome::ParseError(err)
         }
     }
@@ -1450,22 +1462,43 @@ pub fn dispatch_pending<R: SessionRuntime, T: TimeSource>(
 ///   `_z_sn_precedes`): a stale, duplicate or reordered frame is dropped, and a forward jump on
 ///   the reliable channel ends the link when the `reliable-gap-reconnect` policy says so
 ///   (`refuse_by_sn`).
+///
+/// A link that ends is the engine's `LinkLost`, handed back in `to_engine` for the caller to give
+/// the engine once the frame that judged the message is gone (see [`decide_unit_in`]).
 #[cfg(feature = "codec-frame")]
 fn refuse_frame<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    to_engine: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
     priority: crate::qos::Priority,
     reliable: bool,
     sn: u64,
 ) -> Option<DriverLoopOutcome> {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     if !actions.negotiated_qos() && priority != crate::qos::Priority::DEFAULT {
-        engine.process_event(E::LinkLost);
+        *to_engine = Some(E::LinkLost);
         return Some(DriverLoopOutcome::LinkLost(
             crate::link::LostCause::UnknownPriority,
         ));
     }
-    refuse_by_sn(actions, engine, priority, reliable, sn)
+    refuse_by_sn(actions, to_engine, priority, reliable, sn)
+}
+
+/// [`refuse_frame`] for a path that reads the message where it lies ([`dispatch_datagram`]):
+/// it holds no decoded message, so the engine takes the event of a link that ends at once.
+#[cfg(feature = "codec-frame")]
+fn refuse_frame_in_place<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    priority: crate::qos::Priority,
+    reliable: bool,
+    sn: u64,
+) -> Option<DriverLoopOutcome> {
+    let mut to_engine = None;
+    let refused = refuse_frame(actions, &mut to_engine, priority, reliable, sn)?;
+    if let Some(event) = to_engine {
+        engine.process_event(event);
+    }
+    Some(refused)
 }
 
 /// The per-(priority, reliable) conduit SN gate of a `Frame` or `Fragment`: `Some` is the outcome
@@ -1480,7 +1513,7 @@ fn refuse_frame<R: SessionRuntime, T: TimeSource>(
 #[cfg(feature = "codec-frame")]
 fn refuse_by_sn<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    to_engine: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
     priority: crate::qos::Priority,
     reliable: bool,
     sn: u64,
@@ -1512,7 +1545,7 @@ fn refuse_by_sn<R: SessionRuntime, T: TimeSource>(
         RxAdmit::Gap { .. }
             if crate::sn::reacts_to_gap(mode, actions.peer_declarations_final_seen()) =>
         {
-            engine.process_event(E::LinkLost);
+            *to_engine = Some(E::LinkLost);
             Some(DriverLoopOutcome::LinkLost(
                 crate::link::LostCause::ReliableGap,
             ))
@@ -2158,7 +2191,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     // The frame's own chain is owned only for an owned record (the heap profile's).
     #[cfg(not(feature = "alloc"))]
     let _ = chain;
-    if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
+    if let Some(refused) = refuse_frame_in_place(actions, engine, priority, reliable, sn) {
         on_event.event(IterationEvent::Poll(&refused));
         // A frame the SN gate refused is dropped with its records, and the batch goes on behind
         // them: a frame of the other reliability may follow it in the same batch. Upstream drains
@@ -2460,7 +2493,7 @@ where
     } = head;
     // The copying `Fragment` arm's two gates, in its order; an SN rejection
     // reaches the hand-off, which clears the channel's chain.
-    if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
+    if let Some(refused) = refuse_frame_in_place(actions, engine, priority, reliable, sn) {
         report_outcome_reassembling(&refused, reasm, actions, now_ms, &mut |event| {
             on_event.event(event)
         });

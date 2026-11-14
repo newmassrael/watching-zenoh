@@ -264,6 +264,10 @@ CAPABILITY_FEATURES = frozenset({
     "transport_tls", "transport_unixsock-stream", "transport_ws",
     "transport_serial", "transport_unixpipe", "transport_vsock", "stats",
     "e2e-sender", "transport_compression", "auth_usrpwd", "interceptors",
+    # The doors that judge, emit and cost a configuration without opening it
+    # (`wz_capi_c_config_validate*`, `_to_json5`, `_device_requires`): wz-own doors and the
+    # verdict handle they fill, no zenoh-c type; on in the default as `e2e-sender` is.
+    "config-verdict",
     # Open-debt item 913: a multicast listen endpoint joins a group, a door and not a footprint.
     "multicast-transport",
     # A session that forwards between its faces, opened where a config keeps its south apart

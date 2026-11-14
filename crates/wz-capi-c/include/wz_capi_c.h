@@ -182,6 +182,11 @@ z_result_t wz_capi_c_config_disposition(const char *path, int32_t *out);
  * All four read the z_owned_config_t you already built with
  * zc_config_from_file / zc_config_insert_json5 / z_config_default.
  * There is no second config type to keep in step.
+ *
+ * In builds with the `config-verdict` feature, which is ON by default:
+ * these doors, the rows doors and wz_capi_c_config_device_requires
+ * below. A build that names its features (a client above all) and
+ * leaves it out exports none of them.
  * ------------------------------------------------------------------ */
 
 /* Render the config a STOCK ZENOH NODE would have been started with,

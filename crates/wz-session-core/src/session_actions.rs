@@ -5391,57 +5391,50 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         echo_inbound_cookie: bool,
         role: ExtChainRole,
     ) -> Result<(), crate::link::LinkDropCause> {
+        use crate::handshake_encode::{encode_open_head_into, open_head_len};
         let initial_sn = self.open_initial_sn().unwrap_or(self.params.initial_sn);
-        // The staged chain is taken out of its slot for the encode and put back
-        // after it (a move of the vector's handle, which allocates nothing), so
-        // the encode holds ONE session mutex at a time: the cookie's, when it
-        // echoes one, and not the chain's as well. Session mutex scopes stay
+        // The Open is written in two steps, each under ONE session mutex: the
+        // header and the body under the cookie's, when it echoes one, then the
+        // staged chain under the chain's, where it lies. Session mutex scopes stay
         // disjoint by discipline, and the non-reentrant per-profile mutexes are
-        // why. The slot is empty only for the span of the encode, which no other
-        // reader of a handshake chain runs inside of (the send is the chain's
-        // only consumer, and the drive loop is one task on this profile).
-        let chain = R::with_mutex_mut(self.ext_chain_slot(role), core::mem::take);
+        // why. Taken out of its slot instead, so that one encoder could be handed
+        // both, the chain was a copy of the whole bounded chain in this frame on
+        // the fixed profile, under the socket send of the handshake's answer.
+        // The chain counted here is the one written below: the send is the
+        // chain's only consumer, and the drive loop is one task on this profile.
+        let (has_ext, chain_len) = R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            (!chain.is_empty(), crate::ext_chain::ext_chain_len(chain))
+        });
         // The message's own length, so the link lends a slot that holds this
         // OpenSyn / OpenAck. An Open body has no size constant to ask for instead:
         // its cookie's length is a `usize`.
-        let want = if echo_inbound_cookie {
+        let head_len = if echo_inbound_cookie {
             R::with_mutex_mut(&self.inbound_cookie, |cookie| {
-                crate::handshake_encode::open_frame_len(
-                    &self.params,
-                    initial_sn,
-                    is_ack,
-                    cookie.as_deref(),
-                    &chain,
-                )
+                open_head_len(&self.params, initial_sn, is_ack, cookie.as_deref(), has_ext)
             })
         } else {
-            crate::handshake_encode::open_frame_len(&self.params, initial_sn, is_ack, None, &chain)
+            open_head_len(&self.params, initial_sn, is_ack, None, has_ext)
         };
-        let sent = self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
+        let want = head_len + chain_len;
+        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
             if echo_inbound_cookie {
                 R::with_mutex_mut(&self.inbound_cookie, |cookie| {
-                    crate::handshake_encode::encode_open_into(
+                    encode_open_head_into(
                         buf,
                         &self.params,
                         initial_sn,
                         is_ack,
                         cookie.as_deref(),
-                        &chain,
+                        has_ext,
                     )
-                })
+                })?;
             } else {
-                crate::handshake_encode::encode_open_into(
-                    buf,
-                    &self.params,
-                    initial_sn,
-                    is_ack,
-                    None,
-                    &chain,
-                )
+                encode_open_head_into(buf, &self.params, initial_sn, is_ack, None, has_ext)?;
             }
-        });
-        R::with_mutex_mut(self.ext_chain_slot(role), |slot| *slot = chain);
-        sent
+            R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+                crate::ext_chain::encode_ext_chain_into(buf, chain)
+            })
+        })
     }
 
     /// Fixed-memory step S4 — the lend-only Close: the header (the S flag derived
