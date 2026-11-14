@@ -186,12 +186,26 @@ way:
 
 A **protocol fact** is what a session of an ABI states on the wire that no switch of the build
 declaration moves: the same for every build of the ABI at one catalogue version. The declaration
-(`deploy/wz-config.toml`, `[[protocol_fact]]`) gives its value per ABI and the file of this tree
-that holds it, with a text that must occur there or must not; the statement lists the ABI's facts
-beside its values (`facts`), outside the digest, which the ABI and the catalogue version already
-fix. The crate's tests read each named file, so a change of the code a fact rests on is a red test.
-Two facts are declared: the patch level a session states (1, both ABIs) and, for the pico ABI,
-that it never offers batch compression.
+(`deploy/wz-config.toml`, `[[protocol_fact]]`) gives its value per ABI and where this tree holds
+it, as texts that must occur in named files (`holds`) or must not (`lacks`); the statement lists
+the ABI's facts beside its values (`facts`), outside the digest, which the ABI and the catalogue
+version already fix. The crate's tests read each named file, so a change of the code a fact rests
+on is a red test; and `facts_pin.toml` pins the digest of the facts' values at the catalogue
+version, so a fact that changes while `catalog_version` does not is a red test too.
+
+| Fact | pico ABI | zenoh-c ABI | Where it is held |
+|---|---|---|---|
+| `patch` | 1 | 1 | the patch level session-core states in every Init and Join |
+| `batch-compression` | no | (the `transport_compression` capability) | the pico crate forwards no compression feature to the session model |
+| `request-id-resolution` | 32 | 32 | both engines give every session the code 0b10, and every Init carries its size parameters |
+| `router-role` | no | (the `router-node` capability) | the pico ABI opens a client, or a peer for mode peer or a listener; no path of it makes a router |
+| `tcp-link` | yes | yes | the tokio engine takes the tcp link in every build; the cooperative engine dials and accepts tcp on a host and on Zephyr |
+
+The statement also names the build's `engine` and `platform`, in its digest (format version 3,
+decision C15 of `docs/build-configuration.md`): a pico build on the tokio engine and one on the
+cooperative engine, or a host library and a Zephyr one, are different builds even with the same
+capabilities. Every PICS item of both ABIs is now answered from the statement or, for the values
+the zenoh-c ABI reads from its configuration, from the PIXIT.
 
 `check_answers` refuses a row of another ABI; an item the proforma does not have; a row that
 answers in none or several ways; a `why` without a fixed answer or a fixed answer without one; a
@@ -204,13 +218,10 @@ or a limit or policy that answers a support item; a map that does not cover the 
 exactly, or maps one to an answer the item does not admit; a fixed answer the item does not admit;
 and an item that is not answered exactly once for each ABI.
 
-What the statement still cannot answer:
-
-| Item | pico ABI | zenoh-c ABI | What would close it |
-|---|---|---|---|
-| T-ROLE-ROUTER | the `peer` capability admits the router mode's name; whether that mode forwards is not stated | answered (`router-node`) | a protocol fact, once the pico ABI's router mode is read in the code |
-| T-STREAM-LINK | the tcp link has no capability, and whether a build has it depends on its engine and platform | the same | the engine and the platform in the statement |
-| T-RID-RES | the request id resolution | the same | a protocol fact, once the value a session states is read in the code |
+zenoh-pico 1.10.2 has no router role either: its open reads the configuration's mode as client or
+peer and refuses any other value with an invalid-mode error. The pico ABI departs from that: it
+opens a client for any mode but peer, `router` included, where zenoh-pico refuses. That is a
+parity question of the pico ABI, not of the suite; the fact states what the ABI does.
 
 ## 5. The PIXIT
 
@@ -357,8 +368,15 @@ parameters of the suite (`<sce:module-parameter>`), whose ids are TTCN-3 identif
 Every proforma id is upper-case words joined by single hyphens, so each spelling is one rule and
 none loses anything: T-UNICAST is the feature t-unicast and the module parameter PICS_T_UNICAST;
 T-FSN-RES is the module parameter T_FSN_RES; X-TMP-CHANNEL is X_TMP_CHANNEL. Being upper-case, no
-spelling is a TTCN-3 keyword or a predefined function's name. The crate checks every committed id
-by these rules and checks that no two spellings collide (`names`). **No new grammar is needed.**
+spelling is a TTCN-3 keyword or a predefined function's name. **No new grammar is needed.**
+
+One collision is left by these rules alone: a value or PIXIT item PICS-T-X would be the module
+parameter PICS_T_X, which is also what the export makes of the feature of a support item T-X. So
+no proforma id starts with the word PICS; the word elsewhere (T-PICS) is spelled nowhere else and
+is allowed. The export refuses a written name that collides with one it makes as well, but the id
+is where the collision starts, so it is refused there first. `check` also puts every spelling of
+both proformas in one set and refuses two items spelled alike, whatever made them alike (a PIXIT
+item with the id of a PICS value item, for one).
 
 ## 10. Licence: what lives where (decided 2026-11-14)
 
@@ -417,4 +435,4 @@ The wz side, in order. A step that needs nothing of SCE is marked so.
 ## 12. Open
 
 - The base layer's parts that section 3.4 lists as not covered.
-- The three PICS items section 4.3 lists as still unanswered.
+- The pico ABI's answer to a mode other than client and peer (section 4.3).

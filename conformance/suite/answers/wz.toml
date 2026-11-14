@@ -63,12 +63,12 @@ capability = "peer"
 [[answer]]
 abi = "pico"
 item = "T-ROLE-ROUTER"
-unanswered = "The peer capability admits the router mode's name as well as the peer's, and the statement does not say whether that mode forwards between the sessions it holds."
+fact = "router-role"
 
 [[answer]]
 abi = "pico"
 item = "T-STREAM-LINK"
-unanswered = "No capability of the statement names the tcp link, and whether a build has it depends on the platform it is built for, which the statement does not carry."
+fact = "tcp-link"
 
 [[answer]]
 abi = "pico"
@@ -116,7 +116,7 @@ map = { "bits-8" = "8", "bits-16" = "16", "bits-32" = "32", "bits-64" = "64" }
 [[answer]]
 abi = "pico"
 item = "T-RID-RES"
-unanswered = "The request id resolution is not part of the sn-resolution policy, and no protocol fact of the declaration states it yet."
+fact = "request-id-resolution"
 
 [[answer]]
 abi = "pico"
@@ -187,7 +187,7 @@ capability = "router-node"
 [[answer]]
 abi = "c"
 item = "T-STREAM-LINK"
-unanswered = "The statement names the optional stream links (the transport_ capabilities) but no capability names the tcp link, and whether a build has it depends on the platform it is built for."
+fact = "tcp-link"
 
 [[answer]]
 abi = "c"
@@ -235,7 +235,7 @@ map = { "bits-8" = "8", "bits-16" = "16", "bits-32" = "32", "bits-64" = "64" }
 [[answer]]
 abi = "c"
 item = "T-RID-RES"
-unanswered = "The request id resolution is not part of the sn-resolution policy, and no protocol fact of the declaration states it yet."
+fact = "request-id-resolution"
 
 [[answer]]
 abi = "c"

@@ -13,6 +13,24 @@
 //! rule, and none loses anything: lower-casing a support item gives its feature, and writing each
 //! hyphen as an underscore gives a module parameter. Being upper-case, no spelling is a TTCN-3
 //! keyword or a predefined function's name, all of which are lower-case.
+//!
+//! The one way two ids could still be spelled alike is through the prefix the export puts on a
+//! feature: a value or PIXIT item `PICS-T-X` would be the module parameter `PICS_T_X`, which is
+//! also the parameter of the feature of a support item `T-X`. So no id starts with the word
+//! `PICS` ([`is_proforma_id`]); the word elsewhere in an id is spelled nowhere else and is
+//! allowed. The export refuses a written name that collides with a name it makes, too, but the
+//! id is where the collision starts, so it is refused there first.
+
+/// The word the export puts in front of a feature's module parameter.
+const FEATURE_PREFIX: &str = "PICS";
+
+/// Whether `id` is a proforma id: upper-case letters and digits in words joined by single
+/// hyphens, the first word starting with a letter and not `PICS`.
+pub fn is_proforma_id(id: &str) -> bool {
+    is_feature_name(&id.to_ascii_lowercase())
+        && !id.chars().any(|c| c.is_ascii_lowercase())
+        && id.split('-').next() != Some(FEATURE_PREFIX)
+}
 
 /// The feature a PICS support item is in the suite's feature model.
 pub fn feature_name(id: &str) -> String {
@@ -67,6 +85,23 @@ mod tests {
         assert_eq!(feature_parameter("T-UNICAST"), "PICS_T_UNICAST");
         assert_eq!(module_parameter("T-FSN-RES"), "T_FSN_RES");
         assert_eq!(module_parameter("X-TMP-CHANNEL"), "X_TMP_CHANNEL");
+    }
+
+    #[test]
+    fn an_id_does_not_start_with_the_feature_prefix() {
+        // The collision the rule prevents: the value item would be spelled as the feature is.
+        assert_eq!(
+            module_parameter("PICS-T-UNICAST"),
+            feature_parameter("T-UNICAST")
+        );
+        assert!(!is_proforma_id("PICS-T-UNICAST"));
+        assert!(!is_proforma_id("PICS"));
+        // Elsewhere in an id the word is spelled nowhere else.
+        assert!(is_proforma_id("T-PICS"));
+        assert!(is_proforma_id("T-PICS-X"));
+        assert!(is_proforma_id("PICSX-T"));
+        assert!(!is_proforma_id("t-unicast"));
+        assert!(!is_proforma_id("T--UNICAST"));
     }
 
     #[test]
