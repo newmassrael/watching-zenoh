@@ -426,6 +426,7 @@ fn host_admin_space(session: &WeakSession, whatami: WhatAmI) {
                     .unwrap_or_else(|_| "null".to_owned()),
             )
         };
+        let multicast_peers = views.admin_multicast_peers();
         let ctx = AdminAnswerCtx {
             zid_hex: &zid_hex,
             whatami,
@@ -434,7 +435,7 @@ fn host_admin_space(session: &WeakSession, whatami: WhatAmI) {
             metadata_json: &metadata_json,
             read,
             stats: None,
-            multicast_peers: &[],
+            multicast_peers: &multicast_peers,
         };
         let declarations: Vec<AdminDeclaration> = views
             .node()
