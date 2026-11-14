@@ -52,6 +52,43 @@ answer = "text"
 distinct_from = "X-TEST-LINK-INTERFACE"
 
 # ---------------------------------------------------------------------------------------------
+# How the implementation under test is configured for this environment
+#
+# A protocol parameter that an implementation reads from its configuration when a session opens is
+# not a property of the build: the PICS item that asks for it is answered, for that
+# implementation, from these items (an answer row `pixit = "<id>"`), and the value admitted is the
+# PICS item's.
+
+[[item]]
+id = "X-IUT-BATCH-UNICAST"
+question = "Which batch size, in bytes, is the implementation configured to state in its Init?"
+answer = "integer"
+unit = "byte"
+
+[[item]]
+id = "X-IUT-BATCH-MCAST"
+question = "Which batch size, in bytes, is the implementation configured to state in its Join?"
+answer = "integer"
+unit = "byte"
+
+[[item]]
+id = "X-IUT-LEASE"
+question = "Which lease, in milliseconds, is the implementation configured to state?"
+answer = "integer"
+unit = "millisecond"
+
+[[item]]
+id = "X-IUT-KA-PER-LEASE"
+question = "How many keepalives in one lease is the implementation configured to send on an idle link?"
+answer = "integer"
+
+[[item]]
+id = "X-IUT-FRAG-MAX"
+question = "What is the largest message, in bytes, the implementation is configured to rejoin from fragments?"
+answer = "integer"
+unit = "byte"
+
+# ---------------------------------------------------------------------------------------------
 # The upper tester's share of the implementation's resources
 
 [[item]]

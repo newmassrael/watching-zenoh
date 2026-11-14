@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The test configurations of the zenoh conformance test suite (ISO/IEC 9646-2): how many lower
+# tester components stand around the implementation under test, which role each takes, over which
+# link, and in which mode the implementation runs. docs/conformance-suite.md section 7 defines
+# every field; crates/wz-conformance-suite holds the file to it. A test purpose names the one
+# configuration it runs in, and the abstract test suite realises each configuration once.
+#
+# `lower` lists the lower tester's components: `role` is the zenoh role it takes (client, peer,
+# router), `link` stream, datagram or multicast, and `end` whether it dials the implementation
+# (`dials`), is dialled by it (`accepts`), or shares a group with it (`group`). `iut` is the mode
+# the implementation opens its session in. `selection` is what the PICS must answer for the
+# configuration to be realisable at all.
+
+format = "wz-conformance-configurations"
+format_version = 1
+
+[[configuration]]
+id = "CF-UC-IUT-DIALS"
+summary = "The implementation dials one lower tester component that accepts, on a stream link."
+iut = "client"
+selection = "T-UNICAST and T-INITIATOR and T-STREAM-LINK"
+lower = [{ name = "lt", role = "router", link = "stream", end = "accepts" }]
+
+[[configuration]]
+id = "CF-UC-LT-DIALS"
+summary = "One lower tester component dials the implementation, which listens, on a stream link."
+iut = "peer"
+selection = "T-UNICAST and T-ACCEPTOR and T-STREAM-LINK"
+lower = [{ name = "lt", role = "peer", link = "stream", end = "dials" }]
+
+[[configuration]]
+id = "CF-UC-DGRAM"
+summary = "The implementation dials one lower tester component that accepts, on a datagram link."
+iut = "client"
+selection = "T-UNICAST and T-INITIATOR and T-DGRAM-LINK"
+lower = [{ name = "lt", role = "router", link = "datagram", end = "accepts" }]
+
+[[configuration]]
+id = "CF-MC-GROUP"
+summary = "The implementation and one lower tester component are members of one multicast group."
+iut = "peer"
+selection = "T-MCAST"
+lower = [{ name = "lt", role = "peer", link = "multicast", end = "group" }]
+
+[[configuration]]
+id = "CF-ROUTER-TWO"
+summary = "Two lower tester components dial the implementation, which routes, as two clients."
+iut = "router"
+selection = "T-ROLE-ROUTER and T-UNICAST and T-ACCEPTOR and T-STREAM-LINK"
+lower = [
+    { name = "lt1", role = "client", link = "stream", end = "dials" },
+    { name = "lt2", role = "client", link = "stream", end = "dials" },
+]

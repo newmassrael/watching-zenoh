@@ -12,6 +12,10 @@
 #   limit = "<id>"       the item's value is the limit's value in the statement;
 #   policy = "<id>"      the item's value is `map[<the policy's value>]`, and `map` names every
 #                        value the policy can take;
+#   fact = "<id>"        the item's answer is the protocol fact's value for the ABI in the
+#                        statement, through `map` when the fact's words are not the item's;
+#   pixit = "<id>"       the implementation reads the value from its configuration when a session
+#                        opens, so the test environment states it in that PIXIT item;
 #   fixed = "<answer>"   the answer does not depend on the build; `why` says why;
 #   unanswered = "..."   the statement cannot answer the item; the text says what it lacks, and
 #                        the test system takes the answer from the test configuration instead.
@@ -64,7 +68,7 @@ unanswered = "The peer capability admits the router mode's name as well as the p
 [[answer]]
 abi = "pico"
 item = "T-STREAM-LINK"
-unanswered = "No capability of the statement names the tcp link, so the statement cannot answer for a build of this ABI."
+unanswered = "No capability of the statement names the tcp link, and whether a build has it depends on the platform it is built for, which the statement does not carry."
 
 [[answer]]
 abi = "pico"
@@ -74,12 +78,28 @@ capability = "link-udp"
 [[answer]]
 abi = "pico"
 item = "T-COMPRESSION"
-unanswered = "The compression capability is not one of this ABI's, and the statement says nothing of the batch header its sessions accept."
+fact = "batch-compression"
 
 [[answer]]
 abi = "pico"
 item = "T-PATCH"
-unanswered = "The statement does not state the patch the build's sessions advertise."
+fact = "patch"
+map = { "0" = "no", "1" = "yes" }
+
+[[answer]]
+abi = "pico"
+item = "N-QUERY"
+capability = "query"
+
+[[answer]]
+abi = "pico"
+item = "N-QUERYABLE"
+capability = "queryable"
+
+[[answer]]
+abi = "pico"
+item = "N-TOKEN"
+capability = "liveliness"
 
 [[answer]]
 abi = "pico"
@@ -96,7 +116,7 @@ map = { "bits-8" = "8", "bits-16" = "16", "bits-32" = "32", "bits-64" = "64" }
 [[answer]]
 abi = "pico"
 item = "T-RID-RES"
-unanswered = "The request id resolution is not part of the sn-resolution policy, and the statement does not state it."
+unanswered = "The request id resolution is not part of the sn-resolution policy, and no protocol fact of the declaration states it yet."
 
 [[answer]]
 abi = "pico"
@@ -167,7 +187,7 @@ capability = "router-node"
 [[answer]]
 abi = "c"
 item = "T-STREAM-LINK"
-unanswered = "The statement names the optional stream links (the transport_ capabilities) but no capability names the tcp link, so it cannot answer for a build without them."
+unanswered = "The statement names the optional stream links (the transport_ capabilities) but no capability names the tcp link, and whether a build has it depends on the platform it is built for."
 
 [[answer]]
 abi = "c"
@@ -182,7 +202,23 @@ capability = "transport_compression"
 [[answer]]
 abi = "c"
 item = "T-PATCH"
-unanswered = "The statement does not state the patch the build's sessions advertise."
+fact = "patch"
+map = { "0" = "no", "1" = "yes" }
+
+[[answer]]
+abi = "c"
+item = "N-QUERY"
+capability = "query"
+
+[[answer]]
+abi = "c"
+item = "N-QUERYABLE"
+capability = "queryable"
+
+[[answer]]
+abi = "c"
+item = "N-TOKEN"
+capability = "liveliness"
 
 [[answer]]
 abi = "c"
@@ -199,29 +235,29 @@ map = { "bits-8" = "8", "bits-16" = "16", "bits-32" = "32", "bits-64" = "64" }
 [[answer]]
 abi = "c"
 item = "T-RID-RES"
-unanswered = "The request id resolution is not part of the sn-resolution policy, and the statement does not state it."
+unanswered = "The request id resolution is not part of the sn-resolution policy, and no protocol fact of the declaration states it yet."
 
 [[answer]]
 abi = "c"
 item = "T-BATCH-UNICAST"
-unanswered = "A session of this ABI reads its batch size from its configuration when it opens, and the statement does not carry that configuration."
+pixit = "X-IUT-BATCH-UNICAST"
 
 [[answer]]
 abi = "c"
 item = "T-BATCH-MCAST"
-unanswered = "A session of this ABI reads its batch size from its configuration when it opens, and the statement does not carry that configuration."
+pixit = "X-IUT-BATCH-MCAST"
 
 [[answer]]
 abi = "c"
 item = "T-LEASE"
-unanswered = "A session of this ABI reads its lease from its configuration when it opens, and the statement does not carry that configuration."
+pixit = "X-IUT-LEASE"
 
 [[answer]]
 abi = "c"
 item = "T-KA-PER-LEASE"
-unanswered = "A session of this ABI reads its keepalive count from its configuration when it opens, and the statement does not carry that configuration."
+pixit = "X-IUT-KA-PER-LEASE"
 
 [[answer]]
 abi = "c"
 item = "T-FRAG-MAX"
-unanswered = "A session of this ABI reads its reassembly bound from its configuration when it opens, and the statement does not carry that configuration."
+pixit = "X-IUT-FRAG-MAX"

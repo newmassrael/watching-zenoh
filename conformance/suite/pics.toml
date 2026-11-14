@@ -73,7 +73,7 @@ id = "T-ROLE-ROUTER"
 question = "Can the implementation take the router role?"
 status = "o.3"
 answer = "support"
-reference = ["B-ENC-5"]
+reference = ["B-ENC-5", "B-ROUTE-1", "B-ROUTE-2", "B-ROUTE-3"]
 
 [[item]]
 id = "T-STREAM-LINK"
@@ -108,6 +108,30 @@ question = "Does the implementation state a patch of 1 or more and use the first
 status = "o"
 answer = "support"
 reference = ["B-FRAG-3"]
+
+# ---------------------------------------------------------------------------------------------
+# The network services an implementation takes part in
+
+[[item]]
+id = "N-QUERY"
+question = "Does the implementation send Requests (a get, a querier)?"
+status = "o"
+answer = "support"
+reference = ["B-REQ-1", "B-REQ-2", "B-REQ-3"]
+
+[[item]]
+id = "N-QUERYABLE"
+question = "Does the implementation declare queryables and answer Requests?"
+status = "o"
+answer = "support"
+reference = ["B-DECL-4", "B-RESP-1", "B-RESP-2", "B-RESP-3"]
+
+[[item]]
+id = "N-TOKEN"
+question = "Does the implementation declare liveliness tokens?"
+status = "o"
+answer = "support"
+reference = ["B-DECL-4", "B-DECL-5"]
 
 # ---------------------------------------------------------------------------------------------
 # Protocol parameters

@@ -1,0 +1,556 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The conformance requirements of the zenoh conformance test suite: the base layer, network part
+# (the messages a Frame carries, key expressions, and what a node observably forwards).
+# docs/conformance-suite.md section 3 defines every field; crates/wz-conformance-suite holds the
+# file to it. The rules of base-transport.toml's header hold here too: every source is an anchor
+# into the pinned upstream, and a requirement whose sources do not settle it carries an `issue`.
+#
+# What a Push, a Request and a Response carry as their body (Put, Del, Query, Reply, Err) is the
+# zenoh message part, not this one.
+
+format = "wz-conformance-requirements"
+format_version = 1
+layer = "base"
+part = "network"
+base = "zenoh 1.10.2"
+
+# ---------------------------------------------------------------------------------------------
+# Common to the network messages
+
+[[requirement]]
+id = "B-NET-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+The network message ids are: Interest 0x19, ResponseFinal 0x1a, Response 0x1b, Request 0x1c,
+Push 0x1d, Declare 0x1e, OAM 0x1f. A network message starts with one header byte, its low five
+bits the id and bit 7 the flag Z (an extension chain follows the fixed fields).
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/mod.rs` @ `pub const INTEREST: u8 = 0x19;`',
+    '`commons/zenoh-protocol/src/network/mod.rs` @ `pub const OAM: u8 = 0x1f;`',
+]
+
+[[requirement]]
+id = "B-NET-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A wire expression is a key scope, a variable-length integer that fits 16 bits, then, when the
+message's flag N is set, a key suffix as <u8;z16> (UTF-8 text). The flag M says whose
+declarations the scope is read in: set, the sender's; clear, the receiver's. A scope of 0 names
+no declaration, and the suffix alone is the key expression.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/push.rs` @ `/// ~ key_scope:z16 ~`',
+    '`commons/zenoh-protocol/src/network/push.rs` @ `pub const M: u8 = 1 << 6; // 0x40 Mapping`',
+    '`commons/zenoh-protocol/src/core/wire_expr.rs` @ `pub const EMPTY_EXPR_ID: ExprId = 0;`',
+]
+
+[[requirement]]
+id = "B-NET-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "receiver"
+text = '''
+A wire expression with a non-zero scope stands for the key expression declared under that id
+(B-DECL-3) by the side its flag M names, followed by its suffix.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/push.rs` @ `if M==1 then key expr mapping is the one declared by the sender, else it is the one declared by the receiver`',
+    '`commons/zenoh-protocol/src/core/wire_expr.rs` @ `/// A numerical Id mapped to a key expression.`',
+]
+
+[[requirement]]
+id = "B-NET-4"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+The QoS extension of a network message is id 0x1, a 64-bit integer, M = 0. Its value's bits 2 to
+0 are the priority; bit 3 (D) is the congestion control block, clear for drop; bit 4 (E) is
+express (do not batch); bit 5 (F) is block for the first message only; the other bits are
+reserved. A message without it has its kind's default: priority 5 (data) and drop for a Push;
+priority 5 and block for a Request; priority 0 (control) and block for a Declare, an Interest
+and an OAM.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/mod.rs` @ `const D_FLAG: u8 = 0b00001000;`',
+    '`commons/zenoh-protocol/src/network/mod.rs` @ `const F_FLAG: u8 = 0b00100000;`',
+    '`commons/zenoh-protocol/src/network/mod.rs` @ `pub const PUSH: Self = Self::new(Priority::DEFAULT, CongestionControl::DEFAULT_PUSH, false);`',
+    '`commons/zenoh-protocol/src/core/mod.rs` @ `pub const DEFAULT_DECLARE: Self = Self::Block;`',
+]
+
+[[requirement]]
+id = "B-NET-5"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+The timestamp extension of a network message is id 0x2, a byte sequence, M = 0. Its bytes are
+the time as a variable-length integer (a 64-bit NTP time), then the id of the clock that took it
+as a variable-length integer length (at most 16) and that many bytes.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/push.rs` @ `pub type Timestamp = zextzbuf!(0x2, false);`',
+    '`commons/zenoh-codec/src/core/timestamp.rs` @ `let time = uhlc::NTP64(time);`',
+    '`commons/zenoh-codec/src/core/timestamp.rs` @ `if size > (uhlc::ID::MAX_SIZE) {`',
+]
+
+[[requirement]]
+id = "B-NET-6"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+The node id extension of a network message is id 0x3, a 64-bit integer, M = 1, whose value is a
+16-bit node id; 0, the default when it is absent, means the message was made by the node that
+sends it.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/push.rs` @ `pub type NodeId = zextz64!(0x3, true);`',
+    '`commons/zenoh-protocol/src/network/mod.rs` @ `// node_id == 0 means the message has been generated by the node itself`',
+]
+
+# ---------------------------------------------------------------------------------------------
+# Push, Request, Response, ResponseFinal
+
+[[requirement]]
+id = "B-PUSH-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+Push: header flags N (bit 5), M (bit 6) and Z. Then the wire expression (B-NET-2), the
+extensions when Z is set (QoS 0x1, timestamp 0x2, node id 0x3, timestamp stack 0x7 a byte
+sequence with M = 0), and the body.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/push.rs` @ `/// |Z|M|N|  PUSH   |`',
+    '`commons/zenoh-protocol/src/network/push.rs` @ `pub type TsStack = zextzbuf!(0x7, false);`',
+]
+
+[[requirement]]
+id = "B-REQ-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+Request: header flags N (bit 5), M (bit 6) and Z. Then the request id as a variable-length
+integer, the wire expression, the extensions when Z is set, and the body. The extensions: QoS
+0x1, timestamp 0x2, node id 0x3, target id 0x4 a 64-bit integer with M = 1, budget id 0x5 a
+64-bit integer, timeout id 0x6 a 64-bit integer in milliseconds, timestamp stack 0x7.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/request.rs` @ `/// ~ request_id:z32~  (*)`',
+    '`commons/zenoh-protocol/src/network/request.rs` @ `pub type Target = zextz64!(0x4, true);`',
+    '`commons/zenoh-codec/src/network/request.rs` @ `ext_timeout = Some(ext::TimeoutType::from_millis(to.value));`',
+]
+
+[[requirement]]
+id = "B-REQ-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+The target of a Request is 0 best matching, 1 all, 2 all complete; a Request without the target
+extension is best matching, and a receiver refuses another value.
+'''
+sources = [
+    '`commons/zenoh-codec/src/network/request.rs` @ `ext::QueryTarget::AllComplete => 2,`',
+    '`commons/zenoh-protocol/src/network/request.rs` @ `pub const DEFAULT: Self = Self::BestMatching;`',
+]
+
+[[requirement]]
+id = "B-REQ-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "N-QUERY"
+text = '''
+A request id fits the request id resolution the session agreed on, and the base limits it to
+32 bits.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/request.rs` @ `This implementation limits the resolution to 32bit.`',
+]
+
+[[requirement]]
+id = "B-RESP-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+Response: header flags N (bit 5), M (bit 6) and Z. Then the request id it answers, the wire
+expression, the extensions when Z is set (QoS 0x1, timestamp 0x2, responder id 0x3 a byte
+sequence with M = 0, timestamp stack 0x7), and the body.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/response.rs` @ `/// |Z|M|N| Response|`',
+    '`commons/zenoh-protocol/src/network/response.rs` @ `pub type ResponderId = zextzbuf!(0x3, false);`',
+]
+
+[[requirement]]
+id = "B-RESP-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+ResponseFinal: header flag Z, bits 6 and 5 reserved. Then the request id it ends, and the
+extensions when Z is set.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/response.rs` @ `/// |Z|X|X| ResFinal|`',
+]
+
+[[requirement]]
+id = "B-RESP-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "N-QUERYABLE or T-ROLE-ROUTER"
+text = '''
+Every Response to a Request carries the Request's id, and the answering side ends the Request
+with exactly one ResponseFinal of that id, after its last Response. A Request that reaches no
+queryable is ended with a ResponseFinal at once.
+'''
+sources = [
+    '`zenoh/src/net/routing/dispatcher/queries.rs` @ `.send_response_final(&mut ResponseFinal {`',
+]
+issue = '''
+The definition gives the two messages and the id they share but not the order of the exchange;
+the rule here is the pinned implementation's.
+'''
+
+# ---------------------------------------------------------------------------------------------
+# Declare
+
+[[requirement]]
+id = "B-DECL-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+Declare: header flags I (bit 5, an interest id follows) and Z, bit 6 reserved. Then the interest
+id as a variable-length integer when I is set, the extensions when Z is set (QoS 0x1, timestamp
+0x2, node id 0x3), and one declaration.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/declare.rs` @ `/// ~interest_id:z32~  if I==1`',
+    '`commons/zenoh-codec/src/network/declare.rs` @ `header |= declare::flag::I;`',
+]
+
+[[requirement]]
+id = "B-DECL-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A declaration starts with its own header byte, its low five bits its id: key expression 0x00 and
+its undeclaration 0x01, subscriber 0x02 and 0x03, queryable 0x04 and 0x05, token 0x06 and 0x07,
+final 0x1a. Bit 7 is Z.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/declare.rs` @ `pub const D_SUBSCRIBER: u8 = 0x02;`',
+    '`commons/zenoh-protocol/src/network/declare.rs` @ `pub const D_FINAL: u8 = 0x1A;`',
+]
+
+[[requirement]]
+id = "B-DECL-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A key expression declaration: flag N (bit 5) and Z. Then the expression id as a variable-length
+integer that fits 16 bits, a key scope and, when N is set, a key suffix (B-NET-2, without the
+flag M: the scope is always the sender's own), then the extensions. Its undeclaration carries
+the expression id alone.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/declare.rs` @ `/// |Z|X|N| D_KEXPR |`',
+    '`commons/zenoh-protocol/src/network/declare.rs` @ `/// |Z|X|X| U_KEXPR |`',
+]
+
+[[requirement]]
+id = "B-DECL-4"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A subscriber, queryable or token declaration: flags N (bit 5), M (bit 6) and Z. Then the entity
+id as a variable-length integer that fits 32 bits, the wire expression, then the extensions. A
+queryable declaration may carry the queryable info extension, id 0x01, a 64-bit integer with
+M = 0, whose bit 0 says the queryable is complete and whose bits 23 to 8 are its distance.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/declare.rs` @ `/// |Z|M|N|  D_SUB  |`',
+    '`commons/zenoh-protocol/src/network/declare.rs` @ `pub type QueryableInfo = zextz64!(0x01, false);`',
+    '`commons/zenoh-codec/src/network/declare.rs` @ `let distance = (ext.value >> 8) as u16;`',
+]
+
+[[requirement]]
+id = "B-DECL-5"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A subscriber, queryable or token undeclaration carries the entity id it undeclares, and may carry
+the wire expression extension, id 0x0f, a byte sequence with M = 1, whose bytes are one byte of
+flags (bit 0 N, bit 1 M), a key scope and, when N is set, a key suffix.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/declare.rs` @ `/// |Z|X|X|  U_SUB  |`',
+    '`commons/zenoh-protocol/src/network/declare.rs` @ `pub type WireExprExt = zextzbuf!(0x0f, true);`',
+]
+
+[[requirement]]
+id = "B-DECL-6"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+The final declaration is its header byte alone, with flag Z, then the extensions when Z is set.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/declare.rs` @ `/// |Z|X|X| D_FINAL |`',
+]
+
+# ---------------------------------------------------------------------------------------------
+# Interest
+
+[[requirement]]
+id = "B-INT-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+Interest: header bits 6 and 5 the mode (0b00 final, 0b01 current, 0b10 future, 0b11 current and
+future) and flag Z. Then the interest id as a variable-length integer. When the mode is not
+final: one byte of options, bit 0 K (key expressions), bit 1 S (subscribers), bit 2 Q
+(queryables), bit 3 T (tokens), bit 4 R (restricted to a key expression), bit 5 N, bit 6 M,
+bit 7 A (aggregate the replies); and when R is set, the wire expression. Then the extensions when
+Z is set (QoS 0x1, timestamp 0x2, node id 0x3).
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/interest.rs` @ `/// |A|M|N|R|T|Q|S|K|  if Mod!=Final (*)`',
+    '`commons/zenoh-protocol/src/network/interest.rs` @ `/// - Mode 0b11: CurrentFuture`',
+    '`commons/zenoh-codec/src/network/interest.rs` @ `let mode = match (self.header >> HEADER_BITS) & 0b11 {`',
+]
+
+[[requirement]]
+id = "B-INT-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "T-ROLE-ROUTER or T-ROLE-PEER"
+text = '''
+A node that receives an Interest of mode current, or current and future, answers with a
+Declare for each declaration of the kinds the Interest asks for that matches it, each carrying
+the Interest's id, then with a Declare of the final declaration carrying the same id.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/interest.rs` @ `///     |<------------------| -- With interest_id field set`',
+    '`commons/zenoh-protocol/src/network/interest.rs` @ `///     |     DECL FINAL    |`',
+]
+
+[[requirement]]
+id = "B-INT-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "T-ROLE-ROUTER or T-ROLE-PEER"
+text = '''
+After an Interest of mode future, or current and future, a node sends the matching declarations
+and undeclarations that follow without an interest id, until it receives an Interest of mode
+final with the same id.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/interest.rs` @ `///     |<------------------| -- With interest_id field not set`',
+    '`commons/zenoh-protocol/src/network/interest.rs` @ `This stops the transmission of subscriber declarations/undeclarations.`',
+]
+
+[[requirement]]
+id = "B-INT-4"
+strength = "SHOULD"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "T-ROLE-ROUTER or T-ROLE-PEER"
+text = '''
+A node aggregates its replies to an Interest whose option A is set.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/interest.rs` @ `if A==1 then the replies SHOULD be aggregated`',
+]
+
+# ---------------------------------------------------------------------------------------------
+# OAM
+
+[[requirement]]
+id = "B-NOAM-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A network OAM: header bits 6 and 5 the body's encoding (as an extension's, B-EXT-1) and flag Z.
+Then the OAM id as a variable-length integer that fits 16 bits, the extensions when Z is set,
+and the body by its encoding.
+'''
+sources = [
+    '`commons/zenoh-codec/src/network/oam.rs` @ `let body = match self.header & iext::ENC_MASK {`',
+    '`commons/zenoh-protocol/src/network/oam.rs` @ `/// ~    id:z16     ~`',
+]
+issue = '''
+The definition's layout draws bit 7 as reserved and declares a flag T on bit 5, which overlaps
+the encoding; the base codec writes bit 7 as Z and reads bits 6 and 5 as the encoding only.
+'''
+
+# ---------------------------------------------------------------------------------------------
+# Key expressions
+
+[[requirement]]
+id = "B-KE-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A key expression is UTF-8 text: chunks separated by '/', none of them empty, so it neither
+starts nor ends with '/' and holds no "//". It holds none of '#', '?' and '$', but in the
+sub-chunk wildcard "$*".
+'''
+sources = [
+    '`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @ `These chunks are not allowed to be empty.`',
+    '`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @ `nor contain`',
+]
+
+[[requirement]]
+id = "B-KE-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "sender"
+text = '''
+A key expression on the wire is in canon form: no two "$*" in a row, no two "**" chunks in a
+row, no chunk that is "$*" alone (it is written "*"), and no "**" chunk followed by a "*" chunk
+(written "*" then "**").
+'''
+sources = [
+    '`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @ `Key expression must be in canon-form`',
+    '`commons/zenoh-keyexpr/src/key_expr/canon.rs` @ `// **/* is replaced by */**`',
+]
+
+[[requirement]]
+id = "B-KE-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "both"
+text = '''
+A key expression is the set of keys it matches: a chunk "*" matches any one chunk, a chunk "**"
+matches any number of chunks, none included, and "$*" within a chunk matches any text within
+that chunk. Two key expressions intersect when one key is in both sets; one includes another
+when every key of the other is in it.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/core/wire_expr.rs` @ `arbitrary string not including zenoh`',
+    '`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @ `there exists at least one key which is contained in both of the sets defined by`',
+]
+issue = '''
+The definition's resource-key text lets "*" expand to any string without '/', the empty one
+included; the key expression library's chunks are never empty. Which of the two decides whether
+"a/*" matches "a/" is not settled in the base.
+'''
+
+# ---------------------------------------------------------------------------------------------
+# What a node observably forwards
+
+[[requirement]]
+id = "B-ROUTE-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "T-ROLE-ROUTER"
+text = '''
+A router that receives a Push sends it on to each other face that declared a subscriber whose key
+expression intersects the Push's, and not back on the face it came from.
+'''
+sources = [
+    '`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `let route = get_data_route(&rtables, src_face, &expr, msg.ext_nodeid.node_id);`',
+    '`zenoh/src/net/routing/dispatcher/tables.rs` @ `src_face.id != out_face.id`',
+]
+issue = '''
+The definition gives the messages and the meaning of a key expression, not the forwarding rule;
+the rule here is the pinned implementation's.
+'''
+
+[[requirement]]
+id = "B-ROUTE-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "T-ROLE-ROUTER"
+text = '''
+A router sends a Request on to the faces of the queryables whose key expression intersects the
+Request's, as its target says: all of them (all), those that declared themselves complete and
+include the Request's key expression (all complete), or the best matching one (best matching).
+It answers the requester with the Responses it is sent, and with one ResponseFinal once each
+face it sent the Request to has ended it.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/request.rs` @ `/// Deliver the query to all queryables matching the query`',
+    '`zenoh/src/net/routing/dispatcher/queries.rs` @ `QueryTarget::AllComplete => {`',
+]
+issue = '''
+The definition names the three targets in one sentence each; which faces a router picks and when
+it ends the requester's Request are the pinned implementation's.
+'''
+
+[[requirement]]
+id = "B-ROUTE-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "T-ROLE-ROUTER"
+text = '''
+A router declares to a face the subscribers, queryables and tokens of its other faces that match
+an Interest the face sent, by B-INT-2 and B-INT-3, and never a face's own declarations back to
+it.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/network/interest.rs` @ `The INTEREST message is sent to request the transmission of current and optionally future`',
+    '`zenoh/src/net/routing/dispatcher/tables.rs` @ `src_face.id != out_face.id`',
+]
+issue = '''
+That a router never echoes a face's own declarations is the pinned implementation's rule.
+'''

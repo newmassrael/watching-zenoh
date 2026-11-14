@@ -1,0 +1,151 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# Test purposes of the zenoh conformance test suite, transport part (ISO/IEC 9646-1; the
+# structure of ETSI ES 202 553, TPLan): what each test checks, never how or where it runs.
+# docs/conformance-suite.md section 7 defines every field; crates/wz-conformance-suite holds the
+# file to the requirements, the PICS, the configurations and the primitives.
+#
+# `with` is the initial condition, `when` the stimulus and `then` the observation that decides the
+# verdict. The lower tester ("LT") observes and stimulates the wire; the upper tester ("UT") is
+# reached only through the primitives listed in `primitives`. A purpose's selection is its
+# configuration's, and with its own `selection` when it states one.
+
+format = "wz-conformance-purposes"
+format_version = 1
+part = "transport"
+
+[[purpose]]
+id = "TP-INIT-1"
+requirements = ["B-INIT-5", "B-INIT-1", "B-INIT-3", "B-ENC-4", "B-ENC-5"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN"]
+with = "The implementation is idle and the LT listens on the locator the implementation is given."
+when = "The UT opens a client session that dials the LT."
+then = "The first message the LT reads on the new link is an Init with A clear, version 0x09, the role client and a zenoh id of one to sixteen bytes whose length field is the length minus one."
+
+[[purpose]]
+id = "TP-INIT-2"
+requirements = ["B-INIT-2", "B-INIT-1"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN"]
+with = "The implementation is idle."
+when = "The UT opens a client session that dials the LT."
+then = "The InitSyn either carries S with the resolutions and batch size the PICS states (T-FSN-RES, T-RID-RES, T-BATCH-UNICAST), or leaves S clear and the PICS states the defaults (32, 32, 65535)."
+
+[[purpose]]
+id = "TP-INIT-3"
+requirements = ["B-INIT-8"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN"]
+with = "The implementation is idle, and the LT is made to answer with resolutions larger than the implementation states."
+when = "The UT opens a client session, and the LT answers its InitSyn with an InitAck whose frame sequence number resolution is one step wider than the InitSyn's."
+then = "The implementation sends a Close of reason invalid (0x02) and no OpenSyn, and the UT's open is confirmed with a result other than ok."
+
+[[purpose]]
+id = "TP-OPEN-1"
+requirements = ["B-OPEN-4", "B-OPEN-1"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN"]
+with = "The implementation is idle."
+when = "The UT opens a client session, and the LT answers the InitSyn with an InitAck carrying a cookie of 32 bytes the LT chose."
+then = "The implementation's next message is an OpenSyn whose cookie is the InitAck's, byte for byte, and whose lease is the PICS's T-LEASE in the unit its flag T names."
+
+[[purpose]]
+id = "TP-OPEN-2"
+requirements = ["B-OPEN-5"]
+configuration = "CF-UC-LT-DIALS"
+primitives = ["SESSION-OPEN"]
+with = "The implementation listens on the locator the LT dials."
+when = "The LT sends an InitSyn, receives the InitAck, and sends an OpenSyn whose cookie differs from the InitAck's in one byte."
+then = "The implementation sends no OpenAck, and no Frame of a session follows on the link."
+
+[[purpose]]
+id = "TP-EXT-1"
+requirements = ["B-EXT-3", "B-EXT-1", "B-EXT-2"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN"]
+with = "The implementation is idle."
+when = "The UT opens a client session, and the LT answers with an InitAck carrying, before its other extensions, an extension of an id the base does not define, M clear, as a byte sequence of 5 bytes."
+then = "The implementation sends an OpenSyn: it read past the unknown extension."
+
+[[purpose]]
+id = "TP-EXT-2"
+requirements = ["B-EXT-4"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN"]
+with = "The implementation is idle."
+when = "The UT opens a client session, and the LT answers with an InitAck carrying an extension of an id the base does not define with M set."
+then = "The implementation sends no OpenSyn for that InitAck."
+
+[[purpose]]
+id = "TP-BATCH-1"
+requirements = ["B-BATCH-1", "B-BATCH-3"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN", "SUBSCRIBER-DECLARE", "SAMPLE"]
+with = "A session is established between the implementation and the LT, and the UT has declared a subscriber on a/b."
+when = "The LT writes, as one batch with its two length bytes, a Frame holding two Pushes on a/b, and splits the batch's bytes over two writes at a point inside the second Push."
+then = "The UT indicates two samples, in the order the Frame holds them."
+
+[[purpose]]
+id = "TP-BATCH-2"
+requirements = ["B-BATCH-5"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN", "SESSION-PUT"]
+with = "A session is established in which the LT stated a batch size of 512 bytes."
+when = "The UT puts a payload of 2000 bytes on a/b."
+then = "No batch the implementation sends on the link is larger than 512 bytes, and the payload reaches the LT in Fragments."
+
+[[purpose]]
+id = "TP-KA-1"
+requirements = ["B-KA-2", "B-KA-1"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN"]
+with = "A session is established, and the UT requests nothing more."
+when = "The link stays idle for three of the implementation's leases."
+then = "The implementation sends KeepAlives, each no later than the lease divided by the PICS's T-KA-PER-LEASE after its last message, within the PIXIT's X-TIMER-TOLERANCE-MS."
+
+[[purpose]]
+id = "TP-LEASE-1"
+requirements = ["B-LEASE-1"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN"]
+with = "A session is established in which the LT stated a lease of 2000 milliseconds."
+when = "The LT sends nothing more."
+then = "The implementation closes the link once 2000 milliseconds have passed without a message from the LT, within the PIXIT's X-TIMER-TOLERANCE-MS."
+
+[[purpose]]
+id = "TP-SN-1"
+requirements = ["B-SN-2", "B-FRAME-1"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN", "SUBSCRIBER-DECLARE", "SAMPLE"]
+with = "A session is established, and the UT has declared a subscriber on a/b."
+when = "The LT sends a reliable Frame with a Push on a/b, then a Frame of the same channel with the same sequence number and another Push."
+then = "The UT indicates the first sample only."
+
+[[purpose]]
+id = "TP-FRAG-1"
+requirements = ["B-FRAG-4", "B-FRAG-1"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN", "SUBSCRIBER-DECLARE", "SAMPLE"]
+with = "A session is established, and the UT has declared a subscriber on a/b."
+when = "The LT sends a Push on a/b of 3000 bytes as three Fragments of the reliable channel, the last with M clear."
+then = "The UT indicates one sample whose payload is the 3000 bytes."
+
+[[purpose]]
+id = "TP-JOIN-1"
+requirements = ["B-JOIN-1", "B-JOIN-2", "B-JOIN-4"]
+configuration = "CF-MC-GROUP"
+primitives = ["SESSION-OPEN"]
+with = "The implementation is idle, and the LT is a member of the group."
+when = "The UT opens a peer session that joins the group."
+then = "The implementation sends Joins on the group whose resolutions and batch size are the PICS's (T-FSN-RES, T-RID-RES, T-BATCH-MCAST), whose lease is T-LEASE, and whose next sequence numbers fit the frame sequence number resolution."
+
+[[purpose]]
+id = "TP-JOIN-2"
+requirements = ["B-JOIN-5"]
+configuration = "CF-MC-GROUP"
+primitives = ["SESSION-OPEN", "SUBSCRIBER-DECLARE", "SAMPLE"]
+with = "The implementation is a member of the group, and the UT has declared a subscriber on a/b."
+when = "The LT sends Joins stating a batch size other than the implementation's, then a Frame with a Push on a/b."
+then = "The UT indicates no sample."
