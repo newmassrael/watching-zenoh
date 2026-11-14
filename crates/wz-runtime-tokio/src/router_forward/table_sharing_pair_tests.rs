@@ -417,3 +417,57 @@ fn a_callback_of_the_nodes_own_subscriber_may_declare_while_the_group_ingress_ro
     );
     routed.join().expect("the route");
 }
+
+/// A writer that routes the client leg through its own draft, under either value: with the draft
+/// memos off it computes the route each time it asks and keeps none, and the version it publishes
+/// computes the route again for its first reader; with them on it computes the route once and the
+/// published version serves it (`docs/router-table-snapshots.md`, section 6.9). Turned red by a
+/// draft memo that keeps nothing, or by a publish that drops what the draft kept.
+#[test]
+fn routing_table_sharing_a_writer_keeps_the_routes_of_its_draft_when_the_draft_memos_are_on() {
+    /// The client leg of `KEY` in `tables`, every keyexpr taken as declared.
+    fn client_leg(tables: &Tables) -> Arc<[FaceId]> {
+        let hat = tables.owner_broker(CLIENTS_REGION);
+        let names = |_: &str| true;
+        client_route(
+            &hat.subs,
+            Cached {
+                routes: &hat.client_routes,
+                names_a_resource: &names,
+            },
+            KEY,
+            false,
+        )
+    }
+    for sharing in [RoutingTableSharing::Rwlock, RoutingTableSharing::Snapshot] {
+        for drafts in [false, true] {
+            let case = format!("{} draft_route_memos={drafts}", sharing.id());
+            let fwd = RouterForwarder::new(zid(0x01))
+                .with_table_sharing(sharing)
+                .with_draft_route_memos(drafts);
+            let mut write = fwd.tables.write();
+            write.owner_broker_mut(CLIENTS_REGION).subs_mut().insert(
+                FaceId(7),
+                1,
+                KEY.to_owned(),
+                (),
+            );
+            assert_eq!(&*client_leg(&write), &[FaceId(7)], "{case}");
+            assert_eq!(&*client_leg(&write), &[FaceId(7)], "{case}");
+            assert_eq!(
+                write.routes_asked_off_version(),
+                (2, if drafts { 1 } else { 2 }),
+                "{case}: the writer asked twice at its draft's inputs"
+            );
+            write.publish();
+            let read = fwd.tables.read();
+            assert_eq!(&*client_leg(&read), &[FaceId(7)], "{case}");
+            drop(read);
+            assert_eq!(
+                fwd.client_route_computes(),
+                if drafts { 1 } else { 3 },
+                "{case}: the published version computes only what its draft did not keep"
+            );
+        }
+    }
+}

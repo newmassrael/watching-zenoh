@@ -34,6 +34,16 @@
 //!   brings it to the version it publishes ([`RouteCache::bring_to`]), before any reader can load
 //!   that version, and a reader only adds the routes it computed at those inputs. A reader of an
 //!   older version is served from the older version's memo, and none moves a memo's inputs.
+//! - A CHANGED KEY FINDS ITS ROUTES BY INDEX. A memo whose writer leaves out the routes a change
+//!   reaches ([`RouteCache::bring_to_retiring`]) is built by [`RouteCache::indexed`] and keeps its
+//!   routes' keyexprs in a trie of chunks beside the routes, the index the client stores keep their
+//!   keys in, so the writer asks the index for the routes a changed key may meet instead of trying
+//!   every route kept against every changed key (`docs/router-table-snapshots.md`, section 6.9).
+//! - A WRITER MAY KEEP WHAT IT ROUTES THROUGH ITS DRAFT. A writer that routes through the version
+//!   it is still writing asks at inputs no memo was brought to, and its route is computed and not
+//!   kept. Tables that ask for it give the draft a memo of its own where a write first moves an
+//!   input ([`RouteCache::open_draft`]); what that memo keeps at the inputs the draft is published
+//!   at becomes part of the published version's memo (section 6.9).
 
 use std::hash::Hash;
 use std::sync::Arc;
@@ -41,8 +51,9 @@ use std::sync::Arc;
 use wz_routing_graph::Zid;
 
 use crate::counter::Counter;
+use crate::keyexpr_index::KeyexprIndex;
 use crate::persistent_map::PersistentMap;
-use crate::sync::PlainRwLock;
+use crate::sync::{PlainMutex, PlainRwLock};
 
 /// The versions of the tables a route is read from: what a cached route is
 /// fresh against. A route computed at one value is stale at any other.
@@ -65,10 +76,11 @@ pub struct RouteInputs {
 /// nested form cost the readers 586 instructions a Put, `docs/router-table-snapshots.md` section 6.8).
 type Routes<T, S> = PersistentMap<RouteKey<S>, T>;
 
-/// The key a route is kept under.
+/// The key a route is kept under. The keyexpr is shared, because an indexed memo holds the key
+/// twice, in its routes and in its index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RouteKey<S> {
-    keyexpr: String,
+    keyexpr: Arc<str>,
     source: S,
 }
 
@@ -150,21 +162,213 @@ impl<S: Hash> Hash for RouteKey<S> {
 #[derive(Debug)]
 pub struct RouteCache<T, S = Zid> {
     /// The inputs the routes are fresh at: those of the versions of the tables that hold this memo.
-    /// `None` until a writer first brings the memo to a version: such a memo keeps nothing.
+    /// `None` until a writer first brings the memo to a version, and for a draft's memo, whose
+    /// inputs are the draft's own: such a memo keeps nothing of its own.
     inputs: Option<RouteInputs>,
-    routes: PlainRwLock<Routes<T, S>>,
+    kept: PlainRwLock<Kept<T, S>>,
     /// How many routes were COMPUTED rather than served, by this memo and every memo it was
     /// brought from. The witness that separates "the cache is consulted and invalidated" from "the
     /// cache exists": a delivery assertion alone passes with the cache bypassed.
     computes: Arc<Counter>,
+    /// The routes asked at inputs no version's memo was brought to, and computed then, by this memo
+    /// and every memo it was brought from: how often a writer routes through its own draft. Counted
+    /// in test builds only, where the instruments read it, so that a reader pays nothing for it.
+    #[cfg(test)]
+    off_version: Arc<OffVersion>,
+    /// Set on the memo of a write's draft ([`open_draft`](Self::open_draft)), and never on a
+    /// published version's.
+    draft: Option<Box<Draft<T, S>>>,
+}
+
+/// What a memo keeps: its routes and, for an indexed memo, their keys by keyexpr. One value behind
+/// one lock, so that a route and its index entry are added and left out together.
+struct Kept<T, S> {
+    routes: Routes<T, S>,
+    /// The keys of `routes` by their keyexpr, in an indexed memo ([`RouteCache::indexed`]).
+    by_keyexpr: Option<KeyexprIndex<RouteKey<S>>>,
+}
+
+/// A copy shares every node of the routes and of the index: one count each.
+impl<T, S> Clone for Kept<T, S> {
+    fn clone(&self) -> Self {
+        Self {
+            routes: self.routes.clone(),
+            by_keyexpr: self.by_keyexpr.clone(),
+        }
+    }
+}
+
+impl<T, S> Kept<T, S> {
+    fn empty(indexed: bool) -> Self {
+        Self {
+            routes: PersistentMap::new(),
+            by_keyexpr: indexed.then(KeyexprIndex::new),
+        }
+    }
+
+    fn is_indexed(&self) -> bool {
+        self.by_keyexpr.is_some()
+    }
+}
+
+impl<T: Clone, S: Clone + Eq + Hash> Kept<T, S> {
+    fn insert(&mut self, keyexpr: &str, source: &S, route: T) {
+        let key = RouteKey {
+            keyexpr: Arc::from(keyexpr),
+            source: source.clone(),
+        };
+        self.put(key, route);
+    }
+
+    fn put(&mut self, key: RouteKey<S>, route: T) {
+        if let Some(index) = &mut self.by_keyexpr {
+            index.insert(&key.keyexpr, key.clone());
+        }
+        self.routes.insert(key, route);
+    }
+
+    fn remove(&mut self, key: &RouteKey<S>) {
+        if self.routes.remove(key).is_none() {
+            return;
+        }
+        if let Some(index) = &mut self.by_keyexpr {
+            index.remove(&key.keyexpr, key);
+        }
+    }
+
+    /// These routes less those a key changed after `since` reaches; `None` when `changes` can no
+    /// longer say which keys changed (see [`RouteCache::bring_to_retiring`]).
+    ///
+    /// An indexed memo asks its index for the routes whose keyexpr may meet each changed key and
+    /// refines them with `reaches`, so its cost follows the routes the changes meet. A memo with no
+    /// index tries every route against every changed key.
+    fn retiring(
+        mut self,
+        since: u64,
+        changes: impl FnOnce(u64, &mut dyn FnMut(&str)) -> bool,
+        reaches: impl Fn(&str, &str) -> bool,
+    ) -> Option<Self> {
+        let mut reached: Vec<RouteKey<S>> = Vec::new();
+        let complete = match &self.by_keyexpr {
+            Some(index) => changes(since, &mut |changed| {
+                reached.extend(
+                    index
+                        .intersecting(changed)
+                        .into_iter()
+                        .filter(|cached| reaches(changed, &cached.keyexpr))
+                        .cloned(),
+                );
+            }),
+            None => {
+                let mut moved: Vec<String> = Vec::new();
+                let complete = changes(since, &mut |changed| moved.push(changed.to_owned()));
+                if complete {
+                    reached.extend(
+                        self.routes
+                            .keys()
+                            .filter(|cached| {
+                                moved
+                                    .iter()
+                                    .any(|changed| reaches(changed, &cached.keyexpr))
+                            })
+                            .cloned(),
+                    );
+                }
+                complete
+            }
+        };
+        if !complete {
+            return None;
+        }
+        for key in &reached {
+            self.remove(key);
+        }
+        Some(self)
+    }
+}
+
+/// The memo of a write's draft, while the write moves the inputs of the memo it was opened over.
+#[derive(Debug)]
+struct Draft<T, S> {
+    /// The memo of the version the draft was copied from. A route asked at its inputs (the draft
+    /// before the write moved them) is served from it and added to it, as a reader's is.
+    base: Arc<RouteCache<T, S>>,
+    /// Whether `base` is indexed, so that what the draft keeps is indexed as `base` is.
+    indexed: bool,
+    /// The routes computed at the inputs the draft was last asked at, and those inputs. One set:
+    /// the draft's inputs only move forward, so the routes of the inputs it left are never asked
+    /// for again.
+    at: PlainMutex<Option<(RouteInputs, Kept<T, S>)>>,
+}
+
+impl<T: Clone, S: Clone + Eq + Hash> Draft<T, S> {
+    /// [`RouteCache::get_or_compute`] for the memo of a draft.
+    fn get_or_compute(
+        &self,
+        inputs: RouteInputs,
+        source: &S,
+        keyexpr: &str,
+        resource: impl FnOnce() -> bool,
+        compute: impl FnOnce() -> T,
+    ) -> T {
+        if self.base.inputs == Some(inputs) {
+            return self
+                .base
+                .get_or_compute(inputs, source, keyexpr, resource, compute);
+        }
+        #[cfg(test)]
+        self.base.off_version.asked.bump();
+        let key: &dyn RouteKeyParts<S> = &(keyexpr, source);
+        let served = match &*self.at.guard() {
+            Some((at, kept)) if *at == inputs => kept.routes.get(key).cloned(),
+            _ => None,
+        };
+        if let Some(route) = served {
+            return route;
+        }
+        let route = compute();
+        self.base.computes.bump();
+        #[cfg(test)]
+        self.base.off_version.computed.bump();
+        if resource() {
+            let mut at = self.at.guard();
+            if !matches!(&*at, Some((was, _)) if *was == inputs) {
+                *at = Some((inputs, Kept::empty(self.indexed)));
+            }
+            if let Some((_, kept)) = &mut *at {
+                kept.insert(keyexpr, source, route.clone());
+            }
+        }
+        route
+    }
+}
+
+/// The asks a memo answered at inputs no version's memo was brought to.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct OffVersion {
+    /// Routes asked.
+    asked: Counter,
+    /// Of those, the routes computed: every one where the tables keep no draft memo.
+    computed: Counter,
 }
 
 impl<T, S> Default for RouteCache<T, S> {
     fn default() -> Self {
+        Self::starting(Kept::empty(false))
+    }
+}
+
+impl<T, S> RouteCache<T, S> {
+    /// A memo brought to no version yet, keeping `kept`.
+    fn starting(kept: Kept<T, S>) -> Self {
         Self {
             inputs: None,
-            routes: PlainRwLock::new(PersistentMap::new()),
+            kept: PlainRwLock::new(kept),
             computes: Arc::new(Counter::new()),
+            #[cfg(test)]
+            off_version: Arc::default(),
+            draft: None,
         }
     }
 }
@@ -173,6 +377,15 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
     /// An empty cache, brought to no version yet.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty cache, brought to no version yet, that also keeps its routes' keyexprs in an index:
+    /// for a memo whose writer leaves out the routes a change reaches
+    /// ([`bring_to_retiring`](Self::bring_to_retiring)). Every route a reader adds is also added to
+    /// the index, and the writer then finds the routes a changed key reaches by a walk of the
+    /// index. The memos brought from it are indexed too.
+    pub fn indexed() -> Self {
+        Self::starting(Kept::empty(true))
     }
 
     /// The route from `source` for `keyexpr` at `inputs`: served when this memo holds one,
@@ -194,23 +407,78 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
         resource: impl FnOnce() -> bool,
         compute: impl FnOnce() -> T,
     ) -> T {
-        let ours = self.inputs == Some(inputs);
-        if ours {
-            let key: &dyn RouteKeyParts<S> = &(keyexpr, source);
-            if let Some(route) = self.routes.read().get(key) {
-                return route.clone();
-            }
+        if self.inputs != Some(inputs) {
+            return match &self.draft {
+                Some(draft) => draft.get_or_compute(inputs, source, keyexpr, resource, compute),
+                None => self.compute_off_version(compute),
+            };
+        }
+        let key: &dyn RouteKeyParts<S> = &(keyexpr, source);
+        if let Some(route) = self.kept.read().routes.get(key) {
+            return route.clone();
         }
         let route = compute();
         self.computes.bump();
-        if ours && resource() {
-            let key = RouteKey {
-                keyexpr: keyexpr.to_owned(),
-                source: source.clone(),
-            };
-            self.routes.write().insert(key, route.clone());
+        if resource() {
+            self.kept.write().insert(keyexpr, source, route.clone());
         }
         route
+    }
+
+    /// The route asked of a published version's memo at inputs other than its own: computed, and
+    /// not kept.
+    fn compute_off_version(&self, compute: impl FnOnce() -> T) -> T {
+        #[cfg(test)]
+        self.off_version.asked.bump();
+        let route = compute();
+        self.computes.bump();
+        #[cfg(test)]
+        self.off_version.computed.bump();
+        route
+    }
+
+    /// Give the draft of a write a memo of its own, in place of `memo`, before the write moves an
+    /// input of `memo`: what the writer routes through its draft is then kept, at the draft's
+    /// inputs, and becomes part of the version's memo when the draft is published at those inputs
+    /// ([`bring_to_retiring`](Self::bring_to_retiring)). A route asked at the inputs `memo` is at
+    /// is served from `memo` and added to it, as a reader's is. Called by the writer of tables that
+    /// keep what their writer routes (`docs/router-table-snapshots.md`, section 6.9); the version
+    /// that shares `memo` keeps it as it was. A memo that is already a draft's stays.
+    ///
+    /// A draft that is abandoned takes its memo with it, so no other draft is ever served the
+    /// routes of tables that were never published, though its inputs may come to the same numbers.
+    pub fn open_draft(memo: &mut Arc<Self>) {
+        if memo.draft.is_some() {
+            return;
+        }
+        let base = Arc::clone(memo);
+        let indexed = base.kept.read().is_indexed();
+        *memo = Arc::new(Self {
+            inputs: None,
+            kept: PlainRwLock::new(Kept::empty(false)),
+            computes: Arc::clone(&base.computes),
+            #[cfg(test)]
+            off_version: Arc::clone(&base.off_version),
+            draft: Some(Box::new(Draft {
+                base,
+                indexed,
+                at: PlainMutex::new(None),
+            })),
+        });
+    }
+
+    /// `memo` as the memo it was opened over, and what its draft kept at the draft's inputs. A
+    /// draft's memo is never published.
+    fn close_draft(memo: &mut Arc<Self>) -> Option<(RouteInputs, Kept<T, S>)> {
+        let (base, drafted) = {
+            let draft = memo.draft.as_ref()?;
+            (
+                Arc::clone(&draft.base),
+                std::mem::take(&mut *draft.at.guard()),
+            )
+        };
+        *memo = base;
+        drafted
     }
 
     /// Give a version of the tables whose inputs are `inputs` its memo: `memo` stays when it is
@@ -231,50 +499,50 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
     /// `changes(since, visit)` is asked, when only the declaration table's version moved, to call
     /// `visit` with every key declared or withdrawn after `since` (the table version `memo` is
     /// at), and to answer `false` when it can no longer say. `reaches(changed, cached)` is whether
-    /// a change of `changed` can alter the route kept for `cached`. A topology move (`net`), a
-    /// memo brought to no version yet, or a table that cannot answer starts the new memo empty.
+    /// a change of `changed` can alter the route kept for `cached`, and must imply that the two
+    /// keyexprs intersect: an indexed memo ([`indexed`](Self::indexed)) asks it only of the routes
+    /// whose keyexpr the index finds may intersect `changed`. A topology move (`net`), a memo
+    /// brought to no version yet, or a table that cannot answer starts the new memo empty.
     ///
     /// Safe by construction: it only ever leaves out more than it must, never fewer, because the
     /// caller supplies the keys the table's own mutators recorded and every mutation records its
     /// key. The new memo starts from the routes `memo` holds when it is called, which readers of the
     /// versions before may still add to: what they add after it is theirs alone.
+    ///
+    /// A draft's memo ([`open_draft`](Self::open_draft)) is closed first: the new memo is brought
+    /// from the memo the draft was opened over, and also keeps what the draft kept when the draft
+    /// was last asked at `inputs`, which are routes of these very tables.
     pub fn bring_to_retiring(
         memo: &mut Arc<Self>,
         inputs: RouteInputs,
         changes: impl FnOnce(u64, &mut dyn FnMut(&str)) -> bool,
         reaches: impl Fn(&str, &str) -> bool,
     ) {
+        let drafted = Self::close_draft(memo);
         if memo.inputs == Some(inputs) {
             return;
         }
-        let kept = match memo.inputs {
+        let mut kept = match memo.inputs {
             Some(was) if was.net == inputs.net => {
-                let mut moved: Vec<String> = Vec::new();
-                if changes(was.table, &mut |keyexpr| moved.push(keyexpr.to_owned())) {
-                    let mut routes = Routes::clone(&memo.routes.read());
-                    let reached: Vec<RouteKey<S>> = routes
-                        .keys()
-                        .filter(|cached| {
-                            moved
-                                .iter()
-                                .any(|changed| reaches(changed, &cached.keyexpr))
-                        })
-                        .cloned()
-                        .collect();
-                    for cached in &reached {
-                        routes.remove(cached);
-                    }
-                    routes
-                } else {
-                    PersistentMap::new()
-                }
+                let kept = Kept::clone(&memo.kept.read());
+                let indexed = kept.is_indexed();
+                kept.retiring(was.table, changes, reaches)
+                    .unwrap_or_else(|| Kept::empty(indexed))
             }
-            _ => PersistentMap::new(),
+            _ => Kept::empty(memo.kept.read().is_indexed()),
         };
+        if let Some((_, routes)) = drafted.filter(|(at, _)| *at == inputs) {
+            for (key, route) in &routes.routes {
+                kept.put(key.clone(), route.clone());
+            }
+        }
         *memo = Arc::new(Self {
             inputs: Some(inputs),
-            routes: PlainRwLock::new(kept),
+            kept: PlainRwLock::new(kept),
             computes: Arc::clone(&memo.computes),
+            #[cfg(test)]
+            off_version: Arc::clone(&memo.off_version),
+            draft: None,
         });
     }
 
@@ -283,9 +551,29 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
         self.computes.get()
     }
 
-    /// How many routes this memo keeps.
+    /// The routes asked of this memo, and of every memo it was brought from, at inputs no
+    /// version's memo was brought to, and how many of those were computed.
+    #[cfg(test)]
+    pub(crate) fn asks_off_version(&self) -> (usize, usize) {
+        (
+            self.off_version.asked.get(),
+            self.off_version.computed.get(),
+        )
+    }
+
+    /// How many routes this memo keeps: for a draft's memo, those of the memo it was opened over
+    /// and those it kept at the draft's inputs.
     pub fn len(&self) -> usize {
-        self.routes.read().len()
+        match &self.draft {
+            Some(draft) => {
+                let drafted = match &*draft.at.guard() {
+                    Some((_, kept)) => kept.routes.len(),
+                    None => 0,
+                };
+                draft.base.len() + drafted
+            }
+            None => self.kept.read().routes.len(),
+        }
     }
 
     /// Whether no route is kept.
@@ -297,6 +585,8 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    use wz_session_core::keyexpr_match::keyexpr_intersects_text;
 
     fn zid(b: u8) -> Zid {
         Zid::from_slice(&[b, b, b, b])
@@ -407,6 +697,11 @@ mod tests {
         );
         cache.get_or_compute(AT, &zid(1), "demo/a", || true, || unreachable!());
         assert_eq!(cache.computes(), 3);
+        assert_eq!(
+            cache.asks_off_version(),
+            (2, 2),
+            "both asks at the other inputs are counted, and both were computed"
+        );
     }
 
     /// The writer of a version whose inputs moved gives it a memo of its own; the version before
@@ -509,5 +804,290 @@ mod tests {
         cache.get_or_compute(AT, &zid(1), "demo/x", || false, || vec![zid(9)]);
         assert_eq!(cache.computes(), 2);
         assert!(cache.is_empty(), "an undeclared expression keeps nothing");
+    }
+
+    /// The inputs of a draft whose write moved the table once, and of the same draft moved again.
+    const DRAFT: RouteInputs = RouteInputs { net: 1, table: 2 };
+    const LATER: RouteInputs = RouteInputs { net: 1, table: 3 };
+
+    /// An indexed memo brought to `inputs`, as the writer of the first version leaves it.
+    fn indexed_at(inputs: RouteInputs) -> Arc<RouteCache<u64, ()>> {
+        let mut memo = Arc::new(RouteCache::indexed());
+        RouteCache::bring_to(&mut memo, inputs);
+        memo
+    }
+
+    /// The keyexprs a memo of one source keeps. For an indexed memo, also requires that the index
+    /// holds every route's key under its keyexpr and nothing else.
+    fn kept_keys(memo: &RouteCache<u64, ()>) -> BTreeSet<String> {
+        let kept = memo.kept.read();
+        if let Some(index) = &kept.by_keyexpr {
+            assert_eq!(
+                index.len(),
+                kept.routes.len(),
+                "the index holds one entry per route"
+            );
+            for key in kept.routes.keys() {
+                assert!(
+                    index.contains(&key.keyexpr, key),
+                    "{} is indexed under its keyexpr",
+                    key.keyexpr
+                );
+            }
+        }
+        let keys = kept
+            .routes
+            .keys()
+            .map(|key| key.keyexpr.to_string())
+            .collect();
+        drop(kept);
+        keys
+    }
+
+    /// A small deterministic generator (xorshift64*), so that a failing sequence replays.
+    struct Draw(u64);
+
+    impl Draw {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        /// A keyexpr of one to three chunks, drawn from chunks that exercise every rule of the
+        /// matcher: literals, `*`, `**`, `$*` within a chunk and a verbatim chunk.
+        fn keyexpr(&mut self) -> String {
+            const CHUNKS: [&str; 8] = ["a", "b", "dev_7", "*", "**", "x$*", "$*7", "@v"];
+            let depth = 1 + self.next() % 3;
+            (0..depth)
+                .map(|_| CHUNKS[(self.next() % CHUNKS.len() as u64) as usize])
+                .collect::<Vec<_>>()
+                .join("/")
+        }
+    }
+
+    /// An indexed memo, brought across table moves whose changed keys are drawn from every kind of
+    /// chunk the matcher knows, leaves out exactly the routes a memo with no index leaves out, which
+    /// are the routes some changed key intersects, and its index holds exactly its routes after
+    /// every move. Turned red by an index walk that misses a route a changed key meets, or by a
+    /// route left out of the routes and not of the index.
+    #[test]
+    fn an_indexed_memo_leaves_out_exactly_the_routes_a_scan_leaves_out() {
+        for seed in 1..=6u64 {
+            let mut draw = Draw(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut scanned: Arc<RouteCache<u64, ()>> = at(AT);
+            let mut indexed = indexed_at(AT);
+            let mut inputs = AT;
+            for step in 0..40 {
+                for _ in 0..12 {
+                    let keyexpr = draw.keyexpr();
+                    let route = draw.next();
+                    for memo in [&scanned, &indexed] {
+                        memo.get_or_compute(inputs, &(), &keyexpr, || true, || route);
+                    }
+                }
+                let before = kept_keys(&scanned);
+                assert_eq!(
+                    kept_keys(&indexed),
+                    before,
+                    "seed {seed} step {step}: both memos keep the routes the readers added"
+                );
+                let changed: Vec<String> =
+                    (0..1 + draw.next() % 3).map(|_| draw.keyexpr()).collect();
+                let moved = RouteInputs {
+                    table: inputs.table + 1,
+                    ..inputs
+                };
+                for memo in [&mut scanned, &mut indexed] {
+                    RouteCache::bring_to_retiring(
+                        memo,
+                        moved,
+                        |since, visit| {
+                            assert_eq!(since, inputs.table, "asked from the memo's version");
+                            changed.iter().for_each(|key| visit(key));
+                            true
+                        },
+                        keyexpr_intersects_text,
+                    );
+                }
+                inputs = moved;
+                let want: BTreeSet<String> = before
+                    .into_iter()
+                    .filter(|cached| {
+                        !changed
+                            .iter()
+                            .any(|key| keyexpr_intersects_text(key, cached))
+                    })
+                    .collect();
+                assert_eq!(
+                    kept_keys(&scanned),
+                    want,
+                    "seed {seed} step {step}: the scan leaves out what {changed:?} reaches"
+                );
+                assert_eq!(
+                    kept_keys(&indexed),
+                    want,
+                    "seed {seed} step {step}: the index finds what {changed:?} reaches"
+                );
+            }
+        }
+    }
+
+    /// A draft's memo keeps what its writer computes at the draft's inputs and serves it when it is
+    /// asked again there, and the version published at those inputs keeps it, so its readers are
+    /// served. The version the draft was copied from keeps what it kept. Turned red by a draft memo
+    /// that computes every time, or by a publish that drops what the draft kept.
+    #[test]
+    fn a_drafts_memo_keeps_what_its_writer_routes_and_its_version_serves_it() {
+        let published: Arc<RouteCache<u64, ()>> = at(AT);
+        published.get_or_compute(AT, &(), "demo/a", || true, || 1);
+        let mut draft = Arc::clone(&published);
+        RouteCache::open_draft(&mut draft);
+        assert_eq!(draft.get_or_compute(DRAFT, &(), "demo/b", || true, || 2), 2);
+        assert_eq!(
+            draft.get_or_compute(DRAFT, &(), "demo/b", || true, || unreachable!()),
+            2,
+            "asked again at the draft's inputs, the route is served"
+        );
+        assert_eq!(
+            draft.asks_off_version(),
+            (2, 1),
+            "two asks at the draft's inputs, one computed"
+        );
+        assert_eq!(
+            published.len(),
+            1,
+            "the published version's memo is as it was"
+        );
+        assert_eq!(draft.len(), 2);
+        RouteCache::bring_to_retiring(
+            &mut draft,
+            DRAFT,
+            |_, visit| {
+                visit("demo/b");
+                true
+            },
+            |changed, cached| changed == cached,
+        );
+        assert!(draft.draft.is_none(), "a published memo is no draft's");
+        let computes = draft.computes();
+        assert_eq!(
+            draft.get_or_compute(DRAFT, &(), "demo/b", || true, || unreachable!()),
+            2,
+            "the version keeps the route its draft computed"
+        );
+        assert_eq!(
+            draft.get_or_compute(DRAFT, &(), "demo/a", || true, || unreachable!()),
+            1,
+            "and the route the change did not reach"
+        );
+        assert_eq!(draft.computes(), computes);
+    }
+
+    /// A draft's memo asked at the inputs of the memo it was opened over (the draft before its write
+    /// moved them) reads and adds to that memo, as a reader of the version does, and the ask is not
+    /// counted as one off a version. Turned red by a draft memo that keeps such a route to itself.
+    #[test]
+    fn a_drafts_memo_at_the_inputs_it_was_opened_over_reads_and_adds_to_the_versions_memo() {
+        let published: Arc<RouteCache<u64, ()>> = at(AT);
+        published.get_or_compute(AT, &(), "demo/a", || true, || 1);
+        let mut draft = Arc::clone(&published);
+        RouteCache::open_draft(&mut draft);
+        assert_eq!(
+            draft.get_or_compute(AT, &(), "demo/a", || true, || unreachable!()),
+            1
+        );
+        draft.get_or_compute(AT, &(), "demo/c", || true, || 3);
+        assert_eq!(
+            published.len(),
+            2,
+            "a route asked at the version's inputs is the version's"
+        );
+        assert_eq!(draft.asks_off_version(), (0, 0));
+    }
+
+    /// What a draft kept at inputs it then moved past is not published, nor is anything when the
+    /// draft is published at inputs it was never asked at. Turned red by a publish that keeps
+    /// routes computed for tables other than the published ones.
+    #[test]
+    fn a_draft_publishes_only_what_it_kept_at_the_inputs_it_is_published_at() {
+        let published: Arc<RouteCache<u64, ()>> = at(AT);
+        let mut moved_on = Arc::clone(&published);
+        RouteCache::open_draft(&mut moved_on);
+        moved_on.get_or_compute(DRAFT, &(), "demo/a", || true, || 1);
+        moved_on.get_or_compute(LATER, &(), "demo/b", || true, || 2);
+        assert_eq!(
+            moved_on.len(),
+            1,
+            "moving on to later inputs left the earlier inputs' routes"
+        );
+        RouteCache::bring_to(&mut moved_on, LATER);
+        assert_eq!(moved_on.len(), 1);
+        moved_on.get_or_compute(LATER, &(), "demo/b", || true, || unreachable!());
+
+        let mut elsewhere = Arc::clone(&published);
+        RouteCache::open_draft(&mut elsewhere);
+        elsewhere.get_or_compute(DRAFT, &(), "demo/a", || true, || 1);
+        RouteCache::bring_to(&mut elsewhere, LATER);
+        assert!(
+            elsewhere.is_empty(),
+            "nothing the draft kept was at the inputs it was published at"
+        );
+    }
+
+    /// A memo that is already a draft's is not opened again, and a draft that is abandoned leaves
+    /// the version's memo as it was: a later draft that comes to the same inputs is served nothing
+    /// the abandoned one kept. Turned red by a draft's routes kept in the version's memo, which a
+    /// draft of other tables at equal version numbers would then be served.
+    #[test]
+    fn a_draft_is_opened_once_and_one_abandoned_leaves_nothing_behind() {
+        let published: Arc<RouteCache<u64, ()>> = at(AT);
+        let mut abandoned = Arc::clone(&published);
+        RouteCache::open_draft(&mut abandoned);
+        let opened = Arc::clone(&abandoned);
+        RouteCache::open_draft(&mut abandoned);
+        assert!(
+            Arc::ptr_eq(&opened, &abandoned),
+            "a draft's memo is opened once"
+        );
+        abandoned.get_or_compute(DRAFT, &(), "demo/a", || true, || 1);
+        drop((opened, abandoned));
+        assert!(published.is_empty());
+        let mut next = Arc::clone(&published);
+        RouteCache::open_draft(&mut next);
+        assert_eq!(
+            next.get_or_compute(DRAFT, &(), "demo/a", || true, || 2),
+            2,
+            "the next draft computes its own route"
+        );
+    }
+
+    /// The routes a draft of an indexed memo keeps are indexed in the version it is published as,
+    /// so the next change finds them. Turned red by a draft that keeps its routes unindexed.
+    #[test]
+    fn a_drafts_routes_published_into_an_indexed_memo_are_found_by_the_next_change() {
+        let mut memo = indexed_at(AT);
+        RouteCache::open_draft(&mut memo);
+        memo.get_or_compute(DRAFT, &(), "demo/a", || true, || 1);
+        memo.get_or_compute(DRAFT, &(), "demo/b", || true, || 2);
+        RouteCache::bring_to(&mut memo, DRAFT);
+        assert_eq!(
+            kept_keys(&memo),
+            BTreeSet::from(["demo/a".to_owned(), "demo/b".to_owned()])
+        );
+        RouteCache::bring_to_retiring(
+            &mut memo,
+            LATER,
+            |_, visit| {
+                visit("demo/*");
+                true
+            },
+            keyexpr_intersects_text,
+        );
+        assert!(
+            memo.is_empty(),
+            "the index found both routes the change reaches"
+        );
     }
 }

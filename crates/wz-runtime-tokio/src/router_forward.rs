@@ -632,22 +632,45 @@ struct MeshHat {
     /// derived.
     #[cfg(feature = "routing-token-tables")]
     tokens: Arc<LinkstatepeerInterest<()>>,
+    /// Whether a write that moves what a memo is read from first gives its draft a memo of its own,
+    /// so that the writer keeps what it routes through its draft (the tables' `keeps_draft_routes`).
+    keeps_draft_routes: bool,
 }
 
 impl MeshHat {
     /// The region's graph, for writing: copied first if another version of the tables shares it.
+    /// Both memos are read from it.
     fn net_mut(&mut self) -> &mut LinkstateNetwork {
+        self.open_draft_data_routes();
+        self.open_draft_query_routes();
         Arc::make_mut(&mut self.net)
     }
 
     /// The region's subscriber interest, for writing (see [`net_mut`](Self::net_mut)).
     fn subs_mut(&mut self) -> &mut LinkstatepeerInterest<()> {
+        self.open_draft_data_routes();
         Arc::make_mut(&mut self.subs)
     }
 
     /// The region's queryable interest, for writing (see [`net_mut`](Self::net_mut)).
     fn qabls_mut(&mut self) -> &mut LinkstatepeerInterest<QueryableInfo> {
+        self.open_draft_query_routes();
         Arc::make_mut(&mut self.qabls)
+    }
+
+    /// Before a write moves what the data routes are read from, where this hat keeps what its
+    /// writer routes ([`RouteCache::open_draft`](crate::route_cache::RouteCache::open_draft)).
+    fn open_draft_data_routes(&mut self) {
+        if self.keeps_draft_routes {
+            DataRoutes::open_draft(&mut self.data_routes);
+        }
+    }
+
+    /// [`open_draft_data_routes`](Self::open_draft_data_routes) for the query routes.
+    fn open_draft_query_routes(&mut self) {
+        if self.keeps_draft_routes {
+            QueryRoutes::open_draft(&mut self.query_routes);
+        }
     }
 
     /// The region's token interest, for writing (see [`net_mut`](Self::net_mut)).
@@ -672,7 +695,9 @@ impl MeshHat {
     /// the net of its south peer region and not in the router mesh, as the pin
     /// seeds each hat's net from that hat's region
     /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `self.region().bound(),`).
-    fn new(region: Region, self_zid: Zid, node_mode: WhatAmI) -> Self {
+    ///
+    /// `keeps_draft_routes` as the tables' field of that name says.
+    fn new(region: Region, self_zid: Zid, node_mode: WhatAmI, keeps_draft_routes: bool) -> Self {
         // R2893 (751 rule 8d) — the pin builds the south peer region's net with
         // `full_linkstate` off (`zenoh/src/net/routing/hat/peer/mod.rs` @ `Bound::South => {`);
         // a host that runs wz's link-state peer mode turns it back on
@@ -708,6 +733,7 @@ impl MeshHat {
             query_routes: Arc::new(QueryRoutes::new()),
             #[cfg(feature = "routing-token-tables")]
             tokens: Arc::new(LinkstatepeerInterest::new()),
+            keeps_draft_routes,
         }
     }
 }
@@ -943,23 +969,32 @@ struct BrokerHat {
     /// `dump_interest_subs` folding `subs`.
     #[cfg(feature = "routing-token-tables")]
     tokens: Arc<ClientTokens>,
+    /// Whether a write that moves a store first gives its draft a memo of its own, as a mesh hat's
+    /// field of that name says.
+    keeps_draft_routes: bool,
 }
 
 impl BrokerHat {
-    fn new() -> Self {
+    /// The client legs' memos are indexed: their writer leaves out only the routes a changed key
+    /// reaches, and finds those by the index (`docs/router-table-snapshots.md`, section 6.9).
+    fn new(keeps_draft_routes: bool) -> Self {
         Self {
             subs: Arc::new(ClientSubStore::new()),
-            client_routes: Arc::new(ClientRoutes::new()),
+            client_routes: Arc::new(ClientRoutes::indexed()),
             qabls: Arc::new(ClientQablStore::new()),
-            client_query_routes: Arc::new(ClientQueryRoutes::new()),
+            client_query_routes: Arc::new(ClientQueryRoutes::indexed()),
             #[cfg(feature = "routing-token-tables")]
             tokens: Arc::new(ClientTokenStore::new()),
+            keeps_draft_routes,
         }
     }
 
     /// The client faces' subscriptions, for writing: copied first if another version of the
     /// tables shares them.
     fn subs_mut(&mut self) -> &mut ClientSubs {
+        if self.keeps_draft_routes {
+            ClientRoutes::open_draft(&mut self.client_routes);
+        }
         Arc::make_mut(&mut self.subs)
     }
 
@@ -972,6 +1007,9 @@ impl BrokerHat {
 
     /// The client faces' queryables, for writing (see [`subs_mut`](Self::subs_mut)).
     fn qabls_mut(&mut self) -> &mut ClientQabls {
+        if self.keeps_draft_routes {
+            ClientQueryRoutes::open_draft(&mut self.client_query_routes);
+        }
         Arc::make_mut(&mut self.qabls)
     }
 
@@ -1020,11 +1058,30 @@ enum Hat {
 }
 
 impl Hat {
-    fn for_region(region: Region, self_zid: Zid, node_mode: WhatAmI) -> Self {
+    fn for_region(
+        region: Region,
+        self_zid: Zid,
+        node_mode: WhatAmI,
+        keeps_draft_routes: bool,
+    ) -> Self {
         if is_leaf(region, node_mode) {
-            Hat::Broker(BrokerHat::new())
+            Hat::Broker(BrokerHat::new(keeps_draft_routes))
         } else {
-            Hat::Mesh(MeshHat::new(region, self_zid, node_mode))
+            Hat::Mesh(MeshHat::new(
+                region,
+                self_zid,
+                node_mode,
+                keeps_draft_routes,
+            ))
+        }
+    }
+
+    /// Set this hat's `keeps_draft_routes`, as the tables' field of that name says.
+    #[cfg(test)]
+    fn keep_draft_routes(&mut self, on: bool) {
+        match self {
+            Hat::Mesh(hat) => hat.keeps_draft_routes = on,
+            Hat::Broker(hat) => hat.keeps_draft_routes = on,
         }
     }
 
@@ -2373,6 +2430,12 @@ pub(crate) struct Tables {
     /// router it is attached to sends it a declaration only in answer to an interest of its own,
     /// so the interest of a face south of it is brokered north as a client's is.
     north_is_client: bool,
+    /// Whether the writer keeps what it routes through its own draft: a write that moves what a
+    /// route memo is read from first gives its draft a memo of its own, published with the draft
+    /// (`docs/router-table-snapshots.md`, section 6.9). Every hat is built with it. Off: it waits
+    /// for the measurement of how often a writer routes through its draft, which a test build turns
+    /// it on for (`RouterForwarder::with_draft_route_memos`).
+    keeps_draft_routes: bool,
     /// Held faces keyed by id, each carrying its send seam, its tier, and (once
     /// its zid is known) its graph link. One id-keyed map across BOTH tiers
     /// (the `RouterFaceState.tier` says which net), so the flood can scope to a
@@ -3279,6 +3342,31 @@ impl Tables {
                 Hat::Broker(hat) => hat.bring_route_memos(),
             }
         }
+    }
+
+    /// The routes asked of every route memo of these tables, and of the memos they were brought
+    /// from, at inputs no version's memo was brought to, and how many of those were computed: how
+    /// often a writer routed through its own draft (`docs/router-table-snapshots.md`, section 6.9).
+    /// Read by the instruments and the tests.
+    #[cfg(test)]
+    fn routes_asked_off_version(&self) -> (usize, usize) {
+        let memos = self
+            .mesh_hats()
+            .flat_map(|hat| {
+                [
+                    hat.data_routes.asks_off_version(),
+                    hat.query_routes.asks_off_version(),
+                ]
+            })
+            .chain(self.broker_hats().flat_map(|hat| {
+                [
+                    hat.client_routes.asks_off_version(),
+                    hat.client_query_routes.asks_off_version(),
+                ]
+            }));
+        memos.fold((0, 0), |(asked, computed), (a, c)| {
+            (asked + a, computed + c)
+        })
     }
 
     /// The routing facts of face `id`, for writing: copied first if another version of the
@@ -4311,11 +4399,32 @@ impl RouterForwarder {
             );
             let self_zid = *on.north_net().self_zid();
             let node_mode = on.tables.node_mode;
+            let keeps_draft_routes = on.tables.keeps_draft_routes;
             on.tables.hats = regions_of(node_mode, &partition)
                 .into_iter()
-                .map(|region| (region, Hat::for_region(region, self_zid, node_mode)))
+                .map(|region| {
+                    let hat = Hat::for_region(region, self_zid, node_mode, keeps_draft_routes);
+                    (region, hat)
+                })
                 .collect();
             on.tables.partition = partition;
+        }
+        self
+    }
+
+    /// Keep what the writer of the tables routes through its own draft when `on`
+    /// (`docs/router-table-snapshots.md`, section 6.9): a write that moves what a route memo is
+    /// read from first gives its draft a memo of its own, which the version the draft is published
+    /// as keeps. Off by default, until a measurement asks for it; the instruments of the section
+    /// build one router of each value and alternate them. Call it before any face registers.
+    #[cfg(test)]
+    pub(crate) fn with_draft_route_memos(self, on: bool) -> Self {
+        {
+            let mut written = self.on_tables_mut();
+            written.tables.keeps_draft_routes = on;
+            for (_, hat) in written.tables.hats.iter_mut() {
+                hat.keep_draft_routes(on);
+            }
         }
         self
     }
@@ -4491,11 +4600,12 @@ impl RouterForwarder {
                 Tables {
                     hats: regions_of(node_mode, &SouthPartition::Auto)
                         .into_iter()
-                        .map(|region| (region, Hat::for_region(region, self_zid, node_mode)))
+                        .map(|region| (region, Hat::for_region(region, self_zid, node_mode, false)))
                         .collect(),
                     node_mode,
                     partition: SouthPartition::Auto,
                     north_is_client: false,
+                    keeps_draft_routes: false,
                     faces: FaceTable::new(),
                     #[cfg(feature = "resource-snapshot")]
                     receive_ledger: Default::default(),
