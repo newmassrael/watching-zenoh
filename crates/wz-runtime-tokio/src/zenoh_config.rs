@@ -2446,6 +2446,88 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "gateway/south",
 ];
 
+/// The keys of [`HONOURED_CONFIG_KEYS`] whose reader is a CAPABILITY of the build: the key, the
+/// feature of this crate its reader and its enforcer are compiled under, and whether THIS build was
+/// made with that feature.
+///
+/// [`HONOURED_CONFIG_KEYS`] is what wz honours in a build that has every capability, and the lists
+/// that partition the upstream surface, the census and the gates that compare two builds read it
+/// as that. What one build honours is that list less the rows here whose capability it was made
+/// without ([`honoured_config_keys_in_build`]): such a build has neither the reader of the key nor
+/// anything to apply it with, so it reads the key only in the spelling that states nothing
+/// (upstream's default) and refuses it by its name otherwise
+/// ([`ConfigIngestError::NotInBuild`]), and it says so for the key
+/// ([`ConfigKeyDisposition::NotInBuild`]).
+///
+/// The flag is `cfg!` of the feature, so the table is the same text in every build and the one
+/// fact it varies by is stated beside the feature's name.
+///
+/// `qos/network` is not a row although its enforcer is a capability (`access-qos-overwrite`): the
+/// facade offers no feature that selects it, so a node built through the facade, which reads
+/// the key today and drops it for want of a sink, would refuse every document that states it.
+/// Its reader stays in every build until the facade can select the capability.
+pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
+    (
+        "low_pass_filter",
+        "access-quota",
+        cfg!(feature = "access-quota"),
+    ),
+    (
+        "downsampling",
+        "access-downsampling",
+        cfg!(feature = "access-downsampling"),
+    ),
+    (
+        "access_control/default_permission",
+        "access-acl",
+        cfg!(feature = "access-acl"),
+    ),
+    (
+        "access_control/enabled",
+        "access-acl",
+        cfg!(feature = "access-acl"),
+    ),
+    (
+        "access_control/policies",
+        "access-acl",
+        cfg!(feature = "access-acl"),
+    ),
+    (
+        "access_control/rules",
+        "access-acl",
+        cfg!(feature = "access-acl"),
+    ),
+    (
+        "access_control/subjects",
+        "access-acl",
+        cfg!(feature = "access-acl"),
+    ),
+];
+
+/// The capability `path`'s reader is compiled under, when it is one of
+/// [`CAPABILITY_HONOURED_KEYS`]: the feature, and whether this build has it.
+pub fn config_key_capability(path: &str) -> Option<(&'static str, bool)> {
+    CAPABILITY_HONOURED_KEYS
+        .iter()
+        .find(|(key, _, _)| *key == path)
+        .map(|(_, feature, built)| (*feature, *built))
+}
+
+/// Whether this build carries the reader of `path`: every key but a capability's whose feature the
+/// build was made without ([`CAPABILITY_HONOURED_KEYS`]).
+pub fn config_key_in_build(path: &str) -> bool {
+    !matches!(config_key_capability(path), Some((_, false)))
+}
+
+/// The keys of [`HONOURED_CONFIG_KEYS`] THIS build honours, in that list's order: what a door that
+/// reports the build's config surface enumerates.
+pub fn honoured_config_keys_in_build() -> impl Iterator<Item = &'static str> + Clone {
+    HONOURED_CONFIG_KEYS
+        .iter()
+        .copied()
+        .filter(|key| config_key_in_build(key))
+}
+
 /// R311y849 — the leaves that live INSIDE a honoured key which is a subtree
 /// rather than a scalar.
 ///
@@ -3990,6 +4072,11 @@ pub enum ConfigKeyDisposition {
     /// STATEMENT about it — which is not the same as a statement that it is
     /// ignored, and the difference is the one this enum exists for.
     Unknown,
+    /// wz honours this key in a build with the capability its reader is compiled under
+    /// ([`CAPABILITY_HONOURED_KEYS`]), and THIS build was made without it: a document that
+    /// states an instruction here is refused by the key's name, and one that states upstream's
+    /// default is read and nothing applied.
+    NotInBuild,
 }
 
 /// R2797 — [`honours_config_key`] widened from a
@@ -4008,7 +4095,13 @@ pub enum ConfigKeyDisposition {
 /// this order silently depends on.
 pub fn config_key_disposition(path: &str) -> ConfigKeyDisposition {
     if honours_config_key(path) {
-        return ConfigKeyDisposition::Honoured;
+        // What wz honours, answered for the build asked: a capability's key is honoured only by a
+        // build that has the capability.
+        return if config_key_in_build(path) {
+            ConfigKeyDisposition::Honoured
+        } else {
+            ConfigKeyDisposition::NotInBuild
+        };
     }
     if UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(&path) {
         return ConfigKeyDisposition::DeclaredUnhonoured;
@@ -4363,6 +4456,16 @@ pub enum ConfigIngestError {
         /// The text as given.
         value: String,
     },
+    /// A key whose reader is a capability this build was made without
+    /// ([`CAPABILITY_HONOURED_KEYS`]) states an instruction: anything but upstream's default,
+    /// which states none. A build that cannot apply the key does not run as if it had not been
+    /// stated; a build with the capability reads it.
+    NotInBuild {
+        /// The key path.
+        path: &'static str,
+        /// The feature of this crate the key's reader is compiled under.
+        capability: &'static str,
+    },
 }
 
 impl core::fmt::Display for ConfigIngestError {
@@ -4392,6 +4495,13 @@ impl core::fmt::Display for ConfigIngestError {
                      hex, no leading zero, at most 16 bytes"
                 )
             }
+            ConfigIngestError::NotInBuild { path, capability } => {
+                write!(
+                    f,
+                    "{path} states an instruction this build cannot carry out: its reader \
+                     is the `{capability}` capability, which the build was made without"
+                )
+            }
         }
     }
 }
@@ -4406,6 +4516,40 @@ fn honoured<'a>(doc: &'a Json5Value, path: &str) -> Option<&'a Json5Value> {
         Some(Json5Value::Null) | None => None,
         other => other,
     }
+}
+
+/// A key whose reader this build was made without ([`CAPABILITY_HONOURED_KEYS`]), read the one way
+/// the build can: `states_nothing` says whether the value is upstream's default, which a real
+/// zenohd's resolved configuration carries for every such key and which asks for nothing, and any
+/// other value is refused by the key's name ([`ConfigIngestError::NotInBuild`]). An absent or
+/// `null` key states nothing either.
+#[cfg(not(all(
+    feature = "access-acl",
+    feature = "access-downsampling",
+    feature = "access-quota"
+)))]
+fn refuse_unbuilt_instruction(
+    doc: &Json5Value,
+    path: &'static str,
+    states_nothing: fn(&Json5Value) -> bool,
+) -> Result<(), ConfigIngestError> {
+    match honoured(doc, path) {
+        Some(value) if !states_nothing(value) => Err(ConfigIngestError::NotInBuild {
+            path,
+            capability: config_key_capability(path).map_or("", |(feature, _)| feature),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// The default of a list-valued capability key: the empty list.
+#[cfg(not(all(
+    feature = "access-acl",
+    feature = "access-downsampling",
+    feature = "access-quota"
+)))]
+fn is_empty_list(value: &Json5Value) -> bool {
+    matches!(value, Json5Value::Array(items) if items.is_empty())
 }
 
 /// The honoured keys upstream spells as `ModeDependentValue<T>` — either the
@@ -5238,8 +5382,8 @@ pub struct DownsamplingRuleConf {
 ///
 /// Here rather than [`crate::interceptor::downsampling::DownsamplingRule`] for
 /// the reason `LowPassFilterConf` records: that type is gated twice over and
-/// [`ZenohNodeConfig`] must read the same document to the same values in every
-/// build.
+/// [`ZenohNodeConfig`]'s fields are carried in every build, while the read of
+/// the key is the `access-downsampling` capability's.
 ///
 /// ONE item carries N rules and the axes they SHARE. The arm expands that into N
 /// wz rules, copying the shared axes onto each — upstream's own shape, where the
@@ -5261,6 +5405,7 @@ pub struct DownsamplingItemConf {
 }
 
 /// R2651 — `downsampling` as a list of [`DownsamplingItemConf`].
+#[cfg(feature = "access-downsampling")]
 fn downsampling_items_of(
     value: &Json5Value,
     path: &'static str,
@@ -5342,6 +5487,7 @@ fn downsampling_items_of(
 }
 
 /// The nested `rules[]` of one downsampling item.
+#[cfg(feature = "access-downsampling")]
 fn downsampling_rules_of(
     value: &Json5Value,
     path: &'static str,
@@ -5396,7 +5542,7 @@ fn downsampling_rules_of(
 /// them would be wrong in both directions at once.
 ///
 /// Literals here rather than the enum because `wz-access-control` is an OPTIONAL
-/// dependency (`access-acl`) and this module must read the same document in
+/// dependency (`access-acl`) and the echo types of the document are carried in
 /// every build. `acl_literals_match_the_enum` pins the correspondence where both
 /// are visible, so the two cannot drift.
 pub const ACL_MESSAGE_LITERALS: &[&str] = &[
@@ -5869,6 +6015,7 @@ pub(crate) fn first_unhonoured_key_outside(exclude: &[&str]) -> &'static str {
 ///
 /// Upstream says so in its own words -- "a subject property cannot be an empty
 /// list" -- so the two are different documents and only one of them is valid.
+#[cfg(feature = "access-acl")]
 fn optional_axis_of(
     value: &Json5Value,
     path: &'static str,
@@ -5886,6 +6033,7 @@ fn optional_axis_of(
 }
 
 /// R2652 — `access_control/rules` as a list of [`AclConfigRuleConf`].
+#[cfg(feature = "access-acl")]
 fn acl_rules_of(
     value: &Json5Value,
     path: &'static str,
@@ -5965,6 +6113,7 @@ fn acl_rules_of(
 }
 
 /// R2652 — `access_control/subjects` as a list of [`AclConfigSubjectsConf`].
+#[cfg(feature = "access-acl")]
 fn acl_subjects_of(
     value: &Json5Value,
     path: &'static str,
@@ -6065,6 +6214,7 @@ fn acl_subjects_of(
 }
 
 /// R2652 — `access_control/policies` as a list of [`AclConfigPolicyConf`].
+#[cfg(feature = "access-acl")]
 fn acl_policies_of(
     value: &Json5Value,
     path: &'static str,
@@ -6116,7 +6266,8 @@ fn acl_policies_of(
     Ok(out)
 }
 
-/// One JSON5 string, or `WrongType`.
+/// One JSON5 string, or `WrongType`. The access control's reader is its only caller.
+#[cfg(feature = "access-acl")]
 fn want_text(
     value: &Json5Value,
     path: &'static str,
@@ -6146,9 +6297,11 @@ pub const INTERCEPTOR_FLOW_LITERALS: &[&str] = &["egress", "ingress"];
 /// # Why this is not [`crate::interceptor::low_pass::LowPassRule`]
 ///
 /// That type is doubly feature-gated -- its module is `routing-peer` and the
-/// type is `access-quota` -- and [`ZenohNodeConfig`] is deliberately
-/// feature-INDEPENDENT, so a build without those features must still read the
-/// same document to the same values. The conversion happens in
+/// type is `access-quota` -- and [`ZenohNodeConfig`]'s fields are
+/// feature-INDEPENDENT: the emitter and the validators carry them in every
+/// build. The READ of the key is the `access-quota` capability's
+/// ([`CAPABILITY_HONOURED_KEYS`]), and a build with it reads the same document
+/// to the same values whatever else it was made with. The conversion happens in
 /// `apply_one_key`'s arm, which already carries those gates.
 ///
 /// The trick that lets `router_transport_weights` name a foreign type does not
@@ -6220,6 +6373,7 @@ fn enum_list_of(
 }
 
 /// R2650 — `low_pass_filter` as a list of [`LowPassFilterConf`].
+#[cfg(feature = "access-quota")]
 fn low_pass_filters_of(
     value: &Json5Value,
     path: &'static str,
@@ -7360,19 +7514,29 @@ impl ZenohNodeConfig {
         // empty list counts as NAMED: a real zenohd resolves an unmentioned
         // `low_pass_filter` to `[]` (measured), so "filter nothing" and "said
         // nothing" are one instruction and the file did speak.
+        //
+        // Each interceptor key is read where the build has its capability
+        // (`CAPABILITY_HONOURED_KEYS`); a build without it reads the key only as
+        // upstream's default and refuses any other value by the key's name.
+        #[cfg(feature = "access-quota")]
         if let Some(value) = honoured(&doc, "low_pass_filter") {
             out.low_pass_filter = low_pass_filters_of(value, "low_pass_filter")?;
             named.push("low_pass_filter");
         }
+        #[cfg(not(feature = "access-quota"))]
+        refuse_unbuilt_instruction(&doc, "low_pass_filter", is_empty_list)?;
         // R2651 — the second interceptor key, same shape as the one above and
         // the same reason an empty list counts as NAMED.
+        #[cfg(feature = "access-downsampling")]
         if let Some(value) = honoured(&doc, "downsampling") {
             out.downsampling = downsampling_items_of(value, "downsampling")?;
             named.push("downsampling");
         }
+        #[cfg(not(feature = "access-downsampling"))]
+        refuse_unbuilt_instruction(&doc, "downsampling", is_empty_list)?;
         // `qos/network`, the third list of the interceptor keys, and an empty list is NAMED for
         // the reason its siblings' are: the schema default is the empty list, so "no rule" and
-        // "said nothing" are one instruction.
+        // "said nothing" are one instruction. Read in every build (see `CAPABILITY_HONOURED_KEYS`).
         if let Some(value) = honoured(&doc, "qos/network") {
             out.qos_network = qos_network_items_of(value, "qos/network")?;
             named.push("qos/network");
@@ -7381,32 +7545,52 @@ impl ZenohNodeConfig {
         // each is its own honoured key and a document may name any subset; they
         // become one unit only at expansion, where upstream's own `init` builds
         // nothing unless rules, subjects and policies are all present.
-        if let Some(v) = want_bool(&doc, "access_control/enabled")? {
-            out.access_control.enabled = v;
-            named.push("access_control/enabled");
-        }
-        if let Some(value) = honoured(&doc, "access_control/default_permission") {
-            let text = want_text(value, "access_control/default_permission", "allow|deny")?;
-            if !ACL_PERMISSION_LITERALS.contains(&text.as_str()) {
-                return Err(ConfigIngestError::WrongType {
-                    path: "access_control/default_permission",
-                    expected: "allow|deny",
-                });
+        #[cfg(feature = "access-acl")]
+        {
+            if let Some(v) = want_bool(&doc, "access_control/enabled")? {
+                out.access_control.enabled = v;
+                named.push("access_control/enabled");
             }
-            out.access_control.default_permission = text;
-            named.push("access_control/default_permission");
+            if let Some(value) = honoured(&doc, "access_control/default_permission") {
+                let text = want_text(value, "access_control/default_permission", "allow|deny")?;
+                if !ACL_PERMISSION_LITERALS.contains(&text.as_str()) {
+                    return Err(ConfigIngestError::WrongType {
+                        path: "access_control/default_permission",
+                        expected: "allow|deny",
+                    });
+                }
+                out.access_control.default_permission = text;
+                named.push("access_control/default_permission");
+            }
+            if let Some(value) = honoured(&doc, "access_control/rules") {
+                out.access_control.rules = acl_rules_of(value, "access_control/rules")?;
+                named.push("access_control/rules");
+            }
+            if let Some(value) = honoured(&doc, "access_control/subjects") {
+                out.access_control.subjects = acl_subjects_of(value, "access_control/subjects")?;
+                named.push("access_control/subjects");
+            }
+            if let Some(value) = honoured(&doc, "access_control/policies") {
+                out.access_control.policies = acl_policies_of(value, "access_control/policies")?;
+                named.push("access_control/policies");
+            }
         }
-        if let Some(value) = honoured(&doc, "access_control/rules") {
-            out.access_control.rules = acl_rules_of(value, "access_control/rules")?;
-            named.push("access_control/rules");
-        }
-        if let Some(value) = honoured(&doc, "access_control/subjects") {
-            out.access_control.subjects = acl_subjects_of(value, "access_control/subjects")?;
-            named.push("access_control/subjects");
-        }
-        if let Some(value) = honoured(&doc, "access_control/policies") {
-            out.access_control.policies = acl_policies_of(value, "access_control/policies")?;
-            named.push("access_control/policies");
+        // Upstream's defaults, the ones a real zenohd's resolved configuration
+        // renders: access control off, permission `deny`, and no rule, subject
+        // or policy.
+        #[cfg(not(feature = "access-acl"))]
+        {
+            refuse_unbuilt_instruction(&doc, "access_control/enabled", |value| {
+                matches!(value, Json5Value::Bool(false))
+            })?;
+            refuse_unbuilt_instruction(
+                &doc,
+                "access_control/default_permission",
+                |value| matches!(value, Json5Value::String(text) if text == "deny"),
+            )?;
+            refuse_unbuilt_instruction(&doc, "access_control/rules", is_empty_list)?;
+            refuse_unbuilt_instruction(&doc, "access_control/subjects", is_empty_list)?;
+            refuse_unbuilt_instruction(&doc, "access_control/policies", is_empty_list)?;
         }
         // R2788 — the `plugins` section, kept whole: each member is a plugin's
         // own document and only the plugin knows what it means, so the reader
@@ -7584,9 +7768,11 @@ impl ZenohNodeConfig {
             });
         }
 
+        // A capability's key this build was made without reached here only as upstream's default,
+        // and nothing applied it, so it is reported as ignored by this build.
         let mut ignored: Vec<String> = leaves
             .into_iter()
-            .filter(|p| !honours_config_key(p))
+            .filter(|p| !honours_config_key(p) || !config_key_in_build(p))
             .collect();
         ignored.dedup();
         Ok(ZenohConfigIngest {
@@ -9158,6 +9344,20 @@ mod tests {
         assert_eq!(covered, expected);
 
         for (key, doc) in cases {
+            // A capability's key in a build made without it: the same non-default value is an
+            // instruction the build cannot carry out, refused by the key's name.
+            if let Some((capability, false)) = config_key_capability(key) {
+                let refused = ZenohNodeConfig::from_json5(doc).err();
+                assert!(
+                    matches!(
+                        &refused,
+                        Some(ConfigIngestError::NotInBuild { path, capability: named })
+                            if path == key && *named == capability
+                    ),
+                    "{key} is out of this build and its fixture states an instruction: {refused:?}"
+                );
+                continue;
+            }
             let ingest = ZenohNodeConfig::from_json5(doc).unwrap_or_else(|e| panic!("{key}: {e}"));
             assert!(
                 ingest.ignored.is_empty(),
@@ -9692,6 +9892,7 @@ mod tests {
     /// and diverge from zenohd on a document, in the direction the stock-config
     /// lane structurally cannot see: that lane only ever drives documents a real
     /// zenohd already starts on.
+    #[cfg(feature = "access-quota")]
     #[test]
     fn the_low_pass_reader_refuses_exactly_what_upstream_refuses() {
         let ok = ZenohNodeConfig::from_json5(
@@ -9911,6 +10112,7 @@ mod tests {
     /// second-guess them. Refusing either would tighten a surface that is
     /// upstream's — the mirror image of the `declare_subscriber` case below,
     /// where accepting would LOOSEN it.
+    #[cfg(feature = "access-downsampling")]
     #[test]
     fn the_downsampling_reader_refuses_exactly_what_upstream_refuses() {
         let ok = ZenohNodeConfig::from_json5(
@@ -9998,6 +10200,7 @@ mod tests {
     ///
     /// So those refusals belong to [`AclCompileError`] and a parse refusal here
     /// would be stricter than the acceptance boundary this reader is held to.
+    #[cfg(feature = "access-acl")]
     #[test]
     fn the_acl_reader_refuses_exactly_what_upstream_refuses() {
         let ok = ZenohNodeConfig::from_json5(
@@ -12112,9 +12315,16 @@ mod tests {
                     "{key} is in {name} AND in UNHONOURED_UPSTREAM_CONFIG_KEYS; \
                      honouring a key is a MOVE between the two lists, not an addition"
                 );
+                // A capability's key is honoured by a build that has the capability, and said to be
+                // out of the build by one that has not.
+                let honoured_here = if config_key_in_build(key) {
+                    ConfigKeyDisposition::Honoured
+                } else {
+                    ConfigKeyDisposition::NotInBuild
+                };
                 assert_eq!(
                     config_key_disposition(key),
-                    ConfigKeyDisposition::Honoured,
+                    honoured_here,
                     "{key} is in {name} and the disposition disagrees"
                 );
                 checked += 1;
@@ -12129,6 +12339,143 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 100, "only {checked} keys carried the comparison");
+    }
+
+    /// The capability table names honoured keys, each once and each under the feature its reader
+    /// is compiled under, and what this build honours is the full list less the keys of the
+    /// capabilities it was made without.
+    #[test]
+    fn the_build_honours_the_full_list_less_its_missing_capabilities() {
+        assert!(
+            !CAPABILITY_HONOURED_KEYS.is_empty(),
+            "an empty table proves nothing"
+        );
+        for (key, _, _) in CAPABILITY_HONOURED_KEYS {
+            assert!(
+                HONOURED_CONFIG_KEYS.contains(key),
+                "{key} is a capability's key and not a honoured one"
+            );
+            assert_eq!(
+                CAPABILITY_HONOURED_KEYS
+                    .iter()
+                    .filter(|(listed, _, _)| listed == key)
+                    .count(),
+                1,
+                "{key} is listed twice"
+            );
+        }
+        for (key, feature, built) in [
+            (
+                "low_pass_filter",
+                "access-quota",
+                cfg!(feature = "access-quota"),
+            ),
+            (
+                "downsampling",
+                "access-downsampling",
+                cfg!(feature = "access-downsampling"),
+            ),
+            (
+                "access_control/enabled",
+                "access-acl",
+                cfg!(feature = "access-acl"),
+            ),
+            (
+                "access_control/rules",
+                "access-acl",
+                cfg!(feature = "access-acl"),
+            ),
+        ] {
+            assert_eq!(config_key_capability(key), Some((feature, built)), "{key}");
+            assert_eq!(config_key_in_build(key), built, "{key}");
+        }
+        // A key no capability holds is in every build, and `qos/network` is one of them.
+        for key in ["mode", "qos/network"] {
+            assert_eq!(config_key_capability(key), None, "{key}");
+            assert!(config_key_in_build(key), "{key}");
+        }
+
+        let in_build: Vec<&str> = honoured_config_keys_in_build().collect();
+        let missing: Vec<&str> = CAPABILITY_HONOURED_KEYS
+            .iter()
+            .filter(|(_, _, built)| !built)
+            .map(|(key, _, _)| *key)
+            .collect();
+        assert_eq!(in_build.len() + missing.len(), HONOURED_CONFIG_KEYS.len());
+        for key in HONOURED_CONFIG_KEYS {
+            assert_eq!(
+                in_build.contains(key),
+                !missing.contains(key),
+                "{key}: in the build's list exactly when its capability is built"
+            );
+        }
+    }
+
+    /// Upstream's defaults of the capability keys, as a real zenohd's resolved configuration
+    /// renders them, read in every build: a build with the capability names each key, and one
+    /// without it applies nothing and reports the key ignored rather than refusing the document.
+    #[test]
+    fn the_defaults_of_the_capability_keys_read_in_every_build() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ low_pass_filter: [], downsampling: [], qos: { network: [] },
+                 access_control: { enabled: false, default_permission: "deny",
+                                   rules: [], subjects: [], policies: [] } }"#,
+        )
+        .expect("upstream's defaults state no instruction");
+        for (key, _, built) in CAPABILITY_HONOURED_KEYS {
+            assert_eq!(ingest.named.contains(key), *built, "{key} named");
+            assert_eq!(
+                ingest.ignored.iter().any(|leaf| leaf == key),
+                !*built,
+                "{key} ignored"
+            );
+        }
+    }
+
+    /// A build without a capability refuses, by the key's name, any value of the key but
+    /// upstream's default, and a build with it reads the same value.
+    #[test]
+    fn an_instruction_to_a_missing_capability_is_refused_by_the_key() {
+        for (key, doc) in [
+            (
+                "low_pass_filter",
+                r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["a/**"], size_limit: 4 } ] }"#,
+            ),
+            (
+                "downsampling",
+                r#"{ downsampling: [ { messages: ["put"],
+                     rules: [ { key_expr: "a/**", freq: 1.0 } ] } ] }"#,
+            ),
+            (
+                "access_control/enabled",
+                r#"{ access_control: { enabled: true } }"#,
+            ),
+            (
+                "access_control/default_permission",
+                r#"{ access_control: { default_permission: "allow" } }"#,
+            ),
+        ] {
+            let read = ZenohNodeConfig::from_json5(doc);
+            match config_key_capability(key) {
+                Some((capability, false)) => assert_eq!(
+                    read.err(),
+                    Some(ConfigIngestError::NotInBuild {
+                        path: CAPABILITY_HONOURED_KEYS
+                            .iter()
+                            .map(|(listed, _, _)| *listed)
+                            .find(|listed| listed == &key)
+                            .expect("a capability's key"),
+                        capability,
+                    }),
+                    "{key}"
+                ),
+                Some((_, true)) => {
+                    let ingest = read.unwrap_or_else(|e| panic!("{key}: {e}"));
+                    assert!(ingest.named.contains(&key), "{key}");
+                }
+                None => panic!("{key} is a capability's key"),
+            }
+        }
     }
 
     /// R2797 — why the C door cannot be an ENUMERATION.

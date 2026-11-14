@@ -139,7 +139,11 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # in `wz_capi_c.h` can change on its own -- and still has to be a deliberate
 # edit here, because a revision that moves for a reason nobody wrote down is a
 # revision nobody can reason about.
-EXPECTED_REVISION = 14
+#
+# Revision 15 is such a bump: `wz_capi_c_config_disposition` gained a fourth answer
+# (`WZ_CAPI_C_CONFIG_NOT_IN_BUILD`) and `wz_capi_c_config_honoured` lists the keys of the build,
+# without the keys of a capability it was built without. No symbol moved.
+EXPECTED_REVISION = 15
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",

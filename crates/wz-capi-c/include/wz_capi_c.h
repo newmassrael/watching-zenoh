@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 14
+#define WZ_CAPI_C_ABI_REVISION 15
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -138,31 +138,42 @@ const char *wz_capi_c_layout_name(size_t index);
  * surfaces; use the predicate when you have a key and want the answer.
  * ------------------------------------------------------------------ */
 
-/* How many config keys wz honours when reading a stock zenoh config. */
+/* How many config keys THIS LIBRARY honours when reading a stock zenoh
+ * config. A key whose reader is a capability the library was built
+ * without (access_control, low_pass_filter and downsampling in a build
+ * without `interceptors`) is
+ * not counted, and wz_capi_c_config_disposition answers
+ * WZ_CAPI_C_CONFIG_NOT_IN_BUILD for it. Since revision 15. */
 size_t wz_capi_c_config_honoured_count(void);
 
 /* The name of honoured key `index`, or NULL past the end. Walk it until
  * NULL rather than trusting the count. */
 const char *wz_capi_c_config_honoured(size_t index);
 
-/* The three answers wz_capi_c_config_disposition writes. The numbers
- * are ABI; a fourth would move WZ_CAPI_C_ABI_REVISION.
+/* The four answers wz_capi_c_config_disposition writes. The numbers
+ * are ABI; the fourth moved WZ_CAPI_C_ABI_REVISION to 15.
  *
  * HONOURED             writing this key changes what this build does.
  * DECLARED_UNHONOURED  this build reads a document carrying the key,
  *                      applies nothing from it, AND SAYS SO ON PURPOSE.
  * UNKNOWN              this build has NO STATEMENT about the key: a
  *                      misspelling, or surface upstream grew later.
+ * NOT_IN_BUILD         wz honours the key in a library built with the
+ *                      capability its reader belongs to, and this one
+ *                      was built without it: a config stating an
+ *                      instruction there does not open, one stating
+ *                      upstream's default opens and applies nothing.
  *
- * The last two are the pair a boolean would merge, and they are
- * opposite advice to whoever wrote the key — one is a supported
- * deployment, the other is a mistake in their file. */
+ * DECLARED_UNHONOURED and UNKNOWN are the pair a boolean would merge,
+ * and they are opposite advice to whoever wrote the key — one is a
+ * supported deployment, the other is a mistake in their file. */
 #define WZ_CAPI_C_CONFIG_HONOURED 0
 #define WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED 1
 #define WZ_CAPI_C_CONFIG_UNKNOWN 2
+#define WZ_CAPI_C_CONFIG_NOT_IN_BUILD 3
 
 /* What this build says about the config key `path`, written through
- * `out` as one of the three above.
+ * `out` as one of the four above.
  *
  * `path` is NUL-terminated and uses `/` SEPARATORS --
  * "transport/unicast/max_sessions", not a dotted or JSON-pointer
