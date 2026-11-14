@@ -17,6 +17,17 @@
 #                                             the same search for the zenoh-c family: the benches built against the
 #                                             pinned zenoh-c release (variant P) and against wz-capi-c (variant W),
 #                                             which is provisioned and built under target/ by the mode itself
+#   scripts/pico-compare.sh parity <pico|c|rust> [boots] [sizes]
+#                                             the host side of the parity matrix (docs/upstream-parity.md section 5b):
+#                                             upstream's own example programs (z_put z_sub z_get z_queryable z_pub_thr
+#                                             z_sub_thr z_ping z_pong) built from one source against the original, which
+#                                             this mode builds from its pinned source with its default switches, and
+#                                             against the wz preset configs/<original>_defconfig; run in alternating
+#                                             boots (default 24 of each) by scripts/host-bench/parity.py, and judged
+#                                             cell by cell by scripts/lib/kit_compare.py, whose `--format rows` output
+#                                             is what deploy/upstream_parity.json holds. The run is left under
+#                                             target/pico-compare/parity-runs/host-<family>-<time>/ (its verdict.txt,
+#                                             rows.json and record.txt beside the boots)
 #
 # Both sides of every pair are built from the SAME example source: once against the vendored zenoh-pico
 # library and once against `libwz_capi_pico`, in place of it. A number printed here is therefore the
@@ -32,6 +43,11 @@
 # Environment: PICO_CMP_PING_CPUS / PICO_CMP_PONG_CPUS / PICO_CMP_PUB_CPUS / PICO_CMP_SUB_CPUS (defaults
 # 6,7 / 8,9 / 6,7 / 10,11), PICO_CMP_WZ_ENV (extra `VAR=value` words put in front of every wz process,
 # for example WZ_CAPI_RX_BUSY_POLL_US=10), PICO_CMP_NO_BUILD=1 (use the libraries already built).
+# `parity` pins the client side of a pair (z_ping, z_pub_thr, z_put, z_get) to PICO_CMP_CLIENT_CPUS and the
+# server side to PICO_CMP_SERVER_CPUS (defaults 4-7 and 8-11: two physical cores a side on the 22-thread
+# hybrid bench host, because zenoh-c and zenoh run several threads a process and one SMT pair would bind
+# them where it binds pico's one); PICO_CMP_PINGS (default 20000), PICO_CMP_WARMUP_S (3) and
+# PICO_CMP_WINDOW_S (10) set the round trips and the throughput window.
 #
 # What it does NOT show: anything about an MCU, and the cost in CPU of a lower round trip: read the
 # per-process CPU separately before claiming a latency win.
@@ -58,7 +74,7 @@ wz_lib="$WZ_ARTIFACTS/crates/target/release"
 out="$WZ_ARTIFACTS/target/pico-compare"
 mkdir -p "$out/bin"
 
-if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ]; then
+if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" != parity ]; then
     bash scripts/build-zenoh-pico-cli.sh >"$out/build-pico.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the pico library did not build (see $out/build-pico.log)"; exit 2; }
     (cd crates && cargo build --release -p wz-capi-pico) >"$out/build-wz.log" 2>&1 \
@@ -140,6 +156,9 @@ build_zenoh_c_family() {
 }
 
 case "${1:-}" in
+    parity)
+        # builds its own arms, for the family it is given (parity below)
+        ;;
     nodrop-c)
         build_zenoh_c_family
         ;;
@@ -324,6 +343,186 @@ nodrop_c() {
         --pub-cpus "$pub_cpus" --sub-cpus "$sub_cpus" --wz-env "$wz_env" "${batch[@]}"
 }
 
+# ── parity: the host side of the parity matrix (docs/upstream-parity.md section 5b) ──────────────────────
+#
+# Each family builds its two arms into $out/parity/<family>: bin/<program>_P against the original and
+# bin/<program>_W against the wz preset, from ONE source per program, and lib-P / lib-W hold the libraries the
+# programs run against (copies: a later build of the same crate under target/ does not change what a run
+# measured). A builder sets PARITY_REFERENCE and PARITY_IMAGE (the run's image keys), PARITY_SIZE_P and
+# PARITY_SIZE_W (the file each arm's size cells read) and PARITY_NOTES (lines for the run's record.txt).
+
+PARITY_PROGRAMS=(z_put z_sub z_get z_queryable z_pub_thr z_sub_thr z_ping z_pong)
+
+parity_fail() {
+    echo "pico-compare: NOT-MEASURED, $*"
+    exit 2
+}
+
+# The cargo arguments of the wz build of an original's preset: configs/<original>_defconfig alone, resolved.
+# It runs in a command substitution, so its refusal goes to stderr and the caller exits.
+parity_preset_args() {
+    python3 -I scripts/lib/wz_config.py --original-features "$1" \
+        || { echo "pico-compare: NOT-MEASURED, configs/$1_defconfig did not resolve (wz_config.py --original-features $1)" >&2; return 2; }
+}
+
+# zenoh-pico: the original is upstream's DEFAULT build (no switch passed; build-zenoh-pico-cli.sh configures that arm
+# as `zenoh-pico-build-default`, and this builds its shared library), wz is wz-capi-pico built for
+# configs/zenoh-pico_defconfig. The programs are compiled against the default arm's headers.
+parity_build_pico() {
+    local dir="$1" default="$WZ_ARTIFACTS/target/zenoh-pico-build-default" args lib_p example variant name
+    bash scripts/build-zenoh-pico-cli.sh >"$dir/build-pico.log" 2>&1 \
+        || parity_fail "the pico arms did not configure (see $dir/build-pico.log)"
+    cmake --build "$default" --target zenohpico_shared -j"$(nproc)" >>"$dir/build-pico.log" 2>&1 \
+        || parity_fail "pico's default arm did not build (see $dir/build-pico.log)"
+    lib_p="$(find "$default" -name 'libzenohpico.so' -print -quit)"
+    [ -n "$lib_p" ] || parity_fail "no libzenohpico.so under $default"
+    args="$(parity_preset_args zenoh-pico)" || exit 2
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build --release -p wz-capi-pico $args) >"$dir/build-wz.log" 2>&1 \
+        || parity_fail "wz-capi-pico did not build for the preset (see $dir/build-wz.log)"
+    cp -a "$(dirname "$lib_p")"/libzenohpico.so* "$dir/lib-P/" || parity_fail "the pico library did not copy"
+    cp "$WZ_ARTIFACTS/crates/target/release/libwz_capi_pico.so" "$dir/lib-W/" || parity_fail "the wz library did not copy"
+    for example in "${PARITY_PROGRAMS[@]}"; do
+        for variant in P W; do
+            name=zenohpico
+            [ "$variant" = W ] && name=wz_capi_pico
+            cc -std=gnu11 -O2 "$root/vendor/zenoh-pico/examples/unix/c11/$example.c" -DZENOH_LINUX \
+                -I"$default/zenohpico/include" -I"$root/vendor/zenoh-pico/include" -o "$dir/bin/${example}_$variant" \
+                -L"$dir/lib-$variant" "-l$name" "-Wl,-rpath,$dir/lib-$variant" -lpthread \
+                2>"$dir/build-${example}_$variant.log" \
+                || parity_fail "$example against $variant did not build (see $dir/build-${example}_$variant.log)"
+        done
+    done
+    PARITY_REFERENCE="zenoh-pico-$(git -C "$root/vendor/zenoh-pico" rev-parse --short=12 HEAD)"
+    PARITY_IMAGE="wz-zenoh-pico_defconfig"
+    PARITY_SIZE_P="$(readlink -f "$dir/lib-P/libzenohpico.so")"
+    PARITY_SIZE_W="$dir/lib-W/libwz_capi_pico.so"
+    PARITY_NOTES="original=zenoh-pico default build (cmake, no switch), $(grep -c '^#define Z_FEATURE_[A-Z_]* 1' "$default/zenohpico/include/zenoh-pico/config.h") switches on in its config.h
+wz_cargo_args=-p wz-capi-pico $args"
+}
+
+# zenoh-c: the original is upstream's default build from the pinned source (install-zenoh-c-arm.sh nounstable: cmake
+# Release, ZENOHC_BUILD_WITH_UNSTABLE_API and ZENOHC_BUILD_WITH_SHARED_MEMORY at their default FALSE, upstream's
+# own pinned toolchain), wz is wz-capi-c built for configs/zenoh-c_defconfig. The programs are upstream's examples
+# of the pinned source, compiled against the original's headers.
+parity_build_c() {
+    local dir="$1" prefix="$WZ_ARTIFACTS/target/zenoh-c-nounstable" ref="${WZ_ZENOH_C_REF:-$HOME/zenoh-c-ref}"
+    local args drop_in example variant name
+    if [ ! -f "$ref/examples/z_ping.c" ]; then
+        WZ_ZENOH_C_REF="$ref" bash scripts/install-zenoh-c.sh >"$dir/build-zenoh-c-source.log" 2>&1 \
+            || parity_fail "the zenoh-c source did not install (see $dir/build-zenoh-c-source.log)"
+    fi
+    WZ_ZENOH_C_REF="$ref" bash scripts/install-zenoh-c-arm.sh nounstable "$prefix" >"$dir/build-zenoh-c.log" 2>&1 \
+        || parity_fail "zenoh-c's default arm did not build (see $dir/build-zenoh-c.log)"
+    args="$(parity_preset_args zenoh-c)" || exit 2
+    drop_in="$(python3 -I scripts/lib/wz_config.py --drop-in-features c "$prefix/include/zenoh_configure.h" 2>&1)" \
+        || drop_in="not derived: $drop_in"
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build --release -p wz-capi-c $args) >"$dir/build-wz.log" 2>&1 \
+        || parity_fail "wz-capi-c did not build for the preset (see $dir/build-wz.log)"
+    cp -a "$prefix/lib"/libzenohc.so* "$dir/lib-P/" || parity_fail "the zenoh-c library did not copy"
+    cp "$WZ_ARTIFACTS/crates/target/release/libwz_capi_c.so" "$dir/lib-W/" || parity_fail "the wz library did not copy"
+    for example in "${PARITY_PROGRAMS[@]}"; do
+        for variant in P W; do
+            name=zenohc
+            [ "$variant" = W ] && name=wz_capi_c
+            cc -std=gnu11 -O2 "$ref/examples/$example.c" -I"$ref/examples" -I"$prefix/include" \
+                -o "$dir/bin/${example}_$variant" -L"$dir/lib-$variant" "-l$name" "-Wl,-rpath,$dir/lib-$variant" -lpthread \
+                2>"$dir/build-${example}_$variant.log" \
+                || parity_fail "$example against $variant did not build (see $dir/build-${example}_$variant.log)"
+        done
+    done
+    PARITY_REFERENCE="zenoh-c-$(sed -n 's/^ZENOH_C_VERSION=//p' scripts/zenoh-c-oracle.pin)"
+    PARITY_IMAGE="wz-zenoh-c_defconfig"
+    PARITY_SIZE_P="$(readlink -f "$dir/lib-P/libzenohc.so")"
+    PARITY_SIZE_W="$dir/lib-W/libwz_capi_c.so"
+    PARITY_NOTES="original=zenoh-c nounstable arm built from $ref ($(sed -n 's/^ *channel *= *"\([^"]*\)".*/\1/p' "$ref/rust-toolchain.toml" | head -1) toolchain)
+wz_cargo_args=-p wz-capi-c $args
+wz_drop_in_args_for_the_original_header=$drop_in"
+}
+
+# zenoh: upstream's examples package of the pinned tree, generated twice (z8_upstream_suite.py examples): `stock`
+# over upstream's zenoh from the registry, `wz` with the family patched in and wz-capi-core given the preset's
+# features. One manifest but for that, upstream's release profile and Cargo.lock, the repository's compiler.
+parity_build_rust() {
+    local dir="$1" args feats arm variant pkg example programs=()
+    args="$(parity_preset_args zenoh)" || exit 2
+    feats="$(sed -n 's/.*--features \([^ ]*\).*/\1/p' <<<"$args")"
+    for example in "${PARITY_PROGRAMS[@]}"; do
+        programs+=(--example "$example")
+    done
+    for arm in stock wz; do
+        variant=P
+        [ "$arm" = wz ] && variant=W
+        pkg="$(python3 -I scripts/lib/z8_upstream_suite.py examples --arm "$arm" --core-features "$feats" 2>"$dir/generate-$arm.log")" \
+            || parity_fail "the $arm examples package was not generated (see $dir/generate-$arm.log)"
+        # The package's directory is the last line printed (a first clone of the tree may print before it).
+        pkg="${pkg##*$'\n'}"
+        [ -f "$pkg/Cargo.toml" ] || parity_fail "the $arm examples package is not at '$pkg'"
+        (cd "$pkg" && cargo build --release --target-dir "$pkg/target" "${programs[@]}") >"$dir/build-rust-$arm.log" 2>&1 \
+            || parity_fail "the $arm examples did not build (see $dir/build-rust-$arm.log)"
+        for example in "${PARITY_PROGRAMS[@]}"; do
+            cp "$pkg/target/release/examples/$example" "$dir/bin/${example}_$variant" \
+                || parity_fail "$example of the $arm arm did not copy"
+        done
+    done
+    PARITY_REFERENCE="zenoh-$(sed -n 's/^UPSTREAM_VERSION = "\([^"]*\)".*/\1/p' scripts/lib/upstream_feature_census.py)"
+    PARITY_IMAGE="wz-zenoh_defconfig"
+    PARITY_SIZE_P="$dir/bin/z_put_P"
+    PARITY_SIZE_W="$dir/bin/z_put_W"
+    PARITY_NOTES="original=upstream's examples package over zenoh from the registry; size cells read z_put
+wz_cargo_args=wz-capi-core features $feats (from: $args), unified with what the family's crates select"
+}
+
+# parity <family> [boots] [sizes]
+parity() {
+    local family="${1:-}" boots="${2:-24}" sizes="${3:-8,1024}" dir tag run rc
+    case "$family" in
+        pico | c | rust) ;;
+        *) echo "usage: $0 parity <pico|c|rust> [boots] [sizes]" >&2; exit 2 ;;
+    esac
+    dir="$out/parity/$family"
+    rm -rf "$dir"
+    mkdir -p "$dir/bin" "$dir/lib-P" "$dir/lib-W"
+    bash scripts/provision-kconfiglib.sh >"$dir/build-kconfiglib.log" 2>&1 \
+        || parity_fail "kconfiglib did not install (see $dir/build-kconfiglib.log)"
+    cc -O2 -shared -fPIC -o "$dir/bin/heap_peak.so" "$root/scripts/host-bench/heap_peak.c" 2>"$dir/build-heap-shim.log" \
+        || parity_fail "the heap shim did not build (see $dir/build-heap-shim.log)"
+    "parity_build_$family" "$dir"
+    tag="host-$family-$(date -u +%Y%m%dT%H%M%S)"
+    run="$out/parity-runs/$tag"
+    python3 -I "$root/scripts/host-bench/parity.py" --family "$family" --bin-dir "$dir/bin" --run "$run" \
+        --boots "$boots" --sizes "$sizes" --image "$PARITY_IMAGE" --reference "$PARITY_REFERENCE" \
+        --client-cpus "${PICO_CMP_CLIENT_CPUS:-4-7}" --server-cpus "${PICO_CMP_SERVER_CPUS:-8-11}" \
+        --pings "${PICO_CMP_PINGS:-20000}" --warmup-s "${PICO_CMP_WARMUP_S:-3}" --window-s "${PICO_CMP_WINDOW_S:-10}" \
+        --heap-shim "$dir/bin/heap_peak.so" --size-binary "P=$PARITY_SIZE_P" --size-binary "W=$PARITY_SIZE_W"
+    rc=$?
+    [ -d "$run" ] || parity_fail "the boots did not start (parity.py exit $rc)"
+    {
+        echo "run=$tag"
+        echo "family=$family"
+        echo "tree=$(git rev-parse HEAD)"
+        echo "host=$(hostname)"
+        echo "kernel=$(uname -r)"
+        echo "cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)"
+        echo "threads=$(nproc)"
+        echo "cc=$(cc --version | head -1)"
+        echo "rustc=$(cd crates && rustc -V)"
+        echo "boots=$boots of each image, alternating; sizes=$sizes"
+        echo "client_cpus=${PICO_CMP_CLIENT_CPUS:-4-7} server_cpus=${PICO_CMP_SERVER_CPUS:-8-11}"
+        echo "reference=$PARITY_REFERENCE image=$PARITY_IMAGE"
+        echo "$PARITY_NOTES"
+        echo "parity_exit=$rc"
+    } >"$run/record.txt"
+    python3 -I "$root/scripts/lib/kit_compare.py" --run "$run" --ref "$PARITY_REFERENCE" >"$run/verdict.txt" 2>&1 \
+        || { cat "$run/verdict.txt"; parity_fail "the run $run could not be read"; }
+    python3 -I "$root/scripts/lib/kit_compare.py" --run "$run" --ref "$PARITY_REFERENCE" --format rows >"$run/rows.json" \
+        || parity_fail "the rows of $run could not be written"
+    cat "$run/record.txt" "$run/verdict.txt"
+    echo "pico-compare: parity run $run (verdict.txt, rows.json, record.txt)"
+    return "$rc"
+}
+
 mode="${1:-}"
 [ "$#" -gt 0 ] && shift
 case "$mode" in
@@ -333,8 +532,9 @@ case "$mode" in
     nodrop) nodrop "$@" ;;
     nodrop-c) nodrop_c "$@" ;;
     profile) profile "$@" ;;
+    parity) parity "$@" ;;
     *)
-        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate]" >&2
+        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | parity <pico|c|rust> [boots] [sizes]" >&2
         exit 2
         ;;
 esac
