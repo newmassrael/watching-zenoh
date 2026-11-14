@@ -927,4 +927,74 @@ mod shared_memory {
         shared.close();
         node.close();
     }
+
+    /// A reply a client that negotiated shared memory makes with a chunk, to a get of the node's
+    /// own session through its port (`get_on_wire`), is handed to the get as the chunk: the node
+    /// reads it while it routes the reply, as it reads a value or a publication, since its own
+    /// face negotiates nothing and would refuse the descriptor.
+    #[test]
+    fn a_get_of_the_node_reads_the_chunk_a_shm_peer_replies_with() {
+        let node = open_node_offering_shm();
+        let engine = node.as_engine();
+        let shared = client_offering_shm(vec![node.listen_locators()[0].clone()]);
+        assert!(eventually(|| engine.has_shm_peer()));
+
+        let value = chunk();
+        let replied = Arc::clone(&value);
+        let _queryable = shared
+            .as_engine()
+            .declare_queryable_on_wire(
+                ASKED.to_owned(),
+                WireKey::literal(),
+                false,
+                Locality::Any,
+                None,
+                Arc::new(move |_holder| {
+                    let replied = Arc::clone(&replied);
+                    Box::new(move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                        let handle = replied.send_handle();
+                        let _ = out.reply_keyed_meta(
+                            ASKED,
+                            BODY,
+                            wz_session_core::query_sink::ReplyMeta::new()
+                                .with_shared(Some(&handle)),
+                        );
+                    })
+                }),
+            )
+            .expect("a session has queryables");
+
+        let got: Got = Arc::default();
+        until_each_is_told(&[&got], || {
+            let sink = Arc::clone(&got);
+            engine.get_on_wire(
+                ASKED,
+                &WireKey::literal(),
+                &QueryOptions::default(),
+                None,
+                &mut || {
+                    let sink = Arc::clone(&sink);
+                    Box::new(move |reply: &dyn ReplyView| {
+                        if reply.kind() == ReplyKind::Put {
+                            let shared = reply
+                                .payload_shared()
+                                .and_then(|bytes| bytes.shm_chunk())
+                                .is_some();
+                            sink.lock()
+                                .unwrap()
+                                .push((reply.payload().to_vec(), shared));
+                        }
+                    })
+                },
+            );
+        });
+
+        assert_eq!(
+            first(&got, "the node's own get"),
+            (BODY.to_vec(), true),
+            "the node's own get was not handed the chunk the client replied with"
+        );
+        shared.close();
+        node.close();
+    }
 }

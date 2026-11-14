@@ -2528,6 +2528,14 @@ pub enum LocalFaceEvent {
     TokenDown { id: u64, keyexpr: Option<String> },
     /// A reply to a query the face asked, carrying the request id the face gave it.
     Reply(Box<ResponseOwned>),
+    /// A reply to a query the face asked whose value went through shared memory, read already by
+    /// the node's session: `payload` is the buffer the session reads the value as, holding a
+    /// reference of its own. The face takes the value from here and not from the reply, whose
+    /// value names a chunk the node has read.
+    ReplyRead {
+        response: Box<ResponseOwned>,
+        payload: wz_session_core::link::RxBytes,
+    },
     /// The end of the replies to the query the face asked under `request_id`: every queryable
     /// has ended, the query timed out, or nothing was left to ask.
     ReplyFinal { request_id: u64 },
@@ -12122,6 +12130,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         ) else {
             return;
         };
+        // transport-shm -- a reply to a get of the node's own session whose value went through
+        // shared memory is read here, from the chunk the pass above holds, as a publication for
+        // the node's own subscribers is read: the pass took the reference the sender made for
+        // this node, so the session is handed a buffer with a reference of its own. The face's
+        // registry negotiates nothing and would refuse the descriptor.
+        #[cfg(feature = "transport-shm")]
+        if to.face == LOCAL_FACE {
+            let read = {
+                let descriptors =
+                    wz_session_core::response_build::response_shm_descriptors(&carrier);
+                (!descriptors.is_empty()).then(|| self.session_reads_chunk(&descriptors))
+            };
+            if let Some(read) = read {
+                // A value the session cannot read is not handed over as no value.
+                if let Some(payload) = read {
+                    self.tell_local_face_read_reply(carrier, payload);
+                }
+                return;
+            }
+        }
         self.send_to_face(to.face, reliable, || {
             NetworkMessage::Response(Box::new(carrier.clone()))
         });
@@ -12251,6 +12279,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             sink(event);
         }
         true
+    }
+
+    /// [`Self::tell_local_face`] for a reply that came in over a link and whose value the node's
+    /// session has read already into `payload`: the face is told the reply with the value it
+    /// reads, as [`LocalFaceEvent::ReplyRead`].
+    #[cfg(feature = "transport-shm")]
+    fn tell_local_face_read_reply(
+        &self,
+        response: ResponseOwned,
+        payload: wz_session_core::link::RxBytes,
+    ) {
+        let Some(sink) = &self.tables.local_face_sink else {
+            return;
+        };
+        let mut msg = NetworkMessage::Response(Box::new(response));
+        if !self.fwd.strip_namespace(&mut msg) {
+            return;
+        }
+        #[cfg(feature = "pubsub-ts-stack")]
+        self.record_route(&mut msg);
+        if let NetworkMessage::Response(response) = msg {
+            sink(LocalFaceEvent::ReplyRead { response, payload });
+        }
     }
 
     /// A reply of a queryable of the node's own session to the face that asked. A query the

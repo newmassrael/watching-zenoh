@@ -30,9 +30,10 @@
 //!   ask turns into the provider (or into an error that stays).
 //!
 //! What the provider is not: the provider of the engine. The engine keeps shared memory of its own
-//! and this provider does not feed it, so the implicit promotion of a large payload into shared
-//! memory that upstream does with this provider is not done (`docs/zenoh-api-on-the-engine.md`,
-//! Z7).
+//! (`docs/shm-transport.md`), and a buffer of this provider crosses it as the buffer it is
+//! (`transport` below). The implicit promotion of a large put into this provider is made by this
+//! crate before the engine (`transport::Promoter`); the value of a query and a reply are not
+//! promoted yet, where upstream promotes both by default.
 
 /// Initialise the shared memory subsystem as the session opens when the configuration asks for it
 /// (`transport/shared_memory/mode` = `init`); in the default `lazy` mode the first use does.

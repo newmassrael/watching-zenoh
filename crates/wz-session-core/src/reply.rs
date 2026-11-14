@@ -1293,7 +1293,38 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         response: &ResponseOwned,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        let peer_keyexpr_table = peer_keyexpr_table.into();
+        self.dispatch_response_with(response, peer_keyexpr_table.into(), None);
+    }
+
+    /// [`Self::dispatch_response`] for a reply whose Put value the caller has read already into
+    /// `payload`. A router node reads the chunk of shared memory a reply to its own session names
+    /// while the pass that routes the reply holds it, with a reference of its own, as it reads a
+    /// publication for its own subscribers; that pass took the reference the sender made for the
+    /// node, so the chunk is not to be read a second time here. `payload` is delivered as the
+    /// value of a Put reply and let go for any other, and a reply that routing cannot place
+    /// settles nothing, since nothing of it is owed any more.
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    pub fn dispatch_response_read<'a>(
+        &mut self,
+        response: &ResponseOwned,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        payload: crate::link::RxBytes,
+    ) {
+        self.dispatch_response_with(response, peer_keyexpr_table.into(), Some(payload));
+    }
+
+    /// The dispatch of a `Response`, its Put value being `read` when the caller read it and the
+    /// response's own otherwise.
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    fn dispatch_response_with(
+        &mut self,
+        response: &ResponseOwned,
+        peer_keyexpr_table: MappingSpaces<'_>,
+        read: Option<crate::link::RxBytes>,
+    ) {
+        // A build that reads no Put reply has nothing to put a read value in.
+        #[cfg(not(any(feature = "pubsub-put", feature = "query-reply")))]
+        let _ = &read;
         let resolved = match resolve_wireexpr_in(&response.keyexpr.body, peer_keyexpr_table) {
             Some(s) => s,
             // An error reply is not about a key: a node that expires a query it forwarded
@@ -1308,12 +1339,15 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 // acknowledgement, as a push's is: upstream un-swaps a message
                 // before it routes it
                 // (`io/zenoh-transport/src/unicast/universal/rx.rs` @
-                // `map_zmsg_to_shmbuf(`).
+                // `map_zmsg_to_shmbuf(`). A value the caller read owes nothing: its
+                // reference goes with it.
                 #[cfg(all(
                     feature = "transport-shm",
                     any(feature = "pubsub-put", feature = "query-reply")
                 ))]
-                self.settle_unrouted_reply(response);
+                if read.is_none() {
+                    self.settle_unrouted_reply(response);
+                }
                 return;
             }
         };
@@ -1338,10 +1372,14 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                     // the shared un-swap, which reads it, acknowledges it and
                     // counts a refusal. A reply that cannot be read is dropped
                     // here, as an undecodable one is, instead of handing the
-                    // application the descriptor in place of its data.
-                    payload: match self.reply_put_payload(put, response) {
+                    // application the descriptor in place of its data. A value the
+                    // caller read already is delivered as it was read.
+                    payload: match read {
                         Some(bytes) => bytes,
-                        None => return,
+                        None => match self.reply_put_payload(put, response) {
+                            Some(bytes) => bytes,
+                            None => return,
+                        },
                     },
                     attachment: put_reply_attachment(put),
                     encoding: put_reply_encoding(put),
@@ -2547,6 +2585,49 @@ mod tests {
         assert_eq!(reg.shm_unnegotiated_drops(), 1);
         assert_eq!(resolved.load(Ordering::SeqCst), 0, "no segment was opened");
         assert!(bands.lock().unwrap().is_empty());
+    }
+
+    /// A REPLY WHOSE VALUE THE CALLER READ IS DELIVERED AS READ. A router node reads the chunk a
+    /// reply to its own session names while it routes the reply, so its face is handed the value
+    /// with the reply: the registry delivers that value, reads no slice and acknowledges none
+    /// (the node's pass did both), and does so on a registry that negotiated nothing, as the
+    /// node's own face has not.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    #[test]
+    fn a_reply_whose_value_the_caller_read_is_delivered_as_read() {
+        let (mut reg, bands, resolved, captured) = shm_reply_registry();
+        reg.set_shm_negotiated(false);
+        reg.dispatch_response_read(
+            &response_reply_shm(0, Some("home/temp"), Some(0x02)),
+            &HashMap::new(),
+            crate::link::RxBytes::from(b"read by the node".to_vec()),
+        );
+        let snapshot = captured.lock().unwrap();
+        assert_eq!(snapshot.len(), 1, "the reply is delivered");
+        match &snapshot[0].body {
+            InboundReplyBody::Put { payload, .. } => assert_eq!(payload, b"read by the node"),
+            other => panic!("expected Put, got {other:?}"),
+        }
+        assert_eq!(resolved.load(Ordering::SeqCst), 0, "no slice was read");
+        assert!(bands.lock().unwrap().is_empty(), "none was acknowledged");
+        assert_eq!(reg.shm_unnegotiated_drops(), 0, "nor refused");
+    }
+
+    /// A reply whose value the caller read and that routing refuses settles nothing: the value's
+    /// reference goes with the value, so no slice is read or acknowledged, where the same reply
+    /// told by its slices is settled (`an_unroutable_shm_reply_is_still_read_and_acknowledged`).
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    #[test]
+    fn an_unroutable_reply_whose_value_the_caller_read_settles_nothing() {
+        let (mut reg, bands, resolved, captured) = shm_reply_registry();
+        reg.dispatch_response_read(
+            &response_reply_shm(9, None, Some(0x03)),
+            &HashMap::new(),
+            crate::link::RxBytes::from(b"read by the node".to_vec()),
+        );
+        assert!(captured.lock().unwrap().is_empty(), "routing refused it");
+        assert_eq!(resolved.load(Ordering::SeqCst), 0, "no slice was read");
+        assert!(bands.lock().unwrap().is_empty(), "none was acknowledged");
     }
 
     /// R3048 -- AN ERROR REPLY IS NOT A SLICE LIST, AND THAT IS UPSTREAM'S WIRE. The

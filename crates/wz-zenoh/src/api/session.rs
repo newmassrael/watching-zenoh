@@ -2550,6 +2550,19 @@ mod tokio_engine {
         ZBytes::from(view.payload().to_vec())
     }
 
+    /// The value of a Put reply the engine hands up, as [`payload_of_view`] reads a sample's: the
+    /// buffer of shared memory it is when the reader of this crate made it, the bytes otherwise.
+    fn payload_of_reply(view: &dyn ReplyView) -> ZBytes {
+        #[cfg(feature = "shared-memory")]
+        if let Some(shared) = view
+            .payload_shared()
+            .and_then(crate::api::shm::transport::payload_of)
+        {
+            return shared;
+        }
+        ZBytes::from(view.payload().to_vec())
+    }
+
     /// The value of a query the engine hands up, as [`payload_of_view`] reads a sample's: the
     /// buffer of shared memory it is when the reader of this crate made it, the bytes otherwise.
     fn value_of_query(view: &dyn QueryView) -> Option<ZBytes> {
@@ -2818,12 +2831,23 @@ mod tokio_engine {
                 #[cfg(not(feature = "unstable"))]
                 let source_info = None;
                 let attachment = sample.attachment.as_ref().map(|bytes| bytes.to_bytes());
+                // A reply whose payload is a buffer of shared memory is staged as the buffer, as
+                // a put of one is published: its descriptor goes to a querier whose link
+                // negotiated shared memory, its bytes to any other, and a getter of this session
+                // is handed the buffer.
+                #[cfg(feature = "shared-memory")]
+                let shared = match sample.kind {
+                    SampleKind::Put => crate::api::shm::transport::send_handle_of(&sample.payload),
+                    SampleKind::Delete => None,
+                };
                 let meta = ReplyMeta::new()
                     .with_encoding(hint.as_ref())
                     .with_timestamp(timestamp.as_ref())
                     .with_source_info(source_info.as_ref())
                     .with_attachment(attachment.as_deref())
                     .with_qos(Some(qos_level_of(sample.qos)));
+                #[cfg(feature = "shared-memory")]
+                let meta = meta.with_shared(shared.as_ref());
                 let key = sample.key_expr.as_str();
                 match sample.kind {
                     SampleKind::Put => out.reply_keyed_meta(key, &sample.payload.to_bytes(), meta),
@@ -3599,7 +3623,7 @@ mod tokio_engine {
             }
             kind => Ok(Sample {
                 key_expr: KeyExpr::try_from(view.keyexpr().to_owned())?,
-                payload: ZBytes::from(view.payload().to_vec()),
+                payload: payload_of_reply(view),
                 kind: match kind {
                     ReplyKind::Del => SampleKind::Delete,
                     _ => SampleKind::Put,
@@ -7087,6 +7111,92 @@ mod tests {
                     value,
                     Some((BODY.to_vec(), true)),
                     "{who}'s get did not hand the queryable its value as shared memory"
+                );
+            }
+        }
+
+        /// A reply whose payload is a buffer of shared memory, made by a queryable of the registry
+        /// of faces, reaches the getter of the other session as one, whether that getter is
+        /// another registry or a router node: the registry stages the reply as the buffer and
+        /// sends its descriptor over the link that negotiated shared memory, and the getter reads
+        /// it with this crate's reader (a node reads it as it routes the reply to its own get).
+        #[test]
+        fn a_reply_whose_payload_is_a_buffer_of_shared_memory_reaches_the_getter_as_one() {
+            const BODY: &[u8] = b"a reply in shared memory";
+            let on = |id: &str, listen: &str, connect: &str, node: bool| {
+                let opened = || {
+                    open(
+                        Config::from_json5(&format!(
+                            r#"{{ id: "{id}", mode: "peer",
+                                  listen: {{ endpoints: [{listen}] }},
+                                  connect: {{ endpoints: [{connect}] }},
+                                  scouting: {{ multicast: {{ enabled: false }} }},
+                                  transport: {{ shared_memory: {{ enabled: true }} }} }}"#
+                        ))
+                        .expect("a configuration zenoh reads"),
+                    )
+                    .wait()
+                    .expect("opens")
+                };
+                if node {
+                    with_the_node(opened)
+                } else {
+                    opened()
+                }
+            };
+            let endpoint = |port: u16| format!(r#""tcp/127.0.0.1:{port}""#);
+            let (first, second) = (unautoselected_port(), unautoselected_port());
+            let listening = on("a1b3a0", &endpoint(first), "", false);
+            let dialling = on("a1b3a1", "", &endpoint(first), false);
+            let node = on("a1b3a2", &endpoint(second), "", true);
+            let answering = on("a1b3a3", "", &endpoint(second), false);
+            for (who, session) in [("the first dialler", &dialling), ("the second", &answering)] {
+                assert_eq!(connected(session, 1).1.len(), 1, "{who} is linked");
+            }
+            assert!(matches!(&*node.0.engine, Engine::Router(_)), "a node");
+            for session in [&listening, &dialling, &answering] {
+                assert!(matches!(&*session.0.engine, Engine::Tokio(_)), "a registry");
+            }
+
+            for (who, asker, answerer, key) in [
+                ("a registry", &listening, &dialling, "demo/shm/reply/a"),
+                ("a node", &node, &answering, "demo/shm/reply/b"),
+            ] {
+                let provider = answerer
+                    .get_shm_provider()
+                    .wait()
+                    .expect("a session with shared memory has a provider");
+                let _queryable = answerer
+                    .declare_queryable(key)
+                    .callback(move |query| {
+                        let mut buffer = provider.alloc(BODY.len()).wait().expect("a buffer");
+                        buffer.copy_from_slice(BODY);
+                        // A reply that is refused is seen as a get that is never answered.
+                        let _ = query.reply(key, ZBytes::from(buffer)).wait();
+                    })
+                    .wait()
+                    .expect("declares");
+                // The queryable's declaration reaches the asker over the link; until it has, a
+                // get has no queryable to go to and ends with no reply, so it is asked again.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let reply = loop {
+                    let replies = asker.get(key).wait().expect("asks");
+                    match replies.recv_timeout(Duration::from_millis(500)) {
+                        Ok(Some(reply)) => break reply,
+                        _ if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        _ => panic!("{who}'s get was never answered"),
+                    }
+                };
+                let sample = reply.result().expect("a sample, not an error");
+                assert_eq!(
+                    (
+                        sample.payload().to_bytes().into_owned(),
+                        sample.payload().as_shm().is_some()
+                    ),
+                    (BODY.to_vec(), true),
+                    "{who}'s get was not handed the reply as shared memory"
                 );
             }
         }

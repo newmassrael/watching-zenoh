@@ -312,6 +312,12 @@ impl State {
                 self.queries
                     .dispatch_response(&response, &local_face_aliases());
             }
+            // The node read the value of this reply out of shared memory as it routed it; the
+            // registry delivers what was read and not the chunk the reply names.
+            Command::Told(LocalFaceEvent::ReplyRead { response, payload }) => {
+                self.queries
+                    .dispatch_response_read(&response, &local_face_aliases(), payload);
+            }
             Command::Told(LocalFaceEvent::ReplyFinal { request_id }) => {
                 self.queries.deliver_local_final(request_id);
             }
@@ -532,17 +538,27 @@ impl LocalLiveliness {
         let sink: LocalFaceSink = std::sync::Arc::new(move |event| {
             // A reply of a query that asked for it is completed here, on the thread that hands it
             // over, before it waits in the queue of the face.
+            let complete = |response: &mut wz_session_core::wire::ResponseOwned| {
+                let hook = ingressing
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&response.request_id)
+                    .cloned();
+                if let Some(hook) = hook {
+                    hook(response);
+                }
+            };
             let event = match event {
                 LocalFaceEvent::Reply(mut response) => {
-                    let hook = ingressing
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .get(&response.request_id)
-                        .cloned();
-                    if let Some(hook) = hook {
-                        hook(&mut response);
-                    }
+                    complete(&mut response);
                     LocalFaceEvent::Reply(response)
+                }
+                LocalFaceEvent::ReplyRead {
+                    mut response,
+                    payload,
+                } => {
+                    complete(&mut response);
+                    LocalFaceEvent::ReplyRead { response, payload }
                 }
                 other => other,
             };
