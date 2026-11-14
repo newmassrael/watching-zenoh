@@ -119,7 +119,9 @@ fn wz_line(root: &Path, key: Option<&str>) -> String {
                 None => (0, None),
                 Some(e) => (
                     u16::try_from(e.packed_id >> 1).expect("an encoding id is sixteen bits"),
-                    e.schema.as_deref(),
+                    e.schema.as_deref().map(|s| {
+                        core::str::from_utf8(s).expect("the schemas this test writes are text")
+                    }),
                 ),
             };
             line(payload, id, schema, timestamp.time, &timestamp.zid)
@@ -136,7 +138,7 @@ fn wz_put(root: &Path, key: Option<&str>, payload: &[u8], id: u16, schema: Optio
             payload.to_vec(),
             Some(EncodingHint {
                 packed_id: (u32::from(id) << 1) | u32::from(schema.is_some()),
-                schema: schema.map(String::from),
+                schema: schema.map(|s| s.as_bytes().to_vec()),
             }),
             TimestampHint {
                 time: TIME,
