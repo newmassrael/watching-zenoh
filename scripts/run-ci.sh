@@ -22187,8 +22187,11 @@ layer_z_zenohd_interop() {
     # (after the right one proved it connects at all). In this crate for the reason the legs
     # above give. MEASURED: 2 passed against zenohd 1.10.0 (the pin is 1.10.1; this lane is
     # where it is judged against the pinned binary).
+    # Raises 2 -> 3 for the differential leg: the same dictionary file handed to a zenohd
+    # listener first (it must admit the right password and refuse the wrong one) and then to
+    # the C listener, held to the same two answers.
     wz_test_args wz-capi-c listener_auth_zenohd_interop
-    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # The READ direction, which is the one that bears on replacement: an operator

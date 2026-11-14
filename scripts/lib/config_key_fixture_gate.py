@@ -396,7 +396,7 @@ UPSTREAM_TOKENS = {
 # aside), measured on the commit that introduced the table. Both directions
 # fail: above it, a key was honoured or downgraded without an upstream witness;
 # below it, a witness landed and this number must come down in the same commit.
-UNPROVEN_BUDGET = 62
+UNPROVEN_BUDGET = 61
 # How far above a fn declaration its attribute block may reach. A doc comment,
 # a `wz-proves:` line and a two-line `#[ignore]` fit with room to spare.
 ATTRIBUTE_WINDOW = 40
