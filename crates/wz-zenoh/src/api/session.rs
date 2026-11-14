@@ -631,7 +631,6 @@ impl Engine {
         } else {
             None
         };
-        let node = node_role.is_some();
         // Decision D6: a key the configuration states with a value other than its default, that
         // upstream acts on and this engine does not, is refused by its name, and not left to do
         // nothing.
@@ -679,8 +678,10 @@ impl Engine {
             shm_clients: tokio_engine::no_shm_clients(),
             offer_shm: cfg!(feature = "shared-memory"),
             // The multicast groups of a session that holds a shared-memory context are
-            // shared-memory ones, and what a member of one sends it reads through that reader.
-            groups_report_shm: cfg!(feature = "shared-memory") && !node,
+            // shared-memory ones, a node's as well, and what a member of one sends it reads
+            // through that reader (`io/zenoh-transport/src/multicast/rx.rs` @
+            // `if let Some(shm_context) = &self.shm_context {`).
+            groups_report_shm: cfg!(feature = "shared-memory"),
         });
         if let Some(role) = node_role {
             if let Some(ask) = arguments.router_refusal() {

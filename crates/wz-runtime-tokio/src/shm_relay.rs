@@ -29,7 +29,7 @@
 use std::sync::{Arc, Mutex};
 
 use wz_session_core::extshm::{
-    decode_shm_descriptor, ShmDescriptor, ShmRelayHolds, ShmResolver, ShmSendHandle,
+    decode_shm_descriptor, ShmDescriptor, ShmRelayHolds, ShmReservation, ShmResolver, ShmSendHandle,
 };
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::qos::Priority;
@@ -176,9 +176,9 @@ impl ShmRelay {
 impl ShmRelay {
     /// Rewrite `push` so that no slice of its payload is a descriptor: each becomes the bytes of
     /// the chunk the pass holds for it, and a Put left with no shared-memory slice is the plain
-    /// layout without the marker. For an egress whose receivers can never read a chunk, such as a
-    /// multicast group, which negotiates nothing and so is sent bytes whatever a unicast peer
-    /// would have been. Takes no reference: nothing is sent that names the chunk.
+    /// layout without the marker. For an egress whose receivers cannot read a chunk, such as a
+    /// multicast group of a node that holds no shared memory. Takes no reference: nothing is sent
+    /// that names the chunk.
     ///
     /// `Err` when a descriptor names a chunk the pass holds nothing for; `push` is then untouched
     /// and is not to be sent.
@@ -186,14 +186,43 @@ impl ShmRelay {
         &self,
         push: &mut PushOwned,
     ) -> Result<(), wz_session_core::put_payload::RelayFault> {
+        self.for_group(push, false).map(drop)
+    }
+
+    /// Rewrite `push` for a multicast group, which negotiates nothing: for a group that reads
+    /// shared memory (`reads_shm`) each slice stays a descriptor, of a reference taken for the
+    /// group, whatever the chunk's protocol, as upstream's multicast transport admits every
+    /// protocol (`io/zenoh-transport/src/common/shm/interop.rs` @
+    /// `pub struct MulticastTransportShmConfig;`); for any other each becomes the chunk's bytes
+    /// ([`Self::into_plain_bytes`]). One reference stands for every member, as one frame does
+    /// upstream (`commons/zenoh-codec/src/core/zbuf.rs` @ `unsafe { shmb.inc_ref_count() };`).
+    ///
+    /// The references come back beside the push, to commit once the frame is handed to the group
+    /// and to drop, which gives them back, if it is not. `Err` as for
+    /// [`Self::into_plain_bytes`], with every reference taken given back.
+    pub fn for_group(
+        &self,
+        push: &mut PushOwned,
+        reads_shm: bool,
+    ) -> Result<Vec<Box<dyn ShmReservation>>, wz_session_core::put_payload::RelayFault> {
+        use wz_session_core::extshm::encode_shm_descriptor;
         use wz_session_core::put_payload::{relay_shm_slices, Relayed};
+        let mut reservations: Vec<Box<dyn ShmReservation>> = Vec::new();
         let PushOwnedVariant::CodecZenohMsgPut(put) = &mut push.body else {
-            return Ok(());
+            return Ok(reservations);
         };
         relay_shm_slices(put, |descriptor| {
             let held = self.held(&decode_shm_descriptor(descriptor)?)?;
-            Some(Relayed::Bytes(held.bytes().to_vec()))
-        })
+            Some(if reads_shm {
+                let reservation = held.reserve_for_receiver();
+                let bytes = encode_shm_descriptor(&reservation.descriptor());
+                reservations.push(reservation);
+                Relayed::Descriptor(bytes)
+            } else {
+                Relayed::Bytes(held.bytes().to_vec())
+            })
+        })?;
+        Ok(reservations)
     }
 }
 
@@ -488,8 +517,9 @@ mod tests {
         drop(pass);
     }
 
-    /// For an egress whose receivers can never read a chunk (a multicast group), the Push carries
-    /// the chunk's bytes, in the plain layout, and the pass takes no reference for it.
+    /// For an egress whose receivers cannot read a chunk (a group that is not a shared-memory
+    /// one), the Push carries the chunk's bytes, in the plain layout, and the pass takes no
+    /// reference for it.
     #[test]
     fn a_push_for_a_receiver_that_cannot_read_chunks_carries_the_chunks_bytes() {
         let mut payload = ShmBackedPayload::alloc(11).expect("alloc");
@@ -525,6 +555,72 @@ mod tests {
             0,
             "and the one it arrived with went back"
         );
+    }
+
+    /// For a group that reads shared memory the Push keeps the slice as a descriptor of the same
+    /// chunk, with ONE reference taken for the group whatever its members, which stays only once
+    /// it is committed: the frame was handed to the group.
+    #[test]
+    fn a_push_for_a_shared_memory_group_names_the_chunk_with_one_reference_for_the_group() {
+        let (descriptor, mut push) = sent_by_a_publisher(64);
+        let relay = ShmRelay::posix();
+        let pass = relay.open(&push, || true).expect("opened");
+        let reservations = relay.for_group(&mut push, true).expect("the chunk is held");
+        assert_eq!(reservations.len(), 1, "one reference for the group");
+        assert_eq!(
+            held_count(&descriptor),
+            2,
+            "the arrived one and the group's"
+        );
+        let slices = ShmRelay::shm_slices(&push);
+        assert_eq!(slices.len(), 1, "the slice is still a descriptor");
+        assert_eq!(
+            decode_shm_descriptor(slices[0]),
+            Some(descriptor),
+            "of the same chunk"
+        );
+        for reservation in reservations {
+            reservation.commit();
+        }
+        drop(pass);
+        assert_eq!(held_count(&descriptor), 1, "the group's reference stays");
+        assert!(crate::shm_provider::PosixShmResolver
+            .resolve(&descriptor)
+            .is_some());
+        assert_eq!(held_count(&descriptor), 0, "a member released it");
+    }
+
+    /// A group push that was not handed to the group gives the group's reference back, and a
+    /// group that does not read shared memory is sent the bytes and takes none.
+    #[test]
+    fn a_group_push_that_did_not_leave_takes_nothing_and_a_plain_group_is_sent_the_bytes() {
+        let (descriptor, push) = sent_by_a_publisher(64);
+        let relay = ShmRelay::posix();
+        let pass = relay.open(&push, || true).expect("opened");
+
+        let mut refused = push.clone();
+        drop(
+            relay
+                .for_group(&mut refused, true)
+                .expect("the chunk is held"),
+        );
+        assert_eq!(
+            held_count(&descriptor),
+            1,
+            "the group's reference went back"
+        );
+
+        let mut plain = push.clone();
+        let reservations = relay
+            .for_group(&mut plain, false)
+            .expect("the chunk is held");
+        assert!(reservations.is_empty(), "a plain group takes no reference");
+        assert!(
+            ShmRelay::shm_slices(&plain).is_empty(),
+            "it is sent the bytes"
+        );
+        drop(pass);
+        assert_eq!(held_count(&descriptor), 0);
     }
 
     /// A descriptor whose chunk no pass holds is not turned into bytes of anything: the Push is
