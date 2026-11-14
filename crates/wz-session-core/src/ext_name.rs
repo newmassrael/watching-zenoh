@@ -305,18 +305,21 @@ const INIT: &[Row] = &[
     (0x5, OPT, EXT_ENC_UNIT, "low_latency"),
     (0x6, OPT, EXT_ENC_UNIT, "compression"),
     (0x7, OPT, EXT_ENC_Z64, "patch"),
+    (0x8, OPT, EXT_ENC_ZBUF, "region_name"),
 ];
 
-/// `transport/open.rs` — `0x4` twice, told apart by encoding, and `shm` is a
-/// `Z64` here where `Init` makes it a `ZBuf`.
+/// `transport/open.rs` — `0x4` twice, told apart by encoding. `shm` is a `ZBuf`
+/// here as on `Init`, holding the Open half of the negotiation, and `0x7` is the
+/// remote bound where `Init` has the patch level.
 const OPEN: &[Row] = &[
     (0x1, OPT, EXT_ENC_UNIT, "qos"),
-    (0x2, OPT, EXT_ENC_Z64, "shm"),
+    (0x2, OPT, EXT_ENC_ZBUF, "shm"),
     (0x3, OPT, EXT_ENC_ZBUF, AUTH),
     (0x4, OPT, EXT_ENC_ZBUF, MULTI_LINK_SYN),
     (0x4, OPT, EXT_ENC_UNIT, "multi_link_ack"),
     (0x5, OPT, EXT_ENC_UNIT, "low_latency"),
     (0x6, OPT, EXT_ENC_UNIT, "compression"),
+    (0x7, OPT, EXT_ENC_Z64, "remote_bound"),
 ];
 
 /// `transport/join.rs` — where BOTH `qos` and `shm` are mandatory, unlike every
@@ -340,17 +343,26 @@ const FRAGMENT: &[Row] = &[
 /// `transport/oam.rs`.
 const TRANSPORT_OAM: &[Row] = &[(0x1, MAND, EXT_ENC_Z64, "qos")];
 
-/// The three every network message carries — `network/push.rs`,
-/// `network/interest.rs`, `network/declare.rs`, and the first three rows of
-/// `network/request.rs`. `node_id` is the MANDATORY one.
+/// The three `network/interest.rs` and `network/declare.rs` carry, and the first
+/// three of `Push` and `Request`. `node_id` is the MANDATORY one.
 const NETWORK_COMMON: &[Row] = &[
     (0x1, OPT, EXT_ENC_Z64, "qos"),
     (0x2, OPT, EXT_ENC_ZBUF, TIMESTAMP),
     (0x3, MAND, EXT_ENC_Z64, "node_id"),
 ];
 
-/// `network/request.rs` — the common three plus the three that decide what a
-/// query DOES. `target` is mandatory; `budget` and `timeout` are not.
+/// `network/push.rs` — the common three and the timestamp stack, which
+/// `Interest` and `Declare` do not declare.
+const PUSH: &[Row] = &[
+    (0x1, OPT, EXT_ENC_Z64, "qos"),
+    (0x2, OPT, EXT_ENC_ZBUF, TIMESTAMP),
+    (0x3, MAND, EXT_ENC_Z64, "node_id"),
+    (0x7, OPT, EXT_ENC_ZBUF, "ts_stack"),
+];
+
+/// `network/request.rs` — the common three, the three that decide what a query
+/// DOES, and the timestamp stack. `target` is mandatory; `budget` and `timeout`
+/// are not.
 const REQUEST: &[Row] = &[
     (0x1, OPT, EXT_ENC_Z64, "qos"),
     (0x2, OPT, EXT_ENC_ZBUF, TIMESTAMP),
@@ -358,6 +370,7 @@ const REQUEST: &[Row] = &[
     (0x4, MAND, EXT_ENC_Z64, "target"),
     (0x5, OPT, EXT_ENC_Z64, "budget"),
     (0x6, OPT, EXT_ENC_Z64, "timeout"),
+    (0x7, OPT, EXT_ENC_ZBUF, "ts_stack"),
 ];
 
 /// `network/response.rs` — `0x3` is a `ZBuf` responder identity, which shares
@@ -366,6 +379,15 @@ const RESPONSE: &[Row] = &[
     (0x1, OPT, EXT_ENC_Z64, "qos"),
     (0x2, OPT, EXT_ENC_ZBUF, TIMESTAMP),
     (0x3, OPT, EXT_ENC_ZBUF, RESPONDER_ID),
+    (0x7, OPT, EXT_ENC_ZBUF, "ts_stack"),
+];
+
+/// `ResponseFinal`, which takes its types from `network/response.rs`'s `ext`
+/// module but carries only two of them (`pub struct ResponseFinal`: `ext_qos`
+/// and `ext_tstamp`), and reads only those two.
+const RESPONSE_FINAL: &[Row] = &[
+    (0x1, OPT, EXT_ENC_Z64, "qos"),
+    (0x2, OPT, EXT_ENC_ZBUF, TIMESTAMP),
 ];
 
 /// `network/oam.rs` — QoS and Timestamp only; OAM carries no node id.
@@ -401,9 +423,15 @@ const DEL: &[Row] = &[
 /// the query's VALUE
 /// (`ValueType<{ ZExtZBuf::<0x03>::id(false) }, 0x04>`), the ext a reader that
 /// looks only at the message body never finds.
+///
+/// `0x4` is the shared-memory marker that precedes the value when its payload
+/// is sliced: the same declaration's second argument, a UNIT and not
+/// mandatory, which upstream's Query reader takes with the value
+/// (`ext::QueryBodyType::SID | ext::QueryBodyType::VID`).
 const QUERY: &[Row] = &[
     (0x1, OPT, EXT_ENC_ZBUF, SOURCE_INFO),
     (0x3, OPT, EXT_ENC_ZBUF, QUERY_BODY),
+    (0x4, OPT, EXT_ENC_UNIT, "shm"),
     (0x5, OPT, EXT_ENC_ZBUF, "attachment"),
 ];
 
@@ -508,9 +536,11 @@ carrier_tables! {
     ExtCarrier::Fragment => FRAGMENT,
     ExtCarrier::TransportOam => TRANSPORT_OAM,
     ExtCarrier::TransportPlain => &[],
-    ExtCarrier::Push | ExtCarrier::Interest | ExtCarrier::Declare => NETWORK_COMMON,
+    ExtCarrier::Push => PUSH,
+    ExtCarrier::Interest | ExtCarrier::Declare => NETWORK_COMMON,
     ExtCarrier::Request => REQUEST,
-    ExtCarrier::Response | ExtCarrier::ResponseFinal => RESPONSE,
+    ExtCarrier::Response => RESPONSE,
+    ExtCarrier::ResponseFinal => RESPONSE_FINAL,
     ExtCarrier::NetworkOam => NETWORK_OAM,
     ExtCarrier::DeclareCommon => DECLARE_COMMON,
     ExtCarrier::DeclareQueryable => DECLARE_QUERYABLE,
@@ -636,6 +666,192 @@ mod tests {
                 identities(*carrier),
                 rows(*carrier),
             );
+        }
+    }
+
+    /// Every extension zenoh 1.10.2 declares, one per carrier, as the citation
+    /// of its declaration: `(carrier, id, mandatory, encoding, anchor)`.
+    ///
+    /// Each anchor is a `` `path` @ `needle` `` citation of the pinned upstream
+    /// tree, which `scripts/lib/upstream_citation_anchor_gate.py` holds to that
+    /// tree on every push: the day upstream changes a declaration, the needle
+    /// stops occurring and that gate reds. Where the needle is a `zext*!`
+    /// declaration, [`the_upstream_declarations_say_what_their_rows_say`] holds
+    /// the row's three columns to the needle's own text, so a row and the line
+    /// it cites cannot disagree either. [`each_carrier_declares_exactly_what_upstream_declares`]
+    /// holds the table to these rows, both ways.
+    ///
+    /// What it cannot see is a declaration upstream ADDS: no needle here cites
+    /// it. That half needs the upstream tree, which this test does not read.
+    const UPSTREAM_DECLARATIONS: &[(ExtCarrier, u8, bool, u8, &str)] = &[
+        (ExtCarrier::Init, 0x1, OPT, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/transport/init.rs` @ `pub type QoS = zextunit!(0x1, false);`"),
+        (ExtCarrier::Init, 0x1, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/transport/init.rs` @ `pub type QoSLink = zextz64!(0x1, false);`"),
+        (ExtCarrier::Init, 0x2, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/transport/init.rs` @ `pub type Shm = zextzbuf!(0x2, false);`"),
+        (ExtCarrier::Init, 0x3, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/transport/init.rs` @ `pub type Auth = zextzbuf!(0x3, false);`"),
+        (ExtCarrier::Init, 0x4, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/transport/init.rs` @ `pub type MultiLink = zextzbuf!(0x4, false);`"),
+        (ExtCarrier::Init, 0x5, OPT, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/transport/init.rs` @ `pub type LowLatency = zextunit!(0x5, false);`"),
+        (ExtCarrier::Init, 0x6, OPT, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/transport/init.rs` @ `pub type Compression = zextunit!(0x6, false);`"),
+        (ExtCarrier::Init, 0x7, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/transport/init.rs` @ `pub type Patch = zextz64!(0x7, false);`"),
+        (ExtCarrier::Init, 0x8, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/transport/init.rs` @ `pub type RegionName = zextzbuf!(0x8, false);`"),
+        (ExtCarrier::Open, 0x1, OPT, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/transport/open.rs` @ `pub type QoS = zextunit!(0x1, false);`"),
+        (ExtCarrier::Open, 0x2, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/transport/open.rs` @ `pub type Shm = zextzbuf!(0x2, false);`"),
+        (ExtCarrier::Open, 0x3, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/transport/open.rs` @ `pub type Auth = zextzbuf!(0x3, false);`"),
+        (ExtCarrier::Open, 0x4, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/transport/open.rs` @ `pub type MultiLinkSyn = zextzbuf!(0x4, false);`"),
+        (ExtCarrier::Open, 0x4, OPT, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/transport/open.rs` @ `pub type MultiLinkAck = zextunit!(0x4, false);`"),
+        (ExtCarrier::Open, 0x5, OPT, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/transport/open.rs` @ `pub type LowLatency = zextunit!(0x5, false);`"),
+        (ExtCarrier::Open, 0x6, OPT, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/transport/open.rs` @ `pub type Compression = zextunit!(0x6, false);`"),
+        (ExtCarrier::Open, 0x7, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/transport/open.rs` @ `pub type RemoteBound = zextz64!(0x7, false);`"),
+        (ExtCarrier::Join, 0x1, MAND, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/transport/join.rs` @ `pub type QoS = zextzbuf!(0x1, true);`"),
+        (ExtCarrier::Join, 0x2, MAND, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/transport/join.rs` @ `pub type Shm = zextzbuf!(0x2, true);`"),
+        (ExtCarrier::Join, 0x7, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/transport/join.rs` @ `pub type Patch = zextz64!(0x7, false);`"),
+        (ExtCarrier::Frame, 0x1, MAND, EXT_ENC_Z64, "`commons/zenoh-protocol/src/transport/frame.rs` @ `pub type QoS = zextz64!(0x1, true);`"),
+        (ExtCarrier::Fragment, 0x1, MAND, EXT_ENC_Z64, "`commons/zenoh-protocol/src/transport/fragment.rs` @ `pub type QoS = zextz64!(0x1, true);`"),
+        (ExtCarrier::Fragment, 0x2, OPT, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/transport/fragment.rs` @ `pub type First = zextunit!(0x2, false);`"),
+        (ExtCarrier::Fragment, 0x3, OPT, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/transport/fragment.rs` @ `pub type Drop = zextunit!(0x3, false);`"),
+        (ExtCarrier::TransportOam, 0x1, MAND, EXT_ENC_Z64, "`commons/zenoh-protocol/src/transport/oam.rs` @ `pub type QoS = zextz64!(0x1, true);`"),
+        (ExtCarrier::Push, 0x1, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/push.rs` @ `pub type QoS = zextz64!(0x1, false);`"),
+        (ExtCarrier::Push, 0x2, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/push.rs` @ `pub type Timestamp = zextzbuf!(0x2, false);`"),
+        (ExtCarrier::Push, 0x3, MAND, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/push.rs` @ `pub type NodeId = zextz64!(0x3, true);`"),
+        (ExtCarrier::Push, 0x7, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/push.rs` @ `pub type TsStack = zextzbuf!(0x7, false);`"),
+        (ExtCarrier::Request, 0x1, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/request.rs` @ `pub type QoS = zextz64!(0x1, false);`"),
+        (ExtCarrier::Request, 0x2, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/request.rs` @ `pub type Timestamp = zextzbuf!(0x2, false);`"),
+        (ExtCarrier::Request, 0x3, MAND, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/request.rs` @ `pub type NodeId = zextz64!(0x3, true);`"),
+        (ExtCarrier::Request, 0x4, MAND, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/request.rs` @ `pub type Target = zextz64!(0x4, true);`"),
+        (ExtCarrier::Request, 0x5, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/request.rs` @ `pub type Budget = zextz64!(0x5, false);`"),
+        (ExtCarrier::Request, 0x6, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/request.rs` @ `pub type Timeout = zextz64!(0x6, false);`"),
+        (ExtCarrier::Request, 0x7, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/request.rs` @ `pub type TsStack = zextzbuf!(0x7, false);`"),
+        (ExtCarrier::Response, 0x1, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/response.rs` @ `pub type QoS = zextz64!(0x1, false);`"),
+        (ExtCarrier::Response, 0x2, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/response.rs` @ `pub type Timestamp = zextzbuf!(0x2, false);`"),
+        (ExtCarrier::Response, 0x3, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/response.rs` @ `pub type ResponderId = zextzbuf!(0x3, false);`"),
+        (ExtCarrier::Response, 0x7, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/response.rs` @ `pub type TsStack = zextzbuf!(0x7, false);`"),
+        // `ResponseFinal` names two of `response.rs`'s types in its struct; the
+        // declarations it uses are the two above it.
+        (ExtCarrier::ResponseFinal, 0x1, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/response.rs` @ `pub ext_qos: ext::QoSType,`"),
+        (ExtCarrier::ResponseFinal, 0x2, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/response.rs` @ `pub ext_tstamp: Option<ext::TimestampType>,`"),
+        (ExtCarrier::Interest, 0x1, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/interest.rs` @ `pub type QoS = zextz64!(0x1, false);`"),
+        (ExtCarrier::Interest, 0x2, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/interest.rs` @ `pub type Timestamp = zextzbuf!(0x2, false);`"),
+        (ExtCarrier::Interest, 0x3, MAND, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/interest.rs` @ `pub type NodeId = zextz64!(0x3, true);`"),
+        (ExtCarrier::Declare, 0x1, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/declare.rs` @ `pub type QoS = zextz64!(0x1, false);`"),
+        (ExtCarrier::Declare, 0x2, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/declare.rs` @ `pub type Timestamp = zextzbuf!(0x2, false);`"),
+        (ExtCarrier::Declare, 0x3, MAND, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/declare.rs` @ `pub type NodeId = zextz64!(0x3, true);`"),
+        (ExtCarrier::NetworkOam, 0x1, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/oam.rs` @ `pub type QoS = zextz64!(0x1, false);`"),
+        (ExtCarrier::NetworkOam, 0x2, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/oam.rs` @ `pub type Timestamp = zextzbuf!(0x2, false);`"),
+        (ExtCarrier::DeclareCommon, 0x0f, MAND, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/network/declare.rs` @ `pub type WireExprExt = zextzbuf!(0x0f, true);`"),
+        (ExtCarrier::DeclareQueryable, 0x01, OPT, EXT_ENC_Z64, "`commons/zenoh-protocol/src/network/declare.rs` @ `pub type QueryableInfo = zextz64!(0x01, false);`"),
+        (ExtCarrier::Put, 0x1, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/zenoh/put.rs` @ `pub type SourceInfo = zextzbuf!(0x1, false);`"),
+        (ExtCarrier::Put, 0x2, MAND, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/zenoh/put.rs` @ `pub type Shm = zextunit!(0x2, true);`"),
+        (ExtCarrier::Put, 0x3, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/zenoh/put.rs` @ `pub type Attachment = zextzbuf!(0x3, false);`"),
+        (ExtCarrier::Del, 0x1, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/zenoh/del.rs` @ `pub type SourceInfo = zextzbuf!(0x1, false);`"),
+        (ExtCarrier::Del, 0x2, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/zenoh/del.rs` @ `pub type Attachment = zextzbuf!(0x2, false);`"),
+        (ExtCarrier::Query, 0x1, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/zenoh/query.rs` @ `pub type SourceInfo = zextzbuf!(0x1, false);`"),
+        // The value and the shared-memory marker before it are one
+        // declaration: a ZBuf `0x03` and the raw identity `0x04`, a UNIT.
+        (ExtCarrier::Query, 0x3, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/zenoh/query.rs` @ `pub type QueryBodyType = crate::zenoh::ext::ValueType<{ ZExtZBuf::<0x03>::id(false) }, 0x04>;`"),
+        (ExtCarrier::Query, 0x4, OPT, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/zenoh/query.rs` @ `pub type QueryBodyType = crate::zenoh::ext::ValueType<{ ZExtZBuf::<0x03>::id(false) }, 0x04>;`"),
+        (ExtCarrier::Query, 0x5, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/zenoh/query.rs` @ `pub type Attachment = zextzbuf!(0x5, false);`"),
+        (ExtCarrier::Err, 0x1, OPT, EXT_ENC_ZBUF, "`commons/zenoh-protocol/src/zenoh/err.rs` @ `pub type SourceInfo = zextzbuf!(0x1, false);`"),
+        (ExtCarrier::Err, 0x2, MAND, EXT_ENC_UNIT, "`commons/zenoh-protocol/src/zenoh/err.rs` @ `pub type Shm = zextunit!(0x2, true);`"),
+        // The auth methods' ids are named constants upstream (`auth::id`).
+        (ExtCarrier::Auth, 0x1, OPT, EXT_ENC_ZBUF, "`io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @ `pub(super) type InitSyn = zextzbuf!(PUBKEY, false);`"),
+        (ExtCarrier::Auth, 0x1, OPT, EXT_ENC_UNIT, "`io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @ `pub(super) type OpenAck = zextunit!(PUBKEY, false);`"),
+        (ExtCarrier::Auth, 0x2, OPT, EXT_ENC_UNIT, "`io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs` @ `pub(super) type InitSyn = zextunit!(USRPWD, false);`"),
+        (ExtCarrier::Auth, 0x2, OPT, EXT_ENC_Z64, "`io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs` @ `pub(super) type InitAck = zextz64!(USRPWD, false);`"),
+        (ExtCarrier::Auth, 0x2, OPT, EXT_ENC_ZBUF, "`io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs` @ `pub(super) type OpenSyn = zextzbuf!(USRPWD, false);`"),
+    ];
+
+    /// The auth method ids the `Auth` rows' needles name by constant, each
+    /// cited where upstream defines it.
+    const AUTH_METHOD_IDS: &[(&str, u8, &str)] = &[
+        ("PUBKEY", 0x1, "`io/zenoh-transport/src/unicast/establishment/ext/auth/mod.rs` @ `pub(crate) const PUBKEY: u8 = 0x1;`"),
+        ("USRPWD", 0x2, "`io/zenoh-transport/src/unicast/establishment/ext/auth/mod.rs` @ `pub(crate) const USRPWD: u8 = 0x2;`"),
+    ];
+
+    /// The needle of a `` `path` @ `needle` `` anchor.
+    fn needle(anchor: &str) -> &str {
+        let (_, rest) = anchor.split_once(" @ `").expect("an anchor has ` @ `");
+        rest.strip_suffix('`')
+            .expect("an anchor ends in a backtick")
+    }
+
+    /// `(id, mandatory, encoding)` read off a `zext*!(id, mandatory)` needle,
+    /// or `None` for a needle that is not such a declaration.
+    fn declared_by(needle: &str) -> Option<(u8, bool, u8)> {
+        let (enc, rest) = [
+            ("zextunit!(", EXT_ENC_UNIT),
+            ("zextz64!(", EXT_ENC_Z64),
+            ("zextzbuf!(", EXT_ENC_ZBUF),
+        ]
+        .iter()
+        .find_map(|(mac, enc)| needle.split_once(*mac).map(|(_, rest)| (*enc, rest)))?;
+        let (args, _) = rest.split_once(')')?;
+        let (id, mandatory) = args.split_once(", ")?;
+        let id = match id.strip_prefix("0x") {
+            Some(hex) => u8::from_str_radix(hex, 16).ok()?,
+            None => {
+                let (_, value, _) = AUTH_METHOD_IDS.iter().find(|(name, _, _)| *name == id)?;
+                *value
+            }
+        };
+        let mandatory = match mandatory {
+            "true" => true,
+            "false" => false,
+            _ => return None,
+        };
+        Some((id, mandatory, enc))
+    }
+
+    /// Every `zext*!` needle says the three columns its row says, and the auth
+    /// method constants say the ids those rows use. A row typed with one
+    /// column wrong beside a correct citation reds here; the citation itself
+    /// is held to upstream by the anchor gate.
+    #[test]
+    fn the_upstream_declarations_say_what_their_rows_say() {
+        let mut parsed = 0usize;
+        for (carrier, id, mandatory, enc, anchor) in UPSTREAM_DECLARATIONS {
+            if let Some(said) = declared_by(needle(anchor)) {
+                assert_eq!(
+                    said,
+                    (*id, *mandatory, *enc),
+                    "{carrier:?}: the row disagrees with the declaration it cites, {anchor}"
+                );
+                parsed += 1;
+            }
+        }
+        // ANTI-VACUITY: all but the four rows whose needle is a struct field or
+        // the Query value's declaration are read off their needle.
+        assert_eq!(parsed, UPSTREAM_DECLARATIONS.len() - 4);
+        for (name, id, anchor) in AUTH_METHOD_IDS {
+            assert_eq!(
+                needle(anchor),
+                alloc::format!("pub(crate) const {name}: u8 = {id:#x};"),
+                "{anchor}"
+            );
+        }
+    }
+
+    /// The table declares, carrier by carrier, exactly the identities upstream
+    /// declares: no row upstream lacks, and no upstream declaration without
+    /// its row. A row whose encoding or mandatory bit drifts from upstream's
+    /// fails both directions at once.
+    #[test]
+    fn each_carrier_declares_exactly_what_upstream_declares() {
+        for carrier in ALL_CARRIERS {
+            let mut ours: alloc::vec::Vec<u8> = rows(*carrier).iter().map(row_eid).collect();
+            let mut theirs: alloc::vec::Vec<u8> = UPSTREAM_DECLARATIONS
+                .iter()
+                .filter(|(c, ..)| c == carrier)
+                .map(|(_, id, mandatory, enc, _)| row_eid(&(*id, *mandatory, *enc, "")))
+                .collect();
+            ours.sort_unstable();
+            theirs.sort_unstable();
+            assert_eq!(
+                ours, theirs,
+                "{carrier:?}: the table's identities against upstream's declarations"
+            );
+        }
+        // Every carrier the declarations name is one the table sweeps.
+        for (carrier, ..) in UPSTREAM_DECLARATIONS {
+            assert!(ALL_CARRIERS.contains(carrier), "{carrier:?}");
         }
     }
 

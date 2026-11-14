@@ -8861,6 +8861,37 @@ mod tests {
              but its author's reading (R311y605)",
         ),
         (
+            crate::ext_name::ExtCarrier::Open,
+            "shm",
+            "two layouts under one identity: the OpenSyn body is the challenge \
+             and the handoff counters, the OpenAck body the counters alone \
+             (`crate::extshm`), and a ZBuf body walker is handed the body and \
+             not the A flag that tells them apart",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Init,
+            "region_name",
+            "the region's name as its bytes with no framing of their own \
+             (`crate::extregion`), so the value IS the reading",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Push,
+            "ts_stack",
+            "the interception stack `crate::ts_stack` reads; no dissector \
+             walker is written for it yet, so the row renders as its bytes \
+             until one is",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Request,
+            "ts_stack",
+            "as on `Push`",
+        ),
+        (
+            crate::ext_name::ExtCarrier::Response,
+            "ts_stack",
+            "as on `Push`",
+        ),
+        (
             crate::ext_name::ExtCarrier::Put,
             "attachment",
             "USER bytes: the protocol declares no structure there, so walking \
@@ -9869,9 +9900,11 @@ mod tests {
         ),
         (
             crate::ext_name::ExtCarrier::Open,
-            "shm",
-            "the SHM challenge value the peer must echo — a nonce, and the \
-             `Init` half of the same negotiation is a ZBuf that IS walked",
+            "remote_bound",
+            "the side of a region boundary the sender puts the receiver on, \
+             a `Bound` sent as its discriminant (`crate::extbound`). Rendered \
+             as that number: no walker names the two values yet, as `target`'s \
+             does",
         ),
         (
             crate::ext_name::ExtCarrier::Request,
