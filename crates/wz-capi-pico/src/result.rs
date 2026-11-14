@@ -103,6 +103,12 @@ pub const Z_ERR_SCOUT_NO_RESULTS: ZResult = -87;
 /// in a build without its raweth transport, `reth/...`).
 pub const Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN: ZResult = -92;
 
+/// A `z_open` whose config's mode is neither `client` nor `peer` (`router` among them: pico has
+/// no router role). Matches pico `_Z_ERR_CONFIG_INVALID_MODE` (`utils/result.h`), which its
+/// open answers for such a mode (`vendor/zenoh-pico/src/net/session.c` @
+/// `ret = _Z_ERR_CONFIG_INVALID_MODE;`).
+pub const Z_ERR_CONFIG_INVALID_MODE: ZResult = -90;
+
 /// The session has no transport to do this on: a client whose link is gone and has not come
 /// back. Matches pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE` (`utils/result.h`), which its three
 /// `zp_batch_*` answer when `_z_transport_get_common` finds the transport cleared

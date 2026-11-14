@@ -80,10 +80,14 @@ catalog_version = 2
 # is not a capability: no build chooses it, the zenoh-c ABI and the Rust API always have it, and
 # the pico ABI, which reads no zenoh configuration, names the features it wants and so never does.
 core = ["rx-busy-poll", "open-plan"]
+# `std`: the pico ABI layer on the host's standard library (its locks, condition variables and
+# allocator), which the crate's default names first. It is not a capability: no plane comes or
+# goes with it, every host engine selects it, and only a Zephyr image builds the layer without it
+# (`os-zephyr`), from a manifest of its own.
 # `engine-tokio`: the engine a pico build runs its sessions on (docs/capi-pico-on-coop-engine.md).
 # Every build this declaration configures is on the tokio engine; the cooperative engine is not
 # an axis here yet (that note's decision D5).
-pico = ["engine-tokio", "serial-drive-own-thread", "rx-busy-poll"]
+pico = ["std", "engine-tokio", "serial-drive-own-thread", "rx-busy-poll"]
 c = []
 
 # The operating-system facilities every HOST build asks for whatever its capabilities
@@ -2900,12 +2904,13 @@ the peer's.
 [[protocol_fact]]
 id = "router-role"
 pico = "no"
-holds = ["crates/wz-capi-pico/src/session.rs @ _ => WhatAmI::Client,"]
+holds = ["crates/wz-capi-pico/src/session.rs @ Some(_) => return Err(crate::result::Z_ERR_CONFIG_INVALID_MODE),", "crates/wz-capi-pico/src/result.rs @ pub const Z_ERR_CONFIG_INVALID_MODE: ZResult = -90;"]
 lacks = ["crates/wz-capi-pico/src/session.rs @ WhatAmI::Router", "crates/wz-capi-coop/src/engine.rs @ WhatAmI::Router"]
 help = '''
 Whether a session of the ABI can take the router role. The pico ABI opens a
-client, or a peer when the configuration's mode is peer or it listens; no path
-of the ABI makes a router. zenoh-pico has no router role either. The zenoh-c ABI
+client, or a peer when the configuration's mode is peer or it listens, and
+refuses any other mode, router among them, with zenoh-pico's invalid-mode code
+(-90), as zenoh-pico does; no path of the ABI makes a router. The zenoh-c ABI
 states it with the router-node capability instead.
 '''
 

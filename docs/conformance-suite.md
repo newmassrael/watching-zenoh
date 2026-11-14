@@ -198,7 +198,7 @@ version, so a fact that changes while `catalog_version` does not is a red test t
 | `patch` | 1 | 1 | the patch level session-core states in every Init and Join |
 | `batch-compression` | no | (the `transport_compression` capability) | the pico crate forwards no compression feature to the session model |
 | `request-id-resolution` | 32 | 32 | both engines give every session the code 0b10, and every Init carries its size parameters |
-| `router-role` | no | (the `router-node` capability) | the pico ABI opens a client, or a peer for mode peer or a listener; no path of it makes a router |
+| `router-role` | no | (the `router-node` capability) | the pico ABI opens a client, or a peer for mode peer or a listener, and refuses any other mode as zenoh-pico does (-90); no path of it makes a router |
 | `tcp-link` | yes | yes | the tokio engine takes the tcp link in every build; the cooperative engine dials and accepts tcp on a host and on Zephyr |
 
 The statement also names the build's `engine` and `platform`, in its digest (format version 3,
@@ -219,9 +219,10 @@ exactly, or maps one to an answer the item does not admit; a fixed answer the it
 and an item that is not answered exactly once for each ABI.
 
 zenoh-pico 1.10.2 has no router role either: its open reads the configuration's mode as client or
-peer and refuses any other value with an invalid-mode error. The pico ABI departs from that: it
-opens a client for any mode but peer, `router` included, where zenoh-pico refuses. That is a
-parity question of the pico ABI, not of the suite; the fact states what the ABI does.
+peer and refuses any other value with `_Z_ERR_CONFIG_INVALID_MODE` (-90), except in a config with a
+listen locator, over whose mode it writes peer first. The pico ABI does the same, with the same
+code (`Z_ERR_CONFIG_INVALID_MODE`); until 2026-11-14 it opened a client for any mode but peer,
+`router` included.
 
 ## 5. The PIXIT
 
@@ -435,4 +436,3 @@ The wz side, in order. A step that needs nothing of SCE is marked so.
 ## 12. Open
 
 - The base layer's parts that section 3.4 lists as not covered.
-- The pico ABI's answer to a mode other than client and peer (section 4.3).
