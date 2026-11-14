@@ -34,10 +34,10 @@
 //! (`overlays/qemu_admin_fixed_tls.conf` says why).
 
 use core::cell::RefCell;
-use core::fmt::Write;
+use core::net::IpAddr;
 
 use wz::runtime_zephyr::glue::{log, log_args, stack_usage, yield_us};
-use wz::runtime_zephyr::net::await_board_ipv4;
+use wz::runtime_zephyr::net::await_board_ip;
 use wz::runtime_zephyr::stack::StackWatch;
 use wz::runtime_zephyr::stream::{ZephyrTcpDial, ZephyrTcpListener, ZephyrTcpSocket};
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
@@ -54,7 +54,7 @@ use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::slot_observer::{ObserverCell, Requesters};
-use wz_session_core::text_out::FixedText;
+use wz_session_core::text_out::{FixedText, TextOut};
 use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
 use wz_session_mcu::admin_fixed::{
@@ -111,8 +111,9 @@ const ACCEPT_TIMEOUT_MS: u64 = 20_000;
 const VERSION: &str = "wz-zephyr-admin-node";
 /// How long the node waits for the board to have an address.
 const ADDRESS_WAIT_MS: u32 = 30_000;
-/// The widest locator text: `tls/255.255.255.255:65535`.
-const LOCATOR_BYTES: usize = 32;
+/// The widest locator text, of either family the node's address may be:
+/// `tls/[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535`, 62 bytes.
+const LOCATOR_BYTES: usize = 62;
 /// The most commanders one verb lists.
 pub const MAX_COMMANDERS: usize = 4;
 
@@ -323,11 +324,11 @@ impl SessionFactory<Clock, Driver> for Factory {
     }
 }
 
-/// `tls/a.b.c.d:port` for `address`, in fixed text.
-fn locator(address: [u8; 4]) -> FixedText<LOCATOR_BYTES> {
-    let [a, b, c, d] = address;
+/// `tls/a.b.c.d:port` or `tls/[ipv6]:port` for `address`, in fixed text.
+fn locator(address: IpAddr) -> FixedText<LOCATOR_BYTES> {
     let mut text = FixedText::new();
-    let _ = write!(text, "tls/{a}.{b}.{c}.{d}:{TLS_PORT}");
+    text.push_str("tls/");
+    text.push_socket_addr(core::net::SocketAddr::new(address, TLS_PORT));
     text
 }
 
@@ -399,8 +400,8 @@ fn start() -> Result<Running, i32> {
         log(c"wz: FAIL - the board's entropy source could not fill the signing key");
         return Err(2);
     }
-    let Some(address) = await_board_ipv4(ADDRESS_WAIT_MS) else {
-        log(c"wz: FAIL - the board's interface never got an IPv4 address");
+    let Some(address) = await_board_ip(ADDRESS_WAIT_MS) else {
+        log(c"wz: FAIL - the board's interface never got an address of its family");
         return Err(1);
     };
     // The node's zid is the one its key names (decision D1), and its certificate is printed for the

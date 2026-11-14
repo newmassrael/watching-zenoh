@@ -12,8 +12,9 @@
 //!
 //! The local address is the node's, as its interface holds it. It is a
 //! parameter, never a constant here: the node advertises it as its locator, a
-//! dialled link names it as its source, and on a board it comes from DHCP or
-//! Kconfig through [`board_ipv4`](crate::net::board_ipv4).
+//! dialled link names it as its source, and on a board it comes from DHCP,
+//! autoconfiguration or Kconfig through [`board_ip`](crate::net::board_ip), of the
+//! family the image's Kconfig chose.
 
 use alloc::rc::Rc;
 use core::net::{IpAddr, SocketAddr};

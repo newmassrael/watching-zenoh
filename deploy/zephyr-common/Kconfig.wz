@@ -198,3 +198,28 @@ endmenu
 # An IPv6 image also states its address (CONFIG_NET_CONFIG_MY_IPV6_ADDR, or autoconfiguration).
 config NET_IPV6
 	default n
+
+# The family of the node's own address: the one it binds its links on, advertises as its
+# locators and derives its zenoh id's interface from. The board's build hands the choice to
+# cargo (WZ_NODE_IPV6 in wz_zephyr_board.cmake), and `wz_runtime_zephyr::net::board_ip` reads the
+# board's address of that family. A node of one family still dials a locator of the other where
+# the stack has both.
+choice WZ_NODE_FAMILY
+	prompt "The family of the node's own address"
+	depends on NETWORKING
+	default WZ_NODE_IPV4 if NET_IPV4
+	default WZ_NODE_IPV6
+
+config WZ_NODE_IPV4
+	bool "IPv4: the interface's IPv4 address (DHCP or CONFIG_NET_CONFIG_MY_IPV4_ADDR)"
+	depends on NET_IPV4
+
+config WZ_NODE_IPV6
+	bool "IPv6: the interface's preferred global IPv6 address"
+	depends on NET_IPV6
+	help
+	  The board answers the address with wzApplicationGetIpv6Address
+	  (deploy/zephyr-common/wz_board_hooks.c), the first preferred global address any
+	  interface holds: one that autoconfiguration or CONFIG_NET_CONFIG_MY_IPV6_ADDR gave it.
+
+endchoice

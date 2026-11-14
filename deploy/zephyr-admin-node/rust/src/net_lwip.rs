@@ -161,8 +161,12 @@ impl NodeNet for LwipMacNet {
         self.links.clone()
     }
 
-    fn addresses(&self) -> Vec<[u8; 4]> {
-        self.addresses.clone()
+    fn addresses(&self) -> Vec<core::net::IpAddr> {
+        // lwIP here is IPv4 alone.
+        self.addresses
+            .iter()
+            .map(|&address| core::net::IpAddr::from(address))
+            .collect()
     }
 
     fn zid(&self) -> Vec<u8> {

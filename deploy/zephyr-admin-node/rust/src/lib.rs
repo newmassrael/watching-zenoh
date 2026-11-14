@@ -235,11 +235,11 @@ pub trait NodeNet {
     /// The node's links.
     fn links(&self) -> Rc<Self::Links>;
 
-    /// The IPv4 addresses the node advertises as its locators, as its interfaces
-    /// hold them: one per link. The accepting socket is bound on every interface, so
-    /// a host reaches the node on whichever of them it shares a network with, and the
-    /// node tells it all of them.
-    fn addresses(&self) -> Vec<[u8; 4]>;
+    /// The addresses the node advertises as its locators, as its interfaces hold them: one per
+    /// link, IPv4 on lwIP, of the image's chosen family on Zephyr's stack. The accepting socket
+    /// is bound on every interface, so a host reaches the node on whichever of them it shares a
+    /// network with, and the node tells it all of them.
+    fn addresses(&self) -> Vec<core::net::IpAddr>;
 
     /// The node's zenoh id: 1 to 16 bytes, unique per board on a network.
     fn zid(&self) -> Vec<u8>;
@@ -285,9 +285,8 @@ fn params(whatami: WhatAmI, zid: &[u8], signing_key: &[u8]) -> SessionInitParams
 }
 
 #[cfg(all(role_admin, not(storage_fixed)))]
-fn locator(address: [u8; 4]) -> String {
-    let [a, b, c, d] = address;
-    format!("udp/{a}.{b}.{c}.{d}:{LISTEN_PORT}")
+fn locator(address: core::net::IpAddr) -> String {
+    format!("udp/{}", core::net::SocketAddr::new(address, LISTEN_PORT))
 }
 
 /// Assemble the node over `net` and run it. Returns only when it cannot start;
