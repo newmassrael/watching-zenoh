@@ -11,10 +11,13 @@ struct RecordingPlane {
     /// The ticks the composite handed the plane's timer, so a test can be the clock.
     ticks: std::sync::Mutex<Vec<Arc<dyn Fn() -> bool + Send + Sync>>>,
     /// The next word `order_stamp` answers, counting up, for a plane that orders the stamps of
-    /// its session itself; `None` carries the proposal, as the default does.
+    /// its session itself; `None` carries the proposal, as the default does. The word
+    /// `u64::MAX` is refused, as a session with no time left refuses it.
     order_from: Option<std::sync::atomic::AtomicU64>,
-    /// The time word of each sample sent, in order.
-    stamped: std::sync::Mutex<Vec<Option<u64>>>,
+    /// The time word and the sequence number of each sample sent, in order.
+    stamped: std::sync::Mutex<Vec<(Option<u64>, Option<u32>)>>,
+    /// The node clock the plane answers with; `NodeHlc::disabled()` unless a test gives one.
+    node: NodeHlc,
 }
 
 /// A handle that writes its own name when it is dropped.
@@ -40,6 +43,7 @@ impl RecordingPlane {
             ticks: std::sync::Mutex::new(Vec::new()),
             order_from: None,
             stamped: std::sync::Mutex::new(Vec::new()),
+            node: NodeHlc::disabled(),
         }
     }
 
@@ -49,6 +53,19 @@ impl RecordingPlane {
             order_from: Some(std::sync::atomic::AtomicU64::new(word)),
             ..Self::new(true)
         }
+    }
+
+    /// A plane over the node clock `node`.
+    fn over_node(node: NodeHlc) -> Self {
+        Self {
+            node,
+            ..Self::new(true)
+        }
+    }
+
+    /// The time word and sequence number of each sample sent, in order.
+    fn stamped(&self) -> Vec<(Option<u64>, Option<u32>)> {
+        self.stamped.lock().unwrap().clone()
     }
 
     fn handle(&self, name: &'static str) -> Named {
@@ -85,21 +102,22 @@ impl AdvancedPublisherPlane for RecordingPlane {
     type Timer = Named;
 
     fn node_hlc(&self) -> &NodeHlc {
-        // A fresh clock per call would be the duplicate-`ID` defect the node
-        // clock exists to remove; one static disabled clock is the honest
-        // "this plane has none".
-        static DISABLED: std::sync::OnceLock<NodeHlc> = std::sync::OnceLock::new();
-        DISABLED.get_or_init(NodeHlc::disabled)
+        // The plane's one clock, held for its life: a fresh clock per call would be the
+        // duplicate-`ID` defect the node clock exists to remove.
+        &self.node
     }
 
     fn stamps(&self) -> bool {
         self.stamps
     }
 
-    fn order_stamp(&self, proposed: u64) -> u64 {
+    fn order_stamp(&self, proposed: u64) -> Result<u64, PublishError> {
         match &self.order_from {
-            Some(next) => next.fetch_add(1, Ordering::SeqCst),
-            None => proposed,
+            Some(next) => match next.fetch_add(1, Ordering::SeqCst) {
+                u64::MAX => Err(PublishError::TimestampExhausted),
+                word => Ok(word),
+            },
+            None => Ok(proposed),
         }
     }
 
@@ -157,10 +175,10 @@ impl AdvancedPublisherPlane for RecordingPlane {
         options: PublishOptions,
     ) -> Result<usize, PublishError> {
         self.events.lock().unwrap().push(String::from("publish"));
-        self.stamped
-            .lock()
-            .unwrap()
-            .push(options.timestamp.map(|timestamp| timestamp.time));
+        self.stamped.lock().unwrap().push((
+            options.timestamp.map(|timestamp| timestamp.time),
+            options.source_info.map(|source| source.sn),
+        ));
         Ok(payload.len())
     }
 
@@ -404,30 +422,105 @@ fn a_put_and_a_delete_carry_the_time_the_plane_orders() {
             .expect("the declaration is accepted");
     publisher.put(b"x").expect("a put is accepted");
     publisher.delete().expect("a delete is accepted");
-    assert_eq!(*plane.stamped.lock().unwrap(), [Some(42), Some(43)]);
+    assert_eq!(plane.stamped(), [(Some(42), Some(0)), (Some(43), Some(1))]);
 }
 
 /// A plane that does not order stamps carries the node clock's proposal as it is.
 #[test]
 fn a_plane_that_orders_nothing_carries_the_proposal() {
     let plane = Arc::new(RecordingPlane::new(true));
-    let options = AdvancedPublisherOptions {
-        cache: None,
-        publisher_detection: false,
-        ..AdvancedPublisherOptions::default()
-    };
-    let publisher =
-        AdvancedPublisherOn::declare_on(Arc::clone(&plane), "demo/proposed", options, vec![0x01])
-            .expect("the declaration is accepted");
+    let publisher = declare_plain(&plane, "demo/proposed");
     publisher.put(b"x").expect("a put is accepted");
-    let stamped = plane.stamped.lock().unwrap().clone();
+    let stamped = plane.stamped();
     assert_eq!(stamped.len(), 1);
-    let time = stamped[0].expect("an advanced put is stamped");
+    let time = stamped[0].0.expect("an advanced put is stamped");
     assert!(
         time >> 32 > 1_700_000_000,
         "the wall clock's seconds, the plane having no node clock: {}",
         time >> 32
     );
+}
+
+/// An advanced publisher on `plane` with no cache and no detection, sequenced by number.
+fn declare_plain(plane: &Arc<RecordingPlane>, key: &str) -> AdvancedPublisherOn<RecordingPlane> {
+    let options = AdvancedPublisherOptions {
+        cache: None,
+        publisher_detection: false,
+        ..AdvancedPublisherOptions::default()
+    };
+    AdvancedPublisherOn::declare_on(Arc::clone(plane), key, options, vec![0x01])
+        .expect("the declaration is accepted")
+}
+
+/// A session with no time left refuses the sample, as zenoh-pico refuses the put whose
+/// `z_timestamp_new` failed: nothing is sent, and the refused sample takes no sequence number,
+/// so the next one is not reported to a subscriber as a miss.
+#[test]
+fn a_session_with_no_time_left_refuses_the_sample_and_takes_no_sequence_number() {
+    let plane = Arc::new(RecordingPlane::ordering_from(u64::MAX - 1));
+    let publisher = declare_plain(&plane, "demo/exhausted");
+    publisher.put(b"x").expect("the last time there is");
+    assert_eq!(publisher.put(b"y"), Err(PublishError::TimestampExhausted));
+    // The test plane's counter has wrapped to 0: the next sample is given a time again.
+    publisher.delete().expect("the plane gives a time again");
+    assert_eq!(
+        plane.stamped(),
+        [(Some(u64::MAX - 1), Some(0)), (Some(0), Some(1))],
+        "the refused put sent nothing and took no sequence number"
+    );
+}
+
+/// A node clock under the `trusted-only` policy (`true`) or `always` (`false`).
+fn node_clock(trusted_only: bool) -> NodeHlc {
+    NodeHlc::for_node_over_source(
+        &[0x01],
+        wz_session_core::WhatAmI::Peer,
+        wz_node_time::node_clock::TimestampingEnabled::all(true),
+        wz_node_time::timestamp_source::SystemEpoch,
+    )
+    .with_trusted_only_stamping(trusted_only)
+}
+
+/// `trusted-only` stamps no data with a clock that is not trusted, and an advanced publisher's
+/// sample cannot go out without a time: it is refused, nothing is sent, and no sequence number is
+/// taken. Once the host reports the clock synchronised the sample carries the clock's time.
+#[test]
+fn a_trusted_only_node_refuses_a_sample_until_its_clock_is_trusted() {
+    let plane = Arc::new(RecordingPlane::over_node(node_clock(true)));
+    let publisher = declare_plain(&plane, "demo/untrusted");
+    assert_eq!(publisher.put(b"x"), Err(PublishError::ClockUntrusted));
+    assert_eq!(publisher.delete(), Err(PublishError::ClockUntrusted));
+    assert!(plane.stamped().is_empty(), "nothing went out");
+
+    assert!(plane.node.report_sync_acquired());
+    publisher
+        .put(b"x")
+        .expect("a trusted clock stamps the sample");
+    let stamped = plane.stamped();
+    assert_eq!(stamped.len(), 1);
+    assert_eq!(stamped[0].1, Some(0), "the refused samples took no number");
+    let time = stamped[0].0.expect("the sample carries a time");
+    assert!(
+        time >> 32 > 1_700_000_000,
+        "the node clock's time, over the system clock: {}",
+        time >> 32
+    );
+}
+
+/// With the policy off (`always`, the default and what upstream does) a node's clock stamps every
+/// sample whatever its standing.
+#[test]
+fn with_the_policy_off_every_sample_carries_the_node_clocks_time() {
+    let plane = Arc::new(RecordingPlane::over_node(node_clock(false)));
+    let publisher = declare_plain(&plane, "demo/always");
+    publisher
+        .put(b"x")
+        .expect("stamped with the clock as it stands");
+    publisher.delete().expect("and a delete too");
+    let stamped = plane.stamped();
+    assert_eq!(stamped.len(), 2);
+    let (first, second) = (stamped[0].0.unwrap(), stamped[1].0.unwrap());
+    assert!(second > first, "one clock: {first} then {second}");
 }
 
 /// R311y93 (review V1) — the sporadic-heartbeat emit gate. Non-sporadic emits

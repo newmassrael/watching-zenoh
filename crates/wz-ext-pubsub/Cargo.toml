@@ -111,6 +111,9 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "request-put-del",
     "rx-shared-bytes",
 ] }
+# A node clock that holds a clock, so the publisher's tests can take one under the `trusted-only`
+# policy and see what a sample does before and after the clock is trusted.
+wz-node-time = { path = "../wz-node-time", features = ["time-hlc"] }
 
 [lints]
 workspace = true

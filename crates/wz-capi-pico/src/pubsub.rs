@@ -819,7 +819,6 @@ mod one_session_time_tests {
     use alloc::vec::Vec;
 
     use wz_node_time::node_clock::{NodeHlc, TimestampingEnabled};
-    use wz_node_time::timestamp_source::FallbackStamp;
     use wz_session_core::epoch::{EpochSource, EpochUnavailable, SinceEpoch};
     use wz_session_core::ntp64::Ntp64;
     use wz_session_core::WhatAmI;
@@ -863,10 +862,27 @@ mod one_session_time_tests {
     }
 
     /// What the advanced publisher stamps a sample with: the node clock's proposal, as the
-    /// composite makes it, ordered as the pico plane orders it. Both words, the proposal first.
-    fn sample(publisher: &FallbackStamp, time: &SessionTime) -> (u64, u64) {
-        let proposed = publisher.stamp().time;
-        (proposed, time.order_data_stamp(proposed))
+    /// composite takes it, ordered as the pico plane orders it. Both words, the proposal first.
+    fn sample(hlc: &NodeHlc, time: &SessionTime) -> (u64, u64) {
+        let proposed = hlc.stamp().expect("a clock under `always` stamps").time;
+        let given = time
+            .order_data_stamp(proposed)
+            .expect("the session has time left");
+        (proposed, given)
+    }
+
+    /// A session that already gave the greatest time there is refuses a sample, as pico refuses
+    /// the put whose `z_timestamp_new` failed.
+    #[test]
+    fn a_session_with_no_time_left_refuses_a_sample() {
+        let hlc = node_clock();
+        let time = SessionTime::new().learned_by(hlc.clone());
+        assert_eq!(program(Some(u64::MAX), &time), u64::MAX);
+        let proposed = hlc.stamp().expect("a clock under `always` stamps").time;
+        assert_eq!(
+            time.order_data_stamp(proposed),
+            Err(wz_session_core::publish_options::PublishError::TimestampExhausted)
+        );
     }
 
     /// A program stamp from the wall clock, a sample, a program stamp from the node clock (a
@@ -877,13 +893,12 @@ mod one_session_time_tests {
     fn a_programs_and_a_publishers_stamps_are_one_order_across_a_change_of_clock() {
         let hlc = node_clock();
         let time = SessionTime::new().learned_by(hlc.clone());
-        let publisher = FallbackStamp::new(ZID.to_vec(), hlc.clone());
         let clock = Ntp64::from_unix(CLOCK_SECS, 0).as_word();
         let within_bound = hlc.max_delta_word().expect("the node holds a clock") / 2;
 
         let p1 = program(Some(clock + within_bound), &time);
         assert_eq!(p1, clock + within_bound, "the wall clock, as it reads");
-        let (proposed, d1) = sample(&publisher, &time);
+        let (proposed, d1) = sample(&hlc, &time);
         assert!(
             proposed > p1,
             "the node clock learned the program's stamp: {proposed} after {p1}"
@@ -898,7 +913,7 @@ mod one_session_time_tests {
 
         let p3 = program(Some(clock - 3_600 * (1u64 << 32)), &time);
         assert_eq!(p3, p2 + 1, "the wall clock is behind: the stamp goes on");
-        let (proposed, d2) = sample(&publisher, &time);
+        let (proposed, d2) = sample(&hlc, &time);
         assert!(
             proposed > p3,
             "the node clock learned that stamp too: {proposed} after {p3}"
@@ -912,12 +927,11 @@ mod one_session_time_tests {
     fn a_sample_after_a_stamp_the_clock_could_not_learn_still_comes_after_it() {
         let hlc = node_clock();
         let time = SessionTime::new().learned_by(hlc.clone());
-        let publisher = FallbackStamp::new(ZID.to_vec(), hlc.clone());
         let clock = Ntp64::from_unix(CLOCK_SECS, 0).as_word();
         let beyond_bound = hlc.max_delta_word().expect("the node holds a clock") * 4;
 
         let p1 = program(Some(clock + beyond_bound), &time);
-        let (proposed, d1) = sample(&publisher, &time);
+        let (proposed, d1) = sample(&hlc, &time);
         assert!(proposed < p1, "the clock did not learn it: {proposed} {p1}");
         assert_eq!(d1, p1 + 1);
     }
@@ -939,7 +953,7 @@ mod one_session_time_tests {
                     .collect::<Vec<u64>>()
             }));
             let sample_time = time.clone();
-            let publisher = FallbackStamp::new(ZID.to_vec(), hlc.clone());
+            let publisher = hlc.clone();
             threads.push(std::thread::spawn(move || {
                 (0..EACH)
                     .map(|_| sample(&publisher, &sample_time).1)

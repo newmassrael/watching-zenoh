@@ -27,8 +27,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use wz_node_time::node_clock::NodeHlc;
-use wz_node_time::timestamp_source::FallbackStamp;
+use wz_node_time::node_clock::{DataStamp, NodeHlc};
+use wz_node_time::timestamp_source::wall_clock_ntp64;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::qos::{CongestionControl, Priority};
@@ -463,16 +463,18 @@ pub trait AdvancedPublisherPlane: Send + Sync + 'static {
     }
 
     /// The time word a sample of this publisher carries, given the word the node's clock proposes
-    /// for it (the node clock's stamp, or the wall clock where the node does not stamp:
-    /// [`FallbackStamp::stamp`]). The default carries the proposal as it is.
+    /// for it (the node clock's stamp, or the wall clock where the node holds no clock). The
+    /// default carries the proposal as it is, and never refuses.
     ///
     /// A host whose session orders every timestamp it gives through one value of its own answers
     /// here: zenoh-pico stamps an advanced publisher's samples with the session's
     /// `z_timestamp_new` (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
     /// `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`),
-    /// so a sample's time and a program's are one sequence of that session.
-    fn order_stamp(&self, proposed: u64) -> u64 {
-        proposed
+    /// so a sample's time and a program's are one sequence of that session, and a session with
+    /// no time left refuses the sample ([`PublishError::TimestampExhausted`]) as pico refuses the
+    /// put.
+    fn order_stamp(&self, proposed: u64) -> Result<u64, PublishError> {
+        Ok(proposed)
     }
 
     /// Declare the plain publisher on `keyexpr`. The wire knobs in `options` are
@@ -640,7 +642,6 @@ pub struct AdvancedPublisherOn<P: AdvancedPublisherPlane> {
     zid: Vec<u8>,
     eid: u32,
     seqnum: Option<Arc<AtomicU32>>,
-    stamp: FallbackStamp,
     /// R2618 — the publisher's wire knobs, applied to every Put and Del it
     /// makes. See [`WireQos`] for why this is one value rather than a chain at
     /// each site.
@@ -933,11 +934,6 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
             keyexpr,
             eid,
             seqnum,
-            // R311y450 — the §5.18 clock is BORROWED from the session (an Arc
-            // bump), not constructed here. Building one from `local_zid` is what
-            // made this site and the storage service's the two same-`uhlc::ID`
-            // clocks the round removed.
-            stamp: FallbackStamp::new(local_zid.clone(), plane.node_hlc().clone()),
             zid: local_zid,
             qos,
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]
@@ -995,10 +991,24 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
 
     /// The timestamp of the next sample, a Put's or a Del's: the node clock's proposal, as the
     /// plane orders it ([`AdvancedPublisherPlane::order_stamp`]), with this publisher's zid.
-    fn next_timestamp(&self) -> TimestampHint {
-        let mut timestamp = self.stamp.stamp();
-        timestamp.time = self.plane.order_stamp(timestamp.time);
-        timestamp
+    ///
+    /// Every sample of an advanced publisher carries a time: its cache keeps and answers by it,
+    /// and zenoh-pico stamps every sample and refuses the put whose time it cannot make. So a node
+    /// whose `trusted-only` policy withholds its clock's stamp refuses the sample
+    /// ([`PublishError::ClockUntrusted`]): the wall clock in its place would be a time the policy
+    /// says the node does not stamp data with, handed to a subscriber as the node's own. A node
+    /// that holds no clock stamps with the wall clock, upstream's `None` arm of
+    /// `Session::new_timestamp`.
+    fn next_timestamp(&self) -> Result<TimestampHint, PublishError> {
+        let proposed = match self.plane.node_hlc().data_stamp() {
+            DataStamp::Stamped(stamp) => stamp.time,
+            DataStamp::NoClock => wall_clock_ntp64(),
+            DataStamp::Withheld => return Err(PublishError::ClockUntrusted),
+        };
+        Ok(TimestampHint {
+            time: self.plane.order_stamp(proposed)?,
+            zid: self.zid.clone(),
+        })
     }
 
     /// The one body of [`Self::put_with`] and `put_shm_with`: what a put stamps and
@@ -1008,13 +1018,15 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         payload: SamplePayload<'_>,
         options: AdvancedPutOptions,
     ) -> Result<usize, PublishError> {
+        // The time before the sequence number: a sample refused for want of a time takes no
+        // number, so a subscriber is not told of a miss for a sample that was never sent.
+        let timestamp = self.next_timestamp()?;
         // fetch_add returns the pre-increment value, so the first sample
         // carries sn=0 (zenoh advanced_publisher.rs:490-501).
         let sn = self
             .seqnum
             .as_ref()
             .map(|counter| counter.fetch_add(1, Ordering::Relaxed));
-        let timestamp = self.next_timestamp();
 
         // Construct the SourceInfo ONCE (SSOT): the same `(zid, eid, sn)` rides
         // BOTH the wire publish (pubsub-source-info) AND the cache ring, so a
@@ -1112,11 +1124,12 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     /// on a recovering subscriber; with the kind stored that failure mode is
     /// gone, and a recovering subscriber now sees the retraction it missed.
     pub fn delete(&self) -> Result<usize, PublishError> {
+        // The time first, as a put takes it: a refused delete takes no sequence number.
+        let timestamp = self.next_timestamp()?;
         let sn = self
             .seqnum
             .as_ref()
             .map(|counter| counter.fetch_add(1, Ordering::Relaxed));
-        let timestamp = self.next_timestamp();
         let source_info = sn.map(|sn| SourceInfo::new(&self.zid, self.eid, sn));
 
         // R2618 — the SAME fold as the Put arm. The encoding / attachment chain

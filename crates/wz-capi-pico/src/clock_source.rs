@@ -16,8 +16,10 @@
 //!
 //! The library cannot know whether the registered clock follows a reference. The program can, so it
 //! reports it (`wz_ext_clock_report`), and a build whose `clock-quality-stamping` policy is
-//! `trusted-only` stamps no data until it has said so. The policy is the stamper's: a program that
-//! reads the clock (`z_timestamp_new`) is given its time whatever its standing.
+//! `trusted-only` stamps no data until it has said so: an advanced publisher, every sample of which
+//! carries a time, refuses its put and delete until then (`Z_ERR_TIMESTAMP_GENERATION_FAILED`,
+//! nothing sent). The policy is the stamper's: a program that reads the clock (`z_timestamp_new`)
+//! is given its time whatever its standing.
 
 use std::ffi::c_void;
 

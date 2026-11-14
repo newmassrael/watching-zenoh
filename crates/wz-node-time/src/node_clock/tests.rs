@@ -186,6 +186,22 @@ fn trusted_only_holds_back_the_stamps_of_data_and_not_the_clock() {
     assert!(stamped > word, "the stamp of data is the same clock's next");
 }
 
+/// The reason comes with the absence: the policy's refusal is `Withheld`, a node without a clock
+/// is `NoClock`, and once the clock is trusted the stamp is the clock's, as `stamp` gives it.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn the_data_stamp_names_why_there_is_none() {
+    let node = frozen_node_with_policy(&[0x01], true);
+    assert_eq!(node.data_stamp(), DataStamp::Withheld);
+    assert!(node.report_sync_acquired());
+    assert!(matches!(node.data_stamp(), DataStamp::Stamped(_)));
+    assert_eq!(NodeHlc::disabled().data_stamp(), DataStamp::NoClock);
+    assert!(matches!(
+        frozen_node_with_policy(&[0x01], false).data_stamp(),
+        DataStamp::Stamped(_)
+    ));
+}
+
 #[cfg(feature = "time-hlc")]
 #[test]
 fn a_node_that_holds_no_clock_gives_no_reading_either() {

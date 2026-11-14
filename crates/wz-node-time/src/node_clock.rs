@@ -239,6 +239,22 @@ pub enum TimestampVerdict {
     Drop,
 }
 
+/// What a node's clock gives data the node passes on as its own ([`NodeHlc::data_stamp`]), with
+/// the reason when it gives none: a stamper that cannot go out without a time (an advanced
+/// publisher, whose every sample carries one) answers the policy's refusal differently from a node
+/// that holds no clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataStamp {
+    /// The clock's stamp.
+    Stamped(wz_session_core::sample::TimestampHint),
+    /// The `clock-quality-stamping` policy is `trusted-only` and the clock is not trusted: the
+    /// node stamps no data with it.
+    Withheld,
+    /// The node holds no clock (its role does not stamp, or the build has none), or its source
+    /// cannot say what time it is. A caller falls back as it does for a node with no clock.
+    NoClock,
+}
+
 /// The clock plus the identity its stamps carry. Held behind one `Arc` so a
 /// clone cannot separate the two: a stamp pairing one node's time word with
 /// another's zid would be the same uniqueness break this module exists to remove.
@@ -548,14 +564,29 @@ impl NodeHlc {
     /// fraction, and it is the whole reason a node prefers this over the bare
     /// wall clock.
     pub fn stamp(&self) -> Option<wz_session_core::sample::TimestampHint> {
+        match self.data_stamp() {
+            DataStamp::Stamped(stamp) => Some(stamp),
+            DataStamp::Withheld | DataStamp::NoClock => None,
+        }
+    }
+
+    /// [`Self::stamp`] with the reason when there is none: whether the `trusted-only` policy
+    /// withheld it, or the node holds no clock that can say the time. The policy is read once, so
+    /// a standing reported in between cannot make the answer and its reason disagree.
+    pub fn data_stamp(&self) -> DataStamp {
         #[cfg(feature = "time-hlc")]
         {
-            let clock = self.clock.as_deref()?;
+            let Some(clock) = self.clock.as_deref() else {
+                return DataStamp::NoClock;
+            };
             if self.quality_forbids_stamping(clock) {
-                return None;
+                return DataStamp::Withheld;
             }
         }
-        self.clock_stamp()
+        match self.clock_stamp() {
+            Some(stamp) => DataStamp::Stamped(stamp),
+            None => DataStamp::NoClock,
+        }
     }
 
     /// The next timestamp of this node's clock, for a caller that reads the clock for itself

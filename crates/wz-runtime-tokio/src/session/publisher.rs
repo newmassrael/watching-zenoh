@@ -624,6 +624,12 @@ pub enum PublishAliasError {
     /// Unlike every variant above, wire bytes MAY have been emitted (followed
     /// by a `0x3 Drop` stop fragment); resend once the budget is refilled.
     FragmentChainAbandoned,
+    /// The session had no time left to give the publication; projected from the underlying
+    /// [`PublishError::TimestampExhausted`]. No wire bytes were emitted.
+    TimestampExhausted,
+    /// The `trusted-only` clock policy held back the time the publication carries; projected
+    /// from the underlying [`PublishError::ClockUntrusted`]. No wire bytes were emitted.
+    ClockUntrusted,
 }
 
 impl std::fmt::Display for PublishAliasError {
@@ -658,6 +664,16 @@ impl std::fmt::Display for PublishAliasError {
                  fragment followed any fragments already sent); resend once the \
                  budget is refilled"
             ),
+            PublishAliasError::TimestampExhausted => write!(
+                f,
+                "PublishAliasError: the session has no time left to give; the Push \
+                 was not emitted"
+            ),
+            PublishAliasError::ClockUntrusted => write!(
+                f,
+                "PublishAliasError: the trusted-only clock policy holds back the \
+                 time this publication carries; the Push was not emitted"
+            ),
         }
     }
 }
@@ -671,6 +687,8 @@ impl From<PublishError> for PublishAliasError {
             PublishError::TransportUnavailable => PublishAliasError::TransportUnavailable,
             PublishError::RequiresUnicast => PublishAliasError::RequiresUnicast,
             PublishError::FragmentChainAbandoned => PublishAliasError::FragmentChainAbandoned,
+            PublishError::TimestampExhausted => PublishAliasError::TimestampExhausted,
+            PublishError::ClockUntrusted => PublishAliasError::ClockUntrusted,
         }
     }
 }
