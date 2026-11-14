@@ -3972,8 +3972,9 @@ pub(crate) struct SessionInner {
     /// the keys it names, which a publisher or a put takes in place of what its builder says.
     publisher_qos_tree: Arc<KeBoxTree<PublisherQoSConfig>>,
     /// The configuration the session was opened with, as the application reads it
-    /// ([`Session::config`]).
-    #[cfg(feature = "unstable")]
+    /// ([`Session::config`]), and as the runtime admin space reads and writes it, which every
+    /// build on the engine hosts ([`WeakSession::config_notifier`]).
+    #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
     config: crate::api::config::Notifier<zenoh_config::ExpandedConfig>,
     /// What a node records on a message it intercepts: its role, the callback of the user if the
     /// session was opened with one, and the clock of a node that holds none.
@@ -4960,7 +4961,7 @@ impl Session {
             callbacks_drop_sync_group: SyncGroup::default(),
             queries_default_timeout: core.queries_default_timeout,
             publisher_qos_tree: core.publisher_qos_tree,
-            #[cfg(feature = "unstable")]
+            #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
             config: core.config,
             #[cfg(feature = "unstable")]
             timestamps: core.timestamps,
@@ -4998,7 +4999,7 @@ pub(crate) struct RuntimeCore {
     zid: ZenohId,
     queries_default_timeout: Duration,
     publisher_qos_tree: Arc<KeBoxTree<PublisherQoSConfig>>,
-    #[cfg(feature = "unstable")]
+    #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
     config: crate::api::config::Notifier<zenoh_config::ExpandedConfig>,
     #[cfg(feature = "unstable")]
     timestamps: Arc<TimestampSource>,
@@ -5097,7 +5098,7 @@ impl RuntimeCore {
                     .and_then(|json| serde_json::from_str::<PublisherQoSConfList>(&json).ok())
                     .map_or_else(KeBoxTree::new, Into::into),
             ),
-            #[cfg(feature = "unstable")]
+            #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
             config: crate::api::config::Notifier::new(config.0.clone().expanded()),
             #[cfg(feature = "unstable")]
             timestamps,
