@@ -9,7 +9,7 @@ wz-session-core: BatchParse::fails_the_frames_batch; walk_unit counts a unit who
 '''
 
 verification = '''
-INTEGRATOR: replace this paragraph with what the merged tree ran. The author built and ran nothing.
+On pc2, on the integration branch that merged this work with the codec and dissect work before it: scripts/regen-calibration.sh wrote the calibration both halves of the rule give (no zenoh unit of the corpus moved, 49505 read whole; four more null members moved from whole to residual; the null bounds, regions and priors other than the units' no mean and the SN prior are model 6's). The freeze test printed model 7 as unfrozen with digest 0x4c22e97f942204dc; wz-capture's zenoh_evidence tests passed without default features (13). In that run wz-capture with lz4 failed five tests and wz-capi-dissect one (1837 and 246 passed), and the C consumer stopped at the session table's opening, each on a pinned value; the pins were then set to that run's output: the units' no part is 4.0516 bits a unit (row 96414 and 32413, flow 121519 and 40516, the C ABI row 17927 and 16207, the C consumer 13696 and 12155). Generated mDNS flows read 4151 units whole of 54600 where they read 8847, and none of ten reaches half. The raweth sample's Frame carried 0xDE 0xAD, which upstream drops; it now carries an OAM record. INTEGRATOR: add the run of the tip that carries these settings, with the refreshed raweth capture.
 '''
 
 carry = '''
