@@ -146,8 +146,8 @@ pub const fn default_autoconnect_matcher(whatami: WhatAmI) -> WhatAmIMatcher {
 /// R2684 — it lives HERE, with `routing-peer`, rather than in the router hat
 /// where it was written. The graph it views belongs to the peer tier, so a
 /// plain linkstate peer owned the data while the handle that renders it sat
-/// behind `routing-router-hat` — which is the whole of why `linkstate/peers`
-/// could be served only from a router. `router_forward` re-exports it, so every
+/// behind `routing-router-hat` — which is the whole of why a peer's
+/// `linkstate/<region>` leg could be served only from a router. `router_forward` re-exports it, so every
 /// path that already named it is unchanged.
 ///
 /// Gated on `adminspace-router-linkstate` because that is what the seam IS —

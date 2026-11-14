@@ -535,7 +535,7 @@ gain `client_queryables_seen` and `north_interested`, test-only until step 7; th
 other counters it reads already exist on both planes.
 
 The gate gained an `admin` plane, a `counters` plane and a `linkview` plane (the
-DOT the `linkstate/peers` leg renders), each compared after every step, a scene of
+DOT the peers' `linkstate/<region>` leg renders), each compared after every step, a scene of
 queriers and publishers declaring themselves, and a count of which tier each leg
 names over all scenes, because the first run of that count showed that no scene
 had ever reached the `querier` leg. With the scene the two planes agree on every

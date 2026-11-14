@@ -4372,6 +4372,67 @@ fn declare_adminspace_with_config_announces_a_clients_queryable_on_the_wire() {
     );
 }
 
+/// A peer session answers the graph of its `north` region, as upstream's peer hat
+/// does: the single-hop graph of the node and the nodes it links to, here the node
+/// alone since the fixture has no peer named. A client session's hat holds no
+/// graph, so it answers no `linkstate` leg.
+#[cfg(all(feature = "query-get", feature = "adminspace-router-linkstate"))]
+#[test]
+fn a_peer_session_answers_its_north_region_and_a_client_session_none() {
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let ask = |session: &TokioSession, key: &str, into: &Arc<Mutex<Vec<(String, Vec<u8>)>>>| {
+        let r = into.clone();
+        session
+            .query(
+                key,
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                move |reply| {
+                    r.lock()
+                        .unwrap()
+                        .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
+                },
+                |_| {},
+            )
+            .expect("query-get ON in this build");
+    };
+
+    let (peer, _peer_driver) = build_session();
+    assert_eq!(
+        peer.actions().params.whatami,
+        wz_codecs::whatami::WhatAmI::Peer
+    );
+    let zid = zid_to_zenoh_hex(&peer.actions().params.zid);
+    let _peer_admin = peer
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+    let got = Arc::new(Mutex::new(Vec::new()));
+    ask(&peer, &format!("@/{zid}/peer/linkstate/**"), &got);
+    let got = got.lock().unwrap().clone();
+    assert_eq!(got.len(), 1, "the north region alone: {got:?}");
+    assert_eq!(got[0].0, format!("@/{zid}/peer/linkstate/north"));
+    assert_eq!(
+        String::from_utf8(got[0].1.clone()).unwrap(),
+        format!("graph {{\n    0 [ label = \"{zid}\" ]\n}}\n")
+    );
+
+    let (client, _client_driver) = build_client_session();
+    let client_zid = zid_to_zenoh_hex(&client.actions().params.zid);
+    let _client_admin = client
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+    let none = Arc::new(Mutex::new(Vec::new()));
+    ask(
+        &client,
+        &format!("@/{client_zid}/client/linkstate/**"),
+        &none,
+    );
+    assert!(
+        none.lock().unwrap().is_empty(),
+        "a client holds no graph and answers no linkstate leg"
+    );
+}
+
 /// The `sessions[]` row a host that holds this session as one of its transports
 /// lists: none before a handshake has named the peer, as upstream lists only
 /// transports that exist; then one filed under the peer's zid in zenoh's form,
@@ -4914,10 +4975,19 @@ fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
     // DUPLICATE reply, and it additionally catches a key nobody expected —
     // which the literal count could only report as an unexplained number.
     let plugin_prefix = format!("@/{zid_hex}/{whatami}/plugins/");
+    // The fixture is a peer, whose hat holds the graph of its `north` region: a
+    // build that answers the link-state legs answers that one too.
+    let linkstate = format!("@/{zid_hex}/{whatami}/linkstate/north");
+    #[cfg(feature = "adminspace-router-linkstate")]
+    assert!(
+        keys.contains(&linkstate),
+        "a peer's linkstate/north reply present: {keys:?}"
+    );
     let unexpected: Vec<&String> = keys
         .iter()
         .filter(|k| {
-            ![&root, &config, &metrics, &surface].contains(k) && !k.starts_with(&plugin_prefix)
+            ![&root, &config, &metrics, &surface, &linkstate].contains(k)
+                && !k.starts_with(&plugin_prefix)
         })
         .collect();
     assert!(

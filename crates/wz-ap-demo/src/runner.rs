@@ -5028,18 +5028,18 @@ async fn run_peer_until(
             wz::runtime_tokio::admin_read_permit(&shared.guard().admin_permissions())
         );
         // R2684 (§5.23 `adminspace-router-linkstate`) — this peer's OWN link-state
-        // graph, as the read-only render seam its `linkstate/peers` leg needs.
+        // graph, as the read-only render seam its `linkstate/<region>` leg needs.
         //
         // Minted BEFORE the closure and moved in, for the reason the introspection
         // and sessions buffers above are: the handler is registered INTO the
-        // forwarder, so it cannot borrow the forwarder at query time. The view is
-        // `Rc`-backed, so it renders LIVE per GET rather than from a snapshot.
+        // forwarder, so it cannot borrow the forwarder at query time. The view
+        // renders LIVE per GET rather than from a snapshot.
         //
-        // Upstream serves the peer-tier handler from ANY non-Client hat
-        // (`zenoh/src/net/runtime/adminspace.rs` @ `hat.mode().is_peer()`), which
-        // is what wz did not do: the leg existed only on the router host.
+        // Upstream answers the region of every peer and router hat
+        // (`zenoh/src/net/runtime/adminspace.rs` @
+        // `fn linkstate_data(prefix: &keyexpr, context: &AdminContext, query: Query) {`).
         #[cfg(feature = "adminspace-router-linkstate")]
-        let peers_view = forwarder.peers_net_view();
+        let linkstate_view = forwarder.linkstate_regions_view();
         let node_stats_h = node_stats.clone();
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             let admin_read =
@@ -5097,23 +5097,19 @@ async fn run_peer_until(
                     wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
             }
-            // R2684 — the PEER-tier `linkstate/peers` leg, which upstream serves
-            // from any non-Client hat and wz served only from a router.
+            // R2684 — the peer's `linkstate/<region>` leg, the region of its own
+            // hat, which upstream serves from a peer as from a router.
             //
-            // `routers_dot: None` and an empty `successors` are not placeholders:
-            // they are what this node HAS. A plain linkstate peer keeps one graph,
-            // not the router's two, and `route/successor` is rendered from the
-            // ROUTER-tier net — so omitting both is the honest answer, and
-            // `AdminRouterCtx` documents `None` as "omit that leg" rather than
-            // "answer empty".
+            // The empty `successors` is not a placeholder: it is what this node
+            // HAS. `route/successor` is read off the router hats alone, and a peer
+            // holds none.
             #[cfg(feature = "adminspace-router-linkstate")]
             {
-                let peers_dot = peers_view.dot();
+                let linkstate = linkstate_view.regions_text();
                 let rctx = AdminRouterCtx {
                     zid_hex: &zid_hex,
                     whatami: whatami_str,
-                    routers_dot: None,
-                    peers_dot: Some(&peers_dot),
+                    linkstate: &linkstate,
                     successors: &[],
                     read: admin_read,
                 };
@@ -6927,11 +6923,11 @@ async fn run_router_hat_until(
     // BOTH meshes at register time (+ re-advertised to late joiners via the derive
     // fold), so a GET from a DIRECTLY-attached OR a REMOTE (cross-node) querier
     // routes to this router, self-dispatches at the route_request empty-route tail,
-    // and this handler renders LIVE from the two link-state nets per query:
-    // `linkstate/routers` + `route/successor/**` from `routers_net`,
-    // `linkstate/peers` from `linkstatepeers_net` (the wz mirror of zenoh's
-    // routers_linkstate_data / peers_linkstate_data / route_successor,
-    // net/runtime/adminspace.rs:741-919). Root `local_data` (self identity + the
+    // and this handler renders LIVE from the link-state nets per query: one
+    // `linkstate/<region>` leg per region of the router's hats, `north` its routers
+    // and the peers' subregion its peers, and `route/successor/**` from the
+    // routers' net (the wz mirror of upstream's `linkstate_data` and
+    // `route_successor`). Root `local_data` (self identity + the
     // listen locator) rides the shared `answer_admin_query` SSOT.
     //
     // R2685 — this comment used to end "the router's `sessions[]` transport
@@ -6998,7 +6994,7 @@ async fn run_router_hat_until(
         // graph views are: the handler is stored INSIDE the forwarder and so
         // cannot borrow it back.
         let sessions_view = forwarder.sessions_view();
-        let peers_view = forwarder.peers_net_view();
+        let linkstate_view = forwarder.linkstate_regions_view();
         // R2685 — the declaration tables, taken here for the SAME reason the
         // three views above are: the handler is stored inside the forwarder and
         // so cannot borrow it back at query time.
@@ -7158,15 +7154,14 @@ async fn run_router_hat_until(
                     wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
             }
-            // The ROUTER-tier legs, rendered LIVE from the two nets per GET.
-            let routers_dot = routers_view.dot();
-            let peers_dot = peers_view.dot();
+            // The ROUTER-tier legs, rendered LIVE per GET: one `linkstate/<region>`
+            // leg for each region of the router's hats, and the successor routes.
+            let linkstate = linkstate_view.regions_text();
             let successors = routers_view.route_successors_hex();
             let rctx = AdminRouterCtx {
                 zid_hex: &zid_hex,
                 whatami: whatami_str,
-                routers_dot: Some(&routers_dot),
-                peers_dot: Some(&peers_dot),
+                linkstate: &linkstate,
                 successors: &successors,
                 // The SAME resolved permit as the root ctx — read once above.
                 read: admin_read,
@@ -7181,7 +7176,7 @@ async fn run_router_hat_until(
         forwarder.register_local_queryable(&queryable_key, true, Box::new(handler));
         log::info!(
             "wz-ap-demo router-hat: adminspace router legs hosted at {queryable_key} \
-             (linkstate/routers, linkstate/peers, route/successor)"
+             (linkstate/<region>, route/successor)"
         );
 
         // The capacity report, under the wz-owned root and not inside upstream's admin space:

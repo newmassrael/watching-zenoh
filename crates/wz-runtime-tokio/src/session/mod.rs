@@ -7428,6 +7428,30 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     wz_admin::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
             }
+            // A peer answers the graph of its `north` region, as upstream's peer
+            // hat does (`zenoh/src/net/runtime/adminspace.rs` @
+            // `fn linkstate_data(prefix: &keyexpr, context: &AdminContext, query: Query) {`):
+            // the single-hop graph of this node and the one node this session
+            // links it to. A client's hat holds no graph and answers none.
+            #[cfg(feature = "adminspace-router-linkstate")]
+            if whatami == "peer" {
+                let peer = actions.peer_zid().map(|zid| zid_to_zenoh_hex(&zid));
+                let graph = wz_admin::adminspace::single_hop_graph_text(
+                    core::iter::once(zid_hex.as_str()).chain(peer.as_deref()),
+                );
+                let linkstate = [(String::from("north"), graph)];
+                let _ = wz_admin::adminspace::answer_router_admin_query(
+                    view,
+                    out,
+                    &wz_admin::adminspace::AdminRouterCtx {
+                        zid_hex: &zid_hex,
+                        whatami,
+                        linkstate: &linkstate,
+                        successors: &[],
+                        read,
+                    },
+                );
+            }
         };
 
         self.declare_queryable(queryable_key, QueryableOptions::default(), handler)

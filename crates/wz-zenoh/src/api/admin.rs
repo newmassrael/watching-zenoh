@@ -485,8 +485,8 @@ fn host_admin_space(session: &WeakSession, whatami: WhatAmI) {
             let routes = AdminRouterCtx {
                 zid_hex: &zid_hex,
                 whatami,
-                routers_dot: None,
-                peers_dot: None,
+                // The regions' graphs are the `linkstate` queryable's, by region.
+                linkstate: &[],
                 successors: &successors,
                 read,
             };

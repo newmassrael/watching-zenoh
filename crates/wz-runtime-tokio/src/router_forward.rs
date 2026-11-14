@@ -1807,7 +1807,8 @@ fn classify_inbound(faces: &FaceTable, inbound: FaceId) -> InboundFace<'_> {
 /// `routing-router-hat`, `linkstate_forward` is `routing-peer`, and the graph
 /// the view renders — `LinkstateNetwork` — belongs to the PEER tier. A plain
 /// linkstate peer therefore owned the data and could not name the handle that
-/// renders it, which is why `linkstate/peers` was servable only from a router.
+/// renders it, which is why the peers' `linkstate/<region>` leg was servable only
+/// from a router.
 /// The type and its impl were never gated within this module; only the module's
 /// own `#[cfg]` confined them.
 #[cfg(feature = "adminspace-router-linkstate")]
@@ -3536,6 +3537,81 @@ impl crate::linkstate_forward::NetHandle for TablesNet {
     }
 }
 
+/// The regions a node answers a `linkstate` query for, each named as upstream's `Region`
+/// displays it (`north`, `south:<id>:<mode>`) and with the text of its graph: one leg for each
+/// region of a peer or a router hat (`zenoh/src/net/runtime/adminspace.rs` @
+/// `fn linkstate_data(prefix: &keyexpr, context: &AdminContext, query: Query) {`, which answers
+/// the region of each such hat with its `info`).
+///
+/// A router answers its north region, the graph of its routers, and the region its peers are
+/// in, the graph of its peers. A peer answers its north region only, and that is the peer hat's:
+/// with `scouting/gossip/multihop` on the whole of what the node learnt, and without it the pin's
+/// single-hop `Gossip` object, the node and the nodes it holds a link to. A node it only hears of
+/// is used to dial and not kept (`zenoh/src/net/protocol/gossip.rs` @ `if zid == src {`); the
+/// graph here holds such nodes, as the flood of the router carries them, so the faces say who
+/// is a neighbour.
+///
+/// Every graph is rendered from `tables`, the one read the caller holds, and none is read again
+/// through a handle that would take the lock a second time.
+#[cfg(feature = "adminspace-router-linkstate")]
+fn linkstate_regions_of(tables: &Tables) -> Vec<(String, String)> {
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+    let label = |zid: &Zid| zid_to_zenoh_hex(zid.as_slice());
+    let north = NORTH_REGION.to_string();
+    let net = tables.north_net();
+    if tables.node_mode != WhatAmI::Peer {
+        // The region of the peers is the first the hat table serves with the peer hat, which is
+        // the default peer subregion on the `auto` preset. A partition with no such subregion
+        // answers the default one with a graph holding only this node.
+        let peers = tables
+            .hats
+            .iter()
+            .find(|(region, hat)| is_peer_hat(*region, tables.node_mode) && hat.mesh().is_some())
+            .map(|(region, _)| region);
+        let peers_text = match peers {
+            Some(region) => tables.mesh(region).net.dot_with(label),
+            None => LinkstateNetwork::new_in_region(*net.self_zid(), tables.node_mode, true)
+                .dot_with(label),
+        };
+        let peers = peers.unwrap_or(Region::default_south(WhatAmI::Peer));
+        return vec![
+            (north, net.dot_with(label)),
+            (peers.to_string(), peers_text),
+        ];
+    }
+    if net.gossip_multihop() || net.full_linkstate() {
+        return vec![(north, net.dot_with(label))];
+    }
+    let mut nodes = vec![*net.self_zid()];
+    for (_, state) in tables.faces.of_tier(NORTH_REGION) {
+        if let Some(zid) = state.peer_zid {
+            if !nodes.contains(&zid) {
+                nodes.push(zid);
+            }
+        }
+    }
+    let labels: Vec<String> = nodes.iter().map(label).collect();
+    let text = wz_admin::adminspace::single_hop_graph_text(labels.iter().map(String::as_str));
+    vec![(north, text)]
+}
+
+/// A read-only handle over the router's tables that renders, when it is asked, the graph of each
+/// region the node answers a `linkstate` query for (`linkstate_regions_of`). Held by an admin
+/// GET handler the forwarder stores, which cannot borrow the forwarder.
+#[cfg(feature = "adminspace-router-linkstate")]
+#[derive(Clone)]
+pub struct LinkstateRegionsView {
+    tables: Arc<TablesCell>,
+}
+
+#[cfg(feature = "adminspace-router-linkstate")]
+impl LinkstateRegionsView {
+    /// `(region, graph)` for each region, as the tables stand now.
+    pub fn regions_text(&self) -> Vec<(String, String)> {
+        linkstate_regions_of(&self.tables.read())
+    }
+}
+
 /// The router with its [`Tables`] held for the length of one operation: the forwarder, and the
 /// tables as the caller holds them (`T` is a reference or a lock guard, anything that derefs to
 /// `Tables`).
@@ -3924,6 +4000,8 @@ router_entry_points! { on_tables:
     fn peers_net_view(&self) -> LinkstateNetView;
     #[cfg(feature = "adminspace-router-linkstate")]
     fn linkstate_regions_text(&self) -> Vec<(String, String)>;
+    #[cfg(feature = "adminspace-router-linkstate")]
+    fn linkstate_regions_view(&self) -> LinkstateRegionsView;
     fn pending_len(&self) -> usize;
     fn pending_timed_out(&self) -> usize;
 }
@@ -10831,60 +10909,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }))
     }
 
-    /// The regions this node answers a `linkstate` query for, each with the text of its graph
-    /// (`zenoh/src/net/runtime/adminspace.rs` @ `fn linkstate_data`, which answers the region of
-    /// each of the node's hats with its `info`).
-    ///
-    /// A router answers its north region, the graph of its routers, and the region its peers
-    /// are in, the graph of its peers. A peer answers its north region only, and that is the peer
-    /// hat's: with `scouting/gossip/multihop` on the whole of what the node learnt, and without
-    /// it the pin's single-hop `Gossip` object, the node and the nodes it holds a link to. A
-    /// node it only hears of is used to dial and not kept
-    /// (`zenoh/src/net/protocol/gossip.rs` @ `if zid == src {`); the graph here holds such
-    /// nodes, as the flood of the router carries them, so the faces say who is a neighbour.
+    /// The regions this node answers a `linkstate` query for, each with the text of its graph:
+    /// `linkstate_regions_of` over the tables this call holds.
     #[cfg(feature = "adminspace-router-linkstate")]
     pub fn linkstate_regions_text(&self) -> Vec<(String, String)> {
-        use wz_session_core::zid_hex::zid_to_zenoh_hex;
-        let label = |zid: &Zid| zid_to_zenoh_hex(zid.as_slice());
-        let north = NORTH_REGION.to_string();
-        let net = self.tables.north_net();
-        if self.tables.node_mode != WhatAmI::Peer {
-            // The region of the peers is the one `peers_net_view` reads: the first the hat table
-            // serves with the peer hat, which is the default peer subregion on the `auto` preset.
-            let peers = self
-                .tables
-                .hats
-                .iter()
-                .find(|(region, hat)| {
-                    is_peer_hat(*region, self.tables.node_mode) && hat.mesh().is_some()
-                })
-                .map_or(Region::default_south(WhatAmI::Peer), |(region, _)| region);
-            return vec![
-                (north, self.routers_net_view().dot()),
-                (peers.to_string(), self.peers_net_view().dot()),
-            ];
+        linkstate_regions_of(&self.tables)
+    }
+
+    /// A read-only handle that renders `linkstate_regions_of` when it is asked: the admin
+    /// host's `linkstate/<region>` render seam, held by the GET handler the forwarder itself
+    /// stores, for the reason [`sessions_view`](Self::sessions_view) gives.
+    #[cfg(feature = "adminspace-router-linkstate")]
+    pub fn linkstate_regions_view(&self) -> LinkstateRegionsView {
+        LinkstateRegionsView {
+            tables: Arc::clone(&self.fwd.tables),
         }
-        if net.gossip_multihop() || net.full_linkstate() {
-            return vec![(north, net.dot_with(label))];
-        }
-        let mut nodes = vec![*net.self_zid()];
-        for (_, state) in self.tables.faces.of_tier(NORTH_REGION) {
-            if let Some(zid) = state.peer_zid {
-                if !nodes.contains(&zid) {
-                    nodes.push(zid);
-                }
-            }
-        }
-        let mut text = String::from("graph {\n");
-        for (index, zid) in nodes.iter().enumerate() {
-            text.push_str(&format!("    {index} [ label = \"{}\" ]\n", label(zid)));
-        }
-        text.push_str("}\n");
-        vec![(north, text)]
     }
 
     /// A read-only [`LinkstateNetView`] over the PEER-tier graph
-    /// (`linkstatepeers_net`) — the adminspace host's `linkstate/peers` render seam.
+    /// (`linkstatepeers_net`): the graph of the peers' region, the leg
+    /// `linkstate_regions_of` renders under that region's name.
     #[cfg(feature = "adminspace-router-linkstate")]
     pub fn peers_net_view(&self) -> LinkstateNetView {
         // A partition with no subregion has no peers region; its view is an
@@ -13802,6 +13846,21 @@ mod tests {
     /// shares every component with the tables it was taken from, a write to it through the
     /// accessor a writer uses copies the one component written and leaves the original as it
     /// was, and the route memos stay one object between the two versions.
+    /// A router names the regions it answers a `linkstate` query for as upstream's `Region`
+    /// displays them, byte for byte (`commons/zenoh-protocol/src/core/region.rs` @
+    /// `Region::South { id, mode } => write!(f, "south:{id}:{mode}"),`): its routers in `north`
+    /// and its peers in the default peer subregion. The handle an admin host keeps renders the
+    /// same list as the forwarder.
+    #[cfg(feature = "adminspace-router-linkstate")]
+    #[test]
+    fn a_router_names_its_linkstate_regions_as_upstream_displays_them() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let regions = fwd.linkstate_regions_text();
+        let names: Vec<&str> = regions.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["north", "south:0:peer"]);
+        assert_eq!(fwd.linkstate_regions_view().regions_text(), regions);
+    }
+
     #[test]
     fn a_clone_of_the_tables_copies_only_what_a_write_to_it_reaches_and_shares_the_memos() {
         let fwd = RouterForwarder::new(zid(0x01));

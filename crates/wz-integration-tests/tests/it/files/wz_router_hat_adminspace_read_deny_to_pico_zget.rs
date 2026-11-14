@@ -22,7 +22,7 @@
 //! The positive twin (`wz_router_hat_adminspace_to_pico_zget`) federates R1 with R2
 //! and waits for `routers-net converged (2 node(s))` precisely because the
 //! router-tier legs are only non-trivial once a second router is in the graph: the
-//! `linkstate/routers` DOT names both, and `route/successor/**` has a computed hop.
+//! `linkstate/north` DOT names both, and `route/successor/**` has a computed hop.
 //! This test reproduces that setup EXACTLY and then asserts nothing comes back. Run
 //! against one lonely router the assertion would be near-vacuous — a route-successor
 //! leg that is empty anyway proves nothing about a gate. Here every leg the positive
@@ -211,8 +211,8 @@ fn wz_router_adminspace_read_deny_seen_by_pico_z_get() {
         "read=false must suppress every router admin reply under `{root}`; pico saw one\n--- z_get ---\n{out}"
     );
     assert!(
-        !out.contains("linkstate/routers"),
-        "the linkstate/routers leg must be suppressed by the read gate\n--- z_get ---\n{out}"
+        !out.contains("/linkstate/"),
+        "every linkstate/<region> leg must be suppressed by the read gate\n--- z_get ---\n{out}"
     );
     assert!(
         !out.contains("route/successor"),

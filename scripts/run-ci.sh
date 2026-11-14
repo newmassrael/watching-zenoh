@@ -23792,7 +23792,7 @@ layer_e7b2_router_connect_add_over_the_wire() {
 # connects), so R1 can only route the GET after the re-advertise fold
 # (`re_advertise_self_cross_tier` picking up the `local_queryables` fold in
 # `derived_cross_tier_qabls_into`) federates it on join. The test asserts the LIVE
-# `linkstate/routers` DOT body names BOTH routers' zenoh-hex zids + a
+# `linkstate/north` DOT body names BOTH routers' zenoh-hex zids + a
 # `route/successor/src/<x>/dst/<y>` entry. wz<->wz only — the legs add no new wire
 # format (a standard reply GET, cross-impl-proven by adminspace-core), so no Layer Z
 # cross-impl arm is needed (a byte-parity wz<->zenohd DOT test could only assert
