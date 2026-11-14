@@ -290,7 +290,6 @@ pub const DEFAULT_OPEN_TICK_MS: u64 = 50;
 /// with E0063. `#[non_exhaustive]` makes that fragile form UNREPRESENTABLE for
 /// out-of-crate callers (integration tests under `tests/` are separate crates),
 /// so a future third cfg-gated transport field cannot silently break them either.
-#[derive(Default)]
 #[non_exhaustive]
 pub struct DialConfig {
     /// TLS client material for a `tls/...` dial. `None` (the default) => a
@@ -308,9 +307,52 @@ pub struct DialConfig {
     /// every dialed locator's own options. Empty by default, which is a node
     /// whose locators alone decide. See [`LinkDefaults`].
     pub link_defaults: LinkDefaults,
+    /// `transport/unicast/open_timeout`: how long one open of an endpoint may take, its dial and
+    /// its handshake on one clock ([`open_within`]). [`OPEN_TIMEOUT`] unless the node states
+    /// another.
+    pub open_timeout: std::time::Duration,
+}
+
+impl Default for DialConfig {
+    fn default() -> Self {
+        Self {
+            #[cfg(feature = "transport-link-tls")]
+            tls: None,
+            #[cfg(feature = "transport-link-quic")]
+            quic: None,
+            link_defaults: LinkDefaults::default(),
+            open_timeout: OPEN_TIMEOUT,
+        }
+    }
+}
+
+/// Upstream's `transport/unicast/open_timeout`, ten seconds
+/// (`commons/zenoh-config/src/defaults.rs` @ `open_timeout: 10_000,`).
+pub const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(10_000);
+
+/// Run `open`, the dial of one endpoint and the handshake over the link it makes, within
+/// `open_timeout`, and answer [`OpenError::OpenTimeout`] when the bound passes first. Upstream
+/// bounds one open of an endpoint this way, the link's creation and its establishment on the
+/// one clock (`io/zenoh-transport/src/unicast/manager.rs` @
+/// `tokio::time::timeout(self.config.unicast.open_timeout, async {`); the handshake's own
+/// windows still end it sooner where they are shorter.
+pub async fn open_within<T, F>(open_timeout: std::time::Duration, open: F) -> Result<T, OpenError>
+where
+    F: core::future::Future<Output = Result<T, OpenError>>,
+{
+    match tokio::time::timeout(open_timeout, open).await {
+        Ok(opened) => opened,
+        Err(_) => Err(OpenError::OpenTimeout(open_timeout)),
+    }
 }
 
 impl DialConfig {
+    /// `transport/unicast/open_timeout`: the bound every open of an endpoint dialled with this
+    /// config is held to ([`open_within`]).
+    pub fn with_open_timeout(mut self, open_timeout: std::time::Duration) -> Self {
+        self.open_timeout = open_timeout;
+        self
+    }
     /// R2592 — supply the per-link-kind socket configuration every dial layers
     /// its locator's options over. Ungated, like the layer itself.
     pub fn with_link_defaults(mut self, link_defaults: LinkDefaults) -> Self {
@@ -4345,6 +4387,10 @@ pub enum OpenError {
     /// `set_close_reason_count >= 1` with `CloseReason::Generic`), whereas a
     /// peer Close / link loss reaches `Closed` without a close-reason action.
     HandshakeTimeout,
+    /// The open of an endpoint, its dial and its handshake, did not reach Established within
+    /// `transport/unicast/open_timeout` (the bound carried here): [`open_within`]'s answer, the
+    /// one upstream gives when its `open_transport_unicast` times out.
+    OpenTimeout(std::time::Duration),
     /// R311kc — the peer's InitAck size parameters exceeded our InitSyn
     /// advertisement (zenoh-pico `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION`,
     /// unicast/transport.c:123-140: every InitAck size parameter must be

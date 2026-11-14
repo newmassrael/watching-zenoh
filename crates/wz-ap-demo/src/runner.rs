@@ -96,8 +96,8 @@ use wz::runtime_tokio::session_glue::{
 };
 use wz::runtime_tokio::session_open::{
     accept_and_open_session_with_offer, accept_endpoint, dial_endpoint,
-    initiate_and_open_session_with_offer, offer_for_connect, AcceptConfig, DialConfig, DialedLink,
-    OpenError, OpenedSession, OpenedSessionParts, SessionOffer, DEFAULT_OPEN_TICK_MS,
+    initiate_and_open_session_with_offer, offer_for_connect, open_within, AcceptConfig, DialConfig,
+    DialedLink, OpenError, OpenedSession, OpenedSessionParts, SessionOffer, DEFAULT_OPEN_TICK_MS,
 };
 
 // R2592 — the node's per-link-kind socket configuration, carried in
@@ -288,12 +288,17 @@ struct SpawnedTasks {
 /// configuration (`--link-config`), so no dial path this binary has can open a
 /// link without it: this builder is the only place a non-default `DialConfig`
 /// is made.
+///
+/// And every dial config carries the node's `transport/unicast/open_timeout`
+/// (`--open-timeout-ms`), the bound each open of an endpoint it dials runs within.
 fn build_dial_config(
     tls_ca: &Option<String>,
     quic_ca: &Option<String>,
-    link_defaults: &LinkDefaults,
+    tuning: &TransportTuning,
 ) -> io::Result<DialConfig> {
-    let cfg = DialConfig::default().with_link_defaults(link_defaults.clone());
+    let cfg = DialConfig::default()
+        .with_link_defaults(tuning.link_defaults.clone())
+        .with_open_timeout(tuning.open_timeout);
     let cfg = apply_tls_ca(cfg, tls_ca)?;
     let cfg = apply_quic_ca(cfg, quic_ca)?;
     Ok(cfg)
@@ -737,8 +742,8 @@ pub(crate) struct DialCertPaths {
 
 #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
 impl DialCertPaths {
-    fn build(&self, link_defaults: &LinkDefaults) -> io::Result<DialConfig> {
-        build_dial_config(&self.tls_ca, &self.quic_ca, link_defaults)
+    fn build(&self, tuning: &TransportTuning) -> io::Result<DialConfig> {
+        build_dial_config(&self.tls_ca, &self.quic_ca, tuning)
     }
 }
 
@@ -1459,9 +1464,10 @@ async fn dial_candidate(
 /// acceptor's offer returns unchanged.
 async fn establish_link(
     role: &Role,
-    link_defaults: &LinkDefaults,
+    tuning: &TransportTuning,
     offer: SessionOffer,
 ) -> io::Result<(DialedLink, SessionOffer)> {
+    let link_defaults = &tuning.link_defaults;
     match role {
         Role::Acceptor {
             listen,
@@ -1497,7 +1503,7 @@ async fn establish_link(
             // R311y365/y366 — a `tls/...` / `quic/...` --connect threads its
             // `--tls-ca` / `--quic-ca` root-CA into the matching `DialConfig` slot;
             // every cert-free transport takes the default.
-            let dial_cfg = build_dial_config(tls_ca, quic_ca, link_defaults)?;
+            let dial_cfg = build_dial_config(tls_ca, quic_ca, tuning)?;
             // R2099 (open-debt item 512, the `connect/endpoints` residue) — try
             // EVERY candidate in order and take the first that opens, which is
             // upstream's client: `connect_peers_single_link`
@@ -2679,7 +2685,7 @@ async fn open_initiator_with_offer(
 /// existed.
 async fn open_initiator_in_connect_phase(
     role: &Role,
-    link_defaults: &LinkDefaults,
+    tuning: &TransportTuning,
     offer: SessionOffer,
     params: SessionInitParams,
     clock: TokioTime,
@@ -2704,7 +2710,7 @@ async fn open_initiator_in_connect_phase(
             "wz-ap-demo: --connect named no endpoint to dial",
         ));
     }
-    let dial_cfg = build_dial_config(tls_ca, quic_ca, link_defaults)?;
+    let dial_cfg = build_dial_config(tls_ca, quic_ca, tuning)?;
     // R2948 — each candidate on its own schedule: `connect/retry` with the
     // endpoint's `#retry_period_*` tail on top, raced by the runtime's
     // `drive_connect_phase` as upstream's single-link connect races them.
@@ -2719,10 +2725,22 @@ async fn open_initiator_in_connect_phase(
             if attempt > 1 {
                 log::info!("wz-ap-demo: connect attempt {attempt} to {endpoint}");
             }
-            let (dialed, offer) = dial_candidate(endpoint, dial_cfg, offer).await?;
-            open_initiator_with_offer(offer, dialed, params, clock)
-                .await
-                .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))
+            // The dial and the handshake are one open, held to
+            // `transport/unicast/open_timeout` as upstream's `open_transport_unicast` is.
+            let open = async {
+                let (dialed, offer) = dial_candidate(endpoint, dial_cfg, offer)
+                    .await
+                    .map_err(OpenError::Dial)?;
+                open_initiator_with_offer(offer, dialed, params, clock).await
+            };
+            match open_within(dial_cfg.open_timeout, open).await {
+                Ok(opened) => Ok(opened),
+                // A dial that failed reports its own error, as it did before the bound.
+                Err(OpenError::Dial(e)) => Err(e),
+                Err(e) => Err(io::Error::other(format!(
+                    "wz-ap-demo: session open failed: {e:?}"
+                ))),
+            }
         }
     })
     .await;
@@ -3210,7 +3228,7 @@ pub(crate) async fn run_demo(
                 // itself a thin wrapper over the same `_with_offer` entrypoint).
                 Role::Acceptor { shm, .. } => {
                     let (dialed, offer) =
-                        establish_link(&role, &tuning.link_defaults, acceptor_offer(*shm)).await?;
+                        establish_link(&role, &tuning, acceptor_offer(*shm)).await?;
                     accept_and_open_session_with_offer(
                         dialed,
                         params,
@@ -3259,7 +3277,7 @@ pub(crate) async fn run_demo(
                     };
                     open_initiator_in_connect_phase(
                         &role,
-                        &tuning.link_defaults,
+                        &tuning,
                         offer,
                         params,
                         session_clock,
@@ -5454,7 +5472,7 @@ async fn run_peer_until(
             // makes; the default (both CAs absent) is the cert-free mesh, under
             // which a `tls/` or `quic/` target dials to the runtime's typed
             // `Unsupported` rather than to a silent TCP connect.
-            dial_config: std::sync::Arc::new(opts.dial_certs.build(&tuning.link_defaults)?),
+            dial_config: std::sync::Arc::new(opts.dial_certs.build(&tuning)?),
             dial_intents,
             // A peer node hosts no router multicast ingress plane.
             mcast_ingress: None,
@@ -7583,7 +7601,7 @@ async fn run_router_hat_until(
             // material, the dial mirror of the cert its listen presents. One
             // build, shared by the static federation dials, the reconcile-added
             // ones, and every re-dial.
-            dial_config: std::sync::Arc::new(opts.dial_certs.build(&opts.tuning.link_defaults)?),
+            dial_config: std::sync::Arc::new(opts.dial_certs.build(&opts.tuning)?),
             // No gossip-autoconnect on a router (zenoh: routers are reached via
             // configured links, `default_autoconnect_matcher(Router)` is empty) —
             // so no dial-intent stream, exactly run_peer's `--autoconnect`-off arm.

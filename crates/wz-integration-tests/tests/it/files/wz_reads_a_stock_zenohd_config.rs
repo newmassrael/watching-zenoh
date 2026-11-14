@@ -837,6 +837,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "transport/unicast/max_sessions",
             wz.max_sessions.to_string(),
         ),
+        (
+            "transport/unicast/open_timeout",
+            wz.open_timeout_ms.to_string(),
+        ),
         ("transport/unicast/lowlatency", wz.lowlatency.to_string()),
         ("transport/unicast/qos/enabled", wz.qos.to_string()),
         (
@@ -3604,6 +3608,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
       // exercises. NON-DEFAULT on purpose (upstream's is 1000), so a wz that
       // ignored the document and kept its own default would differ.
       max_sessions: 7,
+      // Half upstream's ten seconds, and far above what a dial to the local router takes.
+      open_timeout: 5000,
       lowlatency: false,
       qos: {{ enabled: true }},
       compression: {{ enabled: true }},

@@ -1106,6 +1106,10 @@ pub struct ZenohNodeConfig {
     /// `/ self.manager.config.unicast.keep_alive as u32;`); upstream's default is 4
     /// (`commons/zenoh-config/src/defaults.rs` @ `keep_alive: 4,`).
     pub keep_alive: u32,
+    /// `transport/unicast/open_timeout`, in ms: how long one open of an endpoint, its dial and
+    /// its handshake, may take before it is given up, as upstream bounds `open_transport_unicast`
+    /// (`session_open::open_within`); upstream's default is [`UPSTREAM_OPEN_TIMEOUT_MS`].
+    pub open_timeout_ms: u64,
     /// `transport/unicast/accept_timeout`, in ms: how long an inbound link gets to complete its
     /// handshake. Read by the zenoh-c session's accept loop ([`C_ABI_SESSION_HONOURED_KEYS`]);
     /// upstream's default is ten seconds (`commons/zenoh-config/src/defaults.rs` @
@@ -1549,6 +1553,7 @@ impl Default for ZenohNodeConfig {
             // build's `sn-resolution` policy: this struct is what a zenoh node makes of a file.
             sn_resolution: crate::policy::SnResolution::Bits32,
             keep_alive: wz_session_core::session_init_params::KEEP_ALIVE_PER_LEASE,
+            open_timeout_ms: UPSTREAM_OPEN_TIMEOUT_MS,
             accept_timeout_ms: crate::config::ACCEPT_TIMEOUT_MS,
             accept_pending: crate::config::ACCEPT_PENDING,
             // Upstream's batching bound is a millisecond (`commons/zenoh-config/src/defaults.rs`
@@ -2030,6 +2035,7 @@ impl ZenohNodeConfig {
         out.push_str(" },\n  \"gateway\": { \"south\": ");
         out.push_str(&gateway_south_json(&self.gateway_south));
         out.push_str(" },\n  \"transport\": {\n    \"unicast\": {\n");
+        let _ = writeln!(out, "      \"open_timeout\": {},", self.open_timeout_ms);
         let _ = writeln!(out, "      \"accept_timeout\": {},", self.accept_timeout_ms);
         let _ = writeln!(out, "      \"accept_pending\": {},", self.accept_pending);
         let _ = writeln!(out, "      \"max_links\": {},", self.max_links);
@@ -2201,6 +2207,10 @@ impl ZenohNodeConfig {
 /// states none resolves to.
 pub const UPSTREAM_BATCHING_TIME_LIMIT_MS: u64 = 1;
 
+/// Upstream's `transport/unicast/open_timeout`, in milliseconds, which a file that states none
+/// resolves to (`commons/zenoh-config/src/defaults.rs` @ `open_timeout: 10_000,`).
+pub const UPSTREAM_OPEN_TIMEOUT_MS: u64 = 10_000;
+
 /// R2925 — upstream's `transport/link/tx/queue/size` leaves, each with the
 /// `Priority` wire byte whose queue it sizes, as upstream's transport manager
 /// maps them (`io/zenoh-transport/src/manager.rs` @
@@ -2284,6 +2294,11 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // enforces it: after the dedup-by-zid rule and before the insert
     // (`io/zenoh-transport/src/unicast/manager.rs` @ `max_sessions`).
     "transport/unicast/max_sessions",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, `UNHONOURED_BEYOND_WZ` and the
+    // `TransportUnicastConf` group, so the surface total is unchanged: every open of an endpoint
+    // a node makes, its dial and its handshake, runs within it (`session_open::open_within`), as
+    // upstream's `open_transport_unicast` does.
+    "transport/unicast/open_timeout",
     "transport/unicast/lowlatency",
     "transport/unicast/qos/enabled",
     "transport/unicast/compression/enabled",
@@ -2972,7 +2987,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // the two timeouts quantify over a half-open accept pipeline wz did not
     // model, while this one is a comparison against a table the accept loop
     // already kept. See `HONOURED_CONFIG_KEYS`.
-    "transport/unicast/open_timeout",
+    // `transport/unicast/open_timeout` LEFT this list for `HONOURED_CONFIG_KEYS`: a node's every
+    // open of an endpoint runs within it. Same partition, same total.
 ];
 
 /// The unhonoured keys wz genuinely CANNOT act on — the first of the two kinds
@@ -3201,7 +3217,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // session table, and the accept loop has held one since it existed. What
     // was missing was a bound on it, which is a comparison rather than a
     // subsystem.
-    "transport/unicast/open_timeout",
+    // `transport/unicast/open_timeout` LEFT this list and its group below: the bound on one open
+    // is a timeout around the dial and the handshake, which every opener now runs within.
 ];
 
 /// The unhonoured keys wz ALREADY ACTS ON and the reader was never told — the
@@ -3428,7 +3445,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // This is the outcome the R2159 note below describes, in its own
             // words: the day wz grows a capability, its group reds rather than
             // going quietly stale. It redded, and this is the entry moving out.
-            "transport/unicast/open_timeout",
+            // `transport/unicast/open_timeout` LEFT this group: an open's bound is a timeout
+            // the opener holds, not a table.
         ],
     ),
     // R2159 (open-debt item 229) — the `ListenConfig` group ("a dial/listen
@@ -3719,15 +3737,9 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // session honours the key now, and this ledger carries evidence for unhonoured keys.
     // Open-debt item 925 -- `transport/unicast/accept_timeout`'s row is GONE too: the zenoh-c
     // session honours the key, so the ledger of unhonoured keys carries no evidence for it.
-    // Open-debt 732 — `link_pipeline` cites this key to explain why the
-    // per-candidate dial bound is NOT derived from it: upstream clocks the whole
-    // walk plus the handshake with it, which cannot bound one candidate. The
-    // anchor is the bound's own constant; the disclaimer sits beside it.
-    (
-        "transport/unicast/open_timeout",
-        "not-this-key",
-        "CANDIDATE_DIAL_TIMEOUT",
-    ),
+    // Open-debt 732 -- `transport/unicast/open_timeout`'s `not-this-key` row is GONE: the key
+    // is honoured, as the bound on a whole open, and the per-candidate dial bound it was cited
+    // beside runs inside that bound rather than in place of it.
 ];
 
 /// The two decisions an [`UNHONOURED_DISPOSITIONS`] row may carry, and the one place a third is
@@ -3835,11 +3847,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "transport/shared_memory/transport_optimization/messages",
         "build",
         "applied by the Rust API preset promoter; the node and C ABI do not promote",
-    ),
-    (
-        "transport/unicast/open_timeout",
-        "build",
-        "a deadline over the whole open; wz bounds each dial candidate instead",
     ),
 ];
 
@@ -7659,6 +7666,12 @@ impl ZenohNodeConfig {
             Json5Value::Object(fields) => is_the_tagged_auto_preset(fields),
             _ => false,
         })?;
+        // Any `u64`, as upstream's field takes it: a bound of 0 gives every open up at once,
+        // which is what such a file asks of a zenohd too.
+        if let Some(v) = want_u64(&doc, "transport/unicast/open_timeout")? {
+            out.open_timeout_ms = v;
+            named.push("transport/unicast/open_timeout");
+        }
         if let Some(v) = want_u64(&doc, "transport/unicast/accept_timeout")? {
             out.accept_timeout_ms = v;
             named.push("transport/unicast/accept_timeout");
@@ -9348,6 +9361,11 @@ mod tests {
             (
                 "transport/unicast/max_sessions",
                 r#"{ "transport": { "unicast": { "max_sessions": 9 } } }"#,
+            ),
+            // 2.5 s against upstream's ten.
+            (
+                "transport/unicast/open_timeout",
+                r#"{ "transport": { "unicast": { "open_timeout": 2500 } } }"#,
             ),
             (
                 "transport/unicast/lowlatency",

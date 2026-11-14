@@ -1522,28 +1522,32 @@ async fn dial_face(
         Ok(offer) => offer,
         Err(e) => return (id, peer, Err(e)),
     };
-    let result = match dial_locator(target.locator, &dial_config).await {
-        // R2095 (open-debt item 513) — THE seam the item names. Every capability
-        // the node was configured with rides THIS InitSyn; before it a mesh dial
-        // went out through the bare open, so a `--peer` / `--router-hat` node
-        // offered nothing at all no matter what its config file said. A declared
-        // band still arms the initiator's superset containment against the
-        // acceptor's InitAck — it is one field of the offer now rather than the
-        // only thing in it.
-        Ok(link) => {
-            initiate_and_open_session_with_staging(
-                link,
-                params,
-                offer,
-                stage,
-                clock,
-                None,
-                tick_interval_ms,
-            )
-            .await
+    // The dial and the handshake are one open, bounded by `transport/unicast/open_timeout`.
+    let result = crate::session_open::open_within(dial_config.open_timeout, async {
+        match dial_locator(target.locator, &dial_config).await {
+            // R2095 (open-debt item 513) — THE seam the item names. Every capability
+            // the node was configured with rides THIS InitSyn; before it a mesh dial
+            // went out through the bare open, so a `--peer` / `--router-hat` node
+            // offered nothing at all no matter what its config file said. A declared
+            // band still arms the initiator's superset containment against the
+            // acceptor's InitAck — it is one field of the offer now rather than the
+            // only thing in it.
+            Ok(link) => {
+                initiate_and_open_session_with_staging(
+                    link,
+                    params,
+                    offer,
+                    stage,
+                    clock,
+                    None,
+                    tick_interval_ms,
+                )
+                .await
+            }
+            Err(e) => Err(OpenError::Dial(e)),
         }
-        Err(e) => Err(OpenError::Dial(e)),
-    };
+    })
+    .await;
     // R2900 — the tag is the target's own: an address for the IP family, the
     // transport name for the four shapes that have none (the accept side's
     // split, now that the dial side carries those shapes too).
@@ -1688,27 +1692,31 @@ async fn dial_face_multilink(
         Ok(offer) => offer,
         Err(e) => return (id, peer, Err(e)),
     };
-    let result = match dial_locator(target.locator, &dial_config).await {
-        // R2096 (open-debt item 516) — THE seam the item names. R2095 wired the
-        // SINGLE-link dial (`dial_face`) to the whole offer and this one kept a
-        // bare `qos: bool`, so on an aggregating node three of the four
-        // capabilities reached no InitSyn at all and the wire form depended on
-        // `--max-links`.
-        Ok(link) => {
-            initiate_multilink_with_staging(
-                link,
-                params,
-                offer,
-                band,
-                stage,
-                clock,
-                None,
-                tick_interval_ms,
-            )
-            .await
+    // Bounded as `dial_face`'s open is.
+    let result = crate::session_open::open_within(dial_config.open_timeout, async {
+        match dial_locator(target.locator, &dial_config).await {
+            // R2096 (open-debt item 516) — THE seam the item names. R2095 wired the
+            // SINGLE-link dial (`dial_face`) to the whole offer and this one kept a
+            // bare `qos: bool`, so on an aggregating node three of the four
+            // capabilities reached no InitSyn at all and the wire form depended on
+            // `--max-links`.
+            Ok(link) => {
+                initiate_multilink_with_staging(
+                    link,
+                    params,
+                    offer,
+                    band,
+                    stage,
+                    clock,
+                    None,
+                    tick_interval_ms,
+                )
+                .await
+            }
+            Err(e) => Err(OpenError::Dial(e)),
         }
-        Err(e) => Err(OpenError::Dial(e)),
-    };
+    })
+    .await;
     // Dial target -> its own tag, same as `dial_face`.
     (id, peer, result)
 }

@@ -1233,6 +1233,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // The bound on each open of an endpoint the node dials, its dial and its handshake: every
+    // run-mode that dials holds its opens to it, so it is honoured at any value.
+    if named("transport/unicast/open_timeout") {
+        exp.pair(
+            "transport/unicast/open_timeout",
+            "--open-timeout-ms",
+            cfg.open_timeout_ms.to_string(),
+            None,
+        );
+    }
     if named("transport/unicast/qos/enabled") {
         exp.presence("transport/unicast/qos/enabled", "--qos", cfg.qos, None);
     }
@@ -3439,6 +3449,16 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          no frame field distinguishes from any other close.",
     ),
     (
+        "transport/unicast/open_timeout",
+        KIND_LEG_JUDGED,
+        "expands to `--open-timeout-ms`. A local deadline on one open, the dial and \
+         the handshake together, read off the clock by \
+         `an_open_that_does_not_complete_ends_at_the_open_bound` in the runtime's \
+         tests/connect_and_open_session.rs: \
+         an open against a peer that never answers ends at the bound, before the \
+         handshake's own window.",
+    ),
+    (
         "listen/retry",
         KIND_OFF_WIRE,
         "expands to `--listen-retry`. How often binding is re-attempted; like \
@@ -5260,6 +5280,12 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { unicast: { max_sessions: 5 } } }"#,
+            ),
+            (
+                "transport/unicast/open_timeout",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { unicast: { open_timeout: 2500 } } }"#,
             ),
             // `qos` RESOLVES to true in stock zenoh, so a document that names
             // only `lowlatency` describes a node that cannot start. Both sides
@@ -7816,6 +7842,10 @@ mod stock_config_tests {
                 vec!["--tx-queue-allocation", "eager"],
                 "--tx-queue-allocation expects",
             ),
+            (
+                vec!["--open-timeout-ms", "10s"],
+                "--open-timeout-ms expects",
+            ),
         ] {
             let err = TransportTuning::from_argv(&argv(&cli))
                 .expect_err("a value outside the type is not a tuning");
@@ -9353,6 +9383,9 @@ pub(crate) struct TransportTuning {
     /// `--rx-max-message-size <bytes>`: the largest message a session rejoins
     /// from fragments. Upstream's default unless given.
     pub(crate) link_rx: wz::runtime_tokio::session_glue::LinkRxConf,
+    /// `--open-timeout-ms <ms>`: how long one open of an endpoint this node dials, its dial and
+    /// its handshake, may take. Upstream's ten seconds unless given.
+    pub(crate) open_timeout: std::time::Duration,
 }
 
 /// R2925 — the demo's flag for each priority's queue size, indexed by the
@@ -9378,6 +9411,7 @@ impl Default for TransportTuning {
             link_defaults: Default::default(),
             tx_queue: Default::default(),
             link_rx: Default::default(),
+            open_timeout: wz::runtime_tokio::session_open::OPEN_TIMEOUT,
         }
     }
 }
@@ -9468,6 +9502,12 @@ impl TransportTuning {
                 wz::runtime_tokio::session_glue::QueueAllocation::from_zenoh_name(&v).ok_or_else(
                     || format!("--tx-queue-allocation expects init or lazy, got '{v}'"),
                 )?;
+        }
+        if let Some(v) = parse_pair(rest, "--open-timeout-ms") {
+            out.open_timeout = std::time::Duration::from_millis(
+                v.parse::<u64>()
+                    .map_err(|_| format!("--open-timeout-ms expects milliseconds, got '{v}'"))?,
+            );
         }
         if let Some(v) = parse_pair(rest, "--rx-max-message-size") {
             out.link_rx.max_message_size = v

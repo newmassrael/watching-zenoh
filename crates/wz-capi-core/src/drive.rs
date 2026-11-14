@@ -120,6 +120,9 @@ pub struct DialPhase {
     /// peer have arrived, so a subscriber declared right after the open is told of what was
     /// already there.
     pub wait_declares: bool,
+    /// `transport/unicast/open_timeout`: how long one open of an endpoint, its dial and its
+    /// handshake, may take ([`wz_runtime_tokio::session_open::open_within`]).
+    pub open_timeout: std::time::Duration,
 }
 
 impl DialPhase {
@@ -132,6 +135,7 @@ impl DialPhase {
         start_window: None,
         router_hold: std::time::Duration::ZERO,
         wait_declares: true,
+        open_timeout: wz_runtime_tokio::session_open::OPEN_TIMEOUT,
     };
 }
 
@@ -164,6 +168,9 @@ struct Dialer {
     /// Each endpoint's dial config, built before any dial so a bad trust bundle
     /// fails the open rather than one attempt.
     dial_cfgs: Vec<(String, DialConfig)>,
+    /// `transport/unicast/open_timeout`: the bound on each open this dialer makes, a configured
+    /// endpoint's or a found one's, its dial and its handshake together.
+    open_timeout: std::time::Duration,
     params: SessionInitParams,
     /// What every link this session dials offers at its handshake. See
     /// [`open_blocking`].
@@ -250,6 +257,26 @@ impl Dialer {
     /// `expected` names is [`OpenError::LinkFailed`], and a handshake that does not complete is
     /// [`OpenError::DriveFailed`]; a link the node refused in its handshake is [`DialFailure::Held`].
     async fn open_with(
+        &self,
+        endpoint: &str,
+        dial_cfg: &DialConfig,
+        expected: Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]>,
+    ) -> Result<OpenedSession, DialFailure> {
+        // The dial and the handshake are one open, bounded by `transport/unicast/open_timeout`
+        // as `open_within` bounds the runtime's opens; one that runs out did not complete.
+        match tokio::time::timeout(
+            self.open_timeout,
+            self.open_unbounded(endpoint, dial_cfg, expected),
+        )
+        .await
+        {
+            Ok(opened) => opened,
+            Err(_) => Err(DialFailure::Failed(OpenError::DriveFailed)),
+        }
+    }
+
+    /// [`Self::open_with`] without its bound.
+    async fn open_unbounded(
         &self,
         endpoint: &str,
         dial_cfg: &DialConfig,
@@ -1484,6 +1511,7 @@ fn prepare_dial(
     };
     let dialer = Arc::new(Dialer {
         dial_cfgs,
+        open_timeout: phase.open_timeout,
         params,
         offer: ctx.offer,
         clock: ctx.clock,
@@ -4939,6 +4967,7 @@ mod tests {
             });
             let dialer = Dialer {
                 dial_cfgs: Vec::new(),
+                open_timeout: wz_runtime_tokio::session_open::OPEN_TIMEOUT,
                 params: init_params(
                     WhatAmI::Client,
                     vec![0xC1; 4],
@@ -5075,6 +5104,7 @@ mod tests {
             let dial_cfg = dial_config(&CapiTlsConfig::default(), &endpoint).expect("dial config");
             let dialer = Dialer {
                 dial_cfgs: vec![(endpoint.clone(), dial_cfg)],
+                open_timeout: wz_runtime_tokio::session_open::OPEN_TIMEOUT,
                 params: init_params(
                     WhatAmI::Peer,
                     vec![0xC1; 4],
@@ -5153,6 +5183,7 @@ mod tests {
             let dial_cfg = dial_config(&CapiTlsConfig::default(), &endpoint).expect("dial config");
             let dialer = Dialer {
                 dial_cfgs: vec![(endpoint.clone(), dial_cfg)],
+                open_timeout: wz_runtime_tokio::session_open::OPEN_TIMEOUT,
                 params: init_params(
                     WhatAmI::Peer,
                     vec![0xC1; 4],

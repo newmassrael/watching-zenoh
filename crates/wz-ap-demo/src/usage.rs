@@ -215,6 +215,10 @@ pub(crate) fn print_usage() {
     eprintln!("                             senders still adding to it (default the writer's");
     eprintln!("                             200 us; 0 holds nothing back).");
     eprintln!("                             zenoh transport/link/tx/queue/batching/time_limit");
+    eprintln!("    --open-timeout-ms <ms>");
+    eprintln!("                             how long one open of an endpoint, its dial and its");
+    eprintln!("                             handshake, may take (default 10000).");
+    eprintln!("                             zenoh transport/unicast/open_timeout");
     eprintln!("    --tx-queue-allocation <init|lazy>");
     eprintln!("                             whether a link's queue allocates every batch it may");
     eprintln!("                             hold when its session is established, or each when");

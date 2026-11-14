@@ -317,6 +317,9 @@ fn dial_phase(node: &ZenohNodeConfig, whatami: WhatAmI) -> DialPhase {
         // `connect_scouted`: it waits for the initial declarations of the peers it met.
         // Upstream's default is true.
         wait_declares: node.open_declares.unwrap_or(true),
+        // `transport/unicast/open_timeout`, upstream's ten seconds unless the document states
+        // another.
+        open_timeout: std::time::Duration::from_millis(node.open_timeout_ms),
     }
 }
 
@@ -2270,7 +2273,8 @@ mod tests {
                 "{head}\n\
                  dial: DialPhase {{ policy: PhasePolicy {{ budget: PhaseBudget({budget}), \
                  exit_on_failure: {exit} }}, schedule: {SCHEDULE}, redial: Some({SCHEDULE}), \
-                 start_window: Some(500ms), router_hold: 500ms, wait_declares: true }}\n\
+                 start_window: Some(500ms), router_hold: 500ms, wait_declares: true, \
+                 open_timeout: 10s }}\n\
                  listen_phase: ListenPhase {{ policy: PhasePolicy {{ budget: PhaseBudget(0), \
                  exit_on_failure: true }}, schedule: {SCHEDULE} }}\n\
                  batch_size: 65535\n\
@@ -2346,12 +2350,16 @@ mod tests {
             Some(KeyState::Inert)
         );
         assert_eq!(
-            key_state("transport/unicast/open_timeout"),
+            key_state("transport/link/tx/threads"),
             Some(KeyState::Unmapped)
         );
         // A key the C interface acts on is mapped, whichever list it left.
         assert_eq!(
             key_state("transport/unicast/accept_timeout"),
+            Some(KeyState::Mapped)
+        );
+        assert_eq!(
+            key_state("transport/unicast/open_timeout"),
             Some(KeyState::Mapped)
         );
         assert_eq!(
@@ -2361,7 +2369,7 @@ mod tests {
         assert_eq!(key_state("a/key/nobody/lists"), None);
         assert!(is_section_of_keys_with_a_state("gateway"));
         assert!(!is_section_of_keys_with_a_state(
-            "transport/unicast/open_timeout"
+            "transport/link/tx/threads"
         ));
     }
 
@@ -2375,10 +2383,16 @@ mod tests {
             &[],
             r#"{ connect: { timeout_ms: 500 },
                  scouting: { multicast: { enabled: false } },
-                 transport: { unicast: { open_timeout: 1234 } } }"#,
+                 transport: { unicast: { open_timeout: 1234 },
+                              link: { tx: { threads: 3 } } } }"#,
         )
         .expect("opens");
-        assert_eq!(plan.ignored, ["transport/unicast/open_timeout"]);
+        assert_eq!(plan.ignored, ["transport/link/tx/threads"]);
+        // The open bound is a key the engine acts on: it reaches the dial phase.
+        assert_eq!(
+            plan.dial.open_timeout,
+            std::time::Duration::from_millis(1234)
+        );
     }
 
     /// `transport/link/protocols` is a whitelist of the unicast links the node makes: an endpoint
