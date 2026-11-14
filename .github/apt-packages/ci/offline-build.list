@@ -1,0 +1,5 @@
+image ubuntu22
+bubblewrap
+clang
+libclang-dev
+pkg-config

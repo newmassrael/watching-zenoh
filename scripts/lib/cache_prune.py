@@ -23,6 +23,10 @@ reason, stopping as soon as the repository is back under the registry's `target_
                  removed), everything beyond the newest `keep` entries. A manifest
                  change writes a new rust-cache generation and the previous one is
                  dead weight from that moment.
+  3b. idle       in a class that declares `idle_days`, an entry nobody has read for
+                 that long. A series whose key hashes an input that changed (the
+                 apt archives are keyed on a job's package list) is never written
+                 again, so no newer generation will ever supersede its last entry.
   4. over target if the repository is still over `target_mb`, drop the least dear
                  entries first: lower `evict_priority`, then least recently read.
                  A class with `protect: true` is never touched by this pass. That is
@@ -45,7 +49,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -121,6 +125,13 @@ def plan(entries: list[dict], reg: dict, now: float) -> tuple[list[tuple[dict, s
         for old in members[by_id[cid]["keep"] :]:
             drop(old, f"superseded: `{members[0]['key'][-24:]}` is newer in series `{series[:48]}`")
 
+    for e in entries:
+        cls = class_of(e["key"], classes)
+        if cls is None or e["id"] in gone or not cls.get("idle_days"):
+            continue
+        if now - epoch(e["last_accessed_at"]) >= cls["idle_days"] * 86400:
+            drop(e, f"idle: unread for {cls['idle_days']} days, so no job reads its series any more")
+
     live = [e for e in entries if e["id"] not in gone]
     total = sum(e["size_in_bytes"] for e in live)
     if total > target:
@@ -166,6 +177,86 @@ def class_table(entries: list[dict], reg: dict) -> list[str]:
             f"{'-':>10s}  ORPHAN"
         )
     return rows
+
+
+def steady_state(entries: list[dict], reg: dict) -> dict[str, dict]:
+    """Per class, what it holds once the superseded pass has run.
+
+    The newest `keep` entries of each series on the default branch, which is
+    what the class costs between manifest changes and what `measured_mb` records.
+    A class with no entry at all is reported absent rather than measured as zero:
+    an entry the size pass has just evicted is still demand.
+    """
+    out: dict[str, dict] = {}
+    for cls in reg["classes"]:
+        series: dict[str, list[dict]] = {}
+        for e in entries:
+            if e["ref"] != MAIN_REF or class_of(e["key"], reg["classes"]) is not cls:
+                continue
+            series.setdefault(series_of(cls, e["key"]), []).append(e)
+        kept: list[dict] = []
+        for members in series.values():
+            members.sort(key=lambda x: (x["created_at"], x["id"]), reverse=True)
+            kept.extend(members[: cls["keep"]])
+        out[cls["id"]] = dict(
+            series=len(series),
+            entries=len(kept),
+            mb=sum(e["size_in_bytes"] for e in kept) / MB,
+            absent=not kept,
+        )
+    return out
+
+
+def measure(entries: list[dict], reg: dict, today: str) -> list[str]:
+    """The reading that moves `measured_mb`: a table, then the lines to write."""
+    state = steady_state(entries, reg)
+    rows = [
+        f"{'class':24s} {'series':>6s} {'entries':>7s} {'MB now':>9s} {'measured':>9s} "
+        f"{'budget':>7s}  note"
+    ]
+    total = 0.0
+    for cls in reg["classes"]:
+        s = state[cls["id"]]
+        total += s["mb"]
+        note = "ABSENT: nothing to measure (evicted, or never saved)" if s["absent"] else (
+            "OVER BUDGET" if s["mb"] > cls["budget_mb"] else ""
+        )
+        rows.append(
+            f"{cls['id']:24s} {s['series']:6d} {s['entries']:7d} {s['mb']:9.1f} "
+            f"{cls.get('measured_mb', '-')!s:>9s} {cls['budget_mb']:7g}  {note}"
+        )
+    rows.append(
+        f"steady state of the classes present: {total:.1f} MB against target "
+        f"{reg['target_mb']} MB (cap {reg['cap_mb']} MB)"
+    )
+    rows.append("")
+    rows.append(f"measured_mb / measured_on to write in {REGISTRY.name} (classes present only):")
+    for cls in reg["classes"]:
+        s = state[cls["id"]]
+        if not s["absent"]:
+            rows.append(f'  {cls["id"]}: "measured_mb": {s["mb"]:.1f}, "measured_on": "{today}"')
+    return rows
+
+
+def saver_spec(reg: dict, owner: str) -> list[dict]:
+    """The series definition of every class `owner` (`<workflow>:<job>`) saves.
+
+    Handed by each saving job to the workflow's `evict-superseded` job as a job
+    output, so the job that deletes a superseded generation right after a save
+    groups keys exactly as the superseded pass above does, without checking out
+    or running this repository's code itself.
+    """
+    return [
+        dict(
+            cls=c["id"],
+            prefixes=list(c["prefixes"]),
+            suffix=c.get("generation_suffix"),
+            keep=c["keep"],
+            stale=list(c.get("stale_patterns", [])),
+        )
+        for c in reg["classes"]
+        if owner in c.get("owners", [])
+    ]
 
 
 def read_listing(path: str) -> list[dict]:
@@ -336,6 +427,33 @@ def selftest() -> int:
     d, s = plan(young, reg, now)
     expect("an entry younger than 15 minutes is not evicted for size", d, [])
 
+    reg["classes"].append(
+        dict(cls("apt", "apt-debs-", "-[0-9]+$", prio=60), idle_days=7, owners=["ci.yml:j"])
+    )
+    live = ent("apt-debs-Linux-X64-aa-41", 40, accessed="2026-10-09T10:00:00Z")
+    dead = ent("apt-debs-Linux-X64-bb-40", 40, created="2026-09-20T00:00:00Z",
+               accessed="2026-10-01T00:00:00Z")
+    r, _ = reasons([live, dead])
+    expect("idle: a list series unread for a week goes, a read one stays", r,
+           {"apt-debs-Linux-X64-bb-40": "idle"})
+    newer = ent("apt-debs-Linux-X64-aa-42", 40, created="2026-10-09T09:00:00Z")
+    r, _ = reasons([live, newer])
+    expect("a list series keeps only its newest run's archive", r,
+           {"apt-debs-Linux-X64-aa-41": "superseded"})
+
+    state = steady_state([live, newer, dead, ent("v0-rust-a-Linux-aa-01", 100)], reg)
+    expect(
+        "steady state counts the kept generation per series and calls an empty class absent",
+        (round(state["apt"]["mb"]), state["apt"]["series"], state["host"]["absent"]),
+        (80, 2, True),
+    )
+    expect(
+        "a saver's spec is the pruner's own series definition of the classes it owns",
+        saver_spec(reg, "ci.yml:j"),
+        [dict(cls="apt", prefixes=["apt-debs-"], suffix="-[0-9]+$", keep=1, stale=[])],
+    )
+    expect("a job that owns nothing gets no spec", saver_spec(reg, "ci.yml:other"), [])
+
     print(f"  {'FAIL' if failures else 'all arms behaved as claimed'}")
     return 1 if failures else 0
 
@@ -346,10 +464,29 @@ def main() -> int:
     ap.add_argument("--listing", help="read a saved listing instead of the API")
     ap.add_argument("--apply", action="store_true", help="delete (default is a dry run)")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument(
+        "--measure",
+        action="store_true",
+        help="print each class's steady-state size from the listing, and the "
+        "measured_mb / measured_on lines that reading supports; deletes nothing",
+    )
+    ap.add_argument(
+        "--saver-spec",
+        metavar="WORKFLOW:JOB",
+        help="print `spec=<json>` for $GITHUB_OUTPUT: the series definition of every "
+        "class this job saves",
+    )
     args = ap.parse_args()
     if args.selftest:
         return selftest()
     reg = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    if args.saver_spec:
+        spec = saver_spec(reg, args.saver_spec)
+        if not spec:
+            print(f"cache-prune: {args.saver_spec} owns no class in {REGISTRY.name}", file=sys.stderr)
+            return 1
+        print("spec=" + json.dumps(spec, separators=(",", ":")))
+        return 0
     if args.listing:
         entries = read_listing(args.listing)
     else:
@@ -362,6 +499,9 @@ def main() -> int:
         return 2
     if not entries:
         print("cache-prune: the listing is empty; nothing to judge, nothing deleted")
+        return 0
+    if args.measure:
+        print("\n".join(measure(entries, reg, datetime.now(timezone.utc).strftime("%Y-%m-%d"))))
         return 0
     return run(entries, reg, datetime.now().timestamp(), args.apply, args.repo)
 

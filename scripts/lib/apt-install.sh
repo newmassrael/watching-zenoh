@@ -127,6 +127,22 @@
 #
 # USAGE
 #   apt-install.sh <package>...
+#   apt-install.sh --list <file>
+#
+# THE LIST FILE (open-debt item 945). A workflow job names its packages in ONE
+# file, `.github/apt-packages/<workflow>/<job>.list`, and the job's archive
+# cache is keyed on `hashFiles()` of that same file, so the key and the install
+# read one source. Jobs whose files are byte-identical share one cache entry,
+# which is why the form is canonical and checked here and by
+# `apt_package_census.py`:
+#
+#   image <ImageOS of the runner image, e.g. ubuntu22>
+#   <package>[=<version>]       one per line, sorted (C locale), no repeats
+#
+# No comments and no blank lines: two lists that install the same packages on
+# the same image must hash the same. The image line is in the hashed file so a
+# job moved to another image gets another key; it is held against the runner's
+# own `ImageOS` when that is set, and a mismatch fails by name.
 #
 # ENVIRONMENT
 #   WZ_APT_UPDATE_DEADLINE    ceiling on `apt-get update`, seconds (default 300)
@@ -296,11 +312,73 @@ wz_apt_hand_back() {
     chmod -R u+rwX "${dir}" 2>/dev/null || true
 }
 
+# The packages of a list file, one per line, after holding the file to its
+# canonical form (see USAGE). Exit 2 names what is wrong; nothing is installed
+# from a list that two jobs could spell differently for the same packages.
+wz_apt_read_list() {
+    local file="$1"
+    # `[[ < ]]` collates in the shell's locale; the order is the C locale's.
+    # shellcheck disable=SC2034
+    local LC_ALL=C
+    if [[ ! -r "${file}" ]]; then
+        echo "apt-install: list ${file} is not readable" >&2
+        return 2
+    fi
+    if [[ -n "$(tail -c 1 "${file}")" ]]; then
+        echo "apt-install: list ${file} does not end with a newline" >&2
+        return 2
+    fi
+    local first image="" prev="" line n=0
+    IFS= read -r first <"${file}" || true
+    if [[ ! "${first}" =~ ^image\ ([a-z0-9.]+)$ ]]; then
+        echo "apt-install: list ${file} must open with \`image <ImageOS>\`, found '${first}'" >&2
+        return 2
+    fi
+    image="${BASH_REMATCH[1]}"
+    if [[ -n "${ImageOS:-}" && "${ImageOS}" != "${image}" ]]; then
+        echo "apt-install: list ${file} is for image ${image} and this runner is" \
+            "${ImageOS}; its archive key would describe packages for another image" >&2
+        return 2
+    fi
+    while IFS= read -r line; do
+        if [[ ! "${line}" =~ ^[a-z0-9][a-z0-9+.-]*(=[A-Za-z0-9.+:~-]+)?$ ]]; then
+            echo "apt-install: list ${file}: '${line}' is not a package name" \
+                "(no comments, no blank lines, one package per line)" >&2
+            return 2
+        fi
+        if [[ -n "${prev}" ]] && ! [[ "${prev}" < "${line}" ]]; then
+            echo "apt-install: list ${file}: '${line}' after '${prev}' -- the list is" \
+                "sorted in the C locale with no repeats, so equal lists hash equal" >&2
+            return 2
+        fi
+        prev="${line}"
+        n=$((n + 1))
+        printf '%s\n' "${line}"
+    done < <(tail -n +2 "${file}")
+    if [[ "${n}" -eq 0 ]]; then
+        echo "apt-install: list ${file} names no package" >&2
+        return 2
+    fi
+}
+
 # The one entry point. Split from `main` so the test lane can drive the ceiling
 # without installing anything.
 wz_apt_install() {
+    if [[ "${1:-}" == "--list" ]]; then
+        if [[ $# -ne 2 ]]; then
+            echo "apt-install: usage: $0 --list <file>" >&2
+            return 2
+        fi
+        local listed=() pkg
+        local listing
+        listing="$(wz_apt_read_list "$2")" || return 2
+        while IFS= read -r pkg; do
+            listed+=("${pkg}")
+        done <<<"${listing}"
+        set -- "${listed[@]}"
+    fi
     if [[ $# -lt 1 ]]; then
-        echo "apt-install: usage: $0 <package>..." >&2
+        echo "apt-install: usage: $0 <package>... | --list <file>" >&2
         return 2
     fi
     # `WZ_APT_CMD` arrives as one string and must become argv; unquoted on

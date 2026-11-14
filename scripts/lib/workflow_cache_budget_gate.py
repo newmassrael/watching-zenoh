@@ -53,7 +53,11 @@ that eviction never starts.
      lists `crates` and `vendor/sce`, and every one of them built cold)
   6. the class budgets sum to at most `target_mb`, which is at most 85 percent of
      `cap_mb`, and no measured size exceeds its budget. The headroom is what keeps
-     GitHub's eviction from ever running
+     GitHub's eviction from ever running. Every class carries the date of its
+     `measured_mb` (open-debt item 945: sizes measured on 2026-10-09 had grown by
+     a median 27 percent when they were read again), and one older than
+     `measure_max_age_days` is ANNOUNCED on every run; it does not fail the gate,
+     whose verdict must stay a function of the tree
   7. `.github/workflows/cache-prune.yml` exists and holds only what it needs: a
      schedule, a manual dispatch and a `workflow_run` on the default branch (never
      `push` or `pull_request`), and a single job whose token is `actions: write` +
@@ -71,8 +75,10 @@ because this repository has dozens and zero means the reader stopped reading.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -102,6 +108,8 @@ CLASS_FIELDS = (
     "prefixes",
     "owners",
     "budget_mb",
+    "measured_mb",
+    "measured_on",
     "churn",
     "generation_suffix",
     "keep",
@@ -252,6 +260,43 @@ def classify(template: str, classes: list[dict]) -> tuple[dict | None, str]:
     return next(c for n, c in best if n == top and c["id"] in winners), ""
 
 
+def _measured_date(cls: dict) -> date | None:
+    value = cls.get("measured_on")
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def stale_measurements(reg: dict, today: date) -> list[str]:
+    """Classes whose `measured_mb` is older than `measure_max_age_days`.
+
+    ANNOUNCED, not failed: the verdict of this gate is a function of the tree,
+    so a tree that passed must not turn red on a later day with nothing in it
+    changed (bx keeps verdicts under input content, and the queue integrator
+    must reach the pusher's verdict). The live overflow is the pruner's to
+    report; this says that the registry's numbers are old enough to be wrong.
+    """
+    limit = reg.get("measure_max_age_days")
+    out: list[str] = []
+    if not isinstance(limit, int):
+        return out
+    for cls in reg.get("classes", []):
+        when = _measured_date(cls)
+        if when is None:
+            continue
+        age = (today - when).days
+        if age > limit:
+            out.append(
+                f"class `{cls.get('id')}` measured_mb {cls.get('measured_mb')} is {age} days old "
+                f"(measured {when.isoformat()}, period {limit} days); re-read it with "
+                "`python3 scripts/lib/cache_prune.py --measure --repo <owner>/<repo>`"
+            )
+    return out
+
+
 def check_registry(reg: dict) -> list[str]:
     fails: list[str] = []
     classes = reg.get("classes")
@@ -260,6 +305,12 @@ def check_registry(reg: dict) -> list[str]:
     for key in ("cap_mb", "target_mb"):
         if not isinstance(reg.get(key), (int, float)):
             fails.append(f"{REGISTRY}: `{key}` must be a number")
+    age = reg.get("measure_max_age_days")
+    if not isinstance(age, int) or isinstance(age, bool) or age < 1:
+        fails.append(
+            f"{REGISTRY}: `measure_max_age_days` must be a positive integer; it is the "
+            "period after which a class's `measured_mb` is announced as stale"
+        )
     if fails:
         return fails
     ids: set[str] = set()
@@ -283,10 +334,20 @@ def check_registry(reg: dict) -> list[str]:
             continue
         total += cls["budget_mb"]
         meas = cls.get("measured_mb")
-        if meas is not None and meas > cls["budget_mb"]:
+        if meas is not None and not isinstance(meas, (int, float)):
+            fails.append(f"{REGISTRY}: class `{cid}` measured_mb must be a number or null")
+        elif meas is not None and meas > cls["budget_mb"]:
             fails.append(
                 f"{REGISTRY}: class `{cid}` measured {meas} MB exceeds its {cls['budget_mb']} MB budget"
             )
+        if _measured_date(cls) is None:
+            fails.append(
+                f"{REGISTRY}: class `{cid}` measured_on must be a YYYY-MM-DD date, found "
+                f"{cls.get('measured_on')!r}"
+            )
+        idle = cls.get("idle_days")
+        if idle is not None and (not isinstance(idle, int) or isinstance(idle, bool) or idle < 1):
+            fails.append(f"{REGISTRY}: class `{cid}` idle_days must be a positive integer")
         if not isinstance(cls.get("keep"), int) or cls["keep"] < 1:
             fails.append(f"{REGISTRY}: class `{cid}` keep must be an integer >= 1")
         gs = cls.get("generation_suffix")
@@ -462,12 +523,100 @@ def check_prune(doc: dict | None) -> list[str]:
     return fails
 
 
+EVICT_JOB = "evict-superseded"
+EVICTING_WORKFLOWS = ("ci.yml", "platform.yml")
+SPEC_OUTPUT = "${{ steps.cache-series.outputs.spec }}"
+
+
+def check_evict(docs: dict[str, dict], rows: list[dict]) -> list[str]:
+    """Rule 8: the job that deletes superseded generations right after the saves.
+
+    It is the one job of its workflow holding `actions: write`, so what makes that
+    safe is held here rather than in a comment: it waits for exactly the jobs that
+    save, runs only for a push to the default branch, checks out and runs nothing
+    of the repository (no `uses`, one inline script), and that script is the same
+    in every workflow that carries the job. Each saver names its series through
+    `cache_prune.py --saver-spec`, the pruner's own definition.
+    """
+    fails: list[str] = []
+    scripts: dict[str, str] = {}
+    for base in EVICTING_WORKFLOWS:
+        path = f".github/workflows/{base}"
+        doc = docs.get(path)
+        if not isinstance(doc, dict) or not isinstance(doc.get("jobs"), dict):
+            fails.append(f"{path}: not read, so its `{EVICT_JOB}` job cannot be checked")
+            continue
+        jobs = doc["jobs"]
+        savers = {r["job"] for r in rows if r["file"] == base and r["role"] == "save"}
+        job = jobs.get(EVICT_JOB)
+        if not isinstance(job, dict):
+            fails.append(
+                f"{path}: no `{EVICT_JOB}` job; the superseded generations of its "
+                f"{len(savers)} saving job(s) stay until cache-prune.yml runs after the whole run"
+            )
+            continue
+        needs = job.get("needs")
+        needs = {needs} if isinstance(needs, str) else set(needs or [])
+        if needs != savers:
+            fails.append(
+                f"{path} [{EVICT_JOB}]: needs {sorted(needs)} but the jobs that save are "
+                f"{sorted(savers)} (extra {sorted(needs - savers)}, missing {sorted(savers - needs)})"
+            )
+        if job.get("permissions") != {"actions": "write"}:
+            fails.append(
+                f"{path} [{EVICT_JOB}]: permissions must be exactly `actions: write`, "
+                f"found {job.get('permissions')!r}"
+            )
+        cond = str(job.get("if") or "")
+        if "github.event_name == 'push'" not in cond or MAIN_ONLY not in cond:
+            fails.append(
+                f"{path} [{EVICT_JOB}]: `if` must require `github.event_name == 'push'` and "
+                f"`{MAIN_ONLY}`; a pull request, a fork's included, must never get this token"
+            )
+        steps = [s for s in job.get("steps") or [] if isinstance(s, dict)]
+        if len(steps) != 1 or "uses" in steps[0] or not steps[0].get("run"):
+            fails.append(
+                f"{path} [{EVICT_JOB}]: must be one inline `run` step and no `uses`: a "
+                "checkout or an action would put code beside a token that can delete caches"
+            )
+        else:
+            env = steps[0].get("env") or {}
+            scripts[base] = "\n".join(
+                [str(steps[0]["run"])] + [f"{k}={env.get(k)}" for k in ("SAVERS_JQ", "EVICT_JQ")]
+            )
+        for name in sorted(savers):
+            sj = jobs.get(name) or {}
+            if (sj.get("outputs") or {}).get("cache_spec") != SPEC_OUTPUT:
+                fails.append(
+                    f"{path} [{name}]: a saving job without `outputs.cache_spec: {SPEC_OUTPUT}`; "
+                    f"`{EVICT_JOB}` cannot know its series"
+                )
+            spec_steps = [
+                s for s in sj.get("steps") or []
+                if isinstance(s, dict) and s.get("id") == "cache-series"
+            ]
+            want = f'--saver-spec "{base}:${{GITHUB_JOB}}"'
+            if len(spec_steps) != 1 or want not in str(spec_steps[0].get("run") or ""):
+                fails.append(
+                    f"{path} [{name}]: needs one step `id: cache-series` running "
+                    f"`cache_prune.py {want}`, the pruner's own series definition"
+                )
+    if len(set(scripts.values())) > 1:
+        fails.append(
+            f"the `{EVICT_JOB}` script differs between {sorted(scripts)}; it is one rule, "
+            "written once and copied verbatim, since the job may run no file of the repository"
+        )
+    return fails
+
+
 def check(docs: dict[str, dict], reg: dict, prune: dict | None) -> tuple[list[str], int]:
     fails = check_registry(reg)
     rows = derive_uses(docs)
     if not fails:
         fails.extend(check_uses(rows, reg))
     fails.extend(check_prune(prune))
+    if any(p.endswith(f"/{b}") for p in docs for b in EVICTING_WORKFLOWS):
+        fails.extend(check_evict(docs, rows))
     return fails, len(rows)
 
 
@@ -498,6 +647,11 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    stale = stale_measurements(reg, datetime.now(timezone.utc).date())
+    for s in stale:
+        print(f"workflow-cache-budget NOTICE: {s}")
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print(f"::warning title=stale cache measurement::{s}")
     if fails:
         print("workflow-cache-budget FAIL:", file=sys.stderr)
         for f in fails:
@@ -518,6 +672,8 @@ def _fixture() -> tuple[dict[str, dict], dict, dict]:
             prefixes=prefixes,
             owners=owners,
             budget_mb=100,
+            measured_mb=50,
+            measured_on="2026-11-14",
             churn="pinned",
             generation_suffix=None,
             keep=1,
@@ -531,6 +687,7 @@ def _fixture() -> tuple[dict[str, dict], dict, dict]:
     reg = dict(
         cap_mb=1000,
         target_mb=800,
+        measure_max_age_days=10,
         classes=[
             reg_class("engine", "actions-cache", ["eng-"], ["a.yml:j"], protect=True, evict_priority=100),
             reg_class("apt", "actions-cache", ["apt-"], ["a.yml:j"], churn="run", allow_run_scoped=True),
@@ -668,6 +825,26 @@ def selftest() -> int:
 
     case("a measured size over its budget", over_measured, "exceeds its")
 
+    def no_measured_on(d, r, p):
+        del r["classes"][1]["measured_on"]
+
+    case("a class with no measurement date", no_measured_on, "lacks `measured_on`")
+
+    def bad_measured_on(d, r, p):
+        r["classes"][1]["measured_on"] = "14 Nov"
+
+    case("a measurement date that is not a date", bad_measured_on, "must be a YYYY-MM-DD date")
+
+    def no_max_age(d, r, p):
+        del r["measure_max_age_days"]
+
+    case("no staleness period", no_max_age, "measure_max_age_days")
+
+    def bad_idle(d, r, p):
+        r["classes"][1]["idle_days"] = 0
+
+    case("an idle period that is not positive", bad_idle, "idle_days must be")
+
     case("no prune workflow", None, "is missing")
 
     def prune_pr(d, r, p):
@@ -716,7 +893,106 @@ def selftest() -> int:
         bad += 1
     else:
         print("  ok   an empty population is seen as zero (main() FAILs on it)")
-    total = len(cases) + 1
+    # Rule 8 over two workflows that each carry the eviction job.
+    def evict_docs() -> dict[str, dict]:
+        def saver(base: str) -> dict:
+            return {
+                "outputs": {"cache_spec": SPEC_OUTPUT},
+                "steps": [
+                    {
+                        "id": "cache-series",
+                        "run": f'python3 scripts/lib/cache_prune.py --saver-spec "{base}:${{GITHUB_JOB}}"',
+                    },
+                    {
+                        "uses": "Swatinem/rust-cache@v2",
+                        "name": "rs",
+                        "with": {"shared-key": "main", "save-if": "${{ github.ref == 'refs/heads/main' }}"},
+                    },
+                ],
+            }
+
+        def evict(needs: list[str]) -> dict:
+            return {
+                "needs": needs,
+                "if": "always() && github.event_name == 'push' && github.ref == 'refs/heads/main'",
+                "permissions": {"actions": "write"},
+                "steps": [{"run": "gh api ...", "env": {"SAVERS_JQ": "s", "EVICT_JQ": "e"}}],
+            }
+
+        return {
+            ".github/workflows/ci.yml": {"jobs": {"j": saver("ci.yml"), EVICT_JOB: evict(["j"])}},
+            ".github/workflows/platform.yml": {
+                "jobs": {"leg": saver("platform.yml"), EVICT_JOB: evict(["leg"])}
+            },
+        }
+
+    evict_cases: list[tuple[str, callable, str | None]] = [
+        ("an eviction job that waits for exactly the savers stays clean", lambda d: None, None),
+        (
+            "an eviction job that does not wait for a saver",
+            lambda d: d[".github/workflows/ci.yml"]["jobs"][EVICT_JOB].update(needs=[]),
+            "missing ['j']",
+        ),
+        (
+            "an eviction job with a wider token",
+            lambda d: d[".github/workflows/ci.yml"]["jobs"][EVICT_JOB].update(
+                permissions={"actions": "write", "contents": "read"}
+            ),
+            "exactly `actions: write`",
+        ),
+        (
+            "an eviction job that also runs on a pull request",
+            lambda d: d[".github/workflows/ci.yml"]["jobs"][EVICT_JOB].update(
+                **{"if": "always() && github.ref == 'refs/heads/main'"}
+            ),
+            "must never get this token",
+        ),
+        (
+            "an eviction job that checks the repository out",
+            lambda d: d[".github/workflows/ci.yml"]["jobs"][EVICT_JOB]["steps"].insert(
+                0, {"uses": "actions/checkout@v4"}
+            ),
+            "no `uses`",
+        ),
+        (
+            "a saver that hands over no series",
+            lambda d: d[".github/workflows/ci.yml"]["jobs"]["j"].pop("outputs"),
+            "without `outputs.cache_spec",
+        ),
+        (
+            "two workflows whose eviction scripts differ",
+            lambda d: d[".github/workflows/platform.yml"]["jobs"][EVICT_JOB]["steps"][0].update(
+                run="gh api something else"
+            ),
+            "script differs",
+        ),
+        (
+            "a workflow with savers and no eviction job",
+            lambda d: d[".github/workflows/platform.yml"]["jobs"].pop(EVICT_JOB),
+            "no `evict-superseded` job",
+        ),
+    ]
+    for label, mutate, want in evict_cases:
+        d = evict_docs()
+        mutate(d)
+        got = "\n".join(check_evict(d, derive_uses(d)))
+        ok = (want is None and not got) or (want is not None and want in got)
+        print(f"  {'ok ' if ok else 'BAD'}  {label}: expected {want or 'clean'}")
+        if not ok:
+            print(f"        got: {got or 'clean'}")
+        bad += not ok
+
+    # The staleness notice: announced past the period and silent within it, and
+    # never a FAIL of `check` (the clean fixture above is dated, and passes).
+    _, reg, _ = _fixture()
+    within = stale_measurements(reg, date(2026, 11, 24))
+    past = stale_measurements(reg, date(2026, 11, 25))
+    ok = within == [] and len(past) == len(reg["classes"]) and "11 days old" in past[0]
+    print(f"  {'ok ' if ok else 'BAD'}  a measurement 10 days old is current, 11 days old is announced")
+    if not ok:
+        print(f"        got within={within!r} past={past!r}")
+        bad += 1
+    total = len(cases) + len(evict_cases) + 2
     print(f"  {total - bad}/{total} arm(s) behaved as claimed")
     return 1 if bad else 0
 

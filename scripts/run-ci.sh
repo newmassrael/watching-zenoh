@@ -5184,12 +5184,60 @@ EOF
         scope+="$(basename "${wf}")=${n} "
     done
 
+    # Open-debt item 945: a job's packages come from its list file, the file its
+    # archive key hashes. The reader must install what a canonical list names,
+    # and refuse a list two jobs could spell differently for the same packages
+    # (they would hash apart and stop sharing an entry) or one written for
+    # another runner image.
+    local list_dir list_log list_stub
+    list_dir="$(mktemp -d)"
+    list_log="$(mktemp)"
+    list_stub="$(mktemp)"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$WZ_LIST_LOG"\nexit 0\n' >"$list_stub"
+    chmod +x "$list_stub"
+    printf 'image ubuntu22\nclang\ncmake\npkg-config\n' >"${list_dir}/good.list"
+    printf 'image ubuntu22\ncmake\nclang\n' >"${list_dir}/unsorted.list"
+    printf 'image ubuntu22\n# why\nclang\n' >"${list_dir}/comment.list"
+    printf 'clang\ncmake\n' >"${list_dir}/noimage.list"
+    if ! WZ_LIST_LOG="$list_log" ImageOS=ubuntu22 WZ_APT_CMD="$list_stub" WZ_APT_DEADLINE=5 \
+        bash "$script" --list "${list_dir}/good.list" >/dev/null 2>&1 \
+        || ! grep -q 'install .*clang cmake pkg-config$' "$list_log"; then
+        rm -rf "$list_dir" "$list_log" "$list_stub"
+        echo "  Layer C0g FAIL: a canonical list file did not install the packages" \
+            "it names" >&2
+        return 1
+    fi
+    local bad_list
+    for bad_list in unsorted comment noimage; do
+        : >"$list_log"
+        if WZ_LIST_LOG="$list_log" ImageOS=ubuntu22 WZ_APT_CMD="$list_stub" WZ_APT_DEADLINE=5 \
+            bash "$script" --list "${list_dir}/${bad_list}.list" >/dev/null 2>&1 \
+            || [[ -s "$list_log" ]]; then
+            rm -rf "$list_dir" "$list_log" "$list_stub"
+            echo "  Layer C0g FAIL: the ${bad_list} list was accepted or reached apt;" \
+                "a non-canonical list hashes apart from its equal and loses the" \
+                "shared archive" >&2
+            return 1
+        fi
+    done
+    : >"$list_log"
+    if WZ_LIST_LOG="$list_log" ImageOS=ubuntu24 WZ_APT_CMD="$list_stub" WZ_APT_DEADLINE=5 \
+        bash "$script" --list "${list_dir}/good.list" >/dev/null 2>&1 \
+        || [[ -s "$list_log" ]]; then
+        rm -rf "$list_dir" "$list_log" "$list_stub"
+        echo "  Layer C0g FAIL: a list written for ubuntu22 installed on an ubuntu24" \
+            "runner, under a key that names the other image" >&2
+        return 1
+    fi
+    rm -rf "$list_dir" "$list_log" "$list_stub"
+
     _runci_free_port_gate || return 1
 
     echo "  apt ceiling gate: OK (passes a prompt command, kills a hung one in" \
         "${elapsed}s against a 2s deadline -- bounded on BOTH sides, so an arm that" \
         "never hung fails too -- installs past a failed update and still fails on a" \
-        "failed install, refuses an empty package list, and ${routed} step(s)" \
+        "failed install, refuses an empty package list, installs a canonical list" \
+        "file and refuses 4 malformed or foreign ones, and ${routed} step(s)" \
         "across ${#workflows[@]} workflow(s) route through it with 0 calling" \
         "apt-get directly: ${scope% })"
     return 0

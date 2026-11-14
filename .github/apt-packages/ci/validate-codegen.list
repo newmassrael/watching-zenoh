@@ -1,0 +1,5 @@
+image ubuntu22
+cmake
+perl
+pkg-config
+protobuf-compiler

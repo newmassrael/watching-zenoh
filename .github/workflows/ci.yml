@@ -152,6 +152,8 @@ jobs:
     # version keeps Layer 2 byte-golden output deterministic across
     # SCE codegen invocations.
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
 
     steps:
@@ -244,10 +246,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -259,9 +265,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # cmake + libclang-dev are needed by zenoh-pico-sys (cmake
@@ -308,8 +322,7 @@ jobs:
         # reason R311y865 gave: a second of apt against not knowing which lane
         # reads a `.pc`.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # `rustup show` materialises the toolchain the repo pins — channel +
@@ -516,16 +529,11 @@ jobs:
       # Layers C1i, C2, C4 and C4b run in the `feature-gates` job (R3414): see
       # this job's `Budget margin` step for the measurement that moved them.
 
-      - name: Install python3-yaml (Layer D dep)
-        # Layer D's run-ci.sh path no-ops gracefully when python3-yaml
-        # is missing; on CI we install it explicitly so the lane
-        # runs the real check rather than the local-developer skip.
-        run: bash scripts/lib/apt-install.sh python3-yaml
-
+      # python3-yaml (Layer D's dependency; the lane skips without it) is in this
+      # job's list file and installs with the rest, so the archive saved below
+      # is the whole of what the key's list names.
       - name: Save apt archives
-        # AFTER the second apt step, not the first: this job installs twice and
-        # a save placed between them would carry only half the archive, then sit
-        # on a key nothing updates. See the `feature-gates` copy for the rest.
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
@@ -663,6 +671,8 @@ jobs:
   validate-codegen:
     name: validate (Layers A + C0)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Checkout (with submodules)
@@ -687,10 +697,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -702,9 +716,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # R3016 — this line was written for Layers B and B2 (the sce-codegen and
@@ -722,11 +744,10 @@ jobs:
         # the measurement. `cmake`, `perl` and `pkg-config` stay: the census
         # derives or adjudicates them on other grounds.
         #
-        # This job's `Save apt archives` step is NOT here: it installs twice
-        # (protoc below), and a save between the two would carry half the
-        # archive and then sit on a key nothing updates.
+        # protobuf-compiler (the mnemosyne-server build script's protoc) is in
+        # this job's list file and installs here with the rest.
         run: |
-          bash scripts/lib/apt-install.sh cmake perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: bash scripts/lib/rust-toolchain-pinned.sh
@@ -745,11 +766,7 @@ jobs:
             crates -> target
             vendor/sce -> target
 
-      - name: Install protoc (mnemosyne-server build-script dep)
-        run: bash scripts/lib/apt-install.sh protobuf-compiler
-
       - name: Save apt archives
-        # AFTER the second apt step, for the reason the first one records.
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
@@ -1081,6 +1098,8 @@ jobs:
   codegen-verify:
     name: codegen verify (Layers B + B2)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Checkout (with submodules)
@@ -1099,9 +1118,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # What `sce-codegen` and `xtask` need, as `validate-codegen` recorded it
@@ -1109,7 +1136,7 @@ jobs:
         # verify-codegen.sh's include sort, libxml2-dev + pkg-config because
         # `xtask` links SCE's XML toolchain.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # One install in this job, so the save sits right after it. `always()` and
@@ -1226,6 +1253,8 @@ jobs:
   verdict-legs:
     name: verdict-leg mutation gate (Layer C0mut, shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -1257,10 +1286,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -1272,9 +1305,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # NOT `ci`'s list: R311y881 measured the difference. The resolved tree
@@ -1287,7 +1328,7 @@ jobs:
         # reading this comment. Nor `libxml2-dev` (R3009): that library is
         # needed only by the jobs that run `xtask`, which this one does not.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -1401,6 +1442,8 @@ jobs:
   session-planes:
     name: session-core feature planes (Layers C1c, C1d, C1e, C1f, C1g, C1own, C1h)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 20
     steps:
       - name: Budget stamp — start this job's own clock
@@ -1420,9 +1463,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # The baseline pair and pkg-config, which `scripts/lib/apt_package_census.py`
@@ -1434,7 +1485,7 @@ jobs:
         # libraries, and the crate's manifest names no TLS dependency, so no perl.
         # The pair is carried as the baseline, not because a lane here needs it.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -1600,6 +1651,8 @@ jobs:
   nondefault:
     name: non-default feature compile + census (Layer C1cn, shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -1659,15 +1712,22 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # No `libxml2-dev` (R3009): only the jobs that run `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -1733,6 +1793,8 @@ jobs:
   nondefault-builds:
     name: non-default feature builds (Layer C1cn, the compile gate and the bundles)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     env:
       WZ_C1CN_PART: builds
@@ -1769,14 +1831,21 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -1883,6 +1952,8 @@ jobs:
   defaults-off:
     name: default-off builds (Layer C1cf)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Budget stamp — start this job's own clock
@@ -1926,14 +1997,22 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # No `libxml2-dev` (R3009): only the jobs that run `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -1982,6 +2061,8 @@ jobs:
   gate-provenance:
     name: gate provenance (Layer C0)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Budget stamp — start this job's own clock
@@ -2002,15 +2083,23 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # R4290 — protobuf-compiler is mnemosyne-server's build script, for the
         # install of mnemosyne-cli below that arms Layer C0's citation half.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config protobuf-compiler
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -2089,6 +2178,8 @@ jobs:
   capability-cost:
     name: capability cost of the C ABI builds (Layer C1cs)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 20
     steps:
       - name: Budget stamp — start this job's own clock
@@ -2104,16 +2195,24 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # `cmake`: the gate builds zenoh-pico from the submodule as the same build as each pico
         # case, the denominator of the size it prints (capability_cost_gate.py "The
         # denominator").
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config cmake
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -2320,6 +2419,8 @@ jobs:
   dissect:
     name: passive-dissection feature set (Layer C1bn)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Budget stamp — start this job's own clock
@@ -2344,9 +2445,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         run: |
@@ -2387,9 +2496,7 @@ jobs:
           # module `python3 -m venv` needs (`ensurepip`) until this package is
           # installed, and a runner without it would fail the lane for a reason
           # that is not the arithmetic's.
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config tcpdump \
-            libpcap-dev netbase protobuf-compiler libprotobuf-dev python3-venv
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -2476,6 +2583,8 @@ jobs:
   offline-build:
     name: consumer bundles built offline (Layer C1ob)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 45
     steps:
       - name: Budget stamp — start this job's own clock
@@ -2495,9 +2604,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         run: |
@@ -2509,7 +2626,7 @@ jobs:
           # build-essential, which the entry declares as `cc`, `c++` and `ar`.
           # `pkg-config` is on every job (apt_package_census.py, R311y865); the
           # sandbox does not put it on PATH.
-          bash scripts/lib/apt-install.sh bubblewrap clang libclang-dev pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -2591,6 +2708,8 @@ jobs:
   nondefault-legs:
     name: non-default test legs (Layer C1bnl, shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -2639,15 +2758,22 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # No `libxml2-dev` (R3009): only the jobs that run `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -2736,6 +2862,8 @@ jobs:
   footprint:
     name: codec-footprint Layer F (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     # R311y388 — SHARDED. F was ~13min as ONE job (13 codec lanes + baseline +
     # minus-all-codecs + handshake-only, each a release+LTO build in its own
     # --target-dir). It is now a matrix: each shard builds baseline + its
@@ -2787,10 +2915,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -2802,9 +2934,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # perl included, and libclang for the reason the old comment here gave
@@ -2822,7 +2962,7 @@ jobs:
         # `scripts/lib/apt_package_census.py` derives it and reds if this job's
         # lanes ever do reach it.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -2897,6 +3037,8 @@ jobs:
   interop:
     name: cross-impl proof lanes (E2 + E5z + E6 + E6b + E6e + E6f + E6g + E6h + E6i + E6j + E7 + E8 + E8t + E9 + E10 + E11 + E12 + E13 + E14 + E15 + C1bp + Z)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     # A cold cache must build: the zenoh-pico CMake tree, the whole zenoh workspace in
     # release (zenohd AND the storage-manager plugin), four differently-featured
     # wz-ap-demo builds, the six wz-e2e-* subset binaries, and then Layer Z's serial
@@ -2937,10 +3079,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -2952,9 +3098,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # cmake + libclang-dev: zenoh-pico-sys (cmake crate + bindgen), which the
@@ -2963,8 +3117,7 @@ jobs:
         # (item 522 added it for the libxml probe, which left the `crates`
         # workspace with the SCE pin of R3009 and so took `libxml2-dev` with it).
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -3869,6 +4022,8 @@ jobs:
   cross-mcu:
     name: cross-compile + QEMU (Layer G + Q + Qa)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 45
     # R2842 — AFTER `interop`, because Layer Qa restores the zenohd that job
     # caches and the cache is written when that job ENDS. Run in parallel, the
@@ -3900,10 +4055,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -3915,9 +4074,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # libclang for the sce-codegen / *-sys build scripts. `cmake` used to
@@ -3935,8 +4102,7 @@ jobs:
         # `fatal error: string.h: No such file or directory` (Layer G.6 /
         # G.11). qemu-system-arm boots the mps2 / microbit ELFs (Q.2 / Q.4).
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang \
-            pkg-config gcc-arm-none-eabi libnewlib-arm-none-eabi qemu-system-arm
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy. This is the job the gate matters MOST
@@ -4042,6 +4208,8 @@ jobs:
   zephyr-mcu:
     name: Zephyr cooperative profile boot (Layer Qz)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 60
     env:
       # Pinned to the exact pair the dev host booted (boot banner
@@ -4067,10 +4235,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -4082,9 +4254,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # arm-none-eabi-gcc = the lwip-sys cross cc (CC_thumbv7m_none_eabi) +
@@ -4092,11 +4272,7 @@ jobs:
         # cmake/ninja/dtc are the Zephyr build system; libclang/clang for the
         # wz *-sys build scripts; xz-utils extracts the SDK tarballs.
         run: |
-          bash scripts/lib/apt-install.sh \
-            cmake ninja-build device-tree-compiler \
-            libclang-dev clang pkg-config \
-            gcc-arm-none-eabi libnewlib-arm-none-eabi \
-            qemu-system-arm xz-utils
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -4332,6 +4508,8 @@ jobs:
   zephyr-admin:
     name: Zephyr admin node vs a stock zenohd (Layer Qza)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 60
     # AFTER `interop`, for the reason `cross-mcu` is: the zenohd oracle is a run
     # artifact that job publishes mid-job. `!cancelled()` so an interop red does
@@ -4357,9 +4535,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # The set `zephyr-mcu` installs: cmake/ninja/dtc drive west, libclang and
@@ -4367,11 +4553,7 @@ jobs:
         # the cross cc the facade's lwip-sys edge looks for, qemu-system-arm boots
         # the image, xz-utils unpacks the SDK tarballs.
         run: |
-          bash scripts/lib/apt-install.sh \
-            cmake ninja-build device-tree-compiler \
-            libclang-dev clang pkg-config \
-            gcc-arm-none-eabi libnewlib-arm-none-eabi \
-            qemu-system-arm xz-utils
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -4513,6 +4695,8 @@ jobs:
   feature-gates:
     name: feature-gate NEG lanes (subsets no other job composes)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     # Its OWN runner, deliberately NOT the `ci` job. R311y415 — the COST half
     # of this rationale had gone stale and is corrected here. It used to read
     # "that job is at BOTH of its ceilings: 26m22s against
@@ -4627,10 +4811,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -4642,9 +4830,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # R2165 — `tcpdump`, `libpcap-dev` and `netbase` are NO LONGER here.
@@ -4654,8 +4850,7 @@ jobs:
         # travelled too, and are stated in full on that job's own install step.
         # No `libxml2-dev` (R3009): only the jobs that run `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and
@@ -5080,6 +5275,8 @@ jobs:
   feature-gates-peel:
     name: feature-gate NEG lanes, the four heaviest (peeled for budget)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Budget stamp — start this job's own clock
@@ -5099,15 +5296,23 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # No `cmake`, for the reason in the header above. No `libxml2-dev`
         # either (R3009): only the jobs that run `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -5211,6 +5416,8 @@ jobs:
   feature-gates-peel-2:
     name: feature-gate NEG lanes, workspace sets and C ABI legs (peeled for budget)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Budget stamp — start this job's own clock
@@ -5230,17 +5437,24 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # The `feature-gates` list, which C2's workspace build needs for the
         # RocksDB engine. No `libxml2-dev` (R3009): only the jobs that run
         # `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -5368,6 +5582,8 @@ jobs:
   routing-adminspace:
     name: routing + adminspace lanes (the subsystem feature-gates could not hold)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 45
     steps:
       - name: Budget stamp — start this job's own clock
@@ -5417,10 +5633,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -5432,9 +5652,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # No `cmake`: this job's lanes reach neither `zenoh-pico-sys` nor
@@ -5444,7 +5672,7 @@ jobs:
         # killed at the 900s ceiling on run 32266212482. No `libxml2-dev`
         # either (R3009): only the jobs that run `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -5511,6 +5739,8 @@ jobs:
   adminspace-lanes:
     name: adminspace lanes (handlers, no-default-features, config mutate)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Budget stamp — start this job's own clock
@@ -5528,13 +5758,21 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -5573,6 +5811,8 @@ jobs:
   transport-modes:
     name: transport-MODE lanes (the §5.1 mode axis)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     # Its OWN runner, for the reason the feature-gates job states above: every
     # lane below is a DISTINCT off-default feature set, hence a distinct set of
     # `crates/target` artifacts, and the `ci` job declares it has no disk
@@ -5727,10 +5967,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -5742,17 +5986,24 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # cmake + clang/libclang are for those two C builds (bindgen included);
         # perl matches the sibling job's set. No `libxml2-dev` (R3009): only the
         # jobs that run `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and
@@ -5839,6 +6090,8 @@ jobs:
   isolated-crates:
     name: isolated-crate lanes (what --workspace unification cannot express)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     # Its OWN runner, for the reason the two sibling genre jobs state: every
     # lane here is a DISTINCT feature set and so a distinct set of
     # `crates/target` artifacts, and the `ci` job declares it has no disk
@@ -5941,10 +6194,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -5956,9 +6213,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # The sibling genre jobs' set, carried over verbatim rather than
@@ -5971,7 +6236,7 @@ jobs:
         # only crate that probes for it is in the `xtask` workspace, and this
         # job does not run `xtask`.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and
@@ -6052,6 +6317,8 @@ jobs:
   tokio-matrices:
     name: wz-runtime-tokio feature matrices (Layers C4c, C4d, C1bf)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Free runner disk space (headroom for the matrix feature sets)
@@ -6088,17 +6355,24 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # The five codecs and cmake serve the RocksDB engine's build; clang and
         # libclang serve bindgen (librocksdb-sys); perl and pkg-config are the
         # sibling jobs' set.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `isolated-crates` copy for why `always()` and why the dirty gate.
@@ -6150,6 +6424,8 @@ jobs:
   analyzer-crates:
     name: analyzer-crate lanes (capture, command line, decryptor, replay)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Free runner disk space (headroom for the analyzer feature sets)
@@ -6185,15 +6461,23 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # The set `isolated-crates` ran these lanes with, less `cmake`: the only lane here that
         # reached the crate that needs it was Layer C1bz, which now runs in `analyzer-docs`.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `isolated-crates` copy for why `always()` and why the dirty gate.
@@ -6272,6 +6556,8 @@ jobs:
   analyzer-docs:
     name: analyzer-crate docs (Layer C1bz)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Free runner disk space (headroom for the documented feature sets)
@@ -6303,13 +6589,21 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -6353,6 +6647,8 @@ jobs:
   reduced-docs:
     name: reduced-configuration docs (Layer C1bzr, shard ${{ matrix.shard }}/6)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -6402,17 +6698,24 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # The `nondefault` job's set: this lane documents every member, as that one
         # compiles every member, so the same build scripts run (bindgen for lwip-sys
         # and librocksdb-sys, cmake for zenoh-pico-sys). No `libxml2-dev`: no `xtask`.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -6485,6 +6788,8 @@ jobs:
   capi-c-arms:
     name: §5.27 api-compat-c — the ABI arms and the second oracle (C1ce + arms gate)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -6522,10 +6827,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -6537,9 +6846,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # cmake + pkg-config are what `build-zenoh-pico-cli.sh` and the pinned
@@ -6556,8 +6873,7 @@ jobs:
         # widened list was the `ci` job's, and that job's `libxml2-dev` was for
         # a crate (`libxml`) that left the `crates` workspace with the SCE pin.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -6794,13 +7110,11 @@ jobs:
         # all of them and a partial derivation under-reports it.
         run: python3 scripts/lib/capi_c_abi_provenance.py
 
-      - name: Install valgrind for zenoh-c's leak programs
-        # Layer C1cc runs zenoh-c's own tests against wz, two of them
-        # (`z_leak_pub_sub_test`, `z_leak_queryable_get_test`) through upstream's
-        # `run_leak_check.sh`, as upstream's CMake runs them: under valgrind. With
-        # WZ_C1CC_REQUIRE set the lane fails rather than skips without it.
-        run: bash scripts/lib/apt-install.sh valgrind
-
+      # valgrind is in this job's list file, installed with the rest: Layer C1cc
+      # runs zenoh-c's own tests against wz, two of them (`z_leak_pub_sub_test`,
+      # `z_leak_queryable_get_test`) through upstream's `run_leak_check.sh`, as
+      # upstream's CMake runs them: under valgrind. With WZ_C1CC_REQUIRE set the
+      # lane fails rather than skips without it.
       - name: Layer C1cc — §5.27 api-compat-c, the zenoh-c drop-in
         # R311y498, and R311y865 MOVED IT HERE from the `ci` job. It cost 202s of
         # a job that was running at 91% of its 1800s ceiling, and every
@@ -6857,14 +7171,13 @@ jobs:
           WZ_C1CE_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C1ce
 
-      - name: Install strace and bubblewrap for the facility oracle
-        # Layer C1st judges each packaged artifact's runs against its manifest's `requires` and
-        # `may_require` (scripts/lib/facility_trace.py --judge), which reads the runs through
-        # strace, and runs a raw Ethernet group on a network of its own through bubblewrap (a
-        # user and network namespace that grants CAP_NET_RAW over itself alone); the judgement
-        # fails rather than skips without either.
-        run: bash scripts/lib/apt-install.sh strace bubblewrap
-
+      # strace and bubblewrap are in this job's list file, installed with the rest:
+      # Layer C1st judges each packaged artifact's runs against its manifest's
+      # `requires` and `may_require` (scripts/lib/facility_trace.py --judge), which
+      # reads the runs through strace, and runs a raw Ethernet group on a network of
+      # its own through bubblewrap (a user and network namespace that grants
+      # CAP_NET_RAW over itself alone); the judgement fails rather than skips
+      # without either.
       - name: Layer C1st — every shipped artifact carries its ABI stamp
         # `docs/target-build-contract.md` T6. In THIS job because it builds the release profile
         # of the zenoh-c drop-in, which the C1cc legs above already warmed; the pico C ABI library
@@ -7004,6 +7317,8 @@ jobs:
   e2e-demo:
     name: demo-spawning router e2e lanes (Layers E3..E6u)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 15
     steps:
       - name: Budget stamp — start this job's own clock
@@ -7030,10 +7345,14 @@ jobs:
         # Layer C0g asserts the two agree, because a disagreement would save an
         # empty directory every run and nothing would say so.
         #
-        # Keyed per JOB because the package lists differ per job, and on ci.yml's
-        # hash so a changed list gets a new key rather than a stale hit. The
-        # restore-keys prefix means a changed list still starts from the last
-        # good archive instead of from nothing.
+        # Keyed on the job's PACKAGE LIST (`.github/apt-packages/ci/<job>.list`,
+        # which also names the runner image), not on the job: jobs whose lists
+        # are equal share one entry, and only a change to a list moves its key.
+        # Keyed on the whole ci.yml, every edit to this file wrote 29 new
+        # entries of mostly the same .debs (1.4 GB on 2026-11-14, open-debt item
+        # 945). The install step below reads the same file, so the key and what
+        # is installed cannot disagree. The restore-keys prefix stops at the
+        # list hash: another list's archive would carry its .debs into this one.
         # RESTORE and SAVE are split on purpose. The combined `actions/cache`
         # saves in a post step, and R311y882 shipped it while admitting nobody
         # knew whether that runs after a FAILED job. That unknown is load-bearing
@@ -7045,15 +7364,22 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # No `libxml2-dev` (R3009): only the jobs that run `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -7186,6 +7512,8 @@ jobs:
   e2e-demo-pico:
     name: demo-spawning pico e2e lane (Layer E)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 18
     steps:
       - name: Budget stamp — start this job's own clock
@@ -7206,17 +7534,24 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # The package list `e2e-demo` carries: the integration tests link the
         # RocksDB engine, the pico CLI build needs cmake, and bindgen needs
         # clang. No `libxml2-dev` (R3009): only the jobs that run `xtask` do.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -7276,6 +7611,8 @@ jobs:
   e2e-router-scale:
     name: router-hat data-plane scaling and the wz mesh client (Layers E7s, E7m)
     runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     steps:
       - name: Checkout (with submodules)
@@ -7290,17 +7627,24 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/wz-apt
-          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
           restore-keys: |
-            apt-${{ runner.os }}-${{ github.job }}-
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         # The package list `e2e-demo-pico` carries: the integration tests link the
         # RocksDB engine, build `zenoh-pico-sys` (cmake, through their
         # dev-dependency), and bindgen needs clang. No pico CLI is built here.
         run: |
-          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -7535,3 +7879,132 @@ jobs:
         run: |
           host="$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')"
           python scripts/lib/platform_surface_matrix.py --run "$host"
+
+  # Open-debt item 945: a manifest change makes every rust-cache saver write a new
+  # generation while the previous one stays until `cache-prune.yml` runs, which is
+  # after the WHOLE run (workflow_run `completed`) or on its six-hour schedule. On
+  # 2026-11-14 that left 10,960 MB held against a 10,000 MB cap, past the point
+  # where GitHub's own LRU starts evicting. This job deletes the superseded
+  # generations as soon as the savers have finished.
+  #
+  # LEAST PRIVILEGE, and why the token cannot reach this repository's code:
+  #   * only this job holds `actions: write`; every other job keeps its token;
+  #   * it checks out nothing and runs no file of the repository: its one step is
+  #     the inline script below, with `gh api` and `jq` from the runner image;
+  #   * what the savers hand over (`needs.<job>.outputs.cache_spec`, written by
+  #     `cache_prune.py --saver-spec`) arrives through `env` and is read by `jq`
+  #     as data, as prefixes and as regular expressions, never as shell text; a
+  #     cache id is used only after it matches `^[0-9]+$`;
+  #   * it runs only for a `push` to `refs/heads/main`. A fork's pull request is
+  #     a `pull_request` event, which this condition never accepts, and a push
+  #     to a fork runs in the fork's repository with the fork's token.
+  # The rule is the pruner's superseded pass, restricted to the series a saver
+  # names and to a series whose newest entry was created after this run attempt
+  # started: a save that did not happen deletes nothing. `cache-prune.yml` stays
+  # as the net under it, and `workflow_cache_budget_gate.py` holds this job's
+  # shape (needs, permissions, condition, no `uses`, one script for both
+  # workflows).
+  evict-superseded:
+    name: evict superseded cache generations
+    needs:
+      - ci
+      - validate-codegen
+      - codegen-verify
+      - verdict-legs
+      - session-planes
+      - nondefault
+      - nondefault-builds
+      - defaults-off
+      - gate-provenance
+      - capability-cost
+      - dissect
+      - offline-build
+      - nondefault-legs
+      - footprint
+      - interop
+      - cross-mcu
+      - zephyr-mcu
+      - zephyr-admin
+      - feature-gates
+      - feature-gates-peel
+      - feature-gates-peel-2
+      - routing-adminspace
+      - adminspace-lanes
+      - transport-modes
+      - isolated-crates
+      - tokio-matrices
+      - analyzer-crates
+      - analyzer-docs
+      - reduced-docs
+      - capi-c-arms
+      - e2e-demo
+      - e2e-demo-pico
+      - e2e-router-scale
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+      - name: Delete the generations this run's saves superseded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+          # What each saver handed over: its job name and its classes' series.
+          SAVERS_JQ: >-
+            to_entries[]
+            | select((.value.outputs.cache_spec // "") != "")
+            | {job: .key, spec: (.value.outputs.cache_spec | fromjson)}
+          # The pruner's superseded pass (cache_prune.py `plan`, pass 3) over the
+          # series the savers name: group a class's default-branch keys by the key
+          # with its generation suffix removed, keep the newest `keep`, and only
+          # in a series whose newest entry this run attempt created.
+          EVICT_JQ: >-
+            def t: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+            [ $savers[] as $s
+              | $s.spec[] as $c
+              | [ $caches[]
+                  | select(.key as $k | any($c.prefixes[]; . as $p | $k | startswith($p)))
+                  | select(.key as $k | all($c.stale[]; . as $re | ($k | test($re)) | not)) ]
+              | group_by(if $c.suffix then (.key | sub($c.suffix; "")) else $c.cls end)[]
+              | sort_by([(.created_at | t), .id]) | reverse
+              | select((.[0].created_at | t) >= ($started | t))
+              | .[$c.keep:][]
+            ] | unique_by(.id)[] | "\(.id)\t\(.size_in_bytes)\t\(.key)"
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/evict"
+          mkdir -p "$work"
+          printf '%s' "$NEEDS" | jq -c "$SAVERS_JQ" >"$work/savers.jsonl"
+          if [ ! -s "$work/savers.jsonl" ]; then
+            echo "no saving job handed over a series definition; nothing to evict"
+            exit 0
+          fi
+          if ! started="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}" --jq .run_started_at)" \
+            || ! gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/main&per_page=100" \
+              --jq '.actions_caches[]' >"$work/caches.jsonl"; then
+            echo "::warning title=evict-superseded::the run or the cache list could not be read; nothing deleted, cache-prune.yml will apply the same rule after the run"
+            exit 0
+          fi
+          jq -rn --arg started "$started" \
+            --slurpfile savers "$work/savers.jsonl" --slurpfile caches "$work/caches.jsonl" \
+            "$EVICT_JQ" >"$work/evict.tsv"
+          deleted=0
+          failed=0
+          while IFS=$'\t' read -r id size key; do
+            if ! [[ "$id" =~ ^[0-9]+$ ]]; then
+              echo "::warning title=evict-superseded::refusing a cache id that is not a number: $id"
+              failed=$((failed + 1))
+              continue
+            fi
+            echo "superseded: $id ($((size / 1000000)) MB) $key"
+            if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/caches/${id}" >/dev/null; then
+              deleted=$((deleted + 1))
+            else
+              failed=$((failed + 1))
+            fi
+          done <"$work/evict.tsv"
+          echo "evicted $deleted superseded generation(s) right after the saves"
+          if [ "$failed" -gt 0 ]; then
+            echo "::warning title=evict-superseded::$failed deletion(s) failed; cache-prune.yml applies the same rule after the run"
+          fi

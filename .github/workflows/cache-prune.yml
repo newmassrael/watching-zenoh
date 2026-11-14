@@ -18,6 +18,9 @@
 # one is dead weight from that moment; on a six-hourly schedule as a backstop
 # for runs that never finish; and by hand. A manual run is a DRY RUN unless
 # `apply` is ticked, so the first read of a policy change costs nothing.
+# The `evict-superseded` jobs of ci.yml and platform.yml apply the superseded
+# pass to the series their savers name as soon as those savers finish; this
+# workflow stays the net under them and the only one that applies the rest.
 #
 # WHAT IT HOLDS. The job's token is `actions: write` (the only scope that can
 # delete a cache) plus `contents: read` (the checkout), and the workflow-level

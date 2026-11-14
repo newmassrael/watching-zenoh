@@ -1,0 +1,17 @@
+image ubuntu22
+clang
+cmake
+libbz2-dev
+libclang-dev
+liblz4-dev
+libpcap-dev
+libprotobuf-dev
+libsnappy-dev
+libzstd-dev
+netbase
+perl
+pkg-config
+protobuf-compiler
+python3-venv
+tcpdump
+zlib1g-dev

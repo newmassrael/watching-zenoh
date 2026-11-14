@@ -1,0 +1,5 @@
+image ubuntu22
+clang
+libclang-dev
+perl
+pkg-config
