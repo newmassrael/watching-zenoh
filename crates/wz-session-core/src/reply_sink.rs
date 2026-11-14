@@ -10,7 +10,7 @@
 //! routes each inbound `Response(Reply|Err)` (and the terminal
 //! `ResponseFinal`) for a pending z_get through a Dependency-Inversion
 //! seam rather than a hard-coded `Box<dyn FnMut(&InboundReply)>` +
-//! `Box<dyn FnMut(u64)>` pair, so one registry implementation backs both
+//! `Box<dyn FnMut(RequestId)>` pair, so one registry implementation backs both
 //! profiles (ARCHITECTURE.md §2.4 static-first, dynamic-opt-in):
 //!
 //! - **AP / `alloc` on** — [`BoxedReplySink`] wraps the `on_reply` +
@@ -34,7 +34,7 @@
 //! carries no output contract (unlike the queryable [`crate::query_sink`]
 //! seam's `ReplyOut`): `on_reply` only consumes, it emits nothing.
 //!
-//! `on_final` carries the bare `rid` (`u64`, `Copy`) — a scalar tag, no
+//! `on_final` carries the bare `rid` (a `RequestId`, `Copy`) — a scalar tag, no
 //! view needed; it fires once when the matching `ResponseFinal` arrives
 //! and the registry auto-removes the pending entry.
 
@@ -74,7 +74,7 @@ pub enum ReplyKind {
 pub trait ReplyView {
     /// Echo of the inbound `Response.request_id` — the rid the z_get
     /// caller used when registering.
-    fn rid(&self) -> u64;
+    fn rid(&self) -> crate::wire_id::RequestId;
     /// Resolved keyexpr literal the reply is bound to.
     fn keyexpr(&self) -> &str;
     /// Put / Del / Err discriminant.
@@ -83,7 +83,7 @@ pub trait ReplyView {
     fn payload(&self) -> &[u8];
     /// Encoding hint carried by an Err reply (`packed_id` + optional
     /// `schema`), or `None` for Put / Del.
-    fn err_encoding(&self) -> Option<(u32, Option<&str>)>;
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)>;
     /// A8b — opaque attachment carried by a Put reply on its inner
     /// `MsgPut` body extension (push-body ext id 0x03 — the receive twin
     /// of the A8a emit seam), or `None` for Del / Err or a Put with no
@@ -98,7 +98,7 @@ pub trait ReplyView {
     /// Put-arm twin of [`Self::err_encoding`]; what a querier reconstructs
     /// a stored value's encoding from (the aligner's
     /// `RetrievedValue.encoding`). Default `None`.
-    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         None
     }
     /// R311y78 — the source identity `(zid, eid, sn)` a Put reply carried on
@@ -193,7 +193,7 @@ pub trait ReplyView {
 /// `&dyn ReplyView`).
 pub struct BorrowedReply<'a> {
     /// Echo of the inbound request id.
-    pub rid: u64,
+    pub rid: crate::wire_id::RequestId,
     /// Resolved keyexpr literal.
     pub keyexpr: &'a str,
     /// Put / Del / Err discriminant.
@@ -201,7 +201,7 @@ pub struct BorrowedReply<'a> {
     /// Payload bytes. Empty for a Del reply.
     pub payload: &'a [u8],
     /// Encoding hint for an Err reply, if any.
-    pub err_encoding: Option<(u32, Option<&'a str>)>,
+    pub err_encoding: Option<(u32, Option<&'a [u8]>)>,
     /// A8b — attachment carried by a Put reply (the inner-MsgPut push-body ext
     /// id 0x03), or `None`. Carried so `InboundReply::from_view` preserves the
     /// attachment for a `BorrowedReply` source too, not only for the wire
@@ -230,11 +230,11 @@ pub struct BorrowedReply<'a> {
     pub attachment: Option<&'a [u8]>,
     /// A8b — value encoding carried by a Put reply (`packed_id` + schema), or
     /// `None`. The Put-arm twin of [`Self::err_encoding`].
-    pub put_encoding: Option<(u32, Option<&'a str>)>,
+    pub put_encoding: Option<(u32, Option<&'a [u8]>)>,
 }
 
 impl ReplyView for BorrowedReply<'_> {
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
     fn keyexpr(&self) -> &str {
@@ -246,7 +246,7 @@ impl ReplyView for BorrowedReply<'_> {
     fn payload(&self) -> &[u8] {
         self.payload
     }
-    fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.err_encoding
             .as_ref()
             .map(|(id, schema)| (*id, schema.as_deref()))
@@ -254,7 +254,7 @@ impl ReplyView for BorrowedReply<'_> {
     fn attachment(&self) -> Option<&[u8]> {
         self.attachment
     }
-    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.put_encoding
             .as_ref()
             .map(|(id, schema)| (*id, schema.as_deref()))
@@ -343,7 +343,7 @@ struct ArrivedReply<'a> {
 
 #[cfg(feature = "pubsub-ts-stack")]
 impl ReplyView for ArrivedReply<'_> {
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.inner.rid()
     }
     fn keyexpr(&self) -> &str {
@@ -355,13 +355,13 @@ impl ReplyView for ArrivedReply<'_> {
     fn payload(&self) -> &[u8] {
         self.inner.payload()
     }
-    fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.inner.err_encoding()
     }
     fn attachment(&self) -> Option<&[u8]> {
         self.inner.attachment()
     }
-    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         self.inner.put_encoding()
     }
     #[cfg(feature = "storage-profile")]
@@ -413,7 +413,7 @@ pub trait ReplySink {
     fn on_reply(&mut self, reply: &dyn ReplyView);
     /// Signal the terminal `ResponseFinal` for `rid`. Fires once; the
     /// pending entry is removed by the registry afterwards.
-    fn on_final(&mut self, rid: u64);
+    fn on_final(&mut self, rid: crate::wire_id::RequestId);
     /// R311y323 — the pending for `rid` EXPIRED: its deadline passed before a
     /// terminal `ResponseFinal` arrived. Fires instead of a bare
     /// [`on_final`](Self::on_final), exactly once, and the registry removes the
@@ -438,7 +438,7 @@ pub trait ReplySink {
     /// reason the stream stopped). The default's `on_reply` -> `on_final`
     /// sequence would emit the error FIRST and the cached data after it, and a
     /// caller that treats an error as terminal would lose the data.
-    fn on_timeout(&mut self, rid: u64) {
+    fn on_timeout(&mut self, rid: crate::wire_id::RequestId) {
         self.on_reply(&timeout_reply(rid));
         self.on_final(rid);
     }
@@ -463,7 +463,7 @@ pub trait ReplySink {
 ///
 /// Ungated and no-alloc-safe (a `BorrowedReply` over `'static` literals), so the
 /// MCU profile gets the same timeout signal as AP.
-pub fn timeout_reply(rid: u64) -> BorrowedReply<'static> {
+pub fn timeout_reply(rid: crate::wire_id::RequestId) -> BorrowedReply<'static> {
     BorrowedReply {
         rid,
         keyexpr: "",
@@ -484,7 +484,7 @@ type BoxedReplyFn = Box<dyn FnMut(&dyn ReplyView) + Send + 'static>;
 
 /// Heap final-closure type backing [`BoxedReplySink`].
 #[cfg(feature = "alloc")]
-type BoxedFinalFn = Box<dyn FnMut(u64) + Send + 'static>;
+type BoxedFinalFn = Box<dyn FnMut(crate::wire_id::RequestId) + Send + 'static>;
 
 /// AP / `alloc`-profile adapter: wraps the `on_reply` + `on_final`
 /// capturing closures in heap `Box`es, type-erasing them so a registry
@@ -504,7 +504,7 @@ impl BoxedReplySink {
     /// on_final)` pairing.
     pub fn new(
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(crate::wire_id::RequestId) + Send + 'static,
     ) -> Self {
         Self {
             reply_fn: Box::new(on_reply),
@@ -518,7 +518,7 @@ impl ReplySink for BoxedReplySink {
     fn on_reply(&mut self, reply: &dyn ReplyView) {
         (self.reply_fn)(reply)
     }
-    fn on_final(&mut self, rid: u64) {
+    fn on_final(&mut self, rid: crate::wire_id::RequestId) {
         (self.final_fn)(rid)
     }
 }
@@ -707,13 +707,13 @@ impl<S: ReplySink> ReplySink for ConsolidatingSink<S> {
     ///
     /// The `Latest` check is not duplicated here; `flush_latest` owns it, so the
     /// normal-final path and this one cannot disagree about when a flush is due.
-    fn on_timeout(&mut self, rid: u64) {
+    fn on_timeout(&mut self, rid: crate::wire_id::RequestId) {
         self.flush_latest();
         self.inner.on_reply(&timeout_reply(rid));
         self.inner.on_final(rid);
     }
 
-    fn on_final(&mut self, rid: u64) {
+    fn on_final(&mut self, rid: crate::wire_id::RequestId) {
         // Drain BEFORE the inner final so the consumer sees every reply ahead of
         // the terminal signal — the ordering zenoh produces (it flushes, then
         // closes the query) and the one the Reply-before-Final contract already
@@ -804,10 +804,10 @@ mod tests {
     struct CountingReplySink {
         replies: u32,
         finals: u32,
-        last_rid: u64,
+        last_rid: crate::wire_id::RequestId,
         last_kind: ReplyKind,
         last_len: usize,
-        last_final_rid: u64,
+        last_final_rid: crate::wire_id::RequestId,
     }
 
     impl ReplySink for CountingReplySink {
@@ -817,7 +817,7 @@ mod tests {
             self.last_kind = reply.kind();
             self.last_len = reply.payload().len();
         }
-        fn on_final(&mut self, rid: u64) {
+        fn on_final(&mut self, rid: crate::wire_id::RequestId) {
             self.finals += 1;
             self.last_final_rid = rid;
         }
@@ -882,13 +882,13 @@ mod tests {
             keyexpr: "svc/q",
             kind: ReplyKind::Err,
             payload: b"boom",
-            err_encoding: Some((4, Some("text/plain"))),
+            err_encoding: Some((4, Some(&b"text/plain"[..]))),
             attachment: None,
             put_encoding: None,
         };
         assert_eq!(view.kind(), ReplyKind::Err);
         assert_eq!(view.payload(), b"boom");
-        assert_eq!(view.err_encoding(), Some((4, Some("text/plain"))));
+        assert_eq!(view.err_encoding(), Some((4, Some(&b"text/plain"[..]))));
     }
 
     #[cfg(feature = "alloc")]
@@ -899,7 +899,7 @@ mod tests {
         use std::vec::Vec;
 
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let finals: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let finals: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_cb = Arc::clone(&seen);
         let finals_cb = Arc::clone(&finals);
 
@@ -907,7 +907,7 @@ mod tests {
             move |reply: &dyn ReplyView| {
                 seen_cb.lock().unwrap().push(reply.keyexpr().to_string());
             },
-            move |rid: u64| {
+            move |rid: crate::wire_id::RequestId| {
                 finals_cb.lock().unwrap().push(rid);
             },
         );
@@ -961,7 +961,7 @@ mod consolidating_sink_tests {
     #[derive(Default)]
     struct Recorder {
         delivered: Vec<(String, Vec<u8>)>,
-        finals: Vec<u64>,
+        finals: Vec<crate::wire_id::RequestId>,
     }
 
     impl ReplySink for &mut Recorder {
@@ -969,7 +969,7 @@ mod consolidating_sink_tests {
             self.delivered
                 .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
         }
-        fn on_final(&mut self, rid: u64) {
+        fn on_final(&mut self, rid: crate::wire_id::RequestId) {
             self.finals.push(rid);
         }
     }
@@ -1386,7 +1386,7 @@ mod consolidating_sink_tests {
                     self.arrivals.load(Ordering::SeqCst),
                 ));
             }
-            fn on_final(&mut self, _rid: u64) {}
+            fn on_final(&mut self, _rid: crate::wire_id::RequestId) {}
         }
 
         /// A node that records its routing (when the reply was routed to it) and its receive,

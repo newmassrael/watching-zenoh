@@ -1222,7 +1222,7 @@ fn wire<S: wz_codecs::wireexpr::WireexprStorage>(
     let scope = if id == 0 {
         String::from("literal")
     } else {
-        names.name("K", id)
+        names.name("K", u64::from(id))
     };
     format!(
         "{scope}+{:?}",
@@ -1341,7 +1341,9 @@ fn push_whole(p: &wz_session_core::wire::PushOwned, valued: bool) -> String {
                 |e| format!(
                     "{}+{:?}",
                     e.packed_id,
-                    e.schema.as_ref().map(|s| s.to_string())
+                    e.schema
+                        .as_ref()
+                        .map(|s| String::from_utf8_lossy(s.as_bytes().into_inner()).into_owned())
                 )
             ),
             // The chain other than the shared-memory marker, which the layout

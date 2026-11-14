@@ -136,9 +136,9 @@ pub trait SampleView {
         None
     }
     /// The body-level encoding read where it lies (Put-only on the wire), if present:
-    /// the packed id and the schema text, as [`encoding`](Self::encoding)'s hint
+    /// the packed id and the schema's bytes, as [`encoding`](Self::encoding)'s hint
     /// holds them. Defaults to `None`.
-    fn encoding_parts(&self) -> Option<(u32, Option<&str>)> {
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
         None
     }
     /// The payload as the shareable value the view holds it in, when it holds

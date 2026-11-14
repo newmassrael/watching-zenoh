@@ -42,7 +42,7 @@ use wz_runtime_tokio::sample::EncodingHint;
 
 use crate::abi::{z_loaned_encoding_t, z_moved_encoding_t, z_owned_encoding_t, Handle};
 use crate::ffi::{guard_val, guarded};
-use crate::result::{Z_ENULL, Z_OK};
+use crate::result::{Z_EINVAL, Z_ENULL, Z_OK};
 
 /// The label behind an encoding handle.
 ///
@@ -346,9 +346,11 @@ unsafe fn replace_state(slot: *mut z_owned_encoding_t, label: String) {
 
 /// Borrow `len` bytes at `s` as UTF-8, lossily, or `None` when `s` is null.
 ///
-/// Lossy rather than rejecting: upstream takes a `const char*` and never
-/// validates it, and a `z_encoding_from_substr` that failed on a non-UTF-8 byte
-/// would refuse input upstream accepts.
+/// Lossy, for `zc_internal_encoding_from_data` alone: upstream builds that
+/// encoding from the bytes without a check, and this ABI's state holds a label,
+/// so a schema that is not UTF-8 cannot be held as it came. The label and
+/// schema SETTERS refuse such input instead, as zenoh-c does
+/// ([`substr_to_text`]).
 ///
 /// # Safety
 /// `s` must be null, or point at `len` readable bytes.
@@ -361,17 +363,41 @@ unsafe fn substr_to_string(s: *const c_char, len: usize) -> Option<String> {
     Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
-/// Borrow a NUL-terminated string, or `None` when `s` is null.
+/// A label or schema argument as text: `None` when `s` is null, `Some(Err)`
+/// when its bytes are not UTF-8.
+///
+/// zenoh-c refuses a label or a schema that is not UTF-8 with `Z_EINVAL`
+/// (`src/encoding.rs`, `z_encoding_from_substr` and
+/// `z_encoding_set_schema_from_substr`, each `match from_utf8(..)`), so the
+/// setters that read this answer the same.
 ///
 /// # Safety
-/// `s` must be null, or a valid NUL-terminated C string.
-unsafe fn cstr_to_string(s: *const c_char) -> Option<String> {
+/// `s` must be null, or point at `len` readable bytes.
+unsafe fn substr_to_text(s: *const c_char, len: usize) -> Option<Result<String, ()>> {
     if s.is_null() {
         return None;
     }
     // SAFETY: the caller's contract.
-    let bytes = unsafe { std::ffi::CStr::from_ptr(s) }.to_bytes();
-    Some(String::from_utf8_lossy(bytes).into_owned())
+    let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len) };
+    Some(
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| ()),
+    )
+}
+
+/// [`substr_to_text`] over a NUL-terminated string.
+///
+/// # Safety
+/// `s` must be null, or a valid NUL-terminated C string.
+unsafe fn cstr_to_text(s: *const c_char) -> Option<Result<String, ()>> {
+    if s.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let len = unsafe { std::ffi::CStr::from_ptr(s) }.to_bytes().len();
+    // SAFETY: `len` readable bytes precede the terminator.
+    unsafe { substr_to_text(s, len) }
 }
 
 /// The label of the default encoding, table entry 0, which a gravestone encoding stands for.
@@ -408,8 +434,11 @@ pub unsafe extern "C" fn z_encoding_from_str(
         // SAFETY: the caller's contract.
         unsafe { *this_ = z_owned_encoding_t::null_value() };
         // SAFETY: as above.
-        let Some(label) = (unsafe { cstr_to_string(s) }) else {
-            return Z_ENULL;
+        let label = match unsafe { cstr_to_text(s) } {
+            None => return Z_ENULL,
+            // The slot stays the default encoding, as zenoh-c leaves it.
+            Some(Err(())) => return Z_EINVAL,
+            Some(Ok(label)) => label,
         };
         // SAFETY: the slot was just gravestoned, so there is nothing to free.
         unsafe { replace_state(this_, label) };
@@ -435,8 +464,11 @@ pub unsafe extern "C" fn z_encoding_from_substr(
         // SAFETY: the caller's contract.
         unsafe { *this_ = z_owned_encoding_t::null_value() };
         // SAFETY: as above.
-        let Some(label) = (unsafe { substr_to_string(s, len) }) else {
-            return Z_ENULL;
+        let label = match unsafe { substr_to_text(s, len) } {
+            None => return Z_ENULL,
+            // The slot stays the default encoding, as zenoh-c leaves it.
+            Some(Err(())) => return Z_EINVAL,
+            Some(Ok(label)) => label,
         };
         // SAFETY: the slot was just gravestoned.
         unsafe { replace_state(this_, label) };
@@ -476,8 +508,10 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_str(
     s: *const c_char,
 ) -> crate::result::ZResult {
     // SAFETY: the caller's contract.
-    let Some(schema) = (unsafe { cstr_to_string(s) }) else {
-        return Z_ENULL;
+    let schema = match unsafe { cstr_to_text(s) } {
+        None => return Z_ENULL,
+        Some(Err(())) => return Z_EINVAL,
+        Some(Ok(schema)) => schema,
     };
     // SAFETY: as above.
     unsafe { set_schema(this_, schema) }
@@ -496,8 +530,10 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
     len: usize,
 ) -> crate::result::ZResult {
     // SAFETY: the caller's contract.
-    let Some(schema) = (unsafe { substr_to_string(s, len) }) else {
-        return Z_ENULL;
+    let schema = match unsafe { substr_to_text(s, len) } {
+        None => return Z_ENULL,
+        Some(Err(())) => return Z_EINVAL,
+        Some(Ok(schema)) => schema,
     };
     // SAFETY: as above.
     unsafe { set_schema(this_, schema) }
@@ -914,6 +950,42 @@ mod tests {
             assert_eq!(encoding_label(z_encoding_text_plain()), Some("text/plain"));
             z_encoding_drop(&mut *(&mut owned as *mut _ as *mut z_moved_encoding_t));
         }
+    }
+
+    /// zenoh-c's contract for a schema or a label that is not UTF-8: the
+    /// setters refuse it with `Z_EINVAL` and leave the encoding as it was, and
+    /// an encoding that arrived with such a schema renders it as zenoh does
+    /// (`zenoh/src/api/encoding.rs` @ `std::str::from_utf8(schema).unwrap_or("unknown(non-utf8)")`).
+    #[test]
+    fn a_schema_that_is_not_utf8_is_refused_by_the_setters_and_rendered_as_zenoh_renders_it() {
+        let raw: &[u8] = &[0xFF, 0xFE, b'x'];
+        // SAFETY: local values, valid for the calls.
+        unsafe {
+            let mut owned = z_owned_encoding_t::null_value();
+            z_encoding_clone(&mut owned, z_encoding_text_plain());
+            assert_eq!(
+                z_encoding_set_schema_from_substr(
+                    z_encoding_loan_mut(&mut owned),
+                    raw.as_ptr().cast(),
+                    raw.len()
+                ),
+                Z_EINVAL
+            );
+            assert_eq!(encoding_label(z_encoding_loan(&owned)), Some("text/plain"));
+            z_encoding_drop(&mut *(&mut owned as *mut _ as *mut z_moved_encoding_t));
+
+            let mut parsed = z_owned_encoding_t::null_value();
+            assert_eq!(
+                z_encoding_from_substr(&mut parsed, raw.as_ptr().cast(), raw.len()),
+                Z_EINVAL
+            );
+            z_encoding_drop(&mut *(&mut parsed as *mut _ as *mut z_moved_encoding_t));
+        }
+        let arrived = wz_capi_core::encoding_ids::hint_from_schema_bytes(4, raw);
+        assert_eq!(
+            EncodingState::from_hint(&arrived).label,
+            "text/plain;unknown(non-utf8)"
+        );
     }
 
     /// Equality is over the WIRE projection, in the ZENOH-C dialect: the

@@ -152,7 +152,7 @@ pub enum MulticastTxItem {
     ResponseFinal {
         /// The request id whose reply chain this frame terminates (drained
         /// from the observer's `pending_final_rids`).
-        request_id: u64,
+        request_id: crate::wire_id::RequestId,
         /// R2595 — the QUERY's QoS, which the terminator carries as its
         /// replies do, and which also picks the conduit this frame rides.
         qos: crate::sample::QosLevel,

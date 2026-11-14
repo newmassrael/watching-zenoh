@@ -1398,7 +1398,7 @@ pub fn inbound_to_fsm_event(
     // wire-correct answer. Measured against the real `libzenohpico.so` — the
     // driving oracle's first run disagreed with pico on eighteen generated
     // strings and every one of them was this.
-    if let crate::ext_admit::ExtAdmission::UnknownMandatory { .. } = frame.ext_admission() {
+    if frame.ext_admission().is_refusal() {
         return Some(E::FramingError);
     }
     match frame {
@@ -1641,6 +1641,26 @@ mod mandatory_ext_tests {
                 ExtAdmission::UnknownMandatory { eid: 0x14 }
             ),
             "the decode must name the offending extension: {frame:?}"
+        );
+        assert!(matches!(
+            inbound_to_fsm_event(&frame),
+            Some(E::FramingError)
+        ));
+    }
+
+    /// An entry with the reserved encoding and the `M` bit CLEAR still DECODES
+    /// (as a unit, so the analyzer sees it) and is a framing error for a
+    /// participant, as zenoh 1.10.2 refuses the message
+    /// (`commons/zenoh-codec/src/common/extension.rs` @ `let body = match self.header & iext::ENC_MASK {`).
+    /// Before this rule the same frame reached the data path.
+    #[test]
+    fn a_frame_carrying_a_reserved_encoding_extension_is_a_framing_error() {
+        // id 0xF, encoding 0b11, M clear, chain terminator.
+        let frame = parse_inbound(&frame_with_chain(&[0x6F])).expect("the frame still DECODES");
+        assert_eq!(
+            frame.ext_admission(),
+            ExtAdmission::ReservedEncoding { eid: 0x6F },
+            "{frame:?}"
         );
         assert!(matches!(
             inbound_to_fsm_event(&frame),

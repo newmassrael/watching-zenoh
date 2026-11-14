@@ -235,15 +235,15 @@ impl SessionEngine for SharedSession {
         SharedSession::undeclare_subscriber(self, id)
     }
 
-    fn acquire_keyexpr(&self, keyexpr: String) -> Option<u64> {
+    fn acquire_keyexpr(&self, keyexpr: String) -> Option<wz_session_core::wire_id::ExprId> {
         SharedSession::acquire_keyexpr(self, keyexpr)
     }
 
-    fn release_keyexpr(&self, mapping_id: u64) {
+    fn release_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
         SharedSession::release_keyexpr(self, mapping_id)
     }
 
-    fn keyexpr_declarations(&self) -> Vec<(u64, String)> {
+    fn keyexpr_declarations(&self) -> Vec<(wz_session_core::wire_id::ExprId, String)> {
         SharedSession::keyexpr_declarations(self)
     }
 
@@ -311,7 +311,7 @@ impl SessionEngine for SharedSession {
         &self,
         filter: FilterId,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {

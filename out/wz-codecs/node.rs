@@ -53,8 +53,8 @@ impl ::sce_forge_runtime::codec::HoldsList<super::declare::DeclareExtensionsFiel
 }
 
 // `encoding`
-impl ::sce_forge_runtime::codec::HoldsStr<super::encoding::EncodingSchemaField> for Node {
-    type Str = ::sce_forge_runtime::codec::InlineStr<128>;
+impl ::sce_forge_runtime::codec::HoldsBytes<super::encoding::EncodingSchemaField> for Node {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<128>;
 }
 
 // `err`

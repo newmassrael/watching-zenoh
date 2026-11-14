@@ -45,22 +45,22 @@ pub(super) struct GetPlane {
     pub(super) events: Mutex<VecDeque<GetEvent>>,
 }
 
-/// Which of the observer's registries a pending leg's entry is in.
+/// Which of the observer's registries a pending leg's entry is in, and the id it is registered
+/// under there: each kind's id is its own type, so one cannot be looked up as the other.
 #[derive(Clone, Copy)]
 pub(super) enum GetKind {
     /// A query: its entry is under its request id, and its peer owes a Final.
-    Query,
+    Query(wz_session_core::wire_id::RequestId),
     /// A liveliness snapshot: its entry is under its Interest id, and its peer owes a DeclFinal.
     #[cfg(feature = "liveliness-get")]
-    Liveliness,
+    Liveliness(u64),
 }
 
 /// A leg the session has pending: the face it was asked of, the id its callback is held under,
-/// and the id its entry is registered with (a request id or an Interest id, as its kind says).
+/// and its entry ([`GetKind`]).
 pub(super) struct PendingGet {
     pub(super) face: FaceId,
     pub(super) leg: u64,
-    pub(super) rid: u64,
     pub(super) kind: GetKind,
 }
 
@@ -72,12 +72,12 @@ impl PendingGet {
             return;
         };
         match self.kind {
-            GetKind::Query => {
-                gets.replies.unregister(self.rid);
+            GetKind::Query(rid) => {
+                gets.replies.unregister(rid);
             }
             #[cfg(feature = "liveliness-get")]
-            GetKind::Liveliness => {
-                gets.liveliness_gets.unregister(self.rid);
+            GetKind::Liveliness(interest_id) => {
+                gets.liveliness_gets.unregister(interest_id);
             }
         }
     }

@@ -71,7 +71,11 @@ fn piece_of(message: &[u8], number: u8, range: core::ops::Range<usize>) -> Vec<u
 /// `Reply` with one `Put` of `payload`: no consolidation byte, no timestamp,
 /// no encoding, and the two extensions a responder writes on every reply (a
 /// 64-bit one at id 1 and its own id, 18 bytes, at id 3).
-fn reply<'a>(request_id: u64, key: &'a str, payload: &'a [u8]) -> Vec<u8> {
+fn reply<'a>(
+    request_id: wz_session_core::wire_id::RequestId,
+    key: &'a str,
+    payload: &'a [u8],
+) -> Vec<u8> {
     use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
     use wz_session_core::ext_header::network_eid;
     let qos = ExtEntry {
@@ -106,7 +110,7 @@ fn reply<'a>(request_id: u64, key: &'a str, payload: &'a [u8]) -> Vec<u8> {
 }
 
 /// The querier (the low end) asks `key` under `rid`.
-fn ask(wire: &mut Wire, rid: u64, key: &'static str) {
+fn ask(wire: &mut Wire, rid: wz_session_core::wire_id::RequestId, key: &'static str) {
     wire.send(
         true,
         None,
@@ -116,12 +120,12 @@ fn ask(wire: &mut Wire, rid: u64, key: &'static str) {
 
 /// The responder (the high end) answers `rid` under `key` with `payload`,
 /// one reply to a batch.
-fn answer(wire: &mut Wire, rid: u64, key: &str, payload: &[u8]) {
+fn answer(wire: &mut Wire, rid: wz_session_core::wire_id::RequestId, key: &str, payload: &[u8]) {
     wire.send(false, None, &frame_carrying(&reply(rid, key, payload)));
 }
 
 /// The responder closes `rid`.
-fn close(wire: &mut Wire, rid: u64) {
+fn close(wire: &mut Wire, rid: wz_session_core::wire_id::RequestId) {
     wire.send(false, None, &frame_carrying(&response_final(rid)));
 }
 

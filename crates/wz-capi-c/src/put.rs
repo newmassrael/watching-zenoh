@@ -482,7 +482,7 @@ pub(crate) fn node_publish_handle(
 pub(crate) fn publish_promoted(
     shared: &wz_capi_core::faces::SharedSession,
     keyexpr: &str,
-    mapping: Option<u64>,
+    mapping: Option<wz_session_core::wire_id::ExprId>,
     handle: wz_session_core::extshm::ShmSendHandle,
     options: &PublishOptions,
 ) -> Result<usize, wz_capi_core::faces::FanoutError> {

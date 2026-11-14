@@ -97,7 +97,7 @@ fn put(keyexpr: &str) -> NetworkMessage {
     ))
 }
 
-fn query(rid: u64, keyexpr: &str) -> NetworkMessage {
+fn query(rid: wz_session_core::wire_id::RequestId, keyexpr: &str) -> NetworkMessage {
     NetworkMessage::Request(Box::new(
         wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
             .expect("build request"),

@@ -492,7 +492,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
 #[non_exhaustive]
 pub struct PublisherAliased<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     pub(super) session: Session<R, T, Unicast>,
-    pub(super) mapping_id: u64,
+    pub(super) mapping_id: wz_session_core::wire_id::ExprId,
     pub(super) inline_suffix: Option<String>,
     pub(super) options: PublishOptions,
 }
@@ -510,7 +510,7 @@ impl<R: SessionRuntime, T: TimeSource> Clone for PublisherAliased<R, T> {
 
 impl<R: SessionRuntime, T: TimeSource> PublisherAliased<R, T> {
     /// The declared mapping id.
-    pub fn mapping_id(&self) -> u64 {
+    pub fn mapping_id(&self) -> wz_session_core::wire_id::ExprId {
         self.mapping_id
     }
 
@@ -615,7 +615,7 @@ pub enum PublishAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it). The wrapped value is the offending mapping id.
-    UnknownMapping(u64),
+    UnknownMapping(wz_session_core::wire_id::ExprId),
     /// W3 (SCE pin 7a94d084a) — the payload or resolved keyexpr
     /// exceeded the declared bounded-codec capacity while being copied
     /// into the no-alloc owned Push mirror, so no wire bytes were

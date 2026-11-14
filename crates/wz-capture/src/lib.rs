@@ -11883,7 +11883,10 @@ mod datagram_tests {
     /// At the lifetime of the record it goes into: the codec's borrowed messages
     /// are invariant in theirs, so a key made at `'static` could ride only with a
     /// `'static` payload.
-    pub(crate) fn sender_space<'a>(id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
+    pub(crate) fn sender_space<'a>(
+        id: wz_session_core::wire_id::ExprId,
+        suffix: Option<&'a str>,
+    ) -> Wireexpr<'a> {
         Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id,

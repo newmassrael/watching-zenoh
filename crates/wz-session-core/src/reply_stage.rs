@@ -61,8 +61,9 @@ use crate::sample::{QosLevel, SourceInfo};
 pub struct EncodingParts<'a> {
     /// The wire-packed id (`id << 1 | schema_present`).
     pub packed_id: u32,
-    /// The schema text, if the encoding carries one.
-    pub schema: Option<&'a str>,
+    /// The schema's bytes, if the encoding carries one (any bytes: upstream
+    /// holds a schema as bytes).
+    pub schema: Option<&'a [u8]>,
 }
 
 #[cfg(feature = "alloc")]
@@ -171,7 +172,7 @@ pub enum PartsKind<'a> {
     #[cfg(feature = "query-reply-err")]
     Err {
         /// The error body's encoding id and schema, if any.
-        encoding: Option<(u32, Option<&'a str>)>,
+        encoding: Option<(u32, Option<&'a [u8]>)>,
         /// The error payload.
         payload: &'a [u8],
     },
@@ -183,7 +184,7 @@ pub enum PartsKind<'a> {
 #[derive(Clone, Copy)]
 pub struct ReplyParts<'a> {
     /// The request id the reply answers.
-    pub rid: u64,
+    pub rid: crate::wire_id::RequestId,
     /// The keyexpr the reply is stamped with.
     pub keyexpr: &'a str,
     /// The responder identity (`zid` bytes, entity id) stamped on the response, if
@@ -242,7 +243,7 @@ pub trait FinalStaging {
     fn has_room(&self) -> bool;
 
     /// Owe a `Final` for `rid`, carrying the query's `qos`.
-    fn owe(&mut self, rid: u64, qos: QosLevel);
+    fn owe(&mut self, rid: crate::wire_id::RequestId, qos: QosLevel);
 
     /// A request refused because no `Final` could be owed for it. Counted.
     fn refuse_request(&mut self);
@@ -251,7 +252,7 @@ pub trait FinalStaging {
     fn owed(&self) -> usize;
 
     /// Take every owed `Final`, in the order they were owed.
-    fn drain_owed(&mut self) -> impl Iterator<Item = (u64, QosLevel)>;
+    fn drain_owed(&mut self) -> impl Iterator<Item = (crate::wire_id::RequestId, QosLevel)>;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +318,7 @@ enum RowKind<P: Storage> {
 
 /// One staged reply: fixed fields, and spans into the stage's arena for its bytes.
 struct Row<P: Storage> {
-    rid: u64,
+    rid: crate::wire_id::RequestId,
     qos: QosLevel,
     keyexpr: Span<P>,
     responder: Option<(BoundedVec<u8, ZID_BYTES, P>, u32)>,
@@ -446,15 +447,15 @@ impl<P: Storage> ReplyStage<P> {
         }
     }
 
-    fn put_encoding(&mut self, encoding: Option<(u32, Option<&str>)>) -> RowEncoding<P> {
-        encoding.map(|(id, schema)| (id, schema.map(|schema| self.put(schema.as_bytes()))))
+    fn put_encoding(&mut self, encoding: Option<(u32, Option<&[u8]>)>) -> RowEncoding<P> {
+        encoding.map(|(id, schema)| (id, schema.map(|schema| self.put(schema))))
     }
 
-    /// A row's encoding as the id and the schema text read out of the arena.
-    fn encoding_of(&self, encoding: &RowEncoding<P>) -> Option<(u32, Option<&str>)> {
+    /// A row's encoding as the id and the schema's bytes read out of the arena.
+    fn encoding_of(&self, encoding: &RowEncoding<P>) -> Option<(u32, Option<&[u8]>)> {
         encoding
             .as_ref()
-            .map(|(packed_id, schema)| (*packed_id, schema.map(|schema| self.text(schema))))
+            .map(|(packed_id, schema)| (*packed_id, schema.map(|schema| self.bytes(schema))))
     }
 
     /// A row as the borrowed description it was staged from. Nothing is copied:
@@ -601,13 +602,15 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
                     PartsBody::Shared(_) => 0,
                 },
                 attachment.map_or(0, <[u8]>::len),
-                encoding.and_then(|e| e.schema).map_or(0, str::len),
+                encoding.and_then(|e| e.schema).map_or(0, <[u8]>::len),
             ),
             #[cfg(feature = "query-reply-err")]
             PartsKind::Err { encoding, payload } => (
                 payload.len(),
                 0,
-                encoding.and_then(|(_, schema)| schema).map_or(0, str::len),
+                encoding
+                    .and_then(|(_, schema)| schema)
+                    .map_or(0, <[u8]>::len),
             ),
         };
         // A policy that enforces its capacity addresses its arena with 16 bits, which
@@ -745,7 +748,7 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
 /// answers `usize::MAX`. The policy defaults to this build's
 /// [`Profile`], so `FinalStage` alone is the build's table.
 pub struct FinalStage<P: Storage = Profile> {
-    rows: BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
+    rows: BoundedVec<(crate::wire_id::RequestId, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
     refused_requests: u32,
 }
 
@@ -784,9 +787,12 @@ impl<P: Storage> FinalStage<P> {
 }
 
 impl<P: Storage> IntoIterator for FinalStage<P> {
-    type Item = (u64, QosLevel);
-    type IntoIter =
-        <BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }, P> as IntoIterator>::IntoIter;
+    type Item = (crate::wire_id::RequestId, QosLevel);
+    type IntoIter = <BoundedVec<
+        (crate::wire_id::RequestId, QosLevel),
+        { caps::MAX_PENDING_FINALS },
+        P,
+    > as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.rows.into_iter()
@@ -803,9 +809,9 @@ impl<P: Storage> Default for FinalStage<P> {
 }
 
 impl<P: Storage> core::ops::Deref for FinalStage<P> {
-    type Target = [(u64, QosLevel)];
+    type Target = [(crate::wire_id::RequestId, QosLevel)];
 
-    fn deref(&self) -> &[(u64, QosLevel)] {
+    fn deref(&self) -> &[(crate::wire_id::RequestId, QosLevel)] {
         &self.rows
     }
 }
@@ -815,7 +821,7 @@ impl<P: Storage> FinalStaging for FinalStage<P> {
         self.rows.free_slots() > 0
     }
 
-    fn owe(&mut self, rid: u64, qos: QosLevel) {
+    fn owe(&mut self, rid: crate::wire_id::RequestId, qos: QosLevel) {
         // Room was asked for before the request ran; a table that has none by
         // now is the caller's contract broken, and counted rather than dropped
         // in silence.
@@ -832,7 +838,7 @@ impl<P: Storage> FinalStaging for FinalStage<P> {
         self.rows.len()
     }
 
-    fn drain_owed(&mut self) -> impl Iterator<Item = (u64, QosLevel)> {
+    fn drain_owed(&mut self) -> impl Iterator<Item = (crate::wire_id::RequestId, QosLevel)> {
         OwedDrain {
             rows: &mut self.rows,
             at: 0,
@@ -848,12 +854,13 @@ impl<P: Storage> FinalStaging for FinalStage<P> {
 /// is what lets a frame of queries cost no allocation once the first one has run. A row
 /// is two words and `Copy`, so it is read in place and the backing never moves.
 struct OwedDrain<'a, P: Storage> {
-    rows: &'a mut BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
+    rows:
+        &'a mut BoundedVec<(crate::wire_id::RequestId, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
     at: usize,
 }
 
 impl<P: Storage> Iterator for OwedDrain<'_, P> {
-    type Item = (u64, QosLevel);
+    type Item = (crate::wire_id::RequestId, QosLevel);
 
     fn next(&mut self) -> Option<Self::Item> {
         let row = *self.rows.get(self.at)?;
@@ -884,7 +891,7 @@ mod tests {
     /// from the policy's own contract, never from a feature gate.
     fn fill_to_n_then_refuse_at_n_plus_one<P: Storage>() {
         let mut finals: FinalStage<P> = FinalStage::default();
-        for rid in 0..N as u64 {
+        for rid in 0..N as u32 {
             assert!(finals.has_room(), "entry {rid} is within the capacity");
             finals.owe(rid, QosLevel::DEFAULT);
         }
@@ -895,7 +902,7 @@ mod tests {
             assert!(!finals.has_room(), "a full table has no room");
             finals.refuse_request();
             assert_eq!(finals.refusals(), 1, "the refused request is counted");
-            finals.owe(N as u64, QosLevel::DEFAULT);
+            finals.owe(N as u32, QosLevel::DEFAULT);
             assert_eq!(finals.owed(), N, "an entry past N is not taken");
             assert_eq!(
                 finals.refusals(),
@@ -904,7 +911,7 @@ mod tests {
             );
         } else {
             assert!(finals.has_room(), "an advisory capacity always has room");
-            finals.owe(N as u64, QosLevel::DEFAULT);
+            finals.owe(N as u32, QosLevel::DEFAULT);
             assert_eq!(finals.owed(), N + 1);
             assert_eq!(finals.refusals(), 0, "the growable table refuses nothing");
         }
@@ -914,11 +921,11 @@ mod tests {
     /// table without touching the count of what was refused.
     fn drain_takes_in_order_and_keeps_the_count<P: Storage>() {
         let mut finals: FinalStage<P> = FinalStage::default();
-        for rid in 10..13u64 {
+        for rid in 10..13u32 {
             finals.owe(rid, QosLevel::DEFAULT);
         }
         finals.refuse_request();
-        let mut taken = [0u64; 3];
+        let mut taken: [crate::wire_id::RequestId; 3] = [0; 3];
         for (slot, (rid, _)) in taken.iter_mut().zip(finals.drain_owed()) {
             *slot = rid;
         }
@@ -935,13 +942,13 @@ mod tests {
     /// the drain made it cost one allocation per frame).
     fn drain_keeps_the_backing<P: Storage>() {
         let mut finals: FinalStage<P> = FinalStage::default();
-        for rid in 0..6u64 {
+        for rid in 0..6u32 {
             finals.owe(rid, QosLevel::DEFAULT);
         }
         let first = finals.as_ptr();
         assert_eq!(finals.drain_owed().count(), 6);
         assert!(finals.is_empty());
-        for rid in 0..6u64 {
+        for rid in 0..6u32 {
             finals.owe(rid, QosLevel::DEFAULT);
         }
         assert_eq!(
@@ -967,7 +974,11 @@ mod tests {
     // ---- The reply stage, the same bodies on every policy ----------------------
 
     /// A plain data reply, described the way a queryable's `send_*` describes it.
-    fn put_reply<'a>(rid: u64, keyexpr: &'a str, payload: &'a [u8]) -> ReplyParts<'a> {
+    fn put_reply<'a>(
+        rid: crate::wire_id::RequestId,
+        keyexpr: &'a str,
+        payload: &'a [u8],
+    ) -> ReplyParts<'a> {
         ReplyParts {
             rid,
             keyexpr,
@@ -986,7 +997,11 @@ mod tests {
     }
 
     /// A reply whose bytes come from four places: key, payload, attachment, schema.
-    fn fat_reply<'a>(rid: u64, payload: &'a [u8], attachment: &'a [u8]) -> ReplyParts<'a> {
+    fn fat_reply<'a>(
+        rid: crate::wire_id::RequestId,
+        payload: &'a [u8],
+        attachment: &'a [u8],
+    ) -> ReplyParts<'a> {
         let key = "k";
         ReplyParts {
             rid,
@@ -1009,7 +1024,7 @@ mod tests {
     /// counted where the capacity is hard, taken where it is not.
     fn rows_fill_to_n_then_refuse_at_n_plus_one<P: Storage>() {
         let mut stage: ReplyStage<P> = ReplyStage::default();
-        for rid in 0..caps::MAX_PENDING_REPLIES as u64 {
+        for rid in 0..caps::MAX_PENDING_REPLIES as u32 {
             assert!(stage.stage_parts(put_reply(rid, "a/b", b"x")).is_ok());
         }
         assert_eq!(stage.staged(), caps::MAX_PENDING_REPLIES);
@@ -1058,7 +1073,7 @@ mod tests {
             "the fixture is fat enough to meet the arena first"
         );
         let mut stage: ReplyStage<P> = ReplyStage::default();
-        for rid in 0..fits as u64 {
+        for rid in 0..fits as u32 {
             assert_eq!(
                 stage.stage_parts(fat_reply(rid, &payload, &attachment)),
                 Ok(())
@@ -1081,7 +1096,7 @@ mod tests {
     fn drain_parts_hands_out_what_was_staged<P: Storage>() {
         let zid = [9u8; 4];
         let mut stage: ReplyStage<P> = ReplyStage::default();
-        for rid in 0..3u64 {
+        for rid in 0..3u32 {
             let payload = [rid as u8 + 1; 3];
             let parts = ReplyParts {
                 rid,
@@ -1094,7 +1109,7 @@ mod tests {
                     body: PartsBody::Put(&payload),
                     encoding: Some(EncodingParts {
                         packed_id: 7,
-                        schema: Some("s"),
+                        schema: Some(&b"s"[..]),
                     }),
                     timestamp: Some(TimestampParts {
                         time: 42,
@@ -1107,7 +1122,7 @@ mod tests {
             assert_eq!(stage.stage_parts(parts), Ok(()));
         }
 
-        let mut seen = 0u64;
+        let mut seen = 0u32;
         stage.drain_parts(|parts| {
             assert_eq!(parts.rid, seen, "in the order they were staged");
             assert_eq!(parts.keyexpr, "home/temp");
@@ -1123,7 +1138,7 @@ mod tests {
                 panic!("the staged reply is a Put with every optional field");
             };
             assert_eq!(payload, &[seen as u8 + 1; 3]);
-            assert_eq!((encoding.packed_id, encoding.schema), (7, Some("s")));
+            assert_eq!((encoding.packed_id, encoding.schema), (7, Some(&b"s"[..])));
             assert_eq!((timestamp.time, timestamp.zid), (42, &zid[..]));
             assert_eq!(attachment, b"att");
             seen += 1;

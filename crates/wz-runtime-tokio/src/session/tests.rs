@@ -1537,7 +1537,7 @@ fn a_session_admits_a_protocol_only_when_the_peer_lists_it() {
 /// (`zenoh/src/net/routing/dispatcher/resource.rs:625`).
 #[cfg(all(feature = "codec-push", feature = "declare-keyexpr"))]
 fn inbound_push_aliased_in_our_space(
-    mapping_id: u64,
+    mapping_id: wz_session_core::wire_id::ExprId,
     payload: &[u8],
 ) -> wz_session_core::driver_loop::DriverLoopOutcome {
     let push = wz_codecs::lent::Push {
@@ -1578,7 +1578,7 @@ fn inbound_push_aliased_in_our_space(
 /// back as the wire carries them, then read by the same reader the loop uses.
 #[cfg(all(feature = "codec-push", feature = "pubsub-put"))]
 fn plain_puts_frame(
-    puts: &[(u64, Option<&str>, &[u8])],
+    puts: &[(wz_session_core::wire_id::ExprId, Option<&str>, &[u8])],
 ) -> wz_session_core::driver_loop::DriverLoopOutcome {
     let mut batch = Vec::new();
     for (id, suffix, payload) in puts {
@@ -2022,7 +2022,7 @@ fn publish_options_with_metadata_setters_chain() {
     assert_eq!(ts.zid, vec![0xAA, 0xBB]);
     let enc = opts.encoding.as_ref().unwrap();
     assert_eq!(enc.packed_id, 13);
-    assert_eq!(enc.schema.as_deref(), Some("application/json"));
+    assert_eq!(enc.schema.as_deref(), Some(&b"application/json"[..]));
     let si = opts.source_info.as_ref().unwrap();
     assert_eq!(si.zid_len, 4);
     assert_eq!(si.eid, 7);
@@ -2298,7 +2298,7 @@ fn publish_loopback_propagates_encoding_to_put_sample() {
     let s = captured.lock().unwrap();
     let enc = s[0].encoding.as_ref().unwrap();
     assert_eq!(enc.packed_id, 5);
-    assert_eq!(enc.schema.as_deref(), Some("text/plain"));
+    assert_eq!(enc.schema.as_deref(), Some(&b"text/plain"[..]));
 }
 
 #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-encoding"))]
@@ -3447,7 +3447,7 @@ fn query_loopback_propagates_err_body_with_encoding_tuple() {
         .unwrap()
         .queryables
         .register("error/path", |_q, responder| {
-            responder.reply_err(Some(4), Some("schema_v1"), b"oops");
+            responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
         });
 
     session
@@ -3471,7 +3471,7 @@ fn query_loopback_propagates_err_body_with_encoding_tuple() {
         InboundReplyBody::Err { encoding, payload } => {
             // Packed as the wire packs it, so that a loopback reply reads as a received one does:
             // the id 4 shifted over the bit that says a schema follows.
-            assert_eq!(*encoding, Some((9, Some("schema_v1".to_string()))));
+            assert_eq!(*encoding, Some((9, Some(b"schema_v1".to_vec()))));
             assert_eq!(payload, b"oops");
         }
         other => panic!("expected Err, got {other:?}"),
@@ -4230,7 +4230,7 @@ fn declare_adminspace_answers_root_get_with_local_data_json() {
                 *p.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -4836,7 +4836,7 @@ fn declare_adminspace_config_get_returns_typed_config_json() {
                 *p.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -4893,7 +4893,7 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
                 *p.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -5086,7 +5086,7 @@ fn declare_adminspace_surface_document_arrives_over_the_query_path() {
                 *b.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -5586,7 +5586,7 @@ fn query_wire_branch_default_carries_the_default_timeout_ext() {
 // short-circuiting to the same bytes as the bare builder per the R240 invariant).
 #[cfg(all(test, feature = "query-get"))]
 fn expected_query_request_bytes(
-    mapping_id: u64,
+    mapping_id: wz_session_core::wire_id::ExprId,
     keyexpr: Option<&str>,
     #[allow(unused_mut)] mut meta: wz_session_core::metadata::QueryMetadata,
 ) -> Vec<u8> {
@@ -7598,7 +7598,7 @@ fn awaiting_options() -> QueryOptions {
 /// A final is a message of its own to the build (`codec-response-final`): a build that asks and
 /// does not decode one never sees a query end by it, so what needs one is gated on both.
 #[cfg(all(feature = "query-get", feature = "codec-response-final"))]
-fn finish_query(session: &TokioSession, rid: u64) {
+fn finish_query(session: &TokioSession, rid: wz_session_core::wire_id::RequestId) {
     use wz_codecs::lent::ResponseFinal;
     let response_final = ResponseFinal {
         request_id: rid,
@@ -13284,7 +13284,7 @@ fn tapped_qos_group_session() -> (
 ))]
 #[test]
 fn a_member_interest_in_keyexprs_is_answered_with_the_ones_declared_to_the_group() {
-    use core::num::NonZeroU64;
+    use core::num::NonZeroU16;
     use wz_codecs::declare::DeclareOwnedVariant;
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
     use wz_session_core::inbound::{parse_inbound, InboundFrame};
@@ -13293,7 +13293,7 @@ fn a_member_interest_in_keyexprs_is_answered_with_the_ones_declared_to_the_group
     let (session, mut tap) = tapped_qos_group_session();
     for (id, keyexpr) in [(1, "demo/mc/q"), (2, "other/key")] {
         session
-            .announce_keyexpr(NonZeroU64::new(id).expect("non-zero"), keyexpr)
+            .announce_keyexpr(NonZeroU16::new(id).expect("non-zero"), keyexpr)
             .expect("the declaration is pushed");
     }
     while tap.try_next().is_some() {}
@@ -13611,7 +13611,11 @@ fn group_egress(tap: &mut crate::multicast_pipeline::MulticastTxTap) -> Vec<Stri
     feature = "query-queryable",
     feature = "codec-response-final"
 ))]
-fn query_from_a_member(session: &TokioMulticastSession, rid: u64, keyexpr: &str) {
+fn query_from_a_member(
+    session: &TokioMulticastSession,
+    rid: wz_session_core::wire_id::RequestId,
+    keyexpr: &str,
+) {
     use wz_session_core::network_message::NetworkMessage;
     let request = wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
         .expect("the query builds");
@@ -14420,7 +14424,7 @@ fn subscriber_sample_staged_before_undeclare_is_suppressed() {
 /// wz-session-core test builders are not a dev-dep here per R311ds).
 #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
 pub(super) fn make_request_query(
-    rid: u64,
+    rid: wz_session_core::wire_id::RequestId,
     keyexpr_literal: &str,
 ) -> wz_session_core::wire::RequestOwned {
     use wz_codecs::lent::{
@@ -14752,7 +14756,7 @@ fn remote_only_query_does_not_drain_another_planes_staged_fire() {
         "q/**",
         opts,
         |_r: &dyn wz_session_core::reply_sink::ReplyView| {},
-        |_rid: u64| {},
+        |_rid: wz_session_core::wire_id::RequestId| {},
     );
     // Non-vacuity: the query must actually have reached the drain site. A query
     // that errored early would leave the fire staged for the wrong reason.
@@ -17037,7 +17041,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
         }),
         encoding: Some(EncodingHint {
             packed_id: 0x2d,
-            schema: Some("text/plain".to_string()),
+            schema: Some(b"text/plain".to_vec()),
         }),
         source_info: Some(SourceInfo::new(&[9, 8, 7], 11, 12)),
         attachment: Some(b"attached".to_vec()),
@@ -17050,7 +17054,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
         Vec<u8>,
         Option<Vec<u8>>,
         Option<(u64, Vec<u8>)>,
-        Option<(u32, Option<String>)>,
+        Option<(u32, Option<Vec<u8>>)>,
         Option<SourceInfo>,
         Option<QosLevel>,
     );
@@ -17062,7 +17066,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
             sample.timestamp_parts().map(|(t, z)| (t, z.to_vec())),
             sample
                 .encoding_parts()
-                .map(|(id, schema)| (id, schema.map(str::to_string))),
+                .map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
             sample.source_info().cloned(),
             sample.qos(),
         )
@@ -17097,7 +17101,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
         .expect("offloaded saw it");
     assert_eq!(offloaded, inline);
     assert_eq!(inline.2.as_deref(), Some(&b"attached"[..]), "not vacuous");
-    assert_eq!(inline.4, Some((0x2d, Some("text/plain".to_string()))));
+    assert_eq!(inline.4, Some((0x2d, Some(b"text/plain".to_vec()))));
 }
 
 /// Dropping the handle undeclares the subscription: nothing is delivered after it, and a sample

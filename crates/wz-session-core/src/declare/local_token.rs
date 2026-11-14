@@ -1011,8 +1011,8 @@ mod tests {
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/**".to_string());
-        let mut own = HashMap::new();
-        own.insert(7u64, "ours/**".to_string());
+        let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        own.insert(7, "ours/**".to_string());
 
         // M=0 (`WireexprNonlocal`) with no inline suffix: the id alone.
         let interest = InterestOwned {

@@ -76,7 +76,9 @@ use wz_codecs::wireexpr::{
 /// Public so an observer that reads a Wireexpr off a received message
 /// (`wz-capture`) asks the same function, rather than re-spelling the two-arm
 /// match against a text container whose type depends on the build.
-pub fn id_and_suffix<S: WireexprStorage>(body: &WireexprOwnedVariant<S>) -> (u64, Option<&str>) {
+pub fn id_and_suffix<S: WireexprStorage>(
+    body: &WireexprOwnedVariant<S>,
+) -> (crate::wire_id::ExprId, Option<&str>) {
     match body {
         WireexprOwnedVariant::WireexprLocal(arm) => (
             arm.id,
@@ -197,7 +199,7 @@ pub trait OwnMappingSpace {
     /// mapping on either arm. Heap profile only: it answers with a `String`, and
     /// a space with no allocator is read through [`Self::append_own_mapping`].
     #[cfg(feature = "alloc")]
-    fn resolve_own_mapping(&self, id: u64) -> Option<String>;
+    fn resolve_own_mapping(&self, id: crate::wire_id::ExprId) -> Option<String>;
 
     /// [`Self::resolve_own_mapping`] appended to `out` instead of returned, for
     /// the resolver that composes a keyexpr without a heap
@@ -212,7 +214,7 @@ pub trait OwnMappingSpace {
     #[cfg(feature = "alloc")]
     fn append_own_mapping(
         &self,
-        id: u64,
+        id: crate::wire_id::ExprId,
         out: &mut KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         let literal = self.resolve_own_mapping(id)?;
@@ -224,7 +226,7 @@ pub trait OwnMappingSpace {
     #[cfg(not(feature = "alloc"))]
     fn append_own_mapping(
         &self,
-        id: u64,
+        id: crate::wire_id::ExprId,
         out: &mut KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>>;
 }
@@ -232,14 +234,14 @@ pub trait OwnMappingSpace {
 /// A plain table is an own space too — the shape tests and any future per-face
 /// local-mapping table use, without reaching for the locked session surface.
 #[cfg(feature = "alloc")]
-impl OwnMappingSpace for HashMap<u64, String> {
-    fn resolve_own_mapping(&self, id: u64) -> Option<String> {
+impl OwnMappingSpace for HashMap<crate::wire_id::ExprId, String> {
+    fn resolve_own_mapping(&self, id: crate::wire_id::ExprId) -> Option<String> {
         self.get(&id).cloned()
     }
 
     fn append_own_mapping(
         &self,
-        id: u64,
+        id: crate::wire_id::ExprId,
         out: &mut KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         self.get(&id).map(|literal| out.push_str(literal))
@@ -327,6 +329,10 @@ enum PeerSpaceRepr<'a> {
     /// The growable policy's plain map; a build with no allocator has none.
     #[cfg(feature = "alloc")]
     Map(&'a HashMap<u64, String>),
+    /// Our own table standing in the sender's half, for a message this node sends
+    /// ([`MappingSpaces::as_sent`]): it is keyed by the ids we allocate.
+    #[cfg(feature = "alloc")]
+    Ours(&'a HashMap<crate::wire_id::ExprId, String>),
     /// The static policy's bounded table.
     Table(&'a FixedIdMap<KeyText<Static>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
 }
@@ -346,11 +352,18 @@ impl<'a> PeerSpace<'a> {
     }
 
     /// The literal keyexpr the peer declared for `id`.
-    fn literal(&self, id: u64) -> Option<&'a str> {
+    ///
+    /// A peer's table holds ids widened to 64 bits, as the id map every
+    /// session table shares does (`crate::id_map::IdMap`); an `ExprId` is
+    /// looked up widened ([`crate::wire_id::peer_key`]).
+    fn literal(&self, id: crate::wire_id::ExprId) -> Option<&'a str> {
+        let key = crate::wire_id::peer_key(id);
         match self.0 {
             #[cfg(feature = "alloc")]
-            PeerSpaceRepr::Map(map) => map.get(&id).map(String::as_str),
-            PeerSpaceRepr::Table(table) => table.find(id).map(|text| text.as_str()),
+            PeerSpaceRepr::Map(map) => map.get(&key).map(String::as_str),
+            #[cfg(feature = "alloc")]
+            PeerSpaceRepr::Ours(map) => map.get(&id).map(String::as_str),
+            PeerSpaceRepr::Table(table) => table.find(key).map(|text| text.as_str()),
         }
     }
 }
@@ -362,7 +375,7 @@ pub struct PeerSpaceView<'a>(PeerSpace<'a>);
 
 impl<'a> PeerSpaceView<'a> {
     /// The literal the peer declared for `id`.
-    pub fn get(&self, id: &u64) -> Option<&'a str> {
+    pub fn get(&self, id: &crate::wire_id::ExprId) -> Option<&'a str> {
         self.0.literal(*id)
     }
 
@@ -371,6 +384,8 @@ impl<'a> PeerSpaceView<'a> {
         match self.0 .0 {
             #[cfg(feature = "alloc")]
             PeerSpaceRepr::Map(map) => map.len(),
+            #[cfg(feature = "alloc")]
+            PeerSpaceRepr::Ours(map) => map.len(),
             PeerSpaceRepr::Table(table) => table.count(),
         }
     }
@@ -387,13 +402,13 @@ impl<'a> PeerSpaceView<'a> {
 /// of that pair. Whatever table the storage policy keeps it in.
 impl OwnMappingSpace for PeerSpaceView<'_> {
     #[cfg(feature = "alloc")]
-    fn resolve_own_mapping(&self, id: u64) -> Option<String> {
+    fn resolve_own_mapping(&self, id: crate::wire_id::ExprId) -> Option<String> {
         self.get(&id).map(String::from)
     }
 
     fn append_own_mapping(
         &self,
-        id: u64,
+        id: crate::wire_id::ExprId,
         out: &mut KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         self.get(&id).map(|literal| out.push_str(literal))
@@ -426,6 +441,20 @@ impl<'a> MappingSpaces<'a> {
         Self {
             peer: PeerSpace::of_map(peer),
             own: Some(own),
+        }
+    }
+
+    /// The pair for a message this node SENDS: its `M=1` names the ids we declared
+    /// (`ours`, keyed by the `ExprId`s we allocate) and its `M=0` the ones the peer
+    /// declared (`theirs`), the reverse of a message received.
+    #[cfg(feature = "alloc")]
+    pub fn as_sent(
+        ours: &'a HashMap<crate::wire_id::ExprId, String>,
+        theirs: &'a dyn OwnMappingSpace,
+    ) -> Self {
+        Self {
+            peer: PeerSpace(PeerSpaceRepr::Ours(ours)),
+            own: Some(theirs),
         }
     }
 
@@ -486,7 +515,7 @@ impl<'a> MappingSpaces<'a> {
     /// (the `ext_keyexpr` of an undeclaration), which has only ever read the
     /// peer's.
     #[cfg(feature = "codec-declare")]
-    pub(crate) fn peer_literal(&self, id: u64) -> Option<&'a str> {
+    pub(crate) fn peer_literal(&self, id: crate::wire_id::ExprId) -> Option<&'a str> {
         self.peer.literal(id)
     }
 
@@ -594,7 +623,7 @@ pub struct KeyexprPastBound;
 /// holds its lists in (a wireexpr holds none, so the answer is the same).
 pub fn id_and_suffix_view<'k, D: WireexprLentStorage>(
     body: &WireexprVariantIn<Lent<'k, D>>,
-) -> (u64, Option<&'k str>) {
+) -> (crate::wire_id::ExprId, Option<&'k str>) {
     match body {
         WireexprVariantIn::WireexprLocal(arm) => (arm.id, arm.suffix.map(|s| s.into_inner())),
         WireexprVariantIn::WireexprNonlocal(arm) => (arm.id, arm.suffix.map(|s| s.into_inner())),
@@ -679,7 +708,7 @@ pub fn resolve_wireexpr_into<'k, S: WireexprStorage>(
 /// rule and the answer are the same as for the codec's own forms.
 pub fn resolve_plain_parts<'k>(
     sender_mapping: bool,
-    id: u64,
+    id: crate::wire_id::ExprId,
     suffix: Option<&'k str>,
     spaces: MappingSpaces<'k>,
     out: &'k mut KeyexprBuf,
@@ -698,7 +727,7 @@ pub fn resolve_plain_parts<'k>(
 /// not hold is `None`. A keyexpr that has to be composed lies in `out`.
 fn resolve_parts<'k>(
     arm: Space,
-    id: u64,
+    id: crate::wire_id::ExprId,
     suffix_opt: Option<&'k str>,
     spaces: MappingSpaces<'k>,
     out: &'k mut KeyexprBuf,
@@ -869,7 +898,7 @@ pub fn resolve_declared_keyexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
 /// The rule of [`resolve_declared_keyexpr`] over the parts of a wireexpr,
 /// whichever form carried them.
 fn resolve_declared_parts<'k>(
-    id: u64,
+    id: crate::wire_id::ExprId,
     suffix_opt: Option<&'k str>,
     spaces: MappingSpaces<'k>,
     out: &'k mut KeyexprBuf,
@@ -950,11 +979,11 @@ pub fn absorb_keyexpr_into(table: &mut HashMap<u64, String>, declare: &DeclareOw
             let literal =
                 resolve_declared_keyexpr(&d.keyexpr.body, MappingSpaces::peer_only(&*table));
             if let Some(literal) = literal {
-                table.insert(d.id, literal);
+                table.insert(crate::wire_id::declared_peer_key(d.id), literal);
             }
         }
         DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
-            table.remove(&u.id);
+            table.remove(&crate::wire_id::declared_peer_key(u.id));
         }
         _ => {}
     }
@@ -971,13 +1000,13 @@ mod mapping_bit_tests {
     /// which this table HAS — so a wrong-space read cannot fail by accident.
     fn peer_space() -> HashMap<u64, String> {
         let mut t = HashMap::new();
-        t.insert(7u64, "peers/space/temp".to_string());
+        t.insert(7, "peers/space/temp".to_string());
         t
     }
 
     /// `M=1` — the id names the SENDER's space, which on an inbound message is
     /// the peer's. This is the arm that was always correct.
-    fn sender_mapped(id: u64, suffix: Option<&str>) -> WireexprOwnedVariant {
+    fn sender_mapped(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwnedVariant {
         WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
             id,
             suffix_len: suffix.map(|s| s.len() as u64),
@@ -986,7 +1015,7 @@ mod mapping_bit_tests {
     }
 
     /// `M=0` — the id names the RECEIVER's space, i.e. ours.
-    fn receiver_mapped(id: u64, suffix: Option<&str>) -> WireexprOwnedVariant {
+    fn receiver_mapped(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwnedVariant {
         WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
             id,
             suffix_len: suffix.map(|s| s.len() as u64),
@@ -1064,9 +1093,9 @@ mod mapping_bit_tests {
     /// literal. Every two-space test below asks about `7`, so a read out of the
     /// wrong table cannot fail by accident — it fails by returning the other
     /// string, which is exactly the confident-wrong-answer this design refuses.
-    fn own_space() -> HashMap<u64, String> {
+    fn own_space() -> HashMap<crate::wire_id::ExprId, String> {
         let mut t = HashMap::new();
-        t.insert(7u64, "ours/space/temp".to_string());
+        t.insert(7, "ours/space/temp".to_string());
         t
     }
 
@@ -1087,6 +1116,24 @@ mod mapping_bit_tests {
             Some("ours/space/temp"),
             "M=0 names OUR space -- reading the peer's would return \
              `peers/space/temp`, which is the wrong-space read",
+        );
+    }
+
+    /// A message this node sends reads the spaces the other way round: `M=1` names
+    /// the ids we declared, `M=0` the ones the peer did.
+    #[test]
+    fn a_sent_message_reads_its_mapping_bits_from_the_senders_side() {
+        let ours = own_space();
+        let mut theirs: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        theirs.insert(7, "theirs/space/temp".to_string());
+        let spaces = MappingSpaces::as_sent(&ours, &theirs);
+        assert_eq!(
+            resolve_wireexpr_in(&sender_mapped(7, None), spaces).as_deref(),
+            Some("ours/space/temp")
+        );
+        assert_eq!(
+            resolve_wireexpr_in(&receiver_mapped(7, None), spaces).as_deref(),
+            Some("theirs/space/temp")
         );
     }
 

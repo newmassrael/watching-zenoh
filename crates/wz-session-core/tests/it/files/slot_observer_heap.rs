@@ -67,13 +67,13 @@ fn declare_alias(id: u64, keyexpr: &str) -> NetworkMessage {
     ))))
 }
 
-fn push_on(id: u64) -> NetworkMessage {
+fn push_on(id: wz_session_core::wire_id::ExprId) -> NetworkMessage {
     NetworkMessage::Push(Box::new(
         build_push_aliased(id, None, b"v").expect("build the push"),
     ))
 }
 
-fn ask(rid: u64, keyexpr: &str) -> NetworkMessage {
+fn ask(rid: wz_session_core::wire_id::RequestId, keyexpr: &str) -> NetworkMessage {
     NetworkMessage::Request(Box::new(
         build_request_query(rid, 0, Some(keyexpr)).expect("build the request"),
     ))
@@ -98,7 +98,11 @@ impl ResponseSink for Sent {
             .push(format!("reply {:?}", response.wire()));
     }
 
-    fn send_response_final(&self, request_id: u64, _qos: wz_session_core::sample::QosLevel) {
+    fn send_response_final(
+        &self,
+        request_id: wz_session_core::wire_id::RequestId,
+        _qos: wz_session_core::sample::QosLevel,
+    ) {
         self.0
             .lock()
             .expect("not poisoned")
@@ -278,7 +282,7 @@ fn the_replies_can_be_drained_with_the_final_held_back() {
     assert!(log.iter().all(|line| line.starts_with("reply")));
 
     let owed = core::mem::take(&mut peers.finals);
-    let owed: Vec<(u64, _)> = owed.into_iter().collect();
+    let owed: Vec<(wz_session_core::wire_id::RequestId, _)> = owed.into_iter().collect();
     assert_eq!(owed.len(), 1, "the Final is still owed");
     assert_eq!(owed[0].0, 7);
     for (rid, qos) in owed {

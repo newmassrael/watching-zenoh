@@ -75,14 +75,14 @@ fn layer3_response_final_default_byte_equivalent() {
 fn layer3_response_final_nonzero_rid_byte_equivalent() {
     // Single-byte VLE: any rid in [0, 127] encodes as a single byte
     // equal to the value. Pick 0x42 for the visual distinctness.
-    let rid = 0x42_u64;
+    let rid = 0x42_u32;
     let wz = ResponseFinal {
         header: 0x1A,
         request_id: rid,
         ..ResponseFinal::default()
     }
     .encode_to_vec();
-    let pico = zenoh_pico_encode_response_final(rid);
+    let pico = zenoh_pico_encode_response_final(u64::from(rid));
     assert_eq!(
         wz, pico,
         "ResponseFinal {{ request_id: 0x42 }} must match zenoh-pico"
@@ -96,14 +96,14 @@ fn layer3_response_final_multibyte_vle_rid_byte_equivalent() {
     // rid = 200 (= 0xC8) crosses the 7-bit VLE boundary, producing a
     // 2-byte VLE: 0xC8 = 1100_1000; low 7 bits 0x48 with continuation
     // bit set = 0xC8; high bits = 0x01 → emitted as [0xC8, 0x01].
-    let rid = 200_u64;
+    let rid = 200_u32;
     let wz = ResponseFinal {
         header: 0x1A,
         request_id: rid,
         ..ResponseFinal::default()
     }
     .encode_to_vec();
-    let pico = zenoh_pico_encode_response_final(rid);
+    let pico = zenoh_pico_encode_response_final(u64::from(rid));
     assert_eq!(
         wz, pico,
         "multi-byte VLE rid must match zenoh-pico byte-for-byte"

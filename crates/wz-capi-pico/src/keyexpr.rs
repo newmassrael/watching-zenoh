@@ -96,7 +96,7 @@ pub(crate) unsafe fn wire_key_of(
 /// session that is gone is moot.
 pub(crate) struct WireDeclaration {
     session: Weak<Engine>,
-    id: u64,
+    id: wz_session_core::wire_id::ExprId,
     /// How many bytes of the key the declaration covers — pico's `_prefix_len`.
     prefix_len: usize,
 }
@@ -226,7 +226,10 @@ impl DeclaredKeyexpr {
     /// The id is stable for as long as the key is held: the key owns its
     /// declaration, and the declaration is retracted only when the last key
     /// holding it lets go, so a publisher asks once at declare rather than per put.
-    pub(crate) fn whole_key_mapping(&self, shared: &Engine) -> Option<u64> {
+    pub(crate) fn whole_key_mapping(
+        &self,
+        shared: &Engine,
+    ) -> Option<wz_session_core::wire_id::ExprId> {
         self.declared_on(shared)
             .filter(|d| d.prefix_len == self.literal.len())
             .map(|d| d.id)

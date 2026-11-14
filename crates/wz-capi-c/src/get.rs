@@ -435,15 +435,15 @@ impl ReplyMarshal {
 /// [`EncodingHint`]. One conversion, used by both the Put and the Err arm, so the
 /// two cannot decode the same wire pair differently.
 fn encoding_hint_from_wire(
-    wire: Option<(u32, Option<&str>)>,
+    wire: Option<(u32, Option<&[u8]>)>,
 ) -> Option<wz_runtime_tokio::sample::EncodingHint> {
     let (id, schema) = wire?;
-    Some(wz_capi_core::encoding_ids::hint_from_parts(
+    Some(wz_capi_core::encoding_ids::hint_from_schema_bytes(
         // The wire id is a `u16` field the codec widened; a value past `u16`
         // cannot have come off the wire, and saturating keeps this total rather
         // than adding a panic path inside a dispatch.
         u16::try_from(id).unwrap_or(wz_capi_core::encoding_ids::ENCODING_ID_UNKNOWN),
-        schema.unwrap_or(""),
+        schema.unwrap_or(&[]),
     ))
 }
 

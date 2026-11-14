@@ -123,7 +123,7 @@ fn delta(before: FoldStats, after: FoldStats) -> FoldStats {
 fn session_records() -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     out.push(declare_kexpr(7, "demo/temp"));
-    for round in 0..6u64 {
+    for round in 0..6u32 {
         out.push(push(sender_space(7, None), &[round as u8; 12]));
         out.push(request_query(round + 1, sender_space(0, Some("demo/q"))));
         out.push(response_reply(

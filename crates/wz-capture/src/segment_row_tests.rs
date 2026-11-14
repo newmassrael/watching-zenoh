@@ -53,7 +53,7 @@ fn declarations(extra: &str) -> String {
 }
 
 /// A key as a reference writes it: an id, and the suffix after it.
-type Key = (u64, Option<&'static str>);
+type Key = (wz_session_core::wire_id::ExprId, Option<&'static str>);
 
 /// A literal key, written as id 0 and the key as its suffix.
 fn literal(key: &'static str) -> Key {

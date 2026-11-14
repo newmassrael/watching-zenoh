@@ -237,7 +237,7 @@ async fn wz_sub_decodes_pico_pub_attachment_metadata() {
     );
     assert_eq!(
         enc.schema.as_deref(),
-        Some("utf8"),
+        Some(&b"utf8"[..]),
         "the schema suffix ;utf8 must decode as the EncodingHint schema string"
     );
     assert!(

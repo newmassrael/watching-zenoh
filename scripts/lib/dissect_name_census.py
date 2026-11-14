@@ -110,6 +110,9 @@ OWN_VOCABULARY = {
     "than as a field. ABSENT on a `DeclareKeyExpr`, whose header has no M bit to "
     "read it from",
     "has_schema": "the packed encoding's bit 0, surfaced as a flag",
+    "schema_bytes": "the encoding's `schema` when its bytes are not UTF-8, which "
+    "upstream accepts: the codec field holds bytes either way, and the walker names "
+    "the two readings apart so that each path keeps one kind, text or bytes",
     "zid_len_m1": "the zid length is stored minus one; the raw field is named for what "
     "it holds rather than for what it means",
     "locator_entry": "one locator record. NOT `locator`: `Field::find` is "

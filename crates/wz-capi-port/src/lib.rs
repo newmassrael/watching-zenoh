@@ -245,7 +245,7 @@ pub enum FilteredPut {
 #[derive(Clone, Default)]
 pub struct WireKey {
     /// The keyexpr declaration the wire names, `0` for none.
-    pub mapping_id: u64,
+    pub mapping_id: wz_session_core::wire_id::ExprId,
     /// What follows the declared prefix, `None` when it covers the whole key.
     pub suffix: Option<String>,
     keeps: Option<Arc<dyn Send + Sync>>,
@@ -268,7 +268,7 @@ impl WireKey {
     }
 
     /// Declaration `mapping_id` followed by `suffix`.
-    pub fn aliased(mapping_id: u64, suffix: Option<String>) -> Self {
+    pub fn aliased(mapping_id: wz_session_core::wire_id::ExprId, suffix: Option<String>) -> Self {
         Self {
             mapping_id,
             suffix,

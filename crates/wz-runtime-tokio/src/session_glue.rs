@@ -2851,60 +2851,13 @@ mod tests {
 
     // ── R300 — outbound DECLARE-side gate ─────────────────────
 
-    /// R311y342 — the UPPER-bound twin of
-    /// `send_declare_keyexpr_rejects_reserved_mapping_id_zero`. The id
-    /// space has two ends and only the lower one was guarded: zenoh types
-    /// `DeclareKeyExpr.id` as `ExprId = u16` and zenoh-pico's
-    /// `_z_decl_kexpr_t` holds `uint16_t _id`, while wz's codec carries a
-    /// VLE u64. So an id above `u16::MAX` encoded here and arrived at a
-    /// peer that structurally cannot hold it — wz emitting a shape no
-    /// upstream can represent. Same contract as the zero twin: reject
-    /// pre-emit and pre-side-effect.
-    #[cfg(feature = "declare-keyexpr")]
-    #[test]
-    fn send_declare_keyexpr_rejects_a_mapping_id_wider_than_the_wire() {
-        let (actions, driver) = crate::test_fixtures::recording_actions();
-        let too_wide = u64::from(u16::MAX) + 1;
-        let err = actions
-            .send_declare_keyexpr(too_wide, "home/temp")
-            .expect_err("an alias id neither upstream can hold must not reach the wire");
-        assert_eq!(err, SendDeclareError::MappingIdTooWideForWire(too_wide));
-        assert_eq!(
-            driver.frame_count(),
-            0,
-            "gate must reject pre-emit — no wire frame leaves on Err"
-        );
-        assert!(
-            actions.resolve_outbound_mapping(too_wide).is_none(),
-            "gate must reject pre-side-effect — mapping table untouched on Err"
-        );
-    }
-
-    /// R311y342 — the RETRACTION half of the same bound. Found by sweeping
-    /// the sibling after gating the declare twin: `send_undeclare_kexpr`
-    /// emits WITHOUT consulting the mapping table (its idempotence
-    /// contract), so gating the declare side does not bound it. It has no
-    /// error channel, so the drop is silent — the same contract that
-    /// already drops the emit on a transport-down link.
-    #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
-    #[test]
-    fn send_undeclare_kexpr_does_not_emit_an_id_wider_than_the_wire() {
-        let (actions, driver) = crate::test_fixtures::recording_actions();
-        actions.send_undeclare_kexpr(u64::from(u16::MAX) + 1);
-        assert_eq!(
-            driver.frame_count(),
-            0,
-            "an UndeclKexpr id neither upstream can hold must not reach the wire"
-        );
-    }
-
-    /// R311y342 — the retraction half's boundary: `u16::MAX` is legal and
-    /// must still emit. Pins the off-by-one in the twin above.
+    /// The widest id the wire can hold, `ExprId::MAX`, is retractable: the id's
+    /// type is the wire's, so there is no wider one to refuse.
     #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
     #[test]
     fn send_undeclare_kexpr_emits_the_widest_id_the_wire_can_hold() {
         let (actions, driver) = crate::test_fixtures::recording_actions();
-        actions.send_undeclare_kexpr(u64::from(u16::MAX));
+        actions.send_undeclare_kexpr(wz_session_core::wire_id::ExprId::MAX);
         assert_eq!(
             driver.frame_count(),
             1,
@@ -2912,14 +2865,13 @@ mod tests {
         );
     }
 
-    /// R311y342 — the boundary itself is LEGAL: `u16::MAX` is the widest
-    /// id both upstreams can hold, so the gate must admit it. Pins the
-    /// off-by-one the twin above would otherwise hide.
+    /// The widest id both upstreams can hold, `ExprId::MAX`, registers like
+    /// any other.
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_admits_the_widest_id_the_wire_can_hold() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let widest = u64::from(u16::MAX);
+        let widest = wz_session_core::wire_id::ExprId::MAX;
         actions
             .send_declare_keyexpr(widest, "home/temp")
             .expect("u16::MAX is representable in both upstreams");

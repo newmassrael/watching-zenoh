@@ -105,7 +105,7 @@
     <sce:flag-input name="N" width="1"/>
   </sce:flag-inputs>
   <datamodel>
-    <sce:field id="id" sce:type="uint64" sce:byte="0" sce:bit-size="vle"/>
+    <sce:field id="id" sce:type="uint16" sce:byte="0" sce:bit-size="vle"/>
     <sce:field id="suffix_len" sce:type="uint64" sce:byte="1" sce:bit-size="vle"
                sce:present-if="N"/>
     <sce:field id="suffix" sce:type="string" sce:byte="2" sce:bit-size="length-ref"

@@ -427,16 +427,16 @@ struct RouterEngine {
 #[derive(Default)]
 struct RouterKeys {
     /// The last id given: ids start at 1, and 0 is the scope of a key that is not declared.
-    last: u64,
+    last: ExprId,
     /// `id -> (key, holders)`.
-    held: std::collections::HashMap<u64, (String, usize)>,
+    held: std::collections::HashMap<ExprId, (String, usize)>,
 }
 
 #[cfg(feature = "engine-tokio")]
 impl RouterKeys {
     /// Hold `keyexpr` as declared: the id it already has, with one holder more, or a new one.
-    /// `None` when the wire could not name the id (sixteen bits).
-    fn acquire(&mut self, keyexpr: &str) -> Option<u64> {
+    /// `None` when the wire's id space (an `ExprId`) is spent.
+    fn acquire(&mut self, keyexpr: &str) -> Option<ExprId> {
         if let Some((id, held)) = self
             .held
             .iter_mut()
@@ -446,17 +446,14 @@ impl RouterKeys {
             *held += 1;
             return Some(id);
         }
-        let id = self
-            .last
-            .checked_add(1)
-            .filter(|id| *id <= u64::from(u16::MAX))?;
+        let id = self.last.checked_add(1)?;
         self.last = id;
         self.held.insert(id, (keyexpr.to_owned(), 1));
         Some(id)
     }
 
     /// Let go of one holder of `id`; the declaration ends with the last.
-    fn release(&mut self, id: u64) {
+    fn release(&mut self, id: ExprId) {
         if let Some((_, held)) = self.held.get_mut(&id) {
             *held -= 1;
             if *held == 0 {
@@ -833,7 +830,7 @@ impl Engine {
         }
     }
 
-    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<u64> {
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().acquire_keyexpr(keyexpr.to_owned()),
             // A node declares no key expression to its peers and names none by an id on the wire,
@@ -846,7 +843,7 @@ impl Engine {
         }
     }
 
-    fn release_keyexpr(&self, mapping_id: u64) {
+    fn release_keyexpr(&self, mapping_id: ExprId) {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().release_keyexpr(mapping_id),
             Engine::Router(router) => router
@@ -1099,7 +1096,7 @@ impl Engine {
 
     /// The key expression declarations the engine holds, `(id, key)` in declaration order.
     #[cfg(test)]
-    fn keyexpr_declarations(&self) -> Vec<(u64, String)> {
+    fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().keyexpr_declarations(),
             Engine::Router(_) => Vec::new(),
@@ -1749,11 +1746,11 @@ impl Engine {
         match *self {}
     }
 
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<u64> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<ExprId> {
         match *self {}
     }
 
-    fn release_keyexpr(&self, _mapping_id: u64) {
+    fn release_keyexpr(&self, _mapping_id: ExprId) {
         match *self {}
     }
 
@@ -2437,10 +2434,12 @@ mod tokio_engine {
         if encoding == zenoh_protocol::core::Encoding::default() {
             return None;
         }
+        // The schema's bytes as they are: zenoh holds a schema as bytes, and one
+        // that is not UTF-8 crosses into the engine and onto the wire unchanged.
         let schema = encoding
             .schema
             .as_ref()
-            .map(|schema| String::from_utf8_lossy(schema.as_slice()).into_owned());
+            .map(|schema| schema.as_slice().to_vec());
         Some(EncodingHint {
             packed_id: (u32::from(encoding.id) << 1) | u32::from(schema.is_some()),
             schema,
@@ -2454,13 +2453,13 @@ mod tokio_engine {
 
     /// The encoding the parts of a hint say, as a view of a reply borrows them: the packed id and
     /// the schema; none is the default one.
-    fn encoding_of_parts(parts: Option<(u32, Option<&str>)>) -> Encoding {
+    fn encoding_of_parts(parts: Option<(u32, Option<&[u8]>)>) -> Encoding {
         parts
             .and_then(|(packed_id, schema)| {
                 let id = u16::try_from(packed_id >> 1).ok()?;
                 let schema = schema
                     .filter(|_| packed_id & 1 == 1)
-                    .map(|schema| zenoh_buffers::ZSlice::from(schema.as_bytes().to_vec()));
+                    .map(|schema| zenoh_buffers::ZSlice::from(schema.to_vec()));
                 Some(zenoh_protocol::core::Encoding { id, schema })
             })
             .map(Encoding::from)
@@ -2596,7 +2595,7 @@ mod tokio_engine {
         if scope == 0 {
             WireKey::literal()
         } else {
-            WireKey::aliased(u64::from(scope), suffix)
+            WireKey::aliased(scope, suffix)
         }
     }
 
@@ -2609,7 +2608,7 @@ mod tokio_engine {
         destination: Locality,
     ) -> Option<InterestForm> {
         (destination != Locality::SessionLocal).then(|| InterestForm {
-            mapping_id: u64::from(scope),
+            mapping_id: scope,
             suffix,
             aggregate: false,
         })
@@ -3593,6 +3592,29 @@ mod tokio_engine {
                 sources.retain(|(source, _)| *source != leg);
                 !sources.is_empty()
             });
+        }
+    }
+
+    #[cfg(test)]
+    mod encoding_tests {
+        use super::*;
+
+        /// A schema that is not UTF-8 crosses from this API into the engine and
+        /// back as its bytes, and the API shows it as zenoh 1.10.2 does
+        /// (`zenoh/src/api/encoding.rs` @ `std::str::from_utf8(schema).unwrap_or("unknown(non-utf8)")`).
+        #[test]
+        fn a_schema_that_is_not_utf8_crosses_into_the_engine_and_back_as_its_bytes() {
+            let raw = vec![0xFFu8, 0xFE, b'x'];
+            let api = Encoding::from(zenoh_protocol::core::Encoding {
+                id: 4,
+                schema: Some(zenoh_buffers::ZSlice::from(raw.clone())),
+            });
+            let hint = encoding_hint_of(&api).expect("not the default encoding");
+            assert_eq!(hint.schema.as_deref(), Some(raw.as_slice()));
+            let back = encoding_from(Some(&hint));
+            assert_eq!(back.to_string(), "text/plain;unknown(non-utf8)");
+            let wire: zenoh_protocol::core::Encoding = back.into();
+            assert_eq!(wire.schema.map(|s| s.as_slice().to_vec()), Some(raw));
         }
     }
 
@@ -6799,26 +6821,16 @@ impl WireAnchor for SessionInner {
         }
         // The engine holds a declaration once and counts the holders, so a prefix that is already
         // declared is held again and a forced declaration is the same call.
-        let Some(id) = self.engine.acquire_keyexpr(prefix) else {
-            return Ok(None);
-        };
-        // The wire names a declaration by sixteen bits where the engine counts in sixty-four. An id
-        // that does not fit cannot be named, so the hold just taken is let go and the key is used
+        // `None` once the engine's id space, the wire's `ExprId`, is spent: the key is then used
         // whole, as one that is not worth a declaration is.
-        match ExprId::try_from(id) {
-            Ok(expr_id) => Ok(Some(expr_id)),
-            Err(_) => {
-                self.engine.release_keyexpr(id);
-                Ok(None)
-            }
-        }
+        Ok(self.engine.acquire_keyexpr(prefix))
     }
 
     fn undeclare_prefix(&self, expr_id: ExprId) -> ZResult<()> {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        self.engine.release_keyexpr(u64::from(expr_id));
+        self.engine.release_keyexpr(expr_id);
         Ok(())
     }
 }
@@ -8159,7 +8171,7 @@ mod tests {
     #[test]
     fn a_node_that_has_no_id_left_for_the_wire_declares_nothing() {
         let mut keys = RouterKeys {
-            last: u64::from(u16::MAX),
+            last: ExprId::MAX,
             ..RouterKeys::default()
         };
         assert_eq!(keys.acquire("demo/a"), None);
@@ -8690,7 +8702,7 @@ mod tests {
         let stated: zenoh_protocol::core::Encoding =
             Encoding::APPLICATION_JSON.with_schema("v1").into();
         assert_eq!(encoding.packed_id, (u32::from(stated.id) << 1) | 1);
-        assert_eq!(encoding.schema.as_deref(), Some("v1"));
+        assert_eq!(encoding.schema.as_deref(), Some(&b"v1"[..]));
         let stamp = options.timestamp.expect("the time that was stated");
         assert_eq!(stamp.time, 0x1234_5678_9abc_def0);
         assert_eq!(

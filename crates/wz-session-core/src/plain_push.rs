@@ -48,7 +48,7 @@ const PLAIN_PUT_HEADER: u8 = 0x01;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlainPut {
     /// The key's id: `0` is the literal key, which the suffix then carries whole.
-    pub id: u64,
+    pub id: crate::wire_id::ExprId,
     /// The id is in the sender's mapping (the `M` flag), as every id a peer declared is.
     pub sender_mapping: bool,
     /// The key suffix, as a `start..end` of the buffer; `None` when there is none.
@@ -103,6 +103,32 @@ fn vle_long(buf: &[u8], at: &mut usize) -> Option<u64> {
     None
 }
 
+/// Read a key's id at `*at`, advancing it, as the generated `WireexprLocal` and
+/// `WireexprNonlocal` read it: a VLE of an `ExprId`, at most three bytes, the third
+/// carrying the two top bits. A wider id is refused there, as upstream refuses it
+/// (`commons/zenoh-codec/src/core/wire_expr.rs` @
+/// `let zodec = Zenoh080Bounded::<ExprId>::new();`), so this answers `None` and the
+/// caller hands the record to the codec, which refuses it.
+#[inline(always)]
+fn vle_expr_id(buf: &[u8], at: &mut usize) -> Option<crate::wire_id::ExprId> {
+    let mut value: crate::wire_id::ExprId = 0;
+    for step in 0..3u32 {
+        let byte = *buf.get(*at)?;
+        *at += 1;
+        if step == 2 {
+            if byte > 0x03 {
+                return None;
+            }
+            return Some(value | (crate::wire_id::ExprId::from(byte) << 14));
+        }
+        value |= crate::wire_id::ExprId::from(byte & 0x7f) << (7 * step);
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
 /// Read the plain `Put` that starts at `buf[at]`, and where it ends, or `None` when what
 /// is there is anything else: another message, an extension this reader does not know, a
 /// timestamp, an encoding, a sliced payload, a suffix that is not UTF-8, a length past the
@@ -148,7 +174,7 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
     if header & 0x1f != PUSH_MID {
         return None;
     }
-    let id = vle(buf, &mut cursor)?;
+    let id = vle_expr_id(buf, &mut cursor)?;
     let suffix = if header & FLAG_N != 0 {
         let length = usize::try_from(vle(buf, &mut cursor)?).ok()?;
         let end = cursor.checked_add(length)?;
@@ -329,7 +355,7 @@ mod tests {
     /// The id, whether the mapping is the sender's, the suffix, the payload, the QoS byte and
     /// the length of the record: what the generated codec reads out of one.
     type CodecRead = (
-        u64,
+        crate::wire_id::ExprId,
         bool,
         Option<alloc::string::String>,
         alloc::vec::Vec<u8>,
@@ -400,7 +426,7 @@ mod tests {
     #[test]
     fn where_it_accepts_it_reads_what_the_codec_reads() {
         let mut accepted = 0usize;
-        for id in [0u64, 1, 7, 127, 128, 300, 16_383, 16_384, 65_535] {
+        for id in [0u16, 1, 7, 127, 128, 300, 16_383, 16_384, 65_535] {
             for suffix in [
                 None,
                 Some("a"),
@@ -521,6 +547,34 @@ mod tests {
         let truncated = &plain[..plain.len() - 1];
         assert!(read_plain_put(truncated, 0).is_none());
         assert!(read_plain_put(&[], 0).is_none());
+    }
+
+    /// The widest id an `ExprId` holds reads, and the next one is declined here and refused
+    /// by the codec: a VLE of `65_535` (`ff ff 03`) and of `65_536` (`80 80 04`).
+    #[test]
+    fn an_id_wider_than_an_expr_id_is_declined_as_the_codec_refuses_it() {
+        let record = |id: [u8; 3]| {
+            alloc::vec![
+                0x5du8, // Push, M and no N: the peer's id, no suffix, no extension
+                id[0],
+                id[1],
+                id[2],
+                PLAIN_PUT_HEADER,
+                1,
+                b'x'
+            ]
+        };
+        let widest = record([0xff, 0xff, 0x03]);
+        let (plain, end) = read_plain_put(&widest, 0).expect("the widest id reads");
+        assert_eq!((plain.id, end), (u16::MAX, widest.len()));
+        assert_eq!(
+            through_the_codec(&widest).map(|read| read.0),
+            Some(u16::MAX)
+        );
+
+        let wider = record([0x80, 0x80, 0x04]);
+        assert!(read_plain_put(&wider, 0).is_none());
+        assert!(through_the_codec(&wider).is_none());
     }
 
     /// The reader against the codec over damaged bytes: one byte of a valid record changed to
@@ -699,7 +753,7 @@ mod tests {
     fn a_batch_that_reuses_a_prefix_reads_as_one_record_at_a_time_reads() {
         let qos = |raw: u8| crate::sample::QosLevel::from_raw(raw);
         let none = crate::sample::QosLevel::DEFAULT;
-        let one = |id: u64, suffix: Option<&str>, payload: &[u8], q| {
+        let one = |id: crate::wire_id::ExprId, suffix: Option<&str>, payload: &[u8], q| {
             encode(
                 &crate::lent_push::put_with_qos(id, suffix, payload, q).expect("within the bounds"),
             )

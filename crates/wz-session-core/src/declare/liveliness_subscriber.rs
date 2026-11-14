@@ -1553,8 +1553,8 @@ mod tests {
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/dev".to_string());
-        let mut own = HashMap::new();
-        own.insert(7u64, "ours/dev".to_string());
+        let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        own.insert(7, "ours/dev".to_string());
 
         let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token_nonlocal(42, 7, None));
         reg.dispatch_declare(&body, MappingSpaces::with_own(&peer, &own));

@@ -351,7 +351,7 @@ pub(crate) struct PublisherState {
     /// was not one the caller declared: held for the publisher's life, released when it is
     /// dropped. What a put names its key by, with the caller's own declaration ahead of it
     /// ([`Self::wire_mapping`]).
-    held_declaration: Option<u64>,
+    held_declaration: Option<wz_session_core::wire_id::ExprId>,
     loaned_keyexpr: z_loaned_keyexpr_t,
     /// The background matching listener this publisher declared, if any.
     ///
@@ -402,7 +402,7 @@ impl Drop for PublisherState {
 impl PublisherState {
     /// The id a put on this publisher names its key by: the key the caller declared, or the
     /// one the publisher took for itself, or `None` for the literal.
-    pub(crate) fn wire_mapping(&self) -> Option<u64> {
+    pub(crate) fn wire_mapping(&self) -> Option<wz_session_core::wire_id::ExprId> {
         self.keyexpr.mapping.or(self.held_declaration)
     }
 

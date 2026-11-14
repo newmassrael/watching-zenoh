@@ -4073,7 +4073,8 @@ fn push_e2e(judged: Option<&crate::payload_decode::E2eJudged<'_>>, out: &mut Str
 /// One body for the two places an entry is written, as [`push_keyexpr_miss`]
 /// is for the key beside it. `encoding` is `null` when the message carried none
 /// and otherwise a string, so a consumer reading it never confuses "the default"
-/// with "nothing was said"; the two are different facts on the wire.
+/// with "nothing was said"; the two are different facts on the wire. A schema
+/// that is not UTF-8 is `schema_hex` beside it (revision 67).
 fn push_payload_slot(slot: Option<&crate::payload_decode::PayloadSlot>, out: &mut String) {
     out.push_str(",\"payload\":");
     let Some(slot) = slot else {
@@ -4088,6 +4089,14 @@ fn push_payload_slot(slot: Option<&crate::payload_decode::PayloadSlot>, out: &mu
     match &slot.encoding {
         Some(encoding) => escape_into(encoding, out),
         None => out.push_str("null"),
+    }
+    // Revision 67 — a schema that is not UTF-8 is not in `encoding`, which
+    // names the id alone then, and is written here as its bytes in hex. Only
+    // then: a reader that sees no `schema_hex` reads the schema, if any, in
+    // `encoding`.
+    if let Some(hex) = &slot.schema_hex {
+        out.push_str(",\"schema_hex\":");
+        escape_into(hex, out);
     }
     out.push_str(",\"shm_descriptor\":");
     out.push_str(if slot.shm_descriptor() {
@@ -7130,14 +7139,14 @@ mod tests {
 
         const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
         const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
-        const ID: u64 = 7;
+        const ID: wz_session_core::wire_id::ExprId = 7;
 
         let declare = wz_codecs::lent::Declare {
             body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
                 wz_codecs::lent::DeclKexpr {
                     header: wz_session_core::wire_const::D_MID_KEXPR
                         | wz_session_core::wire_const::FLAG_D_N,
-                    id: ID,
+                    id: u64::from(ID),
                     keyexpr: crate::datagram_tests::sender_space(0, Some("demo/temp")),
                     extensions: None,
                 },
@@ -10673,6 +10682,9 @@ mod tests {
         // Revision 63 — a flow's `ended_chains` with an entry in it, which only a
         // chain that never closed brings.
         rendered.extend(crate::unresolved_chain_tests::ended_chain_documents());
+        // Revision 67 — `schema_hex`, which only a schema that is not UTF-8
+        // brings.
+        rendered.push(schema_document());
 
         let mut seen: Vec<&str> = Vec::new();
         for doc in &rendered {
@@ -14049,6 +14061,56 @@ mod tests {
         }
     }
 
+    /// The field document of two puts under `application/protobuf`: `demo/text`
+    /// with the UTF-8 schema `pkg.Msg`, `demo/raw` with the schema bytes
+    /// `ff fe 78`, which are not UTF-8. The only rows that write `schema_hex`.
+    fn schema_document() -> String {
+        use crate::payload::tests_support as build;
+
+        let protobuf = encoding_id("application/protobuf");
+        let records: Vec<Vec<u8>> = alloc::vec![
+            build::push_with_schema_bytes(
+                "demo/text",
+                Some((protobuf, Some(&b"pkg.Msg"[..]))),
+                b"x"
+            ),
+            build::push_with_schema_bytes(
+                "demo/raw",
+                Some((protobuf, Some(&[0xFF, 0xFE, b'x'][..]))),
+                b"y"
+            ),
+        ];
+        let (d, file, _) = one_frame_per_record(&records);
+        fields_json(&d, &file, None, None)
+    }
+
+    /// Revision 67: an encoding's schema is written in `encoding` when it is
+    /// UTF-8, and as `schema_hex` beside an `encoding` that names the id alone
+    /// when it is not, which upstream accepts
+    /// (`commons/zenoh-protocol/src/core/encoding.rs` @ `pub schema: Option<ZSlice>,`).
+    #[test]
+    fn a_schema_is_written_as_text_when_it_is_utf8_and_as_hex_when_it_is_not() {
+        let doc = schema_document();
+
+        let text = raw(&entry_named(&doc, "demo/text"), "payload");
+        assert!(
+            text.contains("\"encoding\":\"application/protobuf;pkg.Msg\""),
+            "{text}"
+        );
+        assert!(!text.contains("schema_hex"), "{text}");
+
+        let bytes = raw(&entry_named(&doc, "demo/raw"), "payload");
+        assert!(
+            bytes.contains("\"encoding\":\"application/protobuf\",\"schema_hex\":\"fffe78\""),
+            "{bytes}"
+        );
+        assert_eq!(
+            crate::doc_revision::revision(crate::doc_revision::FIELDS),
+            Some(67),
+            "the key arrived with its revision"
+        );
+    }
+
     /// A row whose key does not resolve still names its payload.
     ///
     /// The case an editor opening a capture that began after the declarations is
@@ -14570,7 +14632,10 @@ mod tests {
         const ZID_HIGH: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
 
         /// `M=0`: the id lives in the RECEIVER's space.
-        fn receiver_space(id: u64, suffix: Option<&'static str>) -> Wireexpr<'static> {
+        fn receiver_space(
+            id: wz_session_core::wire_id::ExprId,
+            suffix: Option<&'static str>,
+        ) -> Wireexpr<'static> {
             Wireexpr {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                     id,
@@ -14582,7 +14647,11 @@ mod tests {
 
         /// A `DeclareKeyExpr` binding `id` to `scope` + `suffix`. The header
         /// carries N and nothing else: this message has no M bit to set.
-        fn declare_kexpr(id: u64, scope: u64, suffix: &'static str) -> Vec<u8> {
+        fn declare_kexpr(
+            id: u64,
+            scope: wz_session_core::wire_id::ExprId,
+            suffix: &'static str,
+        ) -> Vec<u8> {
             wz_codecs::lent::Declare {
                 body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
                     wz_codecs::lent::DeclKexpr {

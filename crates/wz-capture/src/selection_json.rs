@@ -1581,7 +1581,10 @@ pub(crate) mod tests {
     }
 
     /// A `Response` whose `Reply` carries a `MsgDel` rather than a put.
-    fn response_reply_del(request_id: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
+    fn response_reply_del(
+        request_id: wz_session_core::wire_id::RequestId,
+        keyexpr: Wireexpr<'static>,
+    ) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
         wz_codecs::lent::Response {
             header: wz_codecs::lent::Response::default().header | n,
@@ -2230,7 +2233,10 @@ pub(crate) mod tests {
     /// A `Request` with a `Del` body, which no zenoh peer sends (upstream's
     /// request body is a query and nothing else) and this reader's codec
     /// decodes, so the dissection classifies it by its body.
-    fn request_del(rid: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
+    fn request_del(
+        rid: wz_session_core::wire_id::RequestId,
+        keyexpr: Wireexpr<'static>,
+    ) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
         wz_codecs::lent::Request {
             header: wz_codecs::lent::Request::default().header | n,
@@ -2293,9 +2299,10 @@ pub(crate) mod tests {
         for step in 0..40u64 {
             let at = Some(1_000 + step * 7);
             let pick = rng.below(10);
-            let open: Vec<u64> = (1..=6).filter(|rid| is_open[*rid as usize]).collect();
+            let open: Vec<wz_session_core::wire_id::RequestId> =
+                (1..=6).filter(|rid| is_open[*rid as usize]).collect();
             if pick <= 3 {
-                let rid = 1 + rng.below(6);
+                let rid = 1 + rng.below(6) as wz_session_core::wire_id::RequestId;
                 let at_key = key(keys[rng.below(3) as usize]);
                 let wire = match rng.below(3) {
                     0 => request_query(rid, at_key),
@@ -2316,7 +2323,11 @@ pub(crate) mod tests {
                 records.push((false, at, response_final(rid)));
                 roles.push(Role::Close);
             } else if pick == 8 {
-                records.push((false, at, response_final(90 + rng.below(5))));
+                records.push((
+                    false,
+                    at,
+                    response_final(90 + rng.below(5) as wz_session_core::wire_id::RequestId),
+                ));
                 roles.push(Role::Orphan);
             } else {
                 let at_key = key(keys[rng.below(3) as usize]);

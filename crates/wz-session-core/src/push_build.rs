@@ -165,7 +165,7 @@ pub fn set_push_keyexpr_literal(push: &mut PushOwned, suffix: &str) -> Result<()
 /// shapes apart at the API surface so a caller cannot silently
 /// invert them.
 pub fn build_push_aliased(
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     value: &[u8],
 ) -> Result<PushOwned, CodecError> {
@@ -301,7 +301,7 @@ fn push_keyexpr_is_literal(push: &PushOwned) -> bool {
 /// the two shapes apart at the API surface so a caller cannot
 /// silently invert them.
 pub fn build_push_del_aliased(
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
 ) -> Result<PushOwned, CodecError> {
     assert!(
@@ -843,7 +843,7 @@ pub fn build_push_shm_literal(
 /// literal sentinel and [`build_push_shm_literal`] is its builder.
 #[cfg(feature = "transport-shm")]
 pub fn build_push_shm_aliased(
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     descriptor: &crate::extshm::ShmDescriptor,
     meta: &PushMetadata,
@@ -881,7 +881,7 @@ pub fn build_push_shm_aliased(
 
 /// R233 — metadata-bearing counterpart of [`build_push_aliased`].
 pub fn build_push_aliased_with_meta(
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     value: &[u8],
     meta: &PushMetadata,
@@ -946,7 +946,7 @@ pub fn build_push_del_literal_with_meta(
 
 /// R233 — metadata-bearing counterpart of [`build_push_del_aliased`].
 pub fn build_push_del_aliased_with_meta(
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     meta: &PushMetadata,
 ) -> Result<PushOwned, CodecError> {
@@ -1158,8 +1158,8 @@ mod tests {
                 .unwrap()
                 .schema
                 .as_ref()
-                .map(|s| s.as_text().into_inner()),
-            Some("application/json")
+                .map(|s| s.as_bytes().into_inner()),
+            Some(&b"application/json"[..])
         );
         // schema_len round-trips from the original schema's byte length.
         assert_eq!(
@@ -1850,8 +1850,8 @@ mod tests {
             let enc = put.encoding.as_ref().expect("encoding round-trips");
             assert_eq!(enc.packed_id, 5);
             assert_eq!(
-                enc.schema.as_ref().map(|s| s.as_text().into_inner()),
-                Some("text/plain")
+                enc.schema.as_ref().map(|s| s.as_bytes().into_inner()),
+                Some(&b"text/plain"[..])
             );
             let body_exts = crate::put_payload::chain(put);
             assert_eq!(body_exts.len(), 2, "source_info + attachment");

@@ -82,12 +82,12 @@ enum Command {
     /// Push `.1` naming id `.0` in the RECEIVER's space, as a zenoh router does for a subscriber it
     /// routes to once the subscriber has declared a key expression to it: the id is one the
     /// session under test declared, and the key is what that declaration says.
-    PushReceiverAlias(u64, &'static [u8]),
+    PushReceiverAlias(wz_session_core::wire_id::ExprId, &'static [u8]),
     /// Close the session and stop, as a router that goes away does.
     Close,
     /// Ask a query of request id `.0` on the key.
     #[cfg(feature = "queryable")]
-    Query(u64, &'static str),
+    Query(wz_session_core::wire_id::RequestId, &'static str),
     /// Hold a queryable on the key that answers each query with the payload, on the query's key.
     #[cfg(feature = "query")]
     Answer(&'static str, &'static [u8]),

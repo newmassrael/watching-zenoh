@@ -2662,7 +2662,9 @@ pub enum LocalFaceEvent {
     },
     /// The end of the replies to the query the face asked under `request_id`: every queryable
     /// has ended, the query timed out, or nothing was left to ask.
-    ReplyFinal { request_id: u64 },
+    ReplyFinal {
+        request_id: wz_session_core::wire_id::RequestId,
+    },
     /// The router's tables were written, so what the face watches ([`MatchPlane`]) may have
     /// changed. Sent once until the face has looked ([`RouterForwarder::tables_looked_at`]), and
     /// only while the face watches anything ([`RouterForwarder::watch_matching`]): it carries no
@@ -3155,7 +3157,7 @@ thread_local! {
 /// the branch open. The handler's own call is the first hold, so the branch does not end before
 /// the replies the handler wrote have gone out.
 pub struct HeldRecord {
-    qid: u64,
+    qid: wz_session_core::wire_id::RequestId,
     /// The key of the query as the queryable was handed it (see [`HostedQueryable::namespaced`]).
     keyexpr: String,
     /// Whether the replies are put under the namespace of the node's own session.
@@ -24300,7 +24302,7 @@ mod tests {
                 }),
             );
         }
-        let askers: Vec<_> = [(1u64, "demo/a"), (2, "demo/b")]
+        let askers: Vec<_> = [(1u32, "demo/a"), (2, "demo/b")]
             .into_iter()
             .map(|(rid, key)| {
                 let asking = Arc::clone(&fwd);
@@ -26732,7 +26734,7 @@ mod tests {
         sink_c.reset();
 
         // A declares three aliases of its own, then uses each one.
-        for (id, keyexpr) in [(7u64, "demo/tok"), (8, "demo/q"), (9, "demo/data")] {
+        for (id, keyexpr) in [(7u16, "demo/tok"), (8, "demo/q"), (9, "demo/data")] {
             forward_one(
                 &fwd,
                 FaceId(0),
@@ -27000,7 +27002,7 @@ mod tests {
 
     /// The `request_id` of the single ResponseFinal recorded on a sink — the
     /// empty-route prompt final routed back to the querier.
-    fn forwarded_response_final_rid(frame: &[u8]) -> u64 {
+    fn forwarded_response_final_rid(frame: &[u8]) -> wz_session_core::wire_id::RequestId {
         use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
         let InboundFrame::Frame { payload, .. } = parse_inbound(frame).expect("parse frame") else {
             panic!("not a Frame");
@@ -27014,7 +27016,7 @@ mod tests {
 
     /// A BestMatching (wire-default) Request for `keyexpr`, self-sourced (no
     /// ext_nodeid — the inbound neighbour is the querier), rid `rid`.
-    fn request_best(rid: u64, keyexpr: &str) -> NetworkMessage {
+    fn request_best(rid: wz_session_core::wire_id::RequestId, keyexpr: &str) -> NetworkMessage {
         NetworkMessage::Request(Box::new(
             wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
                 .expect("build request"),
@@ -27022,7 +27024,11 @@ mod tests {
     }
 
     /// A Request for `keyexpr` with an explicit [`QueryTarget`], self-sourced.
-    fn request_with_target(rid: u64, keyexpr: &str, target: QueryTarget) -> NetworkMessage {
+    fn request_with_target(
+        rid: wz_session_core::wire_id::RequestId,
+        keyexpr: &str,
+        target: QueryTarget,
+    ) -> NetworkMessage {
         NetworkMessage::Request(Box::new(
             wz_session_core::request_build::build_request_query_with_target(
                 rid,
@@ -29963,7 +29969,9 @@ mod tests {
 
     /// Every `Request` a sink recorded, as (the keyexpr id, its literal
     /// suffix); frames that are not a Request are skipped.
-    fn recorded_request_keyexprs(sink: &RecordingLinkDriver) -> Vec<(u64, Option<String>)> {
+    fn recorded_request_keyexprs(
+        sink: &RecordingLinkDriver,
+    ) -> Vec<(wz_session_core::wire_id::ExprId, Option<String>)> {
         use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
         (0..sink.frame_count())
             .filter_map(|i| {
@@ -31128,7 +31136,10 @@ mod tests {
             NetworkMessage::Push(Box::new(push))
         }
 
-        fn stacked_request(rid: u64, conf_flags: u8) -> NetworkMessage {
+        fn stacked_request(
+            rid: wz_session_core::wire_id::RequestId,
+            conf_flags: u8,
+        ) -> NetworkMessage {
             let mut request =
                 wz_session_core::request_build::build_request_query(rid, 0, Some("demo/q"))
                     .expect("build request");
@@ -31141,7 +31152,10 @@ mod tests {
             NetworkMessage::Request(Box::new(request))
         }
 
-        fn stacked_response(qid: u64, conf_flags: u8) -> NetworkMessage {
+        fn stacked_response(
+            qid: wz_session_core::wire_id::RequestId,
+            conf_flags: u8,
+        ) -> NetworkMessage {
             let mut response =
                 wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
                     .expect("build response");

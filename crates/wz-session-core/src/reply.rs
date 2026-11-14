@@ -226,7 +226,7 @@ pub enum InboundReplyBody {
         /// encoding shape (`packed_id`, `schema`). `None` when the reply
         /// carried no encoding or `pubsub-encoding` is off. What a querier
         /// reconstructs the aligner's `RetrievedValue.encoding` from.
-        encoding: Option<(u32, Option<String>)>,
+        encoding: Option<(u32, Option<Vec<u8>>)>,
         /// R311y78 — the source identity `(zid, eid, sn)` the Put reply carried
         /// on its inner-body source_info ext (id 0x01), or `None` when the
         /// reply had no source_info or `reply-source-info` is off (the decode
@@ -274,7 +274,7 @@ pub enum InboundReplyBody {
     /// would be a layering leak at the application surface). `payload`
     /// is the application-level error blob.
     Err {
-        encoding: Option<(u32, Option<String>)>,
+        encoding: Option<(u32, Option<Vec<u8>>)>,
         payload: Vec<u8>,
     },
 }
@@ -292,7 +292,7 @@ pub enum InboundReplyBody {
 pub struct InboundReply {
     /// Echo of the inbound `Response.request_id` — matches the rid
     /// the z_get caller used when registering.
-    pub rid: u64,
+    pub rid: crate::wire_id::RequestId,
     /// Resolved keyexpr literal. For an `Err` response with no
     /// keyexpr arm in the wire form (mapping_id=0, suffix=None) the
     /// dispatch drops silently rather than firing on an empty
@@ -380,7 +380,7 @@ impl ReplyStamp {
 /// Put / Del).
 #[cfg(feature = "alloc")]
 impl ReplyView for InboundReply {
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
     fn keyexpr(&self) -> &str {
@@ -400,7 +400,7 @@ impl ReplyView for InboundReply {
             InboundReplyBody::Err { payload, .. } => payload,
         }
     }
-    fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         match &self.body {
             InboundReplyBody::Err { encoding, .. } => encoding
                 .as_ref()
@@ -420,7 +420,7 @@ impl ReplyView for InboundReply {
             InboundReplyBody::Err { .. } => None,
         }
     }
-    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
         match &self.body {
             InboundReplyBody::Put { encoding, .. } => encoding
                 .as_ref()
@@ -501,7 +501,7 @@ impl InboundReply {
                 attachment: retained_attachment(view),
                 encoding: view
                     .put_encoding()
-                    .map(|(id, schema)| (id, schema.map(String::from))),
+                    .map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
                 source_info: view.source_info().cloned(),
                 timestamp: view.timestamp().cloned(),
             },
@@ -513,7 +513,7 @@ impl InboundReply {
             ReplyKind::Err => InboundReplyBody::Err {
                 encoding: view
                     .err_encoding()
-                    .map(|(id, schema)| (id, schema.map(String::from))),
+                    .map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
                 payload: view.payload().to_vec(),
             },
         };
@@ -599,7 +599,7 @@ fn loopback_put_attachment(attachment: Option<Vec<u8>>) -> Option<crate::link::R
 #[cfg(all(feature = "query-queryable", feature = "alloc"))]
 fn loopback_put_encoding(
     encoding: Option<crate::sample::EncodingHint>,
-) -> Option<(u32, Option<String>)> {
+) -> Option<(u32, Option<Vec<u8>>)> {
     #[cfg(feature = "pubsub-encoding")]
     {
         encoding.map(|e| (e.packed_id, e.schema))
@@ -790,13 +790,15 @@ fn reply_body_timestamp(
     feature = "alloc",
     any(feature = "pubsub-put", feature = "query-reply")
 ))]
-fn put_reply_encoding(put: &crate::wire::parts::MsgPutOwned) -> Option<(u32, Option<String>)> {
+fn put_reply_encoding(put: &crate::wire::parts::MsgPutOwned) -> Option<(u32, Option<Vec<u8>>)> {
     #[cfg(feature = "pubsub-encoding")]
     {
         put.encoding.as_ref().map(|e| {
             (
                 e.packed_id,
-                e.schema.as_ref().map(|s| String::from(s.as_str())),
+                e.schema
+                    .as_ref()
+                    .map(|s| s.as_bytes().into_inner().to_vec()),
             )
         })
     }
@@ -982,23 +984,23 @@ fn local_stamp(
 /// numeric value is exposed for diagnostic surfaces; callers should
 /// not depend on the exact value across runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ReplyHandle(u64);
+pub struct ReplyHandle(crate::wire_id::RequestId);
 
 impl ReplyHandle {
     /// The rid the registration was bound to.
-    pub fn rid(self) -> u64 {
+    pub fn rid(self) -> crate::wire_id::RequestId {
         self.0
     }
 
     /// The handle of query `rid` that ended before anything was registered for it: one that
     /// reached no peer and no local queryable, whose final has already run.
-    pub fn ended(rid: u64) -> Self {
+    pub fn ended(rid: crate::wire_id::RequestId) -> Self {
         Self(rid)
     }
 }
 
 struct Pending<C: ReplySink, P: Storage = Profile> {
-    rid: u64,
+    rid: crate::wire_id::RequestId,
     /// R239 — number of `Final` records this pending entry expects
     /// before it fires `on_final` and drops from the table. Mirrors
     /// zenoh-pico's `_z_pending_query_t._remaining_finals`
@@ -1218,7 +1220,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// `ReplyAcceptance::store` (private) for why refusing beats truncating.
     pub fn register_sink(
         &mut self,
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         expected_finals: u32,
         deadline_ms: Option<u64>,
         accept: ReplyAcceptance<'_>,
@@ -1243,7 +1245,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// supported on `register`; symmetric on `unregister`). Idempotent
     /// — calling on a rid that was never registered or already
     /// fired-and-removed returns `false` without panicking.
-    pub fn unregister(&mut self, rid: u64) -> bool {
+    pub fn unregister(&mut self, rid: crate::wire_id::RequestId) -> bool {
         let before = self.pending.len();
         self.pending.retain(|p| p.rid != rid);
         before != self.pending.len()
@@ -1409,7 +1411,9 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 let encoding = err.encoding.as_ref().map(|e| {
                     (
                         e.packed_id,
-                        e.schema.as_ref().map(|s| String::from(s.as_str())),
+                        e.schema
+                            .as_ref()
+                            .map(|s| s.as_bytes().into_inner().to_vec()),
                     )
                 });
                 InboundReplyBody::Err {
@@ -1532,7 +1536,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// entries from the table, matching the wire-arrival behaviour in
     /// [`Self::dispatch_response_final`] exactly (single dispatch path
     /// via `Self::fire_final_for`).
-    pub fn deliver_local_final(&mut self, rid: u64) {
+    pub fn deliver_local_final(&mut self, rid: crate::wire_id::RequestId) {
         self.fire_final_for(rid);
     }
 
@@ -1744,7 +1748,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// (`vendor/zenoh-pico/src/session/query.c:222-256`): `if
     /// (pen_qry->_remaining_finals > 0) { pen_qry->_remaining_finals--;
     /// } bool do_finalize = (pen_qry->_remaining_finals == 0);`.
-    fn fire_final_for(&mut self, rid: u64) {
+    fn fire_final_for(&mut self, rid: crate::wire_id::RequestId) {
         // Take ownership of each matching entry that reaches zero, one
         // at a time, and leave the rest (decremented but non-zero, or
         // non-matching) in place. Vec::retain would force us to mutate
@@ -1939,12 +1943,12 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
     #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn register(
         &mut self,
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         expected_finals: u32,
         deadline_ms: Option<u64>,
         accept: ReplyAcceptance<'_>,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(crate::wire_id::RequestId) + Send + 'static,
     ) -> ReplyHandle {
         // R311y321 — signature UNCHANGED; every caller of THIS method
         // (liveliness_get, the aligner's query plumbing, the tests) registers a
@@ -2048,8 +2052,8 @@ mod tests {
     }
 
     fn response_reply_put(
-        rid: u64,
-        mapping_id: u64,
+        rid: crate::wire_id::RequestId,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
         payload: &[u8],
     ) -> ResponseOwned {
@@ -2075,7 +2079,7 @@ mod tests {
         .unwrap()
     }
 
-    fn response_reply_del(rid: u64, suffix: &str) -> ResponseOwned {
+    fn response_reply_del(rid: crate::wire_id::RequestId, suffix: &str) -> ResponseOwned {
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
@@ -2098,10 +2102,10 @@ mod tests {
     }
 
     fn response_err(
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         suffix: &str,
         packed_id: u32,
-        schema: Option<&str>,
+        schema: Option<&[u8]>,
         payload: &[u8],
     ) -> ResponseOwned {
         let keyexpr = Wireexpr {
@@ -2133,7 +2137,7 @@ mod tests {
         .unwrap()
     }
 
-    fn response_final_for(rid: u64) -> ResponseFinalOwned {
+    fn response_final_for(rid: crate::wire_id::RequestId) -> ResponseFinalOwned {
         ResponseFinal {
             request_id: rid,
             ..ResponseFinal::default()
@@ -2145,8 +2149,8 @@ mod tests {
     /// R311y740 (N37) — the `M=0` (`Mapping::Receiver`) twin of
     /// [`response_reply_put`]: the mapping id names OUR space, not the peer's.
     fn response_reply_put_nonlocal(
-        rid: u64,
-        mapping_id: u64,
+        rid: crate::wire_id::RequestId,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
         payload: &[u8],
     ) -> ResponseOwned {
@@ -2202,8 +2206,8 @@ mod tests {
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/temp".to_string());
-        let mut own = HashMap::new();
-        own.insert(7u64, "ours/temp".to_string());
+        let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        own.insert(7, "ours/temp".to_string());
 
         let resp = response_reply_put_nonlocal(42, 7, None, b"21.0");
         reg.dispatch_response(&resp, MappingSpaces::with_own(&peer, &own));
@@ -2451,7 +2455,11 @@ mod tests {
     /// suffix is a literal keyexpr; any other id is one the peer never declared in
     /// these tests.
     #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
-    fn response_reply_shm(mapping_id: u64, suffix: Option<&str>, qos: Option<u8>) -> ResponseOwned {
+    fn response_reply_shm(
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        qos: Option<u8>,
+    ) -> ResponseOwned {
         let mut response = response_reply_put(42, mapping_id, suffix, b"");
         let descriptor = crate::extshm::ShmDescriptor {
             data_len: 7,
@@ -3227,11 +3235,11 @@ mod tests {
             payload: b"v",
             err_encoding: None,
             attachment: Some(b"align"),
-            put_encoding: Some((9, Some("text/plain"))),
+            put_encoding: Some((9, Some(&b"text/plain"[..]))),
         };
         let owned = InboundReply::from_view(&view);
         assert_eq!(owned.attachment(), Some(&b"align"[..]));
-        assert_eq!(owned.put_encoding(), Some((9, Some("text/plain"))));
+        assert_eq!(owned.put_encoding(), Some((9, Some(&b"text/plain"[..]))));
         match owned.body {
             InboundReplyBody::Put {
                 attachment,
@@ -3239,7 +3247,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(attachment.as_deref(), Some(&b"align"[..]));
-                assert_eq!(encoding, Some((9, Some("text/plain".to_string()))));
+                assert_eq!(encoding, Some((9, Some(b"text/plain".to_vec()))));
             }
             other => panic!("expected Put, got {other:?}"),
         }
@@ -3399,7 +3407,7 @@ mod tests {
             |_| {},
         );
 
-        let resp = response_err(5, "error/path", 4, Some("schema_v1"), b"oops");
+        let resp = response_err(5, "error/path", 4, Some(&b"schema_v1"[..]), b"oops");
         reg.dispatch_response(&resp, &HashMap::new());
 
         let captured = captured
@@ -3411,7 +3419,7 @@ mod tests {
         assert_eq!(captured.keyexpr_literal, "error/path");
         match &captured.body {
             InboundReplyBody::Err { encoding, payload } => {
-                assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
+                assert_eq!(*encoding, Some((4, Some(b"schema_v1".to_vec()))));
                 assert_eq!(payload, b"oops");
             }
             other => panic!("expected Err body, got {other:?}"),
@@ -4287,7 +4295,7 @@ mod tests {
         let qr = QueryReply::Err {
             rid: 13,
             keyexpr_literal: "sensors/c".to_string(),
-            encoding: Some((4, Some("schema_v1".to_string()))),
+            encoding: Some((4, Some(b"schema_v1".to_vec()))),
             payload: b"err-payload".to_vec(),
             responder: Some((vec![0x01], 9)),
             qos: crate::sample::QosLevel::from_raw(0b0000_0110),
@@ -4305,7 +4313,7 @@ mod tests {
         match inbound.body {
             InboundReplyBody::Err { encoding, payload } => {
                 // The id 4 and a schema, packed as the wire packs them: (4 << 1) | 1.
-                assert_eq!(encoding, Some((9, Some("schema_v1".to_string()))));
+                assert_eq!(encoding, Some((9, Some(b"schema_v1".to_vec()))));
                 assert_eq!(payload, b"err-payload");
             }
             other => panic!("expected Err, got {other:?}"),
@@ -4420,8 +4428,8 @@ mod tests {
     #[test]
     fn finish_all_ends_every_pending_entry_with_its_final() {
         let mut reg = ReplyRegistry::new();
-        let ended = Arc::new(Mutex::new(Vec::<u64>::new()));
-        for (rid, deadline) in [(21u64, Some(u64::MAX)), (22, None), (23, Some(1))] {
+        let ended = Arc::new(Mutex::new(Vec::<crate::wire_id::RequestId>::new()));
+        for (rid, deadline) in [(21u32, Some(u64::MAX)), (22, None), (23, Some(1))] {
             let ended = ended.clone();
             reg.register(
                 rid,
@@ -4727,7 +4735,7 @@ mod tests {
         // per entry (registration order). Mirrors the duplicate-rid
         // contract on the wire/loopback Final path.
         let mut reg = ReplyRegistry::new();
-        let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let order: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         let order_a = order.clone();
         let order_b = order.clone();
         reg.register(
@@ -4914,7 +4922,11 @@ mod decode_isolation_tests {
     /// Constructible regardless of `pubsub-put` / `query-reply` — those
     /// features gate the dispatch consumer arm, not the `codec-response`
     /// wire variant.
-    fn response_reply_put(rid: u64, suffix: &str, payload: &[u8]) -> ResponseOwned {
+    fn response_reply_put(
+        rid: crate::wire_id::RequestId,
+        suffix: &str,
+        payload: &[u8],
+    ) -> ResponseOwned {
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
@@ -4946,7 +4958,7 @@ mod decode_isolation_tests {
     /// A Del-bodied `Response(Reply)` for `suffix`. Constructible
     /// regardless of `pubsub-delete` / `query-reply` (same reason as
     /// [`response_reply_put`]).
-    fn response_reply_del(rid: u64, suffix: &str) -> ResponseOwned {
+    fn response_reply_del(rid: crate::wire_id::RequestId, suffix: &str) -> ResponseOwned {
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
@@ -4971,7 +4983,7 @@ mod decode_isolation_tests {
     /// An Err-bodied `Response` for `suffix`. The Err arm of
     /// `dispatch_response` is unconditional, so this is the live
     /// contrast that proves the pending entry is not dead.
-    fn response_err(rid: u64, suffix: &str, payload: &[u8]) -> ResponseOwned {
+    fn response_err(rid: crate::wire_id::RequestId, suffix: &str, payload: &[u8]) -> ResponseOwned {
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
@@ -5110,7 +5122,10 @@ mod reply_timestamp_decode_isolation_tests {
     /// through `gated_reply_timestamp` and would elide it in this profile. The
     /// codec field is ungated, so this is constructible with the feature off —
     /// which is precisely the foreign-peer shape being guarded.
-    fn stamped_put_response(rid: u64, keyexpr: &str) -> crate::wire::ResponseOwned {
+    fn stamped_put_response(
+        rid: crate::wire_id::RequestId,
+        keyexpr: &str,
+    ) -> crate::wire::ResponseOwned {
         let zid = [0x01u8, 0x02, 0x03, 0x04];
         let put = wz_codecs::lent::MsgPut {
             timestamp: Some(wz_codecs::lent::Timestamp {

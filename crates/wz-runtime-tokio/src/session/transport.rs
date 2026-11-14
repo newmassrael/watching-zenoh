@@ -173,7 +173,7 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     #[allow(clippy::too_many_arguments)]
     fn send_plain_put_qos(
         payload: &Self::Payload,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         suffix: Option<&str>,
         value: &[u8],
         qos: Option<wz_session_core::sample::QosLevel>,
@@ -237,7 +237,7 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     /// multicast session's own. The one per-transport input to the shared query body besides
     /// the two below.
     #[cfg(feature = "query-get")]
-    fn alloc_request_id(payload: &Self::Payload) -> u64;
+    fn alloc_request_id(payload: &Self::Payload) -> wz_session_core::wire_id::RequestId;
 
     /// How many remote `ResponseFinal`s a query that may go remote waits for: one per peer the
     /// transport reaches, as zenoh-pico counts them (`vendor/zenoh-pico/src/net/primitives.c` @
@@ -276,7 +276,11 @@ pub trait RemoteReplyRoute: Clone {
     /// Send one reply the handler produced.
     fn send_reply(&self, reply: wz_session_core::query::QueryReply);
     /// Send the query's terminator, once every reply has left.
-    fn send_final(&self, rid: u64, qos: wz_session_core::sample::QosLevel);
+    fn send_final(
+        &self,
+        rid: wz_session_core::wire_id::RequestId,
+        qos: wz_session_core::sample::QosLevel,
+    );
 }
 
 #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
@@ -285,7 +289,11 @@ impl<R: SessionRuntime, T: TimeSource> RemoteReplyRoute for Arc<SessionLinkActio
         super::queryable::send_staged_reply(self, reply);
     }
 
-    fn send_final(&self, rid: u64, qos: wz_session_core::sample::QosLevel) {
+    fn send_final(
+        &self,
+        rid: wz_session_core::wire_id::RequestId,
+        qos: wz_session_core::sample::QosLevel,
+    ) {
         self.send_response_final(rid, qos);
     }
 }
@@ -312,7 +320,11 @@ impl RemoteReplyRoute
         }
     }
 
-    fn send_final(&self, rid: u64, qos: wz_session_core::sample::QosLevel) {
+    fn send_final(
+        &self,
+        rid: wz_session_core::wire_id::RequestId,
+        qos: wz_session_core::sample::QosLevel,
+    ) {
         use wz_session_core::response_sink::ResponseSink as _;
         self.send_response_final(rid, qos);
     }
@@ -336,7 +348,12 @@ pub struct SilentGroupRoute;
 ))]
 impl RemoteReplyRoute for SilentGroupRoute {
     fn send_reply(&self, _reply: wz_session_core::query::QueryReply) {}
-    fn send_final(&self, _rid: u64, _qos: wz_session_core::sample::QosLevel) {}
+    fn send_final(
+        &self,
+        _rid: wz_session_core::wire_id::RequestId,
+        _qos: wz_session_core::sample::QosLevel,
+    ) {
+    }
 }
 
 /// Typestate marker for a UNICAST session: the payload is the per-peer
@@ -404,7 +421,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
     }
 
     #[cfg(feature = "query-get")]
-    fn alloc_request_id(payload: &Self::Payload) -> u64 {
+    fn alloc_request_id(payload: &Self::Payload) -> wz_session_core::wire_id::RequestId {
         payload.alloc_next_request_id()
     }
 
@@ -485,7 +502,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
     #[cfg(feature = "codec-push")]
     fn send_plain_put_qos(
         payload: &Self::Payload,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         suffix: Option<&str>,
         value: &[u8],
         qos: Option<wz_session_core::sample::QosLevel>,
@@ -527,7 +544,7 @@ pub struct MulticastPayload {
     /// so the session counts from zero, as a unicast link does. Shared by the session's clones, as
     /// `link` is, so two handles of one session never send two queries under one id.
     #[cfg(feature = "query-get")]
-    pub(crate) request_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) request_ids: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// The members the drive loop holds for this group, which a query counts its remote finals
     /// from: set once by
     /// [`Session::attach_group_membership`](super::Session::attach_group_membership) with the
@@ -569,7 +586,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
     }
 
     #[cfg(feature = "query-get")]
-    fn alloc_request_id(payload: &Self::Payload) -> u64 {
+    fn alloc_request_id(payload: &Self::Payload) -> wz_session_core::wire_id::RequestId {
         payload
             .request_ids
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)

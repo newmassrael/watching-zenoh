@@ -193,7 +193,7 @@ impl WriteFilter {
     pub(crate) fn put_plain(
         &self,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         payload: &[u8],
         params: &wz_session_core::publish_options::PlainPutParams,
     ) -> FilteredPut {

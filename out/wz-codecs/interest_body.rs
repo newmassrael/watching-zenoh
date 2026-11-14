@@ -251,7 +251,7 @@ impl<S: InterestBodyStorage> InterestBodyIn<S> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 65554;
+    pub const MAX_ENCODED_BYTES: usize = 65548;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
@@ -586,7 +586,7 @@ impl<'a> InterestBodyView<'a> {
 
     /// Worst-case encoded byte count for this codec, as
     /// [`InterestBodyIn::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 65554;
+    pub const MAX_ENCODED_BYTES: usize = 65548;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`InterestBodyIn::encode`] writes for the value [`Self::into_builder`]

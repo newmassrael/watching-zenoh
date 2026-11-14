@@ -113,7 +113,10 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// Taken by the queryable's staging sink, which runs inside the loopback
     /// window of the query that matched it, so the hold exists before the
     /// query's own terminator can be consulted.
-    pub(super) fn hold_for_handler_job(&self, rid: u64) -> HandlerJobHold<R, T, Tp> {
+    pub(super) fn hold_for_handler_job(
+        &self,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> HandlerJobHold<R, T, Tp> {
         let key = FinalKey { rid, local: true };
         if let Ok(mut map) = self.final_holds.lock() {
             map.entry(key).or_default().holds += 1;
@@ -215,7 +218,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
 
 impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> HeldQuery<R, T, Tp> {
     /// The request id the query carries.
-    pub fn rid(&self) -> u64 {
+    pub fn rid(&self) -> wz_session_core::wire_id::RequestId {
         self.key.rid
     }
 
@@ -272,7 +275,7 @@ pub enum TokioHeldQuery {
 
 impl TokioHeldQuery {
     /// The request id the query carries.
-    pub fn rid(&self) -> u64 {
+    pub fn rid(&self) -> wz_session_core::wire_id::RequestId {
         match self {
             Self::Unicast(held) => held.rid(),
             #[cfg(feature = "transport-multicast")]

@@ -151,11 +151,60 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
     "crates/wz-session-core/src/dissect.rs::vle_u16::": (
         "REFUSE",
         "the PRIMITIVE, not a field: `SpanCursor::vle_u16` is the refusing "
-        "reader itself. It has NO call site as of R311y880 -- `weight` was its "
-        "last one and upstream truncates there -- and it is kept because "
-        "`Zenoh080Bounded<u16>` is a real upstream shape whose u32 sibling "
-        "decides `Encoding.id`. A new call site reds this gate until someone "
-        "names the upstream codec for that field, which is the point.",
+        "reader itself, called for a key expression's scope (`walk_wireexpr` "
+        "below), the field upstream reads as `Zenoh080Bounded<ExprId>`.",
+    ),
+    # A key expression's scope and a request's id. Upstream reads both bounded
+    # (`commons/zenoh-codec/src/core/wire_expr.rs` @
+    # `let zodec = Zenoh080Bounded::<ExprId>::new();`, and
+    # `commons/zenoh-codec/src/network/request.rs` @
+    # `let id: RequestId = bodec.read(&mut *reader)?;` with the response and
+    # response-final readers alike), so a value past `ExprId` / `RequestId` is
+    # `DidntRead` there, and the narrow reads below are the faithful ones.
+    "crates/wz-session-core/src/dissect.rs::walk_wireexpr::id": (
+        "REFUSE",
+        "a key expression's scope, `Zenoh080Bounded::<ExprId>` upstream: a "
+        "varint past u16 is `DidntRead` there, so the walk halts where "
+        "upstream stops reading the batch.",
+    ),
+    "crates/wz-session-core/src/dissect.rs::walk_request::rid": (
+        "REFUSE",
+        "a Request's id, `Zenoh080Bounded::<RequestId>` upstream (u32).",
+    ),
+    "crates/wz-session-core/src/dissect.rs::walk_response::request_id": (
+        "REFUSE",
+        "a Response's request id, `Zenoh080Bounded::<RequestId>` upstream.",
+    ),
+    "crates/wz-session-core/src/dissect.rs::walk_response_final::request_id": (
+        "REFUSE",
+        "a ResponseFinal's request id, `Zenoh080Bounded::<RequestId>` upstream.",
+    ),
+    "crates/wz-session-core/src/dissect.rs::head_keyexpr::rid": (
+        "REFUSE",
+        "the same request id `walk_request` / `walk_response` read, skipped "
+        "to reach the key expression; refused at the same width.",
+    ),
+    "out/wz-codecs/wireexpr_local.rs::decode_into::": (
+        "REFUSE",
+        "the generated sibling of `walk_wireexpr`'s `id`: the scope is "
+        "`Zenoh080Bounded::<ExprId>` upstream.",
+    ),
+    "out/wz-codecs/wireexpr_nonlocal.rs::decode_into::": (
+        "REFUSE",
+        "as `wireexpr_local.rs`: the other mapping arm of the same scope.",
+    ),
+    "out/wz-codecs/request.rs::decode_into::": (
+        "REFUSE",
+        "the generated sibling of `walk_request`'s `rid`: "
+        "`Zenoh080Bounded::<RequestId>` upstream.",
+    ),
+    "out/wz-codecs/response.rs::decode_into::": (
+        "REFUSE",
+        "the generated sibling of `walk_response`'s `request_id`.",
+    ),
+    "out/wz-codecs/response_final.rs::decode_into::": (
+        "REFUSE",
+        "the generated sibling of `walk_response_final`'s `request_id`.",
     ),
     "crates/wz-session-core/src/dissect.rs::vle_u32::": (
         "REFUSE",
@@ -233,15 +282,7 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
 }
 
 
-KEPT_WITHOUT_CALLER: dict[str, str] = {
-    "crates/wz-session-core/src/dissect.rs::vle_u16::": (
-        "`Zenoh080Bounded<u16>` is a real upstream shape -- its `u32` sibling "
-        "is what decides `Encoding.id` -- so the refusing reader stays for the "
-        "field that selects it next. `weight` was its last caller and R311y880 "
-        "moved that field to `vle_u16_truncated` because upstream truncates "
-        "there, which emptied the call sites without making the reader wrong."
-    ),
-}
+KEPT_WITHOUT_CALLER: dict[str, str] = {}
 """R2040 (open-debt item 344) — readers KEPT ON PURPOSE with nothing calling
 them.
 

@@ -4480,8 +4480,11 @@ int main(void) {
      * pieces joined per query, and every opened `e2e` block gains
      * `unjudged_reason` (`reply`, `sender_unknown`, or null); a final's entry
      * gains `ended_transfers` and an ended transfer `ended_by`. Keys arrive;
-     * nothing retires. */
-    revisioned[2].revision = 66;
+     * nothing retires.
+     * 67: a payload whose encoding's schema is not UTF-8 carries the schema as
+     * `schema_hex` (its bytes in lowercase hex) and leaves it out of the
+     * `encoding` string. A key arrives; nothing retires. */
+    revisioned[2].revision = 67;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

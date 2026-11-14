@@ -107,7 +107,7 @@ impl Window<'_> {
     }
 }
 
-/// The bytes an encoding takes after its header: the packed id, and the schema's length and text
+/// The bytes an encoding takes after its header: the packed id, and the schema's length and bytes
 /// when it carries one.
 fn encoding_len(encoding: Option<crate::reply_stage::EncodingParts<'_>>) -> usize {
     let Some(encoding) = encoding else {
@@ -128,7 +128,7 @@ fn write_encoding(out: &mut Window<'_>, encoding: Option<crate::reply_stage::Enc
     out.vle(u64::from(encoding.packed_id), VLE_U32);
     if let Some(schema) = encoding.schema {
         out.vle(schema.len() as u64, VLE_U64);
-        out.bytes(schema.as_bytes());
+        out.bytes(schema);
     }
 }
 
@@ -273,7 +273,7 @@ fn link_chain(chain: &mut [ExtEntryParts<'_>]) {
 /// length: `LengthOutOfRange` past it, so a reply with such a schema is refused and not sent
 /// with another encoding.
 #[cfg(any(feature = "pubsub-encoding", feature = "query-reply-err"))]
-fn schema_text<const MAX: usize>(schema: &str) -> Result<Bounded<&str, MAX>, CodecError> {
+fn schema_bytes<const MAX: usize>(schema: &[u8]) -> Result<Bounded<&[u8], MAX>, CodecError> {
     crate::codec_owned::sent(schema)
 }
 
@@ -433,8 +433,10 @@ impl<'a> ResponseWriter<'a> {
             body,
             qos_extension,
         } = self.direct_view();
-        let mut len =
-            1 + vle_len(parts.rid, VLE_U64) + 1 + vle_len(parts.keyexpr.len() as u64, VLE_U64);
+        let mut len = 1
+            + vle_len(u64::from(parts.rid), VLE_U32)
+            + 1
+            + vle_len(parts.keyexpr.len() as u64, VLE_U64);
         len += parts.keyexpr.len();
         if qos_extension {
             len += 1 + vle_len(u64::from(parts.qos.raw), VLE_U64);
@@ -481,7 +483,7 @@ impl<'a> ResponseWriter<'a> {
             RESPONSE_HEADER
         };
         out.byte(header | LOCAL_KEY);
-        out.vle(parts.rid, VLE_U64);
+        out.vle(u64::from(parts.rid), VLE_U32);
         out.vle(0, VLE_U64);
         out.vle(parts.keyexpr.len() as u64, VLE_U64);
         out.bytes(parts.keyexpr.as_bytes());
@@ -702,7 +704,7 @@ impl<'a> ResponseWriter<'a> {
             .map(|e| {
                 Ok::<_, CodecError>(wz_codecs::encoding::EncodingParts {
                     packed_id: e.packed_id,
-                    schema: e.schema.map(schema_text).transpose()?,
+                    schema: e.schema.map(schema_bytes).transpose()?,
                 })
             })
             .transpose()?;
@@ -798,7 +800,7 @@ impl<'a> ResponseWriter<'a> {
     fn write_err<S: SceSink>(
         &self,
         sink: &mut S,
-        encoding: Option<(u32, Option<&str>)>,
+        encoding: Option<(u32, Option<&[u8]>)>,
         payload: &[u8],
     ) -> Result<(), CodecError>
     where
@@ -808,7 +810,7 @@ impl<'a> ResponseWriter<'a> {
             .map(|(id, schema)| {
                 Ok::<_, CodecError>(wz_codecs::encoding::EncodingParts {
                     packed_id: (id << 1) | u32::from(schema.is_some()),
-                    schema: schema.map(schema_text).transpose()?,
+                    schema: schema.map(schema_bytes).transpose()?,
                 })
             })
             .transpose()?;
@@ -869,7 +871,7 @@ mod tests {
             }),
             Some(EncodingParts {
                 packed_id: (5 << 1) | 1,
-                schema: Some("v=1"),
+                schema: Some(&b"v=1"[..]),
             }),
         ];
         let stamps: [Option<TimestampParts<'_>>; 2] = [
@@ -935,7 +937,7 @@ mod tests {
     fn the_plain_reply_is_written_directly_and_as_the_codec_writes_it() {
         let big = [0xA5u8; 1000];
         let mut taken = 0usize;
-        for rid in [0u64, 1, 127, 128, 16_384, u64::from(u32::MAX) + 1] {
+        for rid in [0u32, 1, 127, 128, 16_384, 1 << 28, u32::MAX] {
             for keyexpr in ["a", "demo/status/node-0001", &"k".repeat(200)] {
                 for payload_len in [0usize, 1, 127, 128, 255, 1000] {
                     for with_encoding in [false, true] {
@@ -947,7 +949,7 @@ mod tests {
                         ] {
                             let encoding = with_encoding.then_some(EncodingParts {
                                 packed_id: (5 << 1) | 1,
-                                schema: Some("v=1"),
+                                schema: Some(&b"v=1"[..]),
                             });
                             let parts = ReplyParts {
                                 rid,
@@ -998,7 +1000,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(taken, 6 * 3 * 6 * 2 * 4, "the matrix ran whole");
+        assert_eq!(taken, 7 * 3 * 6 * 2 * 4, "the matrix ran whole");
     }
 
     fn slice_bytes<B: crate::tx_buf::TxBuf + ?Sized>(buf: &B) -> &[u8] {
@@ -1082,10 +1084,10 @@ mod tests {
         assert_eq!(refused(&past_key, None), Some(CodecError::LengthOutOfRange));
         #[cfg(feature = "pubsub-encoding")]
         {
-            let past_schema = "s".repeat(usize::from(u8::MAX) + 1);
+            let past_schema = alloc::vec![b's'; usize::from(u8::MAX) + 1];
             let encoding = EncodingParts {
                 packed_id: (5 << 1) | 1,
-                schema: Some(&past_schema),
+                schema: Some(past_schema.as_slice()),
             };
             assert_eq!(
                 refused("demo/a", Some(encoding)),
@@ -1120,8 +1122,8 @@ mod tests {
     #[cfg(feature = "query-reply-err")]
     #[test]
     fn an_err_is_written_as_the_owned_path_writes_it() {
-        let encodings: [Option<(u32, Option<&str>)>; 3] =
-            [None, Some((5, None)), Some((5, Some("s")))];
+        let encodings: [Option<(u32, Option<&[u8]>)>; 3] =
+            [None, Some((5, None)), Some((5, Some(&b"s"[..])))];
         let responders: [Option<(&[u8], u32)>; 2] = [None, Some((&[1, 2, 3, 4], 5))];
         let mut compared = 0usize;
         for encoding in encodings {
@@ -1186,7 +1188,7 @@ mod tests {
                     for (del, with_encoding) in [(false, false), (false, true), (true, false)] {
                         let encoding = with_encoding.then_some(EncodingParts {
                             packed_id: (5 << 1) | 1,
-                            schema: Some("v=1"),
+                            schema: Some(&b"v=1"[..]),
                         });
                         direct_matches_generic(ReplyParts {
                             rid: 7,
@@ -1221,8 +1223,8 @@ mod tests {
     #[test]
     fn an_err_is_written_directly_and_as_the_codec_writes_it() {
         let big = [0x5Au8; 1000];
-        let encodings: [Option<(u32, Option<&str>)>; 3] =
-            [None, Some((5, None)), Some((70_000, Some("v=1")))];
+        let encodings: [Option<(u32, Option<&[u8]>)>; 3] =
+            [None, Some((5, None)), Some((70_000, Some(&b"v=1"[..])))];
         let responders: [Option<(&[u8], u32)>; 2] = [None, Some((&[1, 2, 3, 4], 5))];
         let mut taken = 0usize;
         for encoding in encodings {

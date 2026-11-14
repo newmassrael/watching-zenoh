@@ -1637,7 +1637,7 @@ mod tests {
             }),
             encoding: Some(EncodingHint {
                 packed_id: u32::MAX,
-                schema: Some("application/x-schema".repeat(3)),
+                schema: Some(b"application/x-schema".repeat(3)),
             }),
             source_info: Some(SourceInfo {
                 zid: [0xCD; 16],
@@ -1660,7 +1660,7 @@ mod tests {
             ),
             (
                 "aliased",
-                build_push_aliased(u64::MAX >> 8, Some("tail"), b"v").unwrap(),
+                build_push_aliased(crate::wire_id::ExprId::MAX, Some("tail"), b"v").unwrap(),
             ),
             ("delete", build_push_del_literal("demo/x").unwrap()),
             (

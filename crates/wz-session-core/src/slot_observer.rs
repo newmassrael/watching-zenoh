@@ -934,7 +934,7 @@ mod tests {
     }
 
     /// A Push naming id `mapping_id` with `M=0`: the id is in OUR space.
-    fn push_own_alias(mapping_id: u64) -> crate::wire::PushOwned {
+    fn push_own_alias(mapping_id: crate::wire_id::ExprId) -> crate::wire::PushOwned {
         use wz_codecs::lent::Push;
         Push {
             keyexpr: Wireexpr {
@@ -970,8 +970,9 @@ mod tests {
         let mut peers = PeerTables::new();
         let mut requesters = Req::new();
         if own {
-            let mut space = hashbrown::HashMap::new();
-            space.insert(7u64, "ours/x".to_string());
+            let mut space: hashbrown::HashMap<crate::wire_id::ExprId, String> =
+                hashbrown::HashMap::new();
+            space.insert(7, "ours/x".to_string());
             peers.subscribers.set_own_mapping_space(Arc::new(space));
         }
         let outcome = frame(vec![NetworkMessage::Declare(Box::new(

@@ -193,7 +193,7 @@ async fn handle_query(session: &TokioSession, zid: &[u8], req: &Request) -> Resp
         }
         .map(|(packed_id, schema)| EncodingHint {
             packed_id,
-            schema: schema.map(str::to_string),
+            schema: schema.map(<[u8]>::to_vec),
         });
         rows_cb.lock().unwrap().push(ReplyRow {
             key: rv.keyexpr().to_string(),
@@ -203,7 +203,7 @@ async fn handle_query(session: &TokioSession, zid: &[u8], req: &Request) -> Resp
             timestamp: rv.timestamp().cloned(),
         });
     };
-    let on_final = move |_rid: u64| {
+    let on_final = move |_rid: wz_session_core::wire_id::RequestId| {
         if let Some(tx) = tx.take() {
             let _ = tx.send(());
         }

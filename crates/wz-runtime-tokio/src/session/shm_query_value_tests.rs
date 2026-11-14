@@ -21,7 +21,7 @@ use wz_session_core::extshm::encode_shm_descriptor;
 
 const KEY: &str = "demo/shm/query";
 const VALUE: &[u8] = b"a query value that lives in shared memory";
-const MAPPING_ID: u64 = 7;
+const MAPPING_ID: wz_session_core::wire_id::ExprId = 7;
 
 /// The calls that put a query's value in shared memory on the wire.
 #[derive(Clone, Copy, Debug)]

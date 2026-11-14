@@ -2074,11 +2074,14 @@ fn declared_encoding(node: &Field) -> Encoding<'_> {
         return Encoding::Absent;
     };
     let mut packed: Option<u32> = None;
-    let mut schema: Option<&str> = None;
+    let mut schema: Option<&[u8]> = None;
     for part in parts {
         match (part.name.as_ref(), &part.value) {
             ("packed_id", FieldValue::Uint(v)) => packed = Some(*v as u32),
-            ("schema", FieldValue::Text(text)) => schema = Some(text),
+            // The walker writes a UTF-8 schema as `schema` text and any other as
+            // `schema_bytes`.
+            ("schema", FieldValue::Text(text)) => schema = Some(text.as_bytes()),
+            ("schema_bytes", FieldValue::Bytes(raw)) => schema = Some(raw.as_slice()),
             _ => {}
         }
     }
@@ -2369,7 +2372,13 @@ pub struct PayloadSlot {
     /// default `zenoh/bytes`. An id this build's table does not hold is
     /// `unknown(N)`, as upstream prints it, and is NOT `None`: a publisher said
     /// something and calling that "nothing" would erase it.
+    ///
+    /// A schema that is not UTF-8 is left out of this string, and is
+    /// [`Self::schema_hex`] instead.
     pub encoding: Option<String>,
+    /// The schema's bytes in lower-case hex, when the sample's encoding carries
+    /// a schema that is not UTF-8 (upstream accepts one); `None` otherwise.
+    pub schema_hex: Option<String>,
     /// Which node of the message's tree the range is the span of.
     pub span_of: SlotSpan,
 }
@@ -2430,10 +2439,12 @@ pub fn payload_slot(message: &Field) -> Option<PayloadSlot> {
         let descriptor = subtree_shm_descriptor(message)?;
         (&descriptor.span, SlotSpan::ShmDescriptor)
     };
+    let declared = declared_encoding(message);
     Some(PayloadSlot {
         start: span.start,
         end: span.end,
-        encoding: encoding_text(declared_encoding(message)),
+        encoding: encoding_text(declared),
+        schema_hex: schema_hex(declared),
         span_of,
     })
 }
@@ -2456,6 +2467,9 @@ fn subtree_group<'a>(field: &'a Field, name: &str) -> Option<&'a Field> {
 /// schema when there is one, and `unknown(N)` for an id the table lacks.
 /// [`Encoding::Absent`] is `None` and not `zenoh/bytes`: the sample carried no
 /// encoding, and that is a different fact from carrying the default.
+///
+/// A schema that is not UTF-8 is not written into the string, which has no
+/// faithful spelling of it; [`schema_hex`] carries it.
 fn encoding_text(declared: Encoding<'_>) -> Option<String> {
     match declared {
         Encoding::Absent => None,
@@ -2463,10 +2477,34 @@ fn encoding_text(declared: Encoding<'_>) -> Option<String> {
             name,
             schema: Some(schema),
             ..
-        } => Some(alloc::format!("{name};{schema}")),
+        } => match core::str::from_utf8(schema) {
+            Ok(schema) => Some(alloc::format!("{name};{schema}")),
+            Err(_) => Some(String::from(name)),
+        },
         Encoding::Known { name, .. } => Some(String::from(name)),
         Encoding::Unknown { id } => Some(alloc::format!("unknown({id})")),
     }
+}
+
+/// The schema's bytes in lower-case hex when they are not UTF-8, and `None`
+/// for every other declaration, whose schema [`encoding_text`] spells.
+fn schema_hex(declared: Encoding<'_>) -> Option<String> {
+    use core::fmt::Write as _;
+    let Encoding::Known {
+        schema: Some(schema),
+        ..
+    } = declared
+    else {
+        return None;
+    };
+    if core::str::from_utf8(schema).is_ok() {
+        return None;
+    }
+    let mut hex = String::with_capacity(schema.len() * 2);
+    for byte in schema {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Some(hex)
 }
 
 /// Apply the mapping to the MESSAGE a split transfer joined, whose last piece

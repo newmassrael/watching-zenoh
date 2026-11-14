@@ -1875,7 +1875,7 @@ fn framed_frame(record: &[u8]) -> Vec<u8> {
 }
 
 /// A `Request` carrying a `Query` for `suffix`, under `rid`.
-fn query(rid: u64, suffix: &'static str) -> Vec<u8> {
+fn query(rid: wz_session_core::wire_id::RequestId, suffix: &'static str) -> Vec<u8> {
     wz_codecs::lent::Request {
         header: wz_codecs::lent::Request::default().header | wz_codecs::wire_const::FLAG_N_N,
         rid,
@@ -1887,7 +1887,11 @@ fn query(rid: u64, suffix: &'static str) -> Vec<u8> {
 }
 
 /// The `Response` that answers it, carrying `payload`.
-fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u8> {
+fn reply(
+    request_id: wz_session_core::wire_id::RequestId,
+    suffix: &'static str,
+    payload: &'static [u8],
+) -> Vec<u8> {
     wz_codecs::lent::Response {
         header: wz_codecs::lent::Response::default().header | wz_codecs::wire_const::FLAG_N_N,
         request_id,
@@ -1909,7 +1913,7 @@ fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u
 }
 
 /// The closing `ResponseFinal`.
-fn response_final(request_id: u64) -> Vec<u8> {
+fn response_final(request_id: wz_session_core::wire_id::RequestId) -> Vec<u8> {
     wz_codecs::lent::ResponseFinal {
         request_id,
         ..Default::default()
@@ -5643,7 +5647,10 @@ fn a_payload_format_rule_reaches_every_row_producer() {
 
 /// A `Wireexpr` naming an id in the SENDER's space, with an optional suffix
 /// appended to whatever that id was bound to.
-fn aliased_keyexpr(id: u64, suffix: Option<&'static str>) -> wz_codecs::lent::Wireexpr<'static> {
+fn aliased_keyexpr(
+    id: wz_session_core::wire_id::ExprId,
+    suffix: Option<&'static str>,
+) -> wz_codecs::lent::Wireexpr<'static> {
     wz_codecs::lent::Wireexpr {
         body: wz_codecs::lent::WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
             id,
@@ -5670,8 +5677,8 @@ fn declare_kexpr(id: u64, base: &'static str) -> Vec<u8> {
 
 /// A reply under an ALIASED keyexpr, carrying `payload`.
 fn aliased_reply(
-    request_id: u64,
-    id: u64,
+    request_id: wz_session_core::wire_id::RequestId,
+    id: wz_session_core::wire_id::ExprId,
     suffix: Option<&'static str>,
     payload: &'static [u8],
 ) -> Vec<u8> {

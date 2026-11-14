@@ -1459,7 +1459,11 @@ mod tests {
             .encode_to_vec()
     }
 
-    fn declare_sub_aliased(id: u64, mapping: u64, suffix: Option<&str>) -> Vec<u8> {
+    fn declare_sub_aliased(
+        id: u64,
+        mapping: wz_session_core::wire_id::ExprId,
+        suffix: Option<&str>,
+    ) -> Vec<u8> {
         declare_build::build_declare_subscriber(id, mapping, suffix)
             .expect("the production builder must build a subscriber")
             .try_as_borrowed()
@@ -1494,7 +1498,7 @@ mod tests {
     /// `allow(dead_code)`: its only caller is the aliased-declaration test,
     /// which needs a matcher to assert coverage.
     #[cfg(feature = "filter-wildcards")]
-    fn declare_kexpr(id: u64, suffix: &str) -> Vec<u8> {
+    fn declare_kexpr(id: wz_session_core::wire_id::ExprId, suffix: &str) -> Vec<u8> {
         declare_build::build_declare_kexpr(id, suffix)
             .expect("the production builder must build a kexpr binding")
             .try_as_borrowed()
@@ -2357,13 +2361,17 @@ mod tests {
     #[test]
     fn a_wire_id_past_the_exact_integer_line_is_a_string_in_both_documents() {
         const DECLARATION: u64 = u64::MAX;
-        const ALIAS: u64 = u64::MAX - 1;
+        // A scope is an `ExprId`, which the wire bounds far below the exact
+        // integer line, so the alias ids here are the widest a scope can be and
+        // stay numbers; the ids the line is about are the others.
+        const ALIAS: wz_session_core::wire_id::ExprId = wz_session_core::wire_id::ExprId::MAX - 1;
         const SOLICITED_BY: u64 = 1 << 60;
         const REQUEST: u64 = (1 << 60) + 1;
         // The alias a PUBLISH referenced that nothing declared: the throughput
         // plane's unresolved list, which the census and the summary each write
         // with a writer of their own, apart from a declaration's `unresolved`.
-        const PUBLISHED_UNDECLARED: u64 = (1 << 60) + 7;
+        const PUBLISHED_UNDECLARED: wz_session_core::wire_id::ExprId =
+            wz_session_core::wire_id::ExprId::MAX;
         let d = wire(&[
             (true, interest_subs(REQUEST, true, true, "demo/**")),
             (
@@ -2392,7 +2400,6 @@ mod tests {
                 "18446744073709551615", // the declaration
                 "1152921504606846977",  // the request
                 "1152921504606846976",  // solicited_by
-                "1152921504606846983",  // the published, undeclared alias
             ] {
                 assert!(
                     doc.contains(&alloc::format!("\"{digits}\"")),
@@ -2408,14 +2415,9 @@ mod tests {
                 "{which}: the small id stays a number: {doc}"
             );
         }
-        // The alias is an unresolved reference: only the census document names
-        // the declaration's own `unresolved` object; the summary lists it under
-        // the throughput plane's unresolved references.
-        assert!(
-            census_doc.contains("\"18446744073709551614\"")
-                && !census_doc.contains(":18446744073709551614"),
-            "{census_doc}"
-        );
+        // The alias is an unresolved reference, which only the census document
+        // names in the declaration's own `unresolved` object, and as a number.
+        assert!(census_doc.contains(":65534"), "{census_doc}");
     }
 
     fn qbl_reply(interest_id: u64, keyexpr: &str) -> Vec<u8> {

@@ -1243,7 +1243,9 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                         && matches!(
                             &declare.body,
                             wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclKexpr(d)
-                                if !slot.keyexpr_table.contains_key(&d.id)
+                                if !slot
+                                    .keyexpr_table
+                                    .contains_key(&crate::wire_id::declared_peer_key(d.id))
                         );
                     if !grows_past_cap {
                         crate::wireexpr_resolve::absorb_keyexpr_into(
@@ -4947,7 +4949,7 @@ mod tests {
 
         // Fill the cap with distinct-id DeclKexpr (ids 1..=MAX_ALIASES_PER_PEER).
         let mut fill = vec![];
-        for id in 1..=MAX_ALIASES_PER_PEER as u64 {
+        for id in 1..=MAX_ALIASES_PER_PEER as crate::wire_id::ExprId {
             fill.push(NetworkMessage::Declare(Box::new(
                 build_declare_kexpr(id, &format!("demo/{id}")).unwrap(),
             )));
@@ -4964,7 +4966,7 @@ mod tests {
 
         // One id PAST the cap (new growth) + Pushes for the over-cap id and an
         // in-cap id. Growth is rejected; the in-cap alias still resolves.
-        let over = MAX_ALIASES_PER_PEER as u64 + 1;
+        let over = MAX_ALIASES_PER_PEER as crate::wire_id::ExprId + 1;
         let mut b1 = DriverLoopOutcome::FramePayload {
             priority: crate::qos::Priority::DEFAULT,
             reliable: true,
@@ -5039,7 +5041,7 @@ mod tests {
     #[cfg(feature = "multicast-declarations")]
     fn decl_sub_aliased(
         id: u64,
-        alias_id: u64,
+        alias_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
     ) -> crate::network_message::NetworkMessage {
         use crate::network_message::NetworkMessage;

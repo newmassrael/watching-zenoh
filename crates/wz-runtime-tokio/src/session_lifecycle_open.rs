@@ -523,7 +523,7 @@ mod tests {
                     .push(String::from_utf8(payload.to_vec()).expect("text"));
                 Ok(())
             }
-            fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {}
+            fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&[u8]>, _payload: &[u8]) {}
             fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
             fn clear_responder(&mut self) {}
             fn responder(&self) -> Option<(&[u8], u32)> {

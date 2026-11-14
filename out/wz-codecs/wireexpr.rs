@@ -194,7 +194,7 @@ impl<S: WireexprStorage> WireexprIn<S> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 65553;
+    pub const MAX_ENCODED_BYTES: usize = 65547;
 
     /// Encode `self` into the caller-owned sink. Every value has a frame
     /// (docs/adr/0065), so the only error is the sink's own:
@@ -506,7 +506,7 @@ impl<'a> WireexprView<'a> {
 
     /// Worst-case encoded byte count for this codec, as
     /// [`WireexprIn::MAX_ENCODED_BYTES`].
-    pub const MAX_ENCODED_BYTES: usize = 65553;
+    pub const MAX_ENCODED_BYTES: usize = 65547;
 
     /// Encode what this view says into the caller-owned sink: the bytes
     /// [`WireexprIn::encode`] writes for the value [`Self::into_builder`]

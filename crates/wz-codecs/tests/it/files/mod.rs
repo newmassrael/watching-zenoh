@@ -6,6 +6,7 @@
 
 mod compressed_batch;
 mod declared_bounds;
+mod declared_widths;
 mod linkstate;
 mod put_marker_identity;
 mod query_marker_identity;

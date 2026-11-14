@@ -692,6 +692,11 @@ pub mod ext_name;
 /// passive analyzer, the driving oracle — reaches one copy of it.
 pub mod ext_admit;
 
+/// The widths of a key expression's scope and a request's id, zenoh's `ExprId`
+/// and `RequestId`. Unconditional: every build that names either holds it at
+/// the width the wire carries.
+pub mod wire_id;
+
 /// The identity of a unicast datagram link: the one remote end it carries a
 /// session with, fixed once known, and the `InitSyn` header test that binds an
 /// accepting link. Every stack's datagram driver admits what it takes through

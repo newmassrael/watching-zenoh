@@ -273,7 +273,7 @@ fn a_call_reads_what_arrived_and_the_requests_still_open() {
     let mut g = Growing::new(Dissection::new(), "closed == no");
     let mut open_before = 0u64;
     let mut calls = 0u64;
-    for round in 1..=6u64 {
+    for round in 1..=6u32 {
         for (from_low, record, open_after) in [
             (
                 true,
@@ -372,7 +372,7 @@ fn a_message_held_behind_a_gap_reads_every_row_again() {
 #[test]
 fn a_cursor_below_the_last_one_reads_every_row_and_folds_nothing_again() {
     let mut g = Growing::new(Dissection::new(), "closed == no");
-    for round in 1..=4u64 {
+    for round in 1..=4u32 {
         g.udp(true, &request_query(round, sender_space(0, Some("demo/q"))));
         g.ask(&alloc::format!("request {round}"));
     }
@@ -399,7 +399,7 @@ fn a_cursor_below_the_last_one_reads_every_row_and_folds_nothing_again() {
 #[test]
 fn between_calls_the_planes_keep_only_the_rows_whose_word_can_still_move() {
     let mut g = Growing::new(Dissection::new(), "kind == put");
-    for round in 1..=40u64 {
+    for round in 1..=40u32 {
         g.udp(
             true,
             &push(sender_space(0, Some("demo/p")), &[round as u8; 4]),
@@ -462,7 +462,7 @@ fn a_ceiling_that_trims_the_front_does_not_begin_the_planes_again() {
     let mut numbering = Numbering::default();
     let mut memory = SelectionMemory::default();
     let mut cursor = 0u64;
-    for (packets, round) in (1..=30u64).enumerate() {
+    for (packets, round) in (1..=30u32).enumerate() {
         let record = if round % 3 == 0 {
             response_final(round - 1)
         } else {
@@ -516,7 +516,7 @@ fn a_ceiling_that_trims_the_front_does_not_begin_the_planes_again() {
 /// document says, which is what keeping them shows.
 #[test]
 fn a_ceiling_makes_the_planes_give_up_the_rows_it_took() {
-    const ROUNDS: u64 = 900;
+    const ROUNDS: wz_session_core::wire_id::RequestId = 900;
     for selector in [
         "kind == query",
         "closed == no",

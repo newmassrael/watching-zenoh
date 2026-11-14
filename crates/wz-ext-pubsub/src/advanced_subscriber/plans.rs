@@ -110,7 +110,7 @@ pub fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<Sample> {
     if let Some((packed_id, schema)) = reply.put_encoding() {
         sample.encoding = Some(EncodingHint {
             packed_id,
-            schema: schema.map(String::from),
+            schema: schema.map(<[u8]>::to_vec),
         });
     }
     Some(sample)
@@ -194,9 +194,9 @@ pub struct PendingGets {
 #[derive(Default)]
 struct InFlight {
     /// Issued, not yet terminal — the set a teardown must cancel.
-    live: HashSet<u64>,
+    live: HashSet<wz_session_core::wire_id::RequestId>,
     /// Terminal before `record` saw them (the synchronous-loopback ordering).
-    finished_early: HashSet<u64>,
+    finished_early: HashSet<wz_session_core::wire_id::RequestId>,
 }
 
 #[cfg(feature = "advanced-recovery")]
@@ -219,7 +219,7 @@ impl PendingGets {
     ///
     /// A panic in a reply callback poisons this mutex, and the guard below runs
     /// in `Drop` — where a second panic would abort the process. The data behind
-    /// it is two sets of `u64` with no cross-field invariant a panic can leave
+    /// it is two sets of request ids with no cross-field invariant a panic can leave
     /// half-applied, so the poisoned guard is exactly as usable as a healthy one.
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<InFlight>> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
@@ -228,7 +228,7 @@ impl PendingGets {
     /// Record a GET that has just been issued. `false` means the subscriber was
     /// torn down while this GET was going out, and the caller must undo the
     /// registration it just made rather than leave a live pending query behind.
-    pub fn record(&self, rid: u64) -> bool {
+    pub fn record(&self, rid: wz_session_core::wire_id::RequestId) -> bool {
         match self.lock().as_mut() {
             Some(in_flight) => {
                 // Already terminal (the loopback answered inside `query`): there
@@ -244,7 +244,7 @@ impl PendingGets {
     }
 
     /// A GET reached its terminal Final: forget it.
-    pub fn finish(&self, rid: u64) {
+    pub fn finish(&self, rid: wz_session_core::wire_id::RequestId) {
         if let Some(in_flight) = self.lock().as_mut() {
             if !in_flight.live.remove(&rid) {
                 in_flight.finished_early.insert(rid);
@@ -254,7 +254,7 @@ impl PendingGets {
 
     /// Take every still-outstanding rid and refuse all future ones. Idempotent:
     /// a second call answers with an empty list.
-    pub fn cancel(&self) -> Vec<u64> {
+    pub fn cancel(&self) -> Vec<wz_session_core::wire_id::RequestId> {
         match self.lock().take() {
             Some(in_flight) => in_flight.live.into_iter().collect(),
             None => Vec::new(),

@@ -111,7 +111,7 @@ impl SampleView for LentSample<'_, '_> {
     fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
         self.timestamp.map(|ts| (ts.time, ts.zid.into_inner()))
     }
-    fn encoding_parts(&self) -> Option<(u32, Option<&str>)> {
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
         self.encoding.map(|encoding| {
             (
                 encoding.packed_id,
@@ -567,7 +567,7 @@ mod tests {
             }),
             encoding: Some(EncodingHint {
                 packed_id: 0x0b,
-                schema: Some("schema/x".to_string()),
+                schema: Some(b"schema/x".to_vec()),
             }),
             source_info: Some(SourceInfo::new(&[0x51, 0x52, 0x53, 0x54], 9, 41)),
             attachment: Some(alloc::vec![1, 2, 3, 4, 5]),
@@ -785,8 +785,9 @@ mod tests {
 
     /// Install our space: id 3 is `mine/`.
     fn with_own_space(r: &mut SubscriberRegistry) {
-        let mut table = hashbrown::HashMap::new();
-        table.insert(3u64, "mine/".to_string());
+        let mut table: hashbrown::HashMap<crate::wire_id::ExprId, String> =
+            hashbrown::HashMap::new();
+        table.insert(3, "mine/".to_string());
         let space: crate::wireexpr_resolve::SharedOwnMappingSpace = Arc::new(table);
         r.set_own_mapping_space(space);
     }
