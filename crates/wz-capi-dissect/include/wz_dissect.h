@@ -813,9 +813,9 @@
  *
  * A REPLY'S FRAME, at field-document revision 66. A reply is matched against
  * the rules by its OWN key, as the wire wrote it, exactly as a `Push` is: a
- * responder that answers `demo/a/@history` writes that key, `demo/**` does not
- * cover a verbatim `@` chunk, and a rule whose pattern covers the reply's key
- * is the one that applies. Nothing in the key is stripped or interpreted. Its
+ * responder that answers `demo/a/@history` writes that key, a `**` after `demo`
+ * does not cover a verbatim `@` chunk, and a rule whose pattern covers the
+ * reply's key is the one that applies. Nothing in the key is stripped or interpreted. Its
  * frame is read, and its CRC and length are judged (they are properties of its
  * bytes); its counter and its timeout are NOT, because a responder answering
  * from what it holds sends frames it published before, which are not the live
