@@ -118,6 +118,27 @@ pub fn route_trace(line: core::fmt::Arguments<'_>) {
     route_event!("{}", line);
 }
 
+/// A data message's timestamp as a `wz::routing` line names it: the NTP64 time in hex and the
+/// stamping node's zid as zenoh prints it (`<time>/<zid>`), or `none`. Upstream's regions tests
+/// judge a duplicate delivery by this pair (`unique_timestamps`), so the router's egress lines,
+/// its boundary decisions and a peer's receptions name one message by it. Formatted only when a
+/// line is written.
+pub struct TimestampText<'a>(pub Option<&'a wz_session_core::sample::TimestampHint>);
+
+impl core::fmt::Display for TimestampText<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(ts) => write!(
+                f,
+                "{:016x}/{}",
+                ts.time,
+                wz_session_core::zid_hex::zid_to_zenoh_hex(&ts.zid)
+            ),
+            None => f.write_str("none"),
+        }
+    }
+}
+
 /// R311y453 — live NIC-name resolution for the §5.16 `interfaces` subject axis.
 /// Gated on `link-interfaces`, which owns the `libc` dependency the `getifaddrs`
 /// call needs; all three `access-*` knobs pull it.
