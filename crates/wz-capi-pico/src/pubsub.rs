@@ -664,15 +664,13 @@ fn wall_clock_ntp64() -> u64 {
 
 /// Mint a timestamp from a session's clock and zid (pico `z_timestamp_new`).
 ///
-/// **NAMED DIVERGENCE, and it is observable.** pico stamps from its HLC when one
-/// is configured and otherwise fails (`_z_timestamp_new` returns
-/// `_Z_ERR_GENERIC` with no clock). wz's C session carries no HLC, so this
-/// stamps from the session's monotonic clock in NTP64 form with the session's
-/// own zid. The value is well-formed and monotonic within one session; it is NOT
-/// comparable across nodes the way a real HLC timestamp is. A program that only
-/// attaches and reads back its own stamp — which is what
-/// `z_pub_attachment.c` / `z_sub_attachment.c` do — cannot tell the difference,
-/// and one that orders events across peers by it can.
+/// pico's reads the time since the epoch, makes it strictly greater than the session's last
+/// (`vendor/zenoh-pico/src/api/api.c` @ `z_result_t z_timestamp_new(`), and pairs it with the
+/// session's zid; it applies no policy and fails only when the time cannot be read. With a
+/// registered clock this gives the session's node clock's time, which reads that clock and is
+/// strictly increasing too, whatever the clock's standing: the `clock-quality-stamping` policy is
+/// the stamper's (the data the node stamps), not a program's that asks for the time. With nothing
+/// registered it gives the wall clock with the session's zid, without pico's per-session ordering.
 #[no_mangle]
 pub unsafe extern "C" fn z_timestamp_new(
     ts: *mut z_timestamp_t,
@@ -686,22 +684,16 @@ pub unsafe extern "C" fn z_timestamp_new(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        // A program that registered a clock (`wz_ext_clock_source_register`) is stamped from it,
+        // A program that registered a clock (`wz_ext_clock_source_register`) is given its time,
         // through the session's node clock, so successive stamps strictly increase whatever the
         // clock does. A registered clock that cannot say what time it is leaves no stamp to give:
-        // pico's own answer to a stamp with no clock, and the system clock is not the fallback of
+        // pico's own answer to a time it cannot read, and the system clock is not the fallback of
         // a clock the program chose. With nothing registered the stamp is the wall clock, below.
         #[cfg(feature = "clock-source")]
         if !wz_node_time::clock_registry::GLOBAL.is_empty() {
-            return match state.ext.hlc.stamp() {
-                Some(stamp) => {
-                    *ts = z_timestamp_t {
-                        valid: true,
-                        id: crate::zid::z_id_t {
-                            id: state.drive.zid(),
-                        },
-                        time: stamp.time,
-                    };
+            return match clock_timestamp(&state.ext.hlc, state.drive.zid()) {
+                Some(given) => {
+                    *ts = given;
                     Z_OK
                 }
                 None => Z_ERR_GENERIC,
@@ -730,6 +722,68 @@ pub unsafe extern "C" fn z_timestamp_new(
         };
         Z_OK
     })
+}
+
+/// What [`z_timestamp_new`] gives a session whose node clock is `hlc` and whose id is `zid`, when a
+/// clock is registered: the clock's next time, with no stamping policy applied, or `None` when the
+/// clock cannot say what time it is.
+#[cfg(feature = "clock-source")]
+fn clock_timestamp(
+    hlc: &wz_node_time::node_clock::NodeHlc,
+    zid: [u8; crate::zid::Z_ID_SIZE],
+) -> Option<z_timestamp_t> {
+    let stamp = hlc.clock_stamp()?;
+    Some(z_timestamp_t {
+        valid: true,
+        id: crate::zid::z_id_t { id: zid },
+        time: stamp.time,
+    })
+}
+
+#[cfg(all(test, feature = "clock-source"))]
+mod clock_timestamp_tests {
+    use wz_node_time::node_clock::{NodeHlc, TimestampingEnabled};
+    use wz_node_time::timestamp_source::SystemEpoch;
+    use wz_session_core::WhatAmI;
+
+    use super::clock_timestamp;
+
+    /// A node whose clock is not trusted stamps none of its data under `trusted-only`, and a
+    /// program that asks for the time is given the clock's all the same: one clock, so what the
+    /// program is given and what the node stamps once the clock is trusted interleave.
+    #[test]
+    fn a_trusted_only_session_gives_a_program_the_time_of_the_clock_it_stamps_data_with() {
+        let zid = [0x5c; crate::zid::Z_ID_SIZE];
+        let hlc = NodeHlc::for_node_over_source(
+            &zid,
+            WhatAmI::Peer,
+            TimestampingEnabled::all(true),
+            SystemEpoch,
+        )
+        .with_trusted_only_stamping(true);
+        assert!(
+            hlc.stamp().is_none(),
+            "no reference reported: no data is stamped"
+        );
+        let first = clock_timestamp(&hlc, zid).expect("the program is given the time");
+        assert!(first.valid);
+        assert_eq!(first.id.id, zid);
+        assert!(hlc.report_sync_acquired());
+        let stamped = hlc.stamp().expect("a trusted clock stamps data").time;
+        let second = clock_timestamp(&hlc, zid).expect("and given it again");
+        assert!(
+            first.time < stamped && stamped < second.time,
+            "one clock: {} {stamped} {}",
+            first.time,
+            second.time
+        );
+    }
+
+    /// A node that holds no clock has no time to give from it.
+    #[test]
+    fn a_session_with_no_clock_gives_no_time_from_it() {
+        assert!(clock_timestamp(&NodeHlc::disabled(), [0x5d; crate::zid::Z_ID_SIZE]).is_none());
+    }
 }
 
 /// Default publisher-put options (pico `z_publisher_put_options_default`).

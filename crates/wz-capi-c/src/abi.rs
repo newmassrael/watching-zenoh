@@ -1632,7 +1632,12 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// [`WZ_CAPI_C_CONFIG_NOT_IN_BUILD`], and [`wz_capi_c_config_honoured`] lists the keys THIS
 /// library honours, which leaves out the keys of a capability it was built without (the traffic
 /// policy's in a build without `interceptors`, for one).
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 15;
+///
+/// It moves to 16 with no new symbol: the rule `wz_capi_c.h` states for the clock a program
+/// registers changed. `z_timestamp_new` gives a program the node clock's time (the registered
+/// clock where one is), whatever the clock's standing, and the `clock-quality-stamping` policy
+/// holds back only the data the node stamps; before it, `z_timestamp_new` read the system clock.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 16;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;

@@ -1304,7 +1304,10 @@ Each lands whole with its surface lines, tests and faults in one round.
     the forward path, the publication of the session, the reply and the caches take, holds the
     policy, and `NodeHlc::clock_stamp` and the lent clock, which a program reads for itself, do
     not; until this was settled `Session::new_timestamp` of a `trusted-only` node answered the wall
-    clock where the clock it lends answered the node's time.
+    clock where the clock it lends answered the node's time. The two C ABIs follow the same rule:
+    zenoh-c's `z_timestamp_new` gives the session's node clock and the system time where the node
+    holds none, as upstream's `session.new_timestamp()` does (`wz_capi_c` revision 16), and
+    zenoh-pico's gives the registered clock's time whatever its standing (`capi-pico` revision 2).
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

@@ -76,6 +76,16 @@ impl SessionHandle {
         }
     }
 
+    /// The node's clock, the one the session stamps its data with: the registry's or the node's,
+    /// shared and not copied. It holds no clock where the role does not timestamp.
+    pub(crate) fn node_hlc(&self) -> wz_runtime_tokio::node_clock::NodeHlc {
+        match self {
+            Self::Registry(state) => state.shared.node_hlc().clone(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.node_hlc(),
+        }
+    }
+
     /// The id and the announced role of every established peer, the role in its 2-bit wire form
     /// (0 router, 1 peer, 2 client): the registry's sessions, or the faces a node holds.
     pub(crate) fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
