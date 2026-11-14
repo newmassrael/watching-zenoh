@@ -576,7 +576,11 @@ Each lands whole with its surface lines, tests and faults in one round.
     as the subscribers' did (`a_callback_of_the_nodes_own_queryable_may_declare_while_its_session_asks`
     was red); the route now takes the branch of the query's fan under the guard and owes the call
     (`QueryJob`), which is made with no guard held and takes the tables for reading again to send
-    the replies and to end the branch.
+    the replies and to end the branch. The route of a query takes the span it owes the call to as
+    an argument, so no entry point can route a query with no span open and have the call made
+    under the guard; a callback may ask the node a query and undeclare a queryable while a face's
+    query is routed to it (upstream lets its tables go before it calls the queryables:
+    `zenoh/src/api/session.rs` @ `drop(state);`).
   - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
     declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
     `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on
