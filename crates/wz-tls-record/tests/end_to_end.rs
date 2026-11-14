@@ -1712,3 +1712,172 @@ fn an_epoch_change_with_no_announcement_is_counted_and_not_confirmed() {
          pretend otherwise"
     );
 }
+
+/// One framed zenoh KeepAlive sealed as application data at sequence `n`.
+fn sealed_keep_alive(
+    enc: &mut Box<dyn rustls::crypto::cipher::MessageEncrypter>,
+    n: u64,
+) -> Vec<u8> {
+    let unit = vec![0x04u8, n as u8];
+    let mut framed = (unit.len() as u16).to_le_bytes().to_vec();
+    framed.extend_from_slice(&unit);
+    enc.encrypt(
+        OutboundPlainMessage {
+            typ: rustls::ContentType::ApplicationData,
+            version: rustls::ProtocolVersion::TLSv1_2,
+            payload: rustls::crypto::cipher::OutboundChunks::Single(&framed),
+        },
+        n,
+    )
+    .expect("seal")
+    .encode()
+}
+
+/// A client TLS flow fed one packet at a time and never finished.
+struct Feed {
+    d: wz_capture::Dissection,
+    seq: u32,
+    at: usize,
+}
+
+impl Feed {
+    fn new() -> Self {
+        Self {
+            d: wz_capture::Dissection::new(),
+            seq: 1000,
+            at: 0,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        self.d.push_packet(
+            wz_capture::link::LINKTYPE_ETHERNET,
+            self.at,
+            &tcp_packet(self.seq, bytes),
+        );
+        self.seq += bytes.len() as u32;
+        self.at += 1;
+    }
+}
+
+/// The live pass: no key runs no pass, a key for another connection refuses the
+/// flow without settling it, the right key opens the records kept so far, and
+/// a record that arrives afterwards opens under the opener that began the flow.
+#[test]
+fn a_live_feed_opens_its_records_once_keys_arrive_and_keeps_opening_later_ones() {
+    use wz_capture::tls::NotDecrypted;
+    use wz_capture::DecryptionSummary;
+    use wz_tls_record::pass::LiveDecryptor;
+
+    let secret = traffic_secret();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(1));
+    let mut enc = sealer(&secret);
+    let mut feed = Feed::new();
+    feed.push(&client_hello(&random));
+    for n in 0..2u64 {
+        feed.push(&sealed_keep_alive(&mut enc, n));
+    }
+
+    let mut keys = LiveDecryptor::new();
+    assert_eq!(
+        keys.run(&mut feed.d),
+        DecryptionSummary::default(),
+        "no key, no pass"
+    );
+    assert_eq!(
+        feed.d.encrypted_flows()[0].not_decrypted,
+        Some(NotDecrypted::NoKeysSupplied)
+    );
+
+    let other = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&[0xeeu8; 32]),
+        hex(&secret)
+    );
+    assert_eq!(keys.absorb(other.as_bytes()), 1);
+    assert_eq!(keys.run(&mut feed.d).refused, 1);
+    assert_eq!(
+        feed.d.encrypted_flows()[0].not_decrypted,
+        Some(NotDecrypted::NoKeyForSession)
+    );
+
+    let right = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&secret)
+    );
+    assert_eq!(keys.absorb(right.as_bytes()), 1);
+    assert_eq!(keys.connections(), 2);
+    let opened = keys.run(&mut feed.d);
+    assert_eq!(
+        (opened.decrypted, opened.records, opened.frames),
+        (1, 2, 2),
+        "opened={opened:?}"
+    );
+
+    feed.push(&sealed_keep_alive(&mut enc, 2));
+    let later = keys.run(&mut feed.d);
+    assert_eq!(
+        (later.records, later.frames),
+        (1, 1),
+        "the third record opens at sequence 2 under the same opener: later={later:?}"
+    );
+    assert_eq!(feed.d.flows()[0].frames().len(), 3);
+    assert_eq!(feed.d.encrypted_flows()[0].not_decrypted, None);
+    assert!(
+        !format!("{keys:?}").contains(&hex(&secret)),
+        "the decryptor's Debug names no key"
+    );
+}
+
+/// The file pass and the live pass read a capture's own Decryption Secrets
+/// Block the same way: both open its flow with no key handed in.
+#[test]
+fn both_passes_open_a_flow_with_the_captures_own_secrets_block() {
+    use wz_tls_record::pass::{decrypt_capture, LiveDecryptor};
+
+    let secret = traffic_secret();
+    let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(4));
+    let mut enc = sealer(&secret);
+    let mut stream = client_hello(&random);
+    for n in 0..3u64 {
+        stream.extend_from_slice(&sealed_keep_alive(&mut enc, n));
+    }
+    let packet = tcp_packet(1000, &stream);
+    let mut file = wz_capture::pcapng::write(
+        &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+        &[(0, 1_000_000, &packet)],
+    );
+    let log_text = format!(
+        "CLIENT_TRAFFIC_SECRET_0 {} {}\n",
+        hex(&random),
+        hex(&secret)
+    );
+    file.extend_from_slice(&decryption_secrets_block(
+        SECRETS_TYPE_TLS_KEY_LOG,
+        log_text.as_bytes(),
+    ));
+
+    let mut whole = wz_capture::Dissection::from_capture(&file).expect("the file parses");
+    let pass = decrypt_capture(&mut whole, &file, None, None, &mut ());
+    assert_eq!(
+        (pass.tls.summary.decrypted, pass.tls.summary.frames),
+        (1, 3),
+        "summary={:?}",
+        pass.tls.summary
+    );
+    assert_eq!(pass.tls.foreign_secrets_blocks, 0);
+    assert_eq!(pass.quic.flows_offered, 0, "no QUIC flow in this capture");
+    assert!(pass.quic_flows.is_empty());
+
+    let mut fed = wz_capture::Dissection::from_capture(&file).expect("the file parses");
+    let mut keys = LiveDecryptor::new();
+    let live = keys.run(&mut fed);
+    assert_eq!((live.decrypted, live.frames), (1, 3), "live={live:?}");
+    assert_eq!(keys.connections(), 1);
+    assert_eq!(
+        fed.flows()[0].frames().len(),
+        whole.flows()[0].frames().len(),
+        "the two passes read the same messages"
+    );
+}

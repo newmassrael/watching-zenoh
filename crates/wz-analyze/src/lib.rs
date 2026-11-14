@@ -21,9 +21,8 @@
 
 use wz_capture::report::CaptureReport;
 use wz_capture::{CaptureError, Dissection};
-use wz_tls_record::capture::CaptureOpener;
 use wz_tls_record::keylog::KeyLog;
-use wz_tls_record::quic::connection::{DirectionCensus, QuicFlowOpener, SequenceKey};
+use wz_tls_record::quic::connection::SequenceKey;
 
 /// How the report should be rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -327,8 +326,9 @@ pub enum UsageError {
     /// Round 1999 — a flag that cannot work on a live read was given with one.
     ///
     /// REFUSED on exactly [`Self::SelectWithoutPlane`]'s rule. QUIC recovery
-    /// re-reads the CAPTURE's own bytes (`quic_pass`), which a tap does not
-    /// keep, so `--quic` on a live read would be a flag that changes nothing.
+    /// re-reads the CAPTURE's own bytes (`wz_tls_record::pass::open_quic`),
+    /// which a tap does not keep, so `--quic` on a live read would be a flag
+    /// that changes nothing.
     LiveCannotDo(&'static str),
     /// Round 2001 (item 473) — `--csv` named a plane this build does not emit.
     ///
@@ -1231,8 +1231,9 @@ pub fn analyze_request(request: &Request<'_>) -> Result<(String, Outcome), Captu
 /// caller's to decide.
 ///
 /// ⚠ [`Request::capture`] IS STILL READ on this path, and by exactly one thing:
-/// [`quic_pass`] re-reads the capture's own bytes to find QUIC packets, because
-/// a QUIC flow is recovered from the packet record rather than from the
+/// [`wz_tls_record::pass::open_quic`] re-reads the capture's own bytes to find
+/// QUIC packets, because a QUIC flow is recovered from the packet record rather
+/// than from the
 /// dissection. A caller with no capture bytes passes an empty slice and gets no
 /// QUIC decryption — which is why `wz-analyze` REFUSES `--quic` together with a
 /// live read rather than accepting a flag that would quietly do nothing.
@@ -1336,87 +1337,53 @@ pub fn analyze_dissection(
     // reads.
     let _ = (bounded, quic_ports, serial_linktypes);
 
-    // The capture's own keys first, then the external log folded in.
-    let (mut opener, foreign) = CaptureOpener::from_secrets_blocks(dissection.decryption_secrets());
-    if let Some(text) = keylog {
-        opener.absorb(KeyLog::parse(text));
-    }
-    let key_log_connections = opener.log().len();
-    // The pass runs only where there ARE keys, and that is a truthfulness rule
-    // rather than an optimisation. Run with an empty log, every flow is declined
-    // as `no_key_for_session` -- "keys were supplied and none are for this
-    // session" -- which is false about a run that had no keys at all.
-    // `no_keys_supplied` is what such a flow reports when no pass has run, and
-    // it is the accurate statement.
+    // THE DECRYPTION PASS, TLS and then QUIC, which `wz-tls-record::pass` holds
+    // for every composition root: the capture's own keys first, the external
+    // log folded in, and no TLS pass at all where no key is held (see that
+    // module for why that is a truthfulness rule).
+    //
     // R311y677 — the field sink is installed BEFORE the pass, because the
     // plaintext exists only during it. A run that did not ask for fields passes
     // the no-op sink and the pass is byte-for-byte what it was.
+    //
+    // R311y718 — the QUIC half runs ABOVE the census planes, as the TLS half
+    // does: it frames what it recovers, so a plane folded before it would
+    // census the pre-QUIC view and report a floor as a total.
     let mut fields = FieldSink::new(messages_per_flow);
-    // R311y691 — the pass's own SUMMARY, which this reader dropped on the floor.
-    //
-    // `decrypt_with` has returned a `DecryptionSummary` since long before this
-    // crate existed and every call here discarded it, which is the shape this
-    // crate was created to end: a fact computed and reachable by nobody. Most of
-    // it the report re-derives from the dissection, and one number it cannot --
-    // `already_opened`, which is a fact about THIS PASS and not about the
-    // capture, and is therefore gone the moment the summary is dropped.
-    let pass = if key_log_connections > 0 {
-        if per_field {
-            dissection.decrypt_with_sink(&mut opener, &mut fields)
-        } else {
-            dissection.decrypt_with(&mut opener)
-        }
-    } else {
-        wz_capture::DecryptionSummary::default()
-    };
-
-    // R311y671 — what the decryptor OBSERVED about its epoch changes, which the
-    // dissection does not hold: the epochs are the opener's state, and until this
-    // round the `KeyUpdate` messages announcing them were opened and read past.
-    let epochs = opener.epoch_witness();
-    // R311y698 (§1.2a) — THE QUIC PASS, which is the item this crate was
-    // created to make unnecessary and which had never been written.
-    //
-    // `wz-tls-record::quic` could open a QUIC packet since R311y694 and nothing
-    // called it: the register's whole §QUIC section reduced to "there is no
-    // caller". It runs unconditionally rather than behind a flag, because the
-    // Initial packet space needs NO key at all -- a capture with QUIC in it and
-    // no key log still yields its handshake, its version, its connection ID and
-    // its ClientHello, which is exactly what tells a reader whether the key log
-    // they are about to fetch is the right one.
-    //
-    // R311y718 — MOVED ABOVE THE CENSUS PLANES, and the move is the round's
-    // point rather than a tidy-up. The pass now FRAMES what it recovers
-    // (`feed_quic_stream`), so a QUIC flow carries decoded zenoh messages the
-    // moment it returns -- and every plane below is built by walking the
-    // dissection once. Left where it was, throughput, exchanges, payloads and
-    // the node census would each have censused the pre-QUIC view and reported a
-    // floor as a total, which is the defect the comment two blocks up records
-    // for the DECRYPTION pass in the same words. R311y716 shipped that exact
-    // mistake in the alert path; this is the same seam and the same order rule.
-    //
-    // R311y718 — and the FIELD SINK goes with it, on the same argument the TLS
-    // half makes two blocks up: the recovered bytes exist only inside the call,
-    // so a `--fields` run over a `quic/...` capture had no window in which to
-    // walk them. The no-op `()` when fields were not asked for is what
-    // `decrypt_with` passes for the same reason.
-    let (quic, quic_flows) = if per_field {
-        quic_pass(
-            capture,
+    let decryption = if per_field {
+        wz_tls_record::pass::decrypt_capture(
             &mut dissection,
-            opener.log(),
+            capture,
+            keylog,
             quic_cid_len,
             &mut fields,
         )
     } else {
-        quic_pass(
-            capture,
+        wz_tls_record::pass::decrypt_capture(
             &mut dissection,
-            opener.log(),
+            capture,
+            keylog,
             quic_cid_len,
             &mut (),
         )
     };
+    let wz_tls_record::pass::Decryption {
+        tls:
+            wz_tls_record::pass::TlsPass {
+                opener,
+                foreign_secrets_blocks: foreign,
+                // R311y691 — the pass's own SUMMARY: `already_opened` is a fact
+                // about THIS PASS and not about the capture, and the report
+                // cannot re-derive it from the dissection.
+                summary: pass,
+            },
+        quic,
+        quic_flows,
+    } = decryption;
+    let key_log_connections = opener.log().len();
+    // R311y671 — what the decryptor OBSERVED about its epoch changes, which the
+    // dissection does not hold: the epochs are the opener's state.
+    let epochs = opener.epoch_witness();
     let flows = dissection.encrypted_flows();
     let decrypted_flows = flows.iter().filter(|f| f.not_decrypted.is_none()).count();
     // R311y673 — the three OBSERVER PLANES, built only where asked for.
@@ -1794,223 +1761,10 @@ fn key_mismatch_lines(dissection: &Dissection, log: &KeyLog, format: Format) -> 
     )
 }
 
-/// R311y698 (§1.2a) — one QUIC flow, as far as this reader got into it.
-#[derive(Debug, Clone)]
-pub struct QuicFlowOutcome {
-    /// The five-tuple.
-    pub flow: wz_capture::link::FlowKey,
-    /// Per-direction tallies, `[A, B]`.
-    pub census: [DirectionCensus; 2],
-    /// Which direction the client is, settled by whoever sent the first Initial.
-    pub client_direction: Option<wz_session_core::passive::Direction>,
-    /// The version the connection declared.
-    pub version: Option<wz_tls_record::quic::QuicVersion>,
-    /// Whether the key log held this connection's secrets.
-    pub keys_installed: bool,
-    /// Whether a ClientHello was found and its random read.
-    pub client_hello_seen: bool,
-    /// R311y710 (Y2) — the connection's identity was ADOPTED from a key log
-    /// holding exactly one connection, rather than read off the wire.
-    ///
-    /// A PREMISE where `client_hello_seen` is evidence, and carried apart for
-    /// the reason `QuicCensus::declared` is carried apart from recognition one
-    /// crate over: a reader acts differently on "I saw this" and "I assumed
-    /// this", and a rendering that shows only the consequence shows neither.
-    pub identity_adopted: bool,
-    /// Each recovered sequence: direction, which one, and how many contiguous
-    /// bytes came out.
-    pub sequences: Vec<(wz_session_core::passive::Direction, SequenceKey, usize)>,
-    /// Sequences the table's bound refused, `[A, B]`.
-    pub sequences_dropped: [usize; 2],
-}
-
-/// R311y698 (§1.2a) — open every QUIC flow the dissection found.
-///
-/// # Why this needed no seam in `wz-capture`
-///
-/// The register estimated this item as needing one -- `push_datagram` counts a
-/// QUIC packet and returns without retaining its payload, so the bytes appear
-/// to be gone. Measured instead of assumed, which is what R311y679 found for
-/// datagram fields and what R311y694-R311y697 got wrong four times in a row:
-/// the bytes are in the CALLER'S OWN FILE, `Reread` already parses it a second
-/// time for `--fields`, `link::decapsulate` is public, and a datagram flow's
-/// key is a public `FlowKey`. Nothing had to be added anywhere.
-///
-/// So this walks the capture once more, hands each QUIC flow's datagrams to its
-/// own [`QuicFlowOpener`] in capture order, and retains nothing but what came
-/// out. The cost is one extra parse of the caller's file, paid only by a capture
-/// that HAS a QUIC flow -- the early return sits above it.
-fn quic_pass(
-    capture: &[u8],
-    dissection: &mut Dissection,
-    log: &KeyLog,
-    cid_len: Option<usize>,
-    sink: &mut impl wz_capture::PlaintextSink,
-) -> (wz_capture::quic::QuicDecryption, Vec<QuicFlowOutcome>) {
-    use wz_session_core::passive::Direction;
-
-    let keys: Vec<wz_capture::link::FlowKey> = dissection
-        .datagram_flows()
-        .iter()
-        .filter(|f| f.quic.is_some())
-        .map(|f| f.flow)
-        .collect();
-    let mut summary = wz_capture::quic::QuicDecryption {
-        flows_offered: keys.len(),
-        ..Default::default()
-    };
-    if keys.is_empty() {
-        return (summary, Vec::new());
-    }
-    let Some(file) = Reread::of(capture) else {
-        // Unreadable on the second pass. The flows are still OFFERED, so the
-        // summary says none were opened rather than saying there were none --
-        // the distinction `CaptureNotReread` draws one plane over.
-        return (summary, Vec::new());
-    };
-    let mut openers: Vec<(wz_capture::link::FlowKey, QuicFlowOpener)> = keys
-        .iter()
-        .map(|flow| {
-            let opener = QuicFlowOpener::new(log.clone());
-            // R311y709 (Y2) — the declaration reaches the OPENER, which is the
-            // half y698's own register recorded as the failure mode one round
-            // over: a flag the parser reads and nothing acts on.
-            (
-                *flow,
-                match cid_len {
-                    Some(len) => opener.declaring_short_connection_id_len(len),
-                    None => opener,
-                },
-            )
-        })
-        .collect();
-
-    let mut at = 0usize;
-    while let Some(packet) = file.packet(at) {
-        at += 1;
-        let Ok(wz_capture::link::Transport::Udp(datagram)) =
-            wz_capture::link::decapsulate(packet.link_type, packet.index, packet.data)
-        else {
-            continue;
-        };
-        let Some((_, opener)) = openers.iter_mut().find(|(f, _)| *f == datagram.flow) else {
-            continue;
-        };
-        // The SAME direction rule the field walk uses (`packet_disagreement`),
-        // called the same way rather than restated: two readers of one capture
-        // that disagree about which half a packet is on would file a client's
-        // stream under the server.
-        let direction = if datagram.from_low {
-            Direction::A
-        } else {
-            Direction::B
-        };
-        // R311y719 — the CAPTURE PACKET INDEX travels with the offer. It is the
-        // only coordinate that survives decryption for an RFC 9221 datagram: a
-        // recovered batch has no stream to be an offset into, and the ordinal
-        // of the datagram within this pass is a number that would read as a
-        // capture coordinate and is not one.
-        opener.push_datagram(direction, packet.index, datagram.payload);
-    }
-
-    let mut flows = Vec::new();
-    for (flow, opener) in openers {
-        let census = opener.census();
-        let packets: usize = census.iter().map(|c| c.packets).sum();
-        let opened: usize = census.iter().map(|c| c.opened).sum();
-        summary.packets += packets;
-        summary.packets_opened += opened;
-        summary.packets_no_keys += census.iter().map(|c| c.no_keys).sum::<usize>();
-        summary.packets_refused += census.iter().map(|c| c.refused).sum::<usize>();
-        summary.crypto_bytes += census.iter().map(|c| c.crypto_bytes).sum::<usize>();
-        summary.stream_bytes += census.iter().map(|c| c.stream_bytes).sum::<usize>();
-        summary.datagram_bytes += census.iter().map(|c| c.datagram_bytes).sum::<usize>();
-        summary.walks_stopped += census.iter().map(|c| c.walks_stopped).sum::<usize>();
-        if opener.identity_adopted() {
-            summary.flows_identity_adopted += 1;
-        }
-
-        // A flow is WHOLE when every packet in it opened. Zero packets is not
-        // whole: a QUIC flow the dissection counted and this pass saw none of is
-        // a disagreement between two reads of one file, not a success.
-        if packets > 0 && opened == packets {
-            summary.flows_opened += 1;
-        }
-        let mut sequences = Vec::new();
-        for direction in [Direction::A, Direction::B] {
-            for (key, reassembler) in opener.sequences(direction) {
-                sequences.push((direction, key, reassembler.stream().len()));
-                // R311y718 (§1.2a) — AND THE BYTES GO ON TO A ZENOH FRAMER.
-                //
-                // Until this round the recovered stream was MEASURED and never
-                // read: this loop pushed its LENGTH into a listing and dropped
-                // the bytes, so a QUIC capture whose keys were all present
-                // reported `stream_bytes: 25` and `messages decoded: 0`. That is
-                // the "recovered and never read" shape R311y705 named for the
-                // TLS floor, still open on the transport underneath it.
-                //
-                // CRYPTO is offered too, and refused by the seam rather than
-                // filtered out here. The distinction belongs on the far side
-                // because it is the FRAMER's rule -- handshake bytes are a TLS
-                // exchange with no zenoh in them -- and a caller that quietly
-                // skipped them would leave `handshake_offers` at zero and make
-                // a capture whose every stream is CRYPTO indistinguishable from
-                // one that recovered nothing at all.
-                let (stream_id, handshake) = match key {
-                    SequenceKey::Stream(id) => (id, false),
-                    SequenceKey::Crypto(space) => (space.index() as u64, true),
-                };
-                summary
-                    .framing
-                    .absorb(dissection.feed_quic_stream_with_sink(
-                        flow,
-                        direction,
-                        stream_id,
-                        handshake,
-                        reassembler.stream(),
-                        sink,
-                    ));
-            }
-            // R311y719 — AND THE RFC 9221 DATAGRAMS, which is how zenoh's
-            // `transport-link-quic-datagram` sends a batch. R311y718 closed the
-            // stream half and left these counted in the unread floor, correctly
-            // and visibly; this is the other half of the same seam.
-            //
-            // Each carries the index of the capture packet it came out of, and
-            // that index is the coordinate the decoded messages are anchored
-            // by -- the same anchor a cleartext datagram's messages use, and
-            // the only one that survives decryption.
-            for (origin, payload) in opener.datagrams(direction) {
-                summary.framing.absorb(
-                    dissection
-                        .feed_quic_datagram_with_sink(flow, direction, *origin, payload, sink),
-                );
-            }
-        }
-        flows.push(QuicFlowOutcome {
-            flow,
-            census,
-            client_direction: opener.client_direction(),
-            version: opener.version(),
-            keys_installed: opener.keys_installed(),
-            client_hello_seen: opener.client_hello_seen(),
-            identity_adopted: opener.identity_adopted(),
-            sequences,
-            sequences_dropped: opener.sequences_dropped(),
-        });
-    }
-    // R311y718 — the stall, measured from the FINISHED dissection rather than
-    // folded per offer. A stream fed twice has one leftover and not two, and a
-    // sum over offers would report the first offer's pending bytes again after
-    // the second offer consumed them. See `QuicStreamFeed::bytes_undecoded`.
-    summary.framing.bytes_undecoded = dissection
-        .datagram_flows()
-        .iter()
-        .flat_map(|f| f.quic_streams.iter())
-        .map(|s| s.undecoded_bytes() as usize)
-        .sum();
-    (summary, flows)
-}
+/// R311y698 (§1.2a) — one QUIC flow, as far as the decryption pass got into
+/// it. The pass and this type live in `wz_tls_record::pass`, shared with the C
+/// ABI; the name stays here for the callers that reach it through this crate.
+pub use wz_tls_record::pass::QuicFlowOutcome;
 
 /// What a `--select` with an AMBIGUOUS `zid` prefix did, as the sentence a
 /// person reads: which term, and which nodes of this capture it begins.
@@ -4354,18 +4108,12 @@ pub struct Sample {
 /// plan short by rows nobody accounted for is a plan that looks whole.
 pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, CaptureError> {
     let mut dissection = Dissection::from_capture(capture)?;
-    let (mut opener, _) = CaptureOpener::from_secrets_blocks(dissection.decryption_secrets());
-    if let Some(text) = keylog {
-        opener.absorb(KeyLog::parse(text));
-    }
-    if !opener.log().is_empty() {
-        dissection.decrypt_with(&mut opener);
-    }
+    let tls = wz_tls_record::pass::open_tls(&mut dissection, keylog, &mut ());
     // R2462 (open-debt item 706) — THE QUIC PASS, which this entry point had
     // never run.
     //
     // `decrypt_with` opens TLS records and nothing else: the QUIC recovery is
-    // `quic_pass`, and until this round its only caller was `analyze_request`.
+    // `open_quic`, and until this round its only caller was `analyze_request`.
     // So a replay plan built from a QUIC capture held no `QuicStream` list at
     // all -- measured, not inferred: on the same bytes `analyze` reports as
     // `messages decoded: 6`, this walk's dissection listed its origins as
@@ -4376,7 +4124,7 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
     //
     // Unconditional, on `analyze_request`'s own argument: the Initial packet
     // space needs no key, so a QUIC capture with no key log still yields its
-    // handshake. `quic_pass` returns before reading anything when the
+    // handshake. `open_quic` returns before reading anything when the
     // dissection holds no QUIC flow, so a capture without one pays one scan of
     // the flow list.
     //
@@ -4396,7 +4144,13 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
     // where a reader supplies it. Widening this signature was judged separately
     // and declined: `wz-replay` has no way to learn the number either, so the
     // parameter would arrive at its call site as a `None` written twice.
-    quic_pass(capture, &mut dissection, opener.log(), None, &mut recovered);
+    wz_tls_record::pass::open_quic(
+        capture,
+        &mut dissection,
+        tls.opener.log(),
+        None,
+        &mut recovered,
+    );
     // R311y703 (RP4) — ONE second read, serving both halves. The datagram walk
     // already needed it for the bytes; the stream half needs it only for the
     // clock, and a second parse for that would read the same immutable slice
@@ -10187,7 +9941,7 @@ mod quic_pass_tests {
     ///
     /// [`samples`] built its dissection with `Dissection::from_capture` and
     /// `decrypt_with` and stopped. `decrypt_with` opens TLS records; the QUIC
-    /// recovery is `quic_pass`, whose only caller was `analyze_request`. So the
+    /// recovery is `open_quic`, whose only caller was `analyze_request`. So the
     /// plan a replay is built from held no `QuicStream` list at all: on these
     /// same bytes, which `analyze` reports as seven messages decoded, the list
     /// origins came out `[Datagram, QuicDatagram, Datagram, QuicDatagram,
@@ -10205,7 +9959,7 @@ mod quic_pass_tests {
     ///
     /// * `demo/quic-native` exists ONLY inside the QUIC stream and names its
     ///   key by literal, so it grades the PASS and nothing else. Delete the
-    ///   `quic_pass` call in [`samples`] and it disappears.
+    ///   `open_quic` call in [`samples`] and it disappears.
     /// * `demo/temp` is published on the CLEARTEXT flow by numeric id, and the
     ///   binding for that id was declared on the QUIC stream of the flow
     ///   before it. It grades R2460's `absorb_datagram_sublists` call, which

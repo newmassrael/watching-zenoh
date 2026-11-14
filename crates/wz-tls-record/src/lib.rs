@@ -47,6 +47,7 @@
 
 pub mod capture;
 pub mod keylog;
+pub mod pass;
 pub mod quic;
 
 use ring::aead;

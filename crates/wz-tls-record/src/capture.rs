@@ -18,6 +18,7 @@
 //! dependencies and never learns what an AEAD is, while a caller who has a
 //! capture and a key log gets plaintext without writing the loop themselves.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 extern crate alloc;
@@ -51,7 +52,10 @@ use crate::{Suite, TrafficKeys};
 /// same fact.
 #[derive(Debug)]
 pub struct CaptureOpener {
-    log: KeyLog,
+    /// Shared, so the openers a live pass keeps one per flow
+    /// ([`crate::pass::LiveDecryptor`]) hold one copy of the key log between
+    /// them and not one each.
+    log: Arc<KeyLog>,
     /// The flow currently being opened, per direction.
     directions: [Option<DirectionState>; 2],
     /// R311y671 (§1.2a) — the epoch witness of every flow this opener has
@@ -92,7 +96,6 @@ pub struct CaptureOpener {
 
 /// R311y662 (§1.2a) — one EPOCH of one direction: the secret in force between
 /// two key changes, and the suite once a record has settled it.
-#[derive(Debug)]
 struct EpochState {
     secret: Vec<u8>,
     /// Suites still consistent with the secret's length; emptied as the first
@@ -100,6 +103,19 @@ struct EpochState {
     candidates: Vec<Suite>,
     /// The keys, once a suite has been settled by opening a record.
     settled: Option<TrafficKeys>,
+}
+
+impl core::fmt::Debug for EpochState {
+    /// The secret's length and never its bytes, for the reason
+    /// [`TrafficKeys`]'s `Debug` gives: [`CaptureOpener`] derives `Debug`
+    /// through this, and a caller that logs an opener must not log a key.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EpochState")
+            .field("secret", &format_args!("<{} byte(s)>", self.secret.len()))
+            .field("candidates", &self.candidates)
+            .field("settled", &self.settled)
+            .finish()
+    }
 }
 
 impl EpochState {
@@ -770,12 +786,29 @@ impl DirectionState {
 impl CaptureOpener {
     /// Build one from a key log.
     pub fn new(log: KeyLog) -> Self {
+        Self::sharing(Arc::new(log))
+    }
+
+    /// Build one over a key log other openers share.
+    pub fn sharing(log: Arc<KeyLog>) -> Self {
         Self {
             log,
             directions: [None, None],
             retired: [EpochWitness::default(); 2],
             owed: [0, 0],
         }
+    }
+
+    /// Let go of the key log, keeping the flow this opener began.
+    ///
+    /// The secrets a flow needs are taken out of the log when it begins
+    /// ([`RecordOpener::begin_flow`]), so an opener kept to continue one flow
+    /// needs the log no more; holding it would keep every connection's secrets
+    /// alive for as long as the flow runs. An opener that sheds its log refuses
+    /// every flow announced to it afterwards with
+    /// [`NotDecrypted::NoKeyForSession`].
+    pub fn shed_log(&mut self) {
+        self.log = Arc::default();
     }
 
     /// R311y671 (§1.2a) — what the two directions of the flow most recently
@@ -856,7 +889,7 @@ impl CaptureOpener {
     /// preferred either way, because either source may hold connections the
     /// other does not.
     pub fn absorb(&mut self, log: KeyLog) {
-        self.log.absorb(log);
+        Arc::make_mut(&mut self.log).absorb(log);
     }
 }
 
@@ -1347,5 +1380,61 @@ mod tests {
         let (opener, skipped) = CaptureOpener::from_secrets_blocks(&blocks);
         assert_eq!(skipped, 0);
         assert_eq!(opener.log().len(), 2, "both connections must be present");
+    }
+
+    /// A key log naming one connection, both directions, under one secret.
+    fn one_connection(random: &[u8; 32], secret: &[u8]) -> KeyLog {
+        KeyLog::parse(
+            alloc::format!(
+                "CLIENT_TRAFFIC_SECRET_0 {r} {s}\nSERVER_TRAFFIC_SECRET_0 {r} {s}\n",
+                r = hex(random),
+                s = hex(secret)
+            )
+            .as_bytes(),
+        )
+    }
+
+    /// An opener that began a flow holds that flow's secrets, and its `Debug`
+    /// shows their length and not one of their bytes, in hex or in the decimal
+    /// a derived `Debug` of a byte vector writes.
+    #[test]
+    fn an_openers_debug_shows_no_byte_of_a_secret() {
+        let random = [3u8; 32];
+        let secret: Vec<u8> = (0..48u8).map(|i| 0xa0 ^ i).collect();
+        let mut opener = CaptureOpener::new(one_connection(&random, &secret));
+        opener
+            .begin_flow(Some(&random), Some(Direction::A))
+            .expect("the log holds this connection");
+        let shown = alloc::format!("{opener:?}");
+        assert!(!shown.contains(&hex(&secret)), "{shown}");
+        let decimal = alloc::format!("{:?}", &secret[..4]);
+        let decimal = decimal.trim_start_matches('[').trim_end_matches(']');
+        assert!(!shown.contains(decimal), "{shown}");
+        assert!(
+            shown.contains("<48 byte(s)>"),
+            "the length is shown: {shown}"
+        );
+    }
+
+    /// An opener that let go of its log keeps the flow it began and refuses the
+    /// next one, which is what a pass that keeps one opener per flow needs.
+    #[test]
+    fn an_opener_that_shed_its_log_keeps_its_flow_and_refuses_a_new_one() {
+        let random = [3u8; 32];
+        let mut opener = CaptureOpener::new(one_connection(&random, &[9u8; 48]));
+        opener
+            .begin_flow(Some(&random), Some(Direction::A))
+            .expect("the log holds this connection");
+        opener.shed_log();
+        assert!(opener.log().is_empty());
+        assert!(
+            opener.has_keys(Direction::A),
+            "the begun flow keeps its keys"
+        );
+        assert!(opener.has_keys(Direction::B));
+        assert_eq!(
+            opener.begin_flow(Some(&random), Some(Direction::A)),
+            Err(NotDecrypted::NoKeyForSession)
+        );
     }
 }
