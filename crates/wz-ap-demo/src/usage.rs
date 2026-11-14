@@ -215,6 +215,11 @@ pub(crate) fn print_usage() {
     eprintln!("                             senders still adding to it (default the writer's");
     eprintln!("                             200 us; 0 holds nothing back).");
     eprintln!("                             zenoh transport/link/tx/queue/batching/time_limit");
+    eprintln!("    --tx-queue-allocation <init|lazy>");
+    eprintln!("                             whether a link's queue allocates every batch it may");
+    eprintln!("                             hold when its session is established, or each when");
+    eprintln!("                             first wanted (default lazy).");
+    eprintln!("                             zenoh transport/link/tx/queue/allocation/mode");
     eprintln!("    --rx-max-message-size <bytes>");
     eprintln!("                             the largest message a session rejoins from fragments");
     eprintln!("                             (default 1073741824, read as at most the build's");

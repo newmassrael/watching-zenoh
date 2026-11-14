@@ -1346,6 +1346,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // When a link's queue takes its batches, honoured at either value for the reason the
+    // batching switch is.
+    if named("transport/link/tx/queue/allocation/mode") {
+        exp.pair(
+            "transport/link/tx/queue/allocation/mode",
+            "--tx-queue-allocation",
+            String::from(cfg.tx_queue.allocation.zenoh_name()),
+            None,
+        );
+    }
     // The largest message a session rejoins from fragments, honoured at any
     // value for the reason the sizes above are.
     if named("transport/link/rx/max_message_size") {
@@ -3398,6 +3408,14 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          writer_queue.rs: the stated bound while a producer keeps staging, nothing at zero.",
     ),
     (
+        "transport/link/tx/queue/allocation/mode",
+        KIND_LEG_JUDGED,
+        "expands to `--tx-queue-allocation`. Local memory no frame carries: \
+         `an_init_queue_holds_its_batches_before_the_first_frame_and_a_lazy_one_none` in \
+         writer_queue.rs counts the batches a shaped queue holds before its first frame, \
+         every lane's under init and none under lazy.",
+    ),
+    (
         "transport/link/rx/max_message_size",
         KIND_OFF_WIRE,
         "expands to `--rx-max-message-size`. The largest message a session \
@@ -5366,6 +5384,12 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { batching: { time_limit: 5 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/allocation/mode",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { allocation: { mode: "init" } } } } } }"#,
             ),
             (
                 "transport/link/rx/max_message_size",
@@ -7556,7 +7580,8 @@ mod stock_config_tests {
                             congestion_control: { drop: { wait_before_drop: 2500,
                                                           max_wait_before_drop_fragments: 40000 },
                                                   block: { wait_before_close: 7000000 } },
-                            batching: { enabled: false, time_limit: 5 } } },
+                            batching: { enabled: false, time_limit: 5 },
+                            allocation: { mode: "init" } } },
                                    rx: { max_message_size: 65536 } } } }"#,
         )
         .unwrap();
@@ -7584,6 +7609,7 @@ mod stock_config_tests {
                 wait_before_close_us: 7_000_000,
                 batching: false,
                 batching_time_limit_us: 5_000,
+                allocation: wz::runtime_tokio::session_glue::QueueAllocation::Init,
                 ..wz::runtime_tokio::session_glue::TxQueueConf::default()
             },
             "the file's queue section reaches the session the node opens"
@@ -7785,6 +7811,10 @@ mod stock_config_tests {
             (
                 vec!["--tx-batching-time-limit-ms", "1.5"],
                 "--tx-batching-time-limit-ms expects",
+            ),
+            (
+                vec!["--tx-queue-allocation", "eager"],
+                "--tx-queue-allocation expects",
             ),
         ] {
             let err = TransportTuning::from_argv(&argv(&cli))
@@ -9432,6 +9462,12 @@ impl TransportTuning {
                 .ok_or_else(|| {
                     format!("--tx-batching-time-limit-ms expects milliseconds, got '{v}'")
                 })?;
+        }
+        if let Some(v) = parse_pair(rest, "--tx-queue-allocation") {
+            out.tx_queue.allocation =
+                wz::runtime_tokio::session_glue::QueueAllocation::from_zenoh_name(&v).ok_or_else(
+                    || format!("--tx-queue-allocation expects init or lazy, got '{v}'"),
+                )?;
         }
         if let Some(v) = parse_pair(rest, "--rx-max-message-size") {
             out.link_rx.max_message_size = v

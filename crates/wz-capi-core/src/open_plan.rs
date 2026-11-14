@@ -609,6 +609,8 @@ pub struct StatedTxQueue {
     pub batching: Option<bool>,
     /// `batching/time_limit`, in microseconds.
     pub batching_time_limit_us: Option<u64>,
+    /// `allocation/mode`.
+    pub allocation: Option<wz_session_core::link::QueueAllocation>,
 }
 
 impl StatedTxQueue {
@@ -621,6 +623,7 @@ impl StatedTxQueue {
             batching_time_limit_us: (stated.batching_time_limit_us
                 != upstream.batching_time_limit_us)
                 .then_some(stated.batching_time_limit_us),
+            allocation: (stated.allocation != upstream.allocation).then_some(stated.allocation),
         }
     }
 
@@ -631,6 +634,9 @@ impl StatedTxQueue {
         }
         if let Some(limit_us) = self.batching_time_limit_us {
             model.batching_time_limit_us = limit_us;
+        }
+        if let Some(allocation) = self.allocation {
+            model.allocation = allocation;
         }
         model
     }
@@ -1866,10 +1872,17 @@ mod tests {
             stance(bound, TxQueueConf::default()).batching_time_limit_us,
             4_000
         );
+        let init =
+            r#"{ transport: { link: { tx: { queue: { allocation: { mode: "init" } } } } } }"#;
+        assert_eq!(
+            stance(init, TxQueueConf::default()).allocation,
+            wz_session_core::link::QueueAllocation::Init
+        );
         // Upstream's own value is no instruction, and silence is none either: the model keeps
         // its writer's bound rather than taking upstream's millisecond.
         let on = r#"{ transport: { link: { tx: { queue: { batching: { enabled: true,
-                                                                      time_limit: 1 } } } } } }"#;
+                                                                      time_limit: 1 },
+                                                          allocation: { mode: "lazy" } } } } } }"#;
         assert_eq!(stance(on, TxQueueConf::pico()), TxQueueConf::pico());
         assert_eq!(stance("{}", TxQueueConf::default()), TxQueueConf::default());
     }

@@ -907,6 +907,11 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "transport/link/tx/queue/batching/time_limit",
             (wz.tx_queue.batching_time_limit_us / 1_000).to_string(),
         ),
+        // A snake-case name in the tree, as upstream's serde spells it.
+        (
+            "transport/link/tx/queue/allocation/mode",
+            quoted(wz.tx_queue.allocation.zenoh_name()),
+        ),
         (
             "transport/link/rx/max_message_size",
             wz.link_rx.max_message_size.to_string(),
@@ -3675,6 +3680,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
           // Off, so each message leaves as a frame of its own: the one put still reaches. The
           // bound is stated too, off upstream's 1 ms, and holds nothing back with batching off.
           batching: {{ enabled: false, time_limit: 5 }},
+          // Off upstream's `lazy`: the queue takes its batches when the session is established.
+          allocation: {{ mode: "init" }},
         }},
       }},
       // The largest message a session rejoins from fragments, off its 1 GiB

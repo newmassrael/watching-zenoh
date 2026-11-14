@@ -246,6 +246,9 @@ impl wz_session_core::entropy::EntropySource for OsEntropy {
 // callsites (SessionLinkActions::params field, session.rs, wz-ap-demo,
 // the fixture_session_init_params test-support builder) resolve
 // unchanged. DP3 leaf.
+/// The type of [`TxQueueConf::allocation`], so a caller that fills the queue's configuration
+/// names it where it names the configuration.
+pub use wz_session_core::link::QueueAllocation;
 pub use wz_session_core::session_init_params::SessionInitParams;
 /// R2924 — the outbound queue configuration a [`SessionInitParams`] carries.
 pub use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};

@@ -158,6 +158,7 @@ pub fn outbound_channel_with_capacity(
             closed: false,
             senders: 1,
             spare: Vec::new(),
+            spare_max: SPARE_MAX,
             spare_keep_max: SPARE_CAPACITY_MAX,
             carry: None,
             next_seq: 0,
@@ -783,9 +784,13 @@ struct LaneState {
     senders: usize,
     /// ARCHITECTURE section 9.1 — frame buffers the writer is done with, kept to
     /// be lent again so a link in steady state allocates none. Bounded in count
-    /// and in size ([`SPARE_MAX`], `spare_keep_max`) so a burst of large
+    /// and in size (`spare_max`, `spare_keep_max`) so a burst of large
     /// frames cannot make a link hoard memory.
     spare: Vec<Vec<u8>>,
+    /// The most buffers kept spare: [`SPARE_MAX`], or every batch the lanes may hold once a
+    /// shape asked for its batches up front (`allocate_batches`), which are kept for as long as
+    /// the queue lives, as upstream keeps an `init` pipeline's.
+    spare_max: usize,
     /// The largest buffer kept spare: [`SPARE_CAPACITY_MAX`] until a sender asks for a buffer
     /// of the size the session builds its frames in (a batch), then that size up to
     /// [`SPARE_CAPACITY_CEIL`]. A buffer the link itself asked for is the one it will ask for
@@ -941,7 +946,7 @@ impl LaneState {
     fn give_spare(&mut self, mut buf: Vec<u8>) {
         if buf.capacity() == 0
             || buf.capacity() > self.spare_keep_max
-            || self.spare.len() >= SPARE_MAX
+            || self.spare.len() >= self.spare_max
         {
             return;
         }
@@ -974,8 +979,41 @@ impl LaneState {
             let default = Priority::DEFAULT.wire_byte() as usize;
             self.capacity = [self.capacity[default]; Priority::NUM];
         }
+        // A pooled queue's slots were allocated with the queue, which is the `init` mode
+        // already; a heap queue takes its batches now when the shape asks for them up front.
+        #[cfg(feature = "runtime-zero-copy")]
+        let pooled = self.pool.is_some();
+        #[cfg(not(feature = "runtime-zero-copy"))]
+        let pooled = false;
+        if shape.pipeline.allocation == wz_session_core::link::QueueAllocation::Init && !pooled {
+            self.allocate_batches(&shape);
+        }
         #[cfg(feature = "runtime-zero-copy")]
         self.size_budgets();
+    }
+
+    /// Allocate, and keep spare, every batch the lanes a frame can reach may hold under
+    /// `shape`: upstream's `init` mode, which fills each priority's refill ring with its size's
+    /// worth of batches when the pipeline is made (`io/zenoh-transport/src/common/pipeline.rs`
+    /// @ `for _ in 0..*num {`). A session that runs no QoS has the one lane its DEFAULT
+    /// priority sizes, as upstream's non-QoS pipeline has one queue. Each buffer holds a batch
+    /// and the length prefix of a stream frame, the size the session asks for when it builds
+    /// a frame ([`OutboundTx::take_buffer`]), so its first frames allocate nothing.
+    fn allocate_batches(&mut self, shape: &wz_session_core::link::TxQueueShape) {
+        let batches: usize = if self.single_lane {
+            shape.sizes[Priority::DEFAULT.wire_byte() as usize]
+        } else {
+            shape.sizes.iter().sum()
+        };
+        let capacity = shape
+            .batch_bytes
+            .saturating_add(SPARE_CAPACITY_CEIL - u16::MAX as usize)
+            .min(SPARE_CAPACITY_CEIL);
+        self.spare_max = self.spare_max.max(batches);
+        self.spare_keep_max = self.spare_keep_max.max(capacity);
+        while self.spare.len() < batches {
+            self.spare.push(Vec::with_capacity(capacity));
+        }
     }
 
     /// R3239 — size the pool's per-link slot budgets from the lanes this queue
@@ -3859,6 +3897,7 @@ mod tests {
             queue_unit_bytes: BATCH_BYTES,
             pipeline: TxPipeline {
                 batching_time_limit_us: limit_us,
+                ..TxPipeline::DEFAULT
             },
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -3939,11 +3978,81 @@ mod tests {
             queue_unit_bytes: BATCH_BYTES,
             pipeline: TxPipeline {
                 batching_time_limit_us: 7_000,
+                ..TxPipeline::DEFAULT
             },
         });
         assert_eq!(
             tx.shared.batching_time_limit_us.load(Ordering::Relaxed),
             7_000
+        );
+    }
+
+    /// `transport/link/tx/queue/allocation/mode`, read off the buffers a queue holds before its
+    /// first frame: an `init` shape allocates every batch its reachable lanes may hold (all of
+    /// them with QoS, the DEFAULT lane's without), hands the session one of them for its first
+    /// frame, and keeps them all when they come back; a `lazy` shape, upstream's default,
+    /// allocates none until a frame wants one and keeps no more than the spare bound.
+    #[test]
+    fn an_init_queue_holds_its_batches_before_the_first_frame_and_a_lazy_one_none() {
+        use wz_session_core::link::{QueueAllocation, TxPipeline, TxQueueShape};
+        const BATCH: usize = 1_024;
+        let shaped = |allocation: QueueAllocation, qos: bool| {
+            let (tx, rx) = outbound_channel();
+            tx.reshape(TxQueueShape {
+                sizes: [3; Priority::NUM],
+                qos,
+                batch_bytes: BATCH,
+                queue_unit_bytes: BATCH,
+                pipeline: TxPipeline {
+                    allocation,
+                    ..TxPipeline::DEFAULT
+                },
+            });
+            (tx, rx)
+        };
+
+        let (tx, _rx) = shaped(QueueAllocation::Init, true);
+        let all = 3 * Priority::NUM;
+        assert_eq!(
+            tx.spare_count(),
+            all,
+            "every lane's batches, before any frame"
+        );
+        let first = tx.take_buffer(BATCH + 2);
+        assert!(
+            first.capacity() >= BATCH + 2,
+            "a whole batch and its prefix"
+        );
+        assert_eq!(
+            tx.spare_count(),
+            all - 1,
+            "the first frame is built in one of them"
+        );
+        let rest: Vec<Vec<u8>> = (1..all).map(|_| tx.take_buffer(BATCH + 2)).collect();
+        assert_eq!(tx.spare_count(), 0);
+        tx.return_buffer(first);
+        for buf in rest {
+            tx.return_buffer(buf);
+        }
+        assert_eq!(
+            tx.spare_count(),
+            all,
+            "and every one is kept when it comes back"
+        );
+
+        let (tx, _rx) = shaped(QueueAllocation::Init, false);
+        assert_eq!(
+            tx.spare_count(),
+            3,
+            "a session without QoS has the one lane"
+        );
+
+        // CONTROL: the lazy shape, which the same sizes leave with nothing taken up front.
+        let (tx, _rx) = shaped(QueueAllocation::Lazy, true);
+        assert_eq!(
+            tx.spare_count(),
+            0,
+            "a lazy queue takes nothing until a frame wants it"
         );
     }
 

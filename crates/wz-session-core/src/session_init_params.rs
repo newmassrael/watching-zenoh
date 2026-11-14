@@ -375,6 +375,10 @@ pub struct TxQueueConf {
     /// ([`crate::link::TxPipeline::batching_time_limit_us`]). The writer's own bound,
     /// [`crate::link::BATCHING_TIME_LIMIT_US`], when the configuration states none.
     pub batching_time_limit_us: u64,
+    /// `allocation/mode`: whether a link's queue allocates the batches its lanes may hold when
+    /// it is shaped at Established, or the first time each is wanted. Upstream's default is the
+    /// second.
+    pub allocation: crate::link::QueueAllocation,
 }
 
 /// R2926 — upstream's default
@@ -433,6 +437,7 @@ impl Default for TxQueueConf {
             expiry_close_after: build_expiry_close_after(),
             batching: true,
             batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
+            allocation: crate::link::QueueAllocation::Lazy,
         }
     }
 }
@@ -498,6 +503,7 @@ impl TxQueueConf {
             expiry_close_after: build_expiry_close_after(),
             batching: true,
             batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
+            allocation: crate::link::QueueAllocation::Lazy,
         }
     }
 
@@ -547,6 +553,7 @@ impl TxQueueConf {
             },
             pipeline: crate::link::TxPipeline {
                 batching_time_limit_us: self.batching_time_limit_us,
+                allocation: self.allocation,
             },
         }
     }
@@ -603,15 +610,12 @@ mod shape_tests {
         );
         let configured = TxQueueConf {
             batching_time_limit_us: 3_000,
+            allocation: crate::link::QueueAllocation::Init,
             ..TxQueueConf::default()
         };
-        assert_eq!(
-            configured
-                .shape(true, 65535, 65535)
-                .pipeline
-                .batching_time_limit_us,
-            3_000
-        );
+        let shaped = configured.shape(true, 65535, 65535).pipeline;
+        assert_eq!(shaped.batching_time_limit_us, 3_000);
+        assert_eq!(shaped.allocation, crate::link::QueueAllocation::Init);
     }
 }
 
