@@ -242,9 +242,10 @@ pub mod model {
     use crate::zenoh_eprocess::{Prior, Region};
 
     /// The model these sums are, written into the document so that a consumer
-    /// can tell two models apart. Model 7 is model 6's rule with the priors
-    /// the corpus gives once a Frame's records end where the batch's next
-    /// transport message begins, as upstream reads a batch
+    /// can tell two models apart. Model 7 is model 6's rule with the
+    /// parameters the corpus gives once a Frame's records are read as
+    /// upstream reads a batch: they end where the batch's next transport
+    /// message begins, and a record that does not decode fails the batch
     /// (`docs/flow-zenoh-verdict.md` §6.14).
     pub const MODEL: u32 = 7;
 
