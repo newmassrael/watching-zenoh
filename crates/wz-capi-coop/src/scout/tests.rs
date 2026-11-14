@@ -2,7 +2,7 @@
 //! node that answers the group, so the window's reading, sending and ending are checked without a
 //! multicast host.
 
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -51,7 +51,12 @@ struct Responder {
 
 impl Responder {
     fn start(reply: Vec<Vec<u8>>) -> Self {
-        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind the responder");
+        Self::start_at(IpAddr::V4(Ipv4Addr::LOCALHOST), reply)
+    }
+
+    /// A responder bound on `ip`, on a port the host picks.
+    fn start_at(ip: IpAddr, reply: Vec<Vec<u8>>) -> Self {
+        let socket = UdpSocket::bind((ip, 0)).expect("bind the responder");
         socket
             .set_read_timeout(Some(Duration::from_millis(20)))
             .expect("a read timeout");
@@ -187,11 +192,9 @@ fn the_window_over_one_datagram_socket_finds_who_answers() {
         hello_datagram(0, &[0x11; 4], &["udp/10.0.0.1:7447"]),
         hello_datagram(1, &[0x22; 4], &["tcp/10.0.0.2:7447"]),
     ]);
-    let port = responder.at.port();
     let first = crate::scout_datagram::scout_first::<PosixUdpSocket, _>(
         &PosixClock,
-        [127, 0, 0, 1],
-        port,
+        responder.at,
         WHAT,
         vec![0xAA, 0xBB],
         5_000,
@@ -204,8 +207,7 @@ fn the_window_over_one_datagram_socket_finds_who_answers() {
     let mut seen = Vec::new();
     let delivered = crate::scout_datagram::run_scout::<PosixUdpSocket, _>(
         &PosixClock,
-        [127, 0, 0, 1],
-        port,
+        responder.at,
         WHAT,
         vec![0xAA, 0xBB],
         300,
@@ -217,14 +219,39 @@ fn the_window_over_one_datagram_socket_finds_who_answers() {
     assert_eq!(responder.scouts(), 2, "one Scout for each window");
 }
 
+/// The same window asked of an IPv6 address: its socket is of the address's family, so the Scout
+/// leaves from an IPv6 socket and the responder's Hello, which advertises an IPv6 locator, comes
+/// back on it. Needs the host's IPv6 loopback, which the responder binds.
+#[test]
+fn the_window_over_one_datagram_socket_asks_an_ipv6_responder() {
+    use wz_runtime_posix::net::PosixUdpSocket;
+
+    let responder = Responder::start_at(
+        IpAddr::V6(Ipv6Addr::LOCALHOST),
+        vec![hello_datagram(1, &[0x66; 4], &["tcp/[::1]:7447"])],
+    );
+    assert!(responder.at.is_ipv6());
+    let first = crate::scout_datagram::scout_first::<PosixUdpSocket, _>(
+        &PosixClock,
+        responder.at,
+        WHAT,
+        vec![0xAA, 0xBB],
+        5_000,
+        2048,
+    )
+    .expect("the IPv6 responder answered");
+    assert_eq!(first.zid[0], 0x66);
+    assert_eq!(first.locators, ["tcp/[::1]:7447"]);
+    assert_eq!(responder.scouts(), 1);
+}
+
 /// A window over a datagram socket that nobody answers ends with nothing.
 #[test]
 fn the_window_over_one_datagram_socket_finds_nothing_when_nobody_answers() {
     let none = crate::scout_datagram::scout_first::<wz_runtime_posix::net::PosixUdpSocket, _>(
         &PosixClock,
-        [127, 0, 0, 1],
         // The discard port: nothing listens there on a test host.
-        9,
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 9)),
         WHAT,
         Vec::new(),
         100,

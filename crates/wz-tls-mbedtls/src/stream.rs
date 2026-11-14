@@ -22,6 +22,7 @@
 use core::cell::{Cell, RefCell};
 use core::ffi::{c_int, CStr};
 use core::fmt::Write as _;
+use core::net::{IpAddr, SocketAddr};
 
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto};
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
@@ -112,11 +113,11 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
 
     const PROTO: LinkProto = LinkProto::Tls;
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         self.lower.socket.local()
     }
 
-    fn peer(&self) -> ([u8; 4], u16) {
+    fn peer(&self) -> SocketAddr {
         self.lower.socket.peer()
     }
 
@@ -230,7 +231,7 @@ impl Policy {
     fn open<S: Transport>(
         &self,
         role: Role,
-        addr: Option<[u8; 4]>,
+        addr: Option<IpAddr>,
     ) -> Result<Session<'static, S>, TlsError> {
         match *self {
             Policy::Pinned(identity) => Session::open(role, identity),
@@ -243,12 +244,12 @@ impl Policy {
                 match role {
                     Role::Client => {
                         let own = chain.identity.filter(|_| chain.mutual);
-                        let name = addr.filter(|_| chain.verify_name).map(DottedQuad::of);
+                        let name = addr.filter(|_| chain.verify_name).map(AddressText::of);
                         Session::open_chain(
                             role,
                             own,
                             chain.roots,
-                            name.as_ref().map(DottedQuad::as_c_str),
+                            name.as_ref().map(AddressText::as_c_str),
                         )
                     }
                     Role::Server => Session::open_chain(
@@ -267,22 +268,29 @@ impl Policy {
     }
 }
 
-/// An IPv4 address as the text a certificate's IP SAN is matched against, in a buffer of its own
-/// (nothing here allocates).
-struct DottedQuad {
-    text: [u8; 16],
+/// An address as the text a certificate's IP SAN is matched against, in a buffer of its own
+/// (nothing here allocates): dotted decimal for IPv4, RFC 5952 for IPv6, which mbedtls reads back
+/// into the address it compares with the SAN's bytes. The scope of a link-local end is not part
+/// of the name a certificate can carry, so it is not written.
+struct AddressText {
+    text: [u8; ADDRESS_TEXT_BYTES],
     len: usize,
 }
 
-impl DottedQuad {
-    fn of(addr: [u8; 4]) -> Self {
-        let mut quad = Self {
-            text: [0; 16],
+/// The longest address text and its NUL: an IPv6 address with an IPv4 tail
+/// (`ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255`) is 45 bytes, `INET6_ADDRSTRLEN` with the
+/// NUL.
+const ADDRESS_TEXT_BYTES: usize = 46;
+
+impl AddressText {
+    fn of(addr: IpAddr) -> Self {
+        let mut text = Self {
+            text: [0; ADDRESS_TEXT_BYTES],
             len: 0,
         };
-        // 15 bytes is the longest address, and the last byte stays the NUL.
-        let _ = write!(quad, "{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]);
-        quad
+        // The longest text is shorter than the buffer, and the last byte stays the NUL.
+        let _ = write!(text, "{addr}");
+        text
     }
 
     fn as_c_str(&self) -> &CStr {
@@ -290,7 +298,7 @@ impl DottedQuad {
     }
 }
 
-impl core::fmt::Write for DottedQuad {
+impl core::fmt::Write for AddressText {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let end = self.len + s.len();
         if end >= self.text.len() {
@@ -424,14 +432,14 @@ where
 {
     type Stream = TlsStream<D::Stream>;
 
-    fn dial(&self, addr: [u8; 4], port: u16) -> Result<Self::Stream, LinkOpenError> {
+    fn dial(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError> {
         // The policy first: one that cannot make a session never connects.
         let mut session = self
             .policy
-            .open::<Lower<D::Stream>>(Role::Client, Some(addr))
+            .open::<Lower<D::Stream>>(Role::Client, Some(to.ip()))
             .map_err(open_error)?;
         let lower = Lower {
-            socket: self.inner.dial(addr, port)?,
+            socket: self.inner.dial(to)?,
             error: Cell::new(None),
         };
         let mut idle = 0;
@@ -464,10 +472,9 @@ where
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
         fn listen(
             &self,
-            addr: [u8; 4],
-            port: u16,
+            at: SocketAddr,
         ) -> Result<alloc::boxed::Box<dyn StreamListen<Stream = Self::Stream>>, LinkOpenError> {
-            Ok(alloc::boxed::Box::new(self.listen_counted(addr, port)?))
+            Ok(alloc::boxed::Box::new(self.listen_counted(at)?))
         }
     }
 }
@@ -482,13 +489,12 @@ where
     /// `listen` hides them).
     pub fn listen_counted(
         &self,
-        addr: [u8; 4],
-        port: u16,
+        at: SocketAddr,
     ) -> Result<TlsListener<alloc::boxed::Box<dyn StreamListen<Stream = D::Stream>>>, LinkOpenError>
     {
         // Checked before the port is bound, so a dial that cannot accept does not take the port.
         self.accept.ok_or(LinkOpenError::Unsupported)?;
-        let inner = self.inner.listen(addr, port)?;
+        let inner = self.inner.listen(at)?;
         self.listener(inner)
     }
 }
@@ -558,7 +564,7 @@ where
 {
     type Stream = TlsStream<L::Stream>;
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         self.inner.local()
     }
 
@@ -628,6 +634,40 @@ where
                     return Ok(None);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::net::{Ipv4Addr, Ipv6Addr};
+
+    /// The name a dial checks a certificate's IP SAN against is the address's own text on either
+    /// family, NUL terminated, and the longest of each fits the buffer whole.
+    #[test]
+    fn the_name_a_dial_checks_is_the_address_text_on_either_family() {
+        for (ip, text) in [
+            (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), "10.0.0.1"),
+            (IpAddr::V4(Ipv4Addr::BROADCAST), "255.255.255.255"),
+            (IpAddr::V6(Ipv6Addr::LOCALHOST), "::1"),
+            (
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                "2001:db8::1",
+            ),
+            (
+                IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xffff, 0xffff)),
+                "::ffff:255.255.255.255",
+            ),
+            (
+                IpAddr::V6(Ipv6Addr::new(
+                    0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+                )),
+                "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            ),
+        ] {
+            let name = AddressText::of(ip);
+            assert_eq!(name.as_c_str().to_str(), Ok(text), "{ip}");
         }
     }
 }

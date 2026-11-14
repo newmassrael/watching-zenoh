@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use wz_link_lwip::tx_pool::{self, TxPoolStats, TxPoolStorage};
 use wz_runtime_coop::session_drive::{
-    spawn_session, IpEndpoint, Locator, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
+    spawn_session, Locator, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 use wz_runtime_coop::session_runtime::new_session_actions;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
@@ -143,10 +143,10 @@ fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
         |_| {},
     );
     let OpenedLink { sink, pump } = links
-        .open_initiator(Locator::udp(IpEndpoint {
-            addr: [127, 0, 0, 1],
-            port: 7561,
-        }))
+        .open_initiator(Locator::udp(core::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            7561,
+        ))))
         .expect("open initiator");
     let initiator = SessionLinkActions::<CoopRuntime<StepClock>, CoopTime<StepClock>>::new_generic(
         sink,

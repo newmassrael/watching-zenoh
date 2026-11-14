@@ -397,7 +397,7 @@ fn start(port: &mut ZephyrPort) -> Result<impl NodeLoop<ZephyrPort>, i32> {
     };
 
     #[cfg(not(feature = "tls"))]
-    let stack = Stack::new(address, &storage.rx, &storage.tx);
+    let stack = Stack::new(core::net::IpAddr::from(address), &storage.rx, &storage.tx);
     #[cfg(feature = "tls")]
     let stack = crate::fixed_tls::stack(address, &storage.rx, &storage.tx, channel);
     let stack = if IDLE_WAIT_MS > 0 {

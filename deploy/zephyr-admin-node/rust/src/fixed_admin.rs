@@ -436,7 +436,9 @@ fn start() -> Result<Running, i32> {
         timeout_ms: ACCEPT_TIMEOUT_MS,
     };
     let stack = fixed_tls::accepting_stack(address, &STORAGE.rx, &STORAGE.tx, channel, budget);
-    let Ok(port) = ZephyrTcpListener::listen(address, TLS_PORT, BACKLOG) else {
+    let Ok(port) =
+        ZephyrTcpListener::listen(core::net::SocketAddr::from((address, TLS_PORT)), BACKLOG)
+    else {
         log(c"wz: FAIL - the node could not listen on its secure port");
         return Err(3);
     };

@@ -25,6 +25,7 @@
 #[cfg(feature = "event-ring")]
 use std::cell::Cell;
 use std::ffi::CString;
+use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -278,20 +279,19 @@ where
 {
     type Stream = TlsStream<D::Stream>;
 
-    fn dial(&self, addr: [u8; 4], port: u16) -> Result<Self::Stream, LinkOpenError> {
+    fn dial(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError> {
         let dialer = self.dialer.as_ref().ok_or(LinkOpenError::Unsupported)?;
         state_the_time(self.dial_roots);
-        dialer.dial(addr, port)
+        dialer.dial(to)
     }
 
     fn listen(
         &self,
-        addr: [u8; 4],
-        port: u16,
+        at: SocketAddr,
     ) -> Result<Box<dyn StreamListen<Stream = Self::Stream>>, LinkOpenError> {
         let listener = self.listener.as_ref().ok_or(LinkOpenError::Unsupported)?;
         state_the_time(self.listen_roots);
-        let inner = listener.listen_counted(addr, port)?;
+        let inner = listener.listen_counted(at)?;
         Ok(Box::new(Timed {
             inner,
             roots: self.listen_roots,
@@ -315,7 +315,7 @@ struct Timed<S: StreamSocket + 'static> {
 impl<S: StreamSocket + 'static> StreamListen for Timed<S> {
     type Stream = TlsStream<S>;
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         self.inner.local()
     }
 

@@ -21,6 +21,8 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::vec::Vec;
+#[cfg(any(feature = "session-slot", feature = "alloc"))]
+use core::net::{IpAddr, SocketAddr};
 
 use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
@@ -38,8 +40,6 @@ use wz_session_core::session_slot::SlotDriver;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::TxStore;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::IpEndpoint;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::LinkReadiness;
 use crate::session_drive::SessionDatagramLink;
@@ -61,7 +61,7 @@ use crate::stream_link::{NoStream, StreamDriver, StreamSocket};
 #[cfg(feature = "session-slot")]
 use crate::udp_link::UdpStack;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::udp_link::UDP_RX_CAPACITY;
+use crate::udp_link::{bind_refused, dial_bind, UDP_RX_CAPACITY};
 use crate::udp_link::{DatagramSocket, UdpDriver};
 
 /// The link of one session over a platform's datagram sockets `U`, its plain streams `T` and its
@@ -242,7 +242,7 @@ where
 /// frame in a buffer of its own).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub struct IpLinks<U, D, L = NoDial> {
-    local: [u8; 4],
+    local: IpAddr,
     dial: D,
     tls: L,
     shape: LinkShape,
@@ -313,12 +313,13 @@ where
     D: StreamDial,
     D::Stream: 'static,
 {
-    /// Links bound on the node's own address `local` (`[0; 4]` for every interface of the host),
-    /// whose `tcp/` links run over the streams `dial` opens, and which carry no `tls/` link until
-    /// [`IpLinks::with_tls`] gives them one.
-    pub fn new(local: [u8; 4], dial: D) -> Self {
+    /// Links bound on the node's own address `local` (the unspecified address of a family for
+    /// every interface of the host), whose `tcp/` links run over the streams `dial` opens, and
+    /// which carry no `tls/` link until [`IpLinks::with_tls`] gives them one. A dial to a peer of
+    /// the other family binds the unspecified address of the peer's (`udp_link::dial_bind`).
+    pub fn new(local: impl Into<IpAddr>, dial: D) -> Self {
         Self {
-            local,
+            local: local.into(),
             dial,
             tls: NoDial,
             shape: LinkShape::default(),
@@ -395,24 +396,24 @@ where
             LinkProto::Udp if !U::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Udp => {
                 // Port 0 has the stack choose a free one, one per initiator session.
-                let socket = U::bind(self.local, 0).map_err(|_| LinkOpenError::Exhausted)?;
+                let socket = U::bind(dial_bind(self.local, to.at)).map_err(bind_refused::<U>)?;
                 Ok(IpDriver::Udp(self.shape.datagram(
                     UdpDriver::initiator_with_buffers(
                         socket,
-                        (to.at.addr, to.at.port),
+                        to.at,
                         self.shape.datagram_rx,
                         self.shape.tx(),
                     ),
                 )))
             }
             LinkProto::Tcp => {
-                let socket = self.dial.dial(to.at.addr, to.at.port)?;
+                let socket = self.dial.dial(to.at)?;
                 Ok(IpDriver::Tcp(self.shape.stream(
                     StreamDriver::with_buffers(socket, STREAM_RX_CAPACITY, self.shape.tx()),
                 )))
             }
             LinkProto::Tls => {
-                let channel = self.tls.dial(to.at.addr, to.at.port)?;
+                let channel = self.tls.dial(to.at)?;
                 Ok(IpDriver::Tls(self.shape.stream(
                     StreamDriver::with_buffers(channel, STREAM_RX_CAPACITY, self.shape.tx()),
                 )))
@@ -434,7 +435,7 @@ where
 
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
-        let socket = U::bind(self.local, port).map_err(|_| LinkOpenError::Exhausted)?;
+        let socket = U::bind(SocketAddr::new(self.local, port)).map_err(bind_refused::<U>)?;
         let driver = Rc::new(IpDriver::Udp(self.shape.datagram(
             UdpDriver::acceptor_with_buffers(socket, self.shape.datagram_rx, self.shape.tx()),
         )));
@@ -462,7 +463,7 @@ where
     ) -> Result<Box<dyn LinkListener<Self::Pump>>, LinkOpenError> {
         match at.proto {
             LinkProto::Tcp if D::CARRIED => {
-                let listener = self.dial.listen(at.at.addr, at.at.port)?;
+                let listener = self.dial.listen(at.at)?;
                 Ok(Box::new(IpListener::<U, D::Stream, L::Stream> {
                     listener,
                     shape: self.shape,
@@ -470,7 +471,7 @@ where
                 }))
             }
             LinkProto::Tls if L::CARRIED => {
-                let listener = self.tls.listen(at.at.addr, at.at.port)?;
+                let listener = self.tls.listen(at.at)?;
                 Ok(Box::new(IpTlsListener::<U, D::Stream, L::Stream> {
                     listener,
                     shape: self.shape,
@@ -500,8 +501,7 @@ where
     T: StreamSocket + 'static,
 {
     fn local(&self) -> Locator {
-        let (addr, port) = self.listener.local();
-        Locator::tls(IpEndpoint { addr, port })
+        Locator::tls(self.listener.local())
     }
 
     fn accept(&self) -> Result<Option<OpenedLink<Rc<HeapIpDriver<U, S, T>>>>, LinkOpenError> {
@@ -540,8 +540,7 @@ where
     T: StreamSocket + 'static,
 {
     fn local(&self) -> Locator {
-        let (addr, port) = self.listener.local();
-        Locator::tcp(IpEndpoint { addr, port })
+        Locator::tcp(self.listener.local())
     }
 
     fn accept(&self) -> Result<Option<OpenedLink<Rc<HeapIpDriver<U, S, T>>>>, LinkOpenError> {
@@ -597,7 +596,7 @@ where
     /// from `rx` and their frame buffers from `tx`, whose `tcp/` links run over the streams `dial`
     /// opens, and which carries no `tls/` link until [`IpStack::with_tls`] gives it one.
     pub const fn new(
-        local: [u8; 4],
+        local: IpAddr,
         rx: &'static dyn ByteSource,
         tx: &'static dyn ByteSource,
         dial: D,
@@ -653,13 +652,13 @@ where
             LinkProto::Udp => self.udp.bind_initiator(to.at).map(IpDriver::Udp),
             LinkProto::Tcp => {
                 let (rx, tx) = self.claim()?;
-                let socket = self.dial.dial(to.at.addr, to.at.port)?;
+                let socket = self.dial.dial(to.at)?;
                 Ok(IpDriver::Tcp(StreamDriver::over(socket, rx, tx)))
             }
             LinkProto::Tls if !L::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
                 let (rx, tx) = self.claim()?;
-                let channel = self.tls.dial(to.at.addr, to.at.port)?;
+                let channel = self.tls.dial(to.at)?;
                 Ok(IpDriver::Tls(StreamDriver::over(channel, rx, tx)))
             }
         }
@@ -707,8 +706,8 @@ impl<A, U, L> IpAcceptor<A, U, L> {
         self.refused
     }
 
-    /// The `(address, port)` the listener is bound to.
-    pub fn local(&self) -> ([u8; 4], u16)
+    /// The address and port the listener is bound to.
+    pub fn local(&self) -> SocketAddr
     where
         A: StreamListen,
     {
@@ -761,8 +760,8 @@ impl<A, U, T> IpTlsAcceptor<A, U, T> {
         self.refused
     }
 
-    /// The `(address, port)` the listener is bound to.
-    pub fn local(&self) -> ([u8; 4], u16)
+    /// The address and port the listener is bound to.
+    pub fn local(&self) -> SocketAddr
     where
         A: StreamListen,
     {
@@ -864,37 +863,53 @@ mod tests {
     #[cfg(feature = "session-slot")]
     use wz_session_core::byte_cells::ByteCells;
 
-    use crate::session_drive::IpEndpoint;
+    use core::net::{Ipv4Addr, Ipv6Addr};
+
     use crate::udp_link::Received;
 
-    /// A datagram socket that takes everything and has nothing to read.
-    struct Datagrams;
+    /// A datagram socket that takes everything and has nothing to read, bound where it was asked
+    /// to be (port 0: 40001). `V6` false is a stack without IPv6, whose bind of an IPv6 address is
+    /// refused for its family ([`DatagramSocket::refuses_address`]).
+    struct Datagrams<const V6: bool = true>(SocketAddr);
 
-    impl DatagramSocket for Datagrams {
-        type Error = ();
-        fn bind(_addr: [u8; 4], _port: u16) -> Result<Self, ()> {
-            Ok(Datagrams)
+    /// Why a [`Datagrams`] bind failed: the address was IPv6 and the stack has none.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct NoIpv6;
+
+    impl<const V6: bool> DatagramSocket for Datagrams<V6> {
+        type Error = NoIpv6;
+        fn bind(at: SocketAddr) -> Result<Self, NoIpv6> {
+            if at.is_ipv6() && !V6 {
+                return Err(NoIpv6);
+            }
+            let port = if at.port() == 0 { 40_001 } else { at.port() };
+            Ok(Self(SocketAddr::new(at.ip(), port)))
         }
-        fn local(&self) -> ([u8; 4], u16) {
-            ([10, 0, 0, 2], 40_001)
+        fn local(&self) -> SocketAddr {
+            self.0
         }
-        fn send_to(&self, _addr: [u8; 4], _port: u16, _bytes: &[u8]) -> Result<(), ()> {
+        fn send_to(&self, _to: SocketAddr, _bytes: &[u8]) -> Result<(), NoIpv6> {
             Ok(())
+        }
+        // The one failure this socket has is the family it lacks.
+        fn refuses_address(error: &NoIpv6) -> bool {
+            let NoIpv6 = *error;
+            true
         }
         fn wait_readable(&self, _timeout_ms: c_int) {}
         fn times_out(&self) -> bool {
             false
         }
-        fn recv_waiting(&self, _buf: &mut [u8]) -> Result<Option<Received>, ()> {
+        fn recv_waiting(&self, _buf: &mut [u8]) -> Result<Option<Received>, NoIpv6> {
             Ok(None)
         }
-        fn try_recv(&self, _buf: &mut [u8]) -> Result<Option<Received>, ()> {
+        fn try_recv(&self, _buf: &mut [u8]) -> Result<Option<Received>, NoIpv6> {
             Ok(None)
         }
     }
 
-    /// A stream connected to `(addr, port)`, which takes everything and has nothing to read.
-    struct Stream([u8; 4], u16);
+    /// A stream connected to `peer`, which takes everything and has nothing to read.
+    struct Stream(SocketAddr);
 
     /// A dial that connects to any port but [`REFUSING`].
     #[derive(Clone, Copy)]
@@ -904,22 +919,26 @@ mod tests {
 
     impl StreamDial for Dial {
         type Stream = Stream;
-        fn dial(&self, addr: [u8; 4], port: u16) -> Result<Stream, LinkOpenError> {
-            if port == REFUSING {
+        fn dial(&self, to: SocketAddr) -> Result<Stream, LinkOpenError> {
+            if to.port() == REFUSING {
                 Err(LinkOpenError::Refused)
             } else {
-                Ok(Stream(addr, port))
+                Ok(Stream(to))
             }
         }
     }
 
     impl StreamSocket for Stream {
         type Error = ();
-        fn local(&self) -> ([u8; 4], u16) {
-            ([10, 0, 0, 2], 40_002)
+        /// The node's own end, of the peer's family.
+        fn local(&self) -> SocketAddr {
+            match self.0 {
+                SocketAddr::V4(_) => SocketAddr::from(([10, 0, 0, 2], 40_002)),
+                SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::LOCALHOST, 40_002)),
+            }
         }
-        fn peer(&self) -> ([u8; 4], u16) {
-            (self.0, self.1)
+        fn peer(&self) -> SocketAddr {
+            self.0
         }
         fn send_parts(&self, _parts: &[&[u8]]) -> Result<(), ()> {
             Ok(())
@@ -941,18 +960,18 @@ mod tests {
 
     impl StreamDial for ChannelDial {
         type Stream = Channel;
-        fn dial(&self, addr: [u8; 4], port: u16) -> Result<Channel, LinkOpenError> {
-            Dial.dial(addr, port).map(Channel)
+        fn dial(&self, to: SocketAddr) -> Result<Channel, LinkOpenError> {
+            Dial.dial(to).map(Channel)
         }
     }
 
     impl StreamSocket for Channel {
         type Error = ();
         const PROTO: LinkProto = LinkProto::Tls;
-        fn local(&self) -> ([u8; 4], u16) {
+        fn local(&self) -> SocketAddr {
             self.0.local()
         }
-        fn peer(&self) -> ([u8; 4], u16) {
+        fn peer(&self) -> SocketAddr {
             self.0.peer()
         }
         fn send_parts(&self, parts: &[&[u8]]) -> Result<(), ()> {
@@ -975,10 +994,19 @@ mod tests {
     /// The zid of the key every [`Channel`]'s peer proved.
     const PROVEN: [u8; 16] = [0x5e; 16];
 
-    const ROUTER: IpEndpoint = IpEndpoint {
-        addr: [10, 0, 0, 1],
-        port: 7447,
-    };
+    const ROUTER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 7447);
+
+    /// The same router's port at an IPv6 address.
+    const ROUTER_V6: SocketAddr =
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)), 7447);
+
+    /// The node's own IPv4 address.
+    const NODE: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    /// A port on the router that refuses every connection.
+    const fn refusing() -> SocketAddr {
+        SocketAddr::new(ROUTER.ip(), REFUSING)
+    }
 
     #[cfg(feature = "session-slot")]
     static TLS_RX: ByteCells<66, 1> = ByteCells::new();
@@ -988,8 +1016,8 @@ mod tests {
     #[cfg(feature = "session-slot")]
     #[test]
     fn a_tls_dial_opens_the_stream_link_over_the_channel_the_stack_was_given() {
-        let mut stack = IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &TLS_RX, &TLS_TX, Dial)
-            .with_tls(ChannelDial);
+        let mut stack =
+            IpStack::<Datagrams, Dial>::new(NODE, &TLS_RX, &TLS_TX, Dial).with_tls(ChannelDial);
         let tls = stack
             .bind(Locator::tls(ROUTER))
             .expect("a secure stream link");
@@ -1025,7 +1053,7 @@ mod tests {
     #[cfg(feature = "session-slot")]
     #[test]
     fn a_stack_given_no_channel_refuses_tls_as_unsupported_even_with_its_tables_full() {
-        let mut stack = IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &PLAIN_RX, &PLAIN_TX, Dial);
+        let mut stack = IpStack::<Datagrams, Dial>::new(NODE, &PLAIN_RX, &PLAIN_TX, Dial);
         let held = stack
             .bind(Locator::tcp(ROUTER))
             .expect("the one stream link");
@@ -1051,7 +1079,7 @@ mod tests {
     #[cfg(feature = "session-slot")]
     #[test]
     fn a_dial_opens_the_link_of_the_protocol_it_names() {
-        let mut stack = IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &RX, &TX, Dial);
+        let mut stack = IpStack::<Datagrams, Dial>::new(NODE, &RX, &TX, Dial);
         let udp = stack.bind(Locator::udp(ROUTER)).expect("a datagram link");
         assert!(matches!(udp, IpDriver::Udp(_)));
         assert!(!udp.batch_length_prefixed());
@@ -1076,6 +1104,45 @@ mod tests {
     }
 
     #[cfg(feature = "session-slot")]
+    static V6_RX: ByteCells<66, 1> = ByteCells::new();
+    #[cfg(feature = "session-slot")]
+    static V6_TX: ByteCells<34, 1> = ByteCells::new();
+
+    /// The slot profile's dial to an IPv6 locator: a datagram link over a socket of the peer's
+    /// family, a stream link to the same end, each naming its ends in brackets; a stack without
+    /// IPv6 refuses it as unsupported and gives back what it claimed.
+    #[cfg(feature = "session-slot")]
+    #[test]
+    fn a_dial_to_an_ipv6_locator_opens_a_socket_of_its_family() {
+        let mut stack = IpStack::<Datagrams, Dial>::new(NODE, &V6_RX, &V6_TX, Dial);
+        let udp = stack
+            .bind(Locator::udp(ROUTER_V6))
+            .expect("a datagram link");
+        let ends = udp
+            .link_endpoints()
+            .expect("a dialled link knows both ends");
+        assert_eq!(ends.src.as_str(), "udp/[::]:40001");
+        assert_eq!(ends.dst.as_str(), "udp/[fd00::1]:7447");
+        drop(udp);
+        let tcp = stack.bind(Locator::tcp(ROUTER_V6)).expect("a stream link");
+        assert_eq!(
+            tcp.link_endpoints().map(|ends| ends.src.as_str()),
+            Some("tcp/[::1]:40002")
+        );
+        drop(tcp);
+
+        let mut v4_only = IpStack::<Datagrams<false>, Dial>::new(NODE, &V6_RX, &V6_TX, Dial);
+        assert!(matches!(
+            v4_only.bind(Locator::udp(ROUTER_V6)),
+            Err(LinkOpenError::Unsupported)
+        ));
+        assert!(
+            v4_only.bind(Locator::udp(ROUTER)).is_ok(),
+            "the refused dial gave both buffers back"
+        );
+    }
+
+    #[cfg(feature = "session-slot")]
     static REFUSED_RX: ByteCells<66, 1> = ByteCells::new();
     #[cfg(feature = "session-slot")]
     static REFUSED_TX: ByteCells<34, 1> = ByteCells::new();
@@ -1083,14 +1150,9 @@ mod tests {
     #[cfg(feature = "session-slot")]
     #[test]
     fn a_refused_connection_is_refused_and_gives_its_buffers_back() {
-        let mut stack =
-            IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &REFUSED_RX, &REFUSED_TX, Dial);
-        let refusing = IpEndpoint {
-            port: REFUSING,
-            ..ROUTER
-        };
+        let mut stack = IpStack::<Datagrams, Dial>::new(NODE, &REFUSED_RX, &REFUSED_TX, Dial);
         assert!(matches!(
-            stack.bind(Locator::tcp(refusing)),
+            stack.bind(Locator::tcp(refusing())),
             Err(LinkOpenError::Refused)
         ));
         let open = stack
@@ -1107,16 +1169,20 @@ mod tests {
     #[cfg(feature = "session-slot")]
     struct Listener {
         waiting: core::cell::Cell<u8>,
-        peer: ([u8; 4], u16),
+        peer: SocketAddr,
         broken: bool,
     }
+
+    /// Where a [`Listener`] listens.
+    #[cfg(feature = "session-slot")]
+    const LISTENING: SocketAddr = SocketAddr::new(NODE, 7447);
 
     #[cfg(feature = "session-slot")]
     impl Listener {
         fn with_waiting(waiting: u8) -> Self {
             Self {
                 waiting: core::cell::Cell::new(waiting),
-                peer: ([10, 0, 0, 7], 52_000),
+                peer: SocketAddr::from(([10, 0, 0, 7], 52_000)),
                 broken: false,
             }
         }
@@ -1125,8 +1191,8 @@ mod tests {
     #[cfg(feature = "session-slot")]
     impl StreamListen for Listener {
         type Stream = Stream;
-        fn local(&self) -> ([u8; 4], u16) {
-            ([10, 0, 0, 2], 7447)
+        fn local(&self) -> SocketAddr {
+            LISTENING
         }
         fn accept(&self) -> Result<Option<Stream>, LinkOpenError> {
             if self.broken {
@@ -1136,7 +1202,7 @@ mod tests {
                 0 => Ok(None),
                 left => {
                     self.waiting.set(left - 1);
-                    Ok(Some(Stream(self.peer.0, self.peer.1)))
+                    Ok(Some(Stream(self.peer)))
                 }
             }
         }
@@ -1150,9 +1216,9 @@ mod tests {
     #[cfg(feature = "session-slot")]
     #[test]
     fn an_accepted_connection_is_the_stream_link_a_dial_opens() {
-        let stack = IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &ACCEPT_RX, &ACCEPT_TX, Dial);
+        let stack = IpStack::<Datagrams, Dial>::new(NODE, &ACCEPT_RX, &ACCEPT_TX, Dial);
         let mut acceptor = stack.acceptor(Listener::with_waiting(1));
-        assert_eq!(acceptor.local(), ([10, 0, 0, 2], 7447));
+        assert_eq!(acceptor.local(), LISTENING);
         let link: IpDriver<Datagrams, Stream, NoStream> = acceptor
             .accept()
             .expect("the port is sound")
@@ -1176,15 +1242,11 @@ mod tests {
     #[cfg(feature = "session-slot")]
     #[test]
     fn an_accepted_secure_channel_is_the_tls_link_a_dial_opens() {
-        let stack = IpStack::<Datagrams, Dial>::new(
-            [10, 0, 0, 2],
-            &SECURE_ACCEPT_RX,
-            &SECURE_ACCEPT_TX,
-            Dial,
-        )
-        .with_tls(Dial);
+        let stack =
+            IpStack::<Datagrams, Dial>::new(NODE, &SECURE_ACCEPT_RX, &SECURE_ACCEPT_TX, Dial)
+                .with_tls(Dial);
         let mut acceptor = stack.tls_acceptor(Listener::with_waiting(2));
-        assert_eq!(acceptor.local(), ([10, 0, 0, 2], 7447));
+        assert_eq!(acceptor.local(), LISTENING);
         let link: IpDriver<Datagrams, Stream, Stream> = acceptor
             .accept()
             .expect("the port is sound")
@@ -1219,7 +1281,7 @@ mod tests {
     #[cfg(feature = "session-slot")]
     #[test]
     fn a_poll_that_finds_no_connection_claims_no_buffer() {
-        let mut stack = IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &IDLE_RX, &IDLE_TX, Dial);
+        let mut stack = IpStack::<Datagrams, Dial>::new(NODE, &IDLE_RX, &IDLE_TX, Dial);
         let mut acceptor = stack.acceptor(Listener::with_waiting(0));
         for _ in 0..3 {
             let none: Result<Option<IpDriver<Datagrams, Stream, NoStream>>, _> = acceptor.accept();
@@ -1239,7 +1301,7 @@ mod tests {
     #[cfg(feature = "session-slot")]
     #[test]
     fn a_connection_with_no_buffer_for_it_is_taken_off_the_port_and_counted() {
-        let stack = IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &FULL_RX, &FULL_TX, Dial);
+        let stack = IpStack::<Datagrams, Dial>::new(NODE, &FULL_RX, &FULL_TX, Dial);
         let mut acceptor = stack.acceptor(Listener::with_waiting(3));
         let held: IpDriver<Datagrams, Stream, NoStream> = acceptor
             .accept()
@@ -1272,7 +1334,7 @@ mod tests {
     #[cfg(feature = "session-slot")]
     #[test]
     fn a_broken_listener_is_reported_as_it_is() {
-        let stack = IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &BROKEN_RX, &BROKEN_TX, Dial);
+        let stack = IpStack::<Datagrams, Dial>::new(NODE, &BROKEN_RX, &BROKEN_TX, Dial);
         let mut acceptor = stack.acceptor(Listener {
             broken: true,
             ..Listener::with_waiting(1)
@@ -1285,7 +1347,7 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_heap_dial_opens_the_link_of_the_protocol_it_names() {
-        let links = IpLinks::<Datagrams, Dial>::new([10, 0, 0, 2], Dial).with_tx_buffers(2, 34);
+        let links = IpLinks::<Datagrams, Dial>::new(NODE, Dial).with_tx_buffers(2, 34);
         let udp = links
             .open_initiator(Locator::udp(ROUTER))
             .expect("a datagram link")
@@ -1316,21 +1378,54 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_heap_dial_the_other_end_refuses_is_refused() {
-        let links = IpLinks::<Datagrams, Dial>::new([10, 0, 0, 2], Dial);
-        let refusing = IpEndpoint {
-            port: REFUSING,
-            ..ROUTER
-        };
+        let links = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
         assert!(matches!(
-            links.open_initiator(Locator::tcp(refusing)),
+            links.open_initiator(Locator::tcp(refusing())),
             Err(LinkOpenError::Refused)
         ));
+    }
+
+    /// An IPv6 locator dials over a socket of its family on a node whose own address is IPv4:
+    /// the datagram link binds the unspecified IPv6 address and names its ends in brackets, the
+    /// stream link names its peer the same way. A stack without IPv6 refuses the datagram dial as
+    /// unsupported, permanent for the locator, and not as a socket it has none of now.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_heap_dial_to_an_ipv6_locator_opens_a_socket_of_its_family() {
+        let links = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
+        let udp = links
+            .open_initiator(Locator::udp(ROUTER_V6))
+            .expect("a datagram link")
+            .pump;
+        let ends = udp
+            .link_endpoints()
+            .expect("a dialled link knows both ends");
+        assert_eq!(ends.src.as_str(), "udp/[::]:40001");
+        assert_eq!(ends.dst.as_str(), "udp/[fd00::1]:7447");
+        let tcp = links
+            .open_initiator(Locator::tcp(ROUTER_V6))
+            .expect("a stream link")
+            .pump;
+        assert_eq!(
+            tcp.link_endpoints().map(|ends| ends.dst.as_str()),
+            Some("tcp/[fd00::1]:7447")
+        );
+
+        let v4_only = IpLinks::<Datagrams<false>, Dial>::new(NODE, Dial);
+        assert!(matches!(
+            v4_only.open_initiator(Locator::udp(ROUTER_V6)),
+            Err(LinkOpenError::Unsupported)
+        ));
+        assert!(
+            v4_only.open_initiator(Locator::udp(ROUTER)).is_ok(),
+            "the family it has still dials"
+        );
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn heap_links_dial_tls_only_over_the_channel_they_were_given() {
-        let plain = IpLinks::<Datagrams, Dial>::new([10, 0, 0, 2], Dial);
+        let plain = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
         assert!(matches!(
             plain.open_initiator(Locator::tls(ROUTER)),
             Err(LinkOpenError::Unsupported)
@@ -1351,7 +1446,7 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn heap_links_told_their_batch_receive_datagrams_into_that_and_no_more() {
-        let whole = IpLinks::<Datagrams, Dial>::new([10, 0, 0, 2], Dial);
+        let whole = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
         assert_eq!(whole.datagram_rx_capacity(), UDP_RX_CAPACITY);
         let dialled = whole
             .open_initiator(Locator::udp(ROUTER))
@@ -1359,7 +1454,7 @@ mod tests {
             .pump;
         assert_eq!(dialled.link_rx_capacity(), UDP_RX_CAPACITY);
 
-        let sized = IpLinks::<Datagrams, Dial>::new([10, 0, 0, 2], Dial).with_rx_capacity(2048);
+        let sized = IpLinks::<Datagrams, Dial>::new(NODE, Dial).with_rx_capacity(2048);
         let dialled = sized
             .open_initiator(Locator::udp(ROUTER))
             .expect("a datagram link")
@@ -1378,14 +1473,14 @@ mod tests {
         );
 
         assert_eq!(
-            IpLinks::<Datagrams, Dial>::new([0; 4], Dial)
+            IpLinks::<Datagrams, Dial>::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), Dial)
                 .with_rx_capacity(0)
                 .datagram_rx_capacity(),
             1,
             "a buffer of no bytes is refused for one"
         );
         assert_eq!(
-            IpLinks::<Datagrams, Dial>::new([0; 4], Dial)
+            IpLinks::<Datagrams, Dial>::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), Dial)
                 .with_rx_capacity(usize::MAX)
                 .datagram_rx_capacity(),
             UDP_RX_CAPACITY,
@@ -1396,7 +1491,7 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_heap_acceptor_is_a_datagram_link_with_no_peer_yet() {
-        let links = IpLinks::<Datagrams, Dial>::new([10, 0, 0, 2], Dial);
+        let links = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
         let accepting = links.open_acceptor(7447).expect("an accepting link").pump;
         assert!(matches!(*accepting, IpDriver::Udp(_)));
         assert!(

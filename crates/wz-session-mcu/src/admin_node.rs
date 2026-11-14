@@ -554,10 +554,7 @@ mod tests {
             },
         )
         .expect("a fresh node takes its admin keys");
-        let listen_at = wz_runtime_coop::session_drive::IpEndpoint {
-            addr: [10, 0, 0, 2],
-            port: 7531,
-        };
+        let listen_at = core::net::SocketAddr::from(([10, 0, 0, 2], 7531));
         node.tick(0);
         // Weak: it does not hold the session's link (and so its port), and it
         // keeps the allocation, so the ended session's address cannot be handed
@@ -644,10 +641,7 @@ mod tests {
         // A host reaches the node and the handshake completes.
         let OpenedLink { sink, pump } = host_links
             .open_initiator(wz_runtime_coop::session_drive::Locator::udp(
-                wz_runtime_coop::session_drive::IpEndpoint {
-                    addr: [10, 0, 0, 2],
-                    port: 7541,
-                },
+                core::net::SocketAddr::from(([10, 0, 0, 2], 7541)),
             ))
             .expect("host link");
         let host_actions =

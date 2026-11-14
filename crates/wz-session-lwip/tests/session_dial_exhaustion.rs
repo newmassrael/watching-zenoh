@@ -41,9 +41,7 @@ use std::rc::Rc;
 use wz_link_lwip::rx_sockets::{SessionRxPool, SessionRxSocket};
 use wz_link_lwip::LwipLink;
 use wz_runtime_coop::executor::SpawnRefusal;
-use wz_runtime_coop::session_drive::{
-    IpEndpoint, LinkOpenError, PumpSlots, SessionDriveConfig, SessionRole,
-};
+use wz_runtime_coop::session_drive::{LinkOpenError, PumpSlots, SessionDriveConfig, SessionRole};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::datagram_peer::is_init_syn;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
@@ -183,10 +181,7 @@ impl<const SLOTS: usize, const PUMPS: usize, const POOL: usize, const TASKS: usi
         self.next += 1;
         self.host.dial(
             &self.links,
-            DialTarget::address(IpEndpoint {
-                addr: [127, 0, 0, 1],
-                port: self.sink_port,
-            }),
+            DialTarget::address(std::net::SocketAddr::from(([127, 0, 0, 1], self.sink_port))),
             Counting(zid),
             || params(zid),
             config(),

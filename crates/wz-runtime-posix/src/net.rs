@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The host profile's network seam: UDP over the kernel's own sockets.
+//! The host profile's network seam: UDP over the kernel's own sockets, IPv4 and IPv6.
 //!
 //! [`PosixUdpSocket`] is the socket `wz_runtime_coop::udp_link` is written against
 //! ([`DatagramSocket`]); the session's link over it is that module's `UdpDriver`, and
 //! `slot::PosixStack` opens it, beside the stream socket of `stream`, as the stack the slot
 //! profile's session host is given. Nothing here allocates: the socket is a file descriptor and
-//! four words.
+//! the address it is bound to.
+//!
+//! A socket's family is its address's: `socket(AF_INET6, ..)` for an IPv6 one, as zenoh-pico's
+//! POSIX link opens the family its locator resolved to. [`RawAddr`] is the one conversion between
+//! `core::net`'s address and the kernel's `sockaddr_in` / `sockaddr_in6`, both ways, which every
+//! call that passes or reads an address here and in `stream` goes through. An IPv6 socket keeps
+//! the kernel's own `IPV6_V6ONLY` default, as upstream zenoh's listeners do.
 //!
 //! Where Zephyr's socket cannot read `errno` (the FFI has no portable reach for it), this one can,
 //! so a non-blocking receive is one `recvfrom` with `MSG_DONTWAIT` and "nothing yet" is the
@@ -17,6 +23,7 @@
 
 use core::ffi::c_int;
 use core::mem::size_of;
+use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 // The heap profile's readiness seam is compiled where the runtime declares it, whatever this crate's
 // own features are (`wz_runtime_coop::with_heap_link_seams!`), as is every implementation of it here.
@@ -29,7 +36,8 @@ use wz_runtime_coop::udp_link::{DatagramSocket, Received, SERVICE_WAIT_MS};
 /// Why a socket call failed: the call, and the `errno` it left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PosixNetError {
-    /// `socket(AF_INET, ...)` failed with this `errno`.
+    /// `socket(AF_INET, ...)` or `socket(AF_INET6, ...)` failed with this `errno`
+    /// (`EAFNOSUPPORT`: the kernel has no socket of the family).
     Socket(c_int),
     /// `setsockopt(SO_RCVTIMEO)` failed with this `errno`.
     ReceiveTimeout(c_int),
@@ -296,41 +304,166 @@ pub fn multicast_interface() -> Option<[u8; 4]> {
     found
 }
 
-pub(crate) fn sockaddr(addr: [u8; 4], port: u16) -> libc::sockaddr_in {
-    libc::sockaddr_in {
-        // Neutrino's socket address, as the BSDs', carries its own length.
-        #[cfg(target_os = "nto")]
-        sin_len: size_of::<libc::sockaddr_in>() as u8,
-        sin_family: libc::AF_INET as libc::sa_family_t,
-        sin_port: port.to_be(),
-        sin_addr: libc::in_addr {
-            s_addr: u32::from_ne_bytes(addr),
-        },
-        sin_zero: [0; 8],
+/// The kernel's family number of `at`: `AF_INET` or `AF_INET6`.
+pub(crate) fn family_of(at: &SocketAddr) -> c_int {
+    match at {
+        SocketAddr::V4(_) => libc::AF_INET,
+        SocketAddr::V6(_) => libc::AF_INET6,
     }
 }
 
-/// One IPv4 UDP socket on the host, bound to an explicit local address, with every blocking read
-/// of it bounded by [`SERVICE_WAIT_MS`].
+/// A socket address as the kernel reads and writes it, of either family: a `sockaddr_storage`
+/// holding a `sockaddr_in` or a `sockaddr_in6`, and the length of the one it holds. The one
+/// conversion between it and [`SocketAddr`], both ways.
+pub(crate) struct RawAddr {
+    storage: libc::sockaddr_storage,
+    len: libc::socklen_t,
+}
+
+impl RawAddr {
+    /// `at` in the kernel's form, for a call that reads an address (`bind`, `connect`, `sendto`).
+    pub(crate) fn of(at: SocketAddr) -> Self {
+        // SAFETY: an all-zero `sockaddr_storage` is a valid value of it, an unspecified family.
+        let mut storage: libc::sockaddr_storage = unsafe { core::mem::zeroed() };
+        let len = match at {
+            SocketAddr::V4(v4) => {
+                let sin = libc::sockaddr_in {
+                    // Neutrino's socket address, as the BSDs', carries its own length.
+                    #[cfg(target_os = "nto")]
+                    sin_len: size_of::<libc::sockaddr_in>() as u8,
+                    sin_family: libc::AF_INET as libc::sa_family_t,
+                    sin_port: v4.port().to_be(),
+                    sin_addr: libc::in_addr {
+                        s_addr: u32::from_ne_bytes(v4.ip().octets()),
+                    },
+                    sin_zero: [0; 8],
+                };
+                // SAFETY: `sockaddr_storage` is large and aligned enough for every socket address
+                // the kernel has, so a `sockaddr_in` written at its start is in bounds.
+                unsafe {
+                    core::ptr::write((&mut storage as *mut libc::sockaddr_storage).cast(), sin)
+                };
+                size_of::<libc::sockaddr_in>()
+            }
+            SocketAddr::V6(v6) => {
+                // SAFETY: an all-zero `sockaddr_in6` is a valid value of it; the fields are set
+                // below, and what is not set (Neutrino's length aside) is zero as the kernel wants.
+                let mut sin6: libc::sockaddr_in6 = unsafe { core::mem::zeroed() };
+                #[cfg(target_os = "nto")]
+                {
+                    sin6.sin6_len = size_of::<libc::sockaddr_in6>() as u8;
+                }
+                sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+                sin6.sin6_port = v6.port().to_be();
+                sin6.sin6_flowinfo = v6.flowinfo();
+                sin6.sin6_addr.s6_addr = v6.ip().octets();
+                sin6.sin6_scope_id = v6.scope_id();
+                // SAFETY: as for the IPv4 form: the storage holds any socket address.
+                unsafe {
+                    core::ptr::write((&mut storage as *mut libc::sockaddr_storage).cast(), sin6)
+                };
+                size_of::<libc::sockaddr_in6>()
+            }
+        };
+        Self {
+            storage,
+            len: len as libc::socklen_t,
+        }
+    }
+
+    /// Room for any address, for a call that writes one (`recvfrom`, `getsockname`, `accept`).
+    pub(crate) fn empty() -> Self {
+        Self {
+            // SAFETY: an all-zero `sockaddr_storage` is a valid value of it.
+            storage: unsafe { core::mem::zeroed() },
+            len: size_of::<libc::sockaddr_storage>() as libc::socklen_t,
+        }
+    }
+
+    /// The address, for a call that reads it.
+    pub(crate) fn as_ptr(&self) -> *const libc::sockaddr {
+        (&self.storage as *const libc::sockaddr_storage).cast()
+    }
+
+    /// The address, for a call that writes it.
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut libc::sockaddr {
+        (&mut self.storage as *mut libc::sockaddr_storage).cast()
+    }
+
+    /// The length a call reads.
+    pub(crate) fn size(&self) -> libc::socklen_t {
+        self.len
+    }
+
+    /// The length a call that writes the address reads as the room it has and sets to the length
+    /// it wrote.
+    pub(crate) fn size_mut(&mut self) -> &mut libc::socklen_t {
+        &mut self.len
+    }
+
+    /// The address the kernel wrote, or `None` for a family other than the two (no socket here
+    /// has one). The flow label is left out: it is a field of a packet and not of an end, and a
+    /// link compares its peer by address, port and scope.
+    pub(crate) fn to_socket_addr(&self) -> Option<SocketAddr> {
+        match c_int::from(self.storage.ss_family) {
+            libc::AF_INET if self.len as usize >= size_of::<libc::sockaddr_in>() => {
+                // SAFETY: the kernel wrote an `AF_INET` address, which is a `sockaddr_in`, and the
+                // storage is aligned for it.
+                let sin = unsafe { &*(self.as_ptr() as *const libc::sockaddr_in) };
+                Some(SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes()),
+                    u16::from_be(sin.sin_port),
+                )))
+            }
+            libc::AF_INET6 if self.len as usize >= size_of::<libc::sockaddr_in6>() => {
+                // SAFETY: the kernel wrote an `AF_INET6` address, which is a `sockaddr_in6`, and
+                // the storage is aligned for it.
+                let sin6 = unsafe { &*(self.as_ptr() as *const libc::sockaddr_in6) };
+                Some(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::from(sin6.sin6_addr.s6_addr),
+                    u16::from_be(sin6.sin6_port),
+                    0,
+                    sin6.sin6_scope_id,
+                )))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The address a `getsockname` or `getpeername` of `fd` reports: the `errno` when the call fails,
+/// `EAFNOSUPPORT` when it names a family other than the two.
+pub(crate) fn name_of(
+    fd: c_int,
+    call: unsafe extern "C" fn(c_int, *mut libc::sockaddr, *mut libc::socklen_t) -> c_int,
+) -> Result<SocketAddr, c_int> {
+    let mut name = RawAddr::empty();
+    // SAFETY: `name`'s storage and length are live and writable, and the length is its size.
+    let rc = unsafe { call(fd, name.as_mut_ptr(), name.size_mut()) };
+    if rc != 0 {
+        return Err(errno());
+    }
+    name.to_socket_addr().ok_or(libc::EAFNOSUPPORT)
+}
+
+/// One UDP socket on the host, of the family of the address it is bound to, with every blocking
+/// read of it bounded by [`SERVICE_WAIT_MS`].
 pub struct PosixUdpSocket {
     fd: c_int,
-    local: ([u8; 4], u16),
+    local: SocketAddr,
 }
 
 impl PosixUdpSocket {
-    /// A socket bound to `addr:port`; `shared` sets `SO_REUSEADDR` and `SO_REUSEPORT` first, which
-    /// is what lets a group's receiver bind the port another member on this host already holds.
-    fn open(addr: [u8; 4], port: u16, shared: bool) -> Result<Self, PosixNetError> {
+    /// A socket bound to `at`; `shared` sets `SO_REUSEADDR` and `SO_REUSEPORT` first, which is
+    /// what lets a group's receiver bind the port another member on this host already holds.
+    fn open(at: SocketAddr, shared: bool) -> Result<Self, PosixNetError> {
         // SAFETY: plain system call with value arguments.
-        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+        let fd = unsafe { libc::socket(family_of(&at), libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
         if fd < 0 {
             return Err(PosixNetError::Socket(errno()));
         }
         // Owned from here, so an early return closes it.
-        let mut this = Self {
-            fd,
-            local: (addr, port),
-        };
+        let mut this = Self { fd, local: at };
         if let Err(e) = set_receive_timeout_ms(fd, SERVICE_WAIT_MS) {
             return Err(PosixNetError::ReceiveTimeout(e));
         }
@@ -338,23 +471,17 @@ impl PosixUdpSocket {
             set_flag(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR).map_err(PosixNetError::ReuseAddr)?;
             set_flag(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT).map_err(PosixNetError::ReusePort)?;
         }
-        let local = sockaddr(addr, port);
-        // SAFETY: `local` is a live `sockaddr_in` of the length passed.
-        let rc = unsafe {
-            libc::bind(
-                fd,
-                (&local as *const libc::sockaddr_in).cast(),
-                size_of::<libc::sockaddr_in>() as libc::socklen_t,
-            )
-        };
+        let local = RawAddr::of(at);
+        // SAFETY: `local` is a live socket address of the length passed.
+        let rc = unsafe { libc::bind(fd, local.as_ptr(), local.size()) };
         if rc != 0 {
             return Err(PosixNetError::Bind(errno()));
         }
-        if port == 0 {
+        if at.port() == 0 {
             // The locators the link reports and the source every reply comes from name this
             // port; keeping the 0 that was asked for would render `udp/<ip>:0` for a link that
             // has a real one.
-            this.local.1 = this.chosen_port()?;
+            this.local.set_port(this.chosen_port()?);
         }
         Ok(this)
     }
@@ -365,11 +492,11 @@ impl PosixUdpSocket {
         self.fd
     }
 
-    /// A socket bound to `addr:port` that other sockets of this host may bind too, as every member
-    /// of a multicast group does (zenoh-pico sets both options on its group listener
+    /// A socket bound to `at` that other sockets of this host may bind too, as every member of a
+    /// multicast group does (zenoh-pico sets both options on its group listener
     /// unconditionally).
-    pub fn bind_shared(addr: [u8; 4], port: u16) -> Result<Self, PosixNetError> {
-        Self::open(addr, port, true)
+    pub fn bind_shared(at: SocketAddr) -> Result<Self, PosixNetError> {
+        Self::open(at, true)
     }
 
     /// Join `group` on the interface that holds `interface` (the unspecified address: the one the
@@ -413,20 +540,10 @@ impl PosixUdpSocket {
 
     /// The port the kernel bound this socket to.
     fn chosen_port(&self) -> Result<u16, PosixNetError> {
-        let mut name: libc::sockaddr_in = sockaddr([0; 4], 0);
-        let mut len = size_of::<libc::sockaddr_in>() as libc::socklen_t;
-        // SAFETY: `name` and `len` are live and writable, and `len` is `name`'s size.
-        let rc = unsafe {
-            libc::getsockname(
-                self.fd,
-                (&mut name as *mut libc::sockaddr_in).cast(),
-                &mut len,
-            )
-        };
-        if rc != 0 {
-            return Err(PosixNetError::SockName(errno()));
-        }
-        match u16::from_be(name.sin_port) {
+        match name_of(self.fd, libc::getsockname)
+            .map_err(PosixNetError::SockName)?
+            .port()
+        {
             0 => Err(PosixNetError::NoPortChosen),
             port => Ok(port),
         }
@@ -434,10 +551,11 @@ impl PosixUdpSocket {
 
     /// One `recvfrom` with `flags`, into `buf`: the length and source, `Ok(None)` when the call
     /// answered "nothing yet" (`EAGAIN`, which is what a receive timeout and `MSG_DONTWAIT` both
-    /// leave) or was interrupted by a signal, any other failure as an error.
+    /// leave) or was interrupted by a signal, any other failure as an error. A datagram whose
+    /// source the kernel names in a family other than the socket's two is an error too: there
+    /// is no end to judge it by.
     fn receive(&self, buf: &mut [u8], flags: c_int) -> Result<Option<Received>, PosixNetError> {
-        let mut src: libc::sockaddr_in = sockaddr([0; 4], 0);
-        let mut src_len = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        let mut src = RawAddr::empty();
         // SAFETY: `buf` and `src` are live and writable for the lengths given.
         let got = unsafe {
             libc::recvfrom(
@@ -445,8 +563,8 @@ impl PosixUdpSocket {
                 buf.as_mut_ptr().cast(),
                 buf.len(),
                 flags,
-                (&mut src as *mut libc::sockaddr_in).cast(),
-                &mut src_len,
+                src.as_mut_ptr(),
+                src.size_mut(),
             )
         };
         if got < 0 {
@@ -455,27 +573,26 @@ impl PosixUdpSocket {
                 other => Err(PosixNetError::Recv(other)),
             };
         }
-        Ok(Some((
-            got as usize,
-            src.sin_addr.s_addr.to_ne_bytes(),
-            u16::from_be(src.sin_port),
-        )))
+        let from = src
+            .to_socket_addr()
+            .ok_or(PosixNetError::Recv(libc::EAFNOSUPPORT))?;
+        Ok(Some((got as usize, from)))
     }
 }
 
 impl DatagramSocket for PosixUdpSocket {
     type Error = PosixNetError;
 
-    fn bind(addr: [u8; 4], port: u16) -> Result<Self, PosixNetError> {
-        Self::open(addr, port, false)
+    fn bind(at: SocketAddr) -> Result<Self, PosixNetError> {
+        Self::open(at, false)
     }
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         self.local
     }
 
-    fn send_to(&self, addr: [u8; 4], port: u16, bytes: &[u8]) -> Result<(), PosixNetError> {
-        let dest = sockaddr(addr, port);
+    fn send_to(&self, to: SocketAddr, bytes: &[u8]) -> Result<(), PosixNetError> {
+        let dest = RawAddr::of(to);
         // SAFETY: `bytes` and `dest` are live for the call, lengths match.
         let sent = unsafe {
             libc::sendto(
@@ -483,8 +600,8 @@ impl DatagramSocket for PosixUdpSocket {
                 bytes.as_ptr().cast(),
                 bytes.len(),
                 0,
-                (&dest as *const libc::sockaddr_in).cast(),
-                size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                dest.as_ptr(),
+                dest.size(),
             )
         };
         if sent == bytes.len() as isize {
@@ -524,6 +641,10 @@ impl DatagramSocket for PosixUdpSocket {
         self.receive(buf, libc::MSG_DONTWAIT)
     }
 
+    fn refuses_address(error: &PosixNetError) -> bool {
+        *error == PosixNetError::Socket(libc::EAFNOSUPPORT)
+    }
+
     wz_runtime_coop::with_heap_link_seams! {
         #[cfg(feature = "alloc")]
         fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
@@ -542,19 +663,94 @@ impl Drop for PosixUdpSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::net::IpAddr;
 
-    const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+    /// The IPv4 loopback, on a port the kernel picks.
+    const LOOPBACK: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+
+    /// The IPv6 loopback, on a port the kernel picks.
+    const LOOPBACK_V6: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0);
 
     fn pair() -> (PosixUdpSocket, PosixUdpSocket) {
         (
-            PosixUdpSocket::bind(LOOPBACK, 0).expect("a first socket"),
-            PosixUdpSocket::bind(LOOPBACK, 0).expect("a second socket"),
+            PosixUdpSocket::bind(LOOPBACK).expect("a first socket"),
+            PosixUdpSocket::bind(LOOPBACK).expect("a second socket"),
         )
+    }
+
+    /// An address goes into the kernel's form and comes back as it was, on either family, with
+    /// the scope of a link-local end and the length of the form it is; the flow label alone is
+    /// left behind.
+    #[test]
+    fn an_address_round_trips_through_the_kernels_form_on_either_family() {
+        let scoped = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            7446,
+            0,
+            3,
+        ));
+        for at in [
+            SocketAddr::from(([192, 168, 1, 50], 7447)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 7447)),
+            scoped,
+        ] {
+            let raw = RawAddr::of(at);
+            assert_eq!(raw.to_socket_addr(), Some(at));
+            let (family, size) = match at {
+                SocketAddr::V4(_) => (libc::AF_INET, size_of::<libc::sockaddr_in>()),
+                SocketAddr::V6(_) => (libc::AF_INET6, size_of::<libc::sockaddr_in6>()),
+            };
+            assert_eq!(family_of(&at), family);
+            assert_eq!(raw.size() as usize, size);
+        }
+        let labelled = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 7447, 0x1234, 0));
+        assert_eq!(
+            RawAddr::of(labelled).to_socket_addr(),
+            Some(SocketAddr::from((Ipv6Addr::LOCALHOST, 7447)))
+        );
+        assert_eq!(
+            RawAddr::empty().to_socket_addr(),
+            None,
+            "an unspecified family names no end"
+        );
+    }
+
+    /// A datagram between two IPv6 sockets is taken with its source, and the source is the
+    /// sender's own end, as a link compares it. Needs the host's IPv6 loopback.
+    #[test]
+    fn an_ipv6_datagram_is_taken_with_its_source() {
+        let a = PosixUdpSocket::bind(LOOPBACK_V6).expect("an IPv6 socket");
+        let b = PosixUdpSocket::bind(LOOPBACK_V6).expect("a second IPv6 socket");
+        assert_eq!(b.local().ip(), LOOPBACK_V6.ip());
+        assert_ne!(b.local().port(), 0, "the locator must name a real port");
+        a.send_to(b.local(), b"ping6").expect("a send");
+        let mut buf = [0u8; 16];
+        let (len, src) = b
+            .recv_waiting(&mut buf)
+            .expect("no error")
+            .expect("a datagram within the receive timeout");
+        assert_eq!(&buf[..len], b"ping6");
+        assert_eq!(src, a.local(), "the source is the sender's end");
+    }
+
+    /// Only a socket the kernel has no family for is the family's refusal: a dial that meets it
+    /// is not retried, any other failure is.
+    #[test]
+    fn only_a_missing_family_is_refused_for_its_family() {
+        assert!(PosixUdpSocket::refuses_address(&PosixNetError::Socket(
+            libc::EAFNOSUPPORT
+        )));
+        assert!(!PosixUdpSocket::refuses_address(&PosixNetError::Socket(
+            libc::EMFILE
+        )));
+        assert!(!PosixUdpSocket::refuses_address(&PosixNetError::Bind(
+            libc::EAFNOSUPPORT
+        )));
     }
 
     #[test]
     fn a_descriptor_is_made_non_blocking_and_blocking_again_and_each_is_read_back() {
-        let socket = PosixUdpSocket::bind(LOOPBACK, 0).expect("a socket");
+        let socket = PosixUdpSocket::bind(LOOPBACK).expect("a socket");
         let flags = |fd| unsafe { libc::fcntl(fd, libc::F_GETFL) };
         assert_eq!(
             flags(socket.fd()) & libc::O_NONBLOCK,
@@ -584,7 +780,7 @@ mod tests {
 
     #[test]
     fn a_descriptor_is_closed_on_exec_and_a_bad_one_is_refused() {
-        let socket = PosixUdpSocket::bind(LOOPBACK, 0).expect("a socket");
+        let socket = PosixUdpSocket::bind(LOOPBACK).expect("a socket");
         set_close_on_exec(socket.fd()).expect("close-on-exec");
         let flags = unsafe { libc::fcntl(socket.fd(), libc::F_GETFD) };
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
@@ -593,30 +789,35 @@ mod tests {
 
     #[test]
     fn a_bind_on_port_zero_names_the_port_the_kernel_chose() {
-        let socket = PosixUdpSocket::bind(LOOPBACK, 0).expect("a socket");
-        let (addr, port) = socket.local();
-        assert_eq!(addr, LOOPBACK);
-        assert_ne!(port, 0, "the locator must name a real port");
+        let socket = PosixUdpSocket::bind(LOOPBACK).expect("a socket");
+        assert_eq!(socket.local().ip(), LOOPBACK.ip());
+        assert_ne!(
+            socket.local().port(),
+            0,
+            "the locator must name a real port"
+        );
     }
 
     #[test]
     fn a_datagram_sent_to_a_socket_is_taken_with_its_source() {
         let (a, b) = pair();
-        let (b_addr, b_port) = b.local();
-        a.send_to(b_addr, b_port, b"ping").expect("a send");
+        a.send_to(b.local(), b"ping").expect("a send");
         let mut buf = [0u8; 16];
-        let (len, src, src_port) = b
+        let (len, src) = b
             .recv_waiting(&mut buf)
             .expect("no error")
             .expect("a datagram within the receive timeout");
         assert_eq!(&buf[..len], b"ping");
-        assert_eq!(src, LOOPBACK);
-        assert_eq!(src_port, a.local().1, "the source is the sender's port");
+        assert_eq!(
+            src,
+            a.local(),
+            "the source is the sender's address and port"
+        );
     }
 
     #[test]
     fn a_quiet_socket_answers_nothing_yet_both_ways_and_does_not_block() {
-        let socket = PosixUdpSocket::bind(LOOPBACK, 0).expect("a socket");
+        let socket = PosixUdpSocket::bind(LOOPBACK).expect("a socket");
         let mut buf = [0u8; 16];
         assert_eq!(socket.try_recv(&mut buf), Ok(None));
         let started = std::time::Instant::now();
@@ -631,8 +832,7 @@ mod tests {
     #[test]
     fn a_queued_datagram_is_taken_without_waiting() {
         let (a, b) = pair();
-        let (b_addr, b_port) = b.local();
-        a.send_to(b_addr, b_port, b"now").expect("a send");
+        a.send_to(b.local(), b"now").expect("a send");
         // Let the loopback deliver it, then ask without waiting.
         b.wait_readable(100);
         let mut buf = [0u8; 16];
@@ -648,10 +848,9 @@ mod tests {
     fn a_longer_receive_timeout_is_taken_and_a_datagram_still_wakes_the_wait_at_once() {
         let (a, b) = pair();
         assert!(b.set_receive_timeout(2000), "the kernel takes two seconds");
-        let (b_addr, b_port) = b.local();
         // A thread would make this test timing-dependent; send first, then ask: the wait returns
         // with the datagram without using its two seconds.
-        a.send_to(b_addr, b_port, b"early").expect("a send");
+        a.send_to(b.local(), b"early").expect("a send");
         let started = std::time::Instant::now();
         let mut buf = [0u8; 16];
         let (len, ..) = b
@@ -678,8 +877,7 @@ mod tests {
     #[test]
     fn a_datagram_longer_than_the_buffer_is_truncated_to_it() {
         let (a, b) = pair();
-        let (b_addr, b_port) = b.local();
-        a.send_to(b_addr, b_port, b"0123456789").expect("a send");
+        a.send_to(b.local(), b"0123456789").expect("a send");
         let mut buf = [0u8; 4];
         let (len, ..) = b
             .recv_waiting(&mut buf)
@@ -693,9 +891,8 @@ mod tests {
 
     #[test]
     fn binding_a_port_that_is_taken_is_a_bind_error() {
-        let first = PosixUdpSocket::bind(LOOPBACK, 0).expect("a socket");
-        let taken = first.local().1;
-        match PosixUdpSocket::bind(LOOPBACK, taken) {
+        let first = PosixUdpSocket::bind(LOOPBACK).expect("a socket");
+        match PosixUdpSocket::bind(first.local()) {
             Err(PosixNetError::Bind(e)) => assert_eq!(e, libc::EADDRINUSE),
             Err(other) => panic!("a different error: {other:?}"),
             Ok(_) => panic!("a second bind on a taken port must fail"),
