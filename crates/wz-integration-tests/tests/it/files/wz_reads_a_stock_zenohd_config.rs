@@ -3178,8 +3178,12 @@ fn handshake_field_off_the_link(
             let init = dissect_transport_message(&payload, 0).unwrap_or_else(|e| {
                 panic!("wz cannot dissect {who}'s first frame: {e:?}\n{source}")
             });
+            // An INIT is told by its `zid` and an OPEN by its `lease`. Not by
+            // `batch_size`: that rides behind the `S` flag, which upstream sets
+            // only when the size or the resolution is not the default, so a
+            // zenohd InitSyn for a document that names neither carries none.
             assert!(
-                init.find("batch_size").is_some(),
+                init.find("zid").is_some() && init.find("lease").is_none(),
                 "the first frame is not an InitSyn, so the OPEN this leg wants \
                  will never be sent\n{init:?}"
             );
