@@ -1441,12 +1441,7 @@ mod batch_walk_tests {
         /// cleared. Derived from the production encoder so only the extension
         /// chain differs between the two peers.
         fn silent_join(zid: &[u8]) -> Vec<u8> {
-            let dgram = peer_join(zid);
-            let (_, consumed) = crate::join_decode::decode_join_body(dgram[0], &dgram[1..])
-                .expect("the real beacon's body decodes");
-            let mut out = dgram[..1 + consumed].to_vec();
-            out[0] &= !wire_const::FLAG_T_Z;
-            out
+            crate::multicast_join::join_without_chain(&peer_join(zid))
         }
 
         /// A chain-start fragment with NO extension chain at all — the wire a

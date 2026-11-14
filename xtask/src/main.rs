@@ -75,6 +75,7 @@ const CODECS: &[&str] = &[
     "cobs_encode",
     "cobs_decode",
     "stream_envelope",
+    "compressed_batch",
     "close",
     "frame",
     "fragment",
@@ -104,6 +105,11 @@ const CODECS: &[&str] = &[
     "transport_frame_header",
     "transport_fragment_header",
     "transport_join",
+    "transport_oam",
+    // The whole scouting messages, likewise: the header, the `scout` or
+    // `hello` body and the chain.
+    "scouting_scout",
+    "scouting_hello",
     "msg_put",
     "msg_del",
     "wireexpr_local",
@@ -294,6 +300,8 @@ const CODEC_GATES: &[(&str, &str)] = &[
     ("transport_keep_alive", "codec-keep-alive"),
     ("transport_fragment_header", "codec-fragment"),
     ("transport_join", "codec-join"),
+    ("scouting_scout", "codec-scout"),
+    ("scouting_hello", "codec-hello"),
     ("push", "codec-push"),
     ("response_final", "codec-response-final"),
     ("query_value_zbuf", "codec-request"),

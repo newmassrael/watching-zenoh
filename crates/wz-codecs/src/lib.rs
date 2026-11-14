@@ -453,6 +453,49 @@ pub mod transport_join {
     ));
 }
 
+// The batch of a compressing session: the batch header byte and the payload
+// after it. Ungated: compression is a session feature, not a codec one, and the
+// passive reader takes a batch apart on every build that decompresses.
+pub mod compressed_batch {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/compressed_batch.rs"
+    ));
+}
+
+// The transport OAM, whole: header, id, chain, then the body the header's
+// encoding names. Ungated as the network `oam` is: the session reads it on
+// every build with an allocator, under no `codec-*` feature.
+pub mod transport_oam {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_oam.rs"
+    ));
+}
+
+// The two scouting messages, whole: header, the `scout` or `hello` body, the
+// chain. Scouting ids collide with the transport ones, so these are read only
+// off a scouting link.
+#[cfg(feature = "codec-scout")]
+pub mod scouting_scout {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/scouting_scout.rs"
+    ));
+}
+
+#[cfg(feature = "codec-hello")]
+pub mod scouting_hello {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/scouting_hello.rs"
+    ));
+}
+
 // The element of a sliced payload: what `msg_put` repeats when its extension
 // chain carries the shared-memory marker. A leaf, so it is declared before the
 // module that imports it.

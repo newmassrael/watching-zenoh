@@ -19,6 +19,11 @@
 //! decoder here refuses a chain of more than `MAX_EXT_CHAIN_DEPTH` entries,
 //! and the view, which holds no list, reads it. A decoder built on the view
 //! keeps the bound by counting what it walks; the last test holds that.
+//!
+//! The transport OAM, which no node here writes, is held in the second
+//! direction alone (`transport_oam.scxml`, `commons/zenoh-codec/src/transport/oam.rs`
+//! @ `impl<W> WCodec<&Oam, &mut W> for Zenoh080`), with the one refusal the
+//! document leaves to its reader: the reserved body encoding.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -27,6 +32,7 @@ use sce_forge_runtime::codec::SceCursor;
 use wz_codecs::transport_close::TransportCloseView;
 use wz_codecs::transport_init::TransportInitView;
 use wz_codecs::transport_keep_alive::TransportKeepAliveView;
+use wz_codecs::transport_oam::{TransportOamView, TransportOamViewVariant};
 use wz_codecs::transport_open::TransportOpenView;
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
@@ -56,6 +62,15 @@ const UPSTREAM_CLOSE_WITH_EXT: [u8; 6] = [0x83, 0x00, 0x49, 0x02, 0xDE, 0xAD];
 
 /// A KeepAlive with one unit entry of id 0x5 and the mandatory bit set.
 const UPSTREAM_KEEP_ALIVE_WITH_EXT: [u8; 2] = [0x84, 0x15];
+
+/// Transport OAMs: id 42 with no body; id 2 with the z64 body 9 and the QoS
+/// extension (a mandatory z64 of id 1, value 7) between the id and the body;
+/// the two-byte id 129 with the ZBuf body `DE AD BE`.
+const UPSTREAM_OAMS: [&[u8]; 3] = [
+    &[0x00, 0x2A],
+    &[0xA0, 0x02, 0x31, 0x07, 0x09],
+    &[0x40, 0x81, 0x01, 0x03, 0xDE, 0xAD, 0xBE],
+];
 
 fn init_params(whatami: WhatAmI, zid: &[u8], lease_ms: u64) -> SessionInitParams {
     SessionInitParams {
@@ -224,6 +239,83 @@ fn assert_keep_alive_read_alike(wire: &[u8]) {
         }
         Ok(_) => panic!("the decoder here read another message"),
         Err(refused) => panic!("the decoder here refused the frame: {refused:?}"),
+    }
+}
+
+/// [`assert_init_read_alike`] for `transport_oam`: the id the decoder here
+/// projects onto upstream's 16 bits, the encoding, the body by that encoding,
+/// and the chain read between the id and the body.
+fn assert_oam_read_alike(wire: &[u8]) {
+    let view = read_whole!(TransportOamView::decode, wire);
+    assert_eq!(view.encode_to_vec(), wire, "the view writes the frame back");
+    let (view_value, view_body) = match &view.body {
+        TransportOamViewVariant::CodecZenohExtUnit(_) => (0, Vec::new()),
+        TransportOamViewVariant::CodecZenohExtZint(body) => (body.value, Vec::new()),
+        TransportOamViewVariant::CodecZenohExtZbuf(body) => (0, body.value.into_inner().to_vec()),
+        TransportOamViewVariant::Default { .. } => panic!("the reserved encoding is refused"),
+    };
+    match parse_inbound(wire) {
+        Ok(InboundFrame::Oam {
+            id,
+            encoding,
+            value,
+            body,
+            has_ext,
+            extensions,
+        }) => {
+            assert_eq!(id, wire_const::oam_id_from_wire(view.id));
+            assert_eq!(encoding, view.enc());
+            assert_eq!((value, body), (view_value, view_body));
+            assert_eq!(has_ext, view.extensions.is_some());
+            assert_eq!(
+                extensions.iter().map(|e| e.header).collect::<Vec<u8>>(),
+                view_chain_headers!(view)
+            );
+        }
+        Ok(_) => panic!("the decoder here read another message"),
+        Err(refused) => panic!("the decoder here refused the frame: {refused:?}"),
+    }
+}
+
+#[test]
+fn every_upstream_oam_is_read_alike_here_and_by_the_document() {
+    for wire in UPSTREAM_OAMS {
+        assert_oam_read_alike(wire);
+    }
+}
+
+/// The reserved body encoding reaches the document's default arm, which reads
+/// no body, and is refused here as upstream refuses it
+/// (`commons/zenoh-codec/src/transport/oam.rs` @ `_ => return Err(DidntRead),`).
+#[test]
+fn an_oam_of_the_reserved_encoding_is_refused_here_and_read_by_the_view() {
+    let wire = [0x60, 0x01];
+    let view = read_whole!(TransportOamView::decode, &wire);
+    assert_eq!(view.enc(), 3);
+    assert!(matches!(view.body, TransportOamViewVariant::Default { .. }));
+    assert!(matches!(
+        parse_inbound(&wire),
+        Err(InboundParseError::ReservedEncoding)
+    ));
+}
+
+/// An OAM cut inside its id, its chain or its body is refused by both readers.
+#[test]
+fn an_oam_cut_short_is_refused_by_both_readers() {
+    for wire in UPSTREAM_OAMS {
+        for cut in 1..wire.len() {
+            let short = &wire[..cut];
+            assert!(
+                TransportOamView::decode(&mut SceCursor::new(short)).is_err(),
+                "the view refuses {cut} of {} bytes",
+                wire.len()
+            );
+            assert!(
+                parse_inbound(short).is_err(),
+                "the decoder here refuses {cut} of {} bytes",
+                wire.len()
+            );
+        }
     }
 }
 

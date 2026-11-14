@@ -1079,6 +1079,17 @@ pub mod handshake_encode;
 ))]
 mod transport_message_parity;
 
+/// The scouting messages as `scout_responder` writes them and
+/// `scouting_message` reads them, against the documents that state each
+/// whole message.
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-scout",
+    feature = "codec-hello"
+))]
+mod scouting_message_parity;
+
 /// The Frame and Fragment headers as `frame_encode` writes them and `inbound`
 /// reads them, against the documents that state each header.
 #[cfg(all(

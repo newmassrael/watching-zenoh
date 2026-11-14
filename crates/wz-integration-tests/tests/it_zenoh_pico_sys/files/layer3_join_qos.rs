@@ -13,13 +13,14 @@
 //! advertisement that rides a JOIN QoS-SN extension. wz's `encode_join`, under
 //! `#[cfg(feature = "transport-qos")]` and a runtime `is_qos` offer, writes the
 //! `{0,0}` DECOY base next_sn (mirroring zenoh `multicast/link.rs:487`) + the
-//! transport-message `Z` header flag + the hand-rolled QoS-SN ext
-//! (`[0x51][VLE(len)][Priority::NUM * 2 VLE SNs]`, `write_join_qos_ext` in
-//! `wz-session-core::multicast_join`). This test byte-compares that whole qos
+//! transport-message `Z` header flag + the QoS-SN ext
+//! (`[0x51][VLE(len)][Priority::NUM * 2 VLE SNs]`, its SNs laid by `qos_sns` in
+//! `wz-session-core::multicast_join` and the whole written by the
+//! `transport_join` document). This test byte-compares that whole qos
 //! JOIN against zenoh-pico's real C `_z_join_encode` with `_next_sn._is_qos =
 //! true`, which encodes the same `_Z_MSG_EXT_ID_JOIN_QOS` ZBUF ext (0x51,
 //! transport.c:71-83). RED (binds to the transport-qos code): neuter
-//! `write_join_qos_ext` (or the `is_qos` gate) so the ext is dropped/corrupted ->
+//! `qos_sns` (or the `is_qos` gate) so the ext is dropped/corrupted ->
 //! the bytes diverge from pico while a plain-mode JOIN still matches.
 //!
 //! ## The union-alias base (why priority Control carries {0,0})

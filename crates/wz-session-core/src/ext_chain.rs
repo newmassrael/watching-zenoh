@@ -332,15 +332,15 @@ pub(crate) fn collect_handshake_ext_chain<'a>(
     Ok(())
 }
 
-/// The chain of a received Frame, Fragment or Join as its document read it, owned: the heap
-/// profile's form of the chain those messages report. The document's view reads a chain of any
-/// length, so the bound a node reads of a transport chain
+/// The chain of a received Frame, Fragment, Join, transport OAM, Scout or Hello as its document
+/// read it, owned: the heap profile's form of the chain those messages report. The document's
+/// view reads a chain of any length, so the bound a node reads of a transport chain
 /// ([`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)) is kept here, as
 /// `collect_handshake_ext_chain` keeps it.
-#[cfg(all(
-    feature = "alloc",
-    any(feature = "codec-frame", feature = "codec-join")
-))]
+///
+/// Gated on `alloc` alone: the transport OAM is read by every build with an allocator, under no
+/// `codec-*` feature, so every such build has a reader of this.
+#[cfg(feature = "alloc")]
 pub(crate) fn collect_ext_chain<'a>(
     walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
 ) -> Result<Vec<ExtEntryOwned>, crate::parse_error::InboundParseError> {
@@ -363,10 +363,7 @@ pub(crate) fn collect_ext_chain<'a>(
     feature = "codec-open-body",
     feature = "codec-close",
     feature = "codec-keep-alive",
-    all(
-        feature = "alloc",
-        any(feature = "codec-frame", feature = "codec-join")
-    )
+    feature = "alloc"
 ))]
 fn received_entry(
     entry: &wz_codecs::ext_entry::ExtEntryView<'_>,
@@ -541,18 +538,11 @@ pub(crate) fn ext_chain_len(entries: &[ExtEntryOwned]) -> usize {
 /// bounded by [`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)
 /// so a malformed peer cannot pin the decoder into an unbounded loop.
 ///
-/// UNCONDITIONAL within this `alloc`-gated module since transport OAM joined
-/// `parse_inbound`: that arm carries no `codec-*` gate, so every build that
-/// compiles this module calls this function. The `any(codec-*)` union it used
-/// to carry had to be grown twice by feature-SUBSET builds (R311y605,
-/// R311y607) and each growth was a defect until it was found; there is no
-/// longer a list to be short of.
-///
-/// The heap profile's form for the messages whose chain is still read here (a
-/// Frame, a Fragment, a Join, a transport OAM): it returns a growable `Vec`. A
-/// handshake message's chain is read by the message's document and kept through
-/// `collect_handshake_ext_chain`.
-#[cfg(feature = "alloc")]
+/// The chain no message's document holds: the authentication extension's inner
+/// list of method entries, which travels inside a ZBuf body (`auth_dispatch`'s
+/// demultiplex). Every message chain is read by its message's document and kept
+/// through [`collect_ext_chain`] or `collect_handshake_ext_chain`.
+#[cfg(feature = "session-extauth")]
 pub(crate) fn decode_ext_chain(
     cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,
 ) -> Result<Vec<ExtEntryOwned>, crate::parse_error::InboundParseError> {
