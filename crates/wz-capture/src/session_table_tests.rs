@@ -3702,13 +3702,27 @@ fn read_structured_flow(
 /// Measured with a `Frame`'s records read as upstream reads a batch
 /// (`docs/flow-zenoh-verdict.md` §6.14, measured 2026-11-14): its records end
 /// at a transport id, and a record that does not decode, or whose id is in
-/// neither space, fails the batch. Under the earlier reading (2026-10-26) the
-/// same flows read `explained` 8847 times for mDNS, 3926 for DNS, 6929 for
-/// CoAP and 575 for NTP: the difference is batches upstream drops, a `Frame`
-/// whose records come to bytes of the names, the counts or the options that
-/// upstream reads as neither a network message nor a transport one. The random
-/// table above was measured under the earlier reading, and that reading can
-/// only have counted more units `explained` than this one.
+/// neither space, fails the batch. The same flows, `explained` / `residual` /
+/// `undecoded`, in three readings: the first measurement (2026-10-26), the
+/// reader just before model 7 (2026-11-14, with the walk already ending a
+/// `Frame` at a transport id and the codec work's refusals), and model 7:
+///
+/// | protocol | 2026-10-26 | before model 7 | model 7 |
+/// |---|---|---|---|
+/// | mDNS | 8847 / 45753 / 0 | 8847 / 45753 / 0 | 4151 / 50449 / 0 |
+/// | DNS | 3926 / 5927 / 44747 | 2301 / 7547 / 44752 | 1978 / 7869 / 44753 |
+/// | CoAP | 6929 / 11796 / 35875 | 4922 / 13803 / 35875 | 348 / 18377 / 35875 |
+/// | NTP | 575 / 38160 / 15865 | 378 / 38357 / 15865 | 310 / 38425 / 15865 |
+///
+/// Model 7 takes units out of `explained` (mDNS 4696, DNS 323, CoAP 4574, NTP
+/// 68): batches upstream drops, a `Frame` whose records come to bytes of the
+/// names, the counts or the options that upstream reads as neither a network
+/// message nor a transport one. They go to `residual`, except that one DNS
+/// unit becomes `undecoded` with model 7, because the batch header inference
+/// asks the same rule as the walk; the other five of the six DNS units that
+/// became `undecoded` since the first measurement moved before it. The
+/// random table above was measured on 2026-10-26, and no reading since can
+/// have counted more units `explained` than that one.
 ///
 /// What it says against the random table (n = 10: mean 0.061, max 0.40):
 ///

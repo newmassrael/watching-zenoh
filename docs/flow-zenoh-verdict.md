@@ -1627,9 +1627,23 @@ The generated flows of other protocols
 (`structured_datagrams_of_other_protocols_read_by_their_first_byte`, 54600
 datagrams each) read whole far less often, for the same reason: their records
 come to bytes upstream reads as neither a network message nor a transport one.
-mDNS reads 4151 units whole where it read 8847, DNS 1978 where 3926, CoAP 348
-where 6929 and NTP 310 where 575. No flow of ten or more of them reaches half
-read whole, where mDNS, DNS and CoAP flows of ten did.
+Measured on the reader just before model 7 and on model 7, `explained` /
+`residual` / `undecoded`:
+
+| protocol | before model 7 | model 7 | out of `explained` with model 7 |
+|---|---|---|---|
+| mDNS | 8847 / 45753 / 0 | 4151 / 50449 / 0 | 4696 |
+| DNS | 2301 / 7547 / 44752 | 1978 / 7869 / 44753 | 323 |
+| CoAP | 4922 / 13803 / 35875 | 348 / 18377 / 35875 | 4574 |
+| NTP | 378 / 38357 / 15865 | 310 / 38425 / 15865 | 68 |
+
+They go to `residual`, except one DNS unit, which becomes `undecoded` because
+the batch header inference asks the same rule as the walk (`frame_reach`). The
+other five DNS units that became `undecoded` since the first measurement
+(2026-10-26, 44747) moved before model 7, with the walk ending a `Frame` at a
+transport id and the codec work's refusals. No flow of ten or more of them
+reaches half read whole, where under the first measurement mDNS, DNS and CoAP
+flows of ten did.
 
 A lowlatency unit is not part of this rule: upstream reads such a unit as a
 run of messages until it ends
