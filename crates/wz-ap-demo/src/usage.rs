@@ -370,15 +370,18 @@ pub(crate) fn print_usage() {
     eprintln!("                             links carry zenoh's default 100. Two entries naming");
     eprintln!("                             one destination are REFUSED, as a zenohd refuses");
     eprintln!("                             the same config. Requires --router-hat.");
-    eprintln!("    --gateway-south <json5>  how this ROUTER or PEER partitions its south into subregions,");
+    eprintln!("    --gateway-south <json5>  how this node partitions its south into subregions,");
     eprintln!("                             in the shape of the upstream gateway south value:");
     eprintln!("                             \"auto\" (the default), or a list of subregions, each");
     eprintln!("                             with filters on modes, zids, interfaces and region");
     eprintln!("                             names. A remote is placed in the first subregion it");
     eprintln!("                             matches, and every session announces the bound that");
-    eprintln!("                             gives it. Requires --router-hat or --peer and the");
-    eprintln!("                             zenoh-config build feature; refused on every other");
-    eprintln!("                             run mode.");
+    eprintln!(
+        "                             gives it. Requires --router-hat, --peer, --client-node"
+    );
+    eprintln!("                             or a one-shot --connect, and the zenoh-config build");
+    eprintln!("                             feature; refused on every other run mode and with");
+    eprintln!("                             --reconnect.");
     eprintln!(
         "    --govern-multicast       hold this ROUTER's multicast group to the node's access"
     );

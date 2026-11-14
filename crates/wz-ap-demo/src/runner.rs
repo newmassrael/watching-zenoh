@@ -96,8 +96,8 @@ use wz::runtime_tokio::session_glue::{
 };
 use wz::runtime_tokio::session_open::{
     accept_and_open_session_with_offer, accept_endpoint, dial_endpoint,
-    initiate_and_open_session_with_offer, offer_for_connect, AcceptConfig, DialConfig, DialedLink,
-    OpenError, OpenedSession, OpenedSessionParts, SessionOffer, DEFAULT_OPEN_TICK_MS,
+    initiate_and_open_session_with_staging, offer_for_connect, AcceptConfig, DialConfig,
+    DialedLink, OpenError, OpenedSession, OpenedSessionParts, SessionOffer, DEFAULT_OPEN_TICK_MS,
 };
 
 // R2592 — the node's per-link-kind socket configuration, carried in
@@ -2651,14 +2651,32 @@ fn acceptor_offer(#[allow(unused)] shm: bool) -> SessionOffer {
 /// One call for every combination: the per-mode match this replaced could not
 /// express two offers at once, which is exactly why the demo used to reject
 /// `--lowlatency --compression`.
+///
+/// `south_partition` is set before the first wire byte, as a mesh node sets it
+/// on each session it opens: the session's Open then announces the bound the
+/// partition gives the remote, and a remote the rules refuse fails the
+/// handshake, which is upstream's client (`zenoh/src/net/runtime/mod.rs` @
+/// `move |p| region::compute_transient_bound_of(&p, &config)`).
 async fn open_initiator_with_offer(
     offer: SessionOffer,
     dialed: DialedLink,
     params: SessionInitParams,
     clock: TokioTime,
+    south_partition: wz::runtime_tokio::region_partition::SouthPartition,
 ) -> Result<OpenedSession, OpenError> {
-    initiate_and_open_session_with_offer(dialed, params, offer, clock, None, DEFAULT_OPEN_TICK_MS)
-        .await
+    initiate_and_open_session_with_staging(
+        dialed,
+        params,
+        offer,
+        move |actions| {
+            actions.set_south_partition(south_partition);
+            Ok(())
+        },
+        clock,
+        None,
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await
 }
 
 /// A one-shot client's dial and open, run as upstream's client
@@ -2690,6 +2708,7 @@ async fn open_initiator_in_connect_phase(
         connect,
         tls_ca,
         quic_ca,
+        south_partition,
         ..
     } = role
     else {
@@ -2715,12 +2734,14 @@ async fn open_initiator_in_connect_phase(
     let dial_cfg = &dial_cfg;
     let outcome = drive_connect_phase(phase.budget, &scheduled, |endpoint, attempt| {
         let params = params.clone();
+        // Every attempt is a new session, and each one carries the partition.
+        let south_partition = south_partition.clone();
         async move {
             if attempt > 1 {
                 log::info!("wz-ap-demo: connect attempt {attempt} to {endpoint}");
             }
             let (dialed, offer) = dial_candidate(endpoint, dial_cfg, offer).await?;
-            open_initiator_with_offer(offer, dialed, params, clock)
+            open_initiator_with_offer(offer, dialed, params, clock, south_partition)
                 .await
                 .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))
         }
@@ -10000,6 +10021,112 @@ mod node_zid_tests {
             draws.len(),
             "64 draws are pairwise distinct"
         );
+    }
+}
+
+/// Item 751 — a one-shot client's partition reaches its session's Open, as
+/// upstream's client runs its rules on every Open it sends. The partitions are
+/// read by the config reader, which is what hands the client one.
+#[cfg(all(test, feature = "zenoh-config"))]
+mod client_partition_tests {
+    use super::open_initiator_with_offer;
+    use crate::args::{demo_session_init_params, NodeKind, TransportTuning};
+    use wz::runtime_tokio::region_partition::SouthPartition;
+    use wz::runtime_tokio::runtime_impl::TokioTime;
+    use wz::runtime_tokio::session_open::{
+        accept_and_open_session_with_offer, DialedLink, OpenError, OpenedSession, SessionOffer,
+        DEFAULT_OPEN_TICK_MS,
+    };
+
+    fn partition(text: &str) -> SouthPartition {
+        let value = wz::runtime_tokio::json5::parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        wz::runtime_tokio::zenoh_config::gateway_south_of(&value)
+            .unwrap_or_else(|e| panic!("{text}: {e}"))
+    }
+
+    /// A one-shot client opens to an in-process acceptor of `acceptor` kind with
+    /// `south` staged; the client's open result, and whether the acceptor opened.
+    async fn open_with(
+        acceptor: NodeKind,
+        south: SouthPartition,
+    ) -> (Result<OpenedSession, OpenError>, bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback listener");
+        let addr = listener.local_addr().expect("its address");
+        let tuning = TransportTuning::default();
+        let acceptor_params =
+            demo_session_init_params(acceptor, vec![0xa1, 0xb2, 0xc3, 0xd4], &tuning)
+                .expect("acceptor params");
+        let client_params =
+            demo_session_init_params(NodeKind::Initiator, vec![0xc1, 0xb2, 0xc3, 0xd4], &tuning)
+                .expect("client params");
+        let accept = async move {
+            let (stream, _) = listener.accept().await.expect("the client's link");
+            accept_and_open_session_with_offer(
+                DialedLink::Tcp(stream),
+                acceptor_params,
+                SessionOffer::universal(),
+                TokioTime::new(),
+                None,
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .is_ok()
+        };
+        let dial = async move {
+            let stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("a loopback dial");
+            open_initiator_with_offer(
+                SessionOffer::universal(),
+                DialedLink::Tcp(stream),
+                client_params,
+                TokioTime::new(),
+                south,
+            )
+            .await
+        };
+        let (accepted, opened) = tokio::join!(accept, dial);
+        (opened, accepted)
+    }
+
+    /// The bound the client's Open announced for a peer acceptor, as its wire
+    /// value: `None` is no `RemoteBound` extension, the `auto` preset.
+    async fn announced_for_a_peer(south: SouthPartition) -> Option<u8> {
+        let (opened, accepted) = open_with(NodeKind::Acceptor, south).await;
+        let opened = opened.unwrap_or_else(|e| panic!("the client opens: {e:?}"));
+        assert!(accepted, "the acceptor opens");
+        opened.actions.local_remote_bound().map(|bound| bound as u8)
+    }
+
+    #[tokio::test]
+    async fn the_auto_preset_announces_no_bound() {
+        assert_eq!(announced_for_a_peer(SouthPartition::Auto).await, None);
+    }
+
+    /// A subregion whose filter matches the peer puts it south (wire value 1).
+    #[tokio::test]
+    async fn a_subregion_that_matches_the_remote_announces_it_south() {
+        let south = partition(r#"[{ filters: [{ modes: ["peer"] }] }]"#);
+        assert_eq!(announced_for_a_peer(south).await, Some(1));
+    }
+
+    /// A partition none of whose subregions matches the peer leaves it north
+    /// (wire value 0), which is still an announcement, unlike the preset.
+    #[tokio::test]
+    async fn a_partition_that_matches_nothing_announces_the_remote_north() {
+        let south = partition(r#"[{ filters: [{ modes: ["router"] }] }]"#);
+        assert_eq!(announced_for_a_peer(south).await, Some(0));
+    }
+
+    /// A router the client's rules would make a subregion fails the open, as
+    /// upstream's client refuses a router region below a non-router one.
+    #[cfg(feature = "router-hat-router")]
+    #[tokio::test]
+    async fn a_router_the_rules_would_place_south_refuses_the_open() {
+        let (opened, _) = open_with(NodeKind::RouterHat, partition("[{}]")).await;
+        assert!(opened.is_err(), "a client does not hold a router south");
     }
 }
 

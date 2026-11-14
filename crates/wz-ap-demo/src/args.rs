@@ -204,6 +204,13 @@ pub(crate) enum Role {
         /// `None` without `--reconnect`: a one-shot open never reopens, so it
         /// has no plan to retain.
         rescout: Option<RescoutPlan>,
+        /// Item 751 — the south partition this client's session carries: set
+        /// before the handshake, so its Open announces the bound the partition
+        /// gives the remote and a remote the rules refuse fails the open, as
+        /// upstream's client does. `Auto` (announce nothing) unless
+        /// `--gateway-south` was given, which `main` admits on a one-shot
+        /// `--connect` only.
+        south_partition: wz::runtime_tokio::region_partition::SouthPartition,
     },
 }
 
@@ -463,15 +470,17 @@ pub(crate) fn parse_peer_mode(args: &[String]) -> Result<bool, String> {
     }
 }
 
-/// Item 751 — `--gateway-south <partition>`: the router's south partition, as
+/// Item 751 — `--gateway-south <partition>`: the node's south partition, as
 /// JSON5 text in the shape upstream's `gateway/south` value takes (`"auto"`, or
 /// a list of subregions with their filters). Read by the config reader's own
 /// reader of that key (`gateway_south_of`), so the flag and a future config
 /// expansion cannot accept different documents. Absent is the `auto` preset.
 ///
+/// Read in every build: the one-shot client, which every build has, carries the
+/// partition to its session as the mesh run-modes do to theirs.
+///
 /// The reader lives in the config reader, so a build without `zenoh-config`
 /// has none, and the flag is then refused rather than ignored.
-#[cfg(any(feature = "router-hat-router", feature = "routing-peer"))]
 pub(crate) fn parse_gateway_south(
     args: &[String],
 ) -> Result<wz::runtime_tokio::region_partition::SouthPartition, String> {
@@ -490,7 +499,7 @@ pub(crate) fn parse_gateway_south(
         Err(format!(
             "--gateway-south {text:?} requires the `zenoh-config` feature, whose \
              reader parses it (build: cargo build -p wz-ap-demo --features \
-             router-hat-router,zenoh-config, or routing-peer,zenoh-config)"
+             zenoh-config)"
         ))
     }
 }
@@ -1330,53 +1339,88 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // timeout, so naming the key IS the instruction); the two booleans follow
     // the rule the rest of this function uses and act only on a named `true`,
     // because acting on a merged default would add a flag to every invocation.
-    // The TLS material is gated on the ENDPOINT SCHEME, which is the third kind
-    // of precondition this round had to learn (after a cargo feature and a
-    // sibling flag). `--tls-ca` opens its file EAGERLY — measured, as
-    // `wz-ap-demo: No such file or directory (os error 2)` out of a `tcp/`
-    // connect whose config happened to carry a CA path — so expanding it for a
-    // node with no TLS link turns a valid config into a node that will not
-    // start. zenoh scopes these keys to TLS links; so does this. The build is
-    // asked first: a binary without the `tls` feature has no plumbing to hand
-    // the material to on any endpoint (`config_keys_the_demo_drops`).
-    let dials_tls = cfg.connect.iter().any(|e| e.starts_with("tls/"));
-    let listens_tls = cfg.listen.iter().any(|e| e.starts_with("tls/"));
-    const NO_TLS_LINK: &str = "this deployment has no tls endpoint";
-    for (key, flag, value, usable) in [
-        ("id", "--zid", cfg.id.as_ref(), true),
-        ("namespace", "--namespace", cfg.namespace.as_ref(), true),
-        (
-            "transport/link/tls/root_ca_certificate",
-            "--tls-ca",
-            cfg.tls_root_ca.as_ref(),
-            dials_tls,
-        ),
-        (
-            "transport/link/tls/listen_certificate",
-            "--tls-cert",
-            cfg.tls_listen_certificate.as_ref(),
-            listens_tls,
-        ),
-        (
-            "transport/link/tls/listen_private_key",
-            "--tls-key",
-            cfg.tls_listen_private_key.as_ref(),
-            listens_tls,
-        ),
+    for (key, flag, value) in [
+        ("id", "--zid", cfg.id.as_ref()),
+        ("namespace", "--namespace", cfg.namespace.as_ref()),
     ] {
         if named(key) {
             match value {
                 Some(value) => {
-                    let no_tls_link =
-                        (!usable).then_some(KeyEffect::WithheldFromThisRun(NO_TLS_LINK));
-                    let blocked = no_sink(key).or(no_tls_link);
-                    exp.pair(key, flag, value.clone(), blocked);
+                    exp.pair(key, flag, value.clone(), None);
                 }
                 // A key the document names with no value asks for nothing, and
                 // asking for nothing is what this node already does.
                 None => exp.record(key, KeyEffect::AlreadyTheBehaviour),
             }
         }
+    }
+    // The certificate material of `transport/link/tls`, which upstream hands to
+    // every link that speaks TLS: the `quic/` link's configurator reads the same
+    // keys as the `tls/` link's (`io/zenoh-link-commons/src/quic/utils.rs` @
+    // `let c = config.transport().link().tls();`), and each built link kind gets
+    // its own configuration from them (`io/zenoh-link/src/lib.rs` @
+    // `insert_config(LinkKind::Quic, self.quic_inspector.inspect_config(config));`).
+    // So one key reaches this binary's flag for EACH link it was built with: the
+    // root CA a dial verifies by, `--tls-ca` and `--quic-ca`, and the identity a
+    // listener presents, `--tls-cert`/`--tls-key` and `--quic-cert`/`--quic-key`.
+    //
+    // Each flag is gated on the ENDPOINT SCHEME of its side, which is the third
+    // kind of precondition R311y844 had to learn (after a cargo feature and a
+    // sibling flag). `--tls-ca` opens its file EAGERLY — measured, as
+    // `wz-ap-demo: No such file or directory (os error 2)` out of a `tcp/`
+    // connect whose config happened to carry a CA path — and `--quic-ca` is read
+    // by the same dial-config builder, so expanding either for a node with no
+    // link of its scheme turns a valid config into a node that will not start.
+    // The build is asked first: a binary with neither link has no plumbing to
+    // hand the material to on any endpoint (`config_keys_the_demo_drops`).
+    let names_scheme =
+        |endpoints: &[String], scheme: &str| endpoints.iter().any(|e| e.starts_with(scheme));
+    for (key, value, [tls_flag, quic_flag], endpoints, absent) in [
+        (
+            "transport/link/tls/root_ca_certificate",
+            cfg.tls_root_ca.as_ref(),
+            ["--tls-ca", "--quic-ca"],
+            cfg.connect.as_slice(),
+            "this node dials no link that verifies by a root CA",
+        ),
+        (
+            "transport/link/tls/listen_certificate",
+            cfg.tls_listen_certificate.as_ref(),
+            ["--tls-cert", "--quic-cert"],
+            cfg.listen.as_slice(),
+            "this node listens on no link that presents a certificate",
+        ),
+        (
+            "transport/link/tls/listen_private_key",
+            cfg.tls_listen_private_key.as_ref(),
+            ["--tls-key", "--quic-key"],
+            cfg.listen.as_slice(),
+            "this node listens on no link that presents a certificate",
+        ),
+    ] {
+        if !named(key) {
+            continue;
+        }
+        let Some(value) = value else {
+            exp.record(key, KeyEffect::AlreadyTheBehaviour);
+            continue;
+        };
+        let effect = match no_sink(key) {
+            Some(effect) => effect,
+            None => {
+                let mut outcomes: Vec<KeyEffect> = Vec::new();
+                for (flag, scheme, built) in [
+                    (tls_flag, "tls/", cfg!(feature = "tls")),
+                    (quic_flag, "quic/", cfg!(feature = "quic")),
+                ] {
+                    if built && names_scheme(endpoints, scheme) {
+                        outcomes.push(exp.decide_pair(flag, value.clone(), None));
+                    }
+                }
+                combined_link_effect(&outcomes, KeyEffect::WithheldFromThisRun(absent))
+            }
+        };
+        exp.record(key, effect);
     }
     // R2593 — the per-link-kind socket buffers, each onto its own
     // `--link-config <kind>#<key>=<n>`. No precondition: upstream renders them
@@ -1863,20 +1907,38 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             ),
         }
     }
-    // Item 751 (step 7d-2) — the south PARTITION. Its sinks are the nodes that
-    // hold a region-hat forwarder, `--peer` (and `--client-node`, the same run in
-    // the client role) and `--router-hat`, which is the mesh precondition the
-    // lifecycle keys use: any other run mode has no hat to place a remote by and
-    // `--gateway-south` is refused there by name. Upstream builds the partition's
+    // Item 751 (step 7d-2) — the south PARTITION. Upstream builds the partition's
     // hats whatever the node's mode (`zenoh/src/net/routing/gateway.rs` @
-    // `GatewaySouthConf::Custom(subregions) => {`), so a peer document carries it.
-    // The preset is upstream's shipped value and what the flag's absence means, so
-    // a document stating it asks for the behaviour the node already has.
+    // `GatewaySouthConf::Custom(subregions) => {`) and runs its rules on every
+    // Open, a client's included: the bound they give the remote rides the Open
+    // (`zenoh/src/net/runtime/mod.rs` @
+    // `move |p| region::compute_transient_bound_of(&p, &config)`), and a router
+    // they would make a subregion of a non-router fails the handshake
+    // (`zenoh/src/net/runtime/region.rs` @
+    // `if peer.whatami.is_router() && !config.mode().is_router() {`).
+    // So the sinks are the region-hat forwarder of `--peer`, `--client-node` and
+    // `--router-hat`, and the one session of a one-shot `--connect` client, which
+    // announces the same bound on its Open. A `--reconnect` client's supervisor
+    // reopens without a partition and every other run mode holds none, and `main`
+    // refuses the flag on each by name. The preset is upstream's shipped value
+    // and what the flag's absence means, so a document stating it asks for the
+    // behaviour the node already has.
     if named("gateway/south") {
-        let not_a_region_hat_run = (!mesh).then_some(KeyEffect::WithheldFromThisRun(
-            "only a --peer, --client-node or --router-hat node places its remotes by a partition",
-        ));
-        let blocked = no_sink("gateway/south").or(not_a_region_hat_run);
+        let no_partition_holder = if mesh {
+            None
+        } else if client && exp.typed("--reconnect") {
+            Some(KeyEffect::WithheldFromThisRun(
+                "a --reconnect client reopens its link without a partition",
+            ))
+        } else if client {
+            None
+        } else {
+            Some(KeyEffect::WithheldFromThisRun(
+                "only a --peer, --client-node, --router-hat or --connect node places its \
+                 remotes by a partition",
+            ))
+        };
+        let blocked = no_sink("gateway/south").or(no_partition_holder);
         if cfg.gateway_south == wz::runtime_tokio::region_partition::SouthPartition::Auto {
             exp.record("gateway/south", KeyEffect::AlreadyTheBehaviour);
         } else {
@@ -2673,6 +2735,26 @@ fn declares_a_storage(plugins: Option<&wz::runtime_tokio::json5::Json5Value>) ->
         manager.iter().find(|(n, _)| n == "storages"),
         Some((_, Json5Value::Object(storages))) if !storages.is_empty()
     )
+}
+
+/// The verdict for a key that reaches one flag per link that reads it, from
+/// what became of each flag this run opened a link for; `none` when the run
+/// opens no such link.
+///
+/// A flag the operator typed with another value outranks the others: the file's
+/// value then reaches some of the node's links and not all, and a key reported
+/// applied would tell the operator every link carries it. That is the reason a
+/// list carried in part is not applied ([`list_key_effect`]).
+#[cfg(feature = "zenoh-config")]
+fn combined_link_effect(outcomes: &[KeyEffect], none: KeyEffect) -> KeyEffect {
+    [
+        KeyEffect::OverriddenOnTheCommandLine,
+        KeyEffect::Expanded,
+        KeyEffect::AlreadyOnTheCommandLine,
+    ]
+    .into_iter()
+    .find(|effect| outcomes.contains(effect))
+    .unwrap_or(none)
 }
 
 /// R2099 (open-debt item 512) — the verdict for a LIST-valued key, derived from
@@ -3640,22 +3722,23 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
     (
         "transport/link/tls/root_ca_certificate",
         KIND_OFF_WIRE,
-        "expands to `--tls-ca`. A trust store consulted BENEATH zenoh, during \
-         the TLS handshake; its effect is whether a zenoh frame is exchanged \
-         at all, not what any frame contains.",
+        "expands to `--tls-ca` and `--quic-ca`, one per link built. A trust \
+         store consulted BENEATH zenoh, during the TLS handshake; its effect is \
+         whether a zenoh frame is exchanged at all, not what any frame contains.",
     ),
     (
         "transport/link/tls/listen_certificate",
         KIND_OFF_WIRE,
-        "expands to `--tls-cert`. Same layer as `--tls-ca`: the certificate \
-         travels in the TLS handshake, which is not a zenoh frame and is not \
-         what this tree's dissector reads.",
+        "expands to `--tls-cert` and `--quic-cert`, one per link built. Same \
+         layer as `--tls-ca`: the certificate travels in the TLS handshake, \
+         which is not a zenoh frame and is not what this tree's dissector reads.",
     ),
     (
         "transport/link/tls/listen_private_key",
         KIND_OFF_WIRE,
-        "expands to `--tls-key`. A private key is by construction never on \
-         any wire; its effect is whether the TLS handshake completes.",
+        "expands to `--tls-key` and `--quic-key`, one per link built. A private \
+         key is by construction never on any wire; its effect is whether the \
+         TLS handshake completes.",
     ),
     // The mutual-TLS half of the tls block. The demo has no flag for any of the four (its TLS
     // flags are --tls-ca, --tls-cert and --tls-key), so each is pinned in
@@ -3976,12 +4059,14 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     if !cfg!(feature = "transport-qos") {
         out.push("transport/multicast/qos/enabled");
     }
-    // The certificate material this binary spells (`--tls-ca`, `--tls-cert`, `--tls-key`):
-    // its sink is the `tls` feature's plumbing (`apply_tls_ca`, `apply_tls_accept`), and
-    // without it the three flags parse and change nothing. A reader that holds the material
-    // for the `quic/` link alone still reads the keys here, so the expansion site asks this
-    // list rather than the endpoints; a reader with neither link refuses them by name.
-    if !cfg!(feature = "tls") {
+    // The certificate material, which upstream hands to the `tls/` and the `quic/` link alike:
+    // its sinks are this binary's plumbing for either link (`apply_tls_ca`/`apply_tls_accept`
+    // under `tls`, `apply_quic_ca`/`apply_quic_accept` under `quic`), and without either
+    // feature the flags parse and change nothing. A reader built with a link this binary has no feature
+    // for (a workspace build that unifies the runtime's) still reads the keys, so the
+    // expansion site asks this list before the endpoints; a reader with neither link refuses
+    // them by name.
+    if !cfg!(any(feature = "tls", feature = "quic")) {
         out.push("transport/link/tls/root_ca_certificate");
         out.push("transport/link/tls/listen_certificate");
         out.push("transport/link/tls/listen_private_key");
@@ -4091,8 +4176,10 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         out.push("open/return_conditions/connect_scouted");
     }
     if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
-        // Item 751 — the partition's sinks are the same two run modes, which is
-        // also what gates `--gateway-south`'s own parser.
+        // Item 751 — the partition. The one-shot client carries it in every
+        // build, but a file reaches it only where the reader reads the key, and
+        // the reader's capability (`routing-router-hat`) is in a demo build
+        // exactly when one of these two is; without it the key is refused by name.
         out.push("gateway/south");
         out.push("connect/exit_on_failure");
         out.push("listen/retry");
@@ -4998,6 +5085,12 @@ mod stock_config_tests {
     const CONNECT_ONLY: &str = r#"{ connect: { endpoints: ["tcp/r:7447"] } }"#;
     const LISTEN_TLS: &str = r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] } }"#;
     const CONNECT_TLS: &str = r#"{ connect: { endpoints: ["tls/r:7447"] } }"#;
+    /// Both links that read the certificate material, so a build with either one
+    /// has an endpoint its flag is emitted for.
+    const LISTEN_TLS_AND_QUIC: &str =
+        r#"{ listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] } }"#;
+    const CONNECT_TLS_AND_QUIC: &str =
+        r#"{ connect: { endpoints: ["tls/r:7447", "quic/r:7448"] } }"#;
     /// R311y845 — the argv half of the scouting socket: what `--scout-*`
     /// parses, and what an unset flag resolves to.
     ///
@@ -5559,25 +5652,26 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { shared_memory: { enabled: true } } }"#,
             ),
-            // The TLS three need a TLS endpoint in the fixture: the expansion
-            // withholds the flags on a node with no TLS link, so a tcp control
-            // would read the withholding as "the key reaches nothing".
+            // The certificate three need an endpoint of a link that reads them: the
+            // expansion withholds the flags on a node with no such link, so a tcp
+            // control would read the withholding as "the key reaches nothing". Both
+            // links are named, because a build with either one is a sink.
             (
                 "transport/link/tls/root_ca_certificate",
-                CONNECT_TLS,
-                r#"{ connect: { endpoints: ["tls/r:7447"] },
+                CONNECT_TLS_AND_QUIC,
+                r#"{ connect: { endpoints: ["tls/r:7447", "quic/r:7448"] },
                      transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
             ),
             (
                 "transport/link/tls/listen_certificate",
-                LISTEN_TLS,
-                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] },
+                LISTEN_TLS_AND_QUIC,
+                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
                      transport: { link: { tls: { listen_certificate: "/etc/srv.pem" } } } }"#,
             ),
             (
                 "transport/link/tls/listen_private_key",
-                LISTEN_TLS,
-                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] },
+                LISTEN_TLS_AND_QUIC,
+                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
                      transport: { link: { tls: { listen_private_key: "/etc/srv.key" } } } }"#,
             ),
             // The mutual-TLS four, each against the TLS endpoint of the side it configures, so a
@@ -6171,32 +6265,9 @@ mod stock_config_tests {
         // R2141 — both files the binary refuses from; see the doc above.
         const REFUSAL_SOURCES: &[&str] = &[include_str!("main.rs"), include_str!("args.rs")];
 
-        /// A refusal literal with its `\`-continuations flattened.
-        fn flatten(lit: &str) -> String {
-            let mut out = String::new();
-            let mut chars = lit.chars().peekable();
-            while let Some(c) = chars.next() {
-                if c != '\\' {
-                    out.push(c);
-                    continue;
-                }
-                // A `\` before whitespace is a line continuation; anything else
-                // is an ordinary escape and is kept as written.
-                if chars.peek().is_some_and(|n| n.is_whitespace()) {
-                    while chars.peek().is_some_and(|n| n.is_whitespace()) {
-                        chars.next();
-                    }
-                    out.push(' ');
-                } else {
-                    out.push(c);
-                }
-            }
-            out
-        }
-
         // `(flag, alternatives)`: a refusal reading `X requires --a or --b` is
         // satisfied by EITHER, so a rule carries every flag the sentence offers
-        // (`refusal_alternatives`; item 751's `--gateway-south` offers three).
+        // (`refusal_alternatives`; item 751's `--gateway-south` offers four).
         let mut pairs: Vec<(String, Vec<String>)> = Vec::new();
         let mut feature_gated: Vec<String> = Vec::new();
         for lit in REFUSAL_SOURCES.iter().flat_map(|s| string_literals(s)) {
@@ -6538,6 +6609,29 @@ mod stock_config_tests {
         out
     }
 
+    /// A refusal literal with its `\`-continuations flattened.
+    fn flatten(lit: &str) -> String {
+        let mut out = String::new();
+        let mut chars = lit.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            // A `\` before whitespace is a line continuation; anything else
+            // is an ordinary escape and is kept as written.
+            if chars.peek().is_some_and(|n| n.is_whitespace()) {
+                while chars.peek().is_some_and(|n| n.is_whitespace()) {
+                    chars.next();
+                }
+                out.push(' ');
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
     /// The first `--flag` token in `text`.
     fn first_flag(text: &str) -> Option<String> {
         let at = text.find("--")?;
@@ -6572,8 +6666,9 @@ mod stock_config_tests {
 
     /// A refusal that offers its alternatives as a list is satisfied by each
     /// member of it: `main` refuses `--gateway-south` without `--router-hat`,
-    /// `--peer` or `--client-node`, and a reader that kept only the flags
-    /// around ` or ` would hold a peer document to a rule `main` does not make.
+    /// `--peer`, `--client-node` or `--connect`, and a reader that kept only the
+    /// flags around ` or ` would hold a peer document to a rule `main` does not
+    /// make.
     #[test]
     fn a_refusal_offers_every_flag_its_sentence_lists() {
         assert_eq!(
@@ -6607,8 +6702,11 @@ mod stock_config_tests {
         // reads it.
         let derived: Vec<Vec<String>> = string_literals(include_str!("main.rs"))
             .into_iter()
-            .filter_map(|lit| lit.split_once("--gateway-south requires "))
-            .filter_map(|(_, after)| refusal_alternatives(after))
+            .map(flatten)
+            .filter_map(|lit| {
+                lit.split_once("--gateway-south requires ")
+                    .and_then(|(_, after)| refusal_alternatives(after))
+            })
             .collect();
         assert_eq!(
             derived,
@@ -6616,8 +6714,247 @@ mod stock_config_tests {
                 String::from("--router-hat"),
                 String::from("--peer"),
                 String::from("--client-node"),
+                String::from("--connect"),
             ]],
-            "main's one `--gateway-south` refusal and the three run modes it admits"
+            "main's one `--gateway-south` refusal and the four run modes it admits"
+        );
+    }
+
+    /// Whether `added` carries `flag` with `value` as its argument.
+    fn carries(added: &[String], flag: &str, value: &str) -> bool {
+        added
+            .windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value)
+    }
+
+    /// A key that reaches one flag per link is applied only when every link the
+    /// run opens for it carries the file's value: a typed value on one of them
+    /// outranks the others, and no link at all is the caller's verdict.
+    #[test]
+    fn a_key_on_several_links_is_applied_only_where_every_one_carries_it() {
+        let none = KeyEffect::WithheldFromThisRun("no link");
+        assert_eq!(combined_link_effect(&[], none), none);
+        assert_eq!(
+            combined_link_effect(&[KeyEffect::Expanded], none),
+            KeyEffect::Expanded
+        );
+        assert_eq!(
+            combined_link_effect(
+                &[KeyEffect::AlreadyOnTheCommandLine, KeyEffect::Expanded],
+                none
+            ),
+            KeyEffect::Expanded
+        );
+        assert_eq!(
+            combined_link_effect(&[KeyEffect::AlreadyOnTheCommandLine], none),
+            KeyEffect::AlreadyOnTheCommandLine
+        );
+        assert_eq!(
+            combined_link_effect(
+                &[KeyEffect::Expanded, KeyEffect::OverriddenOnTheCommandLine],
+                none
+            ),
+            KeyEffect::OverriddenOnTheCommandLine
+        );
+        assert_eq!(
+            combined_link_effect(
+                &[
+                    KeyEffect::OverriddenOnTheCommandLine,
+                    KeyEffect::AlreadyOnTheCommandLine
+                ],
+                none
+            ),
+            KeyEffect::OverriddenOnTheCommandLine
+        );
+    }
+
+    /// The certificate material is upstream's for the `tls/` and the `quic/`
+    /// link alike, so each key reaches the flag of every link this binary was
+    /// built with, on the side the key configures: a build with one link names
+    /// that link's flag, a build with both names both, and a build with neither
+    /// has no sink. A reader without either link refuses the key by name.
+    #[test]
+    fn the_certificate_keys_reach_every_built_link_that_reads_them() {
+        let cases = [
+            (
+                "transport/link/tls/root_ca_certificate",
+                ["--tls-ca", "--quic-ca"],
+                "/etc/ca.pem",
+                r#"{ connect: { endpoints: ["tls/r:7447", "quic/r:7448"] },
+                     transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
+            ),
+            (
+                "transport/link/tls/listen_certificate",
+                ["--tls-cert", "--quic-cert"],
+                "/etc/srv.pem",
+                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
+                     transport: { link: { tls: { listen_certificate: "/etc/srv.pem" } } } }"#,
+            ),
+            (
+                "transport/link/tls/listen_private_key",
+                ["--tls-key", "--quic-key"],
+                "/etc/srv.key",
+                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
+                     transport: { link: { tls: { listen_private_key: "/etc/srv.key" } } } }"#,
+            ),
+        ];
+        for (key, [tls_flag, quic_flag], value, file) in cases {
+            let read = expand_as_a_build_with_every_link(&["--config", "z.json5"], file);
+            if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
+                let refused = read.expect_err("a key whose reader the build lacks is refused");
+                assert!(refused.contains(key), "{key}: {refused}");
+                continue;
+            }
+            let ex = read.unwrap_or_else(|e| panic!("{key}: {e}"));
+            assert_eq!(
+                carries(&ex.added, tls_flag, value),
+                cfg!(feature = "tls"),
+                "{key} reaches {tls_flag} exactly where the tls link is built: {:?}",
+                ex.added
+            );
+            assert_eq!(
+                carries(&ex.added, quic_flag, value),
+                cfg!(feature = "quic"),
+                "{key} reaches {quic_flag} exactly where the quic link is built: {:?}",
+                ex.added
+            );
+            let verdict = if cfg!(any(feature = "tls", feature = "quic")) {
+                KeyEffect::Expanded
+            } else {
+                KeyEffect::NoSinkInThisBuild
+            };
+            assert_eq!(ex.effect(key), Some(verdict), "{key}");
+        }
+    }
+
+    /// Each link's flag follows the endpoints of its own scheme on the key's own
+    /// side: a node that dials only `quic/` gets `--quic-ca` and never
+    /// `--tls-ca` (whose file the dial builder would open for no link), and a
+    /// node that dials nothing gets neither, whatever it listens on.
+    #[test]
+    fn a_certificate_flag_follows_the_endpoints_of_its_own_link_and_side() {
+        const KEY: &str = "transport/link/tls/root_ca_certificate";
+        if !wz::runtime_tokio::zenoh_config::config_key_in_build(KEY) {
+            return;
+        }
+        let quic_only = expand_as_a_build_with_every_link(
+            &["--config", "z.json5"],
+            r#"{ connect: { endpoints: ["quic/r:7448"] },
+                 transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
+        )
+        .expect("a valid file");
+        assert!(
+            !quic_only.added.iter().any(|a| a == "--tls-ca"),
+            "no tls dial, no --tls-ca: {:?}",
+            quic_only.added
+        );
+        assert_eq!(
+            carries(&quic_only.added, "--quic-ca", "/etc/ca.pem"),
+            cfg!(feature = "quic"),
+            "{:?}",
+            quic_only.added
+        );
+        let withheld =
+            KeyEffect::WithheldFromThisRun("this node dials no link that verifies by a root CA");
+        let verdict = if cfg!(feature = "quic") {
+            KeyEffect::Expanded
+        } else if cfg!(feature = "tls") {
+            withheld
+        } else {
+            KeyEffect::NoSinkInThisBuild
+        };
+        assert_eq!(quic_only.effect(KEY), Some(verdict));
+
+        let listens_only = expand_as_a_build_with_every_link(
+            &["--config", "z.json5"],
+            r#"{ mode: "peer", listen: { endpoints: ["tls/0.0.0.0:7447", "quic/0.0.0.0:7448"] },
+                 transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
+        )
+        .expect("a valid file");
+        assert!(
+            !listens_only
+                .added
+                .iter()
+                .any(|a| a == "--tls-ca" || a == "--quic-ca"),
+            "a root CA is a dial's, and this node dials nothing: {:?}",
+            listens_only.added
+        );
+        let verdict = if cfg!(any(feature = "tls", feature = "quic")) {
+            withheld
+        } else {
+            KeyEffect::NoSinkInThisBuild
+        };
+        assert_eq!(listens_only.effect(KEY), Some(verdict));
+    }
+
+    /// With both links built, a root CA the operator typed for one link stands
+    /// there while the file's reaches the other, and the key is reported as
+    /// overridden rather than applied: not every link carries it.
+    #[cfg(all(feature = "tls", feature = "quic"))]
+    #[test]
+    fn a_typed_flag_for_one_link_leaves_the_file_on_the_other_and_is_reported() {
+        const KEY: &str = "transport/link/tls/root_ca_certificate";
+        let ex = expand_as_a_build_with_every_link(
+            &["--config", "z.json5", "--tls-ca", "/mine.pem"],
+            r#"{ connect: { endpoints: ["tls/r:7447", "quic/r:7448"] },
+                 transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
+        )
+        .expect("a valid file");
+        assert!(
+            carries(&ex.added, "--quic-ca", "/etc/ca.pem"),
+            "{:?}",
+            ex.added
+        );
+        assert!(
+            !ex.added.iter().any(|a| a == "--tls-ca"),
+            "the typed --tls-ca stands: {:?}",
+            ex.added
+        );
+        assert_eq!(ex.effect(KEY), Some(KeyEffect::OverriddenOnTheCommandLine));
+    }
+
+    /// Upstream's client runs its partition's rules on every Open, so a client
+    /// document's `gateway/south` reaches a one-shot `--connect` client, whose
+    /// session announces the bound on its Open. A `--reconnect` client's
+    /// supervisor reopens without a partition, so there the key is withheld and
+    /// says why.
+    #[test]
+    fn a_one_shot_client_carries_the_south_partition_and_a_reconnecting_one_withholds_it() {
+        const KEY: &str = "gateway/south";
+        let file = r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] },
+                        gateway: { south: [{ filters: [{ modes: ["peer"] }] }] } }"#;
+        if !wz::runtime_tokio::zenoh_config::config_key_in_build(KEY) {
+            let refused = expand(&["--config", "z.json5"], file)
+                .expect_err("a key whose reader the build lacks is refused");
+            assert!(refused.contains(KEY), "{refused}");
+            return;
+        }
+        let one_shot = expand(&["--config", "z.json5"], file).expect("a valid file");
+        assert!(
+            one_shot.added.iter().any(|a| a == "--connect")
+                && !one_shot.added.iter().any(|a| a == "--client-node"),
+            "a client with no listen endpoint is the one-shot client: {:?}",
+            one_shot.added
+        );
+        assert!(
+            one_shot.added.iter().any(|a| a == "--gateway-south"),
+            "{:?}",
+            one_shot.added
+        );
+        assert_eq!(one_shot.effect(KEY), Some(KeyEffect::Expanded));
+
+        let reconnecting =
+            expand(&["--config", "z.json5", "--reconnect"], file).expect("a valid file");
+        assert!(
+            !reconnecting.added.iter().any(|a| a == "--gateway-south"),
+            "{:?}",
+            reconnecting.added
+        );
+        assert_eq!(
+            reconnecting.effect(KEY),
+            Some(KeyEffect::WithheldFromThisRun(
+                "a --reconnect client reopens its link without a partition"
+            ))
         );
     }
 
