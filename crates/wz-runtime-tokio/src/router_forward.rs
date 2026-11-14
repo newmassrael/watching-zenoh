@@ -3118,6 +3118,14 @@ const SLOW_TABLES_WAIT: Duration = Duration::from_millis(250);
 /// up, a declaration or the tick waits for, under any load, to about this and the reads in flight.
 const TABLES_WRITER_FIRST_AFTER: Duration = Duration::from_millis(10);
 
+/// How many table-writing messages of one frame share one write of the tables
+/// ([`RouterForwarder::forward_frame`]). A write's end is a publication (the route memos brought
+/// to the new tables, and under `snapshot` a version published), which costs as much as the
+/// declaration it ends, so a frame of declarations pays it once per this many and not once each.
+/// The bound keeps a frame from holding the tables against the other faces for longer than this
+/// many declarations take: a frame of the batch size carries a few thousand of them.
+const TABLE_WRITES_PER_GUARD: usize = 64;
+
 /// How a log line names the remote node of a face: its zid as zenoh prints it, or `-` for a face
 /// whose peer has not told one (a client that never surfaced an id).
 fn peer_label(zid: Option<Zid>) -> String {
@@ -13344,8 +13352,13 @@ impl RouterForwarder {
     /// One frame from face `id`, a message at a time, each taking the tables for the kind of work
     /// it is (`docs/router-task-per-face.md`, phase 3e): the data and query planes read them, so
     /// that frames of different faces route at once, and a declaration, a topology message or an
-    /// interest writes them, alone. The guard of one message is dropped before the next is taken,
-    /// so a frame of declarations does not hold the tables against the data between them.
+    /// interest writes them, alone.
+    ///
+    /// Consecutive writing messages of the frame share one write, up to
+    /// [`TABLE_WRITES_PER_GUARD`] of them, and so one publication: each is applied to the tables
+    /// as the ones before it left them, in the frame's order, which is what one write each did.
+    /// A message that reads ends the write first, so that it is routed by every declaration the
+    /// frame carried before it, and the data between declarations is not held behind them.
     fn forward_frame(&self, id: FaceId, event: IterationEvent<'_, '_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             messages,
@@ -13388,7 +13401,23 @@ impl RouterForwarder {
             }
         };
         drop(on);
+        // Declared after the frame's other guards, so that a write still held when the frame ends
+        // is published while they stand, as one ended inside the loop is.
+        let mut writing: Option<OnTables<'_, WrittenTables<'_>>> = None;
+        let mut writes_held = 0usize;
         for message in messages {
+            // A topology message, a declaration and an interest write the tables; every other
+            // kind reads them.
+            let writes = matches!(
+                message,
+                NetworkMessage::Oam(_) | NetworkMessage::Declare(_) | NetworkMessage::Interest(_)
+            );
+            // A reader may not take the tables while this thread holds them for writing, and is
+            // owed the writes before it published; a full run lets the other faces in.
+            if !writes || writes_held == TABLE_WRITES_PER_GUARD {
+                writing = None;
+                writes_held = 0;
+            }
             // One message of a face, as upstream's `DeMux::handle_message` opens it.
             let _demux = routing_spans::demux(self.own_zid, id);
             log::debug!(
@@ -13416,14 +13445,10 @@ impl RouterForwarder {
                     _ => "other".to_string(),
                 }
             );
-            // A topology message, a declaration and an interest write the tables; every other
-            // kind reads them. The message takes the guard of its kind once, and the ingress
-            // check below runs under it.
-            if matches!(
-                message,
-                NetworkMessage::Oam(_) | NetworkMessage::Declare(_) | NetworkMessage::Interest(_)
-            ) {
-                let mut on = self.on_tables_mut();
+            // The ingress check runs under the guard of the message's kind.
+            if writes {
+                let on = writing.get_or_insert_with(|| self.on_tables_mut());
+                writes_held += 1;
                 if !on.admits_ingress(id, message) {
                     continue;
                 }

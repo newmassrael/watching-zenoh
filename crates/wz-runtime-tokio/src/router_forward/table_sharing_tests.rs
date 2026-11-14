@@ -728,3 +728,169 @@ fn the_declarations_of_one_face_measured_against_their_count() {
         );
     }
 }
+
+/// The face that subscribes in the tests of a frame's writes.
+const SUBSCRIBER: FaceId = FaceId(1);
+
+/// The face that puts in the tests of a frame's writes.
+const PUBLISHER: FaceId = FaceId(2);
+
+/// A router with two client faces, [`SUBSCRIBER`] and [`PUBLISHER`]; the subscriber's link, and
+/// both faces' sessions, which the test holds for as long as the router.
+fn subscriber_and_publisher() -> (
+    RouterForwarder,
+    Arc<CountingLinkDriver>,
+    [Arc<SessionLinkActions>; 2],
+) {
+    let fwd = RouterForwarder::new(zid(0x01));
+    let (subscriber, sink) = client(zid(0xC1));
+    let (publisher, _) = client(zid(0xC2));
+    fwd.register(SUBSCRIBER, &subscriber);
+    fwd.register(PUBLISHER, &publisher);
+    (fwd, sink, [subscriber, publisher])
+}
+
+/// Declarations, withdrawals by id and a redeclaration, in an order whose result depends on it:
+/// `demo/b` (id 2) and `demo/a` (id 4, declared again after id 1 withdrew it) stand at the end,
+/// and `demo/c` came and went.
+fn declarations_in_order() -> Vec<NetworkMessage> {
+    let declare = |id: u64, keyexpr: &str| {
+        NetworkMessage::Declare(Box::new(
+            build_declare_subscriber(id, 0, Some(keyexpr)).expect("build declare"),
+        ))
+    };
+    let undeclare = |id: u64| NetworkMessage::Declare(Box::new(build_undeclare_subscriber(id)));
+    vec![
+        declare(1, "demo/a"),
+        declare(2, "demo/b"),
+        undeclare(1),
+        declare(3, "demo/c"),
+        undeclare(3),
+        declare(4, "demo/a"),
+    ]
+}
+
+/// For each of `keys`, the frames a Put of it from [`PUBLISHER`] gives the subscriber's link.
+fn delivered(fwd: &RouterForwarder, sink: &CountingLinkDriver, keys: &[&str]) -> Vec<usize> {
+    keys.iter()
+        .map(|key| {
+            sink.reset();
+            let put =
+                wz_session_core::push_build::build_push_literal(key, b"x").expect("build push");
+            bring(fwd, PUBLISHER, NetworkMessage::Push(Box::new(put)));
+            sink.frame_count()
+        })
+        .collect()
+}
+
+/// The declarations of one frame leave the tables as the same declarations brought one frame
+/// each do, withdrawals and a redeclaration among them, and are published once and not once each.
+#[test]
+fn a_frame_of_declarations_leaves_the_tables_as_one_frame_each_does_and_is_published_once() {
+    const KEYS: [&str; 3] = ["demo/a", "demo/b", "demo/c"];
+
+    let (one_each, one_each_sink, _one_each_faces) = subscriber_and_publisher();
+    let before = one_each.tables.writes_published();
+    for message in declarations_in_order() {
+        bring(&one_each, SUBSCRIBER, message);
+    }
+    let one_each_writes = one_each.tables.writes_published() - before;
+
+    let (one_frame, one_frame_sink, _one_frame_faces) = subscriber_and_publisher();
+    let before = one_frame.tables.writes_published();
+    bring_frame(&one_frame, SUBSCRIBER, declarations_in_order());
+    let one_frame_writes = one_frame.tables.writes_published() - before;
+
+    assert_eq!(
+        one_each_writes, 6,
+        "a frame of one declaration is one write"
+    );
+    assert_eq!(
+        one_frame_writes, 1,
+        "the declarations of one frame share one write, published once"
+    );
+    assert_eq!(
+        one_each.client_subs_seen(),
+        2,
+        "demo/b and demo/a declared again stand"
+    );
+    assert_eq!(
+        one_frame.client_subs_seen(),
+        one_each.client_subs_seen(),
+        "one frame holds what one frame each holds"
+    );
+    assert_eq!(
+        delivered(&one_each, &one_each_sink, &KEYS),
+        [1, 1, 0],
+        "one frame each: demo/a and demo/b reach the subscriber, demo/c does not"
+    );
+    assert_eq!(
+        delivered(&one_frame, &one_frame_sink, &KEYS),
+        [1, 1, 0],
+        "one frame: the same, so the frame's order was kept"
+    );
+}
+
+/// A frame of more declarations than one write holds takes the tables once for each
+/// [`TABLE_WRITES_PER_GUARD`] of them, and every declaration is taken.
+#[test]
+fn a_frame_of_more_declarations_than_a_write_holds_is_published_once_per_bound() {
+    let (fwd, _sink, _faces) = subscriber_and_publisher();
+    let count = 2 * TABLE_WRITES_PER_GUARD + 1;
+    let frame = (1..=count as u64)
+        .map(|id| {
+            NetworkMessage::Declare(Box::new(
+                build_declare_subscriber(id, 0, Some(format!("demo/bound/{id}").as_str()))
+                    .expect("build declare"),
+            ))
+        })
+        .collect();
+    let before = fwd.tables.writes_published();
+    bring_frame(&fwd, SUBSCRIBER, frame);
+    assert_eq!(
+        fwd.tables.writes_published() - before,
+        3,
+        "two full writes and one for the declaration past them"
+    );
+    assert_eq!(
+        fwd.client_subs_seen(),
+        count,
+        "every declaration of the frame was taken"
+    );
+}
+
+/// A Put between declarations of one frame is routed by the declaration before it, which was
+/// published first, and ends the write: the declaration after it takes the tables again.
+#[test]
+fn a_put_between_declarations_of_one_frame_is_routed_by_the_one_before_it() {
+    let (fwd, sink, _faces) = subscriber_and_publisher();
+    bring(&fwd, SUBSCRIBER, declare_sub("demo/a"));
+    sink.reset();
+    let alias = |id: u64, keyexpr: &str| {
+        NetworkMessage::Declare(Box::new(
+            wz_session_core::declare_build::build_declare_kexpr(id, keyexpr).expect("kexpr"),
+        ))
+    };
+    let put =
+        wz_session_core::push_build::build_push_aliased(5, None, b"x").expect("build aliased push");
+    let before = fwd.tables.writes_published();
+    bring_frame(
+        &fwd,
+        PUBLISHER,
+        vec![
+            alias(5, "demo/a"),
+            NetworkMessage::Push(Box::new(put)),
+            alias(6, "demo/b"),
+        ],
+    );
+    assert_eq!(
+        sink.frame_count(),
+        1,
+        "the Put named the alias the frame declared before it, and reached the subscriber"
+    );
+    assert_eq!(
+        fwd.tables.writes_published() - before,
+        2,
+        "the Put ended the first write, and the declaration after it took a second"
+    );
+}
