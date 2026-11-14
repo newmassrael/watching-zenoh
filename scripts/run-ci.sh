@@ -922,6 +922,125 @@ _runci_legs_settle() {
     return "$_rl_bad"
 }
 
+# The ledger's own behaviour, driven through fixture legs (`true`, `false`) in
+# subshells, so the ledger of the lane that runs this is untouched. A leg of
+# Layer C0; `runci_leg_ledger_gate.py` holds the same rules on the text.
+_runci_legs_selftest() {
+    local _rl_bad=0 _rl_out _rl_n=0
+    _rl_expect() {
+        _rl_n=$((_rl_n + 1))
+        if [[ "$3" != *"$2"* ]]; then
+            echo "  leg ledger selftest FAIL: $1 (wanted '$2' in: $3)" >&2
+            _rl_bad=1
+        fi
+    }
+    _rl_refuse() {
+        _rl_n=$((_rl_n + 1))
+        if [[ "$3" == *"$2"* ]]; then
+            echo "  leg ledger selftest FAIL: $1 (did not want '$2' in: $3)" >&2
+            _rl_bad=1
+        fi
+    }
+
+    # A red leg, its dependents skipped in a chain, a sibling run anyway, and
+    # each malformed declaration failed rather than passed.
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _runci_legs_open FX || exit 9
+        _runci_leg red -- false
+        _runci_leg after-red --after red -- true
+        _runci_leg after-skip --after after-red -- true
+        _runci_leg green -- true
+        _runci_leg Bad -- true
+        _runci_leg dup -- true
+        _runci_leg dup -- true
+        _runci_leg later --after nosuch -- true
+        _runci_leg nosep true
+        _runci_legs_close
+        echo "close=$? verdict=${_RUNCI_LEGS_VERDICT}"
+    } 2>&1 )"
+    _rl_expect "a red leg is named" "FX FAIL: leg red exited 1" "$_rl_out"
+    _rl_expect "its dependent is skipped" "FX leg after-red skipped: depends on red" "$_rl_out"
+    _rl_expect "a skip propagates" "FX leg after-skip skipped: depends on after-red" "$_rl_out"
+    _rl_expect "a bad name fails" "leg 'Bad' is malformed" "$_rl_out"
+    _rl_expect "a repeated name fails" "leg 'dup' is malformed: the name is declared twice" "$_rl_out"
+    _rl_expect "an undeclared dependency fails" "leg 'later' is malformed: it depends on 'nosuch'" "$_rl_out"
+    _rl_expect "a missing separator fails" "leg 'nosep' is malformed: there is no" "$_rl_out"
+    _rl_expect "the close fails once and names every red" \
+        "close=1 verdict=failed legs red Bad dup later nosep; 2 skipped" "$_rl_out"
+    _rl_expect "the siblings ran" "2 of 9 leg(s) passed" "$_rl_out"
+
+    # A clean ledger closes green with its derived evidence line.
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _runci_legs_open FX || exit 9
+        _runci_leg one -- true
+        _runci_leg two --after one -- true
+        _runci_legs_close
+        echo "close=$? verdict=${_RUNCI_LEGS_VERDICT}"
+    } 2>&1 )"
+    _rl_expect "a clean ledger closes green" "close=0 verdict=" "$_rl_out"
+    _rl_expect "with its evidence" "FX: OK (2 ledger leg(s)" "$_rl_out"
+    _rl_refuse "and no red" "FAIL" "$_rl_out"
+
+    # What `run_layer` refuses: an open ledger at return, a red close under a
+    # 0, a leg with no ledger, and a ledger with no leg.
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _runci_legs_open FX || exit 9
+        _runci_leg one -- true
+        _runci_legs_settle FX 0
+        echo "settle=$?"
+    } 2>&1 )"
+    _rl_expect "a lane that returns with its ledger open is refused" "settle=1" "$_rl_out"
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _runci_legs_open FX || exit 9
+        _runci_leg red -- false
+        _runci_legs_close >/dev/null 2>&1
+        _runci_legs_settle FX 0
+        echo "settle=$?"
+    } 2>&1 )"
+    _rl_expect "a red close under a 0 is refused" "settle=1" "$_rl_out"
+    _rl_out="$( {
+        _runci_legs_reset
+        _runci_leg loose -- true
+        echo "leg=$?"
+        _runci_legs_settle FX 0
+        echo "settle=$?"
+    } 2>&1 )"
+    _rl_expect "a leg with no ledger fails" "leg=1" "$_rl_out"
+    _rl_expect "and the lane with it" "settle=1" "$_rl_out"
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _runci_legs_open FX || exit 9
+        _runci_legs_close
+        echo "close=$?"
+    } 2>&1 )"
+    _rl_expect "a ledger with no leg is red" "close=1" "$_rl_out"
+
+    # A leg's command sees the lane's variables and its assignments reach the
+    # lane: the ledger's own locals shadow nothing a lane would name.
+    _rl_out="$( {
+        _RUNCI_LEGS_LANE=""
+        _rl_fixture_lane() {
+            local seen="" out="lane"
+            _rl_fixture_set() { seen="$out"; }
+            _runci_legs_open FX || return 9
+            _runci_leg set -- _rl_fixture_set
+            _runci_legs_close >/dev/null 2>&1
+            echo "seen=${seen}"
+        }
+        _rl_fixture_lane
+    } 2>&1 )"
+    _rl_expect "a leg assigns the lane's variable" "seen=lane" "$_rl_out"
+
+    if (( _rl_bad )); then
+        return 1
+    fi
+    echo "  leg ledger selftest: ${_rl_n} arm(s) behaved as claimed"
+}
+
 # ─── lane evidence (R2275, open-debt item 615) ─────────────────────────────
 #
 # The success-path counterpart of the decline reading below. A lane whose every
@@ -2511,7 +2630,9 @@ layer_c0_test_discipline() {
     _runci_leg runci_plan.selftest -- python3 scripts/lib/runci_plan.py --selftest
     _runci_leg runci_plan --after runci_plan.selftest -- python3 scripts/lib/runci_plan.py --check
     # Open-debt item 938 — the leg ledger's rules held on the text, and the
-    # census of lanes whose independent gates still stop at the first red.
+    # census of lanes whose independent gates still stop at the first red; and
+    # the ledger's runtime, driven through fixture legs.
+    _runci_leg runci_legs_runtime -- _runci_legs_selftest
     _runci_leg runci_leg_ledger_gate.selftest -- python3 scripts/lib/runci_leg_ledger_gate.py --selftest
     _runci_leg runci_leg_ledger_gate --after runci_leg_ledger_gate.selftest -- python3 scripts/lib/runci_leg_ledger_gate.py --check
     # R311y922 — the GATE TEST-PIN lint, item 232's own round. Several lanes
