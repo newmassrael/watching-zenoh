@@ -5311,6 +5311,7 @@ mod link_congestion_tests {
                 qos: false,
                 batch_bytes: 1_024,
                 queue_unit_bytes: 1_024,
+                pipeline: wz_session_core::link::TxPipeline::DEFAULT,
             }]
         );
     }
@@ -6754,6 +6755,7 @@ mod reconnect_tx_tests {
             qos: true,
             batch_bytes: 512,
             queue_unit_bytes: 512,
+            pipeline: wz_session_core::link::TxPipeline::DEFAULT,
         };
 
         let wait = RoomWait::Drop { wait_us: 0 };

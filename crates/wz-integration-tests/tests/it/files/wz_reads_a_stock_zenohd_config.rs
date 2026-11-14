@@ -902,6 +902,11 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "transport/link/tx/queue/batching/enabled",
             wz.tx_queue.batching.to_string(),
         ),
+        // Milliseconds in the tree, microseconds in wz's struct.
+        (
+            "transport/link/tx/queue/batching/time_limit",
+            (wz.tx_queue.batching_time_limit_us / 1_000).to_string(),
+        ),
         (
             "transport/link/rx/max_message_size",
             wz.link_rx.max_message_size.to_string(),
@@ -3667,8 +3672,9 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
             drop: {{ wait_before_drop: 2000, max_wait_before_drop_fragments: 40000 }},
             block: {{ wait_before_close: 6000000 }},
           }},
-          // Off, so each message leaves as a frame of its own: the one put still reaches.
-          batching: {{ enabled: false }},
+          // Off, so each message leaves as a frame of its own: the one put still reaches. The
+          // bound is stated too, off upstream's 1 ms, and holds nothing back with batching off.
+          batching: {{ enabled: false, time_limit: 5 }},
         }},
       }},
       // The largest message a session rejoins from fragments, off its 1 GiB

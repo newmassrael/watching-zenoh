@@ -568,6 +568,42 @@ pub enum RoomWait {
     },
 }
 
+/// How long a link's writer holds an open batch back for producers that are still adding to
+/// it, at most, when the configuration states no `transport/link/tx/queue/batching/time_limit`:
+/// 200 microseconds.
+///
+/// Upstream's default is a millisecond (`commons/zenoh-config/src/defaults.rs` @
+/// `time_limit: 1,`). The writer waits only while the producers are seen still to be staging
+/// (it reads their count a few microseconds apart), so a lone message or the end of a burst
+/// leaves at once whatever the bound, and the bound is reached only by a stream that does not
+/// stop; this is the bound the writer kept before the key was read.
+pub const BATCHING_TIME_LIMIT_US: u64 = 200;
+
+/// What a link's writer does with the batches of its queue, beside the lanes' bounds: the half
+/// of upstream's `TransmissionPipelineConf` that is not a queue size
+/// (`io/zenoh-transport/src/common/pipeline.rs` @ `pub(crate) batching_time_limit: Duration,`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxPipeline {
+    /// `transport/link/tx/queue/batching/time_limit`, in microseconds: the longest the writer
+    /// holds an open batch back while producers keep adding to it, upstream's backoff threshold
+    /// (`io/zenoh-transport/src/common/pipeline.rs` @ `if diff >= self.backoff.threshold {`).
+    /// `0` holds nothing back: the writer flushes as soon as it falls idle.
+    pub batching_time_limit_us: u64,
+}
+
+impl TxPipeline {
+    /// The writer's own settings when the configuration states none.
+    pub const DEFAULT: Self = Self {
+        batching_time_limit_us: BATCHING_TIME_LIMIT_US,
+    };
+}
+
+impl Default for TxPipeline {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// R2924 — the shape of a link's outbound queue once its session is
 /// established: how many batches each priority's queue holds, and whether the
 /// session negotiated QoS at all.
@@ -608,6 +644,8 @@ pub struct TxQueueShape {
     /// memory policy, so it follows the sender's configuration and not the
     /// size of the datagram the peer can read.
     pub queue_unit_bytes: usize,
+    /// What the writer does with the batches, beside the bounds above.
+    pub pipeline: TxPipeline,
 }
 
 impl TxQueueShape {
@@ -2275,6 +2313,7 @@ mod tests {
             qos: true,
             batch_bytes: 1_000,
             queue_unit_bytes: 4_000,
+            pipeline: TxPipeline::DEFAULT,
         };
         assert_eq!(qos.lane_bytes(Priority::DEFAULT), 12_000);
         assert_eq!(qos.lane_bytes(Priority::DataHigh), 20_000);

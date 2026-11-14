@@ -607,6 +607,8 @@ pub struct ShmKeys {
 pub struct StatedTxQueue {
     /// `batching/enabled`.
     pub batching: Option<bool>,
+    /// `batching/time_limit`, in microseconds.
+    pub batching_time_limit_us: Option<u64>,
 }
 
 impl StatedTxQueue {
@@ -616,6 +618,9 @@ impl StatedTxQueue {
         let stated = node.tx_queue;
         Self {
             batching: (stated.batching != upstream.batching).then_some(stated.batching),
+            batching_time_limit_us: (stated.batching_time_limit_us
+                != upstream.batching_time_limit_us)
+                .then_some(stated.batching_time_limit_us),
         }
     }
 
@@ -623,6 +628,9 @@ impl StatedTxQueue {
     fn over(self, mut model: TxQueueConf) -> TxQueueConf {
         if let Some(batching) = self.batching {
             model.batching = batching;
+        }
+        if let Some(limit_us) = self.batching_time_limit_us {
+            model.batching_time_limit_us = limit_us;
         }
         model
     }
@@ -1852,8 +1860,16 @@ mod tests {
         let off = r#"{ transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#;
         assert!(!stance(off, TxQueueConf::default()).batching);
         assert!(!stance(off, TxQueueConf::pico()).batching);
-        // Upstream's own value is no instruction, and silence is none either.
-        let on = r#"{ transport: { link: { tx: { queue: { batching: { enabled: true } } } } } }"#;
+        let bound =
+            r#"{ transport: { link: { tx: { queue: { batching: { time_limit: 4 } } } } } }"#;
+        assert_eq!(
+            stance(bound, TxQueueConf::default()).batching_time_limit_us,
+            4_000
+        );
+        // Upstream's own value is no instruction, and silence is none either: the model keeps
+        // its writer's bound rather than taking upstream's millisecond.
+        let on = r#"{ transport: { link: { tx: { queue: { batching: { enabled: true,
+                                                                      time_limit: 1 } } } } } }"#;
         assert_eq!(stance(on, TxQueueConf::pico()), TxQueueConf::pico());
         assert_eq!(stance("{}", TxQueueConf::default()), TxQueueConf::default());
     }

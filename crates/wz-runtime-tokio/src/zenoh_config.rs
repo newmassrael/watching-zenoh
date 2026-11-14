@@ -1551,7 +1551,14 @@ impl Default for ZenohNodeConfig {
             keep_alive: wz_session_core::session_init_params::KEEP_ALIVE_PER_LEASE,
             accept_timeout_ms: crate::config::ACCEPT_TIMEOUT_MS,
             accept_pending: crate::config::ACCEPT_PENDING,
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            // Upstream's batching bound is a millisecond (`commons/zenoh-config/src/defaults.rs`
+            // @ `time_limit: 1,`). This struct is what a zenoh node makes of a file, so it holds
+            // upstream's; a session that is given no bound keeps its writer's own, shorter one
+            // (`wz_session_core::link::BATCHING_TIME_LIMIT_US`).
+            tx_queue: wz_session_core::session_init_params::TxQueueConf {
+                batching_time_limit_us: UPSTREAM_BATCHING_TIME_LIMIT_MS * 1_000,
+                ..wz_session_core::session_init_params::TxQueueConf::default()
+            },
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             max_links: 1,
             max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
@@ -2078,10 +2085,13 @@ impl ZenohNodeConfig {
             self.tx_queue.max_wait_before_drop_fragments_us,
             self.tx_queue.wait_before_close_us
         );
+        // The bound in the file's milliseconds, rounded up: a bound the writer was given in
+        // microseconds is never written as a shorter one.
         let _ = write!(
             out,
-            ",\n          \"batching\": {{ \"enabled\": {} }}",
-            self.tx_queue.batching
+            ",\n          \"batching\": {{ \"enabled\": {}, \"time_limit\": {} }}",
+            self.tx_queue.batching,
+            self.tx_queue.batching_time_limit_us.div_ceil(1_000)
         );
         out.push_str("\n        }\n");
         out.push_str("      }");
@@ -2181,6 +2191,10 @@ impl ZenohNodeConfig {
         out
     }
 }
+
+/// Upstream's `transport/link/tx/queue/batching/time_limit`, in milliseconds, which a file that
+/// states none resolves to.
+pub const UPSTREAM_BATCHING_TIME_LIMIT_MS: u64 = 1;
 
 /// R2925 — upstream's `transport/link/tx/queue/size` leaves, each with the
 /// `Priority` wire byte whose queue it sizes, as upstream's transport manager
@@ -2295,6 +2309,9 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // group, so the surface total is unchanged: a session configured without batching sends each
     // message as a frame of its own, which upstream's pipeline does with batching off.
     "transport/link/tx/queue/batching/enabled",
+    // MOVED with it, for the same reason: the bound is the one a link's writer holds a stream
+    // back for, which it took from a constant until the session handed it the file's.
+    "transport/link/tx/queue/batching/time_limit",
     // The largest message a session rejoins from fragments. It left
     // `UNHONOURED_BEYOND_WZ` and the `LinkTxConf` group because a session now
     // carries it (`LinkRxConf`) and its reassembly ends a chain past it, as
@@ -2918,7 +2935,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/link/tx/queue/allocation/mode",
     // `transport/link/tx/queue/batching/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: a
     // session leaves its batching window shut when the file turns batching off.
-    "transport/link/tx/queue/batching/time_limit",
+    // `transport/link/tx/queue/batching/time_limit` LEFT with it: the writer holds a stream
+    // back for the file's bound.
     // `transport/link/tx/sequence_number_resolution` LEFT this list for `HONOURED_CONFIG_KEYS`:
     // the width a node offers comes from the file. Same partition, same total.
     "transport/link/tx/threads",
@@ -3135,8 +3153,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // it ([`C_ABI_SESSION_HONOURED_KEYS`]).
     "transport/link/tx/queue/allocation/mode",
     // `transport/link/tx/queue/batching/enabled` LEFT here and its group below: the session's
-    // batching window is the switch it names.
-    "transport/link/tx/queue/batching/time_limit",
+    // batching window is the switch it names. `time_limit` LEFT with it: the writer's bound is
+    // a field of the queue's shape.
     // `transport/link/tx/sequence_number_resolution` LEFT here and its group below: the width
     // a node offers is a parameter of its sessions, which negotiate it with the peer.
     "transport/link/tx/threads",
@@ -3358,8 +3376,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // a parameter of the session, as its lease is.
             "transport/link/tx/queue/allocation/mode",
             // `transport/link/tx/queue/batching/enabled` LEFT this group: the session's
-            // batching window opens or stays shut by it.
-            "transport/link/tx/queue/batching/time_limit",
+            // batching window opens or stays shut by it. `time_limit` LEFT with it: the
+            // writer takes its bound from the queue's shape.
             // R2925 — the eight sizes and the two waits LEFT this group: wz
             // now has the per-priority bounded queues and the drop-vs-block
             // waits they configure. R2926 — and the per-fragment drop cap
@@ -3778,11 +3796,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "transport/link/tx/queue/allocation/mode",
         "build",
         "allocating queue batches at open rather than on demand; wz has no such switch",
-    ),
-    (
-        "transport/link/tx/queue/batching/time_limit",
-        "build",
-        "the batching retention bound; wz holds it as a fixed writer constant",
     ),
     (
         "transport/link/tx/threads",
@@ -7750,6 +7763,17 @@ impl ZenohNodeConfig {
             out.tx_queue.batching = v;
             named.push("transport/link/tx/queue/batching/enabled");
         }
+        // Milliseconds in the file, as upstream's `u64` field reads them, and microseconds in the
+        // session, which is the unit its writer's bound has.
+        if let Some(v) = want_u64(&doc, "transport/link/tx/queue/batching/time_limit")? {
+            out.tx_queue.batching_time_limit_us =
+                v.checked_mul(1_000)
+                    .ok_or_else(|| ConfigIngestError::OutOfRange {
+                        path: "transport/link/tx/queue/batching/time_limit",
+                        value: v.to_string(),
+                    })?;
+            named.push("transport/link/tx/queue/batching/time_limit");
+        }
         // The largest message a session rejoins from fragments. Any `usize` is
         // accepted, as upstream's `usize` field accepts it; the build's
         // reassembly slot bounds what a session applies.
@@ -9376,6 +9400,11 @@ mod tests {
             (
                 "transport/link/tx/queue/batching/enabled",
                 r#"{ "transport": { "link": { "tx": { "queue": { "batching": { "enabled": false } } } } } }"#,
+            ),
+            // 5 ms against upstream's 1.
+            (
+                "transport/link/tx/queue/batching/time_limit",
+                r#"{ "transport": { "link": { "tx": { "queue": { "batching": { "time_limit": 5 } } } } } }"#,
             ),
             (
                 "transport/link/rx/max_message_size",
@@ -11237,6 +11266,14 @@ mod tests {
                 ConfigIngestError::WrongType {
                     path: "transport/link/tx/sequence_number_resolution",
                     expected: "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"",
+                },
+            ),
+            (
+                // A bound in milliseconds whose microseconds a `u64` cannot hold.
+                r#"{ "transport": { "link": { "tx": { "queue": { "batching": { "time_limit": 18446744073709552 } } } } } }"#,
+                ConfigIngestError::OutOfRange {
+                    path: "transport/link/tx/queue/batching/time_limit",
+                    value: "18446744073709552".into(),
                 },
             ),
             (

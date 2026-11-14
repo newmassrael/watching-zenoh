@@ -370,6 +370,11 @@ pub struct TxQueueConf {
     /// batch out at once (`io/zenoh-transport/src/common/pipeline.rs` @
     /// `if !self.batching || $msg.is_express() {`). Upstream's default is `true`.
     pub batching: bool,
+    /// `batching/time_limit`, in microseconds (the key states milliseconds): the longest a link's
+    /// writer holds an open batch back while producers keep adding to it
+    /// ([`crate::link::TxPipeline::batching_time_limit_us`]). The writer's own bound,
+    /// [`crate::link::BATCHING_TIME_LIMIT_US`], when the configuration states none.
+    pub batching_time_limit_us: u64,
 }
 
 /// R2926 — upstream's default
@@ -427,6 +432,7 @@ impl Default for TxQueueConf {
                 .tx_expiry_keeps_session,
             expiry_close_after: build_expiry_close_after(),
             batching: true,
+            batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
         }
     }
 }
@@ -491,6 +497,7 @@ impl TxQueueConf {
                 .tx_expiry_keeps_session,
             expiry_close_after: build_expiry_close_after(),
             batching: true,
+            batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
         }
     }
 
@@ -538,6 +545,9 @@ impl TxQueueConf {
             } else {
                 batch_bytes
             },
+            pipeline: crate::link::TxPipeline {
+                batching_time_limit_us: self.batching_time_limit_us,
+            },
         }
     }
 }
@@ -579,6 +589,29 @@ mod shape_tests {
         assert_eq!((udp.batch_bytes, udp.queue_unit_bytes), (1450, 65535));
         let small = conf.shape(true, 2048, 1024);
         assert_eq!((small.batch_bytes, small.queue_unit_bytes), (2048, 2048));
+    }
+
+    /// The batching bound a session is configured with is the one its links' writers are
+    /// handed at Established, and a session configured with none hands them the writer's own.
+    #[test]
+    fn the_batching_bound_reaches_the_shape_a_link_takes() {
+        let bare = TxQueueConf::default().shape(true, 65535, 65535);
+        assert_eq!(bare.pipeline, crate::link::TxPipeline::DEFAULT);
+        assert_eq!(
+            bare.pipeline.batching_time_limit_us,
+            crate::link::BATCHING_TIME_LIMIT_US
+        );
+        let configured = TxQueueConf {
+            batching_time_limit_us: 3_000,
+            ..TxQueueConf::default()
+        };
+        assert_eq!(
+            configured
+                .shape(true, 65535, 65535)
+                .pipeline
+                .batching_time_limit_us,
+            3_000
+        );
     }
 }
 

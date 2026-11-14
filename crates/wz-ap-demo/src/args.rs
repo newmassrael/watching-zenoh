@@ -1333,6 +1333,19 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // The bound the writer holds a stream back for, in the file's milliseconds. The struct holds
+    // it in microseconds; one the reader built from a file is a whole number of milliseconds.
+    if named("transport/link/tx/queue/batching/time_limit") {
+        exp.pair(
+            "transport/link/tx/queue/batching/time_limit",
+            "--tx-batching-time-limit-ms",
+            cfg.tx_queue
+                .batching_time_limit_us
+                .div_ceil(1_000)
+                .to_string(),
+            None,
+        );
+    }
     // The largest message a session rejoins from fragments, honoured at any
     // value for the reason the sizes above are.
     if named("transport/link/rx/max_message_size") {
@@ -3377,6 +3390,14 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          three with batching on, three frames of one with it off.",
     ),
     (
+        "transport/link/tx/queue/batching/time_limit",
+        KIND_LEG_JUDGED,
+        "expands to `--tx-batching-time-limit-ms`. A local bound on how long the writer \
+         holds a stream back, read off the runtime's timer by \
+         `the_writer_holds_a_stream_back_for_the_batching_bound_and_no_longer` in \
+         writer_queue.rs: the stated bound while a producer keeps staging, nothing at zero.",
+    ),
+    (
         "transport/link/rx/max_message_size",
         KIND_OFF_WIRE,
         "expands to `--rx-max-message-size`. The largest message a session \
@@ -5339,6 +5360,12 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/batching/time_limit",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { batching: { time_limit: 5 } } } } } }"#,
             ),
             (
                 "transport/link/rx/max_message_size",
@@ -7529,7 +7556,7 @@ mod stock_config_tests {
                             congestion_control: { drop: { wait_before_drop: 2500,
                                                           max_wait_before_drop_fragments: 40000 },
                                                   block: { wait_before_close: 7000000 } },
-                            batching: { enabled: false } } },
+                            batching: { enabled: false, time_limit: 5 } } },
                                    rx: { max_message_size: 65536 } } } }"#,
         )
         .unwrap();
@@ -7556,6 +7583,7 @@ mod stock_config_tests {
                 max_wait_before_drop_fragments_us: 40_000,
                 wait_before_close_us: 7_000_000,
                 batching: false,
+                batching_time_limit_us: 5_000,
                 ..wz::runtime_tokio::session_glue::TxQueueConf::default()
             },
             "the file's queue section reaches the session the node opens"
@@ -7754,6 +7782,10 @@ mod stock_config_tests {
                 "--wait-before-close-us expects",
             ),
             (vec!["--tx-batching", "off"], "--tx-batching expects"),
+            (
+                vec!["--tx-batching-time-limit-ms", "1.5"],
+                "--tx-batching-time-limit-ms expects",
+            ),
         ] {
             let err = TransportTuning::from_argv(&argv(&cli))
                 .expect_err("a value outside the type is not a tuning");
@@ -9391,6 +9423,15 @@ impl TransportTuning {
                 "false" => false,
                 _ => return Err(format!("--tx-batching expects true or false, got '{v}'")),
             };
+        }
+        if let Some(v) = parse_pair(rest, "--tx-batching-time-limit-ms") {
+            out.tx_queue.batching_time_limit_us = v
+                .parse::<u64>()
+                .ok()
+                .and_then(|ms| ms.checked_mul(1_000))
+                .ok_or_else(|| {
+                    format!("--tx-batching-time-limit-ms expects milliseconds, got '{v}'")
+                })?;
         }
         if let Some(v) = parse_pair(rest, "--rx-max-message-size") {
             out.link_rx.max_message_size = v

@@ -1146,6 +1146,7 @@ mod datagram {
             qos: false,
             batch_bytes: 1450,
             queue_unit_bytes: 1450,
+            pipeline: wz_session_core::link::TxPipeline::DEFAULT,
         }
     }
 

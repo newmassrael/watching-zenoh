@@ -176,6 +176,7 @@ pub fn outbound_channel_with_capacity(
         flush_wanted: AtomicBool::new(false),
         staged: AtomicU64::new(0),
         staged_at_flush: AtomicU64::new(0),
+        batching_time_limit_us: AtomicU64::new(wz_session_core::link::BATCHING_TIME_LIMIT_US),
         epoch: Instant::now(),
         last_flush_ns: AtomicU64::new(NEVER_FLUSHED),
         last_write_ns: AtomicU64::new(NEVER_FLUSHED),
@@ -305,6 +306,12 @@ struct Lanes {
     /// The difference at the next flush is how many messages the producers staged in between,
     /// which is what tells a stream from a lone message.
     staged_at_flush: AtomicU64,
+    /// The longest the writer lets producers that are still staging keep adding before it
+    /// flushes, in microseconds (`let_producers_finish`): the session's
+    /// `transport/link/tx/queue/batching/time_limit`, handed over with the queue's shape at
+    /// Established, and the writer's own bound before then. Written by a reshape, read by the
+    /// writer, so it is an atomic beside the lanes and not a field behind their lock.
+    batching_time_limit_us: AtomicU64,
     /// The instant this queue was made, which `last_flush_ns` counts from.
     epoch: Instant,
     /// When the last flush ran, in nanoseconds from `epoch`: the writer's or a sender's own.
@@ -554,11 +561,6 @@ impl Drop for RoleGuard {
 
 /// The writer's idle hook.
 type IdleHook = Arc<dyn Fn() + Send + Sync>;
-
-/// How long the writer lets producers keep adding to the open frames before it flushes
-/// them, at most. Zenoh's `batching/time_limit` is a millisecond; the writer waits for
-/// the producers to stop and only this long if they do not.
-const COALESCE_LIMIT: Duration = Duration::from_micros(200);
 
 /// How far apart the writer's two reads of the staged count are: long enough that a
 /// producer that stages a message every microsecond or two shows up in it.
@@ -2047,6 +2049,9 @@ impl OutboundTx {
     /// queue answers with. Senders waiting for room re-read the new bounds.
     pub fn reshape(&self, shape: wz_session_core::link::TxQueueShape) {
         self.shared
+            .batching_time_limit_us
+            .store(shape.pipeline.batching_time_limit_us, Ordering::Relaxed);
+        self.shared
             .state
             .lock()
             .expect("outbound lanes poisoned")
@@ -2775,8 +2780,10 @@ impl OutboundRx {
     }
 
     /// Before the idle hook flushes, let producers that are still staging finish: while the
-    /// staged count moves between two reads a few microseconds apart, wait, for at most
-    /// [`COALESCE_LIMIT`]. A producer that stops (a lone message, the end of a burst) is
+    /// staged count moves between two reads a few microseconds apart, wait, for at most the
+    /// queue's batching bound (`Lanes::batching_time_limit_us`, upstream's
+    /// `batching/time_limit`; nothing at all when it is zero). A producer that stops (a lone
+    /// message, the end of a burst) is
     /// seen to have stopped by the second read, so the flush it is owed leaves within
     /// microseconds; a producer that does not stop is flushed by the limit, and by its own
     /// frame filling up before that. Without the wait the writer, which is faster than a
@@ -2792,8 +2799,8 @@ impl OutboundRx {
     /// a writer that held it (spinning, or asleep on the thread) for the length of a stream
     /// would starve every other link's writer for as long. It wakes when a frame lands
     /// (answered `true`: the producers are filling frames, and a frame is the work to do now,
-    /// not the partial frames that are still open) or when [`COALESCE_LIMIT`] passes
-    /// (`false`: flush what is open).
+    /// not the partial frames that are still open) or when the bound passes (`false`: flush
+    /// what is open).
     async fn let_producers_finish(&self) -> bool {
         // A stream: the producers staged many messages since the last flush, so the writer is
         // being woken to write a few hundred bytes at a time. When the producer shares the
@@ -2821,6 +2828,12 @@ impl OutboundRx {
         if since_flush <= LONE_STAGED_MAX {
             return false;
         }
+        // A bound of nothing holds nothing back, the probes included: upstream's backoff with a
+        // zero threshold pulls the open batch the first time it looks.
+        let limit_us = self.shared.batching_time_limit_us.load(Ordering::Relaxed);
+        if limit_us == 0 {
+            return false;
+        }
         let mut seen = self.shared.staged.load(Ordering::Relaxed);
         for _ in 0..COALESCE_SPIN_PROBES {
             let probe = Instant::now();
@@ -2835,7 +2848,7 @@ impl OutboundRx {
         }
         tokio::select! {
             _ = self.shared.frame_ready.notified() => true,
-            _ = tokio::time::sleep(COALESCE_LIMIT) => false,
+            _ = tokio::time::sleep(Duration::from_micros(limit_us)) => false,
         }
     }
 
@@ -3829,6 +3842,108 @@ mod tests {
                 .await
                 .is_ok(),
             "the writer is woken to flush, as it always was"
+        );
+    }
+
+    /// How long the writer held a stream back before it flushed, on a queue whose shape states
+    /// the batching bound `limit_us`, while a producer thread keeps staging; and whether a
+    /// frame landing ended the wait rather than the bound. The clock is the runtime's, paused,
+    /// so the wait is read in the timer's time and not in the machine's.
+    async fn held_while_a_producer_stages(limit_us: u64) -> (Duration, bool) {
+        use wz_session_core::link::{TxPipeline, TxQueueShape};
+        let (tx, rx) = outbound_channel();
+        tx.reshape(TxQueueShape {
+            sizes: [DEFAULT_QUEUE_SIZE; Priority::NUM],
+            qos: true,
+            batch_bytes: BATCH_BYTES,
+            queue_unit_bytes: BATCH_BYTES,
+            pipeline: TxPipeline {
+                batching_time_limit_us: limit_us,
+            },
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let producer = {
+            let shared = tx.shared.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    shared.staged.fetch_add(1, Ordering::Relaxed);
+                    std::hint::spin_loop();
+                }
+            })
+        };
+        // A stream, not a lone message: more than a couple staged since the last flush, and the
+        // producer seen moving before the writer looks.
+        let before = tx.shared.staged.fetch_add(10, Ordering::Relaxed);
+        while tx.shared.staged.load(Ordering::Relaxed) <= before + 10 {
+            std::thread::yield_now();
+        }
+        let started = tokio::time::Instant::now();
+        let frame_landed = rx.let_producers_finish().await;
+        let held = started.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        producer.join().expect("the producer thread");
+        (held, frame_landed)
+    }
+
+    /// `transport/link/tx/queue/batching/time_limit`, read off how long the writer holds a
+    /// stream back: the bound its queue's shape states, and nothing at all for a bound of zero,
+    /// which is upstream's backoff with a zero threshold. The control establishes that this
+    /// machine lets the probes see the producer moving, which is what makes the zero's answer
+    /// the bound's and not a producer that had stopped.
+    #[tokio::test(start_paused = true)]
+    async fn the_writer_holds_a_stream_back_for_the_batching_bound_and_no_longer() {
+        const LIMIT_US: u64 = 50_000;
+        const ATTEMPTS: usize = 50;
+        let mut held_for_the_bound = false;
+        for _ in 0..ATTEMPTS {
+            let (held, frame_landed) = held_while_a_producer_stages(LIMIT_US).await;
+            assert!(
+                !frame_landed,
+                "no frame landed: only the bound ends the wait"
+            );
+            assert!(
+                held <= Duration::from_micros(LIMIT_US) + Duration::from_millis(1),
+                "the writer held the stream {held:?}, past its bound"
+            );
+            if held >= Duration::from_micros(LIMIT_US) {
+                held_for_the_bound = true;
+                break;
+            }
+        }
+        assert!(
+            held_for_the_bound,
+            "CONTROL: in {ATTEMPTS} attempts the probes never saw the producer moving, so the \
+             zero below would prove nothing"
+        );
+        for _ in 0..ATTEMPTS {
+            let (held, _) = held_while_a_producer_stages(0).await;
+            assert_eq!(held, Duration::ZERO, "a zero bound holds nothing back");
+        }
+    }
+
+    /// A queue that has not been shaped yet holds a stream back for the writer's own bound,
+    /// and a shape replaces it with the session's.
+    #[test]
+    fn a_shape_hands_the_writer_its_batching_bound() {
+        use wz_session_core::link::{TxPipeline, TxQueueShape, BATCHING_TIME_LIMIT_US};
+        let (tx, _rx) = outbound_channel();
+        assert_eq!(
+            tx.shared.batching_time_limit_us.load(Ordering::Relaxed),
+            BATCHING_TIME_LIMIT_US
+        );
+        tx.reshape(TxQueueShape {
+            sizes: [DEFAULT_QUEUE_SIZE; Priority::NUM],
+            qos: false,
+            batch_bytes: BATCH_BYTES,
+            queue_unit_bytes: BATCH_BYTES,
+            pipeline: TxPipeline {
+                batching_time_limit_us: 7_000,
+            },
+        });
+        assert_eq!(
+            tx.shared.batching_time_limit_us.load(Ordering::Relaxed),
+            7_000
         );
     }
 
@@ -5405,6 +5520,7 @@ mod tests {
             qos: false,
             batch_bytes: 4,
             queue_unit_bytes: 4,
+            pipeline: wz_session_core::link::TxPipeline::DEFAULT,
         });
 
         tx.send(Priority::DEFAULT, b"data".to_vec())
@@ -5433,6 +5549,7 @@ mod tests {
             qos: true,
             batch_bytes: 4,
             queue_unit_bytes: 4,
+            pipeline: wz_session_core::link::TxPipeline::DEFAULT,
         });
 
         tx.send(Priority::RealTime, vec![0u8; 4]).expect("enqueue");
@@ -5468,6 +5585,7 @@ mod tests {
                 qos: false,
                 batch_bytes: 1450,
                 queue_unit_bytes: unit,
+                pipeline: wz_session_core::link::TxPipeline::DEFAULT,
             });
             for _ in 0..3 {
                 tx.send(Priority::DEFAULT, vec![0u8; REPLY])

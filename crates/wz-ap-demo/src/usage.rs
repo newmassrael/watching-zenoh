@@ -210,6 +210,11 @@ pub(crate) fn print_usage() {
     eprintln!(
         "                             of its own. zenoh transport/link/tx/queue/batching/enabled"
     );
+    eprintln!("    --tx-batching-time-limit-ms <ms>");
+    eprintln!("                             the longest a link's writer holds a burst back for");
+    eprintln!("                             senders still adding to it (default the writer's");
+    eprintln!("                             200 us; 0 holds nothing back).");
+    eprintln!("                             zenoh transport/link/tx/queue/batching/time_limit");
     eprintln!("    --rx-max-message-size <bytes>");
     eprintln!("                             the largest message a session rejoins from fragments");
     eprintln!("                             (default 1073741824, read as at most the build's");
