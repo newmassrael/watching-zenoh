@@ -71,6 +71,20 @@ pub enum InboundParseError {
         /// the unknown mandatory `0x58` from the region name `0x48`.
         eid: u8,
     },
+    /// An ext chain carried an entry whose encoding is the reserved `0b11`.
+    ///
+    /// zenoh 1.10.2 refuses the whole message on it, mandatory or not: the
+    /// reader of an undeclared extension fails on the encoding before it asks
+    /// the `M` bit (`commons/zenoh-codec/src/common/extension.rs` @
+    /// `let body = match self.header & iext::ENC_MASK {`). The chain decode
+    /// reads it as a unit so that an analyzer still sees it; this is the
+    /// participant's refusal (`crate::ext_admit::ExtAdmission::ReservedEncoding`).
+    /// Distinct from [`Self::ReservedEncoding`], which is a MESSAGE body's
+    /// encoding and carries no extension identity.
+    ReservedExtEncoding {
+        /// The entry's identity (its header without the chain flag).
+        eid: u8,
+    },
     /// The message announced a protocol version other than
     /// [`wz_codecs::wire_const::PROTOCOL_VERSION`], so the rest of its body is
     /// laid out by a protocol this reader does not implement.
@@ -108,6 +122,9 @@ impl fmt::Display for InboundParseError {
                 "inbound ext {:#04x} is unknown and MANDATORY (M bit set)",
                 eid
             ),
+            Self::ReservedExtEncoding { eid } => {
+                write!(f, "inbound ext {:#04x} has the reserved encoding 0b11", eid)
+            }
             Self::ForeignVersion { version } => write!(
                 f,
                 "inbound message announces protocol version {:#04x}; this reader reads {:#04x}",

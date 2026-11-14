@@ -953,12 +953,7 @@ fn first_unknown_mandatory_ext(
 ) -> Option<crate::parse_error::InboundParseError> {
     messages
         .iter()
-        .find_map(|message| match message.ext_admission() {
-            crate::ext_admit::ExtAdmission::UnknownMandatory { eid } => {
-                Some(crate::parse_error::InboundParseError::UnknownMandatoryExt { eid })
-            }
-            _ => None,
-        })
+        .find_map(|message| message.ext_admission().refusal())
 }
 
 /// R74 — decode a `Frame.payload` byte slice into the in-order batch
@@ -1559,11 +1554,9 @@ enum Lend {
 fn admit_lent(
     admission: crate::ext_admit::ExtAdmission,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    match admission {
-        crate::ext_admit::ExtAdmission::UnknownMandatory { eid } => {
-            Err(crate::parse_error::InboundParseError::UnknownMandatoryExt { eid })
-        }
-        _ => Ok(()),
+    match admission.refusal() {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
     }
 }
 

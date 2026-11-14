@@ -38,6 +38,21 @@
 //! seam ([`crate::inbound::inbound_to_fsm_event`]) consults it, and the decode
 //! is unchanged.
 //!
+//! ## The reserved encoding, refused here for the same reason
+//!
+//! An entry whose encoding bits are `0b11` has no body shape. zenoh 1.10.2's
+//! reader of an extension it does not declare answers it with `DidntRead`
+//! before it looks at the `M` bit
+//! (`commons/zenoh-codec/src/common/extension.rs` @ `let body = match self.header & iext::ENC_MASK {`),
+//! and no declared extension has that encoding, so every chain reader refuses
+//! the whole message whatever the `M` bit says. The chain decode reads such an
+//! entry as a unit (`sources/codecs/ext_entry.scxml`, the default arm), because
+//! the analyzer must still show it; the refusal is
+//! [`ExtAdmission::ReservedEncoding`], one layer up, like the mandatory one.
+//! zenoh-pico reads the same entry as a body-less one and accepts the message
+//! (`_z_msg_ext_unknown_body_decode`, its `default:` arm): the two presets
+//! disagree, and this rule follows zenoh 1.10.2.
+//!
 //! ## Why header bytes rather than decoded entries
 //!
 //! The rule reads the header byte and nothing else — id, `M`, and encoding are
@@ -46,7 +61,7 @@
 //! generic) so every consumer reaches one copy of the rule, including builds
 //! whose codec set cannot construct an `ExtEntryOwned` at all.
 
-use crate::ext_header::{ext_eid, EXT_FLAG_M};
+use crate::ext_header::{ext_eid, EXT_ENC_MASK, EXT_FLAG_M};
 use wz_codecs::wire_const;
 
 /// What a conforming PARTICIPANT must do with a decoded extension chain.
@@ -64,10 +79,38 @@ pub enum ExtAdmission {
     /// define. A participant MUST refuse the whole message; `eid` is the
     /// extension identity (`id | M | enc`, zenoh `iext::eid`) that forced it.
     UnknownMandatory { eid: u8 },
+    /// The chain carries an entry whose encoding is the reserved `0b11`, which
+    /// has no body shape. A participant MUST refuse the whole message, whatever
+    /// the entry's `M` bit says; `eid` is the entry's identity.
+    ReservedEncoding { eid: u8 },
     /// This build has no extension space for that message id, so it has
     /// nothing to judge the chain against. The analyzer's reach limit, not a
     /// verdict about the wire.
     Unjudged,
+}
+
+impl ExtAdmission {
+    /// Whether a conforming participant must refuse the whole message.
+    ///
+    /// The one place a caller asks it, so that a refusal added to this enum is
+    /// a refusal at every seam rather than at the seams that matched it by name.
+    pub const fn is_refusal(self) -> bool {
+        matches!(
+            self,
+            Self::UnknownMandatory { .. } | Self::ReservedEncoding { .. }
+        )
+    }
+
+    /// The parse error a participant reports its refusal as, or `None` for a
+    /// message it may act on (`Admissible`) or cannot judge (`Unjudged`).
+    pub const fn refusal(self) -> Option<crate::parse_error::InboundParseError> {
+        use crate::parse_error::InboundParseError;
+        match self {
+            Self::UnknownMandatory { eid } => Some(InboundParseError::UnknownMandatoryExt { eid }),
+            Self::ReservedEncoding { eid } => Some(InboundParseError::ReservedExtEncoding { eid }),
+            Self::Admissible | Self::Unjudged => None,
+        }
+    }
 }
 
 /// WHICH NAMESPACE a message id was read from.
@@ -326,12 +369,19 @@ fn reads_mandatory(carrier: ExtCarrier, declared: &[u8], eid: u8) -> bool {
 /// Reports the FIRST offending entry, matching both upstreams: zenoh's
 /// `skip_all` loop and pico's `_z_msg_ext_decode_iter` both abort at the first
 /// unknown mandatory extension rather than surveying the rest.
+///
+/// An entry with the reserved encoding is judged before its `M` bit, in
+/// upstream's order: its reader fails on the encoding while it reads the body,
+/// and only a body that was read is asked whether it is mandatory.
 pub fn judge_ext_chain(carrier: ExtCarrier, headers: impl IntoIterator<Item = u8>) -> ExtAdmission {
     let Some(declared) = declared_identities(carrier) else {
         return ExtAdmission::Unjudged;
     };
     for header in headers {
         let eid = ext_eid(header);
+        if (eid & EXT_ENC_MASK) == EXT_ENC_MASK {
+            return ExtAdmission::ReservedEncoding { eid };
+        }
         if (eid & EXT_FLAG_M) != 0 && !reads_mandatory(carrier, declared, eid) {
             return ExtAdmission::UnknownMandatory { eid };
         }
@@ -445,6 +495,82 @@ mod tests {
         );
     }
 
+    /// The reserved encoding is refused on every judged carrier, with the `M`
+    /// bit clear as well as set, and before an unknown mandatory entry that
+    /// precedes nothing: zenoh's reader fails on the encoding while it reads
+    /// the body (`commons/zenoh-codec/src/common/extension.rs` @ `let body = match self.header & iext::ENC_MASK {`).
+    /// The `M`-clear leg is the one that was admitted before.
+    #[test]
+    fn the_reserved_encoding_is_refused_whatever_the_mandatory_bit_says() {
+        let carriers = [
+            ExtCarrier::Transport(wire_const::T_MID_INIT),
+            ExtCarrier::Transport(wire_const::T_MID_KEEP_ALIVE),
+            ExtCarrier::Transport(wire_const::T_MID_FRAME),
+            ExtCarrier::Scouting(wire_const::S_MID_SCOUT),
+            ExtCarrier::Network(NetworkEnvelope::Push),
+            ExtCarrier::Declaration(DeclarationKind::Final),
+            ExtCarrier::Zenoh(ZenohBody::Reply),
+        ];
+        for carrier in carriers {
+            for id in 0u8..16 {
+                for m in [0u8, EXT_FLAG_M] {
+                    let eid = id | m | EXT_ENC_MASK;
+                    for z in [0u8, crate::ext_header::EXT_FLAG_Z] {
+                        let verdict = judge_ext_chain(carrier, [eid | z]);
+                        assert_eq!(
+                            verdict,
+                            ExtAdmission::ReservedEncoding { eid },
+                            "{carrier:?} {eid:#04x}"
+                        );
+                        assert!(verdict.is_refusal());
+                    }
+                }
+            }
+        }
+        // Behind an admissible entry it is still the one reported.
+        assert_eq!(
+            judge_ext_chain(
+                ExtCarrier::Transport(wire_const::T_MID_INIT),
+                [0x81u8, 0x6F]
+            ),
+            ExtAdmission::ReservedEncoding { eid: 0x6F }
+        );
+        // The three encodings that have a body are not refused for it.
+        for enc in [0x00u8, 0x20, 0x40] {
+            assert_eq!(
+                judge_ext_chain(
+                    ExtCarrier::Transport(wire_const::T_MID_KEEP_ALIVE),
+                    [0x0F | enc]
+                ),
+                ExtAdmission::Admissible
+            );
+        }
+        // A carrier this build cannot name is still unjudged.
+        assert_eq!(
+            judge_ext_chain(ExtCarrier::Transport(0x1F), [0x6F]),
+            ExtAdmission::Unjudged
+        );
+    }
+
+    /// Each verdict maps to the refusal it is reported as, and the two that a
+    /// participant may proceed past map to none.
+    #[test]
+    fn each_refusal_is_reported_as_its_own_parse_error() {
+        use crate::parse_error::InboundParseError as E;
+        assert_eq!(
+            ExtAdmission::UnknownMandatory { eid: 0x14 }.refusal(),
+            Some(E::UnknownMandatoryExt { eid: 0x14 })
+        );
+        assert_eq!(
+            ExtAdmission::ReservedEncoding { eid: 0x6F }.refusal(),
+            Some(E::ReservedExtEncoding { eid: 0x6F })
+        );
+        assert_eq!(ExtAdmission::Admissible.refusal(), None);
+        assert_eq!(ExtAdmission::Unjudged.refusal(), None);
+        assert!(!ExtAdmission::Admissible.is_refusal());
+        assert!(!ExtAdmission::Unjudged.is_refusal());
+    }
+
     /// An empty chain is admissible on every space, including the empty ones.
     #[test]
     fn an_empty_chain_is_admissible() {
@@ -515,7 +641,9 @@ mod tests {
         ];
         for (carrier, admitted) in cases {
             for eid in (0u8..0x80).filter(|h| h & EXT_FLAG_M != 0) {
-                let want = if admitted.contains(&eid) {
+                let want = if eid & EXT_ENC_MASK == EXT_ENC_MASK {
+                    ExtAdmission::ReservedEncoding { eid }
+                } else if admitted.contains(&eid) {
                     ExtAdmission::Admissible
                 } else {
                     ExtAdmission::UnknownMandatory { eid }
