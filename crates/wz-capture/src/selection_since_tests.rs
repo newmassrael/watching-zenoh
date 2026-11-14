@@ -166,6 +166,7 @@ impl Growing {
         let kept = selection_since_json_coordinated(
             &self.d,
             &self.filter,
+            None,
             &self.numbering,
             window,
             &mut self.kept,
@@ -174,6 +175,7 @@ impl Growing {
         let again = selection_since_json_coordinated(
             &self.d,
             &self.filter,
+            None,
             &self.numbering,
             window,
             &mut self.again,
@@ -422,6 +424,7 @@ fn a_ceiling_that_trims_the_front_does_not_begin_the_planes_again() {
         let doc = selection_since_json_coordinated(
             &d,
             &filter,
+            None,
             &numbering,
             SelectionWindow {
                 after_seq: cursor,
@@ -506,10 +509,17 @@ fn a_ceiling_makes_the_planes_give_up_the_rows_it_took() {
                     after_seq: cursor,
                     through_seq: numbering.issued,
                 };
-                let given_up =
-                    selection_since_json_coordinated(&d, &filter, &numbering, window, &mut forgets);
-                let kept =
-                    selection_since_json_coordinated(&d, &filter, &numbering, window, &mut keeps);
+                let given_up = selection_since_json_coordinated(
+                    &d,
+                    &filter,
+                    None,
+                    &numbering,
+                    window,
+                    &mut forgets,
+                );
+                let kept = selection_since_json_coordinated(
+                    &d, &filter, None, &numbering, window, &mut keeps,
+                );
                 assert_eq!(
                     given_up, kept,
                     "{selector}, round {round}: giving rows up changed the document"

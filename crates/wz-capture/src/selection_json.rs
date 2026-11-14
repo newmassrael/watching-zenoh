@@ -497,17 +497,22 @@ pub(crate) fn for_each_row_after<'d>(
 /// `coordinates` is the caller's numbering, exactly as
 /// `fields_json_where_coordinated` takes it: this crate renders rows and does
 /// not mint the ids a handle in another crate publishes.
+///
+/// `declarations` is what the payload plane reads a sample by, as the field
+/// document reads it: the key a declaration fixes for an id the wire did not
+/// answer, and the profile rules an `e2e` term is decided by. With none, every
+/// `e2e` term over a published sample or a reply carrying a put is `undecided`.
 pub fn selection_json_where_coordinated(
     d: &crate::Dissection,
     filter: &crate::filter::Filter,
+    declarations: Option<&crate::payload::formats::FormatMap<'_>>,
     coordinates: &dyn RowCoordinates,
 ) -> String {
     let grouping = crate::node::session_grouping(d);
     // No question, no walk: an empty selector is the identity and judges nothing,
     // so it pays nothing either. The rule lives in `judged_by`, which the field
-    // document asks too. Handed no declarations: an `e2e` term is undecided
-    // over a sample here.
-    let verdicts = judged_by(d, filter, &grouping, Some(coordinates), None);
+    // document asks too.
+    let verdicts = judged_by(d, filter, &grouping, Some(coordinates), declarations);
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::SELECTION, &mut out);
     out.push_str(",\"rows\":[");
@@ -610,11 +615,13 @@ struct SelectionPlanes {
 
 impl SelectionFold {
     /// Every plane empty, against `filter` (numbered by the caller's list ids)
-    /// and `grouping`: what [`RowJudgement`] begins its walk with.
+    /// and `grouping`, the payload plane reading samples by `declarations`:
+    /// what [`RowJudgement`] begins its walk with.
     fn begin(
         d: &crate::Dissection,
         filter: &crate::filter::Filter,
         grouping: &crate::node::SessionGrouping,
+        declarations: Option<&crate::payload::formats::FormatMap<'_>>,
     ) -> Self {
         if filter.is_any() {
             return Self {
@@ -631,12 +638,16 @@ impl SelectionFold {
                 ambiguities: resolved.into_ambiguities(),
             };
         }
+        let mut payloads = crate::payload::PayloadFold::begin(d, filter, grouping);
+        if let Some(map) = declarations {
+            payloads.read_by(map);
+        }
         Self {
             judged: true,
             planes: Some(SelectionPlanes {
                 filter: resolved.filter().clone(),
                 origin: d.capture_origin_ms(),
-                payloads: crate::payload::PayloadFold::begin(d, filter, grouping),
+                payloads,
                 exchanges: crate::exchange::ExchangeFold::begin(d, filter, grouping),
                 rows: crate::row_plane::RowPlane::default(),
             }),
@@ -836,6 +847,10 @@ pub struct SelectionMemory {
     /// ids: a `flow` term compares those ids, so another numbering is another
     /// selector.
     asked: Option<crate::filter::Filter>,
+    /// The declaration text the payload plane was begun reading samples by, or
+    /// `None` when it was handed none: another text can decide another word for
+    /// a sample, so it begins the planes again as another selector does.
+    declared: Option<String>,
     fold: crate::ordered_fold::Resumable<SelectionFold>,
     /// The entries the planes kept when they last gave up the rows no list
     /// held, or were begun: they give them up again when they have doubled.
@@ -940,17 +955,39 @@ impl SelectionMemory {
     }
 }
 
+/// The declarations a selection's payload plane reads samples by, and the text
+/// they were declared from, which is what tells one memory's from another's.
+#[derive(Clone, Copy)]
+pub struct Declared<'a, 'm> {
+    /// The declarations, parsed from `text`.
+    pub map: &'a crate::payload::formats::FormatMap<'m>,
+    /// The text `map` was declared from, compared as given.
+    pub text: &'a str,
+}
+
+/// What a selection memory is for: the selector's text and the declaration
+/// text its words were judged under, or `None` for a door handed none. An empty
+/// declaration text is not `None`: it declares that no rule covers any key, so
+/// an `e2e` term reads `none` under it where it reads `undecided` under none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryKey {
+    selector: String,
+    declarations: Option<String>,
+}
+
 /// The [`SelectionMemory`] of each selector a handle has been asked under, up to
 /// a count, the most recently used kept.
 ///
-/// A selection memory is for ONE selector: it holds the words that selector said.
-/// A caller that alternates between selectors therefore needs one per selector,
+/// A selection memory is for ONE selector under ONE declaration text: it holds
+/// the words that selector said when samples were read by those declarations. A
+/// caller that alternates between selectors therefore needs one per selector,
 /// or every change of selector empties the memory and the next call writes every
 /// row as new. With one memory, which is the default, a change of selector does
-/// exactly that. A selector is told apart by its text, as it always was.
+/// exactly that, and so does a change of declaration text. Each is told apart by
+/// its text, as the selector always was.
 #[derive(Debug, Default)]
 pub struct SelectionMemories {
-    slots: crate::bounded_slots::BoundedSlots<String, SelectionMemory>,
+    slots: crate::bounded_slots::BoundedSlots<MemoryKey, SelectionMemory>,
 }
 
 impl SelectionMemories {
@@ -966,11 +1003,19 @@ impl SelectionMemories {
         self.slots.set_capacity(n)
     }
 
-    /// The memory of `selector`, made empty if it has none, and marked the most
-    /// recently used.
-    pub fn for_selector(&mut self, selector: &str) -> &mut SelectionMemory {
-        self.slots
-            .touch(&String::from(selector), SelectionMemory::default)
+    /// The memory of `selector` judged under the declaration text
+    /// `declarations` (`None` for none), made empty if it has none, and marked
+    /// the most recently used.
+    pub fn for_selector(
+        &mut self,
+        selector: &str,
+        declarations: Option<&str>,
+    ) -> &mut SelectionMemory {
+        let key = MemoryKey {
+            selector: String::from(selector),
+            declarations: declarations.map(String::from),
+        };
+        self.slots.touch(&key, SelectionMemory::default)
     }
 
     /// How many selectors have a memory now.
@@ -1134,9 +1179,19 @@ fn first_held(d: &crate::Dissection) -> Vec<u64> {
 /// consumer must act on: no row at or below the cursor is compared and none
 /// is written again, so a word the consumer holds for such a row may be stale, and
 /// the way to be right is to ask that selector again from 0.
+///
+/// # The declarations
+///
+/// `declarations` is what the payload plane reads a sample by, as
+/// [`selection_json_where_coordinated`] takes it, with the text it was declared
+/// from. The words depend on it (an `e2e` term is decided under a profile rule
+/// and `undecided` with no declarations), so a memory is for one text: another
+/// text, or none where there was one, begins the planes again and compares
+/// every row, as another selector does.
 pub fn selection_since_json_coordinated(
     d: &crate::Dissection,
     filter: &crate::filter::Filter,
+    declarations: Option<Declared<'_, '_>>,
     coordinates: &dyn RowCoordinates,
     since: SelectionWindow,
     memory: &mut SelectionMemory,
@@ -1153,10 +1208,16 @@ pub fn selection_since_json_coordinated(
         let lists = d.message_lists_with_origin().count();
         filter.numbered_by(lists, &|list| coordinates.list_id(list))
     };
-    if memory.asked.as_ref() != Some(&numbered) || memory.keep_to_what_is_held(d) {
+    let text = declarations.map(|declared| declared.text);
+    if memory.asked.as_ref() != Some(&numbered)
+        || memory.declared.as_deref() != text
+        || memory.keep_to_what_is_held(d)
+    {
         memory.fold = crate::ordered_fold::Resumable::default();
         memory.asked = Some(numbered.clone());
+        memory.declared = text.map(String::from);
     }
+    let map = declarations.map(|declared| declared.map);
     let restarts = memory.work.fold.restarts;
     let fold = memory
         .fold
@@ -1165,7 +1226,7 @@ pub fn selection_since_json_coordinated(
             &grouping,
             &mut memory.work.fold,
             None,
-            || SelectionFold::begin(d, &numbered, &grouping),
+            || SelectionFold::begin(d, &numbered, &grouping, map),
             None,
         )
         .expect("a walk nobody can stop runs to its end");
@@ -1591,6 +1652,7 @@ pub(crate) mod tests {
         selection_since_json_coordinated(
             d,
             &filter,
+            None,
             &EveryRowNumbered,
             SelectionWindow {
                 after_seq: after,
@@ -1729,7 +1791,13 @@ pub(crate) mod tests {
             }
         };
         let ask = |memories: &mut SelectionMemories, selector: &str, after: u64| {
-            since(&d, n, selector, after, memories.for_selector(selector))
+            since(
+                &d,
+                n,
+                selector,
+                after,
+                memories.for_selector(selector, None),
+            )
         };
 
         let mut one = SelectionMemories::default();
@@ -1933,7 +2001,7 @@ pub(crate) mod tests {
     /// `Y` yes, `N` no, `?` undecided, `U` unjudged.
     pub(crate) fn letters(d: &Dissection, selector: &str) -> String {
         let filter = crate::filter::Filter::parse(selector).expect("the selector parses");
-        let doc = selection_json_where_coordinated(d, &filter, &EveryListNumbered);
+        let doc = selection_json_where_coordinated(d, &filter, None, &EveryListNumbered);
         doc.split("\"selected\":\"")
             .skip(1)
             .map(|rest| match rest.split('"').next() {
@@ -2354,13 +2422,13 @@ mod memories_tests {
 
     fn said(memories: &mut SelectionMemories, selector: &str, row: u64) {
         memories
-            .for_selector(selector)
+            .for_selector(selector, None)
             .said
             .insert(row, RowVerdict::Yes);
     }
 
     fn held(memories: &mut SelectionMemories, selector: &str) -> usize {
-        memories.for_selector(selector).len()
+        memories.for_selector(selector, None).len()
     }
 
     /// One memory is the default and a second selector empties it, which is how a

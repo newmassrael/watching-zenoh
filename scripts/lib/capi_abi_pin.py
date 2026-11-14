@@ -53,7 +53,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 57
+EXPECTED_VERSION = 58
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -372,6 +372,15 @@ EXPECTED_SYMBOLS = {
     "wz_dissect_pcap_summary_keyed",
     "wz_dissect_pcap_session_table_keyed",
     "wz_dissect_live_add_keylog",
+    # (ABI 58) -- the two selection documents with the samples read by a
+    # declaration text, so a selector's `e2e` terms are decided under a profile
+    # rule. Two symbols; the text crosses as the C string the field doors take.
+    # The memory rule does not move: the documents are `char*` released by
+    # `wz_dissect_string_free`, and the selection memory a handle keeps (now per
+    # selector and declaration text) is released with it by
+    # `wz_dissect_live_close`.
+    "wz_dissect_live_selection_declaring",
+    "wz_dissect_live_selection_since_declaring",
     # (ABI 35) -- the NODE NAMES of a selector resolved to the zids a caller's
     # table gives them. A `node` term names a node the way the application's own
     # list does, and a record carries only the zid its sender announced; this is

@@ -227,6 +227,12 @@ fn question_everything(
         string_door("live_selection_since", |o| {
             wz_dissect_live_selection_since(handle, sel, 1, o)
         });
+        string_door("live_selection_declaring", |o| {
+            wz_dissect_live_selection_declaring(handle, dec, sel, o)
+        });
+        string_door("live_selection_since_declaring", |o| {
+            wz_dissect_live_selection_since_declaring(handle, dec, sel, 1, o)
+        });
         string_door("live_fields_where", |o| {
             wz_dissect_live_fields_where(handle, b, n, 4, sel, dec, o)
         });

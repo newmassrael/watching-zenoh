@@ -7613,6 +7613,7 @@ mod tests {
                 let light = crate::selection_json::selection_json_where_coordinated(
                     &d,
                     &filter,
+                    None,
                     &EveryListNumbered,
                 );
                 let (in_full, in_light) = (coordinate_rows(&full), coordinate_rows(&light));
@@ -7694,6 +7695,7 @@ mod tests {
         let light = crate::selection_json::selection_json_where_coordinated(
             &d,
             &filter,
+            None,
             &EveryListNumbered,
         );
 
@@ -7732,10 +7734,18 @@ mod tests {
         let any = crate::filter::Filter::parse("  ").expect("parses");
         let picky = crate::filter::Filter::parse("bytes > 6").expect("parses");
 
-        let asked_nothing =
-            crate::selection_json::selection_json_where_coordinated(&d, &any, &EveryListNumbered);
-        let asked =
-            crate::selection_json::selection_json_where_coordinated(&d, &picky, &EveryListNumbered);
+        let asked_nothing = crate::selection_json::selection_json_where_coordinated(
+            &d,
+            &any,
+            None,
+            &EveryListNumbered,
+        );
+        let asked = crate::selection_json::selection_json_where_coordinated(
+            &d,
+            &picky,
+            None,
+            &EveryListNumbered,
+        );
         assert!(
             !asked_nothing.contains("\"selected\""),
             "an empty selector asks nothing and must write no verdict: {asked_nothing}"
@@ -7769,8 +7779,12 @@ mod tests {
     fn a_row_of_a_list_nobody_numbered_carries_no_coordinates_and_still_a_verdict() {
         let (d, _file) = crate::agg::tests::multilink_session_with_file();
         let picky = crate::filter::Filter::parse("bytes > 6").expect("parses");
-        let doc =
-            crate::selection_json::selection_json_where_coordinated(&d, &picky, &NoListNumbered);
+        let doc = crate::selection_json::selection_json_where_coordinated(
+            &d,
+            &picky,
+            None,
+            &NoListNumbered,
+        );
         assert!(
             !doc.contains("\"list_id\"")
                 && !doc.contains("\"anchor\"")
@@ -11925,6 +11939,7 @@ mod tests {
                 verdict_docs.push(crate::selection_json::selection_json_where_coordinated(
                     dissection,
                     selector,
+                    None,
                     &EveryListNumbered,
                 ));
             }
