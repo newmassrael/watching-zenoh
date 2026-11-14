@@ -149,3 +149,13 @@ codecs:
   transport_join:
     capacity:
       extensions: 8
+  transport_oam:
+    capacity:
+      extensions: 8
+  # The scouting messages: the same eight a node reads of a transport chain.
+  scouting_scout:
+    capacity:
+      extensions: 8
+  scouting_hello:
+    capacity:
+      extensions: 8

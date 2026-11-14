@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- The whole scouting Scout message: the header byte, the body `scout.scxml`
+     reads, and the extension chain.
+
+     Scouting is not the transport layer: its messages travel on the scouting
+     socket, before any session, and their ids collide with the transport
+     ones (Scout is 0x01, as InitSyn is). Upstream keeps them apart
+     (`commons/zenoh-protocol/src/scouting/mod.rs` @ `pub mod id {`), and a
+     reader picks this document or a transport one by the link, never by the
+     byte.
+
+     Upstream writes header and body
+     (`commons/zenoh-codec/src/scouting/scout.rs` @
+     `impl<W> WCodec<&Scout, &mut W> for Zenoh080`) and reads a chain after
+     the body when Z is set, with the header of
+     `commons/zenoh-protocol/src/scouting/scout.rs` @ `pub mod flag {`:
+
+       bit 0..4 : mid  0x01
+       bit 5..6 : reserved
+       bit 7    : Z    an extension chain follows the body
+
+     The `I` flag that announces the zid is the body's, in its flags byte,
+     and the body derives it from the zid it is given. Scouting declares no
+     extension of its own; an entry is read by its encoding and judged one
+     layer up. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="scouting_scout">
+  <sce:import src="scout.scxml" kind="codec" as="codec_zenoh_scout"/>
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x01"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:embed id="body" type="codec_zenoh_scout" sce:byte="1"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+  </datamodel>
+</scxml>
