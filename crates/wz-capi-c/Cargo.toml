@@ -104,6 +104,7 @@ default = [
     "transport_multilink",
     "auth_pubkey",
     "e2e-sender",
+    "config-verdict",
     "transport_compression",
     "auth_usrpwd",
     "interceptors",
@@ -307,6 +308,12 @@ zenoh-c-shared-memory = ["wz-runtime-tokio/session-extshm", "wz-capi-core/sessio
 # that only queries leaves it out, and with it the frame writer of `wz-capture` (212 KB of that
 # build's 1.9 MB of symbols).
 e2e-sender = ["dep:wz-capture", "wz-capi-core/e2e-sender"]
+# A configuration judged, emitted and costed without opening it (`src/config_verdict.rs`,
+# `src/config_verdict_rows.rs` and `wz_capi_c_config_device_requires`), wz-own doors with no
+# upstream counterpart. On by default so the library exports what it did; a build that names its
+# features, a client above all, leaves them out, and with them the emitter, the validators and the
+# requirement table they alone reach. `z_open` reads its config through the plan without them.
+config-verdict = ["wz-capi-core/config-verdict"]
 # The four instruments of the observation plane (`docs/observation-plane.md`), and the
 # `wz_capi_c_*` doors that drive them. wz's own, which zenoh-c has not, so each is off as the
 # reference build is: a build without one links none of its doors. What each does is
