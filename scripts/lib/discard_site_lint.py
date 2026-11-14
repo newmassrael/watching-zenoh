@@ -141,6 +141,34 @@ ACCOUNTING = (
 ALLOWED = [
     (
         "wz-capture/segment_chain.rs",
+        "let _ = self.closed.remove(&key);",
+        "The segment chain lets go of what a query's final closed, kept for the "
+        "rows a ceiling has taken from the front of its list (round 4485), on "
+        "the reason of the `judged` entry below: the row is no longer held, so "
+        "no later document can read it again, and the transfers it ended were "
+        "written as `ended_transfers` when the row was written.",
+    ),
+    (
+        "wz-capture/tls.rs",
+        "self.spans.drain(..cut);",
+        "A continuing decryption pass lets go of the record coordinates of "
+        "plaintext its session has already framed (round 4486): every message "
+        "framed from it was mapped to its record when it was framed, and the "
+        "records and the plaintext are untouched. The three lists are one "
+        "mapping, cut together.",
+    ),
+    (
+        "wz-capture/tls.rs",
+        "self.ends.drain(..cut.min(self.ends.len()));",
+        "The second list of the mapping in the entry above, cut with it.",
+    ),
+    (
+        "wz-capture/tls.rs",
+        "self.instants.drain(..cut.min(self.instants.len()));",
+        "The third list of the mapping in the entries above, cut with them.",
+    ),
+    (
+        "wz-capture/segment_chain.rs",
         "let _ = self.judged.remove(&key);",
         "The segment chain lets go of the verdict it kept for each piece of a row "
         "a ceiling has taken from the front of its list: the row is no longer held, "
@@ -552,11 +580,20 @@ ALLOWED = [
     ),
     (
         "wz-capture/exit.rs",
-        "Exiting(Some(self.rows.remove(idx)))",
+        "let flow = self.rows.remove(idx);",
         "THE DOOR ITSELF (R311y713 B1). This is the one removal `FlowTable` "
         "has, and what it returns is the obligation: a `#[must_use] Exiting` "
         "that panics if it is dropped unconsumed. Accounting here would be a "
-        "second opinion about the flow the caller is about to account for",
+        "second opinion about the flow the caller is about to account for. "
+        "Round 4487 split the line in two to keep the key index beside it",
+    ),
+    (
+        "wz-capture/exit.rs",
+        "self.positions.remove(&flow.key());",
+        "The table's key index lets go of the position of the flow the door "
+        "above just took out (round 4487). The index is a lookup over the rows "
+        "and holds no evidence; the flow itself leaves as the `Exiting` the "
+        "caller must retire",
     ),
     (
         "wz-capture/lib.rs",
