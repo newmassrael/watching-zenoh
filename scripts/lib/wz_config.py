@@ -305,6 +305,7 @@ def decl_of(data: dict) -> dict:
         "order": [c["id"] for c in data["capability"]],
         "limits": list(data["limit"]),
         "policies": list(data.get("policy", [])),
+        "facts": list(data.get("protocol_fact", [])),
         "policy_images": list(data.get("policy_image", [])),
         "images": [i["id"] for i in data.get("image", [])],
         "image_dirs": {i["id"]: i["dir"] for i in data.get("image", [])},
@@ -344,6 +345,7 @@ def validate_decl(data: dict) -> list[str]:
     out += validate_artifacts(data)
     out += validate_limits(data["limit"])
     out += validate_policies(data.get("policy", []), data["catalog_version"])
+    out += validate_facts(data.get("protocol_fact", []))
     out += validate_images(data)
     out += validate_policy_images(data)
     out += validate_switches(data)
@@ -1327,6 +1329,40 @@ def policy_symbols(pol: dict) -> list[str]:
     if pol.get("kind") == "choice":
         return [kconfig] + [f"{kconfig}_{snake(c).upper()}" for c in pol.get("choices", [])]
     return [kconfig]
+
+
+FACT_KEYS = {"id", "pico", "c", "held_by", "needle", "absent", "help"}
+FACT_ABIS = ("pico", "c")
+
+
+def validate_facts(facts: list[dict]) -> list[str]:
+    """A protocol fact is what a session of an ABI states on the wire that no switch moves
+    (deploy/wz-config.toml, "Protocol facts"): a value per ABI that has it, and the file of this
+    tree that holds it, with a text that must occur there (`needle`) or must not (`absent`). Whether
+    the file still says so is checked by crates/wz-conformance-suite; here only the shape."""
+    out: list[str] = []
+    ids = [f.get("id") for f in facts]
+    if len(ids) != len(set(ids)):
+        out.append("a protocol fact id is declared twice")
+    for fact in facts:
+        fid = fact.get("id", "?")
+        for key in sorted(set(fact) - FACT_KEYS):
+            out.append(f"protocol fact `{fid}`: `{key}` is not a key a protocol fact has")
+        if not POLICY_ID_RE.fullmatch(str(fid)):
+            out.append(f"protocol fact `{fid}`: an id is lowercase words joined by `-`")
+        if not any(abi in fact for abi in FACT_ABIS):
+            out.append(f"protocol fact `{fid}`: names a value for no ABI ({', '.join(FACT_ABIS)})")
+        for abi in FACT_ABIS:
+            if abi in fact and (not isinstance(fact[abi], str) or not fact[abi]):
+                out.append(f"protocol fact `{fid}`: its {abi} value is not a non-empty string")
+        held = fact.get("held_by")
+        if not isinstance(held, str) or not held or held.startswith("/"):
+            out.append(f"protocol fact `{fid}`: `held_by` is not a path of this tree")
+        if ("needle" in fact) == ("absent" in fact):
+            out.append(f"protocol fact `{fid}`: states exactly one of `needle` and `absent`")
+        if not isinstance(fact.get("help"), str) or not fact.get("help", "").strip():
+            out.append(f"protocol fact `{fid}`: has no help")
+    return out
 
 
 def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
@@ -2671,7 +2707,11 @@ def conformance_statement(decl: dict, abi: str, features: list[str], limits: dic
         "policies": [{"id": pol["id"], "value": policies[pol["id"]], "upstream": pol["default"]}
                      for pol in decl["policies"]],
     }
-    return {**body, "derived_from": derived_from, "digest": statement_digest(body)}
+    # The ABI's protocol facts: fixed by the ABI and the catalogue version, which the digest
+    # already covers, so they are stated beside the body and left out of what is hashed.
+    facts = [{"id": f["id"], "value": f[abi]} for f in decl.get("facts", []) if abi in f]
+    return {**body, "facts": facts, "derived_from": derived_from,
+            "digest": statement_digest(body)}
 
 
 def policy_values(pol: dict) -> list[str]:
@@ -3342,6 +3382,15 @@ def cmd_selftest() -> int:
     expect("a statement lists every limit and every policy with its value",
            [x["id"] for x in stated["limits"]] == [lim["id"] for lim in decl["limits"]]
            and [p["id"] for p in stated["policies"]] == [pol["id"] for pol in decl["policies"]])
+    moved = dict(decl, facts=[dict(f, pico="moved") for f in decl.get("facts", []) if "pico" in f])
+    expect("a statement lists its ABI's protocol facts, and they are outside the digest",
+           [f["id"] for f in stated["facts"]] == [f["id"] for f in decl.get("facts", []) if "pico" in f]
+           and conformance_statement(moved, "pico", arm, defaults, upstream, {"kind": "test"})["digest"]
+           == stated["digest"])
+    expect("a protocol fact without a value, a holder or exactly one check is refused",
+           len(validate_facts([{"id": "x", "help": "h"}])) == 3
+           and not validate_facts([{"id": "x", "pico": "1", "held_by": "a/b", "needle": "n",
+                                    "help": "h"}]))
     expect("a statement of the cooperative build states what that build has, not what was asked",
            {c["id"]: c["supported"] for c in conformance_statement(
                decl, "pico", coop, defaults, upstream, {"kind": "test"})["capabilities"]}

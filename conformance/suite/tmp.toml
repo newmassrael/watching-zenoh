@@ -1,0 +1,167 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The test management protocol of the zenoh conformance test suite (ISO/IEC 9646-2, the
+# coordinated method): what the lower tester and the upper tester say to each other over the TMP
+# channel, which is never the test link's interface (pixit.toml, X-TMP-CHANNEL).
+# docs/conformance-suite.md section 8 defines every field; crates/wz-conformance-suite holds the
+# file to it and to asp.toml.
+#
+# Every message is one CBOR data item (RFC 8949): a map with unsigned integer keys. Key 0 is the
+# message's kind; the other keys are the message's fields. A field of type `params` is a map from
+# the primitive's parameter keys (asp.toml) to their values. On a link that does not keep message
+# boundaries a message is preceded by its length, a 32-bit unsigned integer, big-endian. The
+# encoding is written once more as an SCE codec document of the CBOR format, from which both
+# executors' codecs come; this file is what that document is written from and checked against.
+#
+# The rules:
+#   * the lower tester opens with `hello`, and the upper tester answers with `hello-reply`;
+#     until a `hello-reply` that refuses nothing, no other message is sent;
+#   * every `command`, `reset` and `procedure` carries a sequence number, one more than the last;
+#     the upper tester carries out a sequence number at most once and answers it with exactly one
+#     `confirm`, so a command sent twice is answered twice and done once;
+#   * handles are the upper tester's: it gives one in the confirm of a request that makes an
+#     entity, and the lower tester names the entity by it; a wire identifier is never a handle;
+#   * an `indication` carries the instant the upper tester observed it, by its own monotonic clock
+#     in nanoseconds; the upper tester counts nothing, the executor does;
+#   * `reset` returns every session and every entity of the implementation and leaves it idle.
+
+format = "wz-conformance-tmp"
+format_version = 1
+version = 1
+encoding = "cbor"
+stream_length_prefix = "u32-be"
+
+[[message]]
+name = "hello"
+kind = 1
+from = "lower"
+fields = [
+    { key = 1, name = "tmp-version", type = "uint" },
+    { key = 2, name = "suite", type = "text" },
+]
+
+[[message]]
+name = "hello-reply"
+kind = 2
+from = "upper"
+fields = [
+    { key = 1, name = "tmp-version", type = "uint" },
+    { key = 2, name = "implementation", type = "text" },
+    { key = 3, name = "abi", type = "text", optional = true },
+    { key = 4, name = "statement-digest", type = "text", optional = true },
+    { key = 5, name = "pics", type = "map", optional = true },
+    { key = 6, name = "refusal", type = "uint", optional = true },
+]
+
+[[message]]
+name = "command"
+kind = 3
+from = "lower"
+fields = [
+    { key = 1, name = "seq", type = "uint" },
+    { key = 2, name = "primitive", type = "uint" },
+    { key = 3, name = "params", type = "params" },
+]
+
+[[message]]
+name = "confirm"
+kind = 4
+from = "upper"
+fields = [
+    { key = 1, name = "seq", type = "uint" },
+    { key = 2, name = "result", type = "uint" },
+    { key = 3, name = "handle", type = "uint", optional = true },
+    { key = 4, name = "detail", type = "text", optional = true },
+    { key = 5, name = "value", type = "bytes", optional = true },
+]
+
+[[message]]
+name = "indication"
+kind = 5
+from = "upper"
+fields = [
+    { key = 1, name = "at-ns", type = "uint" },
+    { key = 2, name = "primitive", type = "uint" },
+    { key = 3, name = "params", type = "params" },
+]
+
+[[message]]
+name = "reset"
+kind = 6
+from = "lower"
+fields = [{ key = 1, name = "seq", type = "uint" }]
+
+[[message]]
+name = "procedure"
+kind = 7
+from = "lower"
+fields = [
+    { key = 1, name = "seq", type = "uint" },
+    { key = 2, name = "procedure", type = "uint" },
+    { key = 3, name = "params", type = "map" },
+]
+
+# The results a confirm carries, and the refusals of a hello-reply: one list for every
+# implementation, so one cause has one number whichever API family the adapter maps to.
+[[result]]
+code = 0
+name = "ok"
+
+[[result]]
+code = 1
+name = "unsupported"
+summary = "The implementation's API family has no counterpart for the primitive."
+
+[[result]]
+code = 2
+name = "invalid-argument"
+summary = "The implementation refused a parameter's value, a key expression among them."
+
+[[result]]
+code = 3
+name = "unknown-handle"
+summary = "No entity has the handle the command names."
+
+[[result]]
+code = 4
+name = "timeout"
+summary = "The implementation did not finish the request within its own bound."
+
+[[result]]
+code = 5
+name = "failed"
+summary = "The implementation reported a failure the list has no number for; detail says which."
+
+[[result]]
+code = 6
+name = "resources-exhausted"
+summary = "The implementation had no room for the entity or the message."
+
+[[result]]
+code = 7
+name = "tmp-version"
+summary = "A hello-reply: the upper tester does not speak the lower tester's version."
+
+[[result]]
+code = 8
+name = "statement-mismatch"
+summary = "A hello-reply: the build the upper tester runs on is not the one its statement describes."
+
+[[result]]
+code = 9
+name = "sequence"
+summary = "A sequence number that is not one more than the last, nor one already answered."
+
+# The compound stimuli the upper tester runs locally, because their timing is finer than the
+# protocol's round trip; each is the same in every upper tester and depends on no implementation.
+[[procedure]]
+code = 1
+name = "periodic-put"
+summary = "Put through a publisher `count` times, one every `period` microseconds, the payload numbered from 0."
+parameters = [
+    { key = 1, name = "publisher", type = "handle" },
+    { key = 2, name = "count", type = "uint" },
+    { key = 3, name = "period-us", type = "uint" },
+    { key = 4, name = "payload-size", type = "uint" },
+]

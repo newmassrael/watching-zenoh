@@ -40,12 +40,12 @@ impl Token {
     }
 }
 
-/// Whether `word` is spelled as an item id: an upper-case letter, then upper-case letters,
-/// digits and hyphens.
+/// Whether `word` is spelled as an item id: upper-case letters and digits in words joined by
+/// single hyphens, the first word starting with a letter. That is a feature name upper-cased
+/// (`crate::names`), so every id has its feature and its module parameter.
 pub(crate) fn is_item_id(word: &str) -> bool {
-    let mut chars = word.chars();
-    chars.next().is_some_and(|c| c.is_ascii_uppercase())
-        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+    crate::names::is_feature_name(&word.to_ascii_lowercase())
+        && !word.chars().any(|c| c.is_ascii_lowercase())
 }
 
 fn tokens(text: &str) -> Result<Vec<Token>, String> {

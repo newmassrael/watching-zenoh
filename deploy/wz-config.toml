@@ -2846,6 +2846,42 @@ sessions come and go while it routes: a change waits for no message being
 routed, and a message costs what it costs under `rwlock`.
 '''
 
+# ─── Protocol facts (docs/build-configuration.md, decision C15) ──────────────────────────────
+#
+# A protocol fact is something a session of an ABI states on the wire that no switch of this
+# declaration moves: it is the same for every build of the ABI at this catalogue version. The
+# conformance statement lists the facts of its ABI beside its values, so a test system reads the
+# PICS items they answer from the build (conformance/suite/answers/wz.toml). They are not in the
+# statement's digest: the ABI and the catalogue version already are, and they fix every fact, so
+# a fact whose value changes moves `catalog_version` with it.
+#
+# Each fact names, per ABI, its value (`pico`, `c`; an ABI it does not name has no such fact),
+# and where this tree holds it: `held_by` is a file of this tree, and `needle` a text that must
+# occur in it, or `absent` one that must not. crates/wz-conformance-suite checks both, so a change
+# of the code the fact rests on is a red test, not a statement that has quietly become false.
+[[protocol_fact]]
+id = "patch"
+pico = "1"
+c = "1"
+held_by = "crates/wz-session-core/src/extpatch.rs"
+needle = "pub const CURRENT_PATCH: u8 = 1;"
+help = '''
+The protocol patch level a session states in its Init and its Join: 1, so the
+first and drop markers of a Fragment are used when the peer states 1 too.
+'''
+
+[[protocol_fact]]
+id = "batch-compression"
+pico = "no"
+held_by = "crates/wz-capi-pico/Cargo.toml"
+absent = "compression"
+help = '''
+Whether a session offers and accepts batch compression. The pico ABI never
+compiles the compression handshake: its crate takes the session model without
+its default features and forwards no compression feature to it. The zenoh-c ABI
+states it with the transport_compression capability instead.
+'''
+
 # The role of a node in a zenoh network: upstream's `mode`. A global axis (it names no image),
 # so that every tree that sources the capabilities can state it, and each option selects the
 # capabilities it needs: the role pulls what it requires, and nothing else. What an image also

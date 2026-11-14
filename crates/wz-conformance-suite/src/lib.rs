@@ -9,9 +9,12 @@
 //! them two proformas an implementation and a test environment fill in, the PICS (what the
 //! implementation is) and the PIXIT (where it is tested). This crate holds the parts of that
 //! chain that do not depend on how the test suite is executed: the requirements, the two
-//! proformas, and wz's answers to the PICS. They are TOML files in `conformance/suite/`, read
-//! here into [`Suite`] and [`AnswerFile`] and held to their formats by [`check()`] and
-//! [`check_answers()`].
+//! proformas, wz's answers to the PICS, and the structure the abstract test suite is written to
+//! (its test configurations and purposes, the service primitives and the test management
+//! protocol, [`structure`]). They are TOML files in `conformance/suite/`, read here into
+//! [`Suite`], [`AnswerFile`] and [`structure::Structure`] and held to their formats by
+//! [`check()`], [`check_answers()`] and [`structure::check_structure()`]. How each id is spelled
+//! where the abstract test suite reads it is [`names`].
 //!
 //! The checks are the static ones a test system makes before it selects any test: every
 //! selection expression names a PICS item that exists and can be answered yes or no, every
@@ -21,26 +24,39 @@
 //! (each source is an anchor it resolves at the pin), so this crate checks only the form.
 //!
 //! [`answer()`] reads a wz build's PICS from its conformance statement, the way the test system's
-//! first exchange with an upper tester will: the statement names capabilities, limits and
-//! policies, and `conformance/suite/answers/wz.toml` says which of them answers which item.
+//! first exchange with an upper tester will: the statement names capabilities, limits, policies
+//! and protocol facts, and `conformance/suite/answers/wz.toml` says which of them answers which
+//! item; an item the implementation reads from its configuration is answered from the PIXIT
+//! ([`resolve()`]).
 
 mod answer;
 mod check;
+pub mod names;
 mod selection;
+pub mod structure;
 
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-pub use answer::{answer, Catalogue, CatalogueCapability, CataloguePolicy, PicsAnswer, Statement};
+pub use answer::{
+    answer, resolve, Catalogue, CatalogueCapability, CatalogueFact, CataloguePolicy, PicsAnswer,
+    Statement,
+};
 pub use check::{check, check_answers};
 pub use selection::Selection;
 
 /// The requirement files of the list, by their path under `conformance/suite/`.
-pub const REQUIREMENT_FILES: &[(&str, &str)] = &[(
-    "requirements/base-transport.toml",
-    include_str!("../../../conformance/suite/requirements/base-transport.toml"),
-)];
+pub const REQUIREMENT_FILES: &[(&str, &str)] = &[
+    (
+        "requirements/base-transport.toml",
+        include_str!("../../../conformance/suite/requirements/base-transport.toml"),
+    ),
+    (
+        "requirements/base-network.toml",
+        include_str!("../../../conformance/suite/requirements/base-network.toml"),
+    ),
+];
 
 /// The PICS proforma, `conformance/suite/pics.toml`.
 pub const PICS: &str = include_str!("../../../conformance/suite/pics.toml");
@@ -254,7 +270,8 @@ pub struct AnswerFile {
 }
 
 /// How one PICS item is answered for one ABI: by exactly one of `capability`, `limit`,
-/// `policy` (with `map`), `fixed` (with `why`) and `unanswered`.
+/// `policy` (with `map`), `fact` (with `map` when the fact's words are not the item's), `pixit`,
+/// `fixed` (with `why`) and `unanswered`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnswerRow {
@@ -263,6 +280,11 @@ pub struct AnswerRow {
     pub capability: Option<String>,
     pub limit: Option<String>,
     pub policy: Option<String>,
+    /// A protocol fact of the declaration, read from the statement for the row's ABI.
+    pub fact: Option<String>,
+    /// A PIXIT item: the implementation reads the value from its configuration when a session
+    /// opens, so the test environment states it.
+    pub pixit: Option<String>,
     #[serde(default)]
     pub map: BTreeMap<String, String>,
     pub fixed: Option<String>,

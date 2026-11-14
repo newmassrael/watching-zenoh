@@ -1,0 +1,101 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# Test purposes of the zenoh conformance test suite, network part. The header of
+# purposes/transport.toml holds here too.
+
+format = "wz-conformance-purposes"
+format_version = 1
+part = "network"
+
+[[purpose]]
+id = "TP-PUSH-1"
+requirements = ["B-PUSH-1", "B-NET-2", "B-KE-2"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN", "SESSION-PUT"]
+with = "A session is established, and the LT has declared a subscriber on a/**."
+when = "The UT puts the payload 0x01 on a/b."
+then = "The LT reads a Push whose wire expression stands for a/b, in canon form, carrying the payload."
+
+[[purpose]]
+id = "TP-PUSH-2"
+requirements = ["B-NET-4", "B-PUSH-1"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN", "PUBLISHER-DECLARE", "PUBLISHER-PUT"]
+with = "A session is established, the LT has declared a subscriber on a/b, and the UT has declared a publisher on a/b with priority 2, block and express."
+when = "The UT puts through the publisher."
+then = "The Push the LT reads carries the QoS extension with priority 2, D set and E set, or the Frame that carries it is of priority 2 and the Push states D and E."
+
+[[purpose]]
+id = "TP-DECL-1"
+requirements = ["B-DECL-1", "B-DECL-2", "B-DECL-4"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN", "SUBSCRIBER-DECLARE"]
+with = "A session is established."
+when = "The UT declares a subscriber on a/*."
+then = "The LT reads a Declare holding one subscriber declaration whose wire expression stands for a/*."
+
+[[purpose]]
+id = "TP-DECL-2"
+requirements = ["B-DECL-3", "B-NET-3"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN", "SUBSCRIBER-DECLARE", "SAMPLE"]
+with = "A session is established, and the UT has declared a subscriber on a/b."
+when = "The LT declares the key expression a under expression id 7, then sends a Push whose key scope is 7, M set, and whose suffix is /b."
+then = "The UT indicates one sample on a/b."
+
+[[purpose]]
+id = "TP-REQ-1"
+requirements = ["B-RESP-3", "B-RESP-1", "B-RESP-2", "B-REQ-1"]
+configuration = "CF-UC-IUT-DIALS"
+selection = "N-QUERYABLE"
+primitives = ["SESSION-OPEN", "QUERYABLE-DECLARE", "QUERY", "QUERY-REPLY", "QUERY-END"]
+with = "A session is established, and the UT has declared a queryable on a/b."
+when = "The LT sends a Request on a/b with request id 5; the UT replies once to the query it is indicated, then ends it."
+then = "The LT reads one Response of request id 5, then one ResponseFinal of request id 5, and nothing more for that id."
+
+[[purpose]]
+id = "TP-REQ-2"
+requirements = ["B-REQ-1", "B-REQ-3"]
+configuration = "CF-UC-IUT-DIALS"
+selection = "N-QUERY"
+primitives = ["SESSION-OPEN", "GET", "REPLY", "REPLY-END"]
+with = "A session is established."
+when = "The UT gets a/b; the LT answers the Request it reads with one Response and one ResponseFinal of its id."
+then = "The Request's id fits the agreed request id resolution; the UT indicates one reply, then the end of the query."
+
+[[purpose]]
+id = "TP-INT-1"
+requirements = ["B-INT-2", "B-INT-1", "B-DECL-6"]
+configuration = "CF-UC-LT-DIALS"
+primitives = ["SESSION-OPEN", "SUBSCRIBER-DECLARE"]
+with = "The UT has opened a peer session that listens, declared subscribers on a/b and c/d, and the LT has established a session with it."
+when = "The LT sends an Interest of mode current, restricted to a/**, for subscribers, with interest id 9."
+then = "The LT reads a Declare of the subscriber on a/b carrying interest id 9, no declaration of c/d, then a Declare of the final declaration carrying interest id 9."
+
+[[purpose]]
+id = "TP-KE-1"
+requirements = ["B-KE-3"]
+configuration = "CF-UC-IUT-DIALS"
+primitives = ["SESSION-OPEN", "SUBSCRIBER-DECLARE", "SAMPLE"]
+with = "A session is established, and the UT has declared a subscriber on a/**/c."
+when = "The LT sends Pushes on a/c, a/b/c, a/b/b/c and a/b/d."
+then = "The UT indicates the samples on a/c, a/b/c and a/b/b/c, and none on a/b/d."
+
+[[purpose]]
+id = "TP-ROUTE-1"
+requirements = ["B-ROUTE-1"]
+configuration = "CF-ROUTER-TWO"
+primitives = ["SESSION-OPEN"]
+with = "The UT has opened a router session; lt1 has declared a subscriber on a/*, and lt2 one on b/*."
+when = "lt1 sends a Push on a/x and one on b/x."
+then = "lt2 reads the Push on b/x; lt1 reads neither Push back."
+
+[[purpose]]
+id = "TP-ROUTE-2"
+requirements = ["B-ROUTE-2", "B-RESP-3"]
+configuration = "CF-ROUTER-TWO"
+primitives = ["SESSION-OPEN"]
+with = "The UT has opened a router session; lt2 has declared a queryable on q/*, complete."
+when = "lt1 sends a Request on q/1 with target all; lt2 answers the Request it reads with one Response and its ResponseFinal."
+then = "lt1 reads one Response carrying its own request id, then one ResponseFinal of that id."

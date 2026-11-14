@@ -32,6 +32,13 @@ const UPSTREAM_ROOTS: &[&str] = &[
 const DEFINITION: &str = "commons/zenoh-protocol/";
 const CODEC: &str = "commons/zenoh-codec/";
 
+/// Where the base states the contract of a service rather than a message: the key expression
+/// library, which defines what a key expression is and means, and the public Rust API's
+/// documentation. A contract is a source for a procedure, and the key expression library for the
+/// form of a key expression too.
+const KEYEXPR: &str = "commons/zenoh-keyexpr/";
+const API: &str = "zenoh/src/api/";
+
 /// The ABIs whose libraries carry their statement's digest, so whose PICS can be read from it.
 const ANSWERED_ABIS: &[&str] = &["pico", "c"];
 
@@ -166,14 +173,16 @@ fn check_base(at: &str, r: &Requirement, out: &mut Vec<String>) {
     }
     let (normative, defining) = match r.aspect {
         Aspect::Encoding => (
-            paths
-                .iter()
-                .any(|p| p.starts_with(DEFINITION) || p.starts_with(CODEC)),
-            "the protocol definition or its codec",
+            paths.iter().any(|p| {
+                p.starts_with(DEFINITION) || p.starts_with(CODEC) || p.starts_with(KEYEXPR)
+            }),
+            "the protocol definition, its codec or the key expression library",
         ),
         Aspect::Procedure => (
-            paths.iter().any(|p| p.starts_with(DEFINITION)),
-            "the protocol definition",
+            paths
+                .iter()
+                .any(|p| p.starts_with(DEFINITION) || p.starts_with(KEYEXPR) || p.starts_with(API)),
+            "the protocol definition or a service contract",
         ),
     };
     if !normative && r.issue.is_none() {
@@ -434,6 +443,8 @@ pub fn check_answers(suite: &Suite, answers: &AnswerFile, catalogue: &Catalogue)
             row.capability.is_some(),
             row.limit.is_some(),
             row.policy.is_some(),
+            row.fact.is_some(),
+            row.pixit.is_some(),
             row.fixed.is_some(),
             row.unanswered.is_some(),
         ]
@@ -442,7 +453,7 @@ pub fn check_answers(suite: &Suite, answers: &AnswerFile, catalogue: &Catalogue)
         .count();
         if ways != 1 {
             out.push(format!(
-                "{at}: answers in {ways} ways, and a row answers in exactly one of capability, limit, policy, fixed and unanswered"
+                "{at}: answers in {ways} ways, and a row answers in exactly one of capability, limit, policy, fact, pixit, fixed and unanswered"
             ));
         }
         if row.why.is_some() != row.fixed.is_some() {
@@ -450,8 +461,66 @@ pub fn check_answers(suite: &Suite, answers: &AnswerFile, catalogue: &Catalogue)
                 "{at}: a fixed answer, and only a fixed answer, says why"
             ));
         }
-        if !row.map.is_empty() && row.policy.is_none() {
-            out.push(format!("{at}: only a policy answer has a map"));
+        if !row.map.is_empty() && row.policy.is_none() && row.fact.is_none() {
+            out.push(format!("{at}: only a policy or a fact answer has a map"));
+        }
+        if let Some(fact) = &row.fact {
+            match catalogue
+                .facts
+                .get(fact)
+                .and_then(|f| f.values.get(&row.abi))
+            {
+                None => out.push(format!(
+                    "{at}: {fact} is no protocol fact of the declaration for the {} ABI",
+                    row.abi
+                )),
+                Some(value) => {
+                    let word = if row.map.is_empty() {
+                        Some(value)
+                    } else {
+                        row.map.get(value)
+                    };
+                    let admitted = word.is_some_and(|w| match item.answer {
+                        AnswerKind::Support => w == "yes" || w == "no",
+                        AnswerKind::Value => item.admits(w),
+                    });
+                    if !admitted {
+                        out.push(format!(
+                            "{at}: {fact} = {value} gives no answer the item admits"
+                        ));
+                    }
+                    for (from, to) in &row.map {
+                        let fits = match item.answer {
+                            AnswerKind::Support => to == "yes" || to == "no",
+                            AnswerKind::Value => item.admits(to),
+                        };
+                        if !fits {
+                            out.push(format!(
+                                "{at}: maps {from} to {to:?}, which the item does not admit"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(pixit) = &row.pixit {
+            match suite.pixit.items.iter().find(|p| p.id == *pixit) {
+                None => out.push(format!("{at}: {pixit} is no PIXIT item")),
+                Some(p) => {
+                    let fits = match item.answer {
+                        AnswerKind::Value => p.answer == PixitKind::Integer,
+                        AnswerKind::Support => {
+                            p.answer == PixitKind::Choice
+                                && p.values.iter().all(|v| v == "yes" || v == "no")
+                        }
+                    };
+                    if !fits {
+                        out.push(format!(
+                            "{at}: {pixit} does not answer in the item's kind (an integer for a value, yes or no for a support item)"
+                        ));
+                    }
+                }
+            }
         }
         if let Some(cap) = &row.capability {
             match catalogue.capabilities.get(cap) {
@@ -701,7 +770,10 @@ distinct_from = "X-A"
             "sources = ['`io/zenoh-transport/src/common/batch.rs` @ `const COMPRESSION: u8 = 1; // 1 << 0`']",
         );
         let found = violations(&[implementation.as_str()], PICS_FIXTURE, PIXIT_FIXTURE);
-        refused(&found, "no source is the protocol definition or its codec");
+        refused(
+            &found,
+            "no source is the protocol definition, its codec or the key expression library",
+        );
 
         let with_issue = format!("{implementation}issue = \"Only an implementation says so.\"\n");
         let found = violations(&[with_issue.as_str()], PICS_FIXTURE, PIXIT_FIXTURE);
@@ -716,7 +788,33 @@ distinct_from = "X-A"
             "sources = ['`commons/zenoh-codec/src/core/zint.rs` @ `const VLE_LEN_MAX: usize = vle_len(u64::MAX);`']",
         );
         let found = violations(&[procedure.as_str()], PICS_FIXTURE, PIXIT_FIXTURE);
-        refused(&found, "no source is the protocol definition, so");
+        refused(
+            &found,
+            "no source is the protocol definition or a service contract, so",
+        );
+    }
+
+    #[test]
+    fn the_key_expression_library_is_a_contract_source() {
+        let procedure = edit(
+            &edit(REQUIREMENTS, "aspect = \"encoding\"", "aspect = \"procedure\""),
+            "sources = ['`commons/zenoh-protocol/src/lib.rs` @ `pub const VERSION: u8 = 0x09;`']",
+            "sources = ['`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @ `These chunks are not allowed to be empty.`']",
+        );
+        let found = violations(&[procedure.as_str()], PICS_FIXTURE, PIXIT_FIXTURE);
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    #[test]
+    fn an_id_is_words_joined_by_single_hyphens() {
+        for bad in ["B--FIX", "B-FIX-", "1-FIX", "B-fix"] {
+            let text = edit(REQUIREMENTS, "id = \"B-FIX-1\"", &format!("id = \"{bad}\""));
+            let found = violations(&[text.as_str()], PICS_FIXTURE, PIXIT_FIXTURE);
+            refused(
+                &found,
+                "the id is not upper-case letters, digits and hyphens",
+            );
+        }
     }
 
     #[test]
@@ -1015,6 +1113,66 @@ distinct_from = "X-A"
         let found = answer_violations(&text);
         refused(&found, "answers pico T-PATCH: no row answers it");
         refused(&found, "answers pico T-RID-RES: 2 rows answer it");
+    }
+
+    #[test]
+    fn a_fact_answer_names_a_fact_of_the_abi_that_gives_an_admitted_answer() {
+        let wz = crate::WZ_ANSWERS;
+        let text = edit(wz, "fact = \"patch\"", "fact = \"no-such-fact\"");
+        refused(
+            &answer_violations(&text),
+            "no-such-fact is no protocol fact of the declaration for the pico ABI",
+        );
+
+        let text = edit(
+            wz,
+            "item = \"T-COMPRESSION\"\nfact = \"batch-compression\"",
+            "item = \"T-COMPRESSION\"\nfact = \"patch\"",
+        );
+        refused(
+            &answer_violations(&text),
+            "patch = 1 gives no answer the item admits",
+        );
+
+        let text = edit(
+            wz,
+            "map = { \"0\" = \"no\", \"1\" = \"yes\" }",
+            "map = { \"0\" = \"no\" }",
+        );
+        refused(
+            &answer_violations(&text),
+            "patch = 1 gives no answer the item admits",
+        );
+
+        let text = edit(
+            wz,
+            "map = { \"0\" = \"no\", \"1\" = \"yes\" }",
+            "map = { \"0\" = \"maybe\", \"1\" = \"yes\" }",
+        );
+        refused(&answer_violations(&text), "maps 0 to \"maybe\"");
+    }
+
+    #[test]
+    fn a_pixit_answer_names_a_pixit_item_of_the_item_s_kind() {
+        let wz = crate::WZ_ANSWERS;
+        let text = edit(wz, "pixit = \"X-IUT-LEASE\"", "pixit = \"X-IUT-NONE\"");
+        refused(&answer_violations(&text), "X-IUT-NONE is no PIXIT item");
+
+        let text = edit(wz, "pixit = \"X-IUT-LEASE\"", "pixit = \"X-TMP-CHANNEL\"");
+        refused(
+            &answer_violations(&text),
+            "X-TMP-CHANNEL does not answer in the item's kind",
+        );
+
+        let text = edit(
+            wz,
+            "item = \"T-MCAST\"\ncapability = \"multicast-transport\"",
+            "item = \"T-MCAST\"\npixit = \"X-IUT-LEASE\"",
+        );
+        refused(
+            &answer_violations(&text),
+            "X-IUT-LEASE does not answer in the item's kind",
+        );
     }
 
     #[test]
