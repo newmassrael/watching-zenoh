@@ -2521,6 +2521,12 @@ layer_c0_test_discipline() {
     # MEASURED, warm: `--selftest` 0.04s, `--check` 0.4s.
     python3 scripts/lib/pin_constant_binding_gate.py --selftest || return 1
     python3 scripts/lib/pin_constant_binding_gate.py --check || return 1
+    # The SCE autoroller (SCE ADR 0078 section 4): it plans the next landing of the vendor/sce
+    # pin and changes nothing, so only its selftest runs here, over a history it makes in a
+    # scratch directory: the stop rule, the classes of a path, the guide sections a landing adds
+    # or amends, the refusal of a pin off the target's line, and the control that the runtime
+    # stop comes from wz's lock file and not from the path alone.
+    python3 scripts/lib/sce_autoroll.py --selftest || return 1
     # R2283 (open-debt item 621) — and a COMMIT HOOK CHECK must say which
     # artifact it grades. `pre-commit`'s Check 2 picked its files out of the
     # index and then ran `cargo fmt` over the CHECKOUT; R2282 committed an
@@ -26092,6 +26098,9 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh timestamp stack stamp)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_ts_stack_stamp || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh push put chain)" 2 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_push_put_chain || return 1
     # A batch of several transport messages (Frames of both reliabilities, a KeepAlive behind a
     # Frame), written by upstream's codec: the observer's reader and the participant's read the
     # same messages, in the same Frames and order, as upstream's reader. Two tests, one a reader.

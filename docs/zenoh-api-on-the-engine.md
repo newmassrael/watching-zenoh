@@ -1347,5 +1347,21 @@ Each lands whole with its surface lines, tests and faults in one round.
   with the bound, and the Rust, C++, Kotlin, Go and Python arms and the string variant do not
   (the same gap holds for `sce:max-count` on the heap-backed repeat decode, and on the encode
   side). The fix is made in the SCE generator and wz regenerates `out/**` when it lands; wz adds
-  no check of its own in a wrapper and does not change the generated documentation. Open until
-  then.
+  no check of its own in a wrapper and does not change the generated documentation. Closed by
+  the generator: SCE 3ee3508e44 (a codec length or count past its bound is refused on every
+  backend, ADR 0077 step 1) is behind the pin since the SCE crossing of round R4167, and the
+  generated decode of a bounded length-ref, bytes or text, compares the length with the bound
+  before it reads a byte (`out/wz-codecs/timestamp.rs`, `out/wz-codecs/locator.rs`). Held in
+  two places: `crates/wz-codecs/tests/it/files/declared_bounds.rs` refuses an identity of 17
+  bytes and a locator of 256 as `LengthOutOfRange` in the lent form, the node's and the heap's,
+  with the frames at the bound as the control (only the node answers its capacity for a
+  locator of 255, after reading it whole); and
+  `conformance/differential/tests/zenoh_push_put_chain.rs` takes a Push of a Put upstream
+  wrote with an identity of 16 bytes, which both read alike, makes the identity 17 bytes, and
+  both refuse it. The truncation in the sample projection is no longer reachable from a
+  frame. The same test holds the other half of ADR 0077 section 7 to upstream: a Put whose
+  extension chain is longer than a node stores inline (9 and 32 extensions; 8 is the control)
+  is read by a participant with an allocator entry for entry as upstream reads it. Its
+  receive path lends a Push at the node's capacity and hands one past it over owned, read at
+  the heap's, where it refused it before; the profile with no allocator still refuses it, as
+  its capacity says.
