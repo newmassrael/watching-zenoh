@@ -22,7 +22,7 @@
 //! from `frame_encode` (which is the `T_MID_FRAME` data-plane envelope).
 
 // Vec backs the heap wrappers of the codec-body encoders; `encode_keep_alive`
-// (transport-keepalive) is a const header byte, so a keepalive-only
+// (transport-keepalive) writes one byte into an array, so a keepalive-only
 // subset must not carry the unused imports (CI denies warnings). `VecSink`
 // is the heap `encode_close`'s alone: Init and Open are written through the
 // buffer seam (`encode_init_into` / `encode_open_into`) whatever the buffer is.
@@ -51,7 +51,8 @@ use crate::session_init_params::SessionInitParams;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
-    feature = "codec-close"
+    feature = "codec-close",
+    feature = "transport-keepalive"
 ))]
 use crate::transport_profile::ExtEntryOwned;
 #[cfg(any(
@@ -78,6 +79,8 @@ use wz_codecs::open_body::{OpenBody, OpenBodySource};
 use wz_codecs::transport_close::{TransportCloseSource, TransportCloseWire};
 #[cfg(feature = "codec-init-body")]
 use wz_codecs::transport_init::{TransportInitSource, TransportInitWire};
+#[cfg(feature = "transport-keepalive")]
+use wz_codecs::transport_keep_alive::{TransportKeepAliveSource, TransportKeepAliveWire};
 #[cfg(feature = "codec-open-body")]
 use wz_codecs::transport_open::{TransportOpenSource, TransportOpenWire};
 
@@ -86,13 +89,15 @@ use sce_forge_runtime::codec::Bounded;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
-    feature = "codec-close"
+    feature = "codec-close",
+    feature = "transport-keepalive"
 ))]
 use sce_forge_runtime::codec::BoundedIter;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
-    feature = "codec-close"
+    feature = "codec-close",
+    feature = "transport-keepalive"
 ))]
 use wz_codecs::ext_entry::ExtEntrySource;
 
@@ -726,11 +731,34 @@ pub fn encode_multicast_close_into_slice(out: &mut [u8]) -> Result<usize, CodecE
 /// 1-byte header (MID 0x04, no flags) over a zero-byte body — zenoh-pico
 /// `_z_keep_alive_encode` writes nothing and the header alone marks the
 /// message on the wire (`_z_t_msg_make_keep_alive`; the empty-body codec
-/// parity is pinned by `tests/layer3_keep_alive.rs`). Const array (no
-/// alloc): the message has no variable part.
+/// parity is pinned by `tests/layer3_keep_alive.rs`). An array (no alloc):
+/// a KeepAlive this node sends carries no chain, so it is the one byte its
+/// document (`sources/codecs/transport_keep_alive.scxml`) writes for it.
 #[cfg(feature = "transport-keepalive")]
-pub const fn encode_keep_alive() -> [u8; 1] {
-    [wire_const::T_MID_KEEP_ALIVE]
+pub fn encode_keep_alive() -> [u8; 1] {
+    let mut frame = [0u8; 1];
+    TransportKeepAliveWire::write_window(&KeepAliveMessage, &mut frame)
+        .expect("a KeepAlive with no chain is its one header byte");
+    frame
+}
+
+/// A KeepAlive as `transport_keep_alive` writes it for this node: the message
+/// id, and no chain, so Z is derived clear.
+#[cfg(feature = "transport-keepalive")]
+struct KeepAliveMessage;
+
+#[cfg(feature = "transport-keepalive")]
+impl TransportKeepAliveSource for KeepAliveMessage {
+    fn header(&self) -> u8 {
+        wire_const::T_MID_KEEP_ALIVE
+    }
+
+    fn extensions(
+        &self,
+    ) -> Option<BoundedIter<impl Iterator<Item = impl ExtEntrySource> + Clone, { usize::MAX }, 1>>
+    {
+        None::<BoundedIter<core::slice::Iter<'static, ExtEntryOwned>, { usize::MAX }, 1>>
+    }
 }
 
 /// Pack the `cbyte` field: the 2-bit whatami wire form (via
@@ -913,5 +941,19 @@ mod tests {
         assert_eq!(pack_sn_res(0, 3), 0x0C);
         assert_eq!(pack_sn_res(3, 3), 0x0F);
         assert_eq!(pack_sn_res(2, 1), 0x06);
+    }
+}
+
+// Under the sender's own feature, which is the one place it is built without
+// the receive arm of `codec-keep-alive`.
+#[cfg(all(test, feature = "transport-keepalive"))]
+mod keep_alive_tests {
+    /// The KeepAlive a node sends is its message id alone: no flag, no chain,
+    /// which upstream writes for a KeepAlive
+    /// (`commons/zenoh-codec/src/transport/keepalive.rs` @
+    /// `impl<W> WCodec<&KeepAlive, &mut W> for Zenoh080`).
+    #[test]
+    fn the_keep_alive_sent_is_its_message_id_alone() {
+        assert_eq!(super::encode_keep_alive(), [0x04]);
     }
 }

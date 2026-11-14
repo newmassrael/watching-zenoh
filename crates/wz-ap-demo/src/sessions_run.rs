@@ -548,11 +548,6 @@ async fn run_listen(
     }
 }
 
-/// How many group members one group session tracks at once: the runtime's own
-/// group faces hold the same 32 (`MCAST_MAX_PEERS` in `multicast_glue`).
-#[cfg(feature = "transport-multicast")]
-const GROUP_PEER_TABLE: usize = 32;
-
 /// The policy a group session is held to, and the interface it joined on: the link the
 /// policy's `link_protocols` and `interfaces` axes read.
 ///
@@ -725,9 +720,9 @@ where
     Fut: std::future::Future<Output = io::Result<D>>,
 {
     use wz::runtime_tokio::multicast_glue::{
-        drive_multicast_session_with_shutdown, open_multicast_session, rejoin_group_session,
-        GroupRejoin, MulticastConfig, MulticastDispatcher, MulticastDriveConfig, MulticastLink,
-        MulticastOutcome, MulticastTxProducer,
+        drive_multicast_session_with_shutdown, group_face_dispatcher, open_multicast_session,
+        rejoin_group_session, GroupRejoin, MulticastDriveConfig, MulticastLink, MulticastOutcome,
+        MulticastTxProducer,
     };
     use wz::runtime_tokio::session::TokioMulticastSession;
     use wz::runtime_tokio::session_glue::IterationEvent;
@@ -749,14 +744,11 @@ where
     }
     let mut rejoin = GroupRejoin::new();
     // A dispatcher is built anew on every re-join, and the gate lives on the dispatcher, so
-    // each one is given it here rather than the first alone.
+    // each one is given it here rather than the first alone. Its table is the runtime's group
+    // face's, so the two hold their members to one decision.
     let new_dispatcher = || {
         #[cfg_attr(not(feature = "access-acl-multicast"), allow(unused_mut))]
-        let mut dispatcher = MulticastDispatcher::<GROUP_PEER_TABLE>::new(
-            MulticastConfig::new(params.lease_ms)
-                .with_max_sessions(params.max_sessions)
-                .growing(),
-        );
+        let mut dispatcher = group_face_dispatcher(params);
         #[cfg(feature = "access-acl-multicast")]
         session.install_ingress_gate(&mut dispatcher);
         dispatcher

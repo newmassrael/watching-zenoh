@@ -2,6 +2,7 @@ image ubuntu22
 clang
 cmake
 libclang-dev
+libxml2-dev
 perl
 pkg-config
 protobuf-compiler

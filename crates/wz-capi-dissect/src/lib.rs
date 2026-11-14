@@ -74,6 +74,11 @@ use wz_capture::Dissection;
 use wz_session_core::dissect::{dissect_message, dissect_transport_message, to_json};
 use wz_session_core::lifecycle_wire;
 
+// The analyzer's library, refused with the slot profile for `wz-analyze`'s reason: that profile
+// keeps only the extension entries the build reads and caps every bounded table, so a record
+// would hold less than the wire did and not say so.
+wz_session_core::heap_session_profile!("wz-capi-dissect";);
+
 pub mod live;
 
 pub use live::WzDissectRecord;

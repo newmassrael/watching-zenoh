@@ -14121,125 +14121,77 @@ layer_c1s_runtime_tokio_multicast_tests() {
 # absent so a host-only developer is not forced to install the
 # cross toolchain just to clear C2.
 
-# ─── Layer C1bf — wz-runtime-tokio CROSS-FEATURE composition gate ─────
+# ─── Layer C1bf — every member clippied in its largest configurations ─
 #
-# R311y253. Layer C2 runs `clippy --workspace --all-targets` on the DEFAULT
-# feature set, so it never composes two optional features that are individually
-# exercised by their own lanes but never together. That blind spot shipped a real
-# build break: `DialConfig` (session_open.rs) has TWO `#[cfg]`-gated fields
-# (`tls` @transport-link-tls, `quic` @transport-link-quic), and every exhaustive
-# struct literal in the tree named exactly ONE of them — so the tls-side literals
-# failed E0063 the moment `transport-link-quic` was also on, and the quic-side
-# ones the moment `transport-link-tls` was. Six integration-test targets did not
-# compile under `--all-features`, and NO lane caught it, because the tls lane and
-# the quic lane each enable their own feature alone.
+# Layer C2 runs `clippy --workspace --all-targets` on the DEFAULT feature set, so
+# it never composes two optional features that their own lanes enable one at a
+# time. That shipped a real break (R311y253): `DialConfig` carried one field
+# behind `transport-link-tls` and one behind `transport-link-quic`, every struct
+# literal named one of them, and six integration-test targets failed E0063 with
+# both on while the tls lane and the quic lane each stayed green.
 #
-# This lane closes that gap by clippy-gating every crate in the HAZARD CLASS with
-# ALL of its features on at once, over --all-targets so the integration tests
-# (separate crates, and the ones that actually broke) are included.
+# This lane clippies EVERY workspace member, over `--all-targets` so the tests
+# (where that break was) are in, in each of its LARGEST configurations: every
+# feature on, or, for a crate that refuses a combination of its own features,
+# each consistent set it declares under `[package.metadata.wz-docs]`. Those are
+# the sets Layer C1bz documents, read through `scripts/lib/doc_feature_sets.py`,
+# so a crate states once what it can hold at once. The population is not a list
+# of crates that show one shape of the defect (a `cfg`-gated `pub` field): such a
+# list goes red each time a crate grows the shape, and leaves out every break of
+# another shape (a type that changes with a feature, an item a feature removes).
 #
-# R311y254 — the hazard class is "crates that declare a `#[cfg(feature ...)]`-gated
-# `pub` struct field", because that is exactly the shape an exhaustive struct
-# literal cannot survive: the literal only compiles for the one feature
-# combination its author built with. R311y253 covered wz-runtime-tokio alone and
-# NAMED the rest as a residual; the sweep that closed it found two more crates in
-# the class (wz-session-core — whose ApplicationLayerObserver carries EIGHT
-# independently-gated pub fields — and wz-ap-demo). Both already composed clean,
-# so this is a gate over a latent hazard, not a second fix.
+# One `cargo clippy -p` per configuration and never a workspace-wide
+# `--all-features`: features unify across one cargo invocation, and the
+# workspace holds selectors that exclude each other (the facade's
+# `compile_error!` pairs, sce-rust-runtime's `no_std` and `http-send`, the MCU
+# per-session slot profile the heap crates refuse with `heap_session_profile!`),
+# so that command is refused by design and is no gate.
 #
-# The audit step below is what keeps the list HONEST: it re-derives the hazard set
-# from the source on every run and fails if a crate joins the class without being
-# added to COVERED. Without it, the next crate to grow a cfg-gated pub field would
-# silently sit outside the gate — the exact way the DialConfig break shipped.
-#
-# Scoped per-crate deliberately: a WORKSPACE-wide `--all-features` is structurally
-# impossible here — sce-rust-runtime declares `no_std` and `http-send` mutually
-# exclusive (a compile_error! guard), so `--all-features` can never be a workspace
-# gate. Per-crate is the only form this check can take. If a future crate in the
-# class carries its own mutually-exclusive feature pair, NARROW its entry to an
-# explicit max-compatible feature set — do not drop it from COVERED, which would
-# restore the blind spot this lane exists to cover.
+# Hosted CI runs it in shards (`WZ_ALLFEAT_SHARD` of `WZ_ALLFEAT_SHARDS`),
+# balanced by the seconds `scripts/lib/allfeat_clippy_costs.txt` records
+# (`scripts/lib/allfeat_clippy_plan.py`); unsharded, a local run, it runs every
+# configuration. Every failing configuration is listed before the lane fails, so
+# one run names all of them, and each configuration's seconds are printed in the
+# cost table's row form.
 layer_c1bf_cargo_clippy_all_features() {
-    # R311y566 — `wz-capi-c` JOINED the hazard class and the audit caught it on
-    # HOSTED, where this lane runs and the local sweep does not. The trigger was
-    # y565's `z_close_options_t` / `z_query_reply_del_options_t`, whose fields are
-    # `#[cfg(feature = "zenoh-c-no-unstable-api")]`-gated — exactly the shape an
-    # exhaustive struct literal cannot survive. Its two features are INDEPENDENT
-    # axes rather than an exclusive pair, so `--all-features` is a real arm (the
-    # no-unstable + shared-memory one) and no narrowing is needed.
-    #
-    # `wz-capi-core` joined it with the capability features (R3394): `OpenStance` carries a
-    # `scouting` field that exists with `scout`, and `SessionResources` a `gossip` field that
-    # exists with `peer`, so a struct literal of either names the fields of the build its author
-    # made. The two ABI crates that build one say each field behind the feature that has it.
-    #
-    # The zenoh family joined with its buffers and protocol crates (R3556): the `ext_shm` field of
-    # a put, an error and a query body, and the kind of a slice, exist with `shared-memory`, so a
-    # struct literal of either names the fields of the build its author made. An entry is a
-    # DIRECTORY of `crates/`; a family crate keeps upstream's package name under a `wz-` directory,
-    # so the package is read from the manifest below rather than assumed equal to the directory.
-    #
-    # `wz-session-mcu` joined it with the slot node's entities: the schedule's deadline of a
-    # publisher or a querier (`Active`'s `queries` and `state`) and the node's `get` rows exist with
-    # `query-get`, so a struct literal of either names the fields of the build its author made.
-    # Its features are independent axes, so `--all-features` is a real arm and no narrowing is
-    # needed.
-    #
-    # `wz-zenoh-config` joined it with the configuration crate (R3664, caught hosted at R3683): a
-    # `Config`'s `unstable` field exists with `unstable`, so a struct literal of it names the fields
-    # of the build its author made. Its features are independent axes, so `--all-features` is a
-    # real arm and no narrowing is needed.
-    #
-    # `wz-ext-pubsub` joined it with the advanced publisher's composite: its options carry the
-    # QoS, encoding and attachment knobs behind the features that have their setters, so a struct
-    # literal of either names the fields of the build its author made. Its features are
-    # independent axes, so `--all-features` is a real arm and no narrowing is needed.
-    #
-    # `wz-zenoh`, the top crate, joined it with the session (Z1 of the seam note, caught hosted): its
-    # `unstable` arm adds fields to public structs (the sample, the builders) and its sessions
-    # are built per engine, so a struct literal names the fields of the build its author made. Its
-    # features are independent axes, so `--all-features` is a real arm and no narrowing is needed.
-    #
-    # `wz-admin` joined it when the admin space left the core (the server-layer split, caught
-    # hosted 2026-11-06): the `cfg(feature)`-gated pub fields of the admin rows moved with it. Its
-    # features follow the core's and are independent axes, so `--all-features` is a real arm (it
-    # builds clean, read on a build machine) and no narrowing is needed.
-    local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c wz-capi-core wz-capi-pico
-        wz-zenoh-buffers wz-zenoh-protocol wz-session-mcu wz-zenoh-config wz-ext-pubsub wz-zenoh
-        wz-admin)
-
-    # Drift audit: re-derive the hazard class from source. A crate qualifies when
-    # a `#[cfg(feature ...)]` attribute is immediately followed by a `pub <field>:`
-    # declaration. Deliberately over-inclusive (an enum or private struct can trip
-    # it) — a false positive costs one line in COVERED, a false NEGATIVE costs a
-    # shipped build break.
-    local hazard=() c n
-    for c in crates/*/; do
-        n="$(grep -rn -A1 --include=*.rs '^[[:space:]]*#\[cfg(feature' "$c" 2>/dev/null \
-             | grep -cE '^[^[:space:]]+[-:][0-9]+-[[:space:]]*pub [a-z_]+:' || true)"
-        [ "${n:-0}" -gt 0 ] && hazard+=("$(basename "$c")")
-    done
-
-    local h uncovered=()
-    for h in "${hazard[@]}"; do
-        printf '%s\n' "${covered[@]}" | grep -qx "$h" || uncovered+=("$h")
-    done
-    if [ "${#uncovered[@]}" -gt 0 ]; then
-        echo "  C1bf FAIL: crate(s) grew a cfg-gated pub struct field but are not"
-        echo "  in the C1bf COVERED list, so no lane composes their features:"
-        printf '    - %s\n' "${uncovered[@]}"
-        echo "  Add them to COVERED (or narrow, if they have exclusive features)."
+    local shards="${WZ_ALLFEAT_SHARDS:-1}" shard="${WZ_ALLFEAT_SHARD:-0}"
+    local members plan crate label args_line started ran=0
+    local -a args failed=()
+    # The control group first: what decides the configurations and their shards is held
+    # in both directions before it is trusted.
+    python3 scripts/lib/doc_feature_sets.py --selftest || return 1
+    python3 scripts/lib/allfeat_clippy_plan.py --selftest || return 1
+    members="$(_c1bz_members)"
+    if [[ -z "$members" ]]; then
+        echo "  C1bf FAIL: cargo metadata listed no workspace member"
         return 1
     fi
-    echo "  C1bf audit: hazard class = ${hazard[*]} — all covered"
-
-    local dir pkg
-    for dir in "${covered[@]}"; do
-        pkg="$(awk -F'"' '/^name = /{print $2; exit}' "crates/$dir/Cargo.toml")"
-        [ -n "$pkg" ] || { echo "  C1bf FAIL: crates/$dir/Cargo.toml names no package"; return 1; }
-        (cd crates && cargo clippy -p "$pkg" --all-targets --all-features \
-            --quiet -- -D warnings) || return 1
-    done
+    plan="$(python3 scripts/lib/allfeat_clippy_plan.py plan --shard "$shard" --shards "$shards")" || {
+        echo "  C1bf FAIL: no plan for shard $shard of $shards (the line above says why)"
+        return 1
+    }
+    # A here-string and not a pipe, so the loop runs in this shell and its counts survive it.
+    while read -r crate label args_line; do
+        [[ -n "$crate" ]] || continue
+        read -r -a args <<<"$args_line"
+        started=$SECONDS
+        if ! (cd crates && cargo clippy -p "$crate" --all-targets "${args[@]}" \
+            --quiet -- -D warnings); then
+            failed+=("$crate ($label)")
+        fi
+        echo "  C1bf cost: $crate $label $((SECONDS - started))"
+        ran=$((ran + 1))
+    done <<<"$plan"
+    if [[ $ran -eq 0 ]]; then
+        echo "  C1bf FAIL: shard $shard of $shards ran no configuration"
+        return 1
+    fi
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        echo "  C1bf FAIL: ${#failed[@]} of $ran configuration(s) do not pass clippy -D warnings:"
+        printf '    - %s\n' "${failed[@]}"
+        return 1
+    fi
+    _runci_lane_did C1bf "$ran" "configuration(s) of shard $shard of $shards clippied, all targets"
 }
 # ─── Layer C1bn — the PASSIVE-DISSECTION feature set, RUN ────────────
 #

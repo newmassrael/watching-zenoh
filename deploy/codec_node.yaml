@@ -140,3 +140,12 @@ codecs:
   transport_keep_alive:
     capacity:
       extensions: 8
+  transport_frame_header:
+    capacity:
+      extensions: 8
+  transport_fragment_header:
+    capacity:
+      extensions: 8
+  transport_join:
+    capacity:
+      extensions: 8

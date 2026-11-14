@@ -1,0 +1,7 @@
+# Layer C1bf's weights: the seconds one configuration's clippy took, which is what the shards are
+# balanced by (`allfeat_clippy_plan.py`, whose docstring says how). One row per configuration:
+# <crate> <label> <seconds> <where it was measured>. The lane prints `C1bf cost: <crate> <label>
+# <seconds>` for each configuration it ran; copy a hosted run's lines here with the run's id. A
+# configuration with no row weighs the plan's UNMEASURED_SECONDS, and a row whose configuration
+# the workspace no longer has fails the plan.
+wz-runtime-tokio all 903 hosted run 42929004554, cold, the RocksDB engine built inside the step

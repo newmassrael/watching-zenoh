@@ -117,6 +117,8 @@ use crate::multicast_peer::{
 use crate::duty_outbox::{Duties, DutyOutbox};
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason};
 use crate::multicast_peer_rows::PeerRows;
+#[cfg(feature = "alloc")]
+use crate::multicast_peer_rows::RowIndex;
 #[cfg(all(feature = "reassembly", feature = "storage-profile"))]
 use crate::reassembly_dispatch::Fragment as ReassemblyFragment;
 #[cfg(feature = "reassembly")]
@@ -912,6 +914,12 @@ impl PeerSlot {
 pub struct MulticastDispatcher<const MAX_PEERS: usize> {
     session: Engine<SessionFsmMulticastPolicy<SessionBinding>>,
     peers: PeerRows<PeerSlot, MAX_PEERS>,
+    /// The row of each member by the address its datagrams come from, kept by a table that grows
+    /// ([`MulticastConfig::growable`]) and absent from one that does not, which scans its few
+    /// rows. Every datagram is attributed through [`Self::find_by_src`], so a grown table answers
+    /// it without walking a thousand rows.
+    #[cfg(feature = "alloc")]
+    by_src: RowIndex<SocketAddr>,
     config: MulticastConfig,
     /// Set by the session machine's `enter_running` duty and cleared by its
     /// `release_multicast_link`: whether peers, frames and fragments are
@@ -993,6 +1001,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             PeerRows::init_in(peers, |cell| {
                 PeerSlot::init_in(cell);
             });
+            #[cfg(feature = "alloc")]
+            addr_of_mut!((*at).by_src).write(RowIndex::for_table(config.growable));
             addr_of_mut!((*at).config).write(config);
             addr_of_mut!((*at).running).write(false);
             addr_of_mut!((*at).join_refusals).write(0);
@@ -1019,6 +1029,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let Self {
             session: _,
             peers: _,
+            #[cfg(feature = "alloc")]
+                by_src: _,
             config: _,
             running: _,
             join_refusals: _,
@@ -1065,12 +1077,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
             return;
         };
-        if let Some(member) = self
-            .peers
-            .iter_mut()
-            .find(|p| p.matches_src(src))
-            .and_then(|slot| slot.member.as_mut())
-        {
+        let Some(idx) = self.find_by_src(src) else {
+            return;
+        };
+        if let Some(member) = self.peers[idx].member.as_mut() {
             member.scope(messages);
         }
     }
@@ -1177,8 +1187,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let Some(ns) = self.namespace.as_ref() else {
             return;
         };
-        if let Some(slot) = self.peers.iter_mut().find(|p| p.matches_src(src)) {
-            let ingress = slot
+        if let Some(idx) = self.find_by_src(src) {
+            let ingress = self.peers[idx]
                 .namespace_ingress
                 .get_or_insert_with(|| NamespaceIngress::new(ns.clone()));
             crate::namespace::strip_outcome(ingress, outcome);
@@ -1217,9 +1227,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
             return;
         };
-        let Some(slot) = self.peers.iter_mut().find(|p| p.matches_src(src)) else {
+        let Some(idx) = self.find_by_src(src) else {
             return;
         };
+        let slot = &mut self.peers[idx];
         for msg in messages.iter_mut() {
             match msg {
                 NetworkMessage::Declare(declare) => {
@@ -1378,9 +1389,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
             return;
         };
-        let Some(slot) = self.peers.iter_mut().find(|p| p.matches_src(src)) else {
+        let Some(idx) = self.find_by_src(src) else {
             return;
         };
+        let slot = &mut self.peers[idx];
         for msg in messages.iter() {
             let NetworkMessage::Declare(declare) = msg else {
                 continue;
@@ -1451,6 +1463,12 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// Number of pool slots currently holding a live peer (the
     /// `multicast_peer_table` occupancy gauge).
     pub fn active_peers(&self) -> usize {
+        // A table that grows counts its members in its index: every Join asks this against the
+        // cap, and a scan of a thousand rows per beacon is the cost the index is there to remove.
+        #[cfg(feature = "alloc")]
+        if let Some(members) = self.by_src.members() {
+            return members;
+        }
         self.peers.iter().filter(|p| !p.is_free()).count()
     }
 
@@ -1470,10 +1488,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// `None` if no slot holds it (the address-keyed observability mirror of
     /// [`peer_state`](MulticastDispatcher::peer_state)).
     pub fn peer_state_by_src(&self, src: SocketAddr) -> Option<MulticastPeerState> {
-        self.peers
-            .iter()
-            .find(|p| p.matches_src(src))
-            .map(|p| p.engine.get_current_state())
+        self.find_by_src(src)
+            .map(|idx| self.peers[idx].engine.get_current_state())
     }
 
     /// The zids of the live on-group peers that announced `whatami=Router` — the
@@ -1603,7 +1619,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             // No member is left to hold an index past the fixed rows, so the grown ones go
             // before the rest are made free.
             #[cfg(feature = "alloc")]
-            self.peers.shed_grown();
+            {
+                self.peers.shed_grown();
+                self.by_src.cleared();
+            }
             for peer in self.peers.iter_mut() {
                 peer.reset_in_place();
             }
@@ -1707,6 +1726,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             return JoinOutcome::Refused(JoinRefuse::PeerTableFull);
         };
         self.peers[idx].admit(src, zid, baseline, qos_next_sns, now_ms);
+        #[cfg(feature = "alloc")]
+        self.by_src.admitted(src, idx);
         #[cfg(all(feature = "alloc", feature = "codec-declare"))]
         if let Some(tags) = &mut self.member_tags {
             self.peers[idx].member = Some(tags.admit());
@@ -2084,6 +2105,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
                 self.retire_member(idx);
                 self.peers[idx].evict(reason, on_lost);
+                #[cfg(feature = "alloc")]
+                self.by_src.left(&src);
                 true
             }
             None => false,
@@ -2144,13 +2167,35 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             if let Some(member) = slot.member.take() {
                 self.member_retractions.extend(member.retractions());
             }
+            // The address is read before the eviction clears it.
+            #[cfg(feature = "alloc")]
+            if let Some(src) = slot.src {
+                self.by_src.left(&src);
+            }
             slot.evict(MulticastPeerLostReason::LeaseExpired, &mut on_lost);
             expired += 1;
         }
         expired
     }
 
+    /// The row of the member at `src`: by the index of a table that grows, and by a scan of the
+    /// rows of one that does not.
     fn find_by_src(&self, src: SocketAddr) -> Option<usize> {
+        #[cfg(feature = "alloc")]
+        if let Some(found) = self.by_src.lookup(&src) {
+            if let Some(idx) = found {
+                debug_assert!(
+                    self.peers[idx].matches_src(src),
+                    "the index names row {idx} for a member that row does not hold"
+                );
+            }
+            return found;
+        }
+        self.scan_by_src(src)
+    }
+
+    /// The row of the member at `src`, found by walking the rows.
+    fn scan_by_src(&self, src: SocketAddr) -> Option<usize> {
         self.peers.iter().position(|p| p.matches_src(src))
     }
 }
@@ -3486,6 +3531,121 @@ mod tests {
             JoinOutcome::Refused(JoinRefuse::PeerTableFull)
         );
         assert_eq!(d.peers.len(), 2, "no row was added");
+    }
+
+    /// Each place a row changes hands moves the index of a grown table with it, named one by one:
+    /// an admission enters the member, a Close and a lease expiry take it out, a freed row taken by
+    /// another member answers for that member only, and the reset with the link empties it.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_src_index_follows_each_place_a_row_changes_hands() {
+        let mut d = running_with::<1>(
+            MulticastConfig::new(5_000)
+                .with_max_sessions(Some(4))
+                .growing(),
+        );
+        let (a, b, c) = (member_src(0), member_src(1), member_src(2));
+        assert_eq!(d.ingest_join(&[1], a, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(&[2], b, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.by_src.lookup(&a), Some(Some(0)), "admission, fixed row");
+        assert_eq!(d.by_src.lookup(&b), Some(Some(1)), "admission, grown row");
+
+        assert!(d.close_by_src(a));
+        assert_eq!(d.by_src.lookup(&a), Some(None), "a Close");
+        assert_eq!(d.ingest_join(&[3], c, sn0(), 1_000), JoinOutcome::Admitted);
+        assert_eq!(
+            d.by_src.lookup(&c),
+            Some(Some(0)),
+            "the freed row, under its new member"
+        );
+
+        // `b` was last heard at 0 and `c` at 1_000; the sweep is past `b`'s lease only.
+        assert_eq!(d.sweep(5_500), 1);
+        assert_eq!(d.by_src.lookup(&b), Some(None), "a lease expiry");
+        assert_eq!(d.by_src.members(), Some(1));
+        assert_eq!(d.active_peers(), 1);
+
+        assert_eq!(d.stop(), RELEASE_LINK);
+        assert_eq!(d.by_src.lookup(&c), Some(None), "the reset with the link");
+        assert_eq!(d.by_src.members(), Some(0));
+    }
+
+    /// A table that does not grow keeps no index, on a build with an allocator too: it finds its
+    /// members by a scan of its rows and allocates nothing for them.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_table_that_does_not_grow_keeps_no_index() {
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(
+            d.by_src.lookup(&SRC_A),
+            None,
+            "no index: the rows are scanned"
+        );
+        assert_eq!(d.by_src.members(), None);
+        assert_eq!(d.peer_index_by_src(SRC_A), Some(0));
+        assert_eq!(d.active_peers(), 1);
+    }
+
+    /// The index of a grown table answers, after every step, what a scan of its rows answers, and
+    /// counts as many members as the rows hold: through admissions into fixed and grown rows,
+    /// refreshes, Closes, lease expiries, refusals at the cap and the reset with the link. The
+    /// steps come from a generator of fixed seed, so a failure replays.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_grown_tables_index_answers_as_a_scan_through_any_sequence() {
+        let pool: [SocketAddr; 10] = core::array::from_fn(|n| member_src(n as u16));
+        let mut seed: u64 = 0x5eed_0fab_cd01;
+        let mut draw = |bound: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % bound
+        };
+        for round in 0..8 {
+            let mut d = running_with::<2>(
+                MulticastConfig::new(5_000)
+                    .with_max_sessions(Some(6))
+                    .growing(),
+            );
+            let mut now = 0u64;
+            for step in 0..200 {
+                let k = draw(pool.len() as u64) as usize;
+                match draw(4) {
+                    0 | 1 => {
+                        let _ = d.ingest_join(&[k as u8 + 1], pool[k], sn0(), now);
+                    }
+                    2 => {
+                        let _ = d.close_by_src(pool[k]);
+                    }
+                    _ => {
+                        now += draw(4_000);
+                        let _ = d.sweep(now);
+                    }
+                }
+                for src in pool {
+                    assert_eq!(
+                        d.find_by_src(src),
+                        d.scan_by_src(src),
+                        "round {round} step {step}: {src}"
+                    );
+                }
+                assert_eq!(
+                    d.active_peers(),
+                    d.peers.iter().filter(|p| !p.is_free()).count(),
+                    "round {round} step {step}: the count"
+                );
+            }
+            assert_eq!(d.stop(), RELEASE_LINK);
+            for src in pool {
+                assert_eq!(
+                    d.find_by_src(src),
+                    None,
+                    "round {round}: {src} after the reset"
+                );
+            }
+            assert_eq!(d.active_peers(), 0);
+        }
     }
 
     /// An explicit Close from a peer's address evicts it and frees the slot

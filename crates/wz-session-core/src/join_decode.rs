@@ -65,28 +65,22 @@ pub fn decode_join_body(header: u8, body: &[u8]) -> Result<(Join<'_>, usize), Co
 /// body and its extension chain, which the header's Z flag says is there.
 ///
 /// What a walk over a batched datagram needs to reach the message behind a JOIN. It is
-/// read by the decode that reads the JOIN ([`decode_join_body`]) and the entry decode the
-/// owned chain is read by, under the same depth bound, so no second statement of where a
-/// JOIN ends exists. `None` for a non-JOIN MID or a JOIN that does not decode.
+/// read by the message's document (`sources/codecs/transport_join.scxml`), which reads the
+/// header, the body and the chain as one, under the depth bound a node reads of a transport
+/// chain, so no second statement of where a JOIN ends exists. `None` for a non-JOIN MID, a
+/// JOIN that does not decode, or a chain past the bound.
 pub fn join_message_len(bytes: &[u8]) -> Option<usize> {
     let header = *bytes.first()?;
     if header & 0x1f != wire_const::T_MID_JOIN {
         return None;
     }
-    let (_, base) = decode_join_body(header, &bytes[1..]).ok()?;
-    let base_end = 1 + base;
-    if header & wire_const::FLAG_T_Z == 0 {
-        return Some(base_end);
-    }
-    let chain = &bytes[base_end..];
-    let mut cursor = SceCursor::new(chain);
-    for _ in 0..crate::parse_error::MAX_EXT_CHAIN_DEPTH {
-        let entry = wz_codecs::lent::ExtEntry::decode(&mut cursor).ok()?;
-        if !entry.z() {
-            return Some(base_end + chain.len() - cursor.remaining());
-        }
-    }
-    None
+    let mut cursor = SceCursor::new(bytes);
+    let view = wz_codecs::transport_join::TransportJoinView::decode(&mut cursor).ok()?;
+    let entries = view
+        .extensions
+        .as_ref()
+        .map_or(0, |chain| chain.inner().len());
+    (entries <= crate::parse_error::MAX_EXT_CHAIN_DEPTH).then(|| bytes.len() - cursor.remaining())
 }
 
 /// If `bytes` is a multicast JOIN datagram, decode its full body (a

@@ -1743,6 +1743,30 @@ pub struct GroupFaceSeams<F, G, H> {
     pub on_group_subs: H,
 }
 
+/// The fixed rows of a group face's member table: how many members a face holds without
+/// allocating, and every member it holds when its profile states no cap.
+///
+/// The second half is a decision and not a cost. zenoh-pico states no cap on a group's members:
+/// its list grows while its allocator gives (`vendor/zenoh-pico/src/transport/multicast/rx.c` @
+/// `ztm->_peers = _z_transport_peer_multicast_slist_push_empty(ztm->_peers);`), so a pico preset,
+/// which states none, would grow without bound if the face grew to whatever it heard. A group
+/// admits a member on an unauthenticated Join, and one host on the segment can send Joins from as
+/// many source addresses as it likes, each a row of a kilobyte and more. So a face grows only to
+/// a cap a configuration states (`transport/multicast/max_sessions`, which zenoh states as 1000 by
+/// default), and a face that is given none holds these rows. `docs/upstream-parity.md` records
+/// the divergence, section 7.
+pub const GROUP_FACE_ROWS: usize = 32;
+
+/// The dispatcher of one join of a group face of `params`: a table of [`GROUP_FACE_ROWS`] rows
+/// that grows to the cap the profile states, and holds those rows when it states none.
+pub fn group_face_dispatcher(params: &MulticastParams) -> MulticastDispatcher<GROUP_FACE_ROWS> {
+    MulticastDispatcher::new(
+        MulticastConfig::new(params.lease_ms)
+            .with_max_sessions(params.max_sessions)
+            .growing(),
+    )
+}
+
 /// R2850 / open-debt item 913 — run ONE group face on the caller's executor until
 /// it is stopped or its link is lost for good: bind and open, drive, re-join on
 /// a lost link (see `spawn_group_face` for why a face is one loop, and
@@ -1782,10 +1806,6 @@ where
 {
     use crate::runtime_impl::TokioTime;
 
-    // The table's fixed rows. A heap face grows past them to the cap the profile states
-    // (`transport/multicast/max_sessions`), so this is how many members it holds without
-    // allocating, and the bound only when no cap is stated.
-    const MCAST_MAX_PEERS: usize = 32;
     let GroupFaceSpec {
         label,
         params,
@@ -1805,11 +1825,7 @@ where
     let clock = TokioTime::new();
     let new_dispatcher = || {
         #[cfg_attr(not(feature = "codec-declare"), allow(unused_mut))]
-        let mut dispatcher = MulticastDispatcher::<MCAST_MAX_PEERS>::new(
-            MulticastConfig::new(params.lease_ms)
-                .with_max_sessions(params.max_sessions)
-                .growing(),
-        );
+        let mut dispatcher = group_face_dispatcher(params);
         #[cfg(feature = "codec-declare")]
         if scope_members {
             dispatcher.scope_member_declarations();
@@ -3832,6 +3848,74 @@ mod tests {
             .await
             .is_ok());
         assert!(dispatcher.is_running());
+    }
+
+    /// The decision `GROUP_FACE_ROWS` records, held: a face whose profile states no cap, as a pico
+    /// preset's states none, admits as many members as it has rows and refuses the next, though
+    /// its table grows, where zenoh-pico would admit that member; a face whose profile states a
+    /// cap grows past the rows to it.
+    #[test]
+    fn a_face_with_no_stated_cap_holds_its_rows_where_pico_would_grow() {
+        use wz_session_core::multicast_dispatch::{JoinBaseline, JoinOutcome, JoinRefuse};
+        let baseline = JoinBaseline {
+            sn_res: 0x02,
+            next_sn_reliable: 0,
+            next_sn_best_effort: 0,
+            lease_ms: 5_000,
+            whatami: None,
+        };
+        let member = |n: usize| {
+            let n = u16::try_from(n).expect("a few members");
+            (n.to_le_bytes(), src(1_000 + n))
+        };
+        let joined = |cap: Option<usize>| {
+            let profile = MulticastParams {
+                join_rule: GroupJoinRule::Pico,
+                max_sessions: cap,
+                ..params(&[0xAA, 0xBB, 0xCC, 0xDD])
+            };
+            let mut dispatcher = group_face_dispatcher(&profile);
+            assert!(dispatcher.create().open());
+            let _ = dispatcher.notify_link_ready();
+            assert!(dispatcher.is_running());
+            dispatcher
+        };
+        assert_eq!(
+            GROUP_FACE_ROWS, 32,
+            "the number docs/upstream-parity.md section 7 states"
+        );
+
+        let mut unstated = joined(None);
+        for n in 0..GROUP_FACE_ROWS {
+            let (zid, at) = member(n);
+            assert_eq!(
+                unstated.ingest_join(&zid, at, baseline, 0),
+                JoinOutcome::Admitted
+            );
+        }
+        let (zid, at) = member(GROUP_FACE_ROWS);
+        assert_eq!(
+            unstated.ingest_join(&zid, at, baseline, 0),
+            JoinOutcome::Refused(JoinRefuse::PeerTableFull),
+            "no cap is stated, so the rows are the bound"
+        );
+
+        let cap = GROUP_FACE_ROWS + 8;
+        let mut stated = joined(Some(cap));
+        for n in 0..cap {
+            let (zid, at) = member(n);
+            assert_eq!(
+                stated.ingest_join(&zid, at, baseline, 0),
+                JoinOutcome::Admitted,
+                "member {n} of a stated cap of {cap}"
+            );
+        }
+        let (zid, at) = member(cap);
+        assert_eq!(
+            stated.ingest_join(&zid, at, baseline, 0),
+            JoinOutcome::Refused(JoinRefuse::PeerTableFull)
+        );
+        assert_eq!(stated.active_peers(), cap);
     }
 
     /// R2379 ANTI-VACUITY twin: a re-JOIN whose capabilities MATCH keeps the

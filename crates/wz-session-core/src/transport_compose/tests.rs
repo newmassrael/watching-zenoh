@@ -182,7 +182,7 @@ fn compose_keep_alive_is_the_one_header_byte() {
     assert_eq!(compose_keep_alive(), [wire_const::T_MID_KEEP_ALIVE]);
 }
 
-/// Below the widest ring the codec and the TX path's hand-rolled VLE write the
+/// Below the widest ring the explicit-field builder and the TX path write the
 /// same bytes, for every width, with and without the QoS extension.
 #[test]
 fn build_frame_wire_matches_begin_frame_below_the_widest_ring() {
@@ -209,9 +209,9 @@ fn build_frame_wire_matches_begin_frame_below_the_widest_ring() {
     }
 }
 
-/// And above it they part: the codec ends a VLE at nine bytes with the last
-/// carrying eight bits, the hand-rolled loop writes a tenth. The session cannot
-/// reach the value; a caller that sets `sn` can.
+/// And above it too, where the session cannot reach but a caller that sets `sn`
+/// can: both write the Frame header's document, whose VLE ends at nine bytes
+/// with the last carrying eight bits, as upstream reads it.
 #[test]
 fn build_frame_wire_writes_the_codecs_nine_byte_vle_for_the_top_bucket() {
     let sn = 1u64 << 63;
@@ -220,7 +220,7 @@ fn build_frame_wire_writes_the_codecs_nine_byte_vle_for_the_top_bucket() {
     let mut tx = Vec::new();
     begin_frame(&mut tx, sn, wire_const::FLAG_T_FRAME_R, None)
         .expect("a Vec grows, so its sink is infallible");
-    assert_eq!(tx.len(), 1 + 10, "the TX path's loop writes a tenth byte");
+    assert_eq!(tx, built, "the TX path writes the same nine-byte VLE");
     // The reader reads what the codec wrote.
     let mut cursor = sce_forge_runtime::codec::SceCursor::new(&built[1..]);
     assert_eq!(cursor.read_vle_u64().expect("reads"), sn);

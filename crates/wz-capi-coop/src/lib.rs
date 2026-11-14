@@ -49,6 +49,12 @@
 
 extern crate alloc;
 
+// The engine is the session shell's heap profile: a build that unified the per-session slot
+// profile into its dependencies has none of the forms it is written over, and is refused here by
+// name, with no item of the crate compiled to report what that profile lacks.
+wz_session_core::heap_session_profile! {
+"wz-capi-coop";
+
 /// What `std`'s prelude gave every module and `alloc` does not: brought in by the modules that
 /// use it, so a build without `std` reads the same source. A build's features decide which of
 /// these it names, so one that names none of an item is not an error.
@@ -76,3 +82,4 @@ pub mod tls;
 mod tests;
 
 pub use engine::{CoopConfig, CoopEngine, OpenError, DEFAULT_ACCEPT_PENDING, DEFAULT_MAX_FACES};
+}

@@ -2227,7 +2227,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
         &unit[payload_at..],
         carrier,
         #[cfg(feature = "alloc")]
-        &mut || chain.owned(unit, payload_at),
+        &mut || chain.owned(unit),
         RECORD_FORM,
         RecordSource::Frame,
         actions,

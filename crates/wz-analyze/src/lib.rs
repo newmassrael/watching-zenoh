@@ -24,6 +24,14 @@ use wz_capture::{CaptureError, Dissection};
 use wz_tls_record::keylog::KeyLog;
 use wz_tls_record::quic::connection::SequenceKey;
 
+// The analyzer shows everything a capture carries, and the slot profile reads less of it: a
+// received extension chain keeps only the entries of the extensions the build reads (an unknown
+// one is judged by its header and dropped), and every bounded table stops at its cap. A build
+// that unified that profile into this one would list less than the wire held and say nothing,
+// so it is refused by name. The passive reader itself builds on every profile; the refusal is
+// this reader's.
+wz_session_core::heap_session_profile!("wz-analyze";);
+
 /// How the report should be rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Format {
@@ -8782,11 +8790,13 @@ mod message_name_tests {
         // `0x04` is the KeepAlive MID with every flag clear; the walker names
         // it KeepAlive and so does the session.
         let stream = framed(&[0x04]);
+        // The chain is named by the decoder's own alias: its form is the storage
+        // profile's, which a build this crate shares can change.
         let honest = frame_at(
             0,
             Ok(wz_session_core::inbound::InboundFrame::KeepAlive {
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         match walk_message(sliced(&stream, &honest), &honest) {
@@ -8812,7 +8822,7 @@ mod message_name_tests {
                 // carries, so the stand-in is the ordinary one.
                 session: false,
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         match walk_message(sliced(&stream, &crossed), &crossed) {
@@ -8921,7 +8931,7 @@ mod message_name_tests {
             0,
             Ok(wz_session_core::inbound::InboundFrame::KeepAlive {
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         // The truthful pairing FIRST: a check that refused everything would
@@ -8937,7 +8947,7 @@ mod message_name_tests {
                 reason: 0,
                 session: false,
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         match walk_plaintext(&keepalive, &crossed) {
