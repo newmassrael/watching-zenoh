@@ -1,0 +1,227 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# How a wz build answers the PICS proforma (conformance/suite/pics.toml), read from the build's
+# conformance statement (docs/build-configuration.md, decision C15), for each of the two C ABIs
+# whose libraries carry the statement's digest. docs/conformance-suite.md section 4.3 defines
+# every field; crates/wz-conformance-suite holds every row to the proforma and to the
+# declaration (deploy/wz-config.toml).
+#
+# A row answers one item for one ABI in exactly one way:
+#   capability = "<id>"  the item is supported when the statement says the capability is;
+#   limit = "<id>"       the item's value is the limit's value in the statement;
+#   policy = "<id>"      the item's value is `map[<the policy's value>]`, and `map` names every
+#                        value the policy can take;
+#   fixed = "<answer>"   the answer does not depend on the build; `why` says why;
+#   unanswered = "..."   the statement cannot answer the item; the text says what it lacks, and
+#                        the test system takes the answer from the test configuration instead.
+
+format = "wz-conformance-pics-answers"
+format_version = 1
+implementation = "wz"
+
+# ---------------------------------------------------------------------------------------------
+# The pico ABI
+
+[[answer]]
+abi = "pico"
+item = "T-UNICAST"
+fixed = "yes"
+why = "A session of the pico ABI opens a unicast session in every build; no capability turns it off."
+
+[[answer]]
+abi = "pico"
+item = "T-MCAST"
+capability = "multicast-transport"
+
+[[answer]]
+abi = "pico"
+item = "T-INITIATOR"
+fixed = "yes"
+why = "A client session dials the locator it is given, and the client role needs no capability."
+
+[[answer]]
+abi = "pico"
+item = "T-ACCEPTOR"
+capability = "peer"
+
+[[answer]]
+abi = "pico"
+item = "T-ROLE-CLIENT"
+fixed = "yes"
+why = "The client role needs no capability."
+
+[[answer]]
+abi = "pico"
+item = "T-ROLE-PEER"
+capability = "peer"
+
+[[answer]]
+abi = "pico"
+item = "T-ROLE-ROUTER"
+unanswered = "The peer capability admits the router mode's name as well as the peer's, and the statement does not say whether that mode forwards between the sessions it holds."
+
+[[answer]]
+abi = "pico"
+item = "T-STREAM-LINK"
+unanswered = "No capability of the statement names the tcp link, so the statement cannot answer for a build of this ABI."
+
+[[answer]]
+abi = "pico"
+item = "T-DGRAM-LINK"
+capability = "link-udp"
+
+[[answer]]
+abi = "pico"
+item = "T-COMPRESSION"
+unanswered = "The compression capability is not one of this ABI's, and the statement says nothing of the batch header its sessions accept."
+
+[[answer]]
+abi = "pico"
+item = "T-PATCH"
+unanswered = "The statement does not state the patch the build's sessions advertise."
+
+[[answer]]
+abi = "pico"
+item = "T-VERSION"
+fixed = "9"
+why = "Every wz session speaks the one protocol version of the pinned upstream."
+
+[[answer]]
+abi = "pico"
+item = "T-FSN-RES"
+policy = "sn-resolution"
+map = { "bits-8" = "8", "bits-16" = "16", "bits-32" = "32", "bits-64" = "64" }
+
+[[answer]]
+abi = "pico"
+item = "T-RID-RES"
+unanswered = "The request id resolution is not part of the sn-resolution policy, and the statement does not state it."
+
+[[answer]]
+abi = "pico"
+item = "T-BATCH-UNICAST"
+limit = "PICO_UNICAST_BATCH_BYTES"
+
+[[answer]]
+abi = "pico"
+item = "T-BATCH-MCAST"
+limit = "PICO_MULTICAST_BATCH_BYTES"
+
+[[answer]]
+abi = "pico"
+item = "T-LEASE"
+limit = "PICO_LEASE_MS"
+
+[[answer]]
+abi = "pico"
+item = "T-KA-PER-LEASE"
+limit = "PICO_KEEPALIVES_PER_LEASE"
+
+[[answer]]
+abi = "pico"
+item = "T-FRAG-MAX"
+limit = "PICO_FRAG_MAX_BYTES"
+
+# ---------------------------------------------------------------------------------------------
+# The zenoh-c ABI
+
+[[answer]]
+abi = "c"
+item = "T-UNICAST"
+fixed = "yes"
+why = "A session of the zenoh-c ABI opens a unicast session in every build; no capability turns it off."
+
+[[answer]]
+abi = "c"
+item = "T-MCAST"
+capability = "multicast-transport"
+
+[[answer]]
+abi = "c"
+item = "T-INITIATOR"
+fixed = "yes"
+why = "A client session dials the locator it is given, and the client role needs no capability."
+
+[[answer]]
+abi = "c"
+item = "T-ACCEPTOR"
+capability = "peer"
+
+[[answer]]
+abi = "c"
+item = "T-ROLE-CLIENT"
+fixed = "yes"
+why = "The client role needs no capability."
+
+[[answer]]
+abi = "c"
+item = "T-ROLE-PEER"
+capability = "peer"
+
+[[answer]]
+abi = "c"
+item = "T-ROLE-ROUTER"
+capability = "router-node"
+
+[[answer]]
+abi = "c"
+item = "T-STREAM-LINK"
+unanswered = "The statement names the optional stream links (the transport_ capabilities) but no capability names the tcp link, so it cannot answer for a build without them."
+
+[[answer]]
+abi = "c"
+item = "T-DGRAM-LINK"
+capability = "link-udp"
+
+[[answer]]
+abi = "c"
+item = "T-COMPRESSION"
+capability = "transport_compression"
+
+[[answer]]
+abi = "c"
+item = "T-PATCH"
+unanswered = "The statement does not state the patch the build's sessions advertise."
+
+[[answer]]
+abi = "c"
+item = "T-VERSION"
+fixed = "9"
+why = "Every wz session speaks the one protocol version of the pinned upstream."
+
+[[answer]]
+abi = "c"
+item = "T-FSN-RES"
+policy = "sn-resolution"
+map = { "bits-8" = "8", "bits-16" = "16", "bits-32" = "32", "bits-64" = "64" }
+
+[[answer]]
+abi = "c"
+item = "T-RID-RES"
+unanswered = "The request id resolution is not part of the sn-resolution policy, and the statement does not state it."
+
+[[answer]]
+abi = "c"
+item = "T-BATCH-UNICAST"
+unanswered = "A session of this ABI reads its batch size from its configuration when it opens, and the statement does not carry that configuration."
+
+[[answer]]
+abi = "c"
+item = "T-BATCH-MCAST"
+unanswered = "A session of this ABI reads its batch size from its configuration when it opens, and the statement does not carry that configuration."
+
+[[answer]]
+abi = "c"
+item = "T-LEASE"
+unanswered = "A session of this ABI reads its lease from its configuration when it opens, and the statement does not carry that configuration."
+
+[[answer]]
+abi = "c"
+item = "T-KA-PER-LEASE"
+unanswered = "A session of this ABI reads its keepalive count from its configuration when it opens, and the statement does not carry that configuration."
+
+[[answer]]
+abi = "c"
+item = "T-FRAG-MAX"
+unanswered = "A session of this ABI reads its reassembly bound from its configuration when it opens, and the statement does not carry that configuration."

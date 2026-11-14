@@ -4050,6 +4050,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-conformance-suite"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "wz-e2e-admin-probe"
 version = "0.1.0"
 dependencies = [
