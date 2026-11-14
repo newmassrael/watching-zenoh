@@ -446,6 +446,22 @@ fn next_sn(initiator: &End) -> u64 {
     )
 }
 
+/// The initiator's next best-effort transmit SN.
+fn next_best_effort_sn(initiator: &End) -> u64 {
+    initiator.actions.next_outbound_frame_sn(
+        wz_session_core::qos::Priority::DEFAULT,
+        false,
+        initiator.actions.negotiated_sn_mask(),
+    )
+}
+
+/// [`frame_wire`] on the best-effort channel: the same Frame with its `R` flag clear.
+fn best_effort_frame_wire(sn: u64, payload: &[u8]) -> Vec<u8> {
+    let mut wire = frame_wire(sn, &[], payload);
+    wire[0] &= !wire_const::FLAG_T_FRAME_R;
+    wire
+}
+
 /// One record in one frame, at the next SN, sent from the initiator and read by
 /// one acceptor iteration. Returns that iteration's allocations.
 fn one_record(
@@ -756,6 +772,105 @@ fn a_frame_chain_is_owned_by_no_record_of_the_slot_profile() {
         .map(|(what, n)| format!("{what} in a chained frame: {n} allocation(s)"))
         .collect();
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// One datagram of two Frames, the second behind its own header, as a sender puts a message of
+/// the other reliability into the open batch. The walk of the first Frame's records ends at the
+/// second header, and the second Frame is the next unit of the datagram. A Frame the SN gate
+/// refuses is dropped with its records, and the Frame behind it is still read, as upstream drains
+/// a refused Frame's reader and reads the batch on.
+///
+/// Where the next unit is read depends on the build. Without an allocator the datagram is read
+/// on where it lies, in the same iteration and at no cost to the heap. A build that has one
+/// (this file's lane names the crate's default `alloc`) parks what follows the Frame, one copy,
+/// and the next iteration reads it before it reaches for the link.
+#[test]
+fn a_datagram_of_two_frames_is_read_frame_by_frame() {
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
+        wz_runtime_coop::RuntimeCell::new();
+    let runtime = RUNTIME
+        .start::<LwipUdpDriver>(Frozen)
+        .expect("the runtime is started once");
+    let (mut acceptor, initiator) = establish(&link, &runtime, 7734);
+    let measure = Measurement::new();
+    let told = acceptor.told.clone();
+    let before = told.declared.load(Ordering::SeqCst);
+    let declared = || {
+        (
+            told.declared.load(Ordering::SeqCst) - before,
+            told.declared_id.load(Ordering::SeqCst),
+        )
+    };
+
+    let reliable = next_sn(&initiator);
+    let best_effort = next_best_effort_sn(&initiator);
+    let mut wire = frame_wire(reliable, &[], &record::subscriber(61, "two/a"));
+    wire.extend_from_slice(&best_effort_frame_wire(
+        best_effort,
+        &record::subscriber(62, "two/b"),
+    ));
+    let both = read(
+        &measure,
+        &mut acceptor,
+        &initiator,
+        "a reliable and a best-effort Frame in one datagram",
+        &wire,
+    );
+    #[cfg(feature = "alloc")]
+    {
+        assert_eq!(
+            declared(),
+            (1, 61),
+            "(declarations told, the id of the last): the reliable Frame's record, the rest parked"
+        );
+        acceptor.step();
+    }
+    assert_eq!(
+        declared(),
+        (2, 62),
+        "(declarations told, the id of the last): each Frame's record, the reliable one first"
+    );
+
+    // The reliable Frame again, at the SN already read: a duplicate the gate refuses.
+    let mut wire = frame_wire(reliable, &[], &record::subscriber(63, "two/c"));
+    wire.extend_from_slice(&best_effort_frame_wire(
+        next_best_effort_sn(&initiator),
+        &record::subscriber(64, "two/d"),
+    ));
+    let behind_refused = read(
+        &measure,
+        &mut acceptor,
+        &initiator,
+        "a best-effort Frame behind a refused one",
+        &wire,
+    );
+    #[cfg(feature = "alloc")]
+    {
+        assert_eq!(
+            declared(),
+            (2, 62),
+            "(declarations told, the id of the last): nothing of the refused Frame, the rest parked"
+        );
+        acceptor.step();
+    }
+    assert_eq!(
+        declared(),
+        (3, 64),
+        "(declarations told, the id of the last): the refused Frame's record is not told, the \
+         record of the Frame behind it is"
+    );
+    // A build with an allocator copies the rest of each datagram once to park it, and reads the
+    // parked unit by the copying path: what that costs is not this test's claim.
+    #[cfg(feature = "alloc")]
+    let _ = (both, behind_refused);
+    #[cfg(not(feature = "alloc"))]
+    assert_eq!(
+        (both, behind_refused),
+        (0, 0),
+        "(allocations of the two datagrams)"
+    );
 }
 
 /// The SEND side of the same records, measured and not claimed. A session sends a

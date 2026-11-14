@@ -12953,9 +12953,11 @@ layer_c1m_session_lwip() {
     # ZERO allocations (the one interest that asks for the current subscribers owns
     # one allocation, the answer's owned build, which the file names), a frame that
     # carries a chain of its own costing the same, and the owned builders of the sends
-    # bounded: 3 = what that command PRINTED.
+    # bounded: 3 = what that command PRINTED. The fourth reads a datagram of two Frames, then
+    # one whose first Frame the SN gate refuses: each admitted Frame's record is told, the
+    # second Frame from the unit parked behind the first, as this build has `alloc`.
     wz_test_args wz-session-lwip slot_control_records
-    _runci_guarded_test "C1m slot control records" 3 \
+    _runci_guarded_test "C1m slot control records" 4 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,codec-response-final,session-slot \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1
