@@ -291,7 +291,6 @@ const CODEC_GATES: &[(&str, &str)] = &[
     ("transport_open", "codec-open-body"),
     ("transport_close", "codec-close"),
     ("transport_keep_alive", "codec-keep-alive"),
-    ("transport_frame_header", "codec-frame"),
     ("transport_fragment_header", "codec-fragment"),
     ("push", "codec-push"),
     ("response_final", "codec-response-final"),

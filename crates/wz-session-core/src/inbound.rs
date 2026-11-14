@@ -606,9 +606,9 @@ fn qos_priority_of_entry<E: crate::ext_view::ExtEntryView>(
 /// what the receive path that does not copy a unit (`drive::dispatch_datagram`)
 /// needs of it, kept in fixed storage, so reading it allocates nothing.
 ///
-/// The chain is decoded by the generated entry decoder, entry by entry, under
-/// the depth bound the owned decode (`decode_ext_chain`) applies, and refused
-/// where that decode refuses it. What is kept is what a participant acts on:
+/// The chain is read by the header's document (`transport_frame_header.scxml`,
+/// `transport_fragment_header.scxml`) and walked here under the depth bound the
+/// owned chain is kept under ([`KeptChain`]). What is kept is what a participant acts on:
 /// each entry's header (for the mandatory-extension rule,
 /// [`crate::ext_admit::judge_ext_chain`]), the priority the QoS extension
 /// carries, and the two chain-boundary markers of a Fragment. Each is projected
@@ -632,9 +632,6 @@ pub(crate) struct InPlaceExtChain {
     headers: [u8; crate::parse_error::MAX_EXT_CHAIN_DEPTH],
     len: u8,
     priority: crate::qos::Priority,
-    /// How many bytes of the unit the chain occupies; it ends where the
-    /// payload starts. What [`Self::owned`] reads the entries again from.
-    wire_len: usize,
 }
 
 #[cfg(all(
@@ -651,53 +648,21 @@ impl InPlaceExtChain {
         headers: [0; crate::parse_error::MAX_EXT_CHAIN_DEPTH],
         len: 0,
         priority: crate::qos::Priority::DEFAULT,
-        wire_len: 0,
     };
 
-    /// Read the chain at the cursor, leaving the cursor after its last entry.
-    fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, InboundParseError> {
-        use crate::parse_error::MAX_EXT_CHAIN_DEPTH;
-        use wz_codecs::lent::ExtEntry;
-        let before = cursor.remaining();
-        let mut chain = Self::EMPTY;
-        let mut priority = None;
-        for slot in 0..MAX_EXT_CHAIN_DEPTH {
-            let entry = ExtEntry::decode(cursor).map_err(InboundParseError::Codec)?;
-            chain.headers[slot] = entry.header;
-            chain.len = (slot + 1) as u8;
-            if priority.is_none() {
-                priority = qos_priority_of_entry(&entry);
-            }
-            if !entry.z() {
-                chain.priority = priority.unwrap_or(crate::qos::Priority::DEFAULT);
-                chain.wire_len = before - cursor.remaining();
-                return Ok(chain);
-            }
-        }
-        Err(InboundParseError::ExtChainOverflow)
-    }
-
-    /// The chain's entries, OWNED: decoded again, by the owned decode
-    /// (`decode_ext_chain`), from the bytes of `unit` the chain occupies, which
-    /// end at `payload_at`. Empty when there is no chain.
+    /// The chain of the Frame at the front of `unit`, OWNED: its header read
+    /// again by its document and the entries kept as the owned decode keeps
+    /// them. Empty when there is no chain.
     ///
     /// What a receive path hands a consumer that is given the owned chain (the
     /// `extensions` of a `FramePayload`), made only when one is: a frame whose
     /// every record is lent never pays for it.
     #[cfg(feature = "alloc")]
-    pub(crate) fn owned(
-        &self,
-        unit: &[u8],
-        payload_at: usize,
-    ) -> Result<Vec<ExtEntryOwned>, InboundParseError> {
+    pub(crate) fn owned(&self, unit: &[u8]) -> Result<Vec<ExtEntryOwned>, InboundParseError> {
         if self.len == 0 {
             return Ok(Vec::new());
         }
-        let bytes = payload_at
-            .checked_sub(self.wire_len)
-            .and_then(|start| unit.get(start..payload_at))
-            .ok_or(InboundParseError::Codec(CodecError::NeedMoreBytes))?;
-        decode_ext_chain(&mut SceCursor::new(bytes))
+        decode_frame_head::<Vec<ExtEntryOwned>>(unit).map(|(head, _)| head.chain)
     }
 
     /// Each entry's header byte, in wire order.
@@ -829,6 +794,73 @@ pub fn parse_inbound_consuming_in_into(
     parse_unit_into(unit.as_slice(), Some(unit), out)
 }
 
+/// The form a Frame's or a Fragment's own extension chain is kept in, taken
+/// from the entries its header's document read ([`decode_frame_head`],
+/// [`decode_fragment_head`]): the owned entries of a decoded message, or the
+/// [`InPlaceExtChain`] of one read where it lies. The document's view holds no
+/// list and reads a chain of any length, so each form keeps the bound a node
+/// reads of a transport chain (`MAX_EXT_CHAIN_DEPTH`) and refuses the entry past
+/// it as `ExtChainOverflow`.
+// Gated as the head decoders that name it.
+#[cfg(all(
+    feature = "codec-frame",
+    any(
+        feature = "alloc",
+        all(
+            feature = "storage-profile",
+            any(
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        )
+    )
+))]
+pub(crate) trait KeptChain: Sized {
+    /// The chain whose entries `walked` yields, in wire order.
+    fn keep<'a>(
+        walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+    ) -> Result<Self, InboundParseError>;
+}
+
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+impl KeptChain for Vec<ExtEntryOwned> {
+    fn keep<'a>(
+        walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+    ) -> Result<Self, InboundParseError> {
+        crate::ext_chain::collect_ext_chain(walked)
+    }
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "storage-profile",
+    any(
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+impl KeptChain for InPlaceExtChain {
+    fn keep<'a>(
+        walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+    ) -> Result<Self, InboundParseError> {
+        use crate::parse_error::MAX_EXT_CHAIN_DEPTH;
+        let mut chain = Self::EMPTY;
+        let mut priority = None;
+        for (slot, entry) in walked.enumerate() {
+            if slot == MAX_EXT_CHAIN_DEPTH {
+                return Err(InboundParseError::ExtChainOverflow);
+            }
+            chain.headers[slot] = entry.header;
+            chain.len = (slot + 1) as u8;
+            if priority.is_none() {
+                priority = qos_priority_of_entry(&entry);
+            }
+        }
+        chain.priority = priority.unwrap_or(crate::qos::Priority::DEFAULT);
+        Ok(chain)
+    }
+}
+
 /// What a `Frame` says about itself before its payload: the fields of
 /// [`InboundFrame::Frame`] that are not the payload, with its own extension
 /// chain as `C`: the owned entries the decoded `Frame` reports, or the
@@ -882,10 +914,12 @@ impl FrameHead<InPlaceExtChain> {
     }
 }
 
-/// Decode a `Frame` from just after its header byte up to its payload: the SN
-/// (VLE), then the extension chain when the header's Z flag says there is one,
-/// read by `read_chain` (`no_chain` when there is none). The cursor is left at
-/// the first byte of the payload, which runs to the end of the unit.
+/// Decode the `Frame` at the front of `unit` up to its payload, and the offset
+/// in `unit` at which the payload starts: the header, the SN and the extension
+/// chain the Z flag announces, read by the header's document
+/// (`sources/codecs/transport_frame_header.scxml`), the chain kept as `C`. The
+/// payload is the rest of the unit; where its network messages end is the
+/// reader of the batch's to find (L5).
 ///
 /// The one decode of a frame's head, shared by [`parse_inbound_consuming_in`]'s
 /// `Frame` arm (owned chain; the payload taken as a range or a copy) and
@@ -904,26 +938,20 @@ impl FrameHead<InPlaceExtChain> {
         )
     )
 ))]
-fn decode_frame_head<C>(
-    flags: u8,
-    has_ext: bool,
-    cursor: &mut SceCursor<'_>,
-    read_chain: impl FnOnce(&mut SceCursor<'_>) -> Result<C, InboundParseError>,
-    no_chain: C,
-) -> Result<FrameHead<C>, InboundParseError> {
-    let sn = cursor.read_vle_u64().map_err(InboundParseError::Codec)?;
-    let chain = if has_ext {
-        read_chain(cursor)?
-    } else {
-        no_chain
-    };
-    Ok(FrameHead {
-        reliable: (flags & wire_const::FLAG_T_FRAME_R) != 0,
-        sn,
+fn decode_frame_head<C: KeptChain>(
+    unit: &[u8],
+) -> Result<(FrameHead<C>, usize), InboundParseError> {
+    let mut cursor = SceCursor::new(unit);
+    let view = wz_codecs::transport_frame_header::TransportFrameHeaderView::decode(&mut cursor)?;
+    let chain = C::keep(crate::ext_view::walked(view.extensions.as_ref()))?;
+    let head = FrameHead {
+        reliable: (view.header & wire_const::FLAG_T_FRAME_R) != 0,
+        sn: view.sn,
         #[cfg(feature = "alloc")]
-        has_ext,
+        has_ext: (view.header & wire_const::FLAG_T_Z) != 0,
         chain,
-    })
+    };
+    Ok((head, unit.len() - cursor.remaining()))
 }
 
 /// The `Frame` at the front of `unit`, decoded up to its payload, and the
@@ -949,19 +977,7 @@ pub(crate) fn parse_frame_in_place(
     if header & 0x1F != wire_const::T_MID_FRAME {
         return None;
     }
-    let flags = header & 0xE0;
-    let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
-    let mut cursor = SceCursor::new(&unit[1..]);
-    Some(
-        decode_frame_head(
-            flags,
-            has_ext,
-            &mut cursor,
-            InPlaceExtChain::decode,
-            InPlaceExtChain::EMPTY,
-        )
-        .map(|head| (head, unit.len() - cursor.remaining())),
-    )
+    Some(decode_frame_head(unit))
 }
 
 /// What a `Fragment` says about itself before its payload, with its own
@@ -982,37 +998,40 @@ pub(crate) struct FragmentHead<C> {
     pub(crate) chain: C,
 }
 
-/// Decode a `Fragment` from just after its header byte up to its payload: the
-/// SN (VLE), then the extension chain when the header's Z flag says there is
-/// one, read by `read_chain` (`no_chain` when there is none). The R (reliable)
-/// and M (more) bits are the header's. The cursor is left at the first byte of
-/// the payload, which runs to the end of the unit.
+/// Decode the `Fragment` at the front of `unit` up to its payload, and the
+/// offset in `unit` at which the payload starts: the header (R, M, Z), the SN
+/// and the extension chain, read by the header's document
+/// (`sources/codecs/transport_fragment_header.scxml`), the chain kept as `C`.
+/// The payload runs to the end of the unit.
 ///
 /// The one decode of a fragment's head, shared by [`parse_inbound_consuming`]'s
 /// `Fragment` arm (owned chain, payload copied) and [`parse_fragment_in_place`]
 /// (chain read in place, payload left where it is), as [`decode_frame_head`] is
 /// for a `Frame`.
-#[cfg(feature = "reassembly")]
-fn decode_fragment_head<C>(
-    flags: u8,
-    has_ext: bool,
-    cursor: &mut SceCursor<'_>,
-    read_chain: impl FnOnce(&mut SceCursor<'_>) -> Result<C, InboundParseError>,
-    no_chain: C,
-) -> Result<FragmentHead<C>, InboundParseError> {
-    let sn = cursor.read_vle_u64().map_err(InboundParseError::Codec)?;
-    let chain = if has_ext {
-        read_chain(cursor)?
-    } else {
-        no_chain
-    };
-    Ok(FragmentHead {
-        reliable: (flags & wire_const::FLAG_T_FRAGMENT_R) != 0,
-        sn,
-        more: (flags & wire_const::FLAG_T_FRAGMENT_M) != 0,
-        has_ext,
+// The union of those two callers, whose chain forms are the two `KeptChain`s.
+#[cfg(all(
+    feature = "reassembly",
+    any(
+        feature = "alloc",
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+fn decode_fragment_head<C: KeptChain>(
+    unit: &[u8],
+) -> Result<(FragmentHead<C>, usize), InboundParseError> {
+    let mut cursor = SceCursor::new(unit);
+    let view =
+        wz_codecs::transport_fragment_header::TransportFragmentHeaderView::decode(&mut cursor)?;
+    let chain = C::keep(crate::ext_view::walked(view.extensions.as_ref()))?;
+    let head = FragmentHead {
+        reliable: (view.header & wire_const::FLAG_T_FRAGMENT_R) != 0,
+        sn: view.sn,
+        more: (view.header & wire_const::FLAG_T_FRAGMENT_M) != 0,
+        has_ext: (view.header & wire_const::FLAG_T_Z) != 0,
         chain,
-    })
+    };
+    Ok((head, unit.len() - cursor.remaining()))
 }
 
 #[cfg(all(
@@ -1065,19 +1084,7 @@ pub(crate) fn parse_fragment_in_place(
     if header & 0x1F != wire_const::T_MID_FRAGMENT {
         return None;
     }
-    let flags = header & 0xE0;
-    let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
-    let mut cursor = SceCursor::new(&unit[1..]);
-    Some(
-        decode_fragment_head(
-            flags,
-            has_ext,
-            &mut cursor,
-            InPlaceExtChain::decode,
-            InPlaceExtChain::EMPTY,
-        )
-        .map(|head| (head, unit.len() - cursor.remaining())),
-    )
+    Some(decode_fragment_head(unit))
 }
 
 /// The one decode behind [`parse_inbound_consuming`] and
@@ -1111,15 +1118,8 @@ fn parse_unit_into(
     );
     let header = *bytes.first().ok_or(InboundParseError::Empty)?;
     let mid = header & 0x1F;
-    // The header's flags, its chain flag and a cursor past it are the Frame and
-    // Fragment arms' alone: each handshake message is read whole, header
-    // included, by its document, in a function of its own.
-    #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-    let flags = header & 0xE0;
-    #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-    let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
-    #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-    let mut cursor = SceCursor::new(&bytes[1..]);
+    // Every message below is read whole, header included, by its document or
+    // by the document of its header, in a function of its own.
     match mid {
         #[cfg(feature = "codec-init-body")]
         wire_const::T_MID_INIT => parse_init(bytes, out),
@@ -1129,25 +1129,16 @@ fn parse_unit_into(
         wire_const::T_MID_CLOSE => parse_close(bytes, out),
         #[cfg(all(feature = "alloc", feature = "codec-frame"))]
         wire_const::T_MID_FRAME => {
-            let head =
-                decode_frame_head(flags, has_ext, &mut cursor, decode_ext_chain, Vec::new())?;
-            let remaining = cursor.remaining();
-            // The payload is the tail of the unit, so it is `remaining` bytes
-            // ending where the unit does. With an origin it is a range of it
-            // (a second reference to the storage when the unit is lent); without
-            // one it is a copy, as it was before there was a choice.
-            let tail = cursor
-                .peek_slice(remaining)
-                .map_err(InboundParseError::Codec)?;
+            let (head, payload_at) = decode_frame_head::<Vec<ExtEntryOwned>>(bytes)?;
+            // The payload is the tail of the unit. With an origin it is a range
+            // of it (a second reference to the storage when the unit is lent);
+            // without one it is a copy, as it was before there was a choice.
             let payload = match origin {
                 Some(unit) => unit
-                    .subslice(bytes.len() - remaining..bytes.len())
+                    .subslice(payload_at..bytes.len())
                     .ok_or(InboundParseError::Codec(CodecError::NeedMoreBytes))?,
-                None => RxBytes::from(tail.to_vec()),
+                None => RxBytes::from(bytes[payload_at..].to_vec()),
             };
-            cursor
-                .advance(remaining)
-                .map_err(InboundParseError::Codec)?;
             let FrameHead {
                 reliable,
                 sn,
@@ -1155,7 +1146,6 @@ fn parse_unit_into(
                 chain: extensions,
             } = head;
             let priority = ext_qos_priority(&extensions);
-            let used = bytes.len() - cursor.remaining();
             *out = InboundFrame::Frame {
                 reliable,
                 sn,
@@ -1164,29 +1154,24 @@ fn parse_unit_into(
                 extensions,
                 priority,
             };
-            Ok(used)
+            Ok(bytes.len())
         }
         #[cfg(all(feature = "alloc", feature = "reassembly"))]
         wire_const::T_MID_FRAGMENT => {
-            // Body mirrors T_MID_FRAME: VLE sn, optional Z-gated ext chain,
-            // then tail payload. The R (reliable) and M (more) bits live in
-            // the header flags, not the body. (`reassembly` implies
-            // `codec-frame`, so `flags` / `has_ext` / `cursor` are bound.)
-            let FragmentHead {
-                reliable,
-                sn,
-                more,
-                has_ext,
-                chain: extensions,
-            } = decode_fragment_head(flags, has_ext, &mut cursor, decode_ext_chain, Vec::new())?;
-            let remaining = cursor.remaining();
-            let payload = cursor
-                .peek_slice(remaining)
-                .map_err(InboundParseError::Codec)?
-                .to_vec();
-            cursor
-                .advance(remaining)
-                .map_err(InboundParseError::Codec)?;
+            // The head mirrors a Frame's: the SN and the Z-gated chain after the
+            // header, whose R (reliable) and M (more) bits are the flags; the
+            // payload is the tail of the unit.
+            let (
+                FragmentHead {
+                    reliable,
+                    sn,
+                    more,
+                    has_ext,
+                    chain: extensions,
+                },
+                payload_at,
+            ) = decode_fragment_head::<Vec<ExtEntryOwned>>(bytes)?;
+            let payload = bytes[payload_at..].to_vec();
             let priority = ext_qos_priority(&extensions);
             // R311y578 — project the chain-boundary markers BEFORE the ext
             // chain moves into the variant. Both are unit exts in the
@@ -1194,7 +1179,6 @@ fn parse_unit_into(
             // matches on extension identity, so the z64 `ext_qos` at 0x1
             // above is never mistaken for one.
             let markers = crate::extfragment::project_markers(&extensions);
-            let used = bytes.len() - cursor.remaining();
             *out = InboundFrame::Fragment {
                 reliable,
                 sn,
@@ -1205,7 +1189,7 @@ fn parse_unit_into(
                 priority,
                 markers,
             };
-            Ok(used)
+            Ok(bytes.len())
         }
         #[cfg(feature = "codec-keep-alive")]
         wire_const::T_MID_KEEP_ALIVE => decode_keep_alive(bytes, out),

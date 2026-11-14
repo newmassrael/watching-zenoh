@@ -332,13 +332,35 @@ pub(crate) fn collect_handshake_ext_chain<'a>(
     Ok(())
 }
 
-/// One entry of a received handshake chain, from the view the document read it as to the
+/// The chain of a received Frame or Fragment as its header's document read it, owned: the heap
+/// profile's form of the chain those messages report. The document's view reads a chain of any
+/// length, so the bound a node reads of a transport chain
+/// ([`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)) is kept here, as
+/// `collect_handshake_ext_chain` keeps it.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+pub(crate) fn collect_ext_chain<'a>(
+    walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+) -> Result<Vec<ExtEntryOwned>, crate::parse_error::InboundParseError> {
+    use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
+
+    let mut entries = Vec::new();
+    for (at, entry) in walked.enumerate() {
+        if at == MAX_EXT_CHAIN_DEPTH {
+            return Err(InboundParseError::ExtChainOverflow);
+        }
+        entries.push(received_entry(&entry)?);
+    }
+    Ok(entries)
+}
+
+/// One entry of a received transport chain, from the view the document read it as to the
 /// lifetime-free owned form the message keeps.
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
     feature = "codec-close",
-    feature = "codec-keep-alive"
+    feature = "codec-keep-alive",
+    all(feature = "alloc", feature = "codec-frame")
 ))]
 fn received_entry(
     entry: &wz_codecs::ext_entry::ExtEntryView<'_>,
