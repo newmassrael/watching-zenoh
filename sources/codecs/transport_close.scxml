@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- The whole transport Close message: the header byte, the body
+     `close.scxml` reads (the reason byte), and the extension chain.
+
+     Upstream writes header and reason
+     (`commons/zenoh-codec/src/transport/close.rs` @
+     `impl<W> WCodec<&Close, &mut W> for Zenoh080`) and reads a chain after
+     them when Z is set, with the flags of
+     `commons/zenoh-protocol/src/transport/close.rs` @ `pub mod flag {`:
+
+       bit 0..4 : mid  0x03
+       bit 5    : S    close the whole session, not only the link
+       bit 6    : reserved
+       bit 7    : Z    an extension chain follows the body
+
+     S is presented by the value. Close declares no extension of its own;
+     an entry it carries is judged one layer up like any unknown one. The
+     chain is the generic transport chain; see `transport_init.scxml`. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="transport_close">
+  <sce:import src="close.scxml" kind="codec" as="codec_zenoh_close"/>
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x03"/>
+      <sce:flag name="S"   bit="5"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:embed id="body" type="codec_zenoh_close" sce:byte="1"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+  </datamodel>
+</scxml>

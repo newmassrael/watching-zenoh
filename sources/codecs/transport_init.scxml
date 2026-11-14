@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- The whole transport Init message, InitSyn and InitAck: the header byte,
+     the body `init_body.scxml` reads, and the extension chain.
+
+     Upstream writes it header, body, chain
+     (`commons/zenoh-codec/src/transport/init.rs` @
+     `impl<W> WCodec<&InitSyn, &mut W> for Zenoh080`), with the flags of
+     `commons/zenoh-protocol/src/transport/init.rs` @ `pub mod flag {`:
+
+       bit 0..4 : mid  0x01
+       bit 5    : A    the message is an InitAck; the body carries a cookie
+       bit 6    : S    the body carries the resolution and the batch size
+       bit 7    : Z    an extension chain follows the body
+
+     A and S are the body's own inputs (`init_body.scxml` `S`, `A`), bound
+     here to the header bits that carry them, so an encode derives both from
+     the body it presents and a decode reads the body under the header it
+     read. Z is derived from whether the chain is present.
+
+     The chain is the one every transport message carries: entries of the
+     generic extension codec, ended by the first entry whose own Z is clear.
+     Which extension an entry is, and its typed body, is read one layer up,
+     by identity; the decode reads every entry by its encoding.
+
+     The mid is not checked by the decode: the caller dispatched on it. An
+     unknown mandatory extension is admitted here and judged by the
+     participant, as for every chain this set reads. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="little" name="transport_init">
+  <sce:import src="init_body.scxml" kind="codec" as="codec_zenoh_init_body">
+    <sce:flag-bind input="S" source="header.S"/>
+    <sce:flag-bind input="A" source="header.A"/>
+  </sce:import>
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x01"/>
+      <sce:flag name="A"   bit="5"/>
+      <sce:flag name="S"   bit="6"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:embed id="body" type="codec_zenoh_init_body" sce:byte="1"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+  </datamodel>
+</scxml>
