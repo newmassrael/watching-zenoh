@@ -3926,6 +3926,9 @@ pub const UNHONOURED_DISPOSITION_KINDS: &[&str] = &["build", "exclude"];
 /// runtime whatever the value. There is no behaviour to honour, and wz's own test asserts the
 /// key ignored (the `asserted-ignored` row above).
 pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
+    // A row leaves with its key once the key is honoured. This comment keeps the table one row
+    // per line when one row is left: `deepenable_audit.py` reads the body up to a line holding
+    // only `];`.
     (
         "transport/link/tx/threads",
         "exclude",
