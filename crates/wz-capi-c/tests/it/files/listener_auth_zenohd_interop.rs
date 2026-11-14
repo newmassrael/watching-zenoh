@@ -17,6 +17,11 @@
 //!   2. the right password first (the control), then a zenohd whose ONLY difference is the
 //!      password: it never becomes one, over a window several times what the control needed.
 //!
+//! And a third that makes the dictionary's effect a comparison rather than a reading of wz alone:
+//! the SAME dictionary file is handed first to a zenohd listener, which must admit the right
+//! password and refuse the wrong one (the positive control, read off the session that listener
+//! logs), and then to the C listener, which must do the same with the same two dialers.
+//!
 //! `#[ignore]` (binary-dep e2e): needs `target/zenohd/zenohd` (set `WZ_ZENOHD_BIN` or run
 //! `scripts/build-zenohd.sh`). Run via Layer Z / `--ignored`. This file is in wz-capi-c for the
 //! reason `redial_zenohd_interop` is: wz-capi-c is not a dependency of `wz-integration-tests`.
@@ -42,6 +47,12 @@ use wz_runtime_tokio_test_support::free_port;
 
 const USER: &str = "alice";
 const PASSWORD: &str = "interop-secret";
+/// A password the dictionary does not hold for `USER`.
+const WRONG_PASSWORD: &str = "definitely-the-wrong-password";
+
+/// What a zenohd logs, at debug, for every session it opens
+/// (`io/zenoh-transport/src/unicast/manager.rs` @ `"New transport opened between {} and {}`).
+const ZENOHD_SESSION_OPENED: &str = "New transport opened between";
 
 /// How long the control gets to become one of the listener's routers.
 const ADMIT_BUDGET: Duration = Duration::from_secs(30);
@@ -104,6 +115,75 @@ fn spawn_zenohd_dialling(target: u16, password: &str) -> ChildGuard {
             "zenohd was not up in {ADMIT_BUDGET:?}"
         );
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A zenohd that listens on `port` and holds `dictionary` as its usrpwd responder dictionary, with
+/// its log captured so the sessions it opens can be counted.
+struct ZenohdListener {
+    _guard: ChildGuard,
+    log: tempfile::NamedTempFile,
+}
+
+impl ZenohdListener {
+    fn spawn(port: u16, dictionary: &str) -> Self {
+        let log = tempfile::NamedTempFile::new().expect("a capture file");
+        // One open file description for both streams, so the two do not overwrite each other.
+        let out = log.reopen().expect("open the capture for writing");
+        let err = out.try_clone().expect("dup the capture");
+        let child = Command::new(zenohd_binary())
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{port}"))
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .arg("--cfg")
+            // Quoted and escaped, so a path with backslashes is a valid JSON5 string.
+            .arg(format!(
+                "transport/auth/usrpwd/dictionary_file:{dictionary:?}"
+            ))
+            .env("RUST_LOG", "z=debug")
+            .stdout(Stdio::from(out))
+            .stderr(Stdio::from(err))
+            .spawn()
+            .expect("zenohd spawns");
+        let mut guard = ChildGuard(child);
+        let deadline = Instant::now() + ADMIT_BUDGET;
+        // Its listener accepting means the process is up and has read its config.
+        loop {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return Self { _guard: guard, log };
+            }
+            if let Ok(Some(status)) = guard.0.try_wait() {
+                panic!("the zenohd listener exited before it was up: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the zenohd listener was not up in {ADMIT_BUDGET:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// How many sessions this zenohd has logged opening.
+    fn sessions_opened(&self) -> usize {
+        std::fs::read_to_string(self.log.path())
+            .unwrap_or_default()
+            .matches(ZENOHD_SESSION_OPENED)
+            .count()
+    }
+
+    /// Wait until this zenohd has opened more than `before` sessions, up to `budget`; whether it
+    /// did.
+    fn a_session_opens_past(&self, before: usize, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            if self.sessions_opened() > before {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
     }
 }
 
@@ -180,6 +260,20 @@ unsafe fn a_router_arrives(session: &z_owned_session_t, budget: Duration) -> boo
     false
 }
 
+/// Wait until `session` holds no router, up to `budget`; whether it got there.
+unsafe fn the_routers_go(session: &z_owned_session_t, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        if routers_held(session) == 0 {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn dictionary_file() -> tempfile::NamedTempFile {
     let mut file = tempfile::NamedTempFile::new().expect("a temp file");
     writeln!(file, "{USER}:{PASSWORD}").expect("write the dictionary");
@@ -224,25 +318,14 @@ fn a_stock_zenohd_with_the_wrong_password_never_becomes_a_router_of_a_c_listener
     );
     // Let the control's link go before the refused one is watched, so a router held over from it
     // is not read as the refused peer's.
-    let gone = {
-        let deadline = Instant::now() + ADMIT_BUDGET;
-        loop {
-            // SAFETY: the listener is live.
-            if unsafe { routers_held(&listener) } == 0 {
-                break true;
-            }
-            if Instant::now() >= deadline {
-                break false;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    };
+    // SAFETY: the listener is live.
+    let gone = unsafe { the_routers_go(&listener, ADMIT_BUDGET) };
     assert!(
         gone,
         "the control's link was still held after its zenohd was killed"
     );
 
-    let _bad = spawn_zenohd_dialling(port, "definitely-the-wrong-password");
+    let _bad = spawn_zenohd_dialling(port, WRONG_PASSWORD);
     // SAFETY: the listener is live.
     let admitted = unsafe { a_router_arrives(&listener, REFUSE_WINDOW) };
     // SAFETY: the listener is live and owned here.
@@ -251,5 +334,70 @@ fn a_stock_zenohd_with_the_wrong_password_never_becomes_a_router_of_a_c_listener
         !admitted,
         "a zenohd presenting the wrong password became a router of a listener that names a \
          dictionary"
+    );
+}
+
+/// One dictionary FILE, handed to a zenohd listener and then to a C listener, and the same two
+/// stock dialers at each: the right password and the wrong one.
+///
+/// The zenohd listener goes first and is the POSITIVE CONTROL: it must open a session for the
+/// right password and none for the wrong one over the refusal window, or it shows no effect of
+/// the dictionary and the C listener's answer would be compared with nothing. The C listener is
+/// then held to the same two answers, read where a C program reads them.
+#[test]
+#[ignore = "binary-dep e2e (zenohd, usrpwd initiator and responder); Layer Z runs via --ignored"]
+fn one_dictionary_admits_and_refuses_the_same_zenohds_at_a_zenohd_and_at_a_c_listener() {
+    let dictionary = dictionary_file();
+    let path = dictionary.path().to_str().expect("utf-8");
+
+    let port = free_port();
+    let upstream = ZenohdListener::spawn(port, path);
+    let good = spawn_zenohd_dialling(port, PASSWORD);
+    let upstream_admits = upstream.a_session_opens_past(0, ADMIT_BUDGET);
+    drop(good);
+    assert!(
+        upstream_admits,
+        "the zenohd listener opened no session for the dictionary's own credential, so this \
+         zenohd cannot adjudicate the C listener's"
+    );
+    let before = upstream.sessions_opened();
+    let bad = spawn_zenohd_dialling(port, WRONG_PASSWORD);
+    let upstream_refuses = !upstream.a_session_opens_past(before, REFUSE_WINDOW);
+    drop(bad);
+    drop(upstream);
+    assert!(
+        upstream_refuses,
+        "the zenohd listener opened a session for the wrong password, so it shows no effect of \
+         the dictionary and cannot adjudicate the C listener's"
+    );
+
+    let port = free_port();
+    // SAFETY: a fresh config and session.
+    let listener = unsafe { open_listener(port, path) };
+    let good = spawn_zenohd_dialling(port, PASSWORD);
+    // SAFETY: the listener is live.
+    let wz_admits = unsafe { a_router_arrives(&listener, ADMIT_BUDGET) };
+    drop(good);
+    // SAFETY: the listener is live.
+    let gone = unsafe { the_routers_go(&listener, ADMIT_BUDGET) };
+    let bad = spawn_zenohd_dialling(port, WRONG_PASSWORD);
+    // SAFETY: the listener is live.
+    let wz_refuses = !unsafe { a_router_arrives(&listener, REFUSE_WINDOW) };
+    drop(bad);
+    // SAFETY: the listener is live and owned here.
+    unsafe { close_session(listener) };
+    assert!(
+        wz_admits,
+        "the zenohd listener admitted the dictionary's credential and the C listener given the \
+         same file did not"
+    );
+    assert!(
+        gone,
+        "the right password's link was still held after its zenohd was killed"
+    );
+    assert!(
+        wz_refuses,
+        "the zenohd listener refused the wrong password and the C listener given the same file \
+         admitted it"
     );
 }
