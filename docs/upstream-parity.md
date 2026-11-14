@@ -397,6 +397,16 @@ engine for the MCU would copy that logic. So the pico C ABI on the MCU runs on t
 - **The pico ABI's own host layer** gains `src/os/zephyr.rs`, modelled on zenoh-pico's
   `system/zephyr/system.c`, beside `unix.rs` and `windows.rs` (the types the C program
   stack-allocates are the ones pico's Zephyr header gives them).
+- **Written, not yet built** (2026-11-14): `wz-capi-pico`'s `os-zephyr` (no `std`; the Zephyr host
+  layer and its C seam `deploy/zephyr-common/wz_pico_os_zephyr.c`; the engine's links, clock and
+  random source from `src/coop_host.rs`, Zephyr's sockets as `wz_runtime_zephyr::ZephyrIpLinks`);
+  the crate's LP64 layout pins hold on a 64-bit target only, and a 32-bit image compiles
+  `crates/wz-capi-pico/csrc/pico_layout_pins.c` against pico's header; the image
+  `deploy/zephyr-capi-pico`, the comparison image's program linked to wz in pico's place, run by the
+  kit lane as `zephyr-wz-pico-queryable` and `-st`. Open: the heap profile's datagram link holds a
+  65,535-byte receive buffer where the negotiated batch would do (`ZephyrLinks::with_rx_capacity`
+  has the knob, `IpLinks` not yet); Zephyr's sockets offer the engine no readiness, so a read task
+  waits in the link's loop; scouting stays a host's.
 
 ## 6. Open
 
