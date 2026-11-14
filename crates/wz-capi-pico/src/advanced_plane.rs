@@ -330,11 +330,10 @@ mod tests {
             },
             PublisherQos::pico_default(),
         ));
-        let options = AdvancedPublisherOptions {
-            cache: None,
-            publisher_detection: false,
-            ..AdvancedPublisherOptions::default()
-        };
+        // The options are non-exhaustive, so they are built from their default and set.
+        let mut options = AdvancedPublisherOptions::default();
+        options.cache = None;
+        options.publisher_detection = false;
         let publisher =
             AdvancedPublisherOn::declare_on(plane, "demo/pico/ts", options, ZID.to_vec())
                 .expect("the declaration is accepted");

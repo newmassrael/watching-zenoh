@@ -952,7 +952,14 @@ fn emit_one_push(
         }
         // W3 — the publish build can reject when caller data overflows the
         // declared codec capacity (a no-emit reject); log and skip.
-        Err(e @ PublishAliasError::ExceedsCapacity) => {
+        // A sample the session can give no time (its last time is the greatest one), or whose node
+        // withholds its stamps until its clock is trusted: refused before anything is sent, as
+        // the oversize case is; log and skip.
+        Err(
+            e @ (PublishAliasError::ExceedsCapacity
+            | PublishAliasError::TimestampExhausted
+            | PublishAliasError::ClockUntrusted),
+        ) => {
             log::error!(
                 "wz-ap-demo: publisher_task publish rejected on idx={idx}: {e}; \
                  skipping this iteration"
