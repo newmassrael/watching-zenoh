@@ -655,6 +655,36 @@ pub(crate) fn metadata_flag(
     Ok(Some(value))
 }
 
+/// `--aggregation-subscribers <list>` and `--aggregation-publishers <list>`: the
+/// node config's `aggregation/subscribers` and `aggregation/publishers`, each a
+/// JSON5 list of key expressions, which a `--config` file's keys expand to. The
+/// node's session, or a peer node's own declarations, declare under them. An
+/// absent flag is an empty list; a member that is not a key expression, and a
+/// list in a build without the inclusion test that applies it, are refused.
+pub(crate) fn declaration_aggregation_flags(
+    args: &[String],
+) -> Result<wz::runtime_tokio::declaration_aggregation::DeclarationAggregation, String> {
+    fn list(args: &[String], flag: &str) -> Result<Vec<String>, String> {
+        let Some(text) = parse_pair(args, flag) else {
+            return Ok(Vec::new());
+        };
+        match wz::runtime_tokio::json5::parse(&text) {
+            Ok(wz::runtime_tokio::json5::Json5Value::Array(items)) => items
+                .into_iter()
+                .map(|item| match item {
+                    wz::runtime_tokio::json5::Json5Value::String(key) => Ok(key),
+                    _ => Err(format!("{flag} {text:?} must be a list of key expressions")),
+                })
+                .collect(),
+            _ => Err(format!("{flag} {text:?} must be a list of key expressions")),
+        }
+    }
+    let subscribers = list(args, "--aggregation-subscribers")?;
+    let publishers = list(args, "--aggregation-publishers")?;
+    wz::runtime_tokio::declaration_aggregation::DeclarationAggregation::new(subscribers, publishers)
+        .map_err(|e| format!("--aggregation-subscribers / --aggregation-publishers: {e}"))
+}
+
 /// `--plugin-search-dirs <list>`: the node config's `plugins_loading/search_dirs`,
 /// a JSON5 list of paths and `{ kind, value }` specs, which a `--config` file's
 /// key expands to. Read by the storage host, the run-mode that loads plugins;
@@ -2312,6 +2342,48 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             blocked,
         );
     }
+    // `aggregation/{subscribers,publishers}`, onto `--aggregation-subscribers
+    // <list>` and `--aggregation-publishers <list>`. Every run that declares a
+    // subscriber or a publisher of its own takes them: a single-session run's
+    // session, a peer node's own declarations and a storage host's storages. A
+    // router-hat declares none. An empty list is upstream's default.
+    {
+        let run_flag = typed_role
+            .map(|(flag, _)| flag)
+            .or(selected.map(|s| s.flag));
+        for (key, flag, list) in [
+            (
+                "aggregation/subscribers",
+                "--aggregation-subscribers",
+                &cfg.aggregation_subscribers,
+            ),
+            (
+                "aggregation/publishers",
+                "--aggregation-publishers",
+                &cfg.aggregation_publishers,
+            ),
+        ] {
+            if !named(key) {
+                continue;
+            }
+            if list.is_empty() {
+                exp.record(key, KeyEffect::AlreadyTheBehaviour);
+                continue;
+            }
+            let blocked = no_sink(key).or_else(|| {
+                (run_flag == Some("--router-hat")).then_some(KeyEffect::WithheldFromThisRun(
+                    "a declaration of its own (a --router-hat declares none)",
+                ))
+            });
+            let text = wz::runtime_tokio::json5::Json5Value::Array(
+                list.iter()
+                    .map(|member| wz::runtime_tokio::json5::Json5Value::String(member.clone()))
+                    .collect(),
+            )
+            .to_json5_text();
+            exp.pair(key, flag, text, blocked);
+        }
+    }
     // The run-mode the expanded argv runs, typed or selected by the file, and,
     // when it is a single-session run that cannot host the admin space a
     // document enables, the verdict its admin keys get instead of a flag it
@@ -3845,6 +3917,28 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          wz_storage_host_from_config_alone.rs, starts it on the file with no run \
          flag at all.",
     ),
+    // The aggregates are carried by the declarations themselves: the key a
+    // `DeclSubscriber` and a subscribers `Interest` name, and how many of them go.
+    (
+        "aggregation/subscribers",
+        KIND_NOT_YET_READ,
+        "expands to `--aggregation-subscribers <list>`. A frame DOES carry it: the \
+         DeclSubscriber a subscriber under an aggregate sends names the aggregate, \
+         and the subscribers under it send one between them \
+         (`zenoh/src/api/session.rs` @ `.aggregated_subscribers`). The session's \
+         own count is judged by subscribers_under_one_aggregate_put_one_declaration_on_the_wire; \
+         no leg reads a CONFIG-sourced aggregate off a node's frame yet.",
+    ),
+    (
+        "aggregation/publishers",
+        KIND_NOT_YET_READ,
+        "expands to `--aggregation-publishers <list>`. A frame DOES carry it: the \
+         subscribers Interest a publisher under an aggregate sends names the \
+         aggregate, one for all of them \
+         (`zenoh/src/api/session.rs` @ `.aggregated_publishers`). The session's own count is judged by \
+         publishers_under_one_aggregate_ask_with_one_interest; no leg reads a \
+         CONFIG-sourced aggregate off a node's frame yet.",
+    ),
     // Which library a plugin named without a `__path__` loads from: a search of
     // the file system, which no frame carries.
     (
@@ -4064,6 +4158,14 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // which a build loading no library plugin does not have.
     if !cfg!(all(unix, feature = "plugin-dynamic-loading")) {
         out.push("plugins_loading/search_dirs");
+    }
+    // The aggregates' sink is every session's declare, which a build without the inclusion test
+    // they are applied by does not have; this crate reads that off the runtime rather than
+    // naming the runtime's feature, which it does not declare.
+    for key in ["aggregation/subscribers", "aggregation/publishers"] {
+        if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
+            out.push(key);
+        }
     }
     // §5.23 `adminspace-core` — `metadata`'s sink is an adminspace host's
     // `local_data`, and this binary has four: `--peer` (`routing-peer`),
@@ -5834,6 +5936,20 @@ mod stock_config_tests {
                 "plugins_loading/search_dirs",
                 r#"{ mode: "peer" }"#,
                 r#"{ mode: "peer", plugins_loading: { search_dirs: ["/opt/wz/plugins"] } }"#,
+            ),
+            // One aggregate each, which an empty list (the default) is not. A client
+            // document makes the run the one-shot client, which every build compiles.
+            (
+                "aggregation/subscribers",
+                r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] } }"#,
+                r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] },
+                     aggregation: { subscribers: ["demo/**"] } }"#,
+            ),
+            (
+                "aggregation/publishers",
+                r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] } }"#,
+                r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] },
+                     aggregation: { publishers: ["demo/**"] } }"#,
             ),
         ]
     }
@@ -9668,6 +9784,9 @@ pub(crate) struct PublisherSpec {
 /// `Session::declare_{subscriber, queryable}` path (R311ou / R311ow), handled
 /// in `install_session_handles` rather than the raw `send_declare_*` emit here.
 pub(crate) struct DeclareEmitSpec {
+    /// `--aggregation-subscribers` / `--aggregation-publishers`: the aggregates the session
+    /// declares its subscribers and publishers under ([`declaration_aggregation_flags`]).
+    pub(crate) aggregation: wz::runtime_tokio::declaration_aggregation::DeclarationAggregation,
     pub(crate) token_keyexpr: Option<String>,
     /// R280 — optional `--liveliness-subscribe <keyexpr>` payload.
     /// When `Some`, the demo calls
@@ -10303,6 +10422,62 @@ mod gateway_south_flag_tests {
         ] {
             let err = parse_gateway_south(&argv(Some(bad))).expect_err(bad);
             assert!(err.starts_with("--gateway-south "), "{bad} -> {err}");
+        }
+    }
+}
+
+/// `--aggregation-subscribers` / `--aggregation-publishers`: absent is no
+/// aggregate, a list is read in order where the build can apply it, and a list
+/// that is not one of key expressions is refused with the flag named.
+#[cfg(test)]
+mod aggregation_flag_tests {
+    use super::*;
+    use wz::runtime_tokio::declaration_aggregation::DeclarationAggregation;
+
+    fn argv(pairs: &[(&str, &str)]) -> Vec<String> {
+        let mut out = vec!["--connect".to_string(), "tcp/127.0.0.1:7447".to_string()];
+        for (flag, value) in pairs {
+            out.push(flag.to_string());
+            out.push(value.to_string());
+        }
+        out
+    }
+
+    #[test]
+    fn absent_flags_aggregate_nothing() {
+        assert_eq!(
+            declaration_aggregation_flags(&argv(&[])),
+            Ok(DeclarationAggregation::none())
+        );
+    }
+
+    #[test]
+    fn the_two_lists_reach_the_aggregation_the_build_can_hold() {
+        let read = declaration_aggregation_flags(&argv(&[
+            ("--aggregation-subscribers", r#"["demo/a/**", "demo/**"]"#),
+            ("--aggregation-publishers", r#"["s/*/t"]"#),
+        ]));
+        let held = DeclarationAggregation::new(
+            vec![String::from("demo/a/**"), String::from("demo/**")],
+            vec![String::from("s/*/t")],
+        );
+        match held {
+            Ok(held) => assert_eq!(read, Ok(held)),
+            // A build without the inclusion test refuses the lists by the flags.
+            Err(_) => assert!(read.unwrap_err().starts_with("--aggregation-subscribers")),
+        }
+    }
+
+    #[test]
+    fn a_list_that_is_not_one_of_key_expressions_is_refused_by_the_flag() {
+        for (flag, bad) in [
+            ("--aggregation-subscribers", r#""demo/**""#),
+            ("--aggregation-subscribers", "[3]"),
+            ("--aggregation-publishers", r#"["demo//x"]"#),
+            ("--aggregation-publishers", "[ \"a\""),
+        ] {
+            let err = declaration_aggregation_flags(&argv(&[(flag, bad)])).expect_err(bad);
+            assert!(err.starts_with("--aggregation-"), "{bad} -> {err}");
         }
     }
 }

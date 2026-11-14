@@ -223,6 +223,14 @@ pub(crate) fn print_usage() {
     eprintln!("    --metadata <json5>       free-form value this node's adminspace serves as");
     eprintln!("                             the `metadata` field of @/<zid>/<whatami>, in every");
     eprintln!("                             run-mode that hosts an adminspace. zenoh metadata");
+    eprintln!("    --aggregation-subscribers <json5>");
+    eprintln!("                             a list of key expressions: a subscriber whose key one");
+    eprintln!("                             includes is declared as the first that does, one");
+    eprintln!("                             declaration for every subscriber under it.");
+    eprintln!("                             zenoh aggregation/subscribers");
+    eprintln!("    --aggregation-publishers <json5>");
+    eprintln!("                             the same for the subscribers interest a publisher");
+    eprintln!("                             asks with. zenoh aggregation/publishers");
     eprintln!("    --plugin-search-dirs <json5>");
     eprintln!("                             the directories a --storage-host searches, in order,");
     eprintln!("                             for a plugin its plugins section names without a");

@@ -3425,6 +3425,9 @@ pub(crate) async fn run_demo(
     // entry of the map applies.
     let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(session_clock))
         .with_timestamping(timestamping.map_for(node_whatami));
+    // `aggregation/{subscribers,publishers}`: set before the first declaration
+    // below, since a declaration keeps the key it was made under.
+    session.set_declaration_aggregation(declare_spec.aggregation.clone());
 
     // Read the matching knob BEFORE `publisher_spec` moves into spawn_tasks.
     //
@@ -4214,6 +4217,10 @@ pub(crate) struct PeerOpts {
     pub as_client: bool,
     pub publish_key: Option<String>,
     pub subscribe_key: Option<String>,
+    /// `--aggregation-subscribers` / `--aggregation-publishers`: the node's own subscriber and
+    /// publisher are declared under the aggregate that includes their key, as a session of
+    /// upstream declares them ([`wz::runtime_tokio::declaration_aggregation`]).
+    pub aggregation: wz::runtime_tokio::declaration_aggregation::DeclarationAggregation,
     pub unsubscribe_after_data: bool,
     /// Gossip-autoconnect opt-in AND its tie-break, in one field so the two
     /// cannot disagree: `None` = the peer dials only its static `--connect`
@@ -4661,7 +4668,10 @@ async fn run_peer_until(
     if let Some(key) = publish_key {
         // The number of that interest: one per publisher.
         const PUBLISH_INTEREST_ID: u64 = 1;
-        forwarder.declare_local_interest(PUBLISH_INTEREST_ID, key, false);
+        // Under `aggregation/publishers` the interest names the aggregate that
+        // includes the key, as upstream's session asks.
+        let asked = opts.aggregation.publisher_aggregate(key).unwrap_or(key);
+        forwarder.declare_local_interest(PUBLISH_INTEREST_ID, asked, false);
     }
     // R311y512 — `--interest-timeout <ms>` (zenoh `routing.interests.timeout`): how long an
     // interest this node BROKERS to a gateway waits for that gateway's final before the sweep
@@ -5708,17 +5718,28 @@ async fn run_peer_until(
                 // peer that joins after the retraction never held the interest, so
                 // a retraction needs no re-advertise).
                 if let Some(key) = subscribe_key {
+                    // Under `aggregation/subscribers` the node declares the aggregate
+                    // that includes the key, as upstream's session declares it, and
+                    // retracts the same. The callback counts nothing, so what the
+                    // aggregate brings beyond the key needs no filtering here.
+                    let declared_key = opts.aggregation.subscriber_aggregate(key).unwrap_or(key);
                     if unsubscribe_after_data && forwarder.data_seen() > 0 {
                         if !undeclared {
                             undeclared = true;
-                            forwarder.unregister_local_subscriber(key);
+                            forwarder.unregister_local_subscriber(declared_key);
                         }
                     } else if !declared {
                         declared = true;
                         // A declaration is its callback, as the pin's session has it
                         // (`docs/peer-region-hats.md`, section 12): the demo counts what
                         // arrives through `data_seen`, so the callback does nothing.
-                        forwarder.register_local_subscriber(key, Box::new(|_| {}));
+                        forwarder.register_local_subscriber(declared_key, Box::new(|_| {}));
+                        if declared_key != key {
+                            log::info!(
+                                "wz-ap-demo peer: subscriber {key} declared as aggregate \
+                                 {declared_key}"
+                            );
+                        }
                         // A deterministic barrier for an admin-introspection querier:
                         // the sub is now in `forwarder.subs`, and the introspection
                         // buffer is re-snapshotted at the end of THIS tick (below), so a
@@ -8477,6 +8498,9 @@ pub(crate) struct StorageHostOpts {
     /// `--plugin-search-dirs <list>`: where a plugin the section names without
     /// a `__path__` is searched for. `None` searches upstream's default list.
     pub plugin_search_dirs: Option<wz::runtime_tokio::plugin_search_dirs::LibSearchDirs>,
+    /// `--aggregation-subscribers` / `--aggregation-publishers`: what each client session's
+    /// storages declare their subscribers under.
+    pub aggregation: wz::runtime_tokio::declaration_aggregation::DeclarationAggregation,
     /// `--batch-size` / `--lease-ms`.
     pub tuning: TransportTuning,
 }
@@ -8496,6 +8520,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         config_write_permit,
         plugins: startup_plugins,
         plugin_search_dirs,
+        aggregation,
         metadata,
         tuning,
     } = opts;
@@ -8960,6 +8985,10 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
             )),
             Arc::new(session_clock),
         );
+        // The storages this session will host declare their subscribers under
+        // the node's aggregates, as the storage manager's do on upstream's
+        // runtime session.
+        session.set_declaration_aggregation(aggregation.clone());
 
         // ── admin GET queryable (Send+'static: captures storage_started + Strings) ──
         // Mirrors run_peer's --config-queryable handler (runner.rs answer path) but
@@ -10248,6 +10277,7 @@ mod peer_quic_cert_tests {
             as_client: false,
             publish_key: None,
             subscribe_key: None,
+            aggregation: wz::runtime_tokio::declaration_aggregation::DeclarationAggregation::none(),
             unsubscribe_after_data: false,
             autoconnect: None,
             full_linkstate: true,
@@ -10387,6 +10417,7 @@ mod peer_failfast_tests {
             as_client: false,
             publish_key: None,
             subscribe_key: None,
+            aggregation: wz::runtime_tokio::declaration_aggregation::DeclarationAggregation::none(),
             unsubscribe_after_data: false,
             autoconnect: None,
             full_linkstate: true,

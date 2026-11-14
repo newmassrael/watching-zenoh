@@ -1205,6 +1205,12 @@ pub mod plugins_config;
 ))]
 pub mod plugin_plane;
 
+/// `aggregation/{subscribers,publishers}`: the key expressions a session
+/// declares its subscribers and publishers under, one declaration per aggregate.
+/// Held in every build; a build without `keyexpr-includes` refuses a non-empty
+/// list, having no inclusion test to apply it with.
+pub mod declaration_aggregation;
+
 /// `plugins_loading/search_dirs`: the directories a plugin named without a
 /// `__path__` is searched for in, and the file name it is searched for by. Plain
 /// data and file-system reads, so the config reader holds it in every build and

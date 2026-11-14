@@ -336,6 +336,18 @@ fn demo_main() -> ExitCode {
         }
     };
 
+    // `--aggregation-subscribers` / `--aggregation-publishers`, read ONCE for
+    // the same reason: the session of a single-session run and the local
+    // declarations of a peer node declare under the same aggregates, and a list
+    // this build cannot apply stops the node rather than starting it without.
+    let aggregation = match crate::args::declaration_aggregation_flags(rest) {
+        Ok(aggregation) => aggregation,
+        Err(message) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+    };
+
     // R2112 (open-debt items 102 + 210) — `--timestamping <true|false>`, read
     // ONCE beside the tuning above and for the same reason: it is a NODE-scoped
     // policy, so every run mode must resolve one answer, and a malformed value
@@ -938,6 +950,7 @@ fn demo_main() -> ExitCode {
                     as_client,
                     publish_key,
                     subscribe_key,
+                    aggregation: aggregation.clone(),
                     unsubscribe_after_data,
                     autoconnect,
                     full_linkstate,
@@ -1416,6 +1429,7 @@ fn demo_main() -> ExitCode {
                     // `--config` file's `plugins` key expands to.
                     plugins: parse_pair(rest, "--plugins"),
                     plugin_search_dirs,
+                    aggregation: aggregation.clone(),
                     // §5.23 `adminspace-core` — the one value read above.
                     metadata: metadata.clone(),
                     tuning,
@@ -2757,6 +2771,7 @@ fn demo_main() -> ExitCode {
     }
 
     let declare_spec = DeclareEmitSpec {
+        aggregation,
         token_keyexpr: declare_token_opt,
         liveliness_subscriber_keyexpr: liveliness_subscribe_opt,
         liveliness_subscriber_history: liveliness_subscribe_history,

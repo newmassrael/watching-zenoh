@@ -1200,6 +1200,16 @@ where
     /// forwarders already hold two chains apiece.
     #[cfg(feature = "access-acl")]
     interceptors_ingress: Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
+    /// `aggregation/{subscribers,publishers}`: the keys this session declares its subscribers and
+    /// publishers under ([`crate::declaration_aggregation`]). SHARED on a fork: the handles of a
+    /// session are one participant, and one that declared under another aggregation would split
+    /// a declaration the other still stands on.
+    aggregation: Arc<std::sync::RwLock<crate::declaration_aggregation::DeclarationAggregation>>,
+    /// The one subscriber declaration each aggregate stands for on the wire, and how many of this
+    /// session's subscribers stand on it. SHARED on a fork for the reason the matching refcount
+    /// is: a copy would retract a declaration another handle's subscribers still hold.
+    #[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+    aggregated_subscribers: Arc<std::sync::Mutex<AggregatedSubscriberTable>>,
     // R2708 (item 785) — the buffered registry used to live HERE, on the
     // handle, and that placement was the defect: the drive loop never holds a
     // `Session`, so the only route from a registration to the loop was a stage
@@ -1360,6 +1370,30 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// the same key.
     pub fn is_same_session(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Declare this session's subscribers and publishers under `aggregation`, as a session of
+    /// upstream opened with `aggregation/subscribers` and `aggregation/publishers` declares them
+    /// ([`crate::declaration_aggregation`]). A declaration already made keeps the key it was made
+    /// under, so a host sets this before it declares.
+    pub fn set_declaration_aggregation(
+        &self,
+        aggregation: crate::declaration_aggregation::DeclarationAggregation,
+    ) {
+        *self
+            .aggregation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = aggregation;
+    }
+
+    /// The aggregation this session declares under ([`Self::set_declaration_aggregation`]).
+    pub fn declaration_aggregation(
+        &self,
+    ) -> crate::declaration_aggregation::DeclarationAggregation {
+        self.aggregation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// How many handles share this session. Test-facing: it is how a leak is
@@ -1524,8 +1558,54 @@ where
             put_route: self.put_route.clone(),
             #[cfg(feature = "access-acl")]
             interceptors_ingress: self.interceptors_ingress.clone(),
+            aggregation: self.aggregation.clone(),
+            #[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+            aggregated_subscribers: self.aggregated_subscribers.clone(),
         }
     }
+}
+
+/// The subscriber declarations a session shares between the subscribers an aggregate holds,
+/// keyed by the aggregate.
+#[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+type AggregatedSubscriberTable = std::collections::HashMap<String, AggregatedSubscriber>;
+
+/// One aggregate's declaration: how many subscribers stand on it, and the retraction its first
+/// subscriber's announce returned.
+#[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+struct AggregatedSubscriber {
+    holders: usize,
+    /// `None` while the first holder is still putting the declaration on the wire.
+    retraction: Option<SubscriberRetraction>,
+}
+
+/// The retraction one subscriber under `aggregate` holds: it leaves the shared declaration, and
+/// the last to leave retracts it. The table's lock is released before the declaration's own
+/// retraction runs, which is called under the observer lock by a subscriber's teardown and must
+/// not be called holding a lock a declare takes before the observer.
+#[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+fn leave_aggregated_subscriber(
+    table: Arc<std::sync::Mutex<AggregatedSubscriberTable>>,
+    aggregate: String,
+) -> SubscriberRetraction {
+    Box::new(move || {
+        let last = {
+            let mut held = table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(entry) = held.get_mut(&aggregate) else {
+                return;
+            };
+            if entry.holders > 1 {
+                entry.holders -= 1;
+                return;
+            }
+            held.remove(&aggregate).and_then(|entry| entry.retraction)
+        };
+        if let Some(mut retract) = last {
+            retract();
+        }
+    })
 }
 
 /// R2702 — the per-message [`InterceptorContext`] for a SESSION's own egress,
@@ -3349,6 +3429,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
             )),
+            aggregation: Arc::new(std::sync::RwLock::new(
+                crate::declaration_aggregation::DeclarationAggregation::none(),
+            )),
+            #[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+            aggregated_subscribers: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 
@@ -4006,6 +4093,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             #[cfg(feature = "access-acl")]
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
+            )),
+            aggregation: Arc::new(std::sync::RwLock::new(
+                crate::declaration_aggregation::DeclarationAggregation::none(),
+            )),
+            #[cfg(all(feature = "transport-unicast", feature = "declare-subscriber"))]
+            aggregated_subscribers: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
             )),
         });
         // Forward the zid into the subscriber registry so wire-arrived
@@ -6543,13 +6637,33 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // read a registry nobody had been asked to fill. Refcounted by keyexpr
         // (see the `matching_interests` field doc) because `Publisher` is
         // `Clone`.
+        //
+        // Under `aggregation/publishers` the interest names the aggregate that
+        // includes the key, and every publisher under it shares the one
+        // interest (`zenoh/src/api/session.rs` @ `.aggregated_publishers`).
         #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-        self.acquire_matching_interest(MatchingPlane::Subscribers, &keyexpr);
+        let interest_key = self.publisher_interest_key(&keyexpr);
+        #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+        self.acquire_matching_interest(MatchingPlane::Subscribers, &interest_key);
         Publisher {
             session: self.clone(),
             keyexpr,
             options,
+            #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+            interest_key,
         }
+    }
+
+    /// The key a publisher on `keyexpr` asks for subscribers on: the first publisher aggregate
+    /// that includes it, else the key itself.
+    #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+    pub(crate) fn publisher_interest_key(&self, keyexpr: &str) -> String {
+        self.aggregation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .publisher_aggregate(keyexpr)
+            .unwrap_or(keyexpr)
+            .to_string()
     }
 
     /// R2577 — take a reference on this keyexpr's matching Interest, emitting
@@ -7878,7 +7992,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         } else {
             suffix
         };
-        let retraction = match self.announce_subscriber(id, mapping_id, wire_suffix, &options) {
+        let retraction = match self.announce_subscriber_aggregated(
+            id,
+            &keyexpr_string,
+            mapping_id,
+            wire_suffix,
+            &options,
+        ) {
             Ok(retraction) => retraction,
             Err(e) => {
                 // pico parity (`_z_register_subscriber`, primitives.c:243): roll
@@ -7902,6 +8022,106 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             armed: true,
             retraction,
         })
+    }
+
+    /// [`Self::announce_subscriber`] under this session's aggregation: a subscriber on `literal`
+    /// that an aggregate includes is announced as the aggregate, by the first subscriber under it
+    /// and by no later one, and the declaration is retracted with the last
+    /// ([`crate::declaration_aggregation`]). A subscriber no aggregate includes, and one local to
+    /// the session, is announced as before.
+    fn announce_subscriber_aggregated(
+        &self,
+        id: SubscriptionId,
+        literal: &str,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        options: &SubscribeOptions,
+    ) -> Result<Option<SubscriberRetraction>, SubscribeAliasError>
+    where
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
+        T: 'static,
+    {
+        #[cfg(feature = "declare-subscriber")]
+        if options.allowed_origin.allows_remote() {
+            let aggregate = self
+                .aggregation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .subscriber_aggregate(literal)
+                .map(String::from);
+            if let Some(aggregate) = aggregate {
+                return self.join_aggregated_subscriber(id, aggregate, options);
+            }
+        }
+        #[cfg(not(feature = "declare-subscriber"))]
+        let _ = literal;
+        self.announce_subscriber(id, mapping_id, suffix, options)
+    }
+
+    /// Stand subscriber `id` on `aggregate`'s declaration, making it when no subscriber of this
+    /// session stands on it yet. The table's lock is not held across the announce: sending takes
+    /// the observer lock in a build with an egress policy, and a teardown holds the observer when
+    /// it leaves the table.
+    #[cfg(feature = "declare-subscriber")]
+    fn join_aggregated_subscriber(
+        &self,
+        id: SubscriptionId,
+        aggregate: String,
+        options: &SubscribeOptions,
+    ) -> Result<Option<SubscriberRetraction>, SubscribeAliasError>
+    where
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
+        T: 'static,
+    {
+        let first = {
+            let mut held = self
+                .aggregated_subscribers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match held.get_mut(&aggregate) {
+                Some(entry) => {
+                    entry.holders += 1;
+                    false
+                }
+                None => {
+                    held.insert(
+                        aggregate.clone(),
+                        AggregatedSubscriber {
+                            holders: 1,
+                            retraction: None,
+                        },
+                    );
+                    true
+                }
+            }
+        };
+        let leave =
+            leave_aggregated_subscriber(self.aggregated_subscribers.clone(), aggregate.clone());
+        if !first {
+            return Ok(Some(leave));
+        }
+        let announced = self.announce_subscriber(id, 0, Some(&aggregate), options);
+        let mut held = self
+            .aggregated_subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match announced {
+            Ok(Some(retraction)) => {
+                // This subscriber still holds the entry, so no leave can have removed it.
+                if let Some(entry) = held.get_mut(&aggregate) {
+                    entry.retraction = Some(retraction);
+                }
+                Ok(Some(leave))
+            }
+            // Nothing stands on the wire for the aggregate, so the entry goes and the next
+            // subscriber under it announces again; one that joined meanwhile leaves nothing.
+            other => {
+                held.remove(&aggregate);
+                other
+            }
+        }
     }
 
     /// R311ou — the wire-announce half of [`Self::declare_subscriber`] (pico
