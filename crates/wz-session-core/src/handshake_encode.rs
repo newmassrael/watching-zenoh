@@ -386,7 +386,17 @@ pub fn encode_open_into(
 /// the document derives Z from the chain it is handed, and this half is handed
 /// none. A, T and the message id are the document's own derivation of the body
 /// ([`open_head_byte`]).
-#[cfg(feature = "codec-open-body")]
+// Its callers: the lend-only Open send in `session_actions`, whose gate this
+// carries, and the test that holds its two halves to the Open written whole.
+#[cfg(any(
+    all(
+        feature = "tx-lend-only",
+        feature = "session-unicast",
+        feature = "codec-open-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ),
+    all(test, feature = "codec-init-body", feature = "codec-open-body")
+))]
 pub(crate) fn encode_open_head_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
     params: &SessionInitParams,
@@ -402,7 +412,15 @@ pub(crate) fn encode_open_head_into(
 
 /// The header byte of the head [`encode_open_head_into`] writes: what
 /// `transport_open` would write for `message` with a chain when `has_ext`.
-#[cfg(feature = "codec-open-body")]
+#[cfg(any(
+    all(
+        feature = "tx-lend-only",
+        feature = "session-unicast",
+        feature = "codec-open-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ),
+    all(test, feature = "codec-init-body", feature = "codec-open-body")
+))]
 fn open_head_byte(message: &OpenMessage<'_, '_>, has_ext: bool) -> u8 {
     let mut header = TransportOpenSource::header(message);
     if wz_codecs::open_body::OpenBodyWire::input_a(&message.body) {
@@ -474,7 +492,7 @@ impl TransportOpenSource for OpenMessage<'_, '_> {
 }
 
 /// The Open message [`encode_open_into`] writes, and whose head
-/// [`encode_open_head_into`] writes and `open_head_len` counts.
+/// `encode_open_head_into` writes and `open_head_len` counts.
 /// `LengthOutOfRange` for a cookie past the protocol's `u32` length.
 #[cfg(feature = "codec-open-body")]
 fn open_message<'p, 'e>(
