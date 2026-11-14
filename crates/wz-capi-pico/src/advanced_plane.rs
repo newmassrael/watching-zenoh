@@ -42,8 +42,9 @@ use crate::write_filter::PicoSession;
 /// The plane of one pico session.
 pub(crate) struct PicoPlane {
     session: PicoSession,
-    /// The session's own clock: the plane's stamps come from it, as pico's do
-    /// from the session's ([`crate::session_ext::PicoSessionExt::new`]).
+    /// The session's own clock ([`crate::session_ext::PicoSessionExt::new`]): it
+    /// proposes the plane's stamps, which the session's times then order
+    /// ([`AdvancedPublisherPlane::order_stamp`]).
     hlc: NodeHlc,
     /// What the advanced publisher's own publisher is declared with: the
     /// `publisher_options` the program embedded in its advanced options, which
@@ -119,6 +120,14 @@ impl AdvancedPublisherPlane for PicoPlane {
     /// program pico runs.
     fn stamps(&self) -> bool {
         true
+    }
+
+    /// The session's next time, as pico's advanced publisher stamps each sample with the
+    /// session's `z_timestamp_new` (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+    /// `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`):
+    /// a sample's time and a program's are one strictly increasing sequence of the session.
+    fn order_stamp(&self, proposed: u64) -> u64 {
+        self.session.time.order_data_stamp(proposed)
     }
 
     fn declare_publisher(
@@ -251,6 +260,7 @@ mod tests {
                 engine: shared.as_engine(),
                 mode: WhatAmI::Peer,
                 hlc: NodeHlc::default(),
+                time: crate::last_timestamp::SessionTime::new(),
             },
             PublisherQos::pico_default(),
         );

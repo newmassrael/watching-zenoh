@@ -30,9 +30,12 @@
 /// (`wz_ext_clock_source_register`), `z_timestamp_new` gives a program the clock's time whatever
 /// the clock's standing, and the `clock-quality-stamping` policy holds back only the data the node
 /// stamps; at 1 a `trusted-only` build gave a program no time until the clock was reported trusted.
-/// Also at 2, one session's `z_timestamp_new` stamps strictly increase whichever clock they are read
-/// from, so a stamp made after a registered clock ahead of the system clock is removed goes on from
-/// the last one given; at 1 it was the system clock's reading.
+/// Also at 2, every time one session gives strictly increases, whichever clock it is read from and
+/// whether a program asks for it (`z_timestamp_new`) or the session's advanced publisher stamps a
+/// sample with it: one last time given per session, which the session's node clock learns. So a
+/// stamp made after a registered clock ahead of the system clock is removed goes on from the last
+/// one given, and a sample is never stamped at or before a time a program was given; at 1 the
+/// first was the system clock's reading and the two were not ordered against each other.
 pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 2;
 
 wz_abi_stamp::stamp!(

@@ -89,8 +89,8 @@ pub unsafe extern "C" fn wz_ext_clock_source_register(
 /// After it returns the library no longer calls the callback, and the program may release the
 /// context. A call already running on another thread may still be inside the callback. With no
 /// clock left registered, `z_timestamp_new` reads the system clock again; a session's stamps still
-/// never go back, so while the system clock is behind the last stamp a session gave, its stamps go
-/// on from that one.
+/// never go back, so while the system clock is behind the last stamp a session gave (to a program
+/// or to a sample of its advanced publisher), its stamps go on from that one.
 #[no_mangle]
 pub extern "C" fn wz_ext_clock_source_unregister(handle: u32) -> ZResult {
     crate::ffi::guarded(|| match clock::unregister(handle) {
