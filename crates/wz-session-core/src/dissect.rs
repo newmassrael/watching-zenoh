@@ -1020,7 +1020,7 @@ fn walk_ext_entry_head(
 /// | `query_body` | [`crate::query_value_ext::encode_query_value_ext_body`] |
 /// | `wire_expr` | [`crate::declare_ext_keyexpr::build_ext_keyexpr`] |
 /// | `timestamp` | the generated `Timestamp` codec, via [`walk_timestamp`] |
-/// | `qos` (Join) | `crate::multicast_join::write_join_qos_ext` |
+/// | `qos` (Join) | `crate::multicast_join::qos_sns` |
 /// | `shm` (Init) | `crate::extshm::encode_shm_init_syn_body` / `..._ack_body` |
 ///
 /// | `auth` (Init / Open) | `crate::auth_dispatch::AuthDispatch::mux`, via [`walk_auth_body`] |
@@ -1038,7 +1038,7 @@ fn walk_ext_entry_head(
 ///
 /// ⚠ R311y894 — that last reason used to cover THREE rows, and for two of them
 /// it was false. `Join`'s ZBuf `qos` has been written by
-/// `crate::multicast_join::write_join_qos_ext` since R311y227 and read back by
+/// `crate::multicast_join::qos_sns` since R311y227 and read back by
 /// `decode_join_qos`; the establishment `shm` has been written by
 /// `crate::extshm` for as long as `session-extshm` has existed. Both met the
 /// rule and were excluded anyway, so the most ordinary multicast question a
@@ -1803,7 +1803,7 @@ fn walk_pubkey_challenge_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, Code
 }
 
 /// `Join`'s mandatory ZBuf `qos` body — the per-priority next-SN table
-/// `crate::multicast_join::write_join_qos_ext` writes: `Priority::NUM`
+/// `crate::multicast_join::qos_sns` writes: `Priority::NUM`
 /// `(reliable, best_effort)` VLE pairs, `Control` (0) first, and nothing else.
 ///
 /// A code span rather than an intra-doc link, and the reason is the one
@@ -8355,7 +8355,7 @@ mod tests {
     // The module doc above listed this body among the three left opaque
     // because upstream "declares a layout this tree does not yet encode".
     // For `qos` that reason was FALSE, and the falsity is why the body
-    // stayed unread: `crate::multicast_join::write_join_qos_ext` has written
+    // stayed unread: `crate::multicast_join::qos_sns` has written
     // it since R311y227 and `decode_join_qos` reads it back, so the layout
     // has a producer HERE to be judged against — the very condition the
     // reason said was missing.
@@ -8382,7 +8382,7 @@ mod tests {
     ///
     /// The base body is the CODEC's own encode and the ext body is the
     /// tree's own VLE encoder, laid in the order
-    /// `crate::multicast_join::write_join_qos_ext` writes. `Z` is set on the
+    /// `crate::multicast_join::qos_sns` writes. `Z` is set on the
     /// transport header because the chain only exists when it is, and the
     /// ext header is `0x51` — id `0x1`, MANDATORY, ZBuf — which is the eid
     /// `crate::ext_name` matches on.
@@ -8988,7 +8988,7 @@ mod tests {
     ///
     /// R311y894 measured the cost of that gap. Two of the three rows the
     /// paragraph then carried had had producers for HUNDREDS of rounds --
-    /// `multicast_join::write_join_qos_ext` since R311y227 and
+    /// `multicast_join::qos_sns` since R311y227 and
     /// `extshm::encode_shm_init_*_body` for as long as `session-extshm` existed
     /// -- and both sat excluded under a reason that was already false. Nobody
     /// found it by running anything; someone read the code.

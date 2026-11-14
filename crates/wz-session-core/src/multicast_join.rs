@@ -33,8 +33,13 @@ use sce_forge_runtime::codec::SceCursor;
 use sce_forge_runtime::codec::SliceSink;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
-use sce_forge_runtime::codec::{CodecError, SceSink};
-use wz_codecs::join::{Join, JoinS};
+use sce_forge_runtime::codec::{Bounded, CodecError, SceSink};
+use wz_codecs::ext_entry::{ExtEntryParts, ExtEntryPartsBody};
+use wz_codecs::ext_unit::ExtUnitParts;
+use wz_codecs::ext_zbuf::ExtZbufParts;
+use wz_codecs::ext_zint::ExtZintParts;
+use wz_codecs::join::{Join, JoinParts, JoinS};
+use wz_codecs::transport_join::{TransportJoinParts, TransportJoinWire};
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 
@@ -48,12 +53,11 @@ use crate::sn::MulticastTxConduits;
 // R311y227 — the JOIN QoS-SN extension header byte: id `0x1` | M (mandatory,
 // `0x10`) | ENC_ZBUF (`0x40`) = `0x51` — byte-identical to zenoh-pico
 // `_Z_MSG_EXT_ID_JOIN_QOS` (protocol/ext.h:46) and zenoh's `join::ext::QoS::ID`.
-// A qos JOIN sets the transport-message `Z` header flag and appends this ZBUF ext
-// (`[0x51][VLE(len)][Priority::NUM * 2 VLE SNs]`) after the base body. The QoS ext
-// is emitted FIRST when a Patch ext follows it, matching pico's own order
-// (transport.c @ `_Z_MSG_EXT_ID_JOIN_QOS` before `_Z_MSG_EXT_ID_JOIN_PATCH`), and
-// carries the chain-MORE bit (`0x80`) exactly then — see [`write_join_qos_ext`].
-#[cfg(feature = "transport-qos")]
+// A qos JOIN carries this ZBUF ext (`[0x51][VLE(len)][Priority::NUM * 2 VLE SNs]`)
+// after the base body. The QoS ext is emitted FIRST when a Patch ext follows it,
+// matching pico's own order (transport.c @ `_Z_MSG_EXT_ID_JOIN_QOS` before
+// `_Z_MSG_EXT_ID_JOIN_PATCH`); the chain-MORE bit (`0x80`) it then carries, and the
+// header's `Z`, are the document's, from where the entry stands ([`join_chain`]).
 const JOIN_QOS_EXT_HEADER: u8 = crate::join_decode::JOIN_QOS_EXT_EID;
 /// The ext-id mask (`_Z_EXT_FULL_ID_MASK`, ext.h:30) — strips the chain-MORE bit
 /// so a chained (`0xD1`) and an un-chained (`0x51`) QoS ext compare equal.
@@ -72,21 +76,20 @@ const EXT_FULL_ID_MASK: u8 = 0x7F;
 /// with the comment "use the same id as Init"; and zenoh-pico
 /// `include/zenoh-pico/protocol/ext.h` @ `_Z_MSG_EXT_ID_JOIN_PATCH`, which
 /// spells the identical byte as `(0x07 | _Z_MSG_EXT_ENC_ZINT)`.
-#[cfg(feature = "transport-fragmentation")]
 const JOIN_PATCH_EXT_HEADER: u8 = crate::extpatch::PATCH_EXT_ID | crate::ext_header::EXT_ENC_Z64;
 
 /// Frame a multicast JOIN datagram for `params`:
 /// `[T_MID_JOIN][version][cbyte][zid][S: res-cbyte + batch][lease vle]`
-/// `[next_sn_r vle][next_sn_be vle]`.
+/// `[next_sn_r vle][next_sn_be vle][extension chain]`, written by the message's
+/// document (`sources/codecs/transport_join.scxml`) from the fields this states.
 ///
 /// R311kq — the S-flag optionals (`sn_res` resolution cbyte +
 /// `batch_size`) are present exactly when the config departs from the
 /// protocol defaults ([`MulticastParams::join_advertises_caps`], zenoh-pico
 /// `_z_t_msg_make_join` parity): an omitted optional is the wire statement
 /// "I run the protocol defaults", so a non-default config MUST advertise
-/// or every protocol-default peer would mis-read its caps. The body codec
-/// omits the MID byte, so header + S flag are prepended here (mirror of
-/// the tokio scouting glue's `scout_emit`).
+/// or every protocol-default peer would mis-read its caps. The `S` flag that
+/// announces them is the document's, from whether the body holds them.
 ///
 /// R311kr — a whole-second lease rides the wire in SECONDS under the
 /// `T` header flag ([`wire_const::FLAG_T_JOIN_T`]), pico `make_join`
@@ -99,11 +102,15 @@ const JOIN_PATCH_EXT_HEADER: u8 = crate::extpatch::PATCH_EXT_ID | crate::ext_hea
 /// A1c — the JOIN advertises the LIVE per-channel `next_sn` from `tx_sn`
 /// (the §3.2 `init_rx_seq` contract: receivers seed their RX baseline one
 /// before these, so the next data frame this node mints is admitted).
+///
+/// Panics when `params.zid` is empty, which [`MulticastParams::zid`] does not
+/// admit: the cbyte states the zid's length less one, so no Join carries an
+/// empty zid ([`encode_join_into`] refuses it).
 #[cfg(feature = "alloc")]
 pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec<u8> {
-    let mut dgram = Vec::with_capacity(Join::MAX_ENCODED_BYTES + 1);
+    let mut dgram = Vec::with_capacity(JOIN_MAX_BYTES);
     encode_join_into(params, tx_sn, &mut VecSink::new(&mut dgram))
-        .expect("VecSink is growable, so the JOIN never overflows it");
+        .expect("a zid of 1 to 16 bytes, and a VecSink grows, so the JOIN is written");
     // A group that compresses (`transport/multicast/compression/enabled`) carries its beacon as
     // every other datagram, a batch with the `BatchHeader` in front: upstream's link writes the
     // JOIN through the same batch as any transport message. The sink forms below write the bare
@@ -124,10 +131,12 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec
 /// [`encode_join`] is this over a `VecSink`, so the two cannot disagree about a
 /// byte, and the byte-for-byte pins against zenoh-pico (`layer3_join`,
 /// `layer3_join_qos`) hold for both. `MulticastTxConduits` and the params are read
-/// exactly as the owned form reads them. `CodecError::BufferOverflow` is the one
-/// refusal, from a sink too small for the datagram; nothing is truncated and
-/// nothing falls back to a heap. [`JOIN_MAX_BYTES`] is a bound that fits every
-/// datagram this function writes whatever the zid, QoS and patch settings.
+/// exactly as the owned form reads them. `CodecError::BufferOverflow` is the
+/// refusal of a sink too small for the datagram, and
+/// `CodecError::LengthOutOfRange` that of an empty zid, which no cbyte states;
+/// nothing is truncated and nothing falls back to a heap. [`JOIN_MAX_BYTES`] is a
+/// bound that fits every datagram this function writes whatever the zid, QoS and
+/// patch settings.
 ///
 /// It writes the bare JOIN whatever [`MulticastParams::compression`] says: the batch a
 /// compressing group beacons in is built by [`encode_join`], on a heap. A loop that holds no
@@ -140,26 +149,9 @@ pub fn encode_join_into<S: SceSink>(
 where
     CodecError: From<S::Error>,
 {
-    let zid = &params.zid;
-    let mut join = Join::new();
-    // The protocol's, not a parameter: see `MulticastParams`.
-    join.version = wz_codecs::wire_const::PROTOCOL_VERSION;
-    join.set_whatami(params.whatami.to_wire());
-    if !zid.is_empty() {
-        join.set_zid_len_m1((zid.len() - 1) as u8);
-        join.zid = sce_forge_runtime::codec::Bounded::new(zid.as_slice())
-            .ok_or(CodecError::LengthOutOfRange)?;
-    }
-    if params.join_advertises_caps() {
-        join.s = Some(JoinS {
-            sn_res: pack_res_cbyte(params.seq_num_res, params.req_id_res),
-            batch_size: params.batch_size,
-        });
-    }
     // R311ku — the unit projection SSOT (`crate::lease`) is shared with
     // the unicast OPEN encoder; both carry the same `_Z_FLAG_T_*_T` rule.
-    let (lease_in_seconds, wire_lease) = crate::lease::lease_to_wire(params.lease_ms);
-    join.lease = wire_lease;
+    let (lease_in_seconds, lease) = crate::lease::lease_to_wire(params.lease_ms);
     // A1c — the base `next_sn` is the DEFAULT (Data) conduit's LIVE SNs on a
     // non-qos beacon. R311y227 — a qos beacon writes the `{0, 0}` DECOY here
     // (zenoh `multicast/link.rs:487` sets `next_sn = PrioritySn::DEFAULT` when the
@@ -181,16 +173,25 @@ where
         default_conduit.next_reliable,
         default_conduit.next_best_effort,
     );
-    join.next_sn_reliable = base_r;
-    join.next_sn_best_effort = base_be;
-    let mut flags = if join.s.is_some() {
-        wire_const::FLAG_T_JOIN_S
-    } else {
-        0
+    let body = JoinParts {
+        // The protocol's, not a parameter: see `MulticastParams`.
+        version: wire_const::PROTOCOL_VERSION,
+        // The role in the low two bits; the zid's length above them is the
+        // document's, from the zid.
+        cbyte: params.whatami.to_wire(),
+        zid: crate::codec_owned::sent(params.zid.as_slice())?,
+        s: if params.join_advertises_caps() {
+            Some(JoinS {
+                sn_res: pack_res_cbyte(params.seq_num_res, params.req_id_res),
+                batch_size: params.batch_size,
+            })
+        } else {
+            None
+        },
+        lease,
+        next_sn_reliable: base_r,
+        next_sn_best_effort: base_be,
     };
-    if lease_in_seconds {
-        flags |= wire_const::FLAG_T_JOIN_T;
-    }
     // R2417 — this node's protocol PATCH level rides a JOIN transport extension
     // whenever it can emit the chain-boundary markers that level promises, which
     // on this transport is exactly `transport-fragmentation`: that feature is the
@@ -210,32 +211,41 @@ where
     // @ `ext_patch: PatchType::CURRENT`, a field of the `Join` its tx task
     // builds on every beacon interval.
     #[cfg(feature = "transport-fragmentation")]
-    let has_patch = crate::extpatch::CURRENT_PATCH != crate::extpatch::NO_PATCH;
+    let patch =
+        (crate::extpatch::CURRENT_PATCH != crate::extpatch::NO_PATCH).then_some(ExtZintParts {
+            value: u64::from(crate::extpatch::CURRENT_PATCH),
+        });
     #[cfg(not(feature = "transport-fragmentation"))]
-    let has_patch = false;
+    let patch: Option<ExtZintParts> = None;
     // R311y227 — the per-priority QoS-SN advertisement rides a JOIN transport
-    // extension, so the `Z` (extensions-follow) header bit is set when this node
-    // offers qos on the group. R2417 — a Patch ext sets it too, so a NON-qos
-    // beacon that carries only the patch level still announces its chain
-    // (pico: `if (next_sn._is_qos || has_patch) _Z_SET_FLAG(_Z_FLAG_T_Z)`).
+    // extension when this node offers qos on the group.
     #[cfg(feature = "transport-qos")]
-    let emits_qos_ext = params.is_qos;
+    let mut sns = [0u8; QOS_EXT_BODY_BYTES];
+    #[cfg(feature = "transport-qos")]
+    let qos = if params.is_qos {
+        Some(ExtZbufParts {
+            value: crate::codec_owned::sent(qos_sns(&mut sns, &tx_sn.advertise_per_priority())?)?,
+        })
+    } else {
+        None
+    };
     #[cfg(not(feature = "transport-qos"))]
-    let emits_qos_ext = false;
-    if emits_qos_ext || has_patch {
-        flags |= wire_const::FLAG_T_Z;
-    }
-    out.write_u8(flags | wire_const::T_MID_JOIN)?;
-    join.encode(out)?;
-    #[cfg(feature = "transport-qos")]
-    if emits_qos_ext {
-        write_join_qos_ext(out, &tx_sn.advertise_per_priority(), has_patch)?;
-    }
-    #[cfg(feature = "transport-fragmentation")]
-    if has_patch {
-        write_join_patch_ext(out, crate::extpatch::CURRENT_PATCH)?;
-    }
-    Ok(())
+    let qos: Option<ExtZbufParts<'_>> = None;
+    let (chain, entries) = join_chain(qos.as_ref(), patch.as_ref());
+    // `S` follows from the body and `Z` from the chain, so a NON-qos beacon that
+    // carries only the patch level still announces its chain (pico:
+    // `if (next_sn._is_qos || has_patch) _Z_SET_FLAG(_Z_FLAG_T_Z)`). `T` is the
+    // lease's unit, which no field carries, so it is stated here.
+    let message = TransportJoinParts {
+        header: if lease_in_seconds {
+            wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_T
+        } else {
+            wire_const::T_MID_JOIN
+        },
+        body: &body,
+        extensions: Bounded::new(&chain[..entries]),
+    };
+    Ok(TransportJoinWire::encode_source(&message, out)?)
 }
 
 /// [`encode_join_into`] over a byte slice the caller holds: how many of `out`'s
@@ -264,66 +274,73 @@ pub const JOIN_MAX_BYTES: usize = 1 + Join::MAX_ENCODED_BYTES + 2 + QOS_EXT_BODY
 /// each a VLE of at most nine bytes.
 const QOS_EXT_BODY_BYTES: usize = crate::qos::Priority::NUM * 2 * 9;
 
-/// R311y227 — append the JOIN QoS-SN extension: `[0x51][VLE(len)][NUM*2 VLE SNs]`
-/// (the zenoh `join::ext::QoS` / pico `_Z_MSG_EXT_ID_JOIN_QOS` ZBUF). The body is
-/// the LIVE per-priority `next_sn` each conduit will mint (`reliable` then
-/// `best_effort` per `Priority`, ascending), so a receiver seeds its per-priority
-/// RX baseline one before each. The ZBUF is VLE-length-prefixed
-/// ([`crate::vle::write_zbuf`], the Zenoh080 ZBuf framing / pico
-/// `_z_zsize_encode(len)`).
-///
-/// R2417 — `more` sets the chain-MORE bit ([`crate::ext_header::EXT_FLAG_Z`])
-/// when a Patch ext follows this one, which is pico's own construction:
-/// `_Z_MSG_EXT_ID_JOIN_QOS | _Z_MSG_EXT_MORE(has_patch)`
-/// (`src/protocol/codec/transport.c`). It is a PARAMETER rather than a second
-/// literal header constant because the bit is a property of this ext's POSITION
-/// in the chain, not of its identity — the same reason
-/// [`crate::ext_chain::encode_ext_chain`] patches it per position.
+/// R311y227 — the body of the JOIN QoS-SN extension (the zenoh `join::ext::QoS` /
+/// pico `_Z_MSG_EXT_ID_JOIN_QOS` ZBuf): the LIVE per-priority `next_sn` each
+/// conduit will mint (`reliable` then `best_effort` per `Priority`, ascending), so
+/// a receiver seeds its per-priority RX baseline one before each. Written into
+/// `body` and returned as the bytes it took; the ZBuf's length in front of them is
+/// the document's (`ext_zbuf.scxml`).
 #[cfg(feature = "transport-qos")]
-fn write_join_qos_ext<S: SceSink>(
-    out: &mut S,
+fn qos_sns<'b>(
+    body: &'b mut [u8; QOS_EXT_BODY_BYTES],
     conduits: &[crate::sn::TxSn; crate::qos::Priority::NUM],
-    more: bool,
-) -> Result<(), CodecError>
-where
-    CodecError: From<S::Error>,
-{
-    out.write_u8(if more {
-        JOIN_QOS_EXT_HEADER | crate::ext_header::EXT_FLAG_Z
-    } else {
-        JOIN_QOS_EXT_HEADER
-    })?;
-    // The body is length-prefixed and its length is only known once its SNs are
-    // written, so they are written into an array on the stack first: at the
-    // widest, `Priority::NUM * 2` VLEs of nine bytes.
-    let mut body = [0u8; QOS_EXT_BODY_BYTES];
-    let mut sns = SliceSink::new(&mut body);
-    for c in conduits.iter() {
-        sns.write_vle_u64(c.next_reliable)?;
-        sns.write_vle_u64(c.next_best_effort)?;
-    }
-    let len = sns.position();
-    // A ZBuf: a VLE length, then that many bytes (`crate::vle::write_zbuf`'s framing).
-    out.write_vle_u64(len as u64)?;
-    Ok(out.write_bytes(&body[..len])?)
+) -> Result<&'b [u8], CodecError> {
+    let len = {
+        let mut sns = SliceSink::new(&mut body[..]);
+        for c in conduits.iter() {
+            sns.write_vle_u64(c.next_reliable)?;
+            sns.write_vle_u64(c.next_best_effort)?;
+        }
+        sns.position()
+    };
+    Ok(&body[..len])
 }
 
-/// R2417 — append the JOIN Patch extension: `[0x27][VLE(level)]`, the LAST ext
-/// in the chain (so no chain-MORE bit), byte-identical to pico's
-/// `_z_uint8_encode(_Z_MSG_EXT_ID_JOIN_PATCH)` + `_z_zint64_encode(_patch)` and
-/// to zenoh's `zextz64!(0x7, false)` Z64 body.
+/// The extensions a Join carries at most: the QoS SNs and the patch level.
+const JOIN_EXT_ENTRIES: usize = 2;
+
+/// What the slots of [`join_chain`]'s array that hold no entry hold; never written.
+static NO_ENTRY_BODY: ExtUnitParts = ExtUnitParts {};
+
+/// The chain a beacon carries and how many of the array's slots it fills, in
+/// zenoh-pico's order (`src/protocol/codec/transport.c` @ `_Z_MSG_EXT_ID_JOIN_QOS`
+/// before `_Z_MSG_EXT_ID_JOIN_PATCH`): the QoS SNs, then the patch level.
 ///
-/// It is the TX half of the negotiation [`decode_join_patch`] reads back: the
-/// level says "my fragment chains carry `0x2 First` / `0x3 Drop`", which is why
-/// [`encode_join`] gates it on the feature that makes those markers reach the
-/// wire rather than on the one that reads them.
-#[cfg(feature = "transport-fragmentation")]
-fn write_join_patch_ext<S: SceSink>(out: &mut S, level: u8) -> Result<(), CodecError>
-where
-    CodecError: From<S::Error>,
-{
-    out.write_u8(JOIN_PATCH_EXT_HEADER)?;
-    Ok(out.write_vle_u64(u64::from(level))?)
+/// The chain-MORE bit of each entry is the document's, from where the entry
+/// stands (pico's `_Z_MSG_EXT_ID_JOIN_QOS | _Z_MSG_EXT_MORE(has_patch)`), so each
+/// header here is its extension's identity alone.
+///
+/// R2417 — the Patch entry, `[0x27][VLE(level)]`, is byte-identical to pico's
+/// `_z_uint8_encode(_Z_MSG_EXT_ID_JOIN_PATCH)` + `_z_zint64_encode(_patch)` and to
+/// zenoh's `zextz64!(0x7, false)` Z64 body. It is the TX half of the negotiation
+/// `decode_join_patch` reads back: the level says "my fragment chains carry
+/// `0x2 First` / `0x3 Drop`", which is why [`encode_join_into`] presents it on the
+/// feature that makes those markers reach the wire rather than on the one that
+/// reads them.
+fn join_chain<'e>(
+    qos: Option<&'e ExtZbufParts<'e>>,
+    patch: Option<&'e ExtZintParts>,
+) -> ([ExtEntryParts<'e>; JOIN_EXT_ENTRIES], usize) {
+    let mut chain = [ExtEntryParts {
+        header: 0,
+        body: ExtEntryPartsBody::CodecZenohExtUnit(&NO_ENTRY_BODY),
+    }; JOIN_EXT_ENTRIES];
+    let mut entries = 0;
+    if let Some(body) = qos {
+        chain[entries] = ExtEntryParts {
+            header: JOIN_QOS_EXT_HEADER,
+            body: ExtEntryPartsBody::CodecZenohExtZbuf(body),
+        };
+        entries += 1;
+    }
+    if let Some(body) = patch {
+        chain[entries] = ExtEntryParts {
+            header: JOIN_PATCH_EXT_HEADER,
+            body: ExtEntryPartsBody::CodecZenohExtZint(body),
+        };
+        entries += 1;
+    }
+    (chain, entries)
 }
 
 /// R2417 — the announcer's protocol PATCH level from a JOIN's extension chain,
@@ -776,6 +793,21 @@ mod tests {
             expected.extend_from_slice(&[0x27, 0x01]);
         }
         assert_eq!(encode_join(&p, &tx), expected);
+    }
+
+    /// A zid the cbyte cannot state is refused, not written: the cbyte holds the
+    /// zid's length less one, so an empty zid has none, and nothing reaches the
+    /// sink. A one-byte zid, the shortest there is, is written.
+    #[test]
+    fn a_join_of_no_zid_is_refused() {
+        let tx = MulticastTxConduits::new(sn::mask_from_res(0x02));
+        let mut slot = [0u8; JOIN_MAX_BYTES];
+        assert_eq!(
+            encode_join_into_slice(&params(&[]), &tx, &mut slot),
+            Err(CodecError::LengthOutOfRange)
+        );
+        let written = encode_join_into_slice(&params(&[0x01]), &tx, &mut slot).expect("written");
+        assert_eq!(decode_join_zid(&slot[..written]), Some(&[0x01u8][..]));
     }
 
     /// `encode_join` frames a JOIN whose MID is `T_MID_JOIN` and whose
