@@ -2299,9 +2299,10 @@ pub(crate) mod tests {
         for step in 0..40u64 {
             let at = Some(1_000 + step * 7);
             let pick = rng.below(10);
-            let open: Vec<u64> = (1..=6).filter(|rid| is_open[*rid as usize]).collect();
+            let open: Vec<wz_session_core::wire_id::RequestId> =
+                (1..=6).filter(|rid| is_open[*rid as usize]).collect();
             if pick <= 3 {
-                let rid = 1 + rng.below(6);
+                let rid = 1 + rng.below(6) as wz_session_core::wire_id::RequestId;
                 let at_key = key(keys[rng.below(3) as usize]);
                 let wire = match rng.below(3) {
                     0 => request_query(rid, at_key),
@@ -2322,7 +2323,11 @@ pub(crate) mod tests {
                 records.push((false, at, response_final(rid)));
                 roles.push(Role::Close);
             } else if pick == 8 {
-                records.push((false, at, response_final(90 + rng.below(5))));
+                records.push((
+                    false,
+                    at,
+                    response_final(90 + rng.below(5) as wz_session_core::wire_id::RequestId),
+                ));
                 roles.push(Role::Orphan);
             } else {
                 let at_key = key(keys[rng.below(3) as usize]);

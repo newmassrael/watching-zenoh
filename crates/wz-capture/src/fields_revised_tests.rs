@@ -394,7 +394,7 @@ fn without_revised(doc: &str) -> String {
 /// The record a session carries at step `i`: a put under the declared alias, a
 /// query, its answer and its close, in turn.
 fn record_at(i: u64) -> Vec<u8> {
-    let rid = i / 4 + 1;
+    let rid = wz_session_core::wire_id::RequestId::try_from(i / 4 + 1).expect("a step's rid fits");
     match i % 4 {
         0 => push(sender_space(7, None), &[i as u8; 24]),
         1 => request_query(rid, sender_space(0, Some("demo/q"))),

@@ -1642,11 +1642,12 @@ fn acl_admits_reply_egress<R: SessionRuntime, T: TimeSource>(
     if R::with_mutex_mut(chain_slot, |chain| chain.is_empty()) {
         return true;
     }
-    let no_peer = hashbrown::HashMap::new();
+    let no_peer: hashbrown::HashMap<wz_session_core::wire_id::ExprId, String> =
+        hashbrown::HashMap::new();
     let keyexpr = R::with_mutex_mut(&actions.outbound_mappings, |ours| {
         crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
             msg,
-            wz_session_core::wireexpr_resolve::MappingSpaces::with_own(ours, &no_peer),
+            wz_session_core::wireexpr_resolve::MappingSpaces::as_sent(ours, &no_peer),
         )
     });
     let ctx = SessionAclContext { actions, keyexpr };
@@ -2591,7 +2592,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     R::with_mutex_mut(&actions.outbound_mappings, |ours| {
                         crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
                             msg,
-                            wz_session_core::wireexpr_resolve::MappingSpaces::with_own(ours, &peer),
+                            wz_session_core::wireexpr_resolve::MappingSpaces::as_sent(ours, &peer),
                         )
                     })
                 }
@@ -3369,7 +3370,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                 #[cfg(feature = "access-acl-multicast")]
                 link: Arc::new(std::sync::OnceLock::new()),
                 #[cfg(feature = "query-get")]
-                request_ids: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                request_ids: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 #[cfg(feature = "query-get")]
                 membership: Arc::new(std::sync::OnceLock::new()),
                 #[cfg(all(

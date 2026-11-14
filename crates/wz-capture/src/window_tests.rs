@@ -96,6 +96,7 @@ fn window_of(doc: &str) -> (u64, u64) {
 fn capture(link: Link, queries: u64) -> Wire {
     let mut wire = Wire::new(link, true);
     for rid in 0..queries {
+        let rid = wz_session_core::wire_id::RequestId::try_from(rid).expect("a fixture's rid fits");
         wire.send(
             true,
             None,

@@ -1253,7 +1253,7 @@ mod tests {
     fn enc() -> Option<EncodingHint> {
         Some(EncodingHint {
             packed_id: (4 << 1) | 1,
-            schema: Some("utf-8".to_string()),
+            schema: Some(b"utf-8".to_vec()),
         })
     }
 

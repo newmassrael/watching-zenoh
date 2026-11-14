@@ -329,6 +329,10 @@ enum PeerSpaceRepr<'a> {
     /// The growable policy's plain map; a build with no allocator has none.
     #[cfg(feature = "alloc")]
     Map(&'a HashMap<u64, String>),
+    /// Our own table standing in the sender's half, for a message this node sends
+    /// ([`MappingSpaces::as_sent`]): it is keyed by the ids we allocate.
+    #[cfg(feature = "alloc")]
+    Ours(&'a HashMap<crate::wire_id::ExprId, String>),
     /// The static policy's bounded table.
     Table(&'a FixedIdMap<KeyText<Static>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
 }
@@ -357,6 +361,8 @@ impl<'a> PeerSpace<'a> {
         match self.0 {
             #[cfg(feature = "alloc")]
             PeerSpaceRepr::Map(map) => map.get(&key).map(String::as_str),
+            #[cfg(feature = "alloc")]
+            PeerSpaceRepr::Ours(map) => map.get(&id).map(String::as_str),
             PeerSpaceRepr::Table(table) => table.find(key).map(|text| text.as_str()),
         }
     }
@@ -378,6 +384,8 @@ impl<'a> PeerSpaceView<'a> {
         match self.0 .0 {
             #[cfg(feature = "alloc")]
             PeerSpaceRepr::Map(map) => map.len(),
+            #[cfg(feature = "alloc")]
+            PeerSpaceRepr::Ours(map) => map.len(),
             PeerSpaceRepr::Table(table) => table.count(),
         }
     }
@@ -433,6 +441,20 @@ impl<'a> MappingSpaces<'a> {
         Self {
             peer: PeerSpace::of_map(peer),
             own: Some(own),
+        }
+    }
+
+    /// The pair for a message this node SENDS: its `M=1` names the ids we declared
+    /// (`ours`, keyed by the `ExprId`s we allocate) and its `M=0` the ones the peer
+    /// declared (`theirs`), the reverse of a message received.
+    #[cfg(feature = "alloc")]
+    pub fn as_sent(
+        ours: &'a HashMap<crate::wire_id::ExprId, String>,
+        theirs: &'a dyn OwnMappingSpace,
+    ) -> Self {
+        Self {
+            peer: PeerSpace(PeerSpaceRepr::Ours(ours)),
+            own: Some(theirs),
         }
     }
 
@@ -1094,6 +1116,24 @@ mod mapping_bit_tests {
             Some("ours/space/temp"),
             "M=0 names OUR space -- reading the peer's would return \
              `peers/space/temp`, which is the wrong-space read",
+        );
+    }
+
+    /// A message this node sends reads the spaces the other way round: `M=1` names
+    /// the ids we declared, `M=0` the ones the peer did.
+    #[test]
+    fn a_sent_message_reads_its_mapping_bits_from_the_senders_side() {
+        let ours = own_space();
+        let mut theirs: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        theirs.insert(7, "theirs/space/temp".to_string());
+        let spaces = MappingSpaces::as_sent(&ours, &theirs);
+        assert_eq!(
+            resolve_wireexpr_in(&sender_mapped(7, None), spaces).as_deref(),
+            Some("ours/space/temp")
+        );
+        assert_eq!(
+            resolve_wireexpr_in(&receiver_mapped(7, None), spaces).as_deref(),
+            Some("theirs/space/temp")
         );
     }
 

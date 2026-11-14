@@ -223,7 +223,7 @@ pub enum QueryAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it). The wrapped value is the offending mapping id.
-    UnknownMapping(u64),
+    UnknownMapping(wz_session_core::wire_id::ExprId),
     /// R311s — the `query-get` feature is OFF at compile time.
     /// Reserved for a future Result-form transition (R311s minimal
     /// scope keeps the stub-form fall-through to a sentinel handle
@@ -926,7 +926,7 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
     /// The declared mapping id. Must have been previously registered
     /// via [`SessionLinkActions::send_declare_keyexpr`] for
     /// [`Self::get`] to succeed.
-    pub fn mapping_id(&self) -> u64 {
+    pub fn mapping_id(&self) -> wz_session_core::wire_id::ExprId {
         self.mapping_id
     }
 

@@ -3471,7 +3471,7 @@ fn query_loopback_propagates_err_body_with_encoding_tuple() {
         InboundReplyBody::Err { encoding, payload } => {
             // Packed as the wire packs it, so that a loopback reply reads as a received one does:
             // the id 4 shifted over the bit that says a schema follows.
-            assert_eq!(*encoding, Some((9, Some("schema_v1".to_string()))));
+            assert_eq!(*encoding, Some((9, Some(b"schema_v1".to_vec()))));
             assert_eq!(payload, b"oops");
         }
         other => panic!("expected Err, got {other:?}"),
@@ -17041,7 +17041,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
         }),
         encoding: Some(EncodingHint {
             packed_id: 0x2d,
-            schema: Some("text/plain".to_string()),
+            schema: Some(b"text/plain".to_vec()),
         }),
         source_info: Some(SourceInfo::new(&[9, 8, 7], 11, 12)),
         attachment: Some(b"attached".to_vec()),
@@ -17054,7 +17054,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
         Vec<u8>,
         Option<Vec<u8>>,
         Option<(u64, Vec<u8>)>,
-        Option<(u32, Option<String>)>,
+        Option<(u32, Option<Vec<u8>>)>,
         Option<SourceInfo>,
         Option<QosLevel>,
     );
@@ -17066,7 +17066,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
             sample.timestamp_parts().map(|(t, z)| (t, z.to_vec())),
             sample
                 .encoding_parts()
-                .map(|(id, schema)| (id, schema.map(str::to_string))),
+                .map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
             sample.source_info().cloned(),
             sample.qos(),
         )

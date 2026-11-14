@@ -138,9 +138,7 @@ impl<'a> Captured<'a> {
         let payload = view.payload();
         let attachment = view.attachment();
         let encoding = view.encoding();
-        let schema = encoding
-            .and_then(|hint| hint.schema.as_deref())
-            .map(str::as_bytes);
+        let schema = encoding.and_then(|hint| hint.schema.as_deref());
         let slices = [Some(key), Some(payload), attachment, schema];
         Self {
             total: slices.iter().flatten().map(|part| part.len()).sum(),
@@ -413,9 +411,7 @@ impl<'a> LaneSample<'a> {
             }
             None => (None, rest),
         };
-        let schema = meta
-            .schema
-            .map(|len| String::from_utf8_lossy(&rest[..len]).into_owned());
+        let schema = meta.schema.map(|len| rest[..len].to_vec());
         Self {
             // The bytes were a `&str` when they went in, so they are text.
             key: std::str::from_utf8(key).unwrap_or(""),
@@ -463,7 +459,7 @@ impl SampleView for LaneSample<'_> {
             .as_ref()
             .map(|hint| (hint.time, hint.zid.as_slice()))
     }
-    fn encoding_parts(&self) -> Option<(u32, Option<&str>)> {
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
         self.encoding
             .as_ref()
             .map(|hint| (hint.packed_id, hint.schema.as_deref()))

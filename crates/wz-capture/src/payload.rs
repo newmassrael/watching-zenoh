@@ -2245,7 +2245,7 @@ pub(crate) mod tests_support {
     /// guard below asserts `payloads() == 1` before it asserts anything about a
     /// keyexpr: an undecodable fixture would otherwise read as an unresolved one.
     pub(crate) fn push_declaring_aliased(
-        alias_id: u64,
+        alias_id: wz_session_core::wire_id::ExprId,
         encoding_id: u16,
         payload: &[u8],
     ) -> Vec<u8> {

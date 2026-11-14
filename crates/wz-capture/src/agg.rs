@@ -3065,7 +3065,7 @@ pub(crate) mod tests {
     /// The fixture is therefore the wire shape, not a choice.
     fn declared(
         id: u64,
-        scope: u64,
+        scope: wz_session_core::wire_id::ExprId,
         suffix: Option<&'static str>,
     ) -> wz_codecs::declare::DeclareOwned<wz_codecs::Heap> {
         wz_codecs::lent::Declare {

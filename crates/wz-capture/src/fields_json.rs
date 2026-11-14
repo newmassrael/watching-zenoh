@@ -7139,14 +7139,14 @@ mod tests {
 
         const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
         const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
-        const ID: u64 = 7;
+        const ID: wz_session_core::wire_id::ExprId = 7;
 
         let declare = wz_codecs::lent::Declare {
             body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
                 wz_codecs::lent::DeclKexpr {
                     header: wz_session_core::wire_const::D_MID_KEXPR
                         | wz_session_core::wire_const::FLAG_D_N,
-                    id: ID,
+                    id: u64::from(ID),
                     keyexpr: crate::datagram_tests::sender_space(0, Some("demo/temp")),
                     extensions: None,
                 },
@@ -14637,7 +14637,11 @@ mod tests {
 
         /// A `DeclareKeyExpr` binding `id` to `scope` + `suffix`. The header
         /// carries N and nothing else: this message has no M bit to set.
-        fn declare_kexpr(id: u64, scope: u64, suffix: &'static str) -> Vec<u8> {
+        fn declare_kexpr(
+            id: u64,
+            scope: wz_session_core::wire_id::ExprId,
+            suffix: &'static str,
+        ) -> Vec<u8> {
             wz_codecs::lent::Declare {
                 body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
                     wz_codecs::lent::DeclKexpr {

@@ -3157,7 +3157,7 @@ thread_local! {
 /// the branch open. The handler's own call is the first hold, so the branch does not end before
 /// the replies the handler wrote have gone out.
 pub struct HeldRecord {
-    qid: u64,
+    qid: wz_session_core::wire_id::RequestId,
     /// The key of the query as the queryable was handed it (see [`HostedQueryable::namespaced`]).
     keyexpr: String,
     /// Whether the replies are put under the namespace of the node's own session.
@@ -27002,7 +27002,7 @@ mod tests {
 
     /// The `request_id` of the single ResponseFinal recorded on a sink — the
     /// empty-route prompt final routed back to the querier.
-    fn forwarded_response_final_rid(frame: &[u8]) -> u64 {
+    fn forwarded_response_final_rid(frame: &[u8]) -> wz_session_core::wire_id::RequestId {
         use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
         let InboundFrame::Frame { payload, .. } = parse_inbound(frame).expect("parse frame") else {
             panic!("not a Frame");
@@ -31150,7 +31150,10 @@ mod tests {
             NetworkMessage::Request(Box::new(request))
         }
 
-        fn stacked_response(qid: u64, conf_flags: u8) -> NetworkMessage {
+        fn stacked_response(
+            qid: wz_session_core::wire_id::RequestId,
+            conf_flags: u8,
+        ) -> NetworkMessage {
             let mut response =
                 wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
                     .expect("build response");
