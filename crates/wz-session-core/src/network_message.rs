@@ -1534,7 +1534,8 @@ enum Lend {
     /// Its lists are past what the node's lent form holds inline. The codec
     /// answers `CapacityExceeded` only for a frame it read whole and refused
     /// nothing else of (SCE ADR 0077 section 7), so the record is sound and
-    /// nothing of it was handed over; the cursor is past it.
+    /// nothing of it was handed over; the caller reads it again from where it
+    /// begins.
     PastCapacity,
 }
 
