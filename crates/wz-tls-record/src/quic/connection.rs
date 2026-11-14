@@ -909,17 +909,39 @@ impl QuicFlowOpener {
             .map(|(key, value)| (*key, value))
     }
 
-    /// One sequence's bytes, in order, as far as they are contiguous.
+    /// One sequence's bytes, in order, as far as they are contiguous, from the
+    /// first byte not released ([`Self::release_streams`]).
     pub fn sequence(&self, direction: Direction, key: SequenceKey) -> Option<&[u8]> {
         self.sequences[dir_index(direction)]
             .get(&key)
             .map(|r| r.stream())
     }
 
+    /// Let go of the delivered bytes of every application stream of one
+    /// direction, for a reader that has handed them on.
+    ///
+    /// CRYPTO is kept: the Initial space's stream is where the ClientHello is
+    /// read from, and a handshake is a few kilobytes a connection where a
+    /// stream is what the connection carries for as long as it runs.
+    pub fn release_streams(&mut self, direction: Direction) {
+        for (key, reassembler) in self.sequences[dir_index(direction)].iter_mut() {
+            if matches!(key, SequenceKey::Stream(_)) {
+                reassembler.release();
+            }
+        }
+    }
+
     /// The RFC 9221 datagrams one direction carried, whole and in arrival
-    /// order, each with the capture packet index it came out of.
+    /// order, each with the capture packet index it came out of, since they
+    /// were last taken ([`Self::take_datagrams`]).
     pub fn datagrams(&self, direction: Direction) -> &[(usize, Vec<u8>)] {
         &self.datagrams[dir_index(direction)]
+    }
+
+    /// Take the RFC 9221 datagrams one direction carried since they were last
+    /// taken, for a reader that hands each on once.
+    pub fn take_datagrams(&mut self, direction: Direction) -> Vec<(usize, Vec<u8>)> {
+        core::mem::take(&mut self.datagrams[dir_index(direction)])
     }
 
     /// Sequences the table's bound refused, `[A, B]`.

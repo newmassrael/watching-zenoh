@@ -1229,8 +1229,11 @@ pub mod frames {
     /// sent.
     #[derive(Debug, Default)]
     pub struct StreamReassembler {
-        /// Bytes delivered so far, in order.
+        /// Bytes delivered so far, in order, from stream offset `released`.
         ready: Vec<u8>,
+        /// How many delivered bytes were let go of ([`Self::release`]): the
+        /// stream offset of `ready`'s first byte.
+        released: u64,
         /// Pieces held for a hole ahead of them, keyed by their offset.
         held: BTreeMap<u64, Vec<u8>>,
         /// How many bytes are held.
@@ -1266,16 +1269,16 @@ pub mod frames {
             if fin {
                 self.finished = true;
             }
-            let before = self.ready.len();
+            let before = self.delivered();
             let start = offset;
             let end = start + data.len() as u64;
-            if end <= self.ready.len() as u64 {
+            if end <= before {
                 // Wholly retransmitted: QUIC may resend, and a reader that
                 // appended it again would invent bytes nobody sent.
                 return 0;
             }
-            if start <= self.ready.len() as u64 {
-                let skip = (self.ready.len() as u64 - start) as usize;
+            if start <= before {
+                let skip = (before - start) as usize;
                 self.ready.extend_from_slice(&data[skip..]);
                 self.drain_held();
             } else if self
@@ -1287,28 +1290,50 @@ pub mod frames {
             } else {
                 self.dropped += data.len();
             }
-            self.ready.len() - before
+            (self.delivered() - before) as usize
         }
 
         /// Move whatever the new bytes unblocked out of the hold.
         fn drain_held(&mut self) {
             while let Some((&offset, _)) = self.held.iter().next() {
-                if offset > self.ready.len() as u64 {
+                let at = self.delivered();
+                if offset > at {
                     break;
                 }
                 let piece = self.held.remove(&offset).expect("just seen");
                 self.held_bytes -= piece.len();
                 let end = offset + piece.len() as u64;
-                if end > self.ready.len() as u64 {
-                    let skip = (self.ready.len() as u64 - offset) as usize;
+                if end > at {
+                    let skip = (at - offset) as usize;
                     self.ready.extend_from_slice(&piece[skip..]);
                 }
             }
         }
 
-        /// The contiguous bytes delivered so far.
+        /// The contiguous bytes delivered and not yet released, which begin at
+        /// stream offset [`Self::start`]. The whole stream until
+        /// [`Self::release`] is called.
         pub fn stream(&self) -> &[u8] {
             &self.ready
+        }
+
+        /// The stream offset of [`Self::stream`]'s first byte: how many
+        /// delivered bytes were released.
+        pub fn start(&self) -> u64 {
+            self.released
+        }
+
+        /// How many contiguous bytes were delivered, released or not.
+        pub fn delivered(&self) -> u64 {
+            self.released + self.ready.len() as u64
+        }
+
+        /// Let go of every delivered byte, for a reader that has handed them
+        /// on: the stream goes on being reassembled from where it stood, and a
+        /// retransmission of a released byte is still recognised as one.
+        pub fn release(&mut self) {
+            self.released = self.delivered();
+            self.ready = Vec::new();
         }
 
         /// Bytes held for a hole ahead of them.
@@ -1562,6 +1587,26 @@ mod frame_tests {
         // not an empty hold reporting itself.
         assert_eq!(r.buffered(), 0, "the piece did not fit");
         assert_eq!(r.dropped(), 5, "and what did not fit is counted");
+    }
+
+    /// A RELEASED prefix is gone from the buffer and still in the coordinates:
+    /// the stream goes on from where it stood, a resend of a released byte adds
+    /// nothing, and a piece behind a hole past it waits as before.
+    #[test]
+    fn a_released_prefix_leaves_the_coordinates_where_they_were() {
+        let mut r = StreamReassembler::new(None);
+        assert_eq!(r.push(0, b"hello", false), 5);
+        r.release();
+        assert_eq!(r.stream(), b"", "the released bytes are let go of");
+        assert_eq!((r.start(), r.delivered()), (5, 5));
+
+        assert_eq!(r.push(0, b"hello", false), 0, "a resend is still one");
+        assert_eq!(r.push(3, b"lo, w", false), 3, "an overlap adds its tail");
+        assert_eq!(r.stream(), b", w");
+        assert_eq!(r.push(10, b"ld", false), 0, "a hole holds what follows");
+        assert_eq!(r.push(8, b"or", false), 4, "and filling it delivers both");
+        assert_eq!(r.stream(), b", world");
+        assert_eq!((r.start(), r.delivered()), (5, 12));
     }
 }
 
