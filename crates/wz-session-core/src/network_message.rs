@@ -2014,6 +2014,13 @@ pub fn parse_reassembled_payload_best_effort(bytes: &[u8]) -> BatchParse {
 
 /// Decode the single network record carried by a lowlatency framing unit.
 /// Trailing bytes are reported, never treated as another batched message.
+///
+/// The unit is a KeepAlive, a Close or one network message
+/// (`commons/zenoh-codec/src/transport/mod.rs` @
+/// `id::KEEP_ALIVE => TransportBodyLowLatency::KeepAlive(codec.read(&mut *reader)?),`),
+/// told apart by the masked id; its document would be a variant whose default
+/// arm is the network message dispatch, which stays by hand until a document
+/// can refuse an unknown id (SCE ADR 0100, not yet in the pinned language).
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn parse_lowlatency_payload_best_effort(bytes: &[u8]) -> BatchParse {
     parse_payload_best_effort(bytes, 1, RecordsEnd::AtPayloadEnd)
@@ -2147,6 +2154,12 @@ fn decode_one_record(
 ) -> Result<bool, CodecError> {
     let header = cursor.peek_slice(1)?[0];
     let mid = header & 0x1F;
+    // The dispatch by the masked id stays here and not in a document: upstream
+    // refuses an id it does not know (`commons/zenoh-codec/src/network/mod.rs` @
+    // `impl<W> WCodec<&NetworkMessage, &mut W> for Zenoh080`), which a variant
+    // that reaches an arm for every tag cannot state. Masked dispatch with that
+    // refusal is what SCE ADR 0100 proposes, not yet in the pinned language.
+    //
     // Only the three data-plane arms project through the origin; on a build with
     // none of them this is the one parameter nothing reads.
     #[cfg(not(any(

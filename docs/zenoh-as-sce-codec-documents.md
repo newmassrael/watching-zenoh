@@ -102,9 +102,9 @@ Each (B) and (C) row names its cause:
 |---|---|---|---|---|---|
 | 1 | Stream link: a u16 little-endian length before each batch | `commons/zenoh-protocol/src/transport/init.rs` @ `16 bits (2 bytes) may be prepended to the serialized message indicating the total length`; little-endian: `io/zenoh-transport/src/common/batch.rs` @ `length.copy_from_slice(&len.to_le_bytes());` | A | `sources/codecs/stream_envelope.scxml` | |
 | 2 | Serial link frame (header, u16 length, payload, CRC32, then COBS) | the zenoh-pico serial frame; upstream Rust's serial link (`io/zenoh-links/zenoh-link-serial`) was not compared here | A | `serial_envelope.scxml`, `cobs_encode.scxml`, `cobs_decode.scxml`, `crc32.scxml` | |
-| 3 | Batch header byte, present only when compression was negotiated, then an LZ4 body | `io/zenoh-transport/src/common/batch.rs` @ `const COMPRESSION: u8 = 1; // 1 << 0` | B | `crates/wz-session-core/src/compression.rs:52,78` | S (LZ4 is a transform); W (the header byte is a flag-input of the batch codec) |
-| 4 | A batch is transport messages back to back | `commons/zenoh-codec/src/transport/mod.rs` @ `impl<W> WCodec<&TransportMessage, &mut W> for Zenoh080` | B | `crates/wz-session-core/src/inbound.rs:1097` (dispatch by `header & 0x1F`) | W (`until-eof` repeat of a peek-byte variant); L2 for an unknown id |
-| 5 | Low-latency unit: one KeepAlive, Close or network message, not batched | `commons/zenoh-codec/src/transport/mod.rs` @ `id::KEEP_ALIVE => TransportBodyLowLatency::KeepAlive(codec.read(&mut *reader)?),` | B | `crates/wz-session-core/src/network_message.rs:2018` | W |
+| 3 | Batch header byte, present only when compression was negotiated, then an LZ4 body | `io/zenoh-transport/src/common/batch.rs` @ `const COMPRESSION: u8 = 1; // 1 << 0` | A | `compressed_batch.scxml` (the header's compression flag, then the payload to the end of the unit); written and read by `compression.rs` `compress_batch`, `decompress_batch` | (S: the LZ4 block under the flag is a transform) |
+| 4 | A batch is transport messages back to back | `commons/zenoh-codec/src/transport/mod.rs` @ `impl<W> WCodec<&TransportMessage, &mut W> for Zenoh080` | B | `crates/wz-session-core/src/inbound.rs` `parse_unit_into` (dispatch by `header & 0x1F`) | W (`until-eof` repeat of a peek-byte variant); L2 for an unknown id, proposed by SCE ADR 0100 |
+| 5 | Low-latency unit: one KeepAlive, Close or network message, not batched | `commons/zenoh-codec/src/transport/mod.rs` @ `id::KEEP_ALIVE => TransportBodyLowLatency::KeepAlive(codec.read(&mut *reader)?),` | B | `crates/wz-session-core/src/network_message.rs` `parse_lowlatency_payload_best_effort` | W (peek-byte variant on the masked id, KeepAlive and Close by their documents); L2 through its default arm, the network message dispatch of row 26 |
 
 ### 5.2 Transport messages
 
@@ -176,7 +176,7 @@ extension and of the reserved encoding stay where they are judged (L2, rows
 | 23 | Declare | `commons/zenoh-codec/src/network/declare.rs` @ `impl<W> WCodec<&Declare, &mut W> for Zenoh080` | A | `declare.scxml` | (L3) |
 | 24 | Network OAM | `commons/zenoh-codec/src/network/oam.rs` @ `impl<W> WCodec<&Oam, &mut W> for Zenoh080` | A | `oam.scxml` | (L3) |
 | 25 | The network messages of a Frame, ending at the first byte that is not one | `commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);` | B | `network_message.rs:2001` (`RecordsEnd::AtTransportMessage`) | L5 |
-| 26 | Dispatch of a network message by id (seven ids) | `commons/zenoh-codec/src/network/mod.rs` @ `impl<W> WCodec<&NetworkMessage, &mut W> for Zenoh080` | B | `network_message.rs:1490` | W (peek-byte variant); L2 for an unknown id |
+| 26 | Dispatch of a network message by id (seven ids) | `commons/zenoh-codec/src/network/mod.rs` @ `impl<W> WCodec<&NetworkMessage, &mut W> for Zenoh080` | B | `network_message.rs` `decode_one_record` | W (peek-byte variant); L2 for an unknown id, proposed by SCE ADR 0100 |
 
 ### 5.5 Declaration bodies
 
@@ -304,7 +304,7 @@ wz also carries an extension upstream does not have, a hop limit
 
 | Section | Rows | A | B | C |
 |---|---|---|---|---|
-| 5.1 framing and batch | 5 | 2 | 3 | 0 |
+| 5.1 framing and batch | 5 | 3 | 2 | 0 |
 | 5.2 transport messages | 10 | 9 | 1 | 0 |
 | 5.3 scouting | 2 | 2 | 0 | 0 |
 | 5.4 network messages | 9 | 7 | 2 | 0 |
@@ -315,20 +315,20 @@ wz also carries an extension upstream does not have, a hop limit
 | 5.9 network extensions | 10 | 0 | 10 | 0 |
 | 5.10 zenoh body extensions | 6 | 2 | 4 | 0 |
 | 5.11 unknown extensions | 3 | 1 | 1 | 1 |
-| **Total** | **101** | **50** | **49** | **2** |
+| **Total** | **101** | **51** | **48** | **2** |
 
-By cause, over the 51 rows of (B) and (C) (a row may have more than one):
+By cause, over the 50 rows of (B) and (C) (a row may have more than one):
 
 | Cause | Rows | Which |
 |---|---|---|
 | L1 | 41 | 56-82, 83-93, 95-97 (every typed extension) |
-| L2 | 4 | 4, 26, 100, 101 |
+| L2 | 5 | 4, 5, 26, 100, 101 |
 | L4 | 2 | 59, 67 |
 | L5 | 2 | 12, 25 |
 | L6 | 4 | 49, 84, 86, 88 (and row 45 among the (A) rows) |
 | L7 | 1 | 73 |
-| W | 6 | 3, 4, 5, 26, 49, 51 |
-| S | 1 | 3 (and rows 8, 9, 13, 14 among the (A) rows) |
+| W | 5 | 4, 5, 26, 49, 51 |
+| S | 0 | none (rows 3, 8, 9, 13, 14 among the (A) rows) |
 
 L3 is the cause of no (B) row: it shows on the encode side of 21 (A) rows
 (18-24, 27-35, 36-40), §6.2.3.
@@ -467,8 +467,8 @@ is exactly eight pairs (row 73), which eight named embeds express today.
 Every row marked W is expressible with the elements of §3: a transport or
 scouting message is the same shape as a network message (flags carrier, body,
 Z-gated chain); a batch is an `until-eof` repeat of a peek-byte variant; the
-low-latency unit is a peek-byte variant with a network-message default; a
-compressed batch's header byte is a flag-input of the batch codec. wz's
+low-latency unit is a peek-byte variant with a network-message default (the
+compressed batch's header is a document now, row 3). wz's
 transport documents predate the chain and peek-byte elements, and every
 transport and scouting message has been extended into a whole document since
 (rows 6-17), the Frame as far as its header; the hand code that replaced

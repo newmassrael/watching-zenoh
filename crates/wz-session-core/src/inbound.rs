@@ -1118,6 +1118,13 @@ fn parse_unit_into(
     let mid = header & 0x1F;
     // Every message below is read whole, header included, by its document or
     // by the document of its header, in a function of its own.
+    //
+    // The dispatch itself stays here: a document's variant on the masked id
+    // reaches an arm for every tag, while upstream refuses an id it does not
+    // know (`commons/zenoh-codec/src/transport/mod.rs` @
+    // `impl<W> WCodec<&TransportMessage, &mut W> for Zenoh080`). Masked dispatch
+    // with that refusal is what SCE ADR 0100 proposes; it is not in the pinned
+    // language, so the batch of transport messages waits on it.
     match mid {
         #[cfg(feature = "codec-init-body")]
         wire_const::T_MID_INIT => parse_init(bytes, out),
