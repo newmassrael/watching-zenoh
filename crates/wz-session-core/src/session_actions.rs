@@ -614,6 +614,14 @@ pub struct TxConduits<R: SessionRuntime> {
     /// close this one, which is the link's and not the caller's.
     #[cfg(feature = "transport-batching")]
     auto: core::sync::atomic::AtomicBool,
+    /// A control message was left in the Control conduit's open frame, for the control messages
+    /// after it to join, and a message staged on another conduit is to follow that frame out.
+    /// Raised by the sender of the control message once it has staged it, lowered under the
+    /// Control conduit's lock when that frame is taken: raised with nothing open costs the next
+    /// sender one flush of an empty conduit, while lowered with a frame open would let data pass
+    /// a declaration staged before it, which is the order this is kept for.
+    #[cfg(feature = "transport-batching")]
+    control_open: core::sync::atomic::AtomicBool,
     conduits: [R::Mutex<BatchTx>; TX_CONDUITS],
 }
 
@@ -659,6 +667,8 @@ impl<R: SessionRuntime> TxConduits<R> {
             active: core::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "transport-batching")]
             auto: core::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "transport-batching")]
+            control_open: core::sync::atomic::AtomicBool::new(false),
             conduits: core::array::from_fn(|_| R::new_mutex(BatchTx::default())),
         }
     }
@@ -807,6 +817,57 @@ impl<R: SessionRuntime> TxConduits<R> {
         self.active.load(core::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Raise the `control_open` mark: read and raised where [`Self::is_auto`] is read, by the
+    /// emit chokepoint only, and lowered by the drain of the Control conduit.
+    #[cfg(all(
+        feature = "transport-batching",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn leave_control_open(&self) {
+        self.control_open
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether a control message may still be in the Control conduit's open frame (the
+    /// `control_open` mark).
+    #[cfg(all(
+        feature = "transport-batching",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn control_left_open(&self) -> bool {
+        self.control_open.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Lower the `control_open` mark: called with the Control conduit's lock held, as its open
+    /// frame is taken.
+    #[cfg(feature = "transport-batching")]
+    fn control_taken(&self) {
+        self.control_open
+            .store(false, core::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Every conduit back to its initial state, the window closed. The
     /// reopen path's (`reset_for_reopen`), and gated as that arm is.
     #[cfg(feature = "session-reconnect")]
@@ -816,6 +877,8 @@ impl<R: SessionRuntime> TxConduits<R> {
         for conduit in &self.conduits {
             R::with_mutex_mut(conduit, BatchTx::reset);
         }
+        #[cfg(feature = "transport-batching")]
+        self.control_taken();
     }
 }
 
@@ -9953,24 +10016,41 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // once, and a Control frame still open leaves only when the writer next has nothing to
         // write, so a put on an alias could reach the peer before the declaration of that alias
         // (measured: zenoh-c logs `Route data with unknown scope` and drops every such put), and
-        // an undeclaration could overtake data that still names the alias. So everything staged
-        // earlier leaves first, here, and the control message leaves right after it is staged
-        // (below). Control messages are rare; the data path never reaches this.
+        // an undeclaration could overtake data that still names the alias. So the data staged
+        // earlier leaves first, here, and the Control frame leaves ahead of the data staged after
+        // it (the second half, below). The Control conduit itself is not drained: the control
+        // messages in its open frame were staged before this one and go out with it in one
+        // frame, as upstream's pipeline batches a declaration, which is not express
+        // (`commons/zenoh-protocol/src/network/mod.rs` @ `Self::new(Priority::Control, CongestionControl::DEFAULT_DECLARE, false);`,
+        // `io/zenoh-transport/src/common/pipeline.rs` @ `if !self.batching || $msg.is_express() {`).
+        // On one conduit there is nothing to drain: the frame's order is the staging order.
+        #[cfg(feature = "transport-batching")]
+        let control = TxConduits::<R>::conduit_index(Priority::Control);
         #[cfg(feature = "transport-batching")]
         if priority == Priority::Control && self.tx_conduits.is_auto() {
             // A conduit's lock is held across its sender's wait for room, so a send that may not
             // wait does not wait for it either: it goes ahead only when it can drain every
             // conduit now, and is told there is no room otherwise.
             #[cfg(feature = "alloc")]
-            if probing {
-                if !self.try_flush_open_batch() {
-                    return Ok(Dispatched::NoRoom);
-                }
-            } else {
-                self.flush_open_batch();
+            if !self.drain_conduits(|idx| idx != control, !probing) {
+                return Ok(Dispatched::NoRoom);
             }
             #[cfg(not(feature = "alloc"))]
-            self.flush_open_batch();
+            self.drain_conduits(|idx| idx != control, true);
+        }
+        // The barrier's second half: a message staged on another conduit than the Control one
+        // follows the control messages left open there, which leave first. A control message
+        // that left none costs the data path one atomic load.
+        #[cfg(feature = "transport-batching")]
+        if self.tx_conduits.control_left_open()
+            && TxConduits::<R>::conduit_index(priority) != control
+        {
+            #[cfg(feature = "alloc")]
+            if !self.drain_conduits(|idx| idx == control, !probing) {
+                return Ok(Dispatched::NoRoom);
+            }
+            #[cfg(not(feature = "alloc"))]
+            self.drain_conduits(|idx| idx == control, true);
         }
         // The same barrier on the link's side. Handing the staged data over is not leaving the
         // link first: a link that serves its priorities in strict order sends a Control frame
@@ -10311,29 +10391,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // flush takes that lock.
         #[cfg(feature = "transport-batching")]
         if self.tx_conduits.is_auto() {
+            // A control message stays in its conduit's open frame for the control messages after
+            // it, and leaves when the writer next falls idle, or ahead of the first message staged
+            // on another conduit, whichever is first (the barrier's second half, above). Marked
+            // once its conduit's lock is let go: a drain that took the frame in between leaves the
+            // mark raised over an empty conduit, which costs the next sender an empty drain.
             if priority == Priority::Control && matches!(push, Ok(UnicastPush::Pushed)) {
-                // The barrier's second half: the control message does not wait for the writer
-                // to go idle, since the data staged after it is owed to follow it. A probe does
-                // not wait for the lock of a conduit whose sender waits for room: that conduit is
-                // skipped, and the writer is told to come back to it, as for a send that staged
-                // nothing (below).
-                #[cfg(feature = "alloc")]
-                if probing {
-                    self.flush_open_batch_nowait();
-                    self.own_link().link_driver().tx_staged();
-                } else {
-                    self.flush_open_batch();
-                }
-                #[cfg(not(feature = "alloc"))]
-                self.flush_open_batch();
-            } else {
-                // Whatever the outcome, not only a message staged: the writer's flush skips a
-                // conduit whose lock a sender holds ([`Self::flush_open_batch_nowait`]), and
-                // this sender, done with its conduit, is who tells it to come back. A send that
-                // was dropped for congestion, or refused, has staged nothing, but may have
-                // been holding the lock of a conduit with a frame still open.
-                self.own_link().link_driver().tx_staged();
+                self.tx_conduits.leave_control_open();
             }
+            // Whatever the outcome, not only a message staged: the writer's flush skips a
+            // conduit whose lock a sender holds ([`Self::flush_open_batch_nowait`]), and
+            // this sender, done with its conduit, is who tells it to come back. A send that
+            // was dropped for congestion, or refused, has staged nothing, but may have
+            // been holding the lock of a conduit with a frame still open.
+            self.own_link().link_driver().tx_staged();
         }
         match push {
             // R2923 — upstream's `handle_push_result`
@@ -10865,15 +10936,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // ascending band: a conduit is still emitted whole under one hold, so
         // its frames keep their SN order, and the order across conduits is the
         // walk's.
-        for idx in 0..TX_CONDUITS {
-            // The walk is over BANDS, not slots: the index names a priority and
-            // the priority selects its conduit, so the drain and the staging
-            // seam agree by construction on which conduit is which.
-            let priority = TxConduits::<R>::conduit_priority(idx);
-            R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
-                self.flush_conduit(idx, priority, batch);
-            });
-        }
+        self.drain_conduits(|_| true, true);
     }
 
     /// [`Self::flush_open_batch`] for the link's writer, which must never WAIT for a conduit's
@@ -10901,15 +10964,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (see [`DispatchStage::Probe`]).
     #[cfg(feature = "transport-batching")]
     fn try_flush_open_batch(&self) -> bool {
+        self.drain_conduits(|_| true, false)
+    }
+
+    /// Send the frames open in the conduits whose index `takes` answers `true` for, in
+    /// ascending band, each under its own lock: waited for when `wait`, and otherwise taken only
+    /// if free. Whether every conduit walked was taken and drained; a conduit whose lock a
+    /// sender held is left as it was.
+    #[cfg(feature = "transport-batching")]
+    fn drain_conduits(&self, takes: impl Fn(usize) -> bool, wait: bool) -> bool {
         let mut every_conduit = true;
-        for idx in 0..TX_CONDUITS {
+        for idx in (0..TX_CONDUITS).filter(|&idx| takes(idx)) {
+            // The walk is over BANDS, not slots: the index names a priority and
+            // the priority selects its conduit, so the drain and the staging
+            // seam agree by construction on which conduit is which.
             let priority = TxConduits::<R>::conduit_priority(idx);
-            // `None`: held by a sender, who will ask again. Nothing is open in this call's view
-            // of that conduit that the sender's own call does not own.
-            let taken = R::try_with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
-                self.flush_conduit(idx, priority, batch);
-            });
-            every_conduit &= taken.is_some();
+            let conduit = self.tx_conduits.conduit(priority);
+            let drain = |batch: &mut BatchTx| self.flush_conduit(idx, priority, batch);
+            if wait {
+                R::with_mutex_mut(conduit, drain);
+            } else {
+                // `None`: held by a sender, who will ask again. Nothing is open in this call's
+                // view of that conduit that the sender's own call does not own.
+                every_conduit &= R::try_with_mutex_mut(conduit, drain).is_some();
+            }
         }
         every_conduit
     }
@@ -10918,6 +10996,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the walks of [`Self::flush_open_batch`] and [`Self::flush_open_batch_nowait`].
     #[cfg(feature = "transport-batching")]
     fn flush_conduit(&self, idx: usize, priority: Priority, batch: &mut BatchTx) {
+        // Lowered before the frame is taken, under the lock that keeps a control message from
+        // being staged in between: whatever control message the mark stood for leaves here.
+        if idx == TxConduits::<R>::conduit_index(Priority::Control) {
+            self.tx_conduits.control_taken();
+        }
         // ARCHITECTURE section 9.1 -- a frame open in a lent slot leaves
         // as that slot, with nothing copied.
         //
@@ -10946,9 +11029,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // carries no caller priority, so the band comes from the walk.
             self.send_wire(&frame, channel, priority);
         }
-        // Read only by the lent-batch arms.
-        #[cfg(not(any(feature = "tx-lend-only", feature = "transport-tx-lend")))]
-        let _ = idx;
     }
 
     /// zenoh-pico `zp_batch_start` parity — open a batching window: every

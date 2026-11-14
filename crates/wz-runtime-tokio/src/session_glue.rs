@@ -2763,6 +2763,191 @@ mod tests {
         );
     }
 
+    /// A QoS session whose link's writer pulls what it stages, as a stream link's does, and the
+    /// recorder of what it hands that link. Nothing leaves until a barrier drains a conduit or
+    /// the test runs the writer's idle flush ([`SessionLinkActions::flush_staged`]).
+    #[cfg(all(
+        feature = "transport-batching",
+        feature = "transport-qos",
+        feature = "declare-keyexpr",
+        feature = "codec-push"
+    ))]
+    fn pulled_qos_session() -> (
+        Arc<SessionLinkActions>,
+        Arc<crate::test_fixtures::RecordingLinkDriver>,
+    ) {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        assert!(actions.set_qos_offer(true), "qos offer applies");
+        actions.set_auto_batching(true);
+        (actions, driver)
+    }
+
+    /// Whether the frame holds `text`, as a keyexpr literal is written.
+    #[cfg(all(
+        feature = "transport-batching",
+        feature = "transport-qos",
+        feature = "declare-keyexpr",
+        feature = "codec-push"
+    ))]
+    fn holds(frame: &[u8], text: &str) -> bool {
+        frame
+            .windows(text.len())
+            .any(|window| window == text.as_bytes())
+    }
+
+    /// Declarations made one after the other share the Control conduit's open frame, as
+    /// upstream's pipeline batches them, and that frame leaves ahead of the put staged after
+    /// them: the put does not reach the peer before the declarations it may name.
+    #[cfg(all(
+        feature = "transport-batching",
+        feature = "transport-qos",
+        feature = "declare-keyexpr",
+        feature = "codec-push"
+    ))]
+    #[test]
+    fn declarations_in_a_row_share_one_frame_that_leaves_ahead_of_the_put_after_them() {
+        use wz_session_core::qos::Priority;
+
+        let (actions, driver) = pulled_qos_session();
+        actions
+            .send_declare_keyexpr(7, "home/a")
+            .expect("declare home/a");
+        actions
+            .send_declare_keyexpr(8, "home/b")
+            .expect("declare home/b");
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "the declarations wait in their conduit's open frame"
+        );
+        actions
+            .send_push_literal("home/a", b"21", true)
+            .expect("a put");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "the declarations left before the put was staged, and the put waits in its own"
+        );
+        assert_eq!(driver.frame_priority(0), Priority::Control);
+        let declarations = driver.frame_bytes(0);
+        assert!(
+            holds(&declarations, "home/a") && holds(&declarations, "home/b"),
+            "both declarations are in the one frame"
+        );
+        actions.flush_staged();
+        assert_eq!(
+            driver.frame_count(),
+            2,
+            "the writer's idle flush sends the put"
+        );
+        assert_eq!(driver.frame_priority(1), Priority::DEFAULT);
+    }
+
+    /// A declaration still drains the data staged before it, and the link's fence is raised with
+    /// that data handed over; the declaration itself waits for the writer.
+    #[cfg(all(
+        feature = "transport-batching",
+        feature = "transport-qos",
+        feature = "declare-keyexpr",
+        feature = "codec-push"
+    ))]
+    #[test]
+    fn a_declaration_leaves_behind_the_put_staged_before_it() {
+        use wz_session_core::qos::Priority;
+
+        let (actions, driver) = pulled_qos_session();
+        actions
+            .send_push_literal("home/a", b"21", true)
+            .expect("a put");
+        assert_eq!(driver.frame_count(), 0, "the put waits in its conduit");
+        actions
+            .send_declare_keyexpr(7, "home/a")
+            .expect("declare home/a");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "the put was handed over ahead of the declaration"
+        );
+        assert_eq!(driver.frame_priority(0), Priority::DEFAULT);
+        assert_eq!(
+            driver.fences(),
+            [1],
+            "the fence was raised with the put handed over"
+        );
+        actions.flush_staged();
+        assert_eq!(driver.frame_count(), 2);
+        assert_eq!(
+            driver.frame_priority(1),
+            Priority::Control,
+            "the declaration left when the writer fell idle"
+        );
+    }
+
+    /// A put between two declarations parts them: the first leaves ahead of the put, the put
+    /// ahead of the second, each in a frame of its own.
+    #[cfg(all(
+        feature = "transport-batching",
+        feature = "transport-qos",
+        feature = "declare-keyexpr",
+        feature = "codec-push"
+    ))]
+    #[test]
+    fn a_put_between_two_declarations_leaves_between_them() {
+        use wz_session_core::qos::Priority;
+
+        let (actions, driver) = pulled_qos_session();
+        actions
+            .send_declare_keyexpr(7, "home/a")
+            .expect("declare home/a");
+        actions
+            .send_push_literal("home/x", b"21", true)
+            .expect("a put");
+        actions
+            .send_declare_keyexpr(8, "home/b")
+            .expect("declare home/b");
+        actions.flush_staged();
+        assert_eq!(driver.frame_count(), 3);
+        assert_eq!(
+            [
+                driver.frame_priority(0),
+                driver.frame_priority(1),
+                driver.frame_priority(2)
+            ],
+            [Priority::Control, Priority::DEFAULT, Priority::Control],
+            "declaration, put, declaration, in the order they were made"
+        );
+        assert!(holds(&driver.frame_bytes(0), "home/a"));
+        assert!(!holds(&driver.frame_bytes(0), "home/b"));
+        assert!(holds(&driver.frame_bytes(1), "home/x"));
+        assert!(holds(&driver.frame_bytes(2), "home/b"));
+    }
+
+    /// A session that negotiated no QoS has one conduit, whose frame keeps the order its
+    /// messages were staged in: a declaration drains nothing there, and a put after it does not
+    /// part it from the declarations before, so all of them leave in one frame.
+    #[cfg(all(
+        feature = "transport-batching",
+        feature = "declare-keyexpr",
+        feature = "codec-push"
+    ))]
+    #[test]
+    fn on_one_conduit_declarations_and_puts_share_the_frame_in_their_order() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.set_auto_batching(true);
+        actions
+            .send_declare_keyexpr(7, "home/a")
+            .expect("declare home/a");
+        actions
+            .send_push_literal("home/a", b"21", true)
+            .expect("a put");
+        actions
+            .send_declare_keyexpr(8, "home/b")
+            .expect("declare home/b");
+        assert_eq!(driver.frame_count(), 0, "nothing was drained");
+        actions.flush_staged();
+        assert_eq!(driver.frame_count(), 1, "one frame carries all three");
+    }
+
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_populates_outbound_mapping_table() {
