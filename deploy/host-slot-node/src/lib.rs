@@ -155,8 +155,8 @@ pub mod group {
         pub group: core::net::IpAddr,
         /// The group's port.
         pub port: u16,
-        /// The hop limit of what the node sends.
-        pub ttl: u8,
+        /// The hop limit of what the node sends, or `None` for the kernel's own.
+        pub ttl: Option<u8>,
     }
 
     impl GroupBind<HostGroupTransport> for PosixGroupBind {

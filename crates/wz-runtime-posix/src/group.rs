@@ -47,26 +47,45 @@ fn wildcard(group: &SocketAddr, port: u16) -> SocketAddr {
     SocketAddr::new(unspecified_like(group.ip()), port)
 }
 
+/// The sender of a group: a socket of its family on a port the kernel picks, sending out of
+/// `interface`, with the hop limit `hops` when one is stated and the kernel's own otherwise (no
+/// option is set then).
+fn sender(
+    group: &SocketAddr,
+    interface: GroupInterface,
+    hops: Option<u8>,
+) -> Result<PosixUdpSocket, PosixNetError> {
+    let egress = PosixUdpSocket::bind(wildcard(group, 0))?;
+    egress.set_multicast_interface(interface)?;
+    if let Some(hops) = hops {
+        egress.set_multicast_hops(hops)?;
+    }
+    Ok(egress)
+}
+
 impl<const RX: usize> PosixGroupTransport<RX> {
     /// Join `group` (an IPv4 or an IPv6 group, and its port) on `interface`, which is also the one
     /// the node sends out of ([`GroupInterface::Routing`]: the one the kernel's routing picks for
-    /// the group), sending with the hop limit `hops` (1: one subnet, the kernel's own default and
-    /// zenoh's). An IPv4 group is joined with IGMP (`IP_ADD_MEMBERSHIP`), an IPv6 one with MLD
-    /// (`IPV6_JOIN_GROUP`), each on sockets of the group's family. An interface named in the
-    /// other family is [`PosixNetError::InterfaceFamily`], before a socket is opened.
+    /// the group). `hops` is the hop limit of what it sends when one is stated; `None` leaves the
+    /// kernel's own (1: one subnet), as zenoh sets `IP_MULTICAST_TTL` only when its endpoint
+    /// states `ttl` (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+    /// `if let Some(ttl_str) = config.get(UDP_MULTICAST_TTL)`). A stated `ttl` is applied to an
+    /// IPv6 group too (`IPV6_MULTICAST_HOPS`), where zenoh 1.10.2 only warns that it cannot, as
+    /// the AP's group socket does (`wz_host_net::multicast`). An IPv4 group is joined with IGMP
+    /// (`IP_ADD_MEMBERSHIP`), an IPv6 one with MLD (`IPV6_JOIN_GROUP`), each on sockets of the
+    /// group's family. An interface named in the other family is
+    /// [`PosixNetError::InterfaceFamily`], before a socket is opened.
     pub fn join(
         group: SocketAddr,
         interface: GroupInterface,
-        hops: u8,
+        hops: Option<u8>,
     ) -> Result<Self, PosixNetError> {
         if !interface.names_for(&group) {
             return Err(PosixNetError::InterfaceFamily);
         }
         let ingress = PosixUdpSocket::bind_shared(wildcard(&group, group.port()))?;
         ingress.join_group(group.ip(), interface)?;
-        let egress = PosixUdpSocket::bind(wildcard(&group, 0))?;
-        egress.set_multicast_interface(interface)?;
-        egress.set_multicast_hops(hops)?;
+        let egress = sender(&group, interface, hops)?;
         Ok(Self {
             ingress: Some(ingress),
             egress: Some(egress),
@@ -85,7 +104,7 @@ impl<const RX: usize> PosixGroupTransport<RX> {
     /// interface keeps the first refusal.
     pub fn join_by_routing_or_first_interface(
         group: SocketAddr,
-        hops: u8,
+        hops: Option<u8>,
     ) -> Result<Self, PosixNetError> {
         match Self::join(group, GroupInterface::Routing, hops) {
             Err(first @ PosixNetError::Membership(_)) => {
@@ -218,14 +237,14 @@ mod tests {
         // A unicast address is no group: the kernel refuses the membership, and the transport
         // does not come up half-made.
         let unicast = SocketAddr::from(([10, 0, 0, 1], 0));
-        match PosixGroupTransport::<64>::join(unicast, GroupInterface::Routing, 1) {
+        match PosixGroupTransport::<64>::join(unicast, GroupInterface::Routing, None) {
             Err(PosixNetError::Membership(e)) => assert_eq!(e, libc::EINVAL),
             Err(other) => panic!("a different error: {other:?}"),
             Ok(_) => panic!("joined a unicast address"),
         }
         // The same for an IPv6 unicast address, which MLD refuses as IGMP does an IPv4 one.
         let unicast = SocketAddr::from((Ipv6Addr::LOCALHOST, 0));
-        match PosixGroupTransport::<64>::join(unicast, GroupInterface::Routing, 1) {
+        match PosixGroupTransport::<64>::join(unicast, GroupInterface::Routing, None) {
             Err(PosixNetError::Membership(e)) => assert_eq!(e, libc::EINVAL),
             Err(other) => panic!("a different error: {other:?}"),
             Ok(_) => panic!("joined a unicast address"),
@@ -242,7 +261,7 @@ mod tests {
             (v4, GroupInterface::Index(1)),
         ] {
             assert!(matches!(
-                PosixGroupTransport::<64>::join(group, interface, 1),
+                PosixGroupTransport::<64>::join(group, interface, None),
                 Err(PosixNetError::InterfaceFamily)
             ));
         }
@@ -251,10 +270,9 @@ mod tests {
     /// A transport made as `join` makes it but for the membership, which is the one step that
     /// needs a multicast route on the host: what the rest of the transport does is the same
     /// whether or not the group was joined.
-    fn unjoined(group: SocketAddr, hops: u8) -> PosixGroupTransport<64> {
+    fn unjoined(group: SocketAddr, hops: Option<u8>) -> PosixGroupTransport<64> {
         let ingress = PosixUdpSocket::bind_shared(wildcard(&group, 0)).expect("a receiver");
-        let egress = PosixUdpSocket::bind(wildcard(&group, 0)).expect("a sender");
-        egress.set_multicast_hops(hops).expect("a hop limit");
+        let egress = sender(&group, GroupInterface::Routing, hops).expect("a sender");
         PosixGroupTransport {
             group: SocketAddr::new(group.ip(), ingress.local().port()),
             ingress: Some(ingress),
@@ -267,7 +285,7 @@ mod tests {
     /// An IPv6 group's sockets are of its family, and its hop limit is the IPv6 option's.
     #[test]
     fn an_ipv6_groups_sockets_are_of_its_family_with_the_hop_limit_asked_for() {
-        let transport = unjoined(SocketAddr::from((GROUP_V6, 0)), 3);
+        let transport = unjoined(SocketAddr::from((GROUP_V6, 0)), Some(3));
         let ingress = transport.ingress.as_ref().expect("a receiver");
         let egress = transport.egress.as_ref().expect("a sender");
         assert!(ingress.local().is_ipv6() && egress.local().is_ipv6());
@@ -277,10 +295,35 @@ mod tests {
         );
     }
 
+    /// A group that states no hop limit leaves the option where the kernel left it, on either
+    /// family: the sender reads what a socket nobody set reads, as zenoh's does when its endpoint
+    /// states no `ttl`.
+    #[test]
+    fn a_group_that_states_no_hop_limit_leaves_the_kernels_own() {
+        for (group, level, name) in [
+            (
+                SocketAddr::from((GROUP, 0)),
+                libc::IPPROTO_IP,
+                libc::IP_MULTICAST_TTL,
+            ),
+            (
+                SocketAddr::from((GROUP_V6, 0)),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_MULTICAST_HOPS,
+            ),
+        ] {
+            let untouched = PosixUdpSocket::bind(wildcard(&group, 0)).expect("a socket nobody set");
+            let kernels = get_int(untouched.fd(), level, name);
+            let transport = unjoined(group, None);
+            let egress = transport.egress.as_ref().expect("a sender");
+            assert_eq!(get_int(egress.fd(), level, name), kernels, "{group}");
+        }
+    }
+
     #[test]
     fn the_sender_has_a_port_of_its_own_and_the_hop_limit_asked_for() {
-        let a = unjoined(SocketAddr::from((GROUP, 0)), 5);
-        let b = unjoined(SocketAddr::from((GROUP, 0)), 1);
+        let a = unjoined(SocketAddr::from((GROUP, 0)), Some(5));
+        let b = unjoined(SocketAddr::from((GROUP, 0)), Some(1));
         assert_ne!(
             a.sender_port(),
             b.sender_port(),
@@ -305,7 +348,7 @@ mod tests {
 
     #[test]
     fn a_released_transport_sends_and_receives_nothing_and_does_not_open_again() {
-        let mut transport = unjoined(SocketAddr::from((GROUP, 0)), 1);
+        let mut transport = unjoined(SocketAddr::from((GROUP, 0)), None);
         assert!(transport.open());
         transport.close();
         assert!(!transport.open());
@@ -325,10 +368,10 @@ mod tests {
         let probe = PosixUdpSocket::bind_shared(any_v4(0)).expect("a port");
         let port = probe.local().port();
         let group = SocketAddr::from((GROUP, port));
-        let mut a =
-            PosixGroupTransport::<256>::join(group, GroupInterface::Routing, 1).expect("member a");
-        let mut b =
-            PosixGroupTransport::<256>::join(group, GroupInterface::Routing, 1).expect("member b");
+        let mut a = PosixGroupTransport::<256>::join(group, GroupInterface::Routing, None)
+            .expect("member a");
+        let mut b = PosixGroupTransport::<256>::join(group, GroupInterface::Routing, None)
+            .expect("member b");
         let a_port = a.sender_port().expect("a sender");
         a.send_to_group(b"hello group");
         let mut seen = None;

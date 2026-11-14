@@ -471,7 +471,9 @@ ENDPOINT_SHAPES = {
     "dial":{"keys": {"locator": _key("locator")}},
     "listen": {"keys": {"locator": _key("locator"), "accepts": _int(1, "max_accepts")}},
     "multicast": {"keys": {"locator": _key("locator"), "members": _int(1, "max_members"),
-                           "ttl": _int(1, 255, required=False, default=1)}},
+                           # Upstream's `ttl` (`UDP_MULTICAST_TTL`): set only when stated, as
+                           # zenoh sets it, so a group that states none sends with the kernel's.
+                           "ttl": _int(1, 255, required=False)}},
     "peer": {"keys": {"locator": _key("locator"), "zid": _key("zid")}},
     # Not an endpoint a node reaches or is reached at: the zid of a node it takes orders from, so it
     # has no locator.
@@ -1514,7 +1516,7 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     groups = [ep for ep in data["endpoint"] if ep["role"] == "multicast"]
     group_at = groups[0]["locator"] if groups else ""
     members = groups[0]["members"] if groups else 0
-    group_ttl = groups[0].get("ttl", 1) if groups else 1
+    group_ttl = groups[0].get("ttl") if groups else None
     gat = LOCATOR_RE.fullmatch(group_at) if groups else None
     group_addr = rust_ip(gat)
     group_port = int(gat["port"]) if gat else 0
@@ -1550,12 +1552,13 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     ] if listens else []
     group = [
         "/// The locator of the group, the address and port it names, the hop limit of what the node",
-        "/// sends and how many members of the group it tracks at once.",
+        "/// sends (`None`: the kernel's own, which zenoh leaves when no `ttl` is stated) and how many",
+        "/// members of the group it tracks at once.",
         f"pub const GROUP: &str = {rust_string(group_at)};",
         "pub const GROUP_ADDR: core::net::IpAddr =",
         f"    {group_addr};",
         f"pub const GROUP_PORT: u16 = {group_port};",
-        f"pub const GROUP_TTL: u8 = {group_ttl};",
+        f"pub const GROUP_TTL: Option<u8> = {'None' if group_ttl is None else f'Some({group_ttl})'};",
         f"pub const MEMBERS: usize = {members};",
     ] if groups else []
     commander_lines = commander_rows(commanders)
@@ -2132,7 +2135,7 @@ document_bytes = 8
            and "pub const GROUP_ADDR: core::net::IpAddr =\n"
                "    core::net::IpAddr::V4(core::net::Ipv4Addr::new(224, 0, 0, 224));" in grs
            and "pub const GROUP_PORT: u16 = 7447;" in grs
-           and "pub const GROUP_TTL: u8 = 1;" in grs and "pub const MEMBERS: usize = 4;" in grs
+           and "pub const GROUP_TTL: Option<u8> = None;" in grs and "pub const MEMBERS: usize = 4;" in grs
            and "pub const DIALS: usize = 0;" in grs and "pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;" in grs)
     expect("a node with no group is a member of none, and none of a group's constants is generated",
            "pub const GROUPS: usize = 0;" in rs and "MEMBERS" not in rs and "GROUP_TTL" not in rs
@@ -2189,7 +2192,7 @@ document_bytes = 8
            key_set_entities(wz_config.read_decl_toml(SAMPLE + replay))[-2:]
            == [{"kind": "publisher", "key": "lab/r"}, {"kind": "publisher", "key": "lab/r/other"}])
     expect("a ttl the declaration states is the one generated",
-           "pub const GROUP_TTL: u8 = 8;" in emit(
+           "pub const GROUP_TTL: Option<u8> = Some(8);" in emit(
                "n", wz_config.read_decl_toml(group_node.replace("members = 4", "members = 4\nttl = 8")), sha))
     both = group_node.replace("[[entity]]", '[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.1:7447"\n\n[[entity]]', 1)
     expect("a node may dial a router and be a member of a group", problems(both) == []
