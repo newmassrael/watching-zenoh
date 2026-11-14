@@ -325,7 +325,11 @@ rotted to a directory that no longer exists, and it was cited for months.
 Resolve the paths per machine and keep them in agent memory or a local
 untracked note.
 
-- **SCE** -- the codegen engine; pinned, and read-only from wz sessions.
+- **SCE** -- the codegen engine; pinned, and read-only from wz sessions. The
+  pin moves one SCE landing at a time (SCE ADR 0078 section 4):
+  `python3 scripts/lib/sce_autoroll.py plan --sce <SCE clone at origin/main>`
+  names the next landing, the branch, the regeneration commands and the
+  checks, and changes nothing.
 - **Zenoh (Rust) core crates** (`zenoh`, `zenoh-protocol`, `zenoh-codec`,
   `zenoh-buffers`, `zenoh-keyexpr`, `zenoh-config`, `zenoh-link-*`) at the
   pinned version, `UPSTREAM_VERSION` in `scripts/lib/upstream_feature_census.py`.
