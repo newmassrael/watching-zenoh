@@ -3168,6 +3168,12 @@ layer_c0_test_discipline() {
     #
     # Milliseconds, no binary, no source tree. Layer Z runs the adjudication.
     _runci_leg upstream_carries_the_surface.selftest -- python3 scripts/lib/upstream_carries_the_surface.py --selftest
+    # The same split for `deepenable_audit.py`, the Layer Z sweep beside it. Its
+    # probe documents (a member map such as `plugins` is probed one level down)
+    # and its classifiers (the message, the resolved-config table probe and its
+    # control, the mode verdict) are driven both ways here with no zenohd, so a
+    # classifier that cannot fail is caught where every push can see it.
+    _runci_leg deepenable_audit.selftest -- python3 scripts/lib/deepenable_audit.py --selftest
     # R2336 (open-debt item 15, atom `access-extauth-pubkey`) — the same split
     # for the gate BESIDE that one. `upstream_carries_the_surface.py` asks
     # upstream's SERIALIZER whether a key exists; this asks upstream's SOURCE

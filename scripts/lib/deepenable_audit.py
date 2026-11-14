@@ -24,7 +24,7 @@ that moves the surface or the exception list.
 MEASURED when it was written: it found `listen/retry` accepting a deeper shape
 and absent from the list, which R2078 had introduced and no test could see.
 
-## Why the probe needs no per-key value knowledge
+## The probe value, and the one shape it has to know
 
 Every key gets `{ zzz_not_a_mode: 1 }`, which is not a mode name and not a valid
 value for anything. The classification is the MESSAGE, not the exit code:
@@ -39,10 +39,22 @@ the fixture restated a key its own document already had (`duplicate field`), two
 because the value shape was wrong. An exit code cannot tell a negative result
 from a broken probe.
 
-⚠ ONE KEY IS A KNOWN DEAD PROBE HERE, and it is named rather than silently
-excused: `plugins` answers `plugins.zzz_not_a_mode must be object` -- a complaint
-about the VALUE, not about the name -- while `plugins: { rest: { zzz: 1 } }`
-starts. It is reported as UNDECIDED so the reader is told, not told nothing.
+A key whose value is a MAP OF NAMED MEMBERS gets the same object one level
+further down, and `MEMBER_MAP_KEYS` is where such a key is declared. `plugins` is
+the one: upstream reads it as plugin name -> that plugin's document and refuses a
+member that is not an object before anything reads it
+(`commons/zenoh-config/src/lib.rs` @ `bail!("{} must be object", title);`). Handed
+the generic object, the daemon answered `plugins.zzz_not_a_mode must be object`,
+which is about the probe's VALUE and says nothing about whether a deeper shape is
+accepted. One level down the probe is a plugin's own document, which upstream
+hands to that plugin unread; a plugin nobody required costs the node one logged
+line (`zenoh/src/api/loader.rs` @ `tracing::error!("Plugin load failure: {e}")`).
+
+Until this round that key was printed as UNDECIDED and left to a reader to judge
+by hand, which is a verdict nobody records. The probe is the thing that was
+wrong, so the probe is what changed: `plugins` is measured like every other key
+now, and a declared key whose probe is dead reds as a stale entry instead of
+being excused by name.
 
 ## The SECOND question, added in R2149 (open-debt item 538)
 
@@ -59,16 +71,41 @@ read an operator's typo as a row of a table it honours: not applied, not
 reported, silent.
 
 ⛔ THE TWO DIRECTIONS ARE ASYMMETRIC, AND THAT ASYMMETRY IS THE DESIGN. A
-declared key is refuted only by REFUSED. OPAQUE does NOT refute one: measured,
-a real zenohd answers OPAQUE for `scouting/multicast/autoconnect_strategy`,
-which belongs on the list -- upstream declares it
-`ModeDependentValue<TargetDependentValue<AutoConnectStrategy>>` and the inner
-`Dependent` arm accepts any object, so this probe's value parses and the node
-starts. OPAQUE is a fact about THE PROBE's reach, not about the key, so those
-keys are printed by name and folded into no pass. The other direction needs no
-such care and carries the worse consequence: a HONOURED key upstream resolves as
-a mode table which wz has not declared is a spelling wz refuses and zenohd
-accepts, so the node does not start on a file zenohd runs.
+declared key is refuted only by a measured NOT-A-TABLE. OPAQUE does NOT refute
+one: it is a fact about THE PROBE's reach, not about the key, so a declared key
+the probe cannot reach is printed by name and folded into no pass. The other
+direction needs no such care and carries the worse consequence: a HONOURED key
+upstream resolves as a mode table which wz has not declared is a spelling wz
+refuses and zenohd accepts, so the node does not start on a file zenohd runs.
+
+## The resolved-config probe, for the keys the message cannot reach
+
+Two keys answered OPAQUE to the generic probe while belonging on the list:
+`scouting/gossip/autoconnect_strategy` and `scouting/multicast/autoconnect_strategy`.
+Upstream reads them as `ModeDependentValue<TargetDependentValue<AutoConnectStrategy>>`,
+whose deserializer tries the mode table first and, when that fails, reads the
+same object as a TARGET table
+(`commons/zenoh-config/src/mode_dependent.rs` @ `if let Ok(values) =`), and a
+target table keeps only its `to_` members and drops the rest
+(`commons/zenoh-config/src/mode_dependent.rs` @ `serde_with::with_prefix!(target_prefix "to_");`).
+So no object the probe can hand them is an error, and no message will ever say
+"mode table" for them.
+
+What does say it is the daemon's own resolved config
+(`zenohd/src/main.rs` @ `tracing::info!("Initial conf: {}", &config);`), the
+oracle `upstream_carries_the_surface.py` reads. `RESOLVED_TABLE_PROBES` gives each
+such key a value of its OWN type, and the key is asked twice:
+
+  * the CONTROL, the value alone. It must resolve to itself, or the value is not
+    one the key takes and the second answer would be about the probe -- a FAIL,
+    never a verdict;
+  * the TABLE, `{ router: <value> }` on a node that is a peer. A mode table
+    resolves to exactly that; a target table drops the `router` member, which
+    is not one of its `to_` fields.
+
+The table names a mode the node is NOT, so the member can survive only because
+the value was read as a table keyed by mode, and not because something resolved
+it for the node's own mode.
 
 ## Where this runs
 
@@ -84,6 +121,10 @@ sits there and not in a fast lane: one zenohd startup per key, re-measured in
 R2230 at 122s for the 115-key surface under the 1.10.0 pin -- the same figure
 `run-ci.sh` carries beside the call, deliberately, because two numbers for one
 measurement is how the pair R2149 had to correct went stale in the first place.
+The resolved-config probe adds two starts per key it holds.
+
+`--selftest` drives the probe documents and every classifier over synthetic
+input with no zenohd at all, which is what Layer C0 runs.
 
 ⚠ R2230 -- THIS SCRIPT CANNOT SEE THE THIRD STATE A KEY CAN BE IN, and the pin
 move to 1.10.0 is where that stopped being theoretical. It reported
@@ -103,11 +144,13 @@ check below for a local convenience nothing enforces.
 
 Usage:
     python3 scripts/lib/deepenable_audit.py [--verbose]
+    python3 scripts/lib/deepenable_audit.py --selftest
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
 import re
@@ -130,10 +173,35 @@ ZENOHD = pathlib.Path(os.environ.get("WZ_ZENOHD_BIN") or artifact("target/zenohd
 MODE_TABLE_MARKER = "expected one of `router`, `peer`, `client`"
 STARTED_MARKER = "Zenoh can be reached at"
 RESOLVED_MARKER = "Initial conf:"
+# The daemon's resolved config, as the one line it prints it on. Shared with
+# `upstream_carries_the_surface.py`, which imports it rather than spelling it
+# again: two readers of one line are one pattern.
+INITIAL_CONF = re.compile(r"Initial conf: (\{.*\})\s*$")
 
-# The one key whose generic probe is answered about its VALUE rather than its
-# shape. See the module doc: naming it is the point.
-UNDECIDABLE_BY_THIS_PROBE = {"plugins"}
+# The value every key is probed with.
+GENERIC_PROBE = "{ zzz_not_a_mode: 1 }"
+
+# The keys whose value is a map from a free member name to an object, so the
+# deeper shape the question is about starts one level further down. See the
+# module doc: the generic value at `plugins` is refused for its type.
+MEMBER_MAP_KEYS = frozenset({"plugins"})
+
+# The keys whose value type accepts any object, each with a value of its own
+# type for the resolved-config probe. See the module doc for why the message
+# probe cannot reach them and what this one reads instead.
+RESOLVED_TABLE_PROBES: dict[str, dict] = {
+    "scouting/gossip/autoconnect_strategy": {"to_router": "greater-zid"},
+    "scouting/multicast/autoconnect_strategy": {"to_router": "greater-zid"},
+}
+
+# The mode the table probe names. Not the probe node's own mode (`peer`), so a
+# member that survives was read as a row of a table and not resolved for the
+# node.
+TABLE_PROBE_MODE = "router"
+
+# What `value_at` answers for a path the resolved config does not carry. A
+# sentinel rather than None, because `null` is a value the config does carry.
+MISSING = object()
 
 
 def rust_const(name: str, text: str | None = None) -> list[str]:
@@ -260,18 +328,33 @@ def upstream_surface() -> list[str]:
     return distinct
 
 
-def document_for(key: str) -> str:
-    """`{ mode: "peer", <key as nested objects>: { zzz_not_a_mode: 1 } }`."""
+def probe_value(key: str) -> str:
+    """The deeper shape `key` is handed: the generic object, one level further
+    down for a key whose members are named."""
+    if key in MEMBER_MAP_KEYS:
+        return "{ zzz_not_a_mode: %s }" % GENERIC_PROBE
+    return GENERIC_PROBE
+
+
+def document_with(key: str, value: str) -> str:
+    """`{ mode: "peer", <key as nested objects>: <value> }`, json5."""
     if key == "mode":
-        return '{ mode: { zzz_not_a_mode: 1 } }'
-    inner = "{ zzz_not_a_mode: 1 }"
+        return "{ mode: %s }" % value
+    inner = value
     for seg in reversed(key.split("/")):
         inner = "{ %s: %s }" % (seg, inner)
     return '{ mode: "peer", %s }' % inner[1:-1].strip()
 
 
-def verdict_for(key: str, workdir: pathlib.Path) -> str:
-    """Run one probe, and STOP as soon as the answer is on the page.
+def document_for(key: str) -> str:
+    """The shape probe's document for `key`."""
+    return document_with(key, probe_value(key))
+
+
+def run_zenohd(document: str, workdir: pathlib.Path, answered) -> tuple[bool, str]:
+    """Start zenohd on `document`; stop as soon as `answered(log)` holds.
+
+    Returns whether it held and everything the daemon said.
 
     R2080 — the first cut let `subprocess.run` hit a fixed timeout, so every key
     whose subtree is opaque cost the whole timeout instead of the ~60ms it takes
@@ -280,9 +363,9 @@ def verdict_for(key: str, workdir: pathlib.Path) -> str:
     zenohd's own startup costs, and that part is not ours to shorten.
     """
     config = workdir / "probe.json5"
-    config.write_text(document_for(key) + "\n")
+    config.write_text(document + "\n")
     log = workdir / "probe.log"
-    accepted = False
+    held = False
     with open(log, "wb") as sink:
         proc = subprocess.Popen(
             [str(ZENOHD), "-c", str(config), "--rest-http-port", "none"],
@@ -291,9 +374,8 @@ def verdict_for(key: str, workdir: pathlib.Path) -> str:
         )
         deadline = time.monotonic() + 30.0
         while True:
-            blob = log.read_text(errors="replace")
-            if STARTED_MARKER in blob or RESOLVED_MARKER in blob:
-                accepted = True
+            if answered(log.read_text(errors="replace")):
+                held = True
                 break
             if proc.poll() is not None:
                 break
@@ -303,19 +385,259 @@ def verdict_for(key: str, workdir: pathlib.Path) -> str:
         if proc.poll() is None:
             proc.kill()
         proc.wait()
+    blob = log.read_text(errors="replace")
+    # A daemon that wrote its answer and exited between the read and the poll
+    # above has still answered.
+    return held or answered(blob), blob
 
+
+def started(blob: str) -> bool:
+    """The node came up, or got as far as printing the config it resolved."""
+    return STARTED_MARKER in blob or RESOLVED_MARKER in blob
+
+
+def classify_shape(accepted: bool, blob: str) -> str:
+    """What the shape probe's answer says about the key."""
     if accepted:
         return "OPAQUE"
-    blob = log.read_text(errors="replace")
     if MODE_TABLE_MARKER in blob:
         return "MODE_TABLE"
     return "REFUSED"
 
 
+def verdict_for(key: str, workdir: pathlib.Path) -> str:
+    """Run the shape probe for one key."""
+    accepted, blob = run_zenohd(document_for(key), workdir, started)
+    return classify_shape(accepted, blob)
+
+
+def initial_conf_json(blob: str) -> str | None:
+    """The JSON of the daemon's `Initial conf:` line, or None.
+
+    Only a line the daemon has FINISHED writing counts: the log is read while
+    zenohd writes it, and half a line of JSON is not a config.
+    """
+    for line in blob.splitlines(keepends=True):
+        if not line.endswith("\n"):
+            continue
+        match = INITIAL_CONF.search(line.rstrip("\n"))
+        if match:
+            return match.group(1)
+    return None
+
+
+def value_at(dump: object, key: str) -> object:
+    """The resolved value at `key`, or `MISSING`."""
+    node = dump
+    for seg in key.split("/"):
+        if not isinstance(node, dict) or seg not in node:
+            return MISSING
+        node = node[seg]
+    return node
+
+
+def prune_nulls(value: object) -> object:
+    """`value` with every `null` member of every object left out.
+
+    Upstream renders a field it carries and has no value for as an explicit
+    null, and an absent member and a null one both state nothing, so neither
+    may decide a comparison.
+    """
+    if isinstance(value, dict):
+        return {k: prune_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [prune_nulls(v) for v in value]
+    return value
+
+
+def table_verdict(control: object, table: object, value: object, mode: str) -> str:
+    """What the two resolved answers say about mode-dependence.
+
+    DEAD when the control did not resolve to the value it was handed: the value
+    is then not one the key takes, and the table answer is about the probe.
+    """
+    if control != value:
+        return "DEAD"
+    if table == {mode: value}:
+        return "MODE_TABLE"
+    return "NOT_A_MODE_TABLE"
+
+
+def resolved_at(key: str, value: object, workdir: pathlib.Path) -> object:
+    """Start zenohd with `value` at `key` and read back what it resolved there."""
+    document = document_with(key, json.dumps(value))
+    _, blob = run_zenohd(
+        document, workdir, lambda text: initial_conf_json(text) is not None
+    )
+    text = initial_conf_json(blob)
+    if text is None:
+        raise SystemExit(
+            f"deepenable-audit: FAIL -- zenohd printed no complete `Initial conf:` "
+            f"line for {document}, so the resolved-config probe of {key} has "
+            f"nothing to read. Its last words:\n{blob[-2000:]}"
+        )
+    try:
+        dump = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"deepenable-audit: FAIL -- the `Initial conf:` line for {document} "
+            f"is not JSON ({exc}), so the resolved-config probe of {key} reads "
+            f"nothing."
+        ) from exc
+    return prune_nulls(value_at(dump, key))
+
+
+def mode_verdict(shape: str, table: str | None) -> str:
+    """MODE_TABLE, NOT_A_MODE_TABLE or UNREACHED for one key.
+
+    The resolved-config probe decides a key it holds; otherwise the shape
+    probe's message does, and an OPAQUE answer decides nothing.
+    """
+    if table is not None:
+        return table
+    return {
+        "MODE_TABLE": "MODE_TABLE",
+        "REFUSED": "NOT_A_MODE_TABLE",
+        "OPAQUE": "UNREACHED",
+    }[shape]
+
+
+def selftest() -> int:
+    """Drive the probe documents and every classifier, with no zenohd.
+
+    Each classifier is driven in BOTH directions, because a check whose
+    fixtures only reach its passing arm proves nothing about the arm it exists
+    for.
+    """
+    failures: list[str] = []
+
+    def expect(got: object, want: object, what: str) -> None:
+        if got != want:
+            failures.append(f"{what}: got {got!r}, want {want!r}")
+
+    expect(
+        document_for("plugins"),
+        '{ mode: "peer", plugins: { zzz_not_a_mode: { zzz_not_a_mode: 1 } } }',
+        "a member-map key is probed one level further down",
+    )
+    expect(
+        document_for("connect/retry"),
+        '{ mode: "peer", connect: { retry: { zzz_not_a_mode: 1 } } }',
+        "any other key gets the generic object at the key",
+    )
+    expect(
+        document_for("mode"),
+        "{ mode: { zzz_not_a_mode: 1 } }",
+        "mode is its own document",
+    )
+    expect(
+        document_with(
+            "scouting/multicast/autoconnect_strategy",
+            json.dumps({TABLE_PROBE_MODE: {"to_router": "greater-zid"}}),
+        ),
+        '{ mode: "peer", scouting: { multicast: { autoconnect_strategy: '
+        '{"router": {"to_router": "greater-zid"}} } } }',
+        "the table probe's document",
+    )
+
+    expect(classify_shape(True, ""), "OPAQUE", "a node that came up")
+    expect(
+        classify_shape(False, "unknown field `zzz_not_a_mode`, " + MODE_TABLE_MARKER),
+        "MODE_TABLE",
+        "the mode-table message",
+    )
+    expect(
+        classify_shape(False, "plugins.zzz_not_a_mode must be object"),
+        "REFUSED",
+        "any other refusal",
+    )
+    expect(started("x Initial conf: {}\n"), True, "the resolved line is an answer")
+    expect(started("panicked at ..."), False, "a refusal is not")
+
+    line = '\x1b[2m2026\x1b[0m INFO zenohd: Initial conf: {"a":{"b":1}}\n'
+    expect(initial_conf_json(line), '{"a":{"b":1}}', "a finished resolved line")
+    expect(initial_conf_json(line.rstrip("\n")), None, "a line still being written")
+    expect(initial_conf_json("Zenoh can be reached at x\n"), None, "no resolved line")
+
+    expect(value_at({"a": {"b": 1}}, "a/b"), 1, "a carried path")
+    expect(value_at({"a": {}}, "a/b") is MISSING, True, "a path not carried")
+    expect(value_at({"a": 5}, "a/b") is MISSING, True, "a scalar on the path")
+    expect(
+        prune_nulls({"to_router": "x", "to_peer": None, "n": [{"k": None}]}),
+        {"to_router": "x", "n": [{}]},
+        "nulls left out at every depth",
+    )
+    expect(prune_nulls(MISSING) is MISSING, True, "MISSING passes through")
+
+    value = {"to_router": "greater-zid"}
+    expect(
+        table_verdict(value, {"router": value}, value, "router"),
+        "MODE_TABLE",
+        "the table resolved as a table",
+    )
+    expect(
+        table_verdict(value, {}, value, "router"),
+        "NOT_A_MODE_TABLE",
+        "a target table dropped the mode member",
+    )
+    expect(
+        table_verdict(value, value, value, "router"),
+        "NOT_A_MODE_TABLE",
+        "the table was read as the value itself",
+    )
+    expect(
+        table_verdict(MISSING, {"router": value}, value, "router"),
+        "DEAD",
+        "the control carried nothing",
+    )
+    expect(
+        table_verdict({}, {"router": value}, value, "router"),
+        "DEAD",
+        "the control dropped its own value",
+    )
+
+    expect(mode_verdict("MODE_TABLE", None), "MODE_TABLE", "the message said table")
+    expect(mode_verdict("REFUSED", None), "NOT_A_MODE_TABLE", "the message refused")
+    expect(mode_verdict("OPAQUE", None), "UNREACHED", "opaque decides nothing")
+    expect(mode_verdict("OPAQUE", "MODE_TABLE"), "MODE_TABLE", "the second probe wins")
+    expect(
+        mode_verdict("OPAQUE", "NOT_A_MODE_TABLE"),
+        "NOT_A_MODE_TABLE",
+        "the second probe refutes",
+    )
+
+    # The two probe tables are disjoint, name no `mode`, and hand the table
+    # probe objects, which is the only shape the comparison above is about.
+    expect(
+        sorted(MEMBER_MAP_KEYS & set(RESOLVED_TABLE_PROBES)), [], "the tables overlap"
+    )
+    expect("mode" in RESOLVED_TABLE_PROBES, False, "mode in the table probes")
+    expect(
+        [k for k, v in RESOLVED_TABLE_PROBES.items() if not isinstance(v, dict)],
+        [],
+        "a table probe value that is not an object",
+    )
+
+    if failures:
+        for failure in failures:
+            print(f"  deepenable-audit: SELFTEST FAIL -- {failure}")
+        return 1
+    print("  deepenable-audit: selftest ok")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument(
+        "--selftest",
+        action="store_true",
+        help="drive the probe documents and classifiers; needs no zenohd",
+    )
     args = ap.parse_args()
+
+    if args.selftest:
+        return selftest()
 
     if not ZENOHD.is_file():
         print(
@@ -346,24 +668,59 @@ def main() -> int:
             f"A partial read of the exception list makes every key it lost look "
             f"like a missing entry."
         )
+    # A probe for a key the surface does not have would measure nothing anyone
+    # counts, and pass by having no subject.
+    for name, keys in (
+        ("MEMBER_MAP_KEYS", MEMBER_MAP_KEYS),
+        ("RESOLVED_TABLE_PROBES", set(RESOLVED_TABLE_PROBES)),
+    ):
+        off = sorted(set(keys) - set(surface))
+        if off:
+            raise SystemExit(
+                f"deepenable-audit: FAIL -- {name} holds {off}, which the upstream "
+                f"surface does not. A probe shape for a key nobody counts is a "
+                f"row with no subject; drop it or put the key back on the surface."
+            )
 
     accepts: set[str] = set()
-    undecided: set[str] = set()
     verdicts: dict[str, str] = {}
+    table_verdicts: dict[str, str] = {}
     with tempfile.TemporaryDirectory() as tmp:
         workdir = pathlib.Path(tmp)
         for key in surface:
             verdict = verdict_for(key, workdir)
             verdicts[key] = verdict
-            if key in UNDECIDABLE_BY_THIS_PROBE:
-                undecided.add(key)
-            elif verdict in ("OPAQUE", "MODE_TABLE"):
+            if verdict in ("OPAQUE", "MODE_TABLE"):
                 accepts.add(key)
             if args.verbose:
                 print(f"  {key:48s} {verdict}")
+        for key, value in sorted(RESOLVED_TABLE_PROBES.items()):
+            # The second probe exists for the keys the first cannot reach. A
+            # key the message already decides does not need it, and keeping the
+            # row would hide the day upstream's type stopped swallowing the
+            # probe.
+            if verdicts[key] != "OPAQUE":
+                raise SystemExit(
+                    f"deepenable-audit: FAIL -- {key} is in RESOLVED_TABLE_PROBES "
+                    f"and the shape probe answered {verdicts[key]}, so its message "
+                    f"decides the key. Drop the row."
+                )
+            control = resolved_at(key, value, workdir)
+            table = resolved_at(key, {TABLE_PROBE_MODE: value}, workdir)
+            verdict = table_verdict(control, table, value, TABLE_PROBE_MODE)
+            if verdict == "DEAD":
+                raise SystemExit(
+                    f"deepenable-audit: FAIL -- {key} resolved {value!r} to "
+                    f"{control!r}, so that value is not one the key takes and the "
+                    f"table probe would measure the probe. Fix its row in "
+                    f"RESOLVED_TABLE_PROBES; a dead probe is not a verdict."
+                )
+            table_verdicts[key] = verdict
+            if args.verbose:
+                print(f"  {key:48s} {verdict} (resolved {table!r})")
 
     missing = sorted(accepts - declared)
-    stale = sorted(declared - accepts - undecided)
+    stale = sorted(declared - accepts)
 
     for key in missing:
         print(
@@ -373,19 +730,16 @@ def main() -> int:
     for key in stale:
         print(
             f"  deepenable-audit: {key} is in DEEPENABLE_UPSTREAM_KEYS and refuses "
-            f"a deeper shape. wz accepts a typo zenohd would catch."
-        )
-    for key in sorted(undecided):
-        print(
-            f"  deepenable-audit: {key} UNDECIDED -- this probe's value is wrong "
-            f"for it, not its shape. Judge it by hand."
+            f"a deeper shape. wz accepts a typo zenohd would catch -- or this "
+            f"key's probe value is wrong for its type, which MEMBER_MAP_KEYS is "
+            f"where to say."
         )
 
     # ── the MODE-TABLE cross-check (R2149, open-debt item 538) ──────────
     #
     # This probe already SEPARATES a mode table from an opaque subtree -- the
-    # message says which -- and until now it threw that apart away, folding both
-    # into `accepts`. Nothing anywhere compared it to
+    # message says which -- and until R2149 it threw that apart away, folding
+    # both into `accepts`. Nothing anywhere compared it to
     # `MODE_DEPENDENT_CONFIG_KEYS`, which is the constant deciding whether
     # `inside_a_mode_table` lifts every leaf under a key OUT of the ignored
     # report. A key wrongly in that list makes wz read an operator's typo as a
@@ -409,26 +763,23 @@ def main() -> int:
     # upstream's types and nothing re-asked zenohd. This re-asks, once per key,
     # against a running node.
     #
-    # ⛔ THE OBVIOUS COMPARISON IS WRONG, AND IT WAS MEASURED WRONG BEFORE THIS
+    # ⛔ THE OBVIOUS COMPARISON IS WRONG, AND IT WAS MEASURED WRONG BEFORE R2149
     # SHIPPED. Item 538 prescribed comparing the MODE_TABLE set against the
     # constant in BOTH directions. Run that way, a real zenohd answers OPAQUE
     # for `scouting/multicast/autoconnect_strategy`, which IS in the constant and
-    # belongs there -- upstream declares it
-    # `ModeDependentValue<TargetDependentValue<AutoConnectStrategy>>`, and the
-    # inner `TargetDependentValue::Dependent` arm accepts any object, so this
-    # probe's `{ zzz_not_a_mode: 1 }` parses and the node starts. The verdict is
-    # a fact about THE PROBE's reach, not about the key. So:
+    # belongs there. So:
     #
-    #   * a declared key is refuted only by REFUSED -- zenohd rejecting the
-    #     deeper shape outright. OPAQUE is "this probe cannot tell", and those
-    #     keys are printed BY NAME rather than folded into a pass;
+    #   * a declared key is refuted only by a measured NOT_A_MODE_TABLE --
+    #     zenohd rejecting the table shape outright, or resolving the table
+    #     probe as something else. OPAQUE is "the message cannot tell", and a
+    #     declared key left there is printed BY NAME rather than folded into a
+    #     pass; the two autoconnect strategies are decided by the
+    #     resolved-config probe instead;
     #   * the other direction needs no such care and is the dangerous one: a
     #     HONOURED key a real zenohd answers MODE_TABLE for, which wz has not
     #     declared, is a table spelling wz REFUSES and zenohd accepts -- the node
     #     does not start. Scoped to honoured keys because the constant is
-    #     documented as the honoured ones; the unhonoured mode-dependent keys
-    #     (`scouting/gossip/*`, the `connect`/`listen` timeouts) are correctly
-    #     absent.
+    #     documented as the honoured ones.
     mode_dependent = set(rust_const("MODE_DEPENDENT_CONFIG_KEYS"))
     honoured = set(honoured_surface())
     if not mode_dependent:
@@ -436,7 +787,11 @@ def main() -> int:
             "deepenable-audit: FAIL -- MODE_DEPENDENT_CONFIG_KEYS read as empty, "
             "so both directions below compare against nothing and pass."
         )
-    upstream_tables = {k for k, v in verdicts.items() if v == "MODE_TABLE"}
+    mode_verdicts = {
+        key: mode_verdict(shape, table_verdicts.get(key))
+        for key, shape in verdicts.items()
+    }
+    upstream_tables = {k for k, v in mode_verdicts.items() if v == "MODE_TABLE"}
     if not upstream_tables:
         raise SystemExit(
             "deepenable-audit: FAIL -- no key on the whole surface answered "
@@ -445,12 +800,12 @@ def main() -> int:
         )
 
     # A declared key that is not on the surface at all would make BOTH checks
-    # below pass by absence -- `verdicts.get` answers None, which is neither
-    # REFUSED nor MODE_TABLE. That is this file's own "a population of zero is
-    # green" shape, one level in, so it is a FAIL rather than a silence. It
-    # cannot happen while the Rust side holds MODE_DEPENDENT ⊆ DEEPENABLE ⊆
-    # surface; this is here for when that stops being true.
-    offsurface = sorted(k for k in mode_dependent if k not in verdicts)
+    # below pass by absence -- `mode_verdicts.get` answers None, which is
+    # neither NOT_A_MODE_TABLE nor MODE_TABLE. That is this file's own "a
+    # population of zero is green" shape, one level in, so it is a FAIL rather
+    # than a silence. It cannot happen while the Rust side holds MODE_DEPENDENT
+    # ⊆ DEEPENABLE ⊆ surface; this is here for when that stops being true.
+    offsurface = sorted(k for k in mode_dependent if k not in mode_verdicts)
     if offsurface:
         raise SystemExit(
             "deepenable-audit: FAIL -- "
@@ -459,33 +814,18 @@ def main() -> int:
             "so nothing below judges it."
         )
 
-    # A KNOWN DEAD PROBE MUST NOT REFUTE A DECLARATION. `plugins` answers a
-    # complaint about the VALUE rather than the name, so it lands in REFUSED
-    # while saying nothing about whether the key takes a deeper shape -- which is
-    # the whole reason this file names it rather than excusing it silently. Were
-    # it ever declared mode-dependent, the check below would red on the strength
-    # of a broken probe, and "an exit code cannot tell a negative result from a
-    # broken probe" is this file's own doctrine. So an undecidable key is treated
-    # exactly like OPAQUE: printed by name, refuting nothing. Measured today the
-    # two sets do not intersect, so this is a ratchet and not a fix.
     refuted = sorted(
-        k
-        for k in mode_dependent
-        if verdicts.get(k) == "REFUSED" and k not in UNDECIDABLE_BY_THIS_PROBE
+        k for k in mode_dependent if mode_verdicts[k] == "NOT_A_MODE_TABLE"
     )
-    unreached = sorted(
-        k
-        for k in mode_dependent
-        if verdicts.get(k) == "OPAQUE" or k in UNDECIDABLE_BY_THIS_PROBE
-    )
+    unreached = sorted(k for k in mode_dependent if mode_verdicts[k] == "UNREACHED")
     undeclared = sorted((upstream_tables & honoured) - mode_dependent)
 
     for key in refuted:
         print(
             f"  deepenable-audit: {key} is in MODE_DEPENDENT_CONFIG_KEYS and a "
-            f"real zenohd REFUSES a deeper shape at it. wz lifts every leaf "
-            f"under it out of the ignored report, so an operator's typo there is "
-            f"neither applied nor reported."
+            f"real zenohd does not read a {{ router, peer, client }} table at it. "
+            f"wz lifts every leaf under it out of the ignored report, so an "
+            f"operator's typo there is neither applied nor reported."
         )
     for key in undeclared:
         print(
@@ -497,22 +837,23 @@ def main() -> int:
 
     print(
         f"  deepenable-audit: surface {len(surface)}, declared {len(declared)}, "
-        f"measured accepting {len(accepts)}, undecided {len(undecided)}"
+        f"measured accepting {len(accepts)}"
     )
     print(
-        f"  deepenable-audit: mode tables — {len(upstream_tables)} measured, "
+        f"  deepenable-audit: mode tables — {len(upstream_tables)} measured "
+        f"({len(table_verdicts)} from the resolved config), "
         f"{len(mode_dependent)} declared by wz, "
         f"{len(upstream_tables & honoured)} of the measured are honoured"
     )
     if unreached:
         # Named, never a count folded into the pass: these are the keys whose
-        # value type swallows the probe, so the audit is SILENT about them
-        # rather than agreeing with wz.
+        # value type swallows the probe and that no resolved-config probe holds,
+        # so the audit is SILENT about them rather than agreeing with wz.
         print(
             "  deepenable-audit: this probe cannot decide mode-dependence for "
             + ", ".join(unreached)
             + " (their value type accepts the probe's object, so the node "
-            "starts); wz's declaration stands on upstream's own type."
+            "starts); give each a value of its own type in RESOLVED_TABLE_PROBES."
         )
     outside = sorted(upstream_tables - honoured)
     if outside:

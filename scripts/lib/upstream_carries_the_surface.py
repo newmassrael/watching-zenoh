@@ -69,8 +69,8 @@ longer has is a wz invention that needs a decision and not an exemption.
 The third bucket is deliberately a FAIL rather than a category with members. It
 has no population today and this file says so instead of hiding it: a branch
 nobody has run is a branch nobody has checked, so it fails loudly and states
-what it found, which is the treatment `deepenable_audit.py` gives its own
-UNDECIDED key.
+what it found, which is the treatment `deepenable_audit.py` gives a probe whose
+control does not resolve to its own value.
 
 ## Where this runs
 
@@ -117,7 +117,9 @@ ZENOHD = pathlib.Path(os.environ.get("WZ_ZENOHD_BIN") or artifact("target/zenohd
 
 # The same override `deepenable_audit` and the test harness read, so this cannot
 # end up interrogating a different binary than the layer around it tests.
-INITIAL_CONF = re.compile(r"Initial conf: (\{.*\})\s*$")
+# The daemon's resolved-config line is read by `deepenable_audit` too, so the
+# pattern is that module's, not a second spelling of it.
+INITIAL_CONF = deepenable_audit.INITIAL_CONF
 UNKNOWN_FIELD = re.compile(r"unknown field `([^`]+)`")
 
 # Below this the reader is not reading the surface, whatever it returned. The
