@@ -1100,8 +1100,9 @@ Each lands whole with its surface lines, tests and faults in one round.
       in the flood and again in an answer); a client is told only what it asked, so the
       interest of a peer south of the node is brokered north, and sent again to a router that
       comes up after it; and a token the node learned as an answer was relayed and not held,
-      so its withdrawal reached no one. The client node runs on the tables of the peer node and
-      announces itself as a client; the forwarder has no client hat of its own. A south kept
+      so its withdrawal reached no one. The client node ran on the tables of the peer node
+      then; its north is the pin's client hat now, at node mode Client
+      (`docs/peer-region-hats.md`, section 15). A south kept
       apart is placed by a node alone, so an open that would keep one and fits no node (a
       client that is told no router, a C ABI or a build without `router-node`) is refused by
       the key

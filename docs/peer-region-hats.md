@@ -888,3 +888,112 @@ are regenerated (`WZ_BLESS_PEER_SCENES=<dir>` on the test, then the files copied
 They are taken with the token tables, delete, the admin introspection handlers and the
 peers link view all built (`C1AY peer scenes frozen`), and a build with fewer of them
 reads the same scenes through the tests that state the rules.
+
+## 15. The client hat
+
+A client that keeps a south apart (`gateway/south`) is a node: the gateway of the peers and
+clients that find it, attached north to one router. The pin builds its north as the CLIENT
+hat (`zenoh/src/net/routing/gateway.rs` @ `(Bound::North, WhatAmI::Client) => Box::new(hat::client::Hat::new(region)),`) and its
+subregions as for any node. Until this section the client node ran on the tables of a peer
+node: node mode Peer, the peer hat in the north, and a flag (`north_is_client`) that sent the
+interest of its south north. The `regions` file passed whole that way (126 of 126, scenario
+1 holding the client nodes), so the comparison below is of what the flag left different
+from the pin, and the client hat is
+now a hat of its own, chosen as the router and peer hats are: `hat_kind(North, Client)` is
+`HatKind::Client`, `is_client_hat` asks it, and every rule that differs asks the predicate.
+
+### What the pin's client hat does, and what wz does
+
+| Concern | Pin 1.10.2, `hat/client` | wz before | wz now |
+|---|---|---|---|
+| Hat of the north | the client hat, at node mode Client | the peer hat, at node mode Peer, and a flag | the client hat, at node mode Client, held in a `MeshHat` |
+| Graph | none; `info` is an empty graph, an OAM is ignored | a gossip graph, its bootstrap sent to the router and the router's link state read | a graph of the node's own link, never sent and never read |
+| North transports | one; a second is refused | any number | one; `refuses_face` refuses a second remote placed north |
+| New north face | repropagates interests, subscribers, queryables, tokens; no `DeclareFinal(0)` | the same, by the peer hat's replay | the same, by the face-based replay and `repropagate_brokered_interests` |
+| Declarations sent north | every declaration another hat holds, under an id of its own, withdrawn by that id | the same, numbered by `declaration_ids` for the flag | the same, numbered for the client hat |
+| Declarations from north | kept per face by the id the face gave | kept by the peer hat's id map | kept by the same map, asked for the client hat |
+| Data | to the face when it subscribed and the source is another region; a south source also when the face has not finalized its interest in the resource | the peer hat's face rule and gateway rule at node mode Peer | `face_based` and `gateways_owed` take the client hat |
+| Queries | the twin of data; the face has no queryable info | the gateway asked from every peer-hat block, twice when a south peer region is a block too | asked from the north block alone |
+| Interests of the south | every one sent to the face under an id of its own; a current one held pending | brokered for clients and, with the flag, for south peers | brokered by `routes_interest_north` and `north_is_client` |
+| Interests of the node's session | the face, whatever its remote | the faces whose remote is a router | the faces of the client hat |
+| Admin declaration legs | sources bucketed by the face's mode; the node itself named in the north hat's mode | the north's sources among the peers, the node among the peers | the north's sources by the face's mode, the node among the clients |
+| Admin linkstate legs | only the peer and router hats answer | the north answered as a peer's graph | the south peer and router regions answer, the north does not |
+| Mode the south graphs announce | the runtime's, Client | Peer | Client |
+| `DeclareFinal(0)` to and from south peers | never: the peer hat's initial interest needs a north-bound face | sent to them, and awaited by the open | neither |
+
+The citations, at the pin:
+
+- The hat's region is north (`zenoh/src/net/routing/hat/client/mod.rs` @
+  `debug_assert!(region.bound().is_north());`), it keeps no graph (`"graph {}".to_string()`)
+  and reads no OAM (`fn handle_oam(`).
+- One north transport (`zenoh/src/net/runtime/mod.rs` @
+  `bail!("Client runtimes only accept one north-bound transport");`).
+- A new north face (`zenoh/src/net/routing/hat/client/mod.rs` @
+  `self.repropagate_interests(ctx.reborrow(), &other_hats);`).
+- Declarations north (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn propagate_subscriber(`
+  and `.next_id`), from the north (`.remote_subs.remove(&id)`).
+- Data (`zenoh/src/net/routing/hat/client/pubsub.rs` @
+  `if ctx.subs.is_some() && *src_region != self.region() {` and
+  `dst.has_unfinalized_subscriber_interest = true`), queries
+  (`zenoh/src/net/routing/hat/client/queries.rs` @ `dst.has_unfinalized_queryable_interest = true`).
+- Interests (`zenoh/src/net/routing/hat/client/interests.rs` @ `fn route_interest`).
+- The admin legs (`zenoh/src/net/routing/hat/client/pubsub.rs` @
+  `WhatAmI::Router => srcs.routers.push(face.zid),`, `zenoh/src/net/routing/dispatcher/tables.rs`
+  @ `fn add_north_source(`, and `zenoh/src/net/runtime/adminspace.rs` @
+  `.filter(|(_, hat)| hat.mode().is_peer() || hat.mode().is_router())`).
+- The initial interest (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`).
+
+### Decisions
+
+- **The container is the mesh hat's.** The router and peer hats share `MeshHat` and differ
+  by the rules that ask `hat_kind`; the client hat joins them the same way. Its graph is the
+  one the north peer hat kept, of the node's own links, so the gateway rule reads the face's
+  bound off the link as it does for a peer, and a declaration of the router is routed back
+  along the same table. `Tables::exchanges_topology` keeps the graph to itself: no flood
+  reads it (`OnTables::topology_plane`) and no inbound OAM feeds it. A hat of its own with no
+  graph would have made every route that reads a north graph branch on the hat, for a graph
+  that holds one link.
+- **The client hat is face-based** (`Tables::face_based`): it propagates to its face and
+  never relays within its region, as the north peer hat did for this node.
+- **The gateways are asked from the north block alone.** Found while comparing the query
+  route: a south client's query is routed into every other mesh region, and the old rule
+  asked the gateways from each peer-hat block, which on a node with a south peer region sent
+  the router the query twice. It changes what a peer node with a partition sends as well.
+- **Removed:** `RouterForwarder::as_client_of_north` and the `north_is_client` field. A client
+  node is built by `RouterForwarder::client_with_timestamping`, and `Tables::north_is_client`
+  answers from the node mode.
+
+The rules are held by `router_forward/client_hat_tests.rs`, each with the peer node as the
+control where the rule is the client hat's own.
+
+### The token plane
+
+The pin's dispatcher asks the inter-region filter before it hands a token to another hat
+(`zenoh/src/net/routing/dispatcher/token.rs` @ `let filter = InterRegionFilter {`), and the
+client hat then sends its face every token it is handed, under an id of its own, and withdraws
+it by that id (`zenoh/src/net/routing/hat/client/token.rs` @ `fn propagate_token(`). wz asks the
+same filter for each source of a token before it floods it into the north region
+(`self_advertises_token_into`, by `crosses`), floods to the client hat's one face as a
+face-based hat does, and numbers what it sends there (`numbers_every_declaration_to`). The
+client hat's own gateway view is never asked, by the pin or by wz: a message from the north is
+filtered by the view of the region it enters, and one into the north by the view of the region
+it leaves.
+
+### The initial declarations follow the face's placement
+
+Found while comparing the row of `DeclareFinal(0)`: the forwarder decided it from the two modes
+and the bound the remote announced (`sends_initial_interest_final`, the auto preset's rule),
+which on a custom partition places a peer of a south subregion north. A peer node with such a
+subregion sent its peers the message, which a pin peer never answers, and its open waited out
+the window for theirs. `OnTables::exchanges_initial_declarations` asks what the pin's peer hat
+asks (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`): a face of the
+north region of the peer hat whose remote the node placed north-bound, by the same `place_face`
+that placed the face. The send (`end_initial_declarations`) and the wait
+(`initial_declares_pending`) both read it, and on the auto preset it answers as the old rule
+did. `only_a_peer_of_a_peer_nodes_north_region_ends_its_initial_declarations` holds it.
+
+### Open
+
+- Regions scenario 1 is the end-to-end witness of the whole hat, the token plane included;
+  run it before and after (`Z8_ONLY=scenario1:: Z8_REPEAT=<n>` on the `regions` file,
+  section 13's lane notes).
