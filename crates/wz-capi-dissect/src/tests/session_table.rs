@@ -385,6 +385,49 @@ fn a_session_table_can_be_bounded_and_says_what_the_bound_cost() {
     }
 }
 
+/// The keyed session table door builds the bounded dissection both session table
+/// doors write from, so it is the one that says what a ceiling cost: under the
+/// live-tap preset its `"dropped_by_limits"` names the evicted flow, and with no
+/// key log it answers what the older door answers, byte for byte.
+#[test]
+fn the_keyed_session_table_can_be_bounded_and_says_what_the_bound_cost() {
+    let file = capture_one_flow_past_the_tap_cap();
+    let keyed = |limits: c_int| {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_pcap_session_table_keyed(
+                file.as_ptr(),
+                file.len(),
+                limits,
+                core::ptr::null(),
+                0,
+                &mut out,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK);
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        s
+    };
+    let bounded = keyed(WZ_DISSECT_LIMITS_LIVE_TAP);
+    assert!(
+        bounded.contains(
+            "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\"flows\":1,"
+        ),
+        "{bounded}"
+    );
+    for limits in [WZ_DISSECT_LIMITS_NONE, WZ_DISSECT_LIMITS_LIVE_TAP] {
+        assert_eq!(
+            keyed(limits),
+            call_pcap(&file, limits).expect("answers"),
+            "preset {limits}"
+        );
+    }
+}
+
 /// A container that does not read is a DOCUMENT, a refusal by name, and never an
 /// error code or a panic; a caller's bug is a code and no string.
 #[test]

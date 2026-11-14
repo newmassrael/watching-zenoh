@@ -124,13 +124,24 @@ DOORS = {
         "asking which rows matched must not be handed a truncated answer that "
         "looks complete.",
     ),
-    "wz_dissect_pcap_session_table": (
+    "wz_dissect_pcap_session_table_keyed": (
         CAPI_SESSION_TESTS,
-        "a_session_table_can_be_bounded_and_says_what_the_bound_cost",
+        "the_keyed_session_table_can_be_bounded_and_says_what_the_bound_cost",
         "emits the SESSION TABLE, under a preset passed as an argument. A flow "
         "the ceiling evicts has no row, so a table made short by it must say so "
-        "in the one place a consumer already looks. The test lives in the "
-        "door's own test file, beside the rest of what the door is held to.",
+        "in the one place a consumer already looks. (ABI 57) This row named "
+        "`wz_dissect_pcap_session_table` until both doors began writing through "
+        "one function, which this keyed door's body holds; the older door, "
+        "marked as replaced by it, answers the same bytes with no key log, and "
+        "the test holds that too.",
+    ),
+    "wz_dissect_pcap_summary_keyed": (
+        CAPI,
+        "the_keyed_summary_reports_a_bound_that_bit",
+        "emits the SUMMARY document under a preset passed as an argument (ABI "
+        "57), the join of the plain and the bounded summary doors; the group "
+        "rides its `health` object, and with no key log each preset answers "
+        "what the older door of that preset answers.",
     ),
     "--bounded": (
         CLI,

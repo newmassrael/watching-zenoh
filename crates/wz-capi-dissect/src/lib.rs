@@ -7472,6 +7472,46 @@ mod tests {
         );
     }
 
+    /// The keyed summary door under each preset says what the preset cost, as
+    /// the two doors it joins do: its own bounded dissection is a reader that
+    /// can bite, so its document carries `"dropped_by_limits"`.
+    #[test]
+    fn the_keyed_summary_reports_a_bound_that_bit() {
+        let file = capture_one_flow_past_the_tap_cap();
+        let keyed = |limits: c_int| {
+            let mut out: *mut c_char = core::ptr::null_mut();
+            let rc = unsafe {
+                wz_dissect_pcap_summary_keyed(
+                    file.as_ptr(),
+                    file.len(),
+                    limits,
+                    core::ptr::null(),
+                    0,
+                    &mut out,
+                )
+            };
+            assert_eq!(rc, WZ_DISSECT_OK);
+            let s = unsafe { std::ffi::CStr::from_ptr(out) }
+                .to_str()
+                .expect("utf8")
+                .to_string();
+            unsafe { wz_dissect_string_free(out) };
+            s
+        };
+        let bounded = keyed(WZ_DISSECT_LIMITS_LIVE_TAP);
+        assert!(bounded.contains(LIVE_TAP_ONE_FLOW_BIT), "{bounded}");
+        let unbounded = keyed(WZ_DISSECT_LIMITS_NONE);
+        assert!(
+            unbounded.contains("\"dropped_by_limits\":{\"frames\":0,")
+                && unbounded.contains("\"flows\":0"),
+            "{unbounded}"
+        );
+        // With no key log each preset answers what the older door of that
+        // preset answers, byte for byte.
+        assert_eq!(bounded, call_summary_bounded(&file).expect("reads"));
+        assert_eq!(unbounded, call_summary(&file).expect("reads"));
+    }
+
     /// A scouting exchange must not read as an empty flow.
     ///
     /// R311y607 gave a datagram flow a second list and the summary reported
