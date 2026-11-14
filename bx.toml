@@ -228,8 +228,8 @@ outputs = ["out/**"]
 # number the store gives it on the candidate (last round + 1), files the round and deletes the
 # descriptor. A candidate with no descriptor changes nothing. This is what a queue integrator runs
 # after it cherry-picks an item onto the remote tip (`bx --land`, bx RFC 0024), because the number
-# is a fact of the tree it lands on and not of the commit. `scripts/land.sh` files the same
-# descriptors through the same script, so there is one way to file a round.
+# is a fact of the tree it lands on and not of the commit. `scripts/land.sh` writes a descriptor
+# from an author's append-round arguments and submits it, so there is one way to file a round.
 #
 # The inputs are listed here, unlike `regen-codegen`'s, because what a filing reads is small and
 # known: the descriptors, the store, the workspace declaration and the scripts. A missed input is
@@ -267,15 +267,16 @@ local = "never"
 
 # THE LANDING QUEUE (bx RFC 0024): `bx --land` submits a commit and one integrator per remote branch
 # rebases it onto `main`, files its ledger round, judges it with this repository's own pre-push hook
-# and pushes. It replaces `scripts/land.sh`'s clone-local lock for the pushes of a session; the
-# script stays until the integrator has landed a week of rounds.
+# and pushes. It is main's one writer: a session lands with `scripts/land.sh`, which submits to it,
+# and gate 0p of the hook refuses a push to main from any other clone.
 #
 # `checks` is left out: the pre-push hook judges, run for the landing push's own line, so what the
 # queue accepts is exactly what a push would have been given. The hook grades each ref of that
 # push by what it holds (`scripts/lib/push-refs.sh`), and a clone marked `git config
 # wz.land-integrator true` is the integrator's, which is what lets gate 0p admit its push to main.
-# Mark only the integrator's own clone: the marker lifts the lock requirement for every push it
-# makes.
+# Mark only the integrator's own clone: the marker admits every push to main it makes. Judging by
+# the whole gate (`checks = "ci"`) waits on kept verdicts; docs/verdicts-in-the-fleet.md, stage 4,
+# says why.
 #
 # `derive = ["file-round"]`: the ledger round is filed on the candidate, with the number the store
 # gives it there, and the derived commit carries the fixed message below. The message states no

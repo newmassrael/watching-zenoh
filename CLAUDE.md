@@ -71,14 +71,14 @@ One-time per clone: `git config core.hooksPath .githooks`. Requires
   line, no multi-line bullet wraps, no Co-Authored-By / "Generated with Claude
   Code" / emoji.
 - **Push to `main` only with `bash scripts/land.sh`** (owner, 2026-10-27). It
-  holds the clone's push lock, rebases, files the ledger round with the next
-  number (append-round arguments after `--`, no `--entry-id`) and pushes
-  through the hooks; pre-push gate 0p refuses a push that does not hold the
-  lock (a clone marked `wz.land-integrator` is the queue integrator's and is
-  ordered by the queue instead). A round may instead be a descriptor committed under
-  `docs/rounds/pending/` (`scripts/file-round.sh`). Acknowledging a red hosted
-  run is a row in `docs/hosted-red-acks.md` in a commit of the push, not an
-  option: `--ack-red` and `WZ_ACK_RED` are gone.
+  submits HEAD to the landing queue (`bx --land`, `[land]` in `bx.toml`) and
+  waits; the queue's one integrator rebases it, files its ledger round with the
+  number the store gives it there, judges it with the pre-push hook and pushes.
+  Append-round arguments after `--` (no `--entry-id`) become a round
+  descriptor committed under `docs/rounds/pending/` (`scripts/file-round.sh`).
+  Pre-push gate 0p refuses a push to main from any clone but the integrator's
+  (`wz.land-integrator`). Acknowledging a red hosted run is a row in
+  `docs/hosted-red-acks.md` in a commit of the item, not an option.
 - **pre-push** — publication, SSOT and the few checks that refuse often; the
   rest belongs to hosted CI (owner, 2026-09-23 and 2026-10-27). Deferral is
   printed and is not a local pass. Verify the change's focused behavior while
