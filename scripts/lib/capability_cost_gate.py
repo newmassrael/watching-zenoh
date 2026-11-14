@@ -88,7 +88,12 @@ PICO_BUILDS = artifact("crates/target/pico-reference")
 # A case's library is under the directory of the cargo profile it was built with.
 TARGET = artifact("crates/target")
 
-PICO_BASE = "engine-tokio,serial-drive-own-thread,rx-busy-poll"
+# The features every pico build has, read from the one place that states them, the declaration's
+# `[base] pico`, so a feature the crate's default gains (or loses) reaches the cases from there
+# and not from a second copy here; `wz_config --selftest` holds the cases to the empty selection.
+PICO_BASE = ",".join(
+    wz_config.read_decl_toml(wz_config.DECL.read_text(encoding="utf-8"))["base"]["pico"]
+)
 
 # Planes a build without the capability must not carry, as demangled-symbol patterns. The same
 # patterns are REQUIRED of a build that has the capability.
