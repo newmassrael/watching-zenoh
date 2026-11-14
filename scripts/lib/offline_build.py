@@ -48,16 +48,18 @@ pid and ipc namespaces) that holds only what the entry declares:
     the one step allowed the network; inside, a `CARGO_HOME` of the staging directory replaces
     crates.io with that directory, and no other registry cache is visible;
   * the toolchain the channel names (`rustup which`), bound read-only;
-  * PATH: the toolchain, a directory holding the declared tools by the names a build script calls
-    them (`cc`, `c++`, `ar`) and one holding `git`, `curl` and `wget` as stubs that record their
-    call and fail. Nothing else is on PATH; the environment is cleared and set to these,
+  * PATH: the toolchain, a directory holding the commands of the declared tools by the names a
+    build script or a compiler driver runs them (`cc`, `as`, `ld`, `c++`, `ar`) and one holding
+    `git`, `curl` and `wget` as stubs that record their call and fail. Nothing else is on PATH; the environment is cleared and set to these,
     `WZ_SOURCE_COMMIT` and `LIBCLANG_PATH` when the caller has one;
   * no network: the sandbox has its own empty network namespace.
 
 A bundle passes when cargo exits 0, no stub was called, every declared product is in the target
-directory, and a bundle whose closure holds the commit variable's reader carries the version a
-checkout build of the same tree carries, `v<version>-<git describe>`, and not `-release`. The
-expected version is asked of `git` in the checkout, outside the sandbox.
+directory, and, for a bundle whose closure holds the commit variable's reader, the reader's build
+script handed rustc (`commit_input.rustc_env`, read from cargo's own `build-script-executed`
+messages) the version a checkout build of the same tree composes, `v<version>-<git describe>`. The
+expected version is asked of `git` in the checkout, outside the sandbox. The product is not
+searched for the string: a bundle that never reads `zenoh::GIT_VERSION` (ap-demo) links it away.
 
 The staging directory is `WZ_OFFLINE_BUILD_ROOT`, else the machine's cache directory
 (`$XDG_CACHE_HOME`, else `~/.cache`) under `watching-zenoh/offline-build/<key of the checkout>`. It
@@ -98,8 +100,7 @@ SCHEMA = 1
 DESCRIBE = ["describe", "--always", "--dirty=-modified", "--abbrev=40", "--exclude=*"]
 # Programs a build that has no network and no history must never call.
 STUBBED = ("git", "curl", "wget")
-# A declared tool a build script calls by name, and the variable that names another one.
-TOOL_COMMANDS = {"cc": "CC", "c++": "CXX", "ar": "AR"}
+TOOL_KEYS = ["commands", "variable", "what"]
 # Variables carried into the sandbox when the caller sets them: they locate a declared tool that is
 # not a command.
 CARRIED = ("LIBCLANG_PATH",)
@@ -150,9 +151,9 @@ def shape_findings(decl: object) -> list[str]:
                                          for s in subs):
         out.append(f"source.submodules is not a list of objects with {SUBMODULE_KEYS}")
     commit = decl["commit_input"]
-    if not isinstance(commit, dict) or not isinstance(commit.get("variable"), str) \
-            or not isinstance(commit.get("read_by"), str):
-        out.append("commit_input has no `variable` and `read_by`")
+    if not isinstance(commit, dict) or not all(isinstance(commit.get(k), str)
+                                               for k in ("variable", "read_by", "rustc_env")):
+        out.append("commit_input has no `variable`, `read_by` and `rustc_env`")
     if not isinstance(decl["toolchain"], dict) or not isinstance(decl["toolchain"].get("channel"), str):
         out.append("toolchain has no `channel`")
     cargo = decl["cargo"]
@@ -163,6 +164,12 @@ def shape_findings(decl: object) -> list[str]:
     if not isinstance(tools, dict) or not tools:
         out.append("system_tools is not a non-empty object")
         tools = {}
+    for name, tool in sorted(tools.items()):
+        if not isinstance(tool, dict) or sorted(tool) != TOOL_KEYS:
+            out.append(f"system tool {name!r} does not have exactly {TOOL_KEYS}")
+        elif not (_strings(tool["commands"]) or tool["commands"] == []) \
+                or tool["commands"] != sorted(set(tool["commands"])):
+            out.append(f"system tool {name!r}: commands are not a sorted list of unique names")
     if decl["linker"] not in tools:
         out.append(f"the linker {decl['linker']!r} is not a declared system tool")
     scripts = decl["build_scripts"]
@@ -383,8 +390,10 @@ def findings(decl: dict, graph: Graph, channel: str, modules: dict[str, str], lo
     reader = read_file(commit["read_by"])
     if reader is None:
         out.append(f"commit_input.read_by {commit['read_by']} does not exist")
-    elif commit["variable"] not in reader:
-        out.append(f"commit_input.read_by {commit['read_by']} does not name {commit['variable']}")
+    else:
+        for key in ("variable", "rustc_env"):
+            if commit[key] not in reader:
+                out.append(f"commit_input.read_by {commit['read_by']} does not name {commit[key]}")
 
     for item in decl["not_inputs"]:
         script = next((t for t in item["list"].split() if "/" in t), item["list"])
@@ -562,19 +571,22 @@ def toolchain_bin(channel: str) -> Path:
 
 
 def tool_dir(decl: dict, stage: Path, bundles: list[dict]) -> Path:
-    """The declared command tools by the names a build script calls them."""
+    """The commands of the bundles' declared tools, by the names a build script or a compiler
+    driver runs them. A tool's own command is the program its variable names when the caller sets
+    it (`CC=clang`); every other command is the one on the caller's PATH."""
     out = stage / "tools"
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
-    wanted = sorted({t for b in bundles for t in b["system_tools"] if t in TOOL_COMMANDS})
-    for tool in wanted:
-        named = os.environ.get(TOOL_COMMANDS[tool]) or tool
-        found = shutil.which(named)
-        if not found:
-            raise Unusable(f"the declared tool {tool!r} ({decl['system_tools'][tool]['what']}) is not on PATH "
-                           f"as {named!r}")
-        os.symlink(os.path.realpath(found), out / tool)
+    for tool in sorted({t for b in bundles for t in b["system_tools"]}):
+        spec = decl["system_tools"][tool]
+        for command in spec["commands"]:
+            named = (os.environ.get(spec["variable"]) if command == tool else None) or command
+            found = shutil.which(named)
+            if not found:
+                raise Unusable(f"the declared tool {tool!r} ({spec['what']}) has no {command!r} on PATH "
+                               f"(looked for {named!r})")
+            os.symlink(os.path.realpath(found), out / command)
     return out
 
 
@@ -642,6 +654,23 @@ def package_version(meta: dict[tuple[str, str], Package], reader: Path) -> tuple
     return None
 
 
+def script_env(messages: str, package_dir: Path, name: str) -> list[str]:
+    """The values of `name` the build script of the package at `package_dir` handed rustc, from
+    cargo's JSON messages: one per `build-script-executed` of that package (one per feature set the
+    build compiled it with). A package id is `path+file://<dir>#<name>@<version>`."""
+    prefix = f"path+file://{package_dir}#"
+    values: list[str] = []
+    for line in messages.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if msg.get("reason") != "build-script-executed" or not str(msg.get("package_id", "")).startswith(prefix):
+            continue
+        values += [value for key, value in msg.get("env", []) if key == name]
+    return values
+
+
 def build(decl: dict, ids: list[str]) -> None:
     bundles = [b for b in decl["bundles"] if not ids or b["id"] in ids]
     unknown = sorted(set(ids) - {b["id"] for b in decl["bundles"]})
@@ -649,12 +678,12 @@ def build(decl: dict, ids: list[str]) -> None:
         raise Unusable(f"no bundle {', '.join(unknown)} in the entry")
     sandbox_probe()
     graph, meta = check(decl)
-    reader =package_version(meta, ROOT / decl["commit_input"]["read_by"])
+    reader = package_version(meta, ROOT / decl["commit_input"]["read_by"])
     if reader is None:
         raise Finding(f"no package's build script is {decl['commit_input']['read_by']}")
     reader_version, reader_dir = reader
     commit = describe_checkout()
-    expected = f"v{reader_version}-{commit}".encode()
+    expected = f"v{reader_version}-{commit}"
 
     stage = stage_root()
     src = stage / "src"
@@ -682,11 +711,15 @@ def build(decl: dict, ids: list[str]) -> None:
             argv += ["--features", ",".join(b["features"])]
         if not b["default_features"]:
             argv.append("--no-default-features")
+        # The messages are cargo's own record of the build: `build-script-executed` carries the
+        # environment each build script handed rustc, replayed for a script that did not run again.
+        argv.append("--message-format=json-render-diagnostics")
         log = logs / f"{b['id']}.log"
+        messages = logs / f"{b['id']}.messages.jsonl"
         print(f"  offline-build: {b['id']}: {' '.join(argv[1:])} (log {log})", flush=True)
-        with log.open("w") as fh:
+        with log.open("w") as err, messages.open("w") as out:
             rc = subprocess.run(sandbox_argv(stage, bindir, path, env, workspace) + argv,
-                                stdout=fh, stderr=subprocess.STDOUT, check=False).returncode
+                                stdout=out, stderr=err, check=False).returncode
         problems: list[str] = []
         if rc != 0:
             tail = log.read_text(errors="replace").splitlines()[-40:]
@@ -701,13 +734,13 @@ def build(decl: dict, ids: list[str]) -> None:
             holds_reader = any(meta.get(k) and meta[k].dir.resolve() == reader_dir.resolve()
                                for k in graph.packages[b["id"]])
             if holds_reader:
-                blob = (target / "release" / b["products"][0]).read_bytes()
-                stale = f"v{reader_version}-release".encode()
-                if expected not in blob:
-                    problems.append(f"{b['products'][0]} does not carry {expected.decode()}, the version a "
-                                    f"checkout build of this tree carries")
-                if stale in blob:
-                    problems.append(f"{b['products'][0]} carries {stale.decode()}")
+                staged_reader = src / reader_dir.resolve().relative_to(ROOT.resolve())
+                given = script_env(messages.read_text(errors="replace"), staged_reader,
+                                   decl["commit_input"]["rustc_env"])
+                if given != [expected]:
+                    problems.append(f"the build script of {staged_reader} handed rustc "
+                                    f"{decl['commit_input']['rustc_env']}={given}, where a checkout build "
+                                    f"of this tree composes [{expected!r}]")
         if problems:
             failed.append(b["id"])
             print(f"  offline-build FAIL {b['id']}:\n    " + "\n    ".join(problems), file=sys.stderr)
@@ -738,6 +771,9 @@ def selftest() -> int:
     bad["build_scripts"]["ring"] = ["cc", "nasm"]
     expect("an undeclared tool is a shape finding", any("'nasm'" in p for p in shape_findings(bad)))
     bad = json.loads(json.dumps(decl))
+    del bad["system_tools"]["cc"]["commands"]
+    expect("a tool without its commands is a shape finding", any("'cc'" in p for p in shape_findings(bad)))
+    bad = json.loads(json.dumps(decl))
     bad["bundles"][1]["features"] = ["lifecycle-doors", "identity-make"]
     expect("unsorted features are a shape finding", any("sorted" in p for p in shape_findings(bad)))
 
@@ -749,6 +785,16 @@ def selftest() -> int:
     composed = 'try_to_find_and_link_lib("SNAPPY")\nenv::var(format!("{lib_name}_LIB_DIR"))'
     expect("a composed library variable is read", reads_variable(composed, "SNAPPY_LIB_DIR"))
     expect("a composed variable of another stem is not", not reads_variable(composed, "ZSTD_LIB_DIR"))
+    msgs = "\n".join([
+        json.dumps({"reason": "build-script-executed", "package_id": "path+file:///s/crates/z#zenoh@1.0.0",
+                    "env": [["V", "v1.0.0-" + "a" * 40], ["OTHER", "x"]]}),
+        json.dumps({"reason": "build-script-executed", "package_id": "path+file:///s/crates/zz#other@1.0.0",
+                    "env": [["V", "v9"]]}),
+        json.dumps({"reason": "compiler-artifact", "package_id": "path+file:///s/crates/z#zenoh@1.0.0"}),
+        "not json",
+    ])
+    expect("a build script's rustc environment is read from cargo's messages, for that package only",
+           script_env(msgs, Path("/s/crates/z"), "V") == ["v1.0.0-" + "a" * 40])
     expect("a tree listing is read once per package",
            parse_tree("a v1.0.0 (/x)\nb v2.0.0\na v1.0.0 (/x) (*)\nm v0.1.0 (proc-macro)\n")
            == [("a", "1.0.0"), ("b", "2.0.0"), ("m", "0.1.0")])
@@ -774,10 +820,10 @@ def selftest() -> int:
         "bundles": [{"id": "one", "system_tools": ["ar", "cc"]}, {"id": "two", "system_tools": ["cc"]}],
         "source": {"submodules": [{"path": "vendor/s", "url": "u"}]},
         "output_variables": {"names": ["CC_USER_LIB_DIR"]},
-        "commit_input": {"variable": "THE_COMMIT", "read_by": "crates/app/build.rs"},
+        "commit_input": {"variable": "THE_COMMIT", "read_by": "crates/app/build.rs", "rustc_env": "APP_VERSION"},
         "not_inputs": [{"id": "oracle", "list": "bash scripts/get.sh --inputs", "hand_in": ["ORACLE_ARCHIVE"]}],
     }
-    files = {"crates/app/build.rs": "THE_COMMIT", "scripts/get.sh": "ORACLE_ARCHIVE"}
+    files = {"crates/app/build.rs": "THE_COMMIT APP_VERSION", "scripts/get.sh": "ORACLE_ARCHIVE"}
     modules = {"vendor/s": "u"}
 
     def found(d: dict, lock: str = "", fs: dict | None = None, g: Graph = graph) -> list[str]:

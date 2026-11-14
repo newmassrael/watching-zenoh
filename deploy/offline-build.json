@@ -15,6 +15,7 @@
     "variable": "WZ_SOURCE_COMMIT",
     "value": "what `git describe --always --dirty=-modified --abbrev=40 --exclude=*` answers in a checkout of the commit: the commit of 40 lowercase hex digits for a clean tree",
     "read_by": "crates/wz-zenoh/build.rs",
+    "rustc_env": "WZ_ZENOH_GIT_VERSION",
     "without_it": "the build names itself `release` where a checkout build names the commit"
   },
   "toolchain": {
@@ -29,20 +30,24 @@
   },
   "system_tools": {
     "cc": {
-      "what": "a C compiler driver; rustc also calls it as the linker",
-      "variable": "CC"
+      "what": "a C compiler driver and the assembler and linker it runs by name from PATH (gcc's -print-prog-name answers `as` and `ld`); rustc also calls it as the linker",
+      "variable": "CC",
+      "commands": ["as", "cc", "ld"]
     },
     "c++": {
-      "what": "a C++17 compiler",
-      "variable": "CXX"
+      "what": "a C++17 compiler driver; it runs the assembler `cc` brings",
+      "variable": "CXX",
+      "commands": ["c++"]
     },
     "ar": {
       "what": "an archiver for the static libraries build scripts make",
-      "variable": "AR"
+      "variable": "AR",
+      "commands": ["ar"]
     },
     "libclang": {
-      "what": "the libclang shared library and its resource headers, which bindgen loads while librocksdb-sys's build script runs",
-      "variable": "LIBCLANG_PATH"
+      "what": "the libclang shared library and its resource headers, which bindgen loads while librocksdb-sys's build script runs; a library, not a command",
+      "variable": "LIBCLANG_PATH",
+      "commands": []
     }
   },
   "linker": "cc",
