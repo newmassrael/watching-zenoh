@@ -40,6 +40,24 @@ Then each image against the reference (`--ref`, the first image by default), by 
   replacement, seeded, so a run prints the same interval twice). WIN when the whole interval is
   below 1, LOSS when it is above 1, TIE otherwise. A TIE is not a claim either way.
 
+## A host run
+
+`scripts/pico-compare.sh parity <family>` (docs/upstream-parity.md section 5b) leaves a run of the
+same shape on a host: the same manifest, alternating rounds, and in each boot's directory a
+`host.json` in place of the capture and the console. It holds one figure per metric for that boot
+(scripts/host-bench/parity.py: the median round trip, the median throughput and the CPU per message
+at each size, the RSS and the heap peak of each workload's two processes) and the workloads the boot
+lost. The run's `sizes/<image>/binary` is the file the image's size cells read (the shared library
+of a C family, a program of the Rust family), with `binary.stripped` beside it.
+
+Every host metric is a distribution over boots, the memory figures included (a host's heap and
+resident set move with timing, which a kit's high-water marks do not), so each is judged as the
+turnaround is: the ratio of the median of the image's boot figures to the reference's, with its
+bootstrap interval. A throughput is better when LARGER: its cell is WIN when the whole interval is
+above 1 and LOSS when it is below. Every other metric, of the kit or of a host, is better when
+smaller. The size cells of a host image are the text of its file (`size`) and the bytes of the
+stripped copy.
+
 It judges a run and grades nothing: the committed matrix (`deploy/upstream_parity.json`) is where a
 verdict becomes a row. Exit 0 when the run was read, 2 when it could not be.
 
@@ -61,6 +79,7 @@ import re
 import statistics
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 
 #: The kit's own address on the bench network (CONFIG_NET_CONFIG_MY_IPV4_ADDR of the images).
@@ -77,6 +96,14 @@ STACK_LINE = re.compile(r"stack: peak (\d+) of (\d+) bytes")
 #: heap line, then one line per thread, printed together whenever a figure moved.
 HEAP_LINE = re.compile(r"mem: heap peak (\d+) of (\d+) bytes")
 THREAD_LINE = re.compile(r"mem: stack (\S+) used=(\d+) size=(\d+)")
+#: A host boot's figures (scripts/host-bench/parity.py), in place of a kit boot's capture and console.
+HOST_BOOT = "host.json"
+#: The metrics, kit or host, that are better when larger; every other one is better when smaller.
+HIGHER_IS_BETTER = ("throughput_",)
+
+
+def better(metric: str) -> str:
+    return "higher" if metric.startswith(HIGHER_IS_BETTER) else "lower"
 
 
 @dataclass
@@ -118,6 +145,14 @@ class Image:
     stack: tuple[int, int] | None = None
     boot_medians: list[float] = field(default_factory=list)  # milliseconds, one per boot
     memory: list[Memory] = field(default_factory=list)  # one per boot that reported
+    host: dict[str, list[float]] = field(default_factory=dict)  # a host run: metric -> one per boot
+    lost: dict[str, int] = field(default_factory=dict)  # a host run: workload -> boots that lost it
+    file_bytes: int | None = None  # a host run: the stripped file the size cells read
+    boots: int = 0
+
+    @property
+    def is_host(self) -> bool:
+        return bool(self.host) or self.file_bytes is not None
 
     def worst_memory(self) -> Memory | None:
         """The boot whose heap peak and summed stack were the largest: the image's cost is what it
@@ -138,8 +173,8 @@ def turnarounds(capture: str, node: str) -> list[float]:
             if not from0 and from1]
 
 
-def berkeley_size(elf: pathlib.Path) -> Size:
-    out = subprocess.run(["arm-none-eabi-size", str(elf)], check=True, capture_output=True,
+def berkeley_size(elf: pathlib.Path, tool: str = "arm-none-eabi-size") -> Size:
+    out = subprocess.run([tool, str(elf)], check=True, capture_output=True,
                          text=True).stdout.splitlines()
     text, data, bss = (int(v) for v in out[1].split()[:3])
     return Size(text, data, bss)
@@ -185,8 +220,30 @@ def verdict_interval(lo: float, hi: float) -> str:
     return "TIE"
 
 
+def verdict_interval_for(metric: str, lo: float, hi: float) -> str:
+    """The verdict of an interval of the image's ratio to the reference, for a metric that is better
+    when smaller (as the turnaround) or when larger (a throughput)."""
+    if better(metric) == "lower":
+        return verdict_interval(lo, hi)
+    return "WIN" if lo > 1.0 else "LOSS" if hi < 1.0 else "TIE"
+
+
 def verdict_size(mine: int, ref: int) -> str:
     return "WIN" if mine < ref else "LOSS" if mine > ref else "TIE"
+
+
+def read_host_boot(run: pathlib.Path, boot: pathlib.Path, image: Image) -> None:
+    """A host boot: its figures appended to the image's, and its sizes read once from the run."""
+    figures = json.loads((boot / HOST_BOOT).read_text())
+    image.boots += 1
+    for metric, value in figures.get("values", {}).items():
+        image.host.setdefault(metric, []).append(float(value))
+    for workload in figures.get("lost", {}):
+        image.lost[workload] = image.lost.get(workload, 0) + 1
+    sizes = run / "sizes" / image.key
+    if image.file_bytes is None and (sizes / "binary").is_file():
+        image.size = berkeley_size(sizes / "binary", "size")
+        image.file_bytes = (sizes / "binary.stripped").stat().st_size
 
 
 def read_run(run: pathlib.Path, node: str) -> dict[str, Image]:
@@ -197,6 +254,9 @@ def read_run(run: pathlib.Path, node: str) -> dict[str, Image]:
         _round, key, sub = line.split("\t")
         boot = run / sub
         image = images.setdefault(key, Image(key))
+        if (boot / HOST_BOOT).is_file():
+            read_host_boot(run, boot, image)
+            continue
         elf = pathlib.Path((boot / "elf.path").read_text().strip())
         size = berkeley_size(elf)
         if image.size is not None and image.size != size:
@@ -217,6 +277,18 @@ def report(images: dict[str, Image], ref_key: str) -> list[str]:
     out: list[str] = []
     for image in images.values():
         s = image.size
+        if image.is_host:
+            if s is not None:
+                out.append(f"kit-compare: {image.key}: text {s.text}, data {s.data}, bss {s.bss}; "
+                           f"stripped file {image.file_bytes} bytes")
+            for metric, values in sorted(image.host.items()):
+                out.append(f"kit-compare: {image.key}: {metric} over {len(values)} of {image.boots} "
+                           f"boot(s): median {statistics.median(values):.6g}, boots {min(values):.6g} "
+                           f"to {max(values):.6g}")
+            for workload, count in sorted(image.lost.items()):
+                out.append(f"kit-compare: {image.key}: {workload} lost in {count} of {image.boots} "
+                           f"boot(s) (the boots' host.json say why)")
+            continue
         if s is not None:
             out.append(f"kit-compare: {image.key}: text {s.text}, data {s.data}, bss {s.bss}; "
                        f"flash {s.flash}, static RAM {s.ram}")
@@ -240,14 +312,13 @@ def report(images: dict[str, Image], ref_key: str) -> list[str]:
         else:
             out.append(f"kit-compare: {image.key}: no query/reply pair in any capture")
     for c in cells(images, ref_key):
-        if c.metric == "turnaround":
-            if c.verdict is None:
-                out.append(f"kit-compare: cell turnaround: {c.image} vs {c.reference}: fewer than "
-                           f"two boots with pairs on a side, no verdict")
-            else:
-                out.append(f"kit-compare: cell turnaround: {c.image} vs {c.reference}: ratio "
-                           f"{c.ratio:.3f} [{c.low:.3f}, {c.high:.3f}] over {c.boots[0]} and "
-                           f"{c.boots[1]} boots -> {c.verdict}")
+        if c.low is not None:
+            out.append(f"kit-compare: cell {c.metric}: {c.image} vs {c.reference}: ratio "
+                       f"{c.ratio:.3f} [{c.low:.3f}, {c.high:.3f}] over {c.boots[0]} and "
+                       f"{c.boots[1]} boots, {c.better} is better -> {c.verdict}")
+        elif c.boots is not None and c.verdict is None:
+            out.append(f"kit-compare: cell {c.metric}: {c.image} vs {c.reference}: fewer than "
+                       f"two boots with a figure on a side ({c.boots[0]} and {c.boots[1]}), no verdict")
         else:
             ratio = f"{c.ratio:.3f}" if c.ratio is not None else "n/a"
             out.append(f"kit-compare: cell {c.metric}: {c.image} {c.mine} vs {c.reference} "
@@ -269,6 +340,30 @@ class Cell:
     high: float | None
     boots: tuple[int, int] | None
     verdict: str | None  # WIN, TIE, LOSS, or None when there is nothing to judge
+    better: str = "lower"  # "higher" for a metric that is better when larger (a throughput)
+
+
+def host_cells(image: Image, ref: Image) -> list[Cell]:
+    """The cells of a host image (a parity run of scripts/pico-compare.sh): its size, then every
+    metric both images have figures of, each over the boots."""
+    out: list[Cell] = []
+    if image.size is not None and ref.size is not None:
+        for metric, mine, theirs in (("text", image.size.text, ref.size.text),
+                                     ("file_bytes", image.file_bytes, ref.file_bytes)):
+            out.append(Cell(image.key, ref.key, metric, mine, theirs, mine / theirs, None, None, None,
+                            verdict_size(mine, theirs)))
+    for metric in sorted(set(image.host) | set(ref.host)):
+        mine, theirs = image.host.get(metric, []), ref.host.get(metric, [])
+        boots = (len(mine), len(theirs))
+        if min(boots) >= 2 and statistics.median(theirs) > 0:
+            point, lo, hi = bootstrap_ratio(mine, theirs)
+            out.append(Cell(image.key, ref.key, metric, statistics.median(mine),
+                            statistics.median(theirs), point, lo, hi, boots,
+                            verdict_interval_for(metric, lo, hi), better(metric)))
+        else:
+            out.append(Cell(image.key, ref.key, metric, None, None, None, None, None, boots, None,
+                            better(metric)))
+    return out
 
 
 def cells(images: dict[str, Image], ref_key: str) -> list[Cell]:
@@ -277,6 +372,9 @@ def cells(images: dict[str, Image], ref_key: str) -> list[Cell]:
     ref = images[ref_key]
     for image in images.values():
         if image.key == ref_key:
+            continue
+        if image.is_host or ref.is_host:
+            out.extend(host_cells(image, ref))
             continue
         if image.size is not None and ref.size is not None:
             for metric in ("text", "flash", "ram"):
@@ -312,7 +410,7 @@ def rows(images: dict[str, Image], ref_key: str, run: str) -> list[dict]:
         "ratio": None if c.ratio is None else round(c.ratio, 4),
         "interval": None if c.low is None else [round(c.low, 4), round(c.high, 4)],
         "boots": None if c.boots is None else list(c.boots),
-        "verdict": c.verdict, "run": run,
+        "verdict": c.verdict, "better": c.better, "run": run,
     } for c in cells(images, ref_key)]
 
 
@@ -405,6 +503,54 @@ def selftest() -> int:
                for r in table))
     expect("a firmware that prints no stack line is said to, not read as zero",
            any("pico: stack not reported" in line for line in lines))
+    expect("a kit row says which way its metric is better (all of the kit's: lower)",
+           all(r["better"] == "lower" for r in table))
+
+    # A host run (scripts/host-bench/parity.py), read from a directory as the module reads one.
+    with tempfile.TemporaryDirectory() as tmp:
+        run = pathlib.Path(tmp)
+        manifest = []
+        for rnd in range(1, 7):
+            for key, rtt, thr, heap in (("orig", 20.0, 4.0e5, 9000), ("wz", 15.0, 5.0e5, 7000)):
+                sub = f"{key}-r{rnd}"
+                (run / sub).mkdir()
+                values = {"rtt_us": rtt + rnd * 0.1, "throughput_8B": thr + rnd * 100.0,
+                          "heap_peak_query": heap}
+                lost = {}
+                if key == "wz" and rnd == 3:
+                    lost = {"pubsub": "z_sub printed no sample"}
+                if key == "orig":
+                    values["rss_kib_pubsub"] = 5000
+                (run / sub / HOST_BOOT).write_text(json.dumps({"values": values, "lost": lost}))
+                manifest.append(f"{rnd}\t{key}\t{sub}")
+        (run / "manifest.tsv").write_text("\n".join(manifest) + "\n")
+        host = read_run(run, NODE_DEFAULT)
+        expect("a host boot is read from its host.json, six boots an image",
+               host["wz"].is_host and host["wz"].boots == 6 and len(host["wz"].host["rtt_us"]) == 6)
+        by_metric = {c.metric: c for c in cells(host, "orig")}
+        expect("a shorter round trip is a WIN", by_metric["rtt_us"].verdict == "WIN")
+        expect("a higher throughput is a WIN, with its ratio above 1",
+               by_metric["throughput_8B"].verdict == "WIN" and by_metric["throughput_8B"].ratio > 1
+               and by_metric["throughput_8B"].better == "higher")
+        expect("a heap peak that is the same in every boot gives a degenerate interval, and a smaller one wins",
+               by_metric["heap_peak_query"].verdict == "WIN"
+               and by_metric["heap_peak_query"].low == by_metric["heap_peak_query"].high)
+        expect("a metric only one side has is a cell with no verdict",
+               by_metric["rss_kib_pubsub"].verdict is None and by_metric["rss_kib_pubsub"].boots == (0, 6))
+        expect("a host image has no turnaround cell and no size cell without its sizes",
+               "turnaround" not in by_metric and "text" not in by_metric)
+        host_lines = report(host, "orig")
+        expect("a workload a boot lost is counted and said",
+               any("wz: pubsub lost in 1 of 6" in line for line in host_lines))
+        host_rows = rows(host, "orig", "host-x")
+        expect("a host row carries its interval, its boots and which way is better",
+               any(r["metric"] == "throughput_8B" and r["better"] == "higher" and r["boots"] == [6, 6]
+                   and len(r["interval"]) == 2 for r in host_rows))
+        slower = {k: Image(k) for k in ("orig", "wz")}
+        slower["orig"].host = {"throughput_8B": [5.0e5, 5.1e5, 4.9e5, 5.0e5]}
+        slower["wz"].host = {"throughput_8B": [4.0e5, 4.1e5, 3.9e5, 4.0e5]}
+        expect("a lower throughput is a LOSS",
+               cells(slower, "orig")[0].verdict == "LOSS")
     print(f"  kit-compare selftest: {'PASS' if not fails else f'{fails} FAIL'}")
     return 1 if fails else 0
 

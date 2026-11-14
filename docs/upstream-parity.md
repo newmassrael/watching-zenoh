@@ -357,7 +357,7 @@ MCU first, by the owner's choice.
    `wz-capi-pico` depends on. The MCU cells are then measured with pico's own programs (D4).
 6. **H1. The host matrix.** The same for the three host presets: size against zenoh-pico,
    zenoh-c and zenoh built the same way, time with `pico-compare.sh` and its zenoh-c and
-   zenoh counterparts brought into the same verdict module.
+   zenoh counterparts brought into the same verdict module (section 5b).
 7. **K. The switch chain (D7).** K1: the SCE element gate (asked of the SCE repository: the
    attribute, its emit as `#[cfg]` in the Rust backend, and its conformance tests). K2: the
    SCXML sources annotated where a capability owns states or transitions (the unicast
@@ -398,11 +398,93 @@ engine for the MCU would copy that logic. So the pico C ABI on the MCU runs on t
   `system/zephyr/system.c`, beside `unix.rs` and `windows.rs` (the types the C program
   stack-allocates are the ones pico's Zephyr header gives them).
 
+## 5b. H1 on the host: upstream's examples, two arms, alternating boots
+
+Step H1 measures the three host presets with the method of D1 and the rows of D6. It extends the two
+instruments that exist and adds none: `scripts/pico-compare.sh` is the host comparison (the kit lane,
+`scripts/kit-lane.sh`, needs the kit, its debugger and its lock, and nothing of it applies on a host),
+and `scripts/lib/kit_compare.py` is the verdict. `pico-compare.sh parity <family>` builds the two arms
+and runs `scripts/host-bench/parity.py`, which leaves a run of the kit lane's shape (a `manifest.tsv` of
+alternating rounds, one directory per boot) with a `host.json` in each boot where a kit boot has its
+capture and console; `kit_compare.py --format rows` reads it like a kit run.
+
+**The arms.** One source per program, compiled or built once per arm on the same host in the same
+run. Arm P, the original, is built here from the pinned source with its own default switches; arm W
+is the wz preset of that original (`wz_config.py --original-features <original>`, which resolves
+`configs/<original>_defconfig` alone).
+
+| family | arm P (original) | arm W (wz) | programs | size cells read |
+|---|---|---|---|---|
+| `pico` | vendor/zenoh-pico at its pin, upstream's default cmake build (`zenoh-pico-build-default`, no switch passed), shared library | `wz-capi-pico` for `zenoh-pico_defconfig` | `examples/unix/c11/*.c` of the pin, against the default arm's headers | the shared library |
+| `c` | zenoh-c at the pin of `scripts/zenoh-c-oracle.pin`, built from its source (`install-zenoh-c-arm.sh nounstable`: Release, no unstable API, no shared memory, upstream's pinned toolchain) | `wz-capi-c` for `zenoh-c_defconfig` | `examples/*.c` of that source, against the original's headers | the shared library |
+| `rust` | upstream's `examples` package of the pinned tree over upstream's `zenoh` from the registry | the same package with the family in `[patch.crates-io]` and `wz-capi-core` given the preset's features | `examples/examples/*.rs` of the pin | `z_put` |
+
+The Rust package is generated (`z8_upstream_suite.py examples --arm stock|wz`, beside Z8's test
+package): the eight sources, `src/lib.rs` and the build script byte for byte, one manifest for both arms
+but for the patch and the engine's features, upstream's `[profile.release]` (fat LTO, one codegen unit,
+`panic = "abort"`) and upstream's `Cargo.lock` as the starting lock of both, so the third-party crates
+the arms share are at the versions upstream released with. `zenoh-ext` is left out of both: none of the
+eight programs calls it. The programs are `z_put`, `z_sub`, `z_get`, `z_queryable`, `z_pub_thr`,
+`z_sub_thr`, `z_ping` and `z_pong` in every family.
+
+**A boot** is one image running each workload once, every program started afresh, peer mode over TCP
+loopback with the client side (`z_ping`, `z_pub_thr`, `z_put`, `z_get`) pinned to CPUs 4-7 and the
+server side to 8-11 (two physical cores a side on the bench host: zenoh-c and zenoh run several threads
+a process); zenoh-c's and zenoh's sessions are given `--no-multicast-scouting`, so a session meets only
+the other side.
+
+**The cells**, each a figure per boot except size:
+
+| metric | what one boot gives | better |
+|---|---|---|
+| `text` | `size` of the arm's file | lower |
+| `file_bytes` | bytes of the file stripped (`strip --strip-unneeded`) | lower |
+| `rtt_us` | median of 20,000 round trips of 8 B (`z_ping` / `z_pong`, after a 3 s warm-up) | lower |
+| `throughput_<n>B` | median of the subscriber's reports over a 10 s window after a 3 s warm-up (`z_pub_thr` / `z_sub_thr`), n = 8 and 1024 | higher |
+| `cpu_ns_per_msg_<n>B` | the CPU of both processes over that window (`/proc/<pid>/stat`), per message the median rate delivers in it | lower |
+| `rss_kib_<workload>` | peak resident set of the workload's two processes, summed (`getrusage` of each) | lower |
+| `heap_peak_<workload>` | peak of the bytes held through the C allocator by each process, summed (`heap_peak.so` preloaded, in runs of their own so no time figure carries its cost) | lower |
+
+The workloads with a memory cell are `rtt`, `thr_<n>B`, `pubsub` (`z_sub` and one `z_put`, which
+must be delivered) and `query` (`z_queryable` and one `z_get`, which must be answered); the heap is
+read for `pubsub`, `query` and `thr` at the largest size. Every figure of a pair is the sum of its two
+processes because both arms run both sides: a cost moved from one side to the other is the same cost.
+
+**The verdict** is D1's. Size is one figure per build: WIN when smaller. Every other cell is a
+distribution over boots, the memory cells included (on a host they move with timing): the ratio of the
+median of the image's boot figures to the reference's, and a 95 percent bootstrap interval of that ratio
+(10,000 resamples, each image's boots resampled with replacement on its own, seeded, the 2.5th and
+97.5th percentiles). For a metric better when lower, WIN when the whole interval is below 1 and LOSS
+when above; for a throughput, the reverse. A TIE claims nothing. A row says which way its metric is
+better (`better`).
+
+**The host and the boots.** pc3: nobody else uses it (the owner, 2026-10-31), where pc2 is shared at a
+load of 15 to 30 and a time figure there is the host's. 24 boots of each image, alternating by round as
+the kit lane does: the kit read a boot spread of about 6 percent and put the interval of twelve against
+twelve at about 3 percent a side, and the host's spread is not known before the first run, so the first
+run uses the kit's number and the next is set from its intervals. A timed workload counts only when its
+pinned CPUs were used by nothing else (`nodrop.py`'s rule, at most 10 percent foreign) and is run again
+up to six times; a functional one that did not deliver, up to three. A workload a boot lost is left out
+of that boot's figures and counted in the report. A size figure names its host (section 2).
+
+**What a run is not.** One host, loopback, peer mode; the C families measure the library under
+upstream's programs, the Rust family the whole program. Arm W of the Rust family carries what the
+family's crates select beside the preset (cargo unifies features; it cannot take away what `wz-zenoh`
+asks of the engine), and the record says so. zenoh-c is built with its own pinned compiler, the rest
+with the repository's. The heap shim counts the allocator's usable size of each block, not what was
+asked, in both arms alike, and does not see memory a library maps itself, which the RSS cell does.
+
+**Rows.** A run directory holds `verdict.txt` (the report), `rows.json` (`--format rows`) and
+`record.txt` (host, CPU, kernel, compilers, the tree, the cargo arguments of arm W and, for zenoh-c,
+the drop-in arguments derived from the original's header beside the preset's). The committed run entry
+of `deploy/upstream_parity.json` takes `rows` from `rows.json` unchanged and its `target`, `method`,
+`tree` and `caveats` from `record.txt`.
+
 ## 6. Open
 
-- The zenoh (Rust) cells need the upstream examples built against wz through
-  `api-compat-rust`, whose top crate is in progress. Until then the zenoh cells are size
-  and the C ABI's.
+- The zenoh (Rust) cells are measured by section 5b with upstream's examples over the family
+  (`api-compat-rust`); whether the eight programs build and run over it is the first thing a run
+  of that family says.
 - Whether the MCU preset's defconfig (`configs/zenoh-pico-mcu_defconfig`) is generated
   from the declaration like the host ones, or is the pico image's derived switches written
   out, is decided in M2.
