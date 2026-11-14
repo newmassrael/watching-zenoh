@@ -8202,7 +8202,9 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  *     direction. (ABI 57) A flow the decryption pass opened adds about 40
  *     bytes for each record holding plaintext its session has not framed yet,
  *     a message's worth, so this still stops growing with the capture. The
- *     keys a handle holds are not counted here.
+ *     keys a handle holds are outside the scope: a key log grows with the
+ *     connections it names and a flow's opener with the flows, not with the
+ *     rows.
  *   - selection is what wz_dissect_live_selection_since keeps between calls: the
  *     word each selector said of each row, which is how a later call says which
  *     moved, a nibble a row, and the folds that decide the words (the verdict of
