@@ -266,6 +266,12 @@ impl ::sce_forge_runtime::codec::HoldsList<super::transport_init::TransportInitE
     type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
 }
 
+// `transport_join`
+#[cfg(feature = "codec-join")]
+impl ::sce_forge_runtime::codec::HoldsList<super::transport_join::TransportJoinExtensionsField> for Node {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
 // `transport_keep_alive`
 #[cfg(feature = "codec-keep-alive")]
 impl ::sce_forge_runtime::codec::HoldsList<super::transport_keep_alive::TransportKeepAliveExtensionsField> for Node {
