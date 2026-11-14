@@ -1187,7 +1187,8 @@ impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
 /// How the walk hands a record over ([`WalkedRecord`]). With
 /// [`RecordForm::Lent`], a Push, a Request and a Response are not projected into
 /// their owned messages at all: each is decoded where the payload lies and lent
-/// for the call, so nothing of it is copied (ARCHITECTURE section 9.2). Every
+/// for the call, so nothing of it is copied (ARCHITECTURE section 9.2); a Push
+/// whose lists are past what the node lends inline is handed over owned. Every
 /// other record is the build's [`WireStorage`] copy of the payload's bytes either
 /// way, and so is every record with [`RecordForm::Owned`]: the payload need only
 /// outlive the walk.
@@ -1460,6 +1461,13 @@ pub(crate) fn try_for_each_record<'f>(
 /// the owned rule, hand it to `each`, and answer `true`; `false` for any other
 /// kind, which the caller decodes owned.
 ///
+/// `false` too, with the cursor where the record begins, for a Push whose lists
+/// are past what the node's lent form holds inline ([`Lend::PastCapacity`]): the
+/// protocol bounds an extension chain by nothing, and a participant with an
+/// allocator reads it whole, as upstream does, in the owned form the caller
+/// decodes it into. Only the rare record past that capacity pays the second
+/// decode; every other one is still lent with nothing allocated.
+///
 /// Each kind is decoded in a function of its own, never inlined: a decoded
 /// Request or Response is a wide value (inline extension chains), and kept out of
 /// line it occupies the stack only while that one record is handed over, not
@@ -1485,7 +1493,16 @@ fn lend_record<'f>(
 ) -> Result<bool, crate::parse_error::InboundParseError> {
     match mid {
         #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
-        wire_const::N_MID_PUSH => lend_push(cursor, each).map(|()| true),
+        wire_const::N_MID_PUSH => {
+            let start = *cursor;
+            match lend_push(cursor, each)? {
+                Lend::Lent => Ok(true),
+                Lend::PastCapacity => {
+                    *cursor = start;
+                    Ok(false)
+                }
+            }
+        }
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => lend_request(cursor, each).map(|()| true),
         #[cfg(all(
@@ -1495,6 +1512,29 @@ fn lend_record<'f>(
         wire_const::N_MID_RESPONSE => lend_response(cursor, each).map(|()| true),
         _ => Ok(false),
     }
+}
+
+/// What [`lend_push`] did with the Push at the cursor, when the frame is one the
+/// protocol admits.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-push",
+    any(feature = "alloc", feature = "rx-push"),
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+#[derive(Debug)]
+enum Lend {
+    /// Decoded where the payload lies and handed to the consumer.
+    Lent,
+    /// Its lists are past what the node's lent form holds inline. The codec
+    /// answers `CapacityExceeded` only for a frame it read whole and refused
+    /// nothing else of (SCE ADR 0077 section 7), so the record is sound and
+    /// nothing of it was handed over; the cursor is past it.
+    PastCapacity,
 }
 
 /// The refusal a lent record's admission makes, as the owned walk makes it.
@@ -1539,14 +1579,19 @@ fn admit_lent(
 fn lend_push<'f>(
     cursor: &mut SceCursor<'f>,
     each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
-) -> Result<(), crate::parse_error::InboundParseError> {
+) -> Result<Lend, crate::parse_error::InboundParseError> {
     // Decoded into the binding that lends it (see `lend_declare`), at the frame's lifetime: the
     // codec's lent message is invariant in it, and the record is lent for the call alone.
     let mut push = wz_codecs::lent::Push::<'f>::default();
-    wz_codecs::lent::Push::decode_into(cursor, &mut push)
-        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    match wz_codecs::lent::Push::decode_into(cursor, &mut push) {
+        Ok(()) => {}
+        Err(sce_forge_runtime::codec::CodecError::CapacityExceeded) => {
+            return Ok(Lend::PastCapacity)
+        }
+        Err(refused) => return Err(crate::parse_error::InboundParseError::Codec(refused)),
+    }
     admit_lent(push_view_admission(&push))?;
-    each(WalkedRecord::Push(&push))
+    each(WalkedRecord::Push(&push)).map(|()| Lend::Lent)
 }
 
 #[cfg(all(
@@ -1653,7 +1698,14 @@ fn lend_any_record<'f>(
         // What the build reads off the wire (`rx-push`, `rx-response`, `rx-control`): a kind it did
         // not ask for is a MID with no decoder here, and ends the walk of its frame.
         #[cfg(all(feature = "codec-push", feature = "rx-push"))]
-        wire_const::N_MID_PUSH => lend_push(cursor, each).map(|()| Walk::Continue),
+        wire_const::N_MID_PUSH => match lend_push(cursor, each)? {
+            Lend::Lent => Ok(Walk::Continue),
+            // The slot profile holds no other form of a record, so a Push past what it
+            // lends inline is refused, as its fixed capacity says.
+            Lend::PastCapacity => Err(crate::parse_error::InboundParseError::Codec(
+                sce_forge_runtime::codec::CodecError::CapacityExceeded,
+            )),
+        },
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => lend_request(cursor, each).map(|()| Walk::Continue),
         #[cfg(all(feature = "codec-response", feature = "rx-response"))]
@@ -2211,6 +2263,81 @@ mod chain_saturation_tests {
                 other => panic!("expected a Push, got {other:?}"),
             }
         }
+    }
+
+    /// The chain headers (the shared-memory marker's at its place) and the
+    /// inline payload of the Put a Push record carries.
+    fn put_reading(msg: &NetworkMessage) -> (Vec<u8>, Option<Vec<u8>>) {
+        match msg {
+            NetworkMessage::Push(p) => match &p.body {
+                wz_codecs::push::PushOwnedVariant::CodecZenohMsgPut(put) => (
+                    crate::put_payload::chain_headers(put).map_or_else(Vec::new, |h| h.collect()),
+                    crate::put_payload::inline_bytes(put).map(<[u8]>::to_vec),
+                ),
+                other => panic!("expected a Put body, got {other:?}"),
+            },
+            other => panic!("expected a Push, got {other:?}"),
+        }
+    }
+
+    /// THE LENT WALK PAST THE CAP. The receive path lends a Push in the node's
+    /// lent form, whose chain holds eight entries. A Push past that is sound,
+    /// and a participant with an allocator reads it whole: the walk hands it
+    /// over owned, as the batch decode reads it, and goes on from its end, so
+    /// the Push after it is lent again. The Push at the cap before it is the
+    /// control: lent, not owned.
+    #[test]
+    fn the_lent_walk_owns_a_push_past_what_a_node_lends_and_goes_on_after_it() {
+        let depth = crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH;
+        for count in [depth + 1, 32, 300] {
+            let wire = [
+                push_with_put_exts(depth),
+                push_with_put_exts(count),
+                push_with_put_exts(depth),
+            ]
+            .concat();
+            let batch = parse_frame_payload(&wire).expect("the batch decode reads all three");
+            assert_eq!(batch.len(), 3);
+            let expected = put_reading(&batch[1]);
+            assert_eq!(expected.0.len(), count, "the batch decode reads it whole");
+            assert_eq!(expected.1.as_deref(), Some(&[0xAAu8, 0xBB, 0xCC][..]));
+            let mut record = new_record_buf();
+            let mut seen: Vec<&str> = Vec::new();
+            let result = for_each_record(&wire, &mut record, RecordForm::Lent, |one| match one {
+                WalkedRecord::Push(_) => seen.push("lent"),
+                WalkedRecord::Owned(one) => {
+                    assert_eq!(one.len(), 1, "one record per call");
+                    assert_eq!(put_reading(&one[0]), expected, "{count} extensions");
+                    seen.push("owned");
+                }
+                #[allow(unreachable_patterns)]
+                _ => panic!("only Pushes were encoded"),
+            });
+            assert!(result.is_ok(), "{count} extensions: {result:?}");
+            assert_eq!(seen, ["lent", "owned", "lent"], "{count} extensions");
+        }
+    }
+
+    /// The slot profile's walk holds no owned form of a record, so there a Push
+    /// past what it lends is refused, after the record at the cap before it.
+    #[cfg(all(feature = "session-slot", feature = "rx-push"))]
+    #[test]
+    fn the_slot_walk_refuses_a_push_past_what_it_lends() {
+        let depth = crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH;
+        let wire = [push_with_put_exts(depth), push_with_put_exts(depth + 1)].concat();
+        let mut record = new_record_buf();
+        let mut handed = 0;
+        let result = for_each_record(&wire, &mut record, RecordForm::LentControl, |_| handed += 1);
+        assert_eq!(handed, 1, "only the Push at the cap is handed over");
+        assert!(
+            matches!(
+                result,
+                Err(crate::parse_error::InboundParseError::Codec(
+                    sce_forge_runtime::codec::CodecError::CapacityExceeded
+                ))
+            ),
+            "{result:?}"
+        );
     }
 
     /// An observer keeps what it read and reports where it stopped, rather
