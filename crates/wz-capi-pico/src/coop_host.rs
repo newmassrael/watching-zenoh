@@ -41,6 +41,10 @@ mod host {
     pub(crate) fn epoch() -> Epoch {
         wz_runtime_posix::PosixEpoch
     }
+
+    /// The datagram socket a scout over one socket asks by.
+    #[cfg(all(feature = "scout-mcu", not(feature = "scout")))]
+    pub(crate) type Datagram = wz_runtime_posix::net::PosixUdpSocket;
 }
 
 #[cfg(all(
@@ -81,9 +85,94 @@ mod host {
     pub(crate) fn epoch() -> Epoch {
         wz_runtime_zephyr::ZephyrEpoch
     }
+
+    /// The datagram socket a scout over one socket asks by: Zephyr's, as pico's Zephyr scout link
+    /// is.
+    #[cfg(all(feature = "scout-mcu", not(feature = "scout")))]
+    pub(crate) type Datagram = wz_runtime_zephyr::net::ZephyrUdpSocket;
 }
 
 pub(crate) use host::*;
+
+/// Scouting over one datagram socket of the host (`scout-mcu`), as zenoh-pico scouts where its
+/// platform has no interface iterator: the window is `wz-capi-coop`'s `scout_datagram`, asked over
+/// this host's socket and clock. A build with `scout` scouts with the host's window instead.
+#[cfg(all(feature = "scout-mcu", not(feature = "scout")))]
+mod scouting {
+    use core::net::IpAddr;
+
+    use wz_session_core::scouting_host::ScoutedHello;
+
+    use super::host;
+    use crate::prelude::*;
+
+    /// What one datagram of a scout is read into: zenoh-pico's multicast batch as the build states
+    /// it, which is what its scout reads into.
+    const SCOUT_RX_BYTES: usize = wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES;
+
+    /// The group as a datagram socket of the stacks names it; an IPv6 group has none, and its
+    /// window is one nobody answers.
+    fn ipv4(group: IpAddr) -> Option<[u8; 4]> {
+        match group {
+            IpAddr::V4(addr) => Some(addr.octets()),
+            IpAddr::V6(_) => None,
+        }
+    }
+
+    pub(crate) fn run_scout(
+        group: IpAddr,
+        port: u16,
+        what: u8,
+        zid: Vec<u8>,
+        budget_ms: u64,
+        on_hello: impl FnMut(&ScoutedHello),
+    ) -> usize {
+        let Some(group) = ipv4(group) else {
+            return 0;
+        };
+        wz_capi_coop::scout_datagram::run_scout::<host::Datagram, _>(
+            &host::clock(),
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+            SCOUT_RX_BYTES,
+            on_hello,
+        )
+    }
+
+    pub(crate) fn scout_first(
+        group: IpAddr,
+        port: u16,
+        what: u8,
+        zid: Vec<u8>,
+        budget_ms: u64,
+    ) -> Option<ScoutedHello> {
+        wz_capi_coop::scout_datagram::scout_first::<host::Datagram, _>(
+            &host::clock(),
+            ipv4(group)?,
+            port,
+            what,
+            zid,
+            budget_ms,
+            SCOUT_RX_BYTES,
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_scout_asks_an_ipv4_group_and_has_no_socket_for_another() {
+            assert_eq!(ipv4(IpAddr::from([224, 0, 0, 224])), Some([224, 0, 0, 224]));
+            assert_eq!(ipv4(IpAddr::from([0xff02, 0, 0, 0, 0, 0, 0, 1])), None);
+        }
+    }
+}
+#[cfg(all(feature = "scout-mcu", not(feature = "scout")))]
+pub(crate) use scouting::*;
 
 // A host build's answers, read as the ABI reads them. The open over the links is the engine's
 // tests' and the round trips' (`tests/`), which dial through `links()` on every cooperative build.

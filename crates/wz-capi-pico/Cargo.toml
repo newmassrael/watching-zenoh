@@ -167,6 +167,18 @@ scout = [
     "wz-capi-core?/scout",
     "wz-capi-coop?/scout",
 ]
+# `scout-mcu`: the same capability where the build has no host network (`Z_FEATURE_SCOUTING` in an
+# image): the window is one datagram socket of the stack the engine runs on, the Scout written to
+# the group from it and the Hellos read back on it, which is how zenoh-pico scouts on a platform
+# with no interface iterator, Zephyr's sockets among them (`wz-capi-coop`'s `scout-datagram`). It
+# selects no `std`, so an `os-zephyr` image names it; `scout` beside it keeps the host's window.
+scout-mcu = [
+    "link-udp",
+    "wz-session-core/scouting-active",
+    "wz-session-core/codec-scout",
+    "wz-session-core/codec-hello",
+    "wz-capi-coop?/scout-datagram",
+]
 # `query`: `z_get` and the querier, the requesting end of a query. Both engines ask a get and
 # watch whether a queryable matches, so it selects neither. Every get and querier holds a
 # cancellation token, whose cancel waits on the host's condition variable (`wz-capi-port`'s

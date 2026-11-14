@@ -583,12 +583,12 @@ pub unsafe extern "C" fn z_open(
         let connect: Vec<String> = match (connect, &listen) {
             (Some(connect), _) => vec![connect],
             (None, Some(_)) => Vec::new(),
-            #[cfg(feature = "scout")]
+            #[cfg(any(feature = "scout", feature = "scout-mcu"))]
             (None, None) => match crate::scout::locators_by_scout(&cfg) {
                 Ok(locators) => locators,
                 Err(code) => return code,
             },
-            #[cfg(not(feature = "scout"))]
+            #[cfg(not(any(feature = "scout", feature = "scout-mcu")))]
             (None, None) => return crate::result::Z_ERR_SCOUT_NO_RESULTS,
         };
         drop(cfg);

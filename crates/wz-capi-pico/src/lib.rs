@@ -122,6 +122,18 @@ compile_error!(
      (see Cargo.toml)"
 );
 
+// `scout-mcu` is the cooperative engine's window over one datagram socket; the tokio engine scouts
+// on the host's sockets, which is `scout`.
+#[cfg(all(
+    feature = "scout-mcu",
+    feature = "engine-tokio",
+    not(feature = "scout")
+))]
+compile_error!(
+    "wz-capi-pico: the tokio engine scouts on the host's sockets: a build with it names `scout`, \
+     and `scout-mcu` is the cooperative engine's window over one datagram socket"
+);
+
 pub mod abi;
 #[cfg(feature = "admin-space")]
 pub mod admin_space;
@@ -187,7 +199,7 @@ pub mod query;
 #[cfg(any(feature = "query", feature = "queryable"))]
 pub mod reply_keyexpr;
 pub mod result;
-#[cfg(feature = "scout")]
+#[cfg(any(feature = "scout", feature = "scout-mcu"))]
 pub mod scout;
 pub mod serde;
 pub mod session;

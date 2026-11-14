@@ -41,7 +41,9 @@
 //! its read task's thread, its sleep) is `wz-capi-port`'s `os`; the `std` feature, on by default,
 //! gives it the host's, and the runtime's critical sections the process's lock (`host-lock`).
 //! Without it the image supplies both: the kernel's answers to `os` and a `critical-section`
-//! implementation. Scouting asks the host's multicast sockets and comes with `std` only.
+//! implementation. Scouting with a socket for each interface asks the host's multicast sockets and
+//! comes with `std` only (`scout`); scouting over one datagram socket of the stack, as zenoh-pico
+//! scouts where it has no interface iterator, needs neither (`scout-datagram`).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -65,6 +67,8 @@ mod admission_gate;
 mod engine;
 #[cfg(feature = "scout")]
 pub mod scout;
+#[cfg(feature = "scout-datagram")]
+pub mod scout_datagram;
 #[cfg(feature = "tls-mbedtls")]
 pub mod tls;
 // The tests are a host's: they run a router stand-in on threads of `std`.

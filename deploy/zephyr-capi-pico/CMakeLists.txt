@@ -39,7 +39,7 @@ foreach(on
   set(${on} 1 CACHE STRING "" FORCE)
 endforeach()
 foreach(off
-    Z_FEATURE_PUBLICATION Z_FEATURE_SUBSCRIPTION Z_FEATURE_QUERY Z_FEATURE_SCOUTING
+    Z_FEATURE_PUBLICATION Z_FEATURE_SUBSCRIPTION Z_FEATURE_QUERY
     Z_FEATURE_LINK_TCP Z_FEATURE_LINK_UDP_MULTICAST Z_FEATURE_UNSTABLE_API Z_FEATURE_CONNECTIVITY
     Z_FEATURE_ADVANCED_PUBLICATION Z_FEATURE_ADVANCED_SUBSCRIPTION Z_FEATURE_LOCAL_SUBSCRIBER
     Z_FEATURE_LOCAL_QUERYABLE Z_FEATURE_ADMIN_SPACE Z_FEATURE_RAWETH_TRANSPORT
@@ -48,12 +48,20 @@ foreach(off
     Z_FEATURE_BATCH_TX_MUTEX Z_FEATURE_BATCH_PEER_MUTEX)
   set(${off} 0 CACHE STRING "" FORCE)
 endforeach()
+set(rust_features "")
 if(CONFIG_WZ_PICO_ABI_MULTI_THREAD)
   set(Z_FEATURE_MULTI_THREAD 1 CACHE STRING "" FORCE)
-  set(rust_arm multi-thread)
+  list(APPEND rust_features multi-thread)
 else()
   set(Z_FEATURE_MULTI_THREAD 0 CACHE STRING "" FORCE)
-  set(rust_arm "")
+endif()
+# Scouting: an open with no locator scouts for a router, over one datagram socket of Zephyr's stack
+# as pico's own Zephyr build does (the Kconfig symbol's help).
+if(CONFIG_WZ_PICO_ABI_SCOUTING)
+  set(Z_FEATURE_SCOUTING 1 CACHE STRING "" FORCE)
+  list(APPEND rust_features scouting)
+else()
+  set(Z_FEATURE_SCOUTING 0 CACHE STRING "" FORCE)
 endif()
 set(ZENOH_PICO_INCLUDEDIR ${pico_src}/include)
 include(${pico_src}/cmake/feature_config.cmake)
@@ -95,7 +103,7 @@ endif()
 wz_zephyr_rust_app(
   RUST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rust
   LIB      wz_zephyr_capi_pico
-  FEATURES ${rust_arm}
+  FEATURES ${rust_features}
   UNDEFINED
     socket bind getsockname sendto recvfrom poll close
     connect send recv getpeername shutdown setsockopt

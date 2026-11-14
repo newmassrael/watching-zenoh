@@ -176,6 +176,63 @@ fn a_lookup_ends_at_the_first_answer() {
     );
 }
 
+/// The window over one datagram socket of a stack (`scout_datagram`, zenoh-pico's on a platform with
+/// no interface iterator) asks once from a socket the stack binds, reads the responders' unicast
+/// Hellos back on it, and ends at the first for a lookup; a survey collects every answer.
+#[test]
+fn the_window_over_one_datagram_socket_finds_who_answers() {
+    use wz_runtime_posix::net::PosixUdpSocket;
+
+    let responder = Responder::start(vec![
+        hello_datagram(0, &[0x11; 4], &["udp/10.0.0.1:7447"]),
+        hello_datagram(1, &[0x22; 4], &["tcp/10.0.0.2:7447"]),
+    ]);
+    let port = responder.at.port();
+    let first = crate::scout_datagram::scout_first::<PosixUdpSocket, _>(
+        &PosixClock,
+        [127, 0, 0, 1],
+        port,
+        WHAT,
+        vec![0xAA, 0xBB],
+        5_000,
+        2048,
+    )
+    .expect("the responder answered");
+    assert_eq!(first.zid[0], 0x11);
+    assert_eq!(first.locators, ["udp/10.0.0.1:7447"]);
+
+    let mut seen = Vec::new();
+    let delivered = crate::scout_datagram::run_scout::<PosixUdpSocket, _>(
+        &PosixClock,
+        [127, 0, 0, 1],
+        port,
+        WHAT,
+        vec![0xAA, 0xBB],
+        300,
+        2048,
+        |hello| seen.push(hello.zid[0]),
+    );
+    assert_eq!(delivered, 2);
+    assert_eq!(seen, [0x22, 0x11], "after the window, last responder first");
+    assert_eq!(responder.scouts(), 2, "one Scout for each window");
+}
+
+/// A window over a datagram socket that nobody answers ends with nothing.
+#[test]
+fn the_window_over_one_datagram_socket_finds_nothing_when_nobody_answers() {
+    let none = crate::scout_datagram::scout_first::<wz_runtime_posix::net::PosixUdpSocket, _>(
+        &PosixClock,
+        [127, 0, 0, 1],
+        // The discard port: nothing listens there on a test host.
+        9,
+        WHAT,
+        Vec::new(),
+        100,
+        2048,
+    );
+    assert!(none.is_none());
+}
+
 /// A window nobody answers ends at its deadline with nothing, and says it asked once.
 #[test]
 fn a_window_nobody_answers_ends_empty_at_its_deadline() {
