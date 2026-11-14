@@ -94,8 +94,8 @@
 //! ⚠ THE KEY IS NAMED BY ITS ROLE HERE, NOT BY ITS PATH, and that is the gate's
 //! doing rather than shyness. `unhonoured_kind_evidence_gate` refuses any wz
 //! source that spells an unhonoured key without a ledger row saying why the
-//! spelling is not proof wz honours it, and its kinds are `wz-has-it`,
-//! `not-this-key` and `asserted-ignored` — none of which
+//! spelling is not proof wz honours it, and its kinds are `wz-has-it` and
+//! `asserted-ignored` — neither of which
 //! is "prose explaining where the value would arrive". The vocabulary is closed
 //! on purpose, so the mention is what gives way. `zenoh_config`'s own lists are
 //! where the key's spelling lives, and that is the one place it should.

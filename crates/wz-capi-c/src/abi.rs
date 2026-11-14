@@ -2000,10 +2000,38 @@ mod config_disposition_tests {
             ask("transport/shared_memory/transport_optimization/messages"),
             (Z_OK, not_acted_on)
         );
-        // CONTROL: a key that is not a session's is answered by the reader, as before.
+        // CONTROL: a key that is not a session's is answered by the reader, as before, in both
+        // of the reader's answers. The keys are taken from the reader's own lists, so a key
+        // moving from one list to the other moves the control with it.
+        use wz_runtime_tokio::zenoh_config::{
+            honoured_config_keys_in_build, SESSION_HONOURED_KEYS, UNHONOURED_UPSTREAM_CONFIG_KEYS,
+        };
+        match UNHONOURED_UPSTREAM_CONFIG_KEYS
+            .iter()
+            .copied()
+            .find(|key| !SESSION_HONOURED_KEYS.contains(key))
+        {
+            Some(key) => assert_eq!(
+                ask(key),
+                (Z_OK, WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED),
+                "{key}"
+            ),
+            // The day the last such key is honoured the list holds a session's keys at most,
+            // and the reader has no unhonoured answer left to give for any other.
+            None => assert!(
+                UNHONOURED_UPSTREAM_CONFIG_KEYS
+                    .iter()
+                    .all(|key| SESSION_HONOURED_KEYS.contains(key)),
+                "the reader declares no key unhonoured outside a session's"
+            ),
+        }
+        let honoured = honoured_config_keys_in_build()
+            .find(|key| !SESSION_HONOURED_KEYS.contains(key))
+            .expect("the reader honours a key that is not a session's in every build");
         assert_eq!(
-            ask("transport/unicast/open_timeout"),
-            (Z_OK, WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED)
+            ask(honoured),
+            (Z_OK, WZ_CAPI_C_CONFIG_HONOURED),
+            "{honoured}"
         );
     }
 

@@ -37,7 +37,7 @@ use crate::e2e_frame::{self, Values};
 use crate::e2e_profile::Profile;
 use crate::transport_build::{build, RESOLUTION_WORDS};
 use crate::transport_build_json::build_document;
-use crate::transport_build_tests::corpus_descriptions;
+use crate::transport_build_tests::{corpus_descriptions, ONE_RECORD_PAYLOAD};
 use crate::transport_layout::{
     layout, layout_under, Encoding, Kind, LayoutError, RelativeTo, Row, COVERED_MESSAGES,
 };
@@ -142,8 +142,12 @@ fn framed(body: &[u8], framing: Framing) -> Vec<u8> {
     unit
 }
 
-/// A frame with a payload that is a whole network message, laid by hand.
-const FRAME_WITH_A_PUSH: [u8; 8] = [0x25, 0x05, 0x1D, 0x00, 0x01, 0x00, 0x00, 0x00];
+/// A frame with a payload that is a whole network message, laid by hand: a
+/// Push to key id 0 whose Put carries the two bytes `00 00` behind their
+/// length. Every byte is the Push's, since a byte after it with a transport id
+/// in its low five bits would end the Frame (see
+/// `transport_build_tests::ONE_RECORD_PAYLOAD`).
+const FRAME_WITH_A_PUSH: [u8; 8] = [0x25, 0x05, 0x1D, 0x00, 0x01, 0x02, 0x00, 0x00];
 
 // ---------------------------------------------- 1. against the build door
 
@@ -230,7 +234,9 @@ fn every_vle_width_from_one_to_nine_reads_back_to_the_builds_row() {
             for (what, json, field) in [
                 (
                     "frame sn",
-                    format!(r#"{{"message":"frame","reliable":true,"sn":{v},"payload":"00"}}"#),
+                    format!(
+                        r#"{{"message":"frame","reliable":true,"sn":{v},"payload":"{ONE_RECORD_PAYLOAD}"}}"#
+                    ),
                     "sn",
                 ),
                 (
@@ -351,7 +357,9 @@ fn vle_len(v: u64) -> usize {
 #[test]
 fn a_sequence_number_beyond_the_named_ring_is_reported_not_refused() {
     let b = build(
-        r#"{"message":"frame","reliable":true,"sn":300,"payload":"00"}"#,
+        &format!(
+            r#"{{"message":"frame","reliable":true,"sn":300,"payload":"{ONE_RECORD_PAYLOAD}"}}"#
+        ),
         Framing::Datagram,
     )
     .expect("builds with no ring named");

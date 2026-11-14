@@ -7711,15 +7711,7 @@ mod tests {
         // size, so the missing segment splices the stream MID-FRAME.
         let mut stream = Vec::new();
         for i in 0..400u16 {
-            let body = [
-                wz_session_core::wire_const::T_MID_FRAME
-                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
-                (i % 0x80) as u8,
-                0x1F,
-                0x00,
-                0x00,
-                0x00,
-            ];
+            let body = numbered_frame((i % 0x80) as u8);
             stream.extend_from_slice(&(body.len() as u16).to_le_bytes());
             stream.extend_from_slice(&body);
         }
@@ -7897,15 +7889,7 @@ mod tests {
     fn hole_capture() -> Vec<u8> {
         let mut stream = Vec::new();
         for i in 0..64u16 {
-            let body = [
-                wz_session_core::wire_const::T_MID_FRAME
-                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
-                (i % 0x80) as u8,
-                0x1F,
-                0x00,
-                0x00,
-                0x00,
-            ];
+            let body = numbered_frame((i % 0x80) as u8);
             stream.extend_from_slice(&(body.len() as u16).to_le_bytes());
             stream.extend_from_slice(&body);
         }
@@ -7927,6 +7911,26 @@ mod tests {
             .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
             .collect();
         wz_capture::pcap::write(1, &records)
+    }
+
+    /// A reliable `Frame` numbered `sn` whose four-byte body is two network
+    /// OAM records, each its header and a zero id with no body.
+    ///
+    /// Every byte after the header is a record of the `Frame`, so the unit is
+    /// one transport message. A record whose first byte has a transport id in
+    /// its low five bits would end the `Frame` there and be read as the
+    /// batch's next transport message, as upstream's `Frame` reader rewinds to
+    /// it (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`).
+    fn numbered_frame(sn: u8) -> [u8; 6] {
+        use wz_session_core::wire_const::{FLAG_T_FRAME_R, N_MID_OAM, T_MID_FRAME};
+        [
+            T_MID_FRAME | FLAG_T_FRAME_R,
+            sn,
+            N_MID_OAM,
+            0x00,
+            N_MID_OAM,
+            0x00,
+        ]
     }
 
     #[test]
@@ -8881,6 +8885,10 @@ mod tests {
             "a handle still waiting on its gap cannot already agree with a \
              reader that gave up on it"
         );
+        // Two records per Frame: each unit of `hole_capture` is a Frame whose
+        // payload is two network OAMs (`numbered_frame`), both of which a Frame
+        // reader reads as records, as upstream's does. 16 units lie before the
+        // hole and 47 survive it, so 32 and 94 records are walked.
         assert!(
             still_open.contains("\"walked_records\":32") && whole.contains("\"walked_records\":94"),
             "and the difference is the bytes BEHIND the hole:\n  open:  \
@@ -17199,18 +17207,23 @@ mod tests {
     /// the sum would divide by five.
     #[test]
     fn the_health_door_reports_the_datagram_sequence_apart_from_the_total() {
-        // A numbered `Frame` (`T_MID_FRAME | FLAG_T_FRAME_R`) with a four-byte
-        // body, as one datagram and as one length-prefixed stream message.
-        let frame = |sn: u8| [0x25, sn, 0x1F, 0x00, 0x00, 0x00];
+        // A numbered `Frame` with a four-byte body, as one datagram and as one
+        // length-prefixed stream message.
         let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
         for sn in [0u8, 1, 4] {
-            let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &frame(sn));
+            let packet = udp_packet(
+                [10, 0, 0, 1],
+                7447,
+                [10, 0, 0, 2],
+                7447,
+                &numbered_frame(sn),
+            );
             push_live(handle, WZ_DISSECT_NO_TIMESTAMP, &packet);
         }
         let mut seq = 1000u32;
         for sn in [0u8, 1] {
             let mut framed = vec![6u8, 0];
-            framed.extend_from_slice(&frame(sn));
+            framed.extend_from_slice(&numbered_frame(sn));
             let packet = tcp_packet(seq, &framed);
             seq += framed.len() as u32;
             push_live(handle, WZ_DISSECT_NO_TIMESTAMP, &packet);

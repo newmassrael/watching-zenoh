@@ -9521,7 +9521,7 @@ mod tests {
                     | wz_session_core::wire_const::FLAG_T_FRAME_R,
                 sn,
             ];
-            wire.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
+            wire.extend_from_slice(&crate::datagram_tests::TWO_OAM_RECORDS);
             wire
         };
         let fragment = |sn: u8, more: bool| {
