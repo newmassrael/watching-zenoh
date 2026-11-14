@@ -32,6 +32,9 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use sce_forge_runtime::codec::{Bounded, SceCursor, VecSink};
+use wz_codecs::compressed_batch::{CompressedBatchParts, CompressedBatchView, CompressedBatchWire};
+
 /// The `BatchHeader` COMPRESSION bit (zenoh `batch.rs:127` `COMPRESSION = 1`):
 /// bit 0 of the 1-byte header set => the payload that follows is lz4-compressed.
 pub const BATCH_HEADER_COMPRESSION: u8 = 0x01;
@@ -49,22 +52,28 @@ pub const BATCH_HEADER_BYTES: usize = 1;
 /// `batch.rs:347-351` — incompressible data ships raw with the COMPRESSION bit
 /// clear, never growing). The returned `[BatchHeader][payload]` is what the link
 /// layer then length-frames.
+///
+/// The header and the payload are written by the batch's document
+/// (`sources/codecs/compressed_batch.scxml`); the LZ4 block is the transform this
+/// function owns. Panics on a payload past the batch size, which a batch of this
+/// session never is.
 pub fn compress_batch(payload: &[u8]) -> Vec<u8> {
     let max = lz4_flex::block::get_maximum_output_size(payload.len());
     let mut scratch = vec![0u8; max];
     let n = lz4_flex::block::compress_into(payload, &mut scratch).unwrap_or(0);
-    if n > 0 && n < payload.len() {
-        let mut out = Vec::with_capacity(1 + n);
-        out.push(BATCH_HEADER_COMPRESSION);
-        out.extend_from_slice(&scratch[..n]);
-        out
+    // Incompressible (or the compressor declined): ship raw, the flag clear.
+    let (header, body) = if n > 0 && n < payload.len() {
+        (BATCH_HEADER_COMPRESSION, &scratch[..n])
     } else {
-        // Incompressible (or the compressor declined): ship raw, bit 0 clear.
-        let mut out = Vec::with_capacity(1 + payload.len());
-        out.push(0x00);
-        out.extend_from_slice(payload);
-        out
-    }
+        (0x00, payload)
+    };
+    let batch = CompressedBatchParts {
+        header,
+        payload: Bounded::new(body).expect("a batch's payload is within its batch size"),
+    };
+    let mut out = Vec::with_capacity(CompressedBatchWire::measure(&batch).len());
+    let Ok(()) = CompressedBatchWire::encode_source(&batch, &mut VecSink::new(&mut out));
+    out
 }
 
 /// Un-wrap a `[BatchHeader][payload]` batch from a compression-negotiated
@@ -76,8 +85,11 @@ pub fn compress_batch(payload: &[u8]) -> Vec<u8> {
 /// caller maps this to a framing error). The bit-clear case copies the raw
 /// payload out verbatim.
 pub fn decompress_batch(wire: &[u8], max_decompressed: usize) -> Option<Vec<u8>> {
-    let (&header, payload) = wire.split_first()?;
-    if header & BATCH_HEADER_COMPRESSION != 0 {
+    // The header and the payload as the batch's document reads them; the payload
+    // is the rest of the unit.
+    let batch = CompressedBatchView::decode(&mut SceCursor::new(wire)).ok()?;
+    let payload = batch.payload.into_inner();
+    if batch.compression() {
         let mut out = vec![0u8; max_decompressed];
         let n = lz4_flex::block::decompress_into(payload, &mut out).ok()?;
         out.truncate(n);
