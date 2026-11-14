@@ -19,8 +19,8 @@ form, the Z-bit continuation of an extension chain, and the payload whose shape
 depends on whether a shared-memory marker is in the chain. Where wz still
 writes a skeleton by hand (the transport messages past the handshake, the
 scouting messages, the dispatch by message id, their extension chains), the
-reason is on the wz side; the handshake messages are whole documents
-(rows 6-11).
+reason is on the wz side; the handshake messages and the Join are whole
+documents (rows 6-11, 14).
 The language blocks at five places, all on the extension and refusal side:
 (L1) choosing an extension's body codec by its identity (`id | M | enc`) while
 an unknown identity is still read by its encoding, which every one of the 41
@@ -119,11 +119,16 @@ those documents (`inbound.rs` `parse_init`, `handshake_encode.rs`
 header, as upstream codes it (`transport_frame_header.scxml`,
 `transport_fragment_header.scxml`, read by `inbound.rs` `decode_frame_head` and
 written by `frame_encode.rs` `begin_frame`); what follows the header is the
-rest of the unit. Join and the transport OAM have a document for the body and
-none for the header byte or the extension chain: the body codecs take the
-header's flags as flag-inputs (`join.scxml:60`), and wz reads the header and
-the chain by hand. The network messages (§5.4) show the whole shape is
-expressible (`sources/codecs/push.scxml:92`).
+rest of the unit. The Join is a whole document as the handshake messages are
+(`transport_join.scxml`, the body `join.scxml` with S bound to the header):
+the session writes a beacon through it (`multicast_join.rs` `encode_join_into`)
+and every reader of a received Join starts from its view (`join_decode.rs`
+`read_join`, the Join arm of `inbound.rs`), so where the body ends and the chain
+starts is the document's answer. The transport OAM has a document for the body
+and none for the header byte or the extension chain: the body codec takes the
+header's flags as flag-inputs, and wz reads the header and the chain by hand.
+The network messages (§5.4) show the whole shape is expressible
+(`sources/codecs/push.scxml:92`).
 
 Two places of the moved rows stay hand-written, both on the wz side. The
 lend-only Open writes its head and its chain under two session mutexes, one
@@ -143,7 +148,7 @@ extension and of the reserved encoding stay where they are judged (L2, rows
 | 11 | KeepAlive | `commons/zenoh-codec/src/transport/keepalive.rs` @ `impl<W> WCodec<&KeepAlive, &mut W> for Zenoh080` | A | `transport_keep_alive.scxml` | |
 | 12 | Frame | `commons/zenoh-codec/src/transport/frame.rs` @ `impl<W> WCodec<&FrameHeader, &mut W> for Zenoh080` | B | header, SN and chain `transport_frame_header.scxml`; the end of its network messages by hand, `network_message.rs` `RecordsEnd::AtTransportMessage` | L5 (the payload is not the batch's tail, row 25) |
 | 13 | Fragment | `commons/zenoh-codec/src/transport/fragment.rs` @ `impl<W> WCodec<&FragmentHeader, &mut W> for Zenoh080` | A | header, SN and chain `transport_fragment_header.scxml`; the payload is the rest of the unit | S (reassembly is state across messages) |
-| 14 | Join | `commons/zenoh-codec/src/transport/join.rs` @ `impl<W> WCodec<&Join, &mut W> for Zenoh080` | B | body `join.scxml`; header, T unit and chain `join_decode.rs:20`, `inbound.rs:1235` | W; S (T: `commons/zenoh-codec/src/transport/join.rs` @ `if lease.as_millis() % 1_000 == 0 {`) |
+| 14 | Join | `commons/zenoh-codec/src/transport/join.rs` @ `impl<W> WCodec<&Join, &mut W> for Zenoh080` | A | `transport_join.scxml` (body `join.scxml`); read by `join_decode.rs:40` `read_join` and `inbound.rs:1204`, written by `multicast_join.rs` `encode_join_into` | S (the T flag's lease unit: `commons/zenoh-codec/src/transport/join.rs` @ `if lease.as_millis() % 1_000 == 0 {`) |
 | 15 | Transport OAM | `commons/zenoh-codec/src/transport/oam.rs` @ `impl<W> WCodec<&Oam, &mut W> for Zenoh080` | B | `inbound.rs:1561` by hand; `oam.scxml` has the same layout with the network id as its default | W |
 
 ### 5.3 Scouting messages
@@ -209,7 +214,7 @@ extension and of the reserved encoding stay where they are judged (L2, rows
 | 52 | PrioritySn (reliable, best-effort) | `commons/zenoh-codec/src/transport/join.rs` @ `impl<W> WCodec<&PrioritySn, &mut W> for Zenoh080` | A | `join.scxml` (the base pair) | |
 | 53 | Extension entry: header, then unit, z64 or zbuf by `enc` | `commons/zenoh-protocol/src/common/extension.rs` @ `pub mod iext {` | A | `ext_entry.scxml`, `ext_unit.scxml`, `ext_zint.scxml`, `ext_zbuf.scxml` | (accepts `0b11`, row 101) |
 | 54 | Extension chain of a network or zenoh message (Z continuation) | `commons/zenoh-codec/src/common/extension.rs` @ `pub fn skip_all<R>(reader: &mut R, s: &str) -> Result<(), DidntRead>` | A | `<sce:tlv-chain terminate-on="entry-flag" entry-flag-name="Z">` in every network and zenoh document | |
-| 55 | Extension chain of a transport or scouting message | as 54 | B | in the documents of rows 6-13; Join, transport OAM and the scouting messages `ext_chain.rs` `decode_ext_chain` | W |
+| 55 | Extension chain of a transport or scouting message | as 54 | B | in the documents of rows 6-14; transport OAM and the scouting messages `ext_chain.rs` `decode_ext_chain` | W |
 
 ### 5.8 Extensions of transport messages
 
@@ -238,9 +243,9 @@ column "typed body" says what that body needs beyond L1.
 | 70 | Open LowLatency (unit 0x5) | `commons/zenoh-protocol/src/transport/open.rs` @ `pub type LowLatency = zextunit!(0x5, false);` | B | `extlowlatency.rs:58` | none; L1 |
 | 71 | Open Compression (unit 0x6) | `commons/zenoh-protocol/src/transport/open.rs` @ `pub type Compression = zextunit!(0x6, false);` | B | `extcompression.rs:41` | none; L1 |
 | 72 | Open RemoteBound (z64 0x7) | `commons/zenoh-protocol/src/transport/open.rs` @ `pub type RemoteBound = zextz64!(0x7, false);` | B | `extbound.rs:58` | a plain value; L1 |
-| 73 | Join QoS (zbuf 0x1, mandatory): eight PrioritySn | `commons/zenoh-codec/src/transport/join.rs` @ `let mut ext_qos = Box::new([PrioritySn::DEFAULT; Priority::NUM]);` | B | `multicast_join.rs:283`, `dissect.rs:1849` | eight pairs; L1, L7 |
+| 73 | Join QoS (zbuf 0x1, mandatory): eight PrioritySn | `commons/zenoh-codec/src/transport/join.rs` @ `let mut ext_qos = Box::new([PrioritySn::DEFAULT; Priority::NUM]);` | B | `multicast_join.rs:274` (`qos_sns`), `join_decode.rs` `qos_next_sns`, `dissect.rs:1849` | eight pairs; L1, L7 |
 | 74 | Join Shm (zbuf 0x2, mandatory) | `commons/zenoh-protocol/src/transport/join.rs` @ `pub type Shm = zextzbuf!(0x2, true);` | C | none (`dissect.rs:8673` keeps it apart from the Init one) | L1 |
-| 75 | Join Patch (z64 0x7) | `commons/zenoh-protocol/src/transport/join.rs` @ `pub type Patch = zextz64!(0x7, false);` | B | `multicast_join.rs:63` | a plain value; L1 |
+| 75 | Join Patch (z64 0x7) | `commons/zenoh-protocol/src/transport/join.rs` @ `pub type Patch = zextz64!(0x7, false);` | B | `multicast_join.rs:69` | a plain value; L1 |
 | 76 | Frame QoS (z64 0x1, mandatory) | `commons/zenoh-protocol/src/transport/frame.rs` @ `pub type QoS = zextz64!(0x1, true);` | B | `inbound.rs:560`, `dissect.rs:1438` | flags over a VLE carrier; L1 |
 | 77 | Fragment QoS (z64 0x1, mandatory) | `commons/zenoh-protocol/src/transport/fragment.rs` @ `pub type QoS = zextz64!(0x1, true);` | B | as 76 | as 76; L1 |
 | 78 | Fragment First (unit 0x2) | `commons/zenoh-protocol/src/transport/fragment.rs` @ `pub type First = zextunit!(0x2, false);` | B | `extfragment.rs:69` | none; L1 |
@@ -294,7 +299,7 @@ wz also carries an extension upstream does not have, a hop limit
 | Section | Rows | A | B | C |
 |---|---|---|---|---|
 | 5.1 framing and batch | 5 | 2 | 3 | 0 |
-| 5.2 transport messages | 10 | 7 | 3 | 0 |
+| 5.2 transport messages | 10 | 8 | 2 | 0 |
 | 5.3 scouting | 2 | 0 | 2 | 0 |
 | 5.4 network messages | 9 | 7 | 2 | 0 |
 | 5.5 declaration bodies | 9 | 9 | 0 | 0 |
@@ -304,9 +309,9 @@ wz also carries an extension upstream does not have, a hop limit
 | 5.9 network extensions | 10 | 0 | 10 | 0 |
 | 5.10 zenoh body extensions | 6 | 2 | 4 | 0 |
 | 5.11 unknown extensions | 3 | 1 | 1 | 1 |
-| **Total** | **101** | **45** | **54** | **2** |
+| **Total** | **101** | **46** | **53** | **2** |
 
-By cause, over the 56 rows of (B) and (C) (a row may have more than one):
+By cause, over the 55 rows of (B) and (C) (a row may have more than one):
 
 | Cause | Rows | Which |
 |---|---|---|
@@ -316,8 +321,8 @@ By cause, over the 56 rows of (B) and (C) (a row may have more than one):
 | L5 | 2 | 12, 25 |
 | L6 | 4 | 49, 84, 86, 88 (and row 45 among the (A) rows) |
 | L7 | 1 | 73 |
-| W | 11 | 3, 4, 5, 14-17, 26, 49, 51, 55 |
-| S | 2 | 3, 14 (and rows 8, 9, 13 among the (A) rows) |
+| W | 10 | 3, 4, 5, 15-17, 26, 49, 51, 55 |
+| S | 1 | 3 (and rows 8, 9, 13, 14 among the (A) rows) |
 
 L3 is the cause of no (B) row: it shows on the encode side of 21 (A) rows
 (18-24, 27-35, 36-40), §6.2.3.
@@ -458,9 +463,10 @@ scouting message is the same shape as a network message (flags carrier, body,
 Z-gated chain); a batch is an `until-eof` repeat of a peek-byte variant; the
 low-latency unit is a peek-byte variant with a network-message default; a
 compressed batch's header byte is a flag-input of the batch codec. wz's
-transport documents predate the chain and peek-byte elements and were never
-extended (`inbound.rs:1235` says the Join codec "has no ext awareness"); the
-hand code that replaced them is also where the in-place receive path lends
+transport documents predate the chain and peek-byte elements, and only the
+handshake messages, the Frame and Fragment headers and the Join have been
+extended into whole documents since (rows 6-14); the hand code that replaced
+them is also where the in-place receive path lends
 records (`network_message.rs:1490`). Moving them into documents is a wz task
 and asks nothing of SCE, except L2 for the exact refusal of an unknown id.
 
