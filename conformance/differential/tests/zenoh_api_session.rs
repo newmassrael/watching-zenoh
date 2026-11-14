@@ -280,6 +280,18 @@ mod observer {
                     ))
                     .wait(),
             );
+            // In the subjects' order: behind the sourced put, ahead of the deletes and of the
+            // fragments of the large put. Upstream puts this message of the other reliability into
+            // the batch that is open, behind a Frame header of its own, with reliable messages
+            // behind it in the same batch; the engine ends a Frame's records at the next transport
+            // message of its batch and reads that message next, so they reach the subscriber
+            // (`zenoh_rx_batch.rs` holds both readers of a batch to upstream's).
+            sent_one(
+                session
+                    .put("demo/best", "v6")
+                    .reliability(up_zenoh::qos::Reliability::BestEffort)
+                    .wait(),
+            );
             sent_one(session.delete("demo/plain").wait());
             sent_one(session.delete("demo/plain").attachment("gone").wait());
             // A key declared by the source goes on the wire as a declaration and its suffix, and is
@@ -289,17 +301,6 @@ mod observer {
             let longer = declared.join("leaf").expect("a key");
             sent_one(session.put(&longer, "v10").wait());
             sent_one(session.put("demo/big", vec![7u8; 70_000]).wait());
-            // Last, and after the fragments of the large one, which end a batch. Upstream puts a
-            // message of the other reliability into the batch that is open, behind a frame header
-            // of its own, and the engine reads a frame to the end of the batch it is in, so
-            // whatever follows a best-effort message in a batch is lost to it (carried in
-            // docs/zenoh-api-on-the-engine.md, Z2c). Sent here, no reliable message is behind it.
-            sent_one(
-                session
-                    .put("demo/best", "v6")
-                    .reliability(up_zenoh::qos::Reliability::BestEffort)
-                    .wait(),
-            );
             std::thread::sleep(Duration::from_millis(400));
             sent
         }

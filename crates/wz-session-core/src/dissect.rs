@@ -3652,11 +3652,41 @@ fn head_keyexpr(payload: &[u8], with_request_id: bool) -> Result<HeadKeyexpr, Co
 /// build cannot read does not invalidate the ones before it. Never returns
 /// `Err`; an empty payload is an empty, complete dissection.
 pub fn dissect_batch(payload: &[u8], base: usize) -> BatchDissection {
+    dissect_records(payload, base, false).0
+}
+
+/// The records of a `Frame`'s payload read as the tail of its unit, and how
+/// many bytes of the payload they take: all of it, or the bytes before the
+/// batch's next transport message. A sender puts a message of the other
+/// reliability into an open batch behind a second `Frame` header; that header
+/// ends this `Frame`, and is no record of it nor a remainder, as
+/// [`crate::network_message::BatchParse::next_message_at`] says for the decoder.
+fn dissect_frame_records(payload: &[u8], base: usize) -> (BatchDissection, usize) {
+    dissect_records(payload, base, true)
+}
+
+/// The walk of [`dissect_batch`] and [`dissect_frame_records`]: the second
+/// answer is how many bytes of `payload` the walk covered, records and halted
+/// remainder, which is less than all of it only when `ends_at_transport` and a
+/// transport message ended the records.
+fn dissect_records(
+    payload: &[u8],
+    base: usize,
+    ends_at_transport: bool,
+) -> (BatchDissection, usize) {
     let mut c = SpanCursor::with_base(payload, base);
     let mut records = Vec::new();
     let mut halt = None;
+    let mut covered = payload.len();
     while c.remaining() > 0 {
         let offset = c.offset();
+        if ends_at_transport
+            && c.peek_u8()
+                .is_ok_and(|b| crate::network_message::is_transport_mid(b & 0x1F))
+        {
+            covered = offset - base;
+            break;
+        }
         match walk_network_record(&mut c) {
             Ok(Some(f)) => records.push(f),
             Ok(None) => {
@@ -3682,11 +3712,14 @@ pub fn dissect_batch(payload: &[u8], base: usize) -> BatchDissection {
         }
         None => 0,
     };
-    BatchDissection {
-        records,
-        halt,
-        unparsed_bytes,
-    }
+    (
+        BatchDissection {
+            records,
+            halt,
+            unparsed_bytes,
+        },
+        covered,
+    )
 }
 
 /// Dissect ONE transport message — the shape [`crate::inbound::parse_inbound`]
@@ -3937,13 +3970,14 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             }
             if mid == wire_const::T_MID_FRAME {
                 let payload_start = c.offset();
-                let rem = c.remaining();
+                // The payload is the tail of the unit up to the batch's next
+                // transport message, which is not this Frame's to dissect.
+                let (batch, rem) = dissect_frame_records(c.peek_rest()?, payload_start);
                 let raw = c.bytes("payload", rem)?;
                 let bytes = match &raw.value {
                     FieldValue::Bytes(b) => b.clone(),
                     _ => Vec::new(),
                 };
-                let batch = dissect_batch(&bytes, payload_start);
                 // A batch that halted keeps its walked records AND the raw
                 // remainder, so no capture byte goes unaccounted for.
                 let mut children = batch.records;
@@ -7090,6 +7124,56 @@ mod tests {
         assert_eq!(uint(&records[1], "request_id"), 3);
     }
 
+    /// A unit of two Frames, the second behind its own header because its
+    /// sender put a message of the other reliability into the open batch: the
+    /// first Frame's dissection ends where that header begins, with its own
+    /// record and no remainder, and the second dissects from there on its own.
+    #[test]
+    fn a_frame_ends_at_the_next_frame_header_of_its_unit() {
+        let record_a = concat(&[alloc::vec![0x1Au8], vle(3)]);
+        let record_b = concat(&[alloc::vec![0x1Au8], vle(4)]);
+        let first = concat(&[alloc::vec![0x05u8 | 0x20], vle(1), record_a.clone()]);
+        let second = concat(&[alloc::vec![0x05u8], vle(2), record_b]);
+        let unit = concat(&[first.clone(), second]);
+
+        let f = dissect_transport_message(&unit, 0).expect("the first Frame dissects");
+        assert_eq!(f.name, "Frame");
+        assert_eq!(
+            f.span,
+            Span {
+                start: 0,
+                end: first.len()
+            }
+        );
+        let payload = f.find("payload").expect("the payload");
+        assert_eq!(
+            payload.span,
+            Span {
+                start: first.len() - record_a.len(),
+                end: first.len()
+            }
+        );
+        let records = match &payload.value {
+            FieldValue::Nested(v) => v.clone(),
+            other => panic!("the frame payload was not descended into: {other:?}"),
+        };
+        assert_eq!(records.len(), 1, "one record and no remainder: {records:?}");
+        assert_eq!(records[0].name, "ResponseFinal");
+        assert_eq!(uint(&records[0], "request_id"), 3);
+
+        let g = dissect_transport_message(&unit[first.len()..], first.len())
+            .expect("the second Frame dissects");
+        assert_eq!(g.name, "Frame");
+        assert_eq!(uint(&g, "sn"), 2);
+        assert_eq!(
+            g.span,
+            Span {
+                start: first.len(),
+                end: unit.len()
+            }
+        );
+    }
+
     #[test]
     fn a_truncated_batch_keeps_what_it_read_and_says_where_it_stopped() {
         let good = concat(&[alloc::vec![0x1Au8], vle(1)]);
@@ -7126,9 +7210,11 @@ mod tests {
         // the code, so adding a codec-* arm to one side alone reds this.
         let mut decoder_known = Vec::new();
         let mut dissector_known = Vec::new();
+        // Both walks read network messages and nothing else: the reassembled
+        // payload's, which a transport MID halts as an unknown record does.
         for mid in 0u8..32 {
             let payload = [mid];
-            let parsed = crate::network_message::parse_frame_payload_best_effort(&payload);
+            let parsed = crate::network_message::parse_reassembled_payload_best_effort(&payload);
             let decodes = !matches!(
                 parsed.halt,
                 Some(crate::network_message::BatchHalt::UnknownMid { .. })

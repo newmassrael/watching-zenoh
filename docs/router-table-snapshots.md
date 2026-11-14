@@ -24,10 +24,13 @@ each other:
   write guard (`RouterForwarder::register`), and the tick takes the write guard every `trees_delay`
   (100 ms by default) whether or not a tree is dirty.
 - **A user callback reached inside a read guard cannot declare.** The router queues hosted deliveries until
-  the guard is gone (`local_publish::DeliveryScope`), but two paths still call a handler inside the guard:
-  the multicast ingress (`RouterForwarder::route_mcast_ingress`, `route_mcast_ingress_request`, which open no
-  scope) and the inline fallback of `run_query_job`. A handler there that declares takes the write guard
-  under its own read guard, and the thread waits for itself.
+  the guard is gone (`local_publish::DeliveryScope`). When this note was written two paths still called a
+  handler inside the guard: the multicast ingress, which opened no scope, and the inline fallback of
+  `run_query_job` for a query routed where no scope was open. A handler there that declares takes the write
+  guard under its own read guard, and the thread waits for itself. Both are closed: the multicast ingress
+  opens the scope, and the route of a query takes the scope as an argument, so a hosted queryable is
+  owed to it by construction and is never called under the guard. A subscriber reached by a route that
+  opened no scope is still delivered inline.
 - **The data path writes through the read guard.** The route memos fill under a lock of their own, the
   egress queues and the declaration numbering under per-face mutexes. These are correct, and they are the
   part of the design A and B share (section 3).

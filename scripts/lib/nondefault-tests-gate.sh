@@ -144,7 +144,9 @@ wz_artifact_root_init "$repo" || exit 2
 # `features` is a comma-separated list of NON-DEFAULT feature names, never
 # `--all-features` (refused by name below, for the reasons in the header). It may
 # be written one feature per line with `\` continuations; whitespace is stripped,
-# so the list stays diffable a line at a time.
+# so the list stays diffable a line at a time. The token `-default` in it builds the
+# package without its default features (`leg_feature_args`): a test that only a build
+# with no allocator compiles is reached that way, and nothing else is.
 #
 # `test-name-filter` may be EMPTY, which means the whole crate at that feature
 # set. An empty filter cannot hide a defect -- it runs MORE, not less -- and the
@@ -1204,6 +1206,21 @@ wz-session-core/query-reply-err|"
         session-unicast-open,\
         transport-keepalive\
         |--test=slot_control_records"
+    # The same datagrams on the slot profile built with NO allocator: `-default` drops the
+    # crate's default `alloc`, so no crate of the session tier links it, and the file's own
+    # `cfg` is `not(alloc)`. The walk that reads a datagram on where it lies is compiled by no
+    # other leg.
+    "wz-session-lwip|hook|\
+        -default,\
+        codec-close,\
+        codec-response-final,\
+        declare-subscriber,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-keepalive\
+        |--test=slot_frames_without_alloc"
     # ── R2156 (item 543): wz-ap-demo's SECOND leg, and the HANDOFF ──────
     #
     # The row above runs the config surface at ONE feature, because the guard it
@@ -1508,8 +1525,8 @@ an intermittent HANG in the two-dialer FIFO rendezvous (measured 1-in-3 alone, 7
     # The `tls/` link of the COOPERATIVE engine through the pico ABI
     # (`tests/it/files/tls_coop_roundtrip.rs`, `tls-mbedtls`; a module of the merged target `it`,
     # so a row names its test by the path `-- --list` reports there). They are about the engine the build selects, and a build that has the tokio
-    # engine on selects that one, which is every build this table can spell (it has no
-    # `--no-default-features`). The cooperative engine runs them in `run-ci.sh`, the lane
+    # engine on selects that one, which is every build of this crate the table spells (no leg
+    # of it is `-default`). The cooperative engine runs them in `run-ci.sh`, the lane
     # `C1co tls engine-coop`, with 2 passed guarded.
     "wz-capi-pico|files::tls_coop_roundtrip::a_dial_that_trusts_the_listeners_certificate_opens_a_session_that_carries_a_put_each_way|\
 the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine on"
@@ -1549,6 +1566,28 @@ fi
 
 # Whitespace is what lets a feature list be written one name per line.
 leg_feats() { local f="${1}"; echo "${f//[[:space:]]/}"; }
+
+# The `cargo test` arguments of a leg's feature field, in the array `LEG_FEATURE_ARGS`. The token
+# `-default` builds the package WITHOUT its default features (`--no-default-features`): the one way
+# a leg reaches code that only such a build compiles, as a profile with no allocator is for a crate
+# whose default is `alloc`. Every other token is a feature name. One function for the run and the
+# census, so the two cannot build a leg two ways.
+leg_feature_args() {
+    local feats="$1" f
+    local -a parts=() names=()
+    LEG_FEATURE_ARGS=()
+    IFS=',' read -r -a parts <<<"$feats"
+    for f in "${parts[@]}"; do
+        if [[ "$f" == "-default" ]]; then
+            LEG_FEATURE_ARGS+=(--no-default-features)
+        elif [[ -n "$f" ]]; then
+            names+=("$f")
+        fi
+    done
+    if [[ ${#names[@]} -gt 0 ]]; then
+        LEG_FEATURE_ARGS+=(--features "$(IFS=','; echo "${names[*]}")")
+    fi
+}
 
 # The `cargo test` arguments of a leg's filter field, in the array `LEG_FILTER_ARGS`.
 #
@@ -1603,7 +1642,8 @@ done
 if [[ "${1:-}" == "--list" ]]; then
     for leg in "${LEGS[@]}"; do
         IFS='|' read -r pkg scope feats filter handoff <<<"$leg"
-        echo "  [$scope] $pkg --features $(leg_feats "$feats") ${filter:-<whole crate>}"
+        leg_feature_args "$(leg_feats "$feats")"
+        echo "  [$scope] $pkg ${LEG_FEATURE_ARGS[*]} ${filter:-<whole crate>}"
         [[ -n "$handoff" ]] && echo "          hands off to another leg: $handoff"
     done
     for row in "${SKIPS[@]}"; do
@@ -1671,7 +1711,8 @@ if [[ "${1:-}" == "--census" ]]; then
         if [[ "$feats" == "@all" ]]; then
             argv+=(--all-features)
         elif [[ -n "$feats" ]]; then
-            argv+=(--features "$feats")
+            leg_feature_args "$feats"
+            argv+=("${LEG_FEATURE_ARGS[@]}")
         fi
         leg_filter_args "$pkg" "$filter" || return 1
         argv+=(${LEG_FILTER_ARGS[@]+"${LEG_FILTER_ARGS[@]}"})
@@ -2031,7 +2072,8 @@ for leg in "${LEGS[@]}"; do
         done < <(tr ',' '\n' <<<"$handoff")
     fi
 
-    cargo_args=(test -p "$pkg" --features "$feats")
+    leg_feature_args "$feats"
+    cargo_args=(test -p "$pkg" "${LEG_FEATURE_ARGS[@]}")
     leg_filter_args "$pkg" "$filter" || { rc=1; continue; }
     cargo_args+=(${LEG_FILTER_ARGS[@]+"${LEG_FILTER_ARGS[@]}"})
     cargo_args+=(--quiet)

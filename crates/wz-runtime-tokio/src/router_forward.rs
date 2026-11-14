@@ -4179,10 +4179,10 @@ impl RouterForwarder {
     /// the face that asked, and let go of the call's hold of the branch. What the call keeps for
     /// later ([`RouterForwarder::hold_current_query`]) keeps the branch open until it is dropped.
     ///
-    /// The queryable is called with no tables held by this function: it is the program's
-    /// callback and may declare on the node. The tables are taken for reading after it returns, to
-    /// send its replies and to end the branch. When the route that owed the call had no span
-    /// open, the caller holds its own guard and the call is made inside it, as it always was.
+    /// The queryable is called with no tables held: it is the program's callback and may declare
+    /// on the node or ask it a query. Only [`Self::deliver_owed`] calls this, once the span of the
+    /// route that owed the job has ended and its guard is let go. The tables are taken for reading
+    /// after the handler returns, to send its replies and to end the branch.
     fn run_query_job(&self, job: QueryJob) {
         let QueryJob {
             handler,
@@ -4246,7 +4246,7 @@ impl RouterForwarder {
     pub fn local_get(&self, request: &RequestOwned) {
         // Declared before the tables are taken, so that it ends after they are let go.
         let deliveries = local_publish::DeliveryScope::enter(self);
-        self.on_tables().local_get(request);
+        self.on_tables().local_get(request, &deliveries);
         deliveries.finish();
     }
 
@@ -4260,7 +4260,9 @@ impl RouterForwarder {
         encoding: &wz_session_core::sample::EncodingHint,
     ) -> Result<(), CodecError> {
         let deliveries = local_publish::DeliveryScope::enter(self);
-        let result = self.on_tables().local_get_shm(request, value, encoding);
+        let result = self
+            .on_tables()
+            .local_get_shm(request, value, encoding, &deliveries);
         deliveries.finish();
         result
     }
@@ -11276,11 +11278,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// empty-route tail (self is excluded from the routing targets, so a GET
     /// matching only a self-hosted queryable — e.g. `@/<self-zid>/router/**` —
     /// arrives with `forwarded == 0`). Clones the matching handlers out of the
-    /// store and invokes each through [`Hosted::call`] ([`run_query_job`](Self::run_query_job)),
-    /// once the tables' read guard of the route is let go when the route opened a span for the
-    /// calls ([`local_publish::DeliveryScope`]), and inside it when it did not (see
-    /// [`dispatch_local_subscribers`](Self::dispatch_local_subscribers)
-    /// for what that allows a handler), accumulating replies via the SAME
+    /// store and invokes each through [`Hosted::call`] ([`run_query_job`](RouterForwarder::run_query_job)),
+    /// once the tables' read guard of the route is let go: the call is owed to `calls`, the span
+    /// the entry point of the route opened before it took the guard
+    /// ([`local_publish::DeliveryScope`]), accumulating replies via the SAME
     /// `QueryResponder` / `QueryReply::into_response` SSOT the wire queryable path
     /// uses, and emits them + the closing `ResponseFinal` (rid = the querier's) to
     /// `inbound`. The admin handler renders topology data + replies and NEVER
@@ -11302,6 +11303,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         keyexpr: &str,
         fan: &Arc<QueryFan>,
         deadline: Instant,
+        calls: &local_publish::DeliveryScope<'_>,
     ) -> usize {
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let target = read_request_target(request);
@@ -11410,20 +11412,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             });
             // The queryable is the program's callback, and a callback may use the session: declare
             // on the node, publish, ask. The call is owed to the span of the route and made once
-            // the tables are let go, when there is one, and made here when there is none. The
-            // branch of the fan is taken above and ends with the call, so the final of the query
-            // is sent by the last branch to end, whichever way this goes.
-            let job = Box::new(QueryJob {
+            // the tables are let go. The branch of the fan is taken above and ends with the call,
+            // so the final of the query is sent by the last branch to end.
+            calls.owe_query(Box::new(QueryJob {
                 handler: Arc::clone(handler),
                 query: whole.clone(),
                 keyexpr: keyexpr.to_owned(),
                 record,
                 inbound,
                 reliable,
-            });
-            if let Err(job) = local_publish::owe_query(job) {
-                self.fwd.run_query_job(*job);
-            }
+            }));
         }
         dispatched
     }
@@ -11578,18 +11576,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// under the request id `request` carries.
     ///
     /// [`attach_local_face`]: RouterForwarder::attach_local_face
-    pub fn local_get(&self, request: &RequestOwned) {
+    fn local_get(&self, request: &RequestOwned, calls: &local_publish::DeliveryScope<'_>) {
         // The key of the query is the session's, under its namespace if it has one.
         #[cfg(feature = "routing-namespace")]
         if let Some(local) = &self.fwd.local_namespace {
             let mut request = request.clone();
             if wz_session_core::namespace::apply_egress_request(&local.prefix, &mut request).is_ok()
             {
-                self.route_request(LOCAL_FACE, Region::Local, true, &request, None);
+                self.route_request(LOCAL_FACE, Region::Local, true, &request, None, calls);
             }
             return;
         }
-        self.route_request(LOCAL_FACE, Region::Local, true, request, None);
+        self.route_request(LOCAL_FACE, Region::Local, true, request, None, calls);
     }
 
     /// [`Self::local_get`] for a Query whose value is a chunk of shared memory its owner holds,
@@ -11599,11 +11597,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// face the bytes, and a queryable of the node's own session the chunk as its reader reads
     /// it. The caller may let go of `value` when this returns.
     #[cfg(feature = "transport-shm")]
-    pub fn local_get_shm(
+    fn local_get_shm(
         &self,
         request: &RequestOwned,
         value: wz_session_core::extshm::ShmSendHandle,
         encoding: &wz_session_core::sample::EncodingHint,
+        calls: &local_publish::DeliveryScope<'_>,
     ) -> Result<(), CodecError> {
         // Only the descriptor is wanted of this reservation: the reference it took goes back
         // when it drops, and each face is sent a reference of its own.
@@ -11619,11 +11618,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if let Some(local) = &self.fwd.local_namespace {
             if wz_session_core::namespace::apply_egress_request(&local.prefix, &mut request).is_ok()
             {
-                self.route_request_held(LOCAL_FACE, Region::Local, true, &request, None);
+                self.route_request_held(LOCAL_FACE, Region::Local, true, &request, None, calls);
             }
             return Ok(());
         }
-        self.route_request_held(LOCAL_FACE, Region::Local, true, &request, None);
+        self.route_request_held(LOCAL_FACE, Region::Local, true, &request, None, calls);
         Ok(())
     }
 
@@ -11665,6 +11664,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         request: &RequestOwned,
         group: Option<GroupMember>,
+        calls: &local_publish::DeliveryScope<'_>,
     ) {
         // transport-shm -- hold the chunk of every shared-memory slice the query's value carries
         // for as long as the Query is routed, FIRST and for the reason `route_push` gives. A
@@ -11675,7 +11675,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         else {
             return;
         };
-        self.route_request_held(inbound, tier, reliable, request, group);
+        self.route_request_held(inbound, tier, reliable, request, group, calls);
     }
 
     /// [`Self::route_request`] once whatever holds the chunks of the Query's value holds them:
@@ -11688,6 +11688,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         request: &RequestOwned,
         group: Option<GroupMember>,
+        calls: &local_publish::DeliveryScope<'_>,
     ) {
         // Resolve the query keyexpr + the inbound face's zid/link in one scoped
         // borrow (released before any send re-borrows `faces`).
@@ -11879,7 +11880,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // finding about this router, in the note.
         let forwarded = forwarded
             + self.dispatch_router_local_queryables(
-                inbound, reliable, request, &keyexpr, &fan, deadline,
+                inbound, reliable, request, &keyexpr, &fan, deadline, calls,
             );
         // The routing call lets go of the query now that its branches are sent. It is the last
         // holder when every branch has ended while the route was being served (a branch an
@@ -13610,6 +13611,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         request: &RequestOwned,
         from: Option<&MulticastPeerId>,
+        calls: &local_publish::DeliveryScope<'_>,
     ) {
         // As the Push twin above: the group's chain, by the group's link, before anything counts
         // or routes.
@@ -13630,6 +13632,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             reliable,
             request,
             Some(GroupMember::from_wire(from)),
+            calls,
         );
     }
 
@@ -13830,10 +13833,11 @@ impl RouterForwarder {
                     _ => {}
                 }
             } else {
-                // The subscribers of the node's own session are the program's callbacks, which may
-                // use the session and so write the tables: they are handed what this message
-                // brings once the guard below is let go. Declared before it, so it ends after it.
-                let _deliveries = local_publish::DeliveryScope::enter(self);
+                // The subscribers and the queryables of the node's own session are the program's
+                // callbacks, which may use the session and so write the tables: they are handed
+                // what this message brings once the guard below is let go. Declared before it, so
+                // it ends after it.
+                let deliveries = local_publish::DeliveryScope::enter(self);
                 let on = self.on_tables_for_a_frame();
                 if !on.admits_ingress(id, message) {
                     continue;
@@ -13867,7 +13871,7 @@ impl RouterForwarder {
                     // BestMatching region by region, C5b).
                     NetworkMessage::Request(request) => {
                         self.queries_seen.bump();
-                        on.route_request(id, tier, *reliable, request, None);
+                        on.route_request(id, tier, *reliable, request, None, &deliveries);
                     }
                     // A queryable's reply: route it BACK toward the querier via the
                     // pending table (C5c) — peek on a Response (more replies may
@@ -14048,7 +14052,7 @@ impl FaceForwarder for RouterForwarder {
         // for a face's frame. Declared before the tables are taken, so that it ends after.
         let deliveries = local_publish::DeliveryScope::enter(self);
         self.on_tables()
-            .route_mcast_ingress_request(reliable, request, from);
+            .route_mcast_ingress_request(reliable, request, from, &deliveries);
         deliveries.finish();
     }
 
@@ -23927,6 +23931,132 @@ mod tests {
             "the callback came back from declaring on the node that asked it"
         );
         asked.join().expect("the query");
+    }
+
+    /// A query a face routes to a queryable of the session: its callback asks the node a query of
+    /// its own, whose queryable declares a subscriber, and then undeclares that queryable. Each
+    /// of those takes the tables, for reading or for writing, so each would wait for the read the
+    /// route of the face's query held if a callback were called inside it. Upstream routes a query
+    /// and lets its tables go before the faces are sent it
+    /// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `drop(rtables);`), and its session calls
+    /// the queryables once its own state is let go (`zenoh/src/api/session.rs` @ `drop(state);`).
+    #[test]
+    fn a_callback_of_the_nodes_own_queryable_may_ask_and_declare_while_a_face_routes_to_it() {
+        use wz_session_core::query_sink::{QueryView, ReplyOut};
+        use wz_session_core::sink::SampleView;
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        let (inner_called, inner_heard) = std::sync::mpsc::channel::<()>();
+        let inner_called = std::sync::Mutex::new(inner_called);
+        let declaring = Arc::clone(&fwd);
+        let inner = fwd.host_queryable(
+            "demo/inner",
+            false,
+            Box::new(move |_view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                declaring.register_local_subscriber(
+                    "demo/declared/**",
+                    Box::new(|_: &dyn SampleView| {}),
+                );
+                let _ = inner_called.lock().unwrap().send(());
+            }),
+        );
+        let (outer_done, outer_finished) = std::sync::mpsc::channel::<bool>();
+        let outer_done = std::sync::Mutex::new(outer_done);
+        let asking = Arc::clone(&fwd);
+        fwd.host_queryable(
+            "demo/outer",
+            false,
+            Box::new(move |_view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                let request =
+                    wz_session_core::request_build::build_request_query(2, 0, Some("demo/inner"))
+                        .expect("build request");
+                asking.local_get(&request);
+                let undeclared = asking.unhost_queryable(inner);
+                let _ = outer_done.lock().unwrap().send(undeclared);
+            }),
+        );
+        let queryables = fwd.on_tables().tables.local_queryables.len();
+        let subscribers = fwd.on_tables().tables.local_subscribers.len();
+        let routing = Arc::clone(&fwd);
+        let routed = std::thread::spawn(move || {
+            let request =
+                wz_session_core::request_build::build_request_query(1, 0, Some("demo/outer"))
+                    .expect("build request");
+            forward_one(
+                &routing,
+                FaceId(0),
+                NetworkMessage::Request(Box::new(request)),
+            );
+        });
+        assert!(
+            inner_heard.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the queryable the callback asked was called and came back from declaring"
+        );
+        assert_eq!(
+            outer_finished.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "the callback came back from asking and undeclared the queryable it asked"
+        );
+        routed.join().expect("the route");
+        assert_eq!(
+            fwd.on_tables().tables.local_queryables.len(),
+            queryables - 1,
+            "the queryable the callback asked is undeclared"
+        );
+        assert_eq!(
+            fwd.on_tables().tables.local_subscribers.len(),
+            subscribers + 1,
+            "the subscriber the inner callback declared is held"
+        );
+    }
+
+    /// Two queries of the session on two threads at once, each to a queryable whose callback
+    /// declares: a callback is called with no guard of the tables held, so neither declaration
+    /// waits for the route of the other query.
+    #[test]
+    fn callbacks_of_the_nodes_own_queryables_on_two_threads_may_both_declare() {
+        use wz_session_core::query_sink::{QueryView, ReplyOut};
+        use wz_session_core::sink::SampleView;
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        for key in ["demo/a", "demo/b"] {
+            let done = std::sync::Mutex::new(done.clone());
+            let inner = Arc::clone(&fwd);
+            fwd.host_queryable(
+                key,
+                false,
+                Box::new(move |_view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                    inner.register_local_subscriber(
+                        "demo/declared/**",
+                        Box::new(|_: &dyn SampleView| {}),
+                    );
+                    let _ = done.lock().unwrap().send(());
+                }),
+            );
+        }
+        let askers: Vec<_> = [(1u64, "demo/a"), (2, "demo/b")]
+            .into_iter()
+            .map(|(rid, key)| {
+                let asking = Arc::clone(&fwd);
+                std::thread::spawn(move || {
+                    let request =
+                        wz_session_core::request_build::build_request_query(rid, 0, Some(key))
+                            .expect("build request");
+                    asking.local_get(&request);
+                })
+            })
+            .collect();
+        for _ in 0..2 {
+            assert!(
+                finished.recv_timeout(Duration::from_secs(5)).is_ok(),
+                "each callback came back from declaring"
+            );
+        }
+        for asker in askers {
+            asker.join().expect("the query");
+        }
     }
 
     /// The same for what a face sends: the callback of a subscriber of the session is called once

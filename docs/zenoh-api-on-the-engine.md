@@ -498,10 +498,15 @@ Each lands whole with its surface lines, tests and faults in one round.
     walk of a frame's records stops before a transport message id, and what follows is the next
     unit of the batch, parked for the driver on the copying path (round 4100) and read on from
     that offset on the in-place path (round 4103). The best-effort parse that the capture tools
-    use keeps reporting the id as unknown, on purpose. The differential still sends its best-effort
-    put last: it was moved among the others and the scenario did not finish on this tree, for a
-    reason that is not the reception (the control with the old order did not finish either; that
-    hang was a deadlock of the node, repaired below). A datagram of two frames through the loops
+    use ends a frame there too now, and says where the next message begins
+    (`BatchParse::next_message_at`); a frame the SN gate refuses no longer takes the rest of its
+    batch with it; `conformance/differential/tests/zenoh_rx_batch.rs` holds both readers of a batch
+    to upstream's codec. The differential of the session sends its best-effort put in the order
+    the other scenarios publish (behind the sourced put, ahead of the deletes): it had been sent
+    last because the scenario did not finish when it was moved, and that hang was the node's
+    deadlock repaired below, not the reception. With no allocator the receive reads the second
+    frame in the iteration of the datagram (`slot_frames_without_alloc`, `wz-session-lwip`). A
+    datagram of two frames through the loops
     of the profile with no allocator is held by
     `what_follows_a_second_frame_header_in_a_batch_is_dispatched` (`wz-session-lwip`), on the
     copying loop, the in-place loop and the in-place loop on the fixed backing: the copying loop
@@ -576,7 +581,11 @@ Each lands whole with its surface lines, tests and faults in one round.
     as the subscribers' did (`a_callback_of_the_nodes_own_queryable_may_declare_while_its_session_asks`
     was red); the route now takes the branch of the query's fan under the guard and owes the call
     (`QueryJob`), which is made with no guard held and takes the tables for reading again to send
-    the replies and to end the branch.
+    the replies and to end the branch. The route of a query takes the span it owes the call to as
+    an argument, so no entry point can route a query with no span open and have the call made
+    under the guard; a callback may ask the node a query and undeclare a queryable while a face's
+    query is routed to it (upstream lets its tables go before it calls the queryables:
+    `zenoh/src/api/session.rs` @ `drop(state);`).
   - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
     declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
     `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on

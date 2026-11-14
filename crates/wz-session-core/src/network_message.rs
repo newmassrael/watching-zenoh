@@ -1348,7 +1348,8 @@ pub(crate) fn for_each_record<'f>(
 /// reliability behind one) begins where the last record ends. The walk of a Frame stops there
 /// and leaves what follows to the reader of the batch.
 #[cfg(feature = "codec-frame")]
-// Read by the record walk and by the heap profile's frame; a build with neither reads nothing.
+// Read by the record walk, the heap profile's frame, the best-effort walk and the dissector; a
+// build with none of them reads nothing.
 #[allow(dead_code)]
 pub(crate) fn is_transport_mid(mid: u8) -> bool {
     mid <= wz_codecs::wire_const::T_MID_JOIN
@@ -1882,6 +1883,17 @@ pub struct BatchParse {
     /// because a consumer reporting "N bytes unparsed" should not have to
     /// hold the payload to compute it.
     pub unparsed_bytes: usize,
+    /// Where the next transport message of the batch begins in the payload,
+    /// when the walk of a `Frame`'s payload ended at one; `None` when its
+    /// records reach the end of the payload, or the walk halted.
+    ///
+    /// A `Frame` is read as the tail of its unit, and a sender puts a message
+    /// of the other reliability into an open batch behind a second `Frame`
+    /// header. The records of this `Frame` end before that header, and the
+    /// bytes from it on are the next transport message, which the reader of the
+    /// batch reads: they are neither records of this `Frame` nor unparsed, so
+    /// the batch is complete and [`Self::unparsed_bytes`] does not count them.
+    pub next_message_at: Option<usize>,
 }
 
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
@@ -1925,29 +1937,62 @@ impl BatchParse {
 ///
 /// Never returns `Err`. An empty payload is `messages = []`, `halt = None`
 /// — a valid empty batch, exactly as in the strict parse.
+///
+/// `bytes` is the `Frame`'s payload as the tail of its unit, so the walk ends
+/// before a transport message ([`BatchParse::next_message_at`]), as the record
+/// walk of a participant does: upstream's `Frame` reader rewinds the message it
+/// cannot read as a network one and the batch's loop reads it as a transport
+/// message (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`,
+/// `io/zenoh-transport/src/unicast/universal/rx.rs` @ `while !batch.is_empty() {`).
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn parse_frame_payload_best_effort(bytes: &[u8]) -> BatchParse {
-    parse_payload_best_effort(bytes, usize::MAX)
+    parse_payload_best_effort(bytes, usize::MAX, RecordsEnd::AtTransportMessage)
+}
+
+/// Decode, best-effort, the bytes a completed fragment chain joined. They are
+/// network messages and nothing else (upstream decodes a network message out of
+/// them, `io/zenoh-transport/src/common/defragmentation.rs` @
+/// `pub(crate) fn defragment`), so a transport MID among them is a record this
+/// walk cannot read, and halts it as any unknown MID does.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+pub fn parse_reassembled_payload_best_effort(bytes: &[u8]) -> BatchParse {
+    parse_payload_best_effort(bytes, usize::MAX, RecordsEnd::AtPayloadEnd)
 }
 
 /// Decode the single network record carried by a lowlatency framing unit.
 /// Trailing bytes are reported, never treated as another batched message.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn parse_lowlatency_payload_best_effort(bytes: &[u8]) -> BatchParse {
-    parse_payload_best_effort(bytes, 1)
+    parse_payload_best_effort(bytes, 1, RecordsEnd::AtPayloadEnd)
+}
+
+/// Where a best-effort walk's records may end before a halt.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecordsEnd {
+    /// At the payload's end only: the bytes are network messages and nothing else.
+    AtPayloadEnd,
+    /// At a transport message too: the bytes are a `Frame`'s payload read as the tail of its
+    /// unit, which ends where the batch's next transport message begins.
+    AtTransportMessage,
 }
 
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-fn parse_payload_best_effort(bytes: &[u8], max_records: usize) -> BatchParse {
+fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) -> BatchParse {
     let total = bytes.len();
     let mut messages = Vec::new();
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut cursor = SceCursor::new(bytes);
     let mut halt = None;
+    let mut next_message_at = None;
     while cursor.remaining() > 0 {
         // The offset is recomputed per record rather than tracked, so it
         // cannot drift from the cursor the decoders actually advance.
         let offset = total - cursor.remaining();
+        if end == RecordsEnd::AtTransportMessage && is_transport_mid(bytes[offset] & 0x1F) {
+            next_message_at = Some(offset);
+            break;
+        }
         if messages.len() == max_records {
             halt = Some(BatchHalt::CodecError {
                 offset,
@@ -2015,6 +2060,7 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize) -> BatchParse {
         spans,
         halt,
         unparsed_bytes,
+        next_message_at,
     }
 }
 
@@ -3397,30 +3443,31 @@ mod best_effort_batch_tests {
     /// `Unknown` and stop (its length is unknowable, so there is nothing
     /// to resynchronise on), but only the best-effort one says WHERE.
     ///
-    /// `0x00` is outside the seven-wide network MID set on purpose — the
+    /// `0x18` is outside the seven-wide network MID set on purpose — the
     /// authored catalog covers all seven, so a meaningful Unknown fixture
-    /// has to be synthetic.
+    /// has to be synthetic. It is outside the transport MIDs (`0x00..=0x07`)
+    /// too: one of those ends a `Frame`'s records instead.
     #[test]
     fn an_unknown_mid_halts_with_its_offset_under_both_contracts() {
         let first = oam_record(7);
         let mut wire = first.clone();
-        wire.extend_from_slice(&[0x00, 0xAB, 0xCD]);
+        wire.extend_from_slice(&[0x18, 0xAB, 0xCD]);
 
         let strict = parse_frame_payload(&wire).expect("unknown MID absorbs, not errors");
         assert_eq!(oam_ids(&strict), vec![7]);
         assert!(matches!(
             strict.last(),
-            Some(NetworkMessage::Unknown { mid: 0x00, .. })
+            Some(NetworkMessage::Unknown { mid: 0x18, .. })
         ));
 
         let best = parse_frame_payload_best_effort(&wire);
         assert_eq!(oam_ids(&best.messages), vec![7]);
         match best.messages.last() {
             Some(NetworkMessage::Unknown { mid, body }) => {
-                assert_eq!(*mid, 0x00);
+                assert_eq!(*mid, 0x18);
                 assert_eq!(
                     body.as_slice(),
-                    &[0x00, 0xAB, 0xCD],
+                    &[0x18, 0xAB, 0xCD],
                     "the absorbed body starts AT the unknown header, not after it"
                 );
             }
@@ -3429,11 +3476,84 @@ mod best_effort_batch_tests {
         assert_eq!(
             best.halt,
             Some(BatchHalt::UnknownMid {
-                mid: 0x00,
+                mid: 0x18,
                 offset: first.len()
             })
         );
         assert_eq!(best.unparsed_bytes, 3);
+        assert_eq!(best.next_message_at, None);
+    }
+
+    /// A batch whose sender put a message of the other reliability behind a
+    /// second `Frame` header: the first `Frame`'s payload, read as the tail of
+    /// the unit, holds its own records and then that header. The best-effort
+    /// walk ends the records before it and says where it begins; nothing is
+    /// absorbed, nothing is unparsed, and the batch is complete.
+    #[test]
+    fn a_second_frame_header_ends_the_records_of_the_first() {
+        let first = [oam_record(7), oam_record(8)].concat();
+        // A best-effort `Frame` header (`R` clear, no extensions) with sn 3, and one record.
+        let second = [
+            vec![wz_codecs::wire_const::T_MID_FRAME, 0x03],
+            oam_record(9),
+        ]
+        .concat();
+        let wire = [first.clone(), second].concat();
+
+        let best = parse_frame_payload_best_effort(&wire);
+        assert_eq!(oam_ids(&best.messages), vec![7, 8]);
+        assert_eq!(best.next_message_at, Some(first.len()));
+        assert!(best.is_complete(), "a transport message is no halt");
+        assert_eq!(best.unparsed_bytes, 0);
+        assert!(
+            !best
+                .messages
+                .iter()
+                .any(|m| matches!(m, NetworkMessage::Unknown { .. })),
+            "the next transport message is not absorbed as an unknown record"
+        );
+        let (seven, eight) = (oam_record(7).len(), oam_record(8).len());
+        assert_eq!(best.spans, vec![(0, seven), (seven, eight)]);
+    }
+
+    /// Every transport MID ends a `Frame`'s records, the first byte of a
+    /// payload included, and no network MID does.
+    #[test]
+    fn every_transport_mid_and_no_network_mid_ends_a_frames_records() {
+        for mid in 0u8..32 {
+            let best = parse_frame_payload_best_effort(&[mid]);
+            if mid <= wz_codecs::wire_const::T_MID_JOIN {
+                assert_eq!(best.next_message_at, Some(0), "mid {mid:#04x}");
+                assert!(best.messages.is_empty(), "mid {mid:#04x}");
+            } else {
+                assert_eq!(best.next_message_at, None, "mid {mid:#04x}");
+            }
+        }
+    }
+
+    /// The bytes of a joined fragment chain are network messages only, as
+    /// upstream decodes them: a transport MID there is an unknown record that
+    /// halts the walk, and not the end of a `Frame`.
+    #[test]
+    fn a_transport_mid_in_a_reassembled_payload_halts_as_an_unknown_record() {
+        let first = oam_record(7);
+        let wire = [
+            first.clone(),
+            vec![wz_codecs::wire_const::T_MID_FRAME, 0x03],
+            oam_record(9),
+        ]
+        .concat();
+        let joined = parse_reassembled_payload_best_effort(&wire);
+        assert_eq!(oam_ids(&joined.messages), vec![7]);
+        assert_eq!(joined.next_message_at, None);
+        assert_eq!(
+            joined.halt,
+            Some(BatchHalt::UnknownMid {
+                mid: wz_codecs::wire_const::T_MID_FRAME,
+                offset: first.len()
+            })
+        );
+        assert_eq!(joined.unparsed_bytes, wire.len() - first.len());
     }
 
     /// The two walks share ONE per-MID dispatch (`decode_one_record`), so
