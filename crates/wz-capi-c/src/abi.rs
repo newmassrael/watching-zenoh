@@ -2000,10 +2000,16 @@ mod config_disposition_tests {
             ask("transport/shared_memory/transport_optimization/messages"),
             (Z_OK, not_acted_on)
         );
-        // CONTROL: a key that is not a session's is answered by the reader, as before.
+        // CONTROL: a key that is not a session's is answered by the reader, as before, in both
+        // of the reader's answers: one it declares unhonoured and one it honours, the bound on
+        // an open, which this library's dialer runs within.
+        assert_eq!(
+            ask("transport/link/tx/threads"),
+            (Z_OK, WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED)
+        );
         assert_eq!(
             ask("transport/unicast/open_timeout"),
-            (Z_OK, WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED)
+            (Z_OK, WZ_CAPI_C_CONFIG_HONOURED)
         );
     }
 

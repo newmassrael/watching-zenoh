@@ -3713,10 +3713,15 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
 /// other side of the wire) LEFT with its last row: `qos/publication` and
 /// `transport/link/tx/sequence_number_resolution` are both honoured now, and a kind with no
 /// population is a branch nobody runs, the reason `upstream-only` was dropped above.
+///
+/// `not-this-key` (the citing site is about a different wz mechanism) LEFT with its last row
+/// too: `transport/unicast/open_timeout` was cited beside the per-candidate dial bound, and the
+/// key is honoured now as the bound on a whole open, which that dial bound runs inside. A key
+/// that needs the kind again brings it back with its row, its anchor and its `NOT-THIS-KEY:`
+/// disclaimer in one change.
 pub const UNHONOURED_CITATION_KINDS: &[&str] = &[
     "asserted-ignored",
-    // `foreign-node-config` stood here; see above for why it left.
-    "not-this-key",
+    // `foreign-node-config` and `not-this-key` stood here; see above for why they left.
     "wz-has-it",
 ];
 
@@ -3748,7 +3753,9 @@ pub const UNHONOURED_CITATION_KINDS: &[&str] = &[
 ///   citing doc is a unixpipe-only `HANDSHAKE_TIMEOUT` that happens to match
 ///   the key's default, over a listener upstream gives no bound at all.
 ///   `anchor` names that other mechanism, and it must EXIST — AND the mechanism
-///   must DISCLAIM the key where the two meet. See below.
+///   must DISCLAIM the key where the two meet. See below. The kind has no row today and is
+///   out of [`UNHONOURED_CITATION_KINDS`]; this paragraph and the next say what bringing it
+///   back obliges.
 ///
 /// # The disclaimer, and the hole it closes (R2155, open-debt item 541)
 ///

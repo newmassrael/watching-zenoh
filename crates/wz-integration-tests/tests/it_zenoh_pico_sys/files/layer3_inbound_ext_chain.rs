@@ -14,6 +14,7 @@
 //! Wire shape under test:
 //!   `[parent_flags|T_MID_INIT, ...init_body, ...ext_chain]`
 
+use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::ExtEntryOwnedVariant;
 use wz_codecs::wire_const::PROTOCOL_VERSION;
 use wz_runtime_tokio::session_glue::{
@@ -168,11 +169,10 @@ fn parse_inbound_decodes_ext_chain_from_pico_wire() {
     }
 }
 
-// wz-proves: none -- hand-synthesized wire; no foreign code invoked
-#[test]
-fn ext_chain_overflow_rejects_unbounded_continuation() {
-    // Synthesize a wire where every ext entry keeps Z=1 (no
-    // terminator). MAX_EXT_CHAIN_DEPTH+1 entries → ExtChainOverflow.
+/// A minimal InitAck carrying `entries` Unit extensions (id 0, M=0, a
+/// 1-byte header each, no body), every one announcing a next (Z=1) and, when
+/// `terminated`, the last one clearing it.
+fn initack_with_unit_chain(entries: usize, terminated: bool) -> Vec<u8> {
     let parent_flags = FLAG_T_INIT_S | FLAG_T_INIT_A | FLAG_T_Z;
     let mut wire = Vec::new();
     wire.push(parent_flags | T_MID_INIT);
@@ -189,18 +189,45 @@ fn ext_chain_overflow_rejects_unbounded_continuation() {
         0x00, // batch_size LE
         0x00, // VLE cookie_len=0
     ]);
-    // MAX_EXT_CHAIN_DEPTH+1 Unit entries, all Z=1, no terminator.
-    // ext_id=0, M=0, enc=0 (Unit), Z=1 (0x80). Unit body is 0
-    // bytes, so each entry is just the 1-byte header.
-    wire.resize(wire.len() + MAX_EXT_CHAIN_DEPTH + 1, 0x80);
+    wire.resize(wire.len() + entries, 0x80);
+    if terminated {
+        *wire.last_mut().expect("a chain of at least one entry") = 0x00;
+    }
+    wire
+}
 
-    let err = match parse_inbound(&wire) {
-        Err(e) => e,
-        Ok(_) => panic!("expected ExtChainOverflow error"),
-    };
+// wz-proves: none -- hand-synthesized wire; no foreign code invoked
+#[test]
+fn ext_chain_overflow_rejects_unbounded_continuation() {
+    // A whole chain one entry past the bound: the wire is read, and the
+    // participant's capacity refuses the entry past it.
+    let past_the_bound = initack_with_unit_chain(MAX_EXT_CHAIN_DEPTH + 1, true);
     assert_eq!(
-        err,
-        InboundParseError::ExtChainOverflow,
-        "non-terminating chain must surface ExtChainOverflow"
+        parse_inbound(&past_the_bound).err(),
+        Some(InboundParseError::ExtChainOverflow),
+        "a chain past the bound must surface ExtChainOverflow"
     );
+
+    // CONTROL: the same chain at the bound is read whole.
+    let at_the_bound = initack_with_unit_chain(MAX_EXT_CHAIN_DEPTH, true);
+    assert!(
+        matches!(
+            parse_inbound(&at_the_bound),
+            Ok(InboundFrame::Init { has_ext: true, .. })
+        ),
+        "a chain at the bound must be read"
+    );
+
+    // A chain whose last entry still announces a next, cut by the end of the
+    // unit, is a wire that cannot be read, whatever its length: zenoh's
+    // reader and zenoh-pico's walk the chain until the flag clears and fail
+    // on the missing header, and the bound judges only a chain that was read.
+    for entries in [MAX_EXT_CHAIN_DEPTH, MAX_EXT_CHAIN_DEPTH + 1] {
+        let cut = initack_with_unit_chain(entries, false);
+        assert_eq!(
+            parse_inbound(&cut).err(),
+            Some(InboundParseError::Codec(CodecError::NeedMoreBytes)),
+            "an unterminated chain of {entries} entries is a truncated wire"
+        );
+    }
 }
