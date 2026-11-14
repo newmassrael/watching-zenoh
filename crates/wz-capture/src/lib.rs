@@ -13971,9 +13971,22 @@ mod datagram_tests {
             w
         };
         // FRAME and FRAGMENT are hand-walked by `parse_inbound` rather than
-        // routed through a body codec (a VLE sn then the tail), so there is no
-        // codec to anchor to and the bytes are the sn and the payload.
-        let frame = alloc::vec![wc::T_MID_FRAME, 0x00, 0xDE, 0xAD];
+        // routed through a body codec (a VLE sn then the tail), so the header
+        // bytes are the sn and the tail. A Frame's tail is network records, and
+        // upstream drops a batch whose record does not decode, so it carries
+        // one, built by its own codec; a Fragment's tail is a piece of a
+        // network message and is not read as records.
+        let frame = {
+            let mut w = alloc::vec![wc::T_MID_FRAME, 0x00];
+            w.extend_from_slice(
+                &wz_codecs::lent::Oam {
+                    id: 0,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            );
+            w
+        };
         let fragment = alloc::vec![wc::T_MID_FRAGMENT, 0x00, 0xBE, 0xEF];
         let join = {
             let body = wz_codecs::join::Join {
