@@ -26075,6 +26075,12 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh peer publisher before a router)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_api_peer_publisher_before_router || return 1
+    # A client that enables its admin space, asked for `@/<zid>/client` by an upstream client through
+    # an upstream router: the two crates answer alike. Two tests, the comparison and the control that
+    # a client which answers nothing is a difference.
+    _runci_guarded_test "Layer E18 (differential, zenoh client admin space)" 2 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_api_client_admin_space || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh timestamp stack stamp)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_ts_stack_stamp || return 1
