@@ -903,10 +903,12 @@ transport-batching = []
 
 # chunk-5 (SessionLinkActions struct move) — transport-keepalive gates
 # the migrated `start_keepalive_worker` / `stop_keepalive_worker` action
-# bodies (the Established-side keepalive cadence). Standalone gate-only
-# (no wz-codecs forward; the wire-level KeepAlive parse is the separate
-# codec-keep-alive axis). The wz-runtime-tokio side forwards here.
-transport-keepalive = []
+# bodies (the Established-side keepalive cadence). A sender writes the
+# message through its document (`sources/codecs/transport_keep_alive.scxml`),
+# so it takes the KeepAlive codecs of wz-codecs; the receive arm that parses
+# a peer's KeepAlive stays the separate codec-keep-alive axis of this crate.
+# The wz-runtime-tokio side forwards here.
+transport-keepalive = ["wz-codecs/codec-keep-alive"]
 
 # A4 — session-reconnect gates the declaration-cache STORAGE on the
 # actions bundle (`declaration_cache` field + the append/prune hooks in
