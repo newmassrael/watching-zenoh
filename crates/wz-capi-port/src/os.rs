@@ -2,7 +2,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! What an engine asks of the operating system it runs on: a mutex held across a step, the
-//! identity of the calling thread, a thread of its own, and a sleep.
+//! identity of the calling thread, a thread of its own, and a sleep; and what a C ABI over it asks
+//! besides: a condition variable that a thread waits on with that mutex held, which zenoh-pico's
+//! channels and its undeclare (waiting for a callback in flight) block on.
 //!
 //! An engine that the program steps still has a lock and may have a thread: the session is shared
 //! between the C session handle and every entity on it and is called from any thread, and
@@ -27,6 +29,11 @@
 //! void  wz_os_mutex_lock(void *mutex);         /* waits until it is this thread's */
 //! void  wz_os_mutex_unlock(void *mutex);
 //! void  wz_os_mutex_free(void *mutex);
+//! void *wz_os_condvar_new(void);               /* NULL when none is left */
+//! void  wz_os_condvar_wait(void *condvar, void *mutex); /* mutex held; held again on return */
+//! void  wz_os_condvar_notify_one(void *condvar);
+//! void  wz_os_condvar_notify_all(void *condvar);
+//! void  wz_os_condvar_free(void *condvar);
 //! uintptr_t wz_os_thread_current(void);        /* never 0 */
 //! int   wz_os_thread_spawn(void (*entry)(void *), void *arg, uintptr_t *id);  /* 0 on success */
 //! int   wz_os_thread_join(uintptr_t id);       /* waits for it to end, then frees it */
@@ -109,6 +116,33 @@ mod host {
             Self::new(T::default())
         }
     }
+
+    /// The process's condition variable, waited on with a [`Mutex`]'s guard.
+    #[derive(Default)]
+    pub struct Condvar(std::sync::Condvar);
+
+    impl Condvar {
+        /// A condition variable no thread waits on.
+        pub fn new() -> Self {
+            Self(std::sync::Condvar::new())
+        }
+
+        /// Release the guard's mutex, sleep until notified, and take the mutex again. A wake may
+        /// come without a notification, so the caller waits in a loop on its own condition.
+        pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+            self.0.wait(guard).unwrap_or_else(PoisonError::into_inner)
+        }
+
+        /// Wake one waiting thread, if one waits.
+        pub fn notify_one(&self) {
+            self.0.notify_one();
+        }
+
+        /// Wake every waiting thread.
+        pub fn notify_all(&self) {
+            self.0.notify_all();
+        }
+    }
 }
 
 /// A kernel's, through the functions the image links (the module doc).
@@ -125,6 +159,11 @@ mod kernel {
         fn wz_os_mutex_lock(mutex: *mut c_void);
         fn wz_os_mutex_unlock(mutex: *mut c_void);
         fn wz_os_mutex_free(mutex: *mut c_void);
+        fn wz_os_condvar_new() -> *mut c_void;
+        fn wz_os_condvar_wait(condvar: *mut c_void, mutex: *mut c_void);
+        fn wz_os_condvar_notify_one(condvar: *mut c_void);
+        fn wz_os_condvar_notify_all(condvar: *mut c_void);
+        fn wz_os_condvar_free(condvar: *mut c_void);
         fn wz_os_thread_current() -> usize;
         fn wz_os_thread_spawn(
             entry: unsafe extern "C" fn(*mut c_void),
@@ -270,6 +309,62 @@ mod kernel {
             unsafe { wz_os_mutex_unlock(self.mutex.raw.as_ptr()) }
         }
     }
+
+    /// The kernel's condition variable, waited on with a [`Mutex`]'s guard.
+    pub struct Condvar {
+        raw: NonNull<c_void>,
+    }
+
+    // SAFETY: the kernel's condition variable may be waited on and notified from any thread; it
+    // holds no value of its own.
+    unsafe impl Send for Condvar {}
+    unsafe impl Sync for Condvar {}
+
+    impl Condvar {
+        /// A condition variable no thread waits on. A kernel with none left is out of memory, as
+        /// for a [`Mutex`].
+        pub fn new() -> Self {
+            // SAFETY: the image's contract (module doc).
+            let raw = NonNull::new(unsafe { wz_os_condvar_new() }).unwrap_or_else(|| {
+                alloc::alloc::handle_alloc_error(core::alloc::Layout::new::<Self>())
+            });
+            Self { raw }
+        }
+
+        /// Release the guard's mutex, sleep until notified, and take the mutex again. A wake may
+        /// come without a notification, so the caller waits in a loop on its own condition.
+        pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+            // SAFETY: the guard holds its mutex, which the kernel releases while this thread
+            // sleeps and holds again before the call returns, so the guard still holds it after.
+            unsafe { wz_os_condvar_wait(self.raw.as_ptr(), guard.mutex.raw.as_ptr()) };
+            guard
+        }
+
+        /// Wake one waiting thread, if one waits.
+        pub fn notify_one(&self) {
+            // SAFETY: `raw` is this condition variable's, alive until it drops.
+            unsafe { wz_os_condvar_notify_one(self.raw.as_ptr()) }
+        }
+
+        /// Wake every waiting thread.
+        pub fn notify_all(&self) {
+            // SAFETY: as for `notify_one`.
+            unsafe { wz_os_condvar_notify_all(self.raw.as_ptr()) }
+        }
+    }
+
+    impl Default for Condvar {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Drop for Condvar {
+        fn drop(&mut self) {
+            // SAFETY: a thread waiting on it borrows it, so none waits once it drops; freed once.
+            unsafe { wz_os_condvar_free(self.raw.as_ptr()) }
+        }
+    }
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -283,6 +378,25 @@ mod tests {
         handle.join();
         assert_ne!(here, there, "the spawned thread has an identity of its own");
         assert_eq!(current(), here);
+    }
+
+    #[test]
+    fn a_waiter_on_the_condvar_sees_what_the_notifier_wrote_under_the_mutex() {
+        let shared = alloc::sync::Arc::new((Mutex::new(false), Condvar::new()));
+        let notifier = alloc::sync::Arc::clone(&shared);
+        let (handle, _) = spawn(move || {
+            sleep_ms(20);
+            *notifier.0.lock() = true;
+            notifier.1.notify_all();
+        })
+        .expect("a host gives a thread");
+        let mut ready = shared.0.lock();
+        while !*ready {
+            ready = shared.1.wait(ready);
+        }
+        assert!(*ready, "the wait ends only once the flag is set");
+        drop(ready);
+        handle.join();
     }
 
     #[test]

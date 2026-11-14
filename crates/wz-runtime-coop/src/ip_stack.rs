@@ -253,11 +253,26 @@ pub struct IpLinks<U, D, L = NoDial> {
 /// into and whether its owner waits for its input. Held by the stack and copied to its listeners,
 /// so a link taken off a port is shaped as one dialled.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 struct LinkShape {
     tx_slots: usize,
     tx_capacity: usize,
     owner_waits: bool,
+    /// The receive buffer of a datagram link: the largest datagram until the stack is told the
+    /// largest batch its sessions receive ([`IpLinks::with_rx_capacity`]).
+    datagram_rx: usize,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl Default for LinkShape {
+    fn default() -> Self {
+        Self {
+            tx_slots: 0,
+            tx_capacity: 0,
+            owner_waits: false,
+            datagram_rx: UDP_RX_CAPACITY,
+        }
+    }
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -351,6 +366,23 @@ where
         self
     }
 
+    /// Links whose datagram links receive into buffers of `bytes` each, in place of the largest
+    /// datagram: the batch the sessions advertise, which no peer's batch exceeds once the two
+    /// have negotiated, as zenoh-pico's UDP link reads into a buffer of its own batch size. A node
+    /// with a small heap pays its batch a link and not 64 KiB. The figure is taken between one byte
+    /// and the largest datagram; a stream link keeps the largest batch with its length, which its
+    /// framing needs before the batch is known.
+    #[must_use]
+    pub fn with_rx_capacity(mut self, bytes: usize) -> Self {
+        self.shape.datagram_rx = bytes.clamp(1, UDP_RX_CAPACITY);
+        self
+    }
+
+    /// The receive buffer each datagram link of these links opens with.
+    pub fn datagram_rx_capacity(&self) -> usize {
+        self.shape.datagram_rx
+    }
+
     /// The link of a dial to `to`, before it is shared. A stack that cannot make a socket is
     /// [`LinkOpenError::Exhausted`]; a connection the other end does not take is
     /// [`LinkOpenError::Refused`]; a `tls/` dial on links given no secure channel is
@@ -368,7 +400,7 @@ where
                     UdpDriver::initiator_with_buffers(
                         socket,
                         (to.at.addr, to.at.port),
-                        UDP_RX_CAPACITY,
+                        self.shape.datagram_rx,
                         self.shape.tx(),
                     ),
                 )))
@@ -404,7 +436,7 @@ where
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = U::bind(self.local, port).map_err(|_| LinkOpenError::Exhausted)?;
         let driver = Rc::new(IpDriver::Udp(self.shape.datagram(
-            UdpDriver::acceptor_with_buffers(socket, UDP_RX_CAPACITY, self.shape.tx()),
+            UdpDriver::acceptor_with_buffers(socket, self.shape.datagram_rx, self.shape.tx()),
         )));
         Ok(OpenedLink {
             sink: driver.clone(),
@@ -1314,6 +1346,51 @@ mod tests {
             Some("tls/10.0.0.1:7447")
         );
         assert_eq!(tls.peer_credential_zid(), Some(PROVEN));
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn heap_links_told_their_batch_receive_datagrams_into_that_and_no_more() {
+        let whole = IpLinks::<Datagrams, Dial>::new([10, 0, 0, 2], Dial);
+        assert_eq!(whole.datagram_rx_capacity(), UDP_RX_CAPACITY);
+        let dialled = whole
+            .open_initiator(Locator::udp(ROUTER))
+            .expect("a datagram link")
+            .pump;
+        assert_eq!(dialled.link_rx_capacity(), UDP_RX_CAPACITY);
+
+        let sized = IpLinks::<Datagrams, Dial>::new([10, 0, 0, 2], Dial).with_rx_capacity(2048);
+        let dialled = sized
+            .open_initiator(Locator::udp(ROUTER))
+            .expect("a datagram link")
+            .pump;
+        assert_eq!(dialled.link_rx_capacity(), 2048);
+        let accepting = sized.open_acceptor(7447).expect("an accepting link").pump;
+        assert_eq!(accepting.link_rx_capacity(), 2048);
+        let stream = sized
+            .open_initiator(Locator::tcp(ROUTER))
+            .expect("a stream link")
+            .pump;
+        assert_ne!(
+            stream.link_rx_capacity(),
+            2048,
+            "a stream link keeps the largest batch its framing reads"
+        );
+
+        assert_eq!(
+            IpLinks::<Datagrams, Dial>::new([0; 4], Dial)
+                .with_rx_capacity(0)
+                .datagram_rx_capacity(),
+            1,
+            "a buffer of no bytes is refused for one"
+        );
+        assert_eq!(
+            IpLinks::<Datagrams, Dial>::new([0; 4], Dial)
+                .with_rx_capacity(usize::MAX)
+                .datagram_rx_capacity(),
+            UDP_RX_CAPACITY,
+            "and none is larger than the largest datagram"
+        );
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]

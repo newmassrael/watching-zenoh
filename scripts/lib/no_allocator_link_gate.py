@@ -797,6 +797,19 @@ IMAGES: dict[str, Image] = {
         " kernel's allocator, as the admin node's heap profile does",
         ci=False,
     ),
+    # The pico C ABI on the MCU: wz-capi-pico without std on the cooperative engine, the library a
+    # zenoh-pico program links in place of zenoh-pico. pico's own `z_malloc` is the kernel heap, and
+    # the C ABI allocates as pico does, so the image declares the kernel's allocator.
+    "zephyr-capi-pico": Image(
+        "deploy/zephyr-capi-pico/rust/Cargo.toml",
+        "staticlib",
+        "wz-zephyr-capi-pico",
+        "pending",
+        (Build(V7EMHF, env=ZEPHYR_BUILD_VALUES, label="cyt4bf"),),
+        "the pico C ABI allocates as zenoh-pico does (its z_malloc is the kernel heap), so the"
+        " image takes the heap form of the Zephyr profile and the kernel's allocator",
+        ci=False,
+    ),
     "zephyr-app": Image(
         "deploy/zephyr-app/rust/Cargo.toml",
         "staticlib",

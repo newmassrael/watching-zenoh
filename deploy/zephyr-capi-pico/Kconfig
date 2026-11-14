@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+mainmenu "The pico C ABI on the T2G kit: zenoh-pico's program over wz"
+
+rsource "../zephyr-common/Kconfig.wz"
+rsource "../zephyr-eth-wzmac/Kconfig.zeth"
+
+# The program is the comparison image's (deploy/zephyr-pico-compare/src/main.c), which reads the
+# router it connects to from this symbol; the default is that image's, so the two dial the same
+# router.
+config PICO_COMPARE_LOCATOR
+	string "The router the node connects to"
+	default "udp/192.168.100.1:7447"
+	help
+	  The program runs as a client of a router on the bench host, over UDP unicast, as the
+	  comparison image does. The router listens on this locator.
+
+config WZ_PICO_ABI_MULTI_THREAD
+	bool "zenoh-pico's multi-threaded arm (Z_FEATURE_MULTI_THREAD)"
+	help
+	  The header the program compiles against and the Rust half are both built for pico's
+	  multi-threaded arm: the session's read task is a thread of the cooperative engine
+	  (CONFIG_WZ_OS), started by the open, and `main` only declares and waits. Without it the
+	  program steps the session itself (`zp_spin_once`). The two arms allocate different structs,
+	  so the header and the library are always built for the same one.
+
+source "Kconfig.zephyr"

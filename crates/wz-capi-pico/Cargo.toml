@@ -24,8 +24,8 @@
 #             and so the Round-1 gate `#[test]` (tests/pubsub_roundtrip.rs)
 #             can drive the exported symbols in-process.
 #
-# AP/std-only: no no_std obligation (the pico C ABI targets the AP profile;
-# the embedded MCU FFI surface is a separate later atom).
+# `std` is a default feature: without it the crate is `no_std` with `alloc`, for the
+# pico C ABI on an MCU (`std` below, docs/upstream-parity.md section 5a).
 
 [package]
 name = "wz-capi-pico"
@@ -56,6 +56,7 @@ wz-conformance-build = { path = "../wz-conformance-build" }
 # build with `--no-default-features` for the multi-thread runtime, or set
 # WZ_CAPI_WORKER_THREADS at run time (see wz-capi-core's feature of this name).
 default = [
+    "std",
     "engine-tokio",
     "serial-drive-own-thread",
     "rx-busy-poll",
@@ -73,6 +74,15 @@ default = [
     "unstable-api",
     "connectivity",
 ]
+# `std`: the library runs on a host, whose standard library gives the engine port's mutex,
+# condition variable, threads and sleep (`wz-capi-port`'s `os`) and the host layer under the
+# platform exports (`src/os/unix.rs`, `src/os/windows.rs`). Without it the crate is `no_std` with
+# `alloc` and the ABI layer stands on the port alone, so that the pico C ABI on an MCU is this
+# crate and not a copy of it (`docs/upstream-parity.md` section 5a). Both host engines and every
+# capability whose code is still written against the host's library select it, so a host build
+# has it whatever its feature list; a capability comes to the MCU when its module no longer
+# needs it.
+std = ["wz-capi-port/std", "wz-capi-coop?/std"]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
 # `engine-tokio`: `wz-capi-core`, a session on its own OS thread and tokio runtime. It carries
@@ -87,8 +97,21 @@ default = [
 # cooperative one otherwise: a build that names `engine-coop` and no capability the cooperative
 # engine lacks is the cooperative client. The selection reads features, not a config key, because
 # what an engine does not have is not linked. A build that names neither engine is refused.
-engine-tokio = ["dep:wz-capi-core", "dep:tokio"]
-engine-coop = ["dep:wz-capi-coop", "dep:wz-runtime-posix"]
+#
+# Both are a host's: `engine-coop` is the cooperative engine over the host's sockets
+# (`wz-runtime-posix`), so each selects `std`.
+engine-tokio = ["std", "dep:wz-capi-core", "dep:tokio"]
+engine-coop = ["std", "dep:wz-capi-coop", "dep:wz-runtime-posix"]
+# `os-zephyr`: the library in a Zephyr image, without `std`: the cooperative engine over Zephyr's
+# own sockets, kernel tick and random source (`wz-runtime-zephyr`, `src/coop_host.rs`), the host
+# layer of `src/os/zephyr.rs` under the platform exports (the kernel heap, Zephyr's POSIX clocks
+# and objects, as zenoh-pico's own Zephyr backend uses them), and the port's `os` answered by the
+# kernel. The image links the C seams both name (`deploy/zephyr-common/wz_os_zephyr.c`,
+# `wz_pico_os_zephyr.c`), the board's hooks and a `critical-section` implementation, and builds
+# this crate for the bare core; a build that also names a host engine keeps its host's layer and
+# links. The session core is asked for its `no_std` atomics, which a core without 64-bit atomics
+# (a Cortex-M7) needs. A capability that selects `std` is refused beside it (`src/lib.rs`).
+os-zephyr = ["dep:wz-capi-coop", "dep:wz-runtime-zephyr", "wz-session-core/no_std"]
 # The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,
 # `Z_FEATURE_LIVELINESS`, `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature
 # of this crate: on in a default build, so the drop-in exports what the reference build does,
@@ -134,8 +157,9 @@ link-udp = ["wz-capi-core?/link-udp"]
 # locator. Both engines scout (a scout needs no session), so it selects neither: it turns the
 # window on in the one the build has, which is how a cooperative client finds a router. The
 # session's own scouting vocabulary is named because the plane reads the locator grammar and the
-# defaults from it.
+# defaults from it. The group's sockets are the host's (`wz-host-net`), so it selects `std`.
 scout = [
+    "std",
     "link-udp",
     "wz-session-core/scouting-active",
     "wz-session-core/codec-scout",
@@ -144,8 +168,10 @@ scout = [
     "wz-capi-coop?/scout",
 ]
 # `query`: `z_get` and the querier, the requesting end of a query. Both engines ask a get and
-# watch whether a queryable matches, so it selects neither.
-query = ["wz-capi-core?/query", "wz-capi-coop?/query"]
+# watch whether a queryable matches, so it selects neither. Every get and querier holds a
+# cancellation token, whose cancel waits on the host's condition variable (`wz-capi-port`'s
+# `cancellation`), so it selects `std`.
+query = ["std", "wz-capi-core?/query", "wz-capi-coop?/query"]
 # `queryable`: `z_declare_queryable` and the replies, the answering end of a query. Both engines
 # answer queries, so it selects neither: it turns the queryable on in the one the build has.
 queryable = ["wz-capi-core?/queryable", "wz-capi-coop?/queryable"]
@@ -154,8 +180,10 @@ queryable = ["wz-capi-core?/queryable", "wz-capi-coop?/queryable"]
 liveliness = ["wz-capi-core?/liveliness", "wz-capi-coop?/liveliness"]
 # `liveliness-get`: the snapshot get of the liveliness plane. It is a query, so it needs the
 # requesting end of one; both engines ask it (the tokio engine's drive loop sweeps the get
-# deadlines, the cooperative engine's every step does), so it selects neither.
+# deadlines, the cooperative engine's every step does), so it selects neither. It holds the
+# get's cancellation token, so it selects `std` as `query` does.
 liveliness-get = [
+    "std",
     "liveliness",
     "query",
     "wz-capi-core?/liveliness-get",
@@ -173,6 +201,7 @@ liveliness-get = [
 # on the runtime's advanced features, the cooperative engine's `ticker` is the periodic job the
 # heartbeat and the sweeps are, and a build without either carries none.
 advanced = [
+    "std",
     "liveliness",
     "queryable",
     "unstable-api",
@@ -199,6 +228,7 @@ advanced = [
 # build is, and part of the unstable surface as the other `wz_ext_*` doors are: it implies
 # `unstable-api`. The registry and the clock are `wz-node-time`'s.
 clock-source = [
+    "std",
     "unstable-api",
     "dep:wz-node-time",
     "wz-node-time/clock-source",
@@ -210,6 +240,7 @@ clock-source = [
 # reference build is, and part of the unstable surface: it implies `unstable-api`. The ring is
 # `wz-node-time`'s.
 event-ring = [
+    "std",
     "unstable-api",
     "dep:wz-node-time",
     "wz-node-time/event-ring",
@@ -221,6 +252,7 @@ event-ring = [
 # wz's own, which zenoh-pico has not, so off as the reference build is, and part of the unstable
 # surface: it implies `unstable-api`. The machine and the supervisor are `wz-session-core`'s.
 supervision = [
+    "std",
     "unstable-api",
     "wz-session-core/supervision",
     "wz-capi-port/supervision",
@@ -231,6 +263,7 @@ supervision = [
 # part of the unstable surface: it implies `unstable-api`. The record, the sampler and the message
 # meter are `wz-session-core`'s.
 resource-snapshot = [
+    "std",
     "unstable-api",
     "wz-session-core/resource-snapshot",
     "wz-capi-port/resource-snapshot",
@@ -243,6 +276,7 @@ resource-snapshot = [
 # `if(Z_FEATURE_ADMIN_SPACE AND NOT Z_FEATURE_QUERYABLE)`), so it implies `queryable`, and
 # forces it off without the unstable API, so it implies `unstable-api`.
 admin-space = [
+    "std",
     "queryable",
     "unstable-api",
     "wz-capi-core?/admin-space",
@@ -263,12 +297,14 @@ local-queryable = ["wz-capi-core?/local-queryable", "wz-capi-coop?/local-queryab
 # cancellation token, and the option fields that carry them (`reliability`, `source_info`,
 # `cancellation_token`). Off, those fields are not in the option structs a program allocates,
 # which are then the smaller structs pico's default header declares. None of it is an engine's:
-# it selects neither (`wz-capi-core`'s is a marker its own code reads).
-unstable-api = ["wz-capi-core?/unstable-api"]
+# it selects neither (`wz-capi-core`'s is a marker its own code reads). The cancellation token's
+# cancel blocks on the host's condition variable (`wz-capi-port`'s `cancellation`), so it selects
+# `std`, as do the planes below whose modules are still written against the host's library.
+unstable-api = ["std", "wz-capi-core?/unstable-api"]
 # `connectivity` (`Z_FEATURE_CONNECTIVITY`): the transport and link snapshots and the event
 # listeners of pico's connectivity plane. Upstream declares it only with the unstable API. Both
 # engines report their faces through the port, so it selects neither.
-connectivity = ["unstable-api", "wz-capi-core?/connectivity", "wz-capi-coop?/connectivity"]
+connectivity = ["std", "unstable-api", "wz-capi-core?/connectivity", "wz-capi-coop?/connectivity"]
 # `gossip`: a session that is told of a node by one it holds a link to dials it (see the
 # runtime's feature of the same name). Pico itself has no such plane.
 gossip = ["engine-tokio", "peer", "wz-capi-core/gossip"]
@@ -387,14 +423,21 @@ wz-capi-core = { path = "../wz-capi-core", default-features = false, optional = 
 # The cooperative engine (`engine-coop`), over the host's sockets and clock
 # (`wz-runtime-posix`). Its runtime's critical sections are a lock of the process (the
 # engine selects the runtime's `host-lock`), so this library links no `critical-section`
-# implementation and exports nothing beside its C ABI.
-wz-capi-coop = { path = "../wz-capi-coop", optional = true }
+# implementation and exports nothing beside its C ABI. Without its default features: its host half
+# comes with this crate's `std`.
+wz-capi-coop = { path = "../wz-capi-coop", default-features = false, optional = true }
 # The PEM bytes a `Z_CONFIG_TLS_*` key names, read from a file path or a base64 token. This ABI is
 # the edge that holds the key spellings, so it resolves "path or base64" once, here, and hands PEM
 # bytes to whichever engine the build selects; that reading is not an engine's, and `wz-tls-pem` is
 # the one both engines take it from.
 wz-tls-pem = { path = "../wz-tls-pem", optional = true }
 wz-runtime-posix = { path = "../wz-runtime-posix", optional = true }
+# The cooperative engine's host in a Zephyr image (`os-zephyr`): Zephyr's datagram and stream
+# sockets as the session's links on the heap profile, the kernel's tick as its clock, and the
+# board's random source and wall clock. The heap profile (`alloc`), as the engine allocates.
+wz-runtime-zephyr = { path = "../wz-runtime-zephyr", optional = true, default-features = false, features = [
+    "alloc",
+] }
 # The session core's own types (key expression canon and matching, QoS, locality, samples, the
 # sinks), named where they live and not through the tokio engine's re-exports of them: the ABI
 # layer knows no engine, and the engine this crate drives is a selection
@@ -414,8 +457,9 @@ wz-ext-pubsub = { path = "../wz-ext-pubsub", optional = true }
 wz-node-time = { path = "../wz-node-time", optional = true }
 # The port between this ABI and the engine that runs its sessions: the vocabulary both name
 # (ids, callback factories, a key's wire form, the write filter's plane and answer), so the ABI
-# layer is spelled in no engine's types (docs/capi-pico-on-coop-engine.md, D1).
-wz-capi-port = { path = "../wz-capi-port" }
+# layer is spelled in no engine's types (docs/capi-pico-on-coop-engine.md, D1). Without its
+# default features: its host half comes with this crate's `std`.
+wz-capi-port = { path = "../wz-capi-port", default-features = false }
 # The tokio RUNTIME is not a dependency of this crate: it is the tokio engine's
 # (`wz-capi-core`), and the modules of the capabilities only that engine has reach
 # it through the engine, as `wz_capi_core::runtime`. An ABI depends on its engines,
@@ -512,6 +556,9 @@ wz-capi-port = { path = "../wz-capi-port" }
 # `tests/reply_options_roundtrip.rs`). `liveliness-get` is `wz-capi-core/liveliness-get`, and
 # `transport-fragmentation` is in the engine's base list, which both drop-ins share.
 
+# The host layer's own crates, a host's alone: an MCU image has no `getrandom` source of its
+# kind and its C library is the image's, which `src/os/<host>.rs` names for itself.
+[target.'cfg(any(unix, windows))'.dependencies]
 # Per-session zid entropy. zenoh identifies a PEER by its zid, so two sessions
 # sharing one are the SAME peer on the wire — a listener would dedup/aggregate
 # them instead of holding two faces. pico generates a random `Z_ZID_LENGTH` = 16

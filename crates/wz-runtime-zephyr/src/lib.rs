@@ -70,7 +70,7 @@ pub mod stack;
 pub mod stream;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use links::ZephyrLinks;
+pub use links::{ZephyrIpLinks, ZephyrLinks};
 
 /// A Zephyr firmware's image glue on the heap profile, written once in its crate root:
 /// the global allocator over the kernel heap, a `critical_section` implementation over

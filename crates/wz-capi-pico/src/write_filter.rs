@@ -45,8 +45,9 @@
 //! the key they were held on, which a client's do not
 //! (`DeclaredKeyexpr::retraction_naming`).
 
-use std::sync::{Arc, Mutex, PoisonError};
+use alloc::sync::Arc;
 
+use wz_capi_port::os::Mutex;
 use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, WireKey};
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
@@ -54,6 +55,7 @@ use wz_session_core::declare_form::InterestForm;
 use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;
+use crate::prelude::*;
 use crate::session::{engine_of, Engine, PicoSessionHandle};
 
 /// This session's own role: pico's `zn->_mode`, kept in the handle at open
@@ -162,10 +164,7 @@ impl WriteFilter {
             sink,
             self.count_local,
         );
-        self.listeners
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(id);
+        self.listeners.lock().push(id);
         (self.shared.clone(), id)
     }
 
@@ -203,11 +202,7 @@ impl Drop for WriteFilter {
     fn drop(&mut self) {
         // Taken out first, so no lock is held while a listener goes: releasing its last
         // `MatchingSink` runs the C `drop(context)`, which may re-enter the session.
-        let listeners = std::mem::take(
-            self.listeners
-                .get_mut()
-                .unwrap_or_else(PoisonError::into_inner),
-        );
+        let listeners = core::mem::take(self.listeners.get_mut());
         for id in listeners {
             self.shared.undeclare_matching_listener(id);
         }

@@ -28,10 +28,12 @@
 # image. A MEASURE image (zephyr-tls-fit, the secure channel's fit) runs alone, with no router: it is
 # flashed, reset, and held to its own console verdict. COMPARE images (zephyr-pico-queryable and -st,
 # zenoh-pico answering the same two GETs with its
-# read and lease tasks and with the program stepping it) are run by
+# read and lease tasks and with the program stepping it; zephyr-wz-pico-queryable and -st, the same
+# program linked to wz's pico C ABI in place of zenoh-pico) are run by
 # `compare` beside answering images (docs/upstream-parity.md M1): each boot in alternating order, the
 # session's datagrams captured at the host's wire, and scripts/lib/kit_compare.py's verdict per cell.
-# The pico image builds from vendor/zenoh-pico, so a tree sent here carries that submodule too.
+# The pico images build from vendor/zenoh-pico (the wz one from its headers), so a tree sent here
+# carries that submodule too.
 #
 # WHERE IT RUNS: from a checkout of this repository on the host the kit is attached to (the lane builds
 # from the tree it lives in, so what was measured is what is in front of you). Send a tree there with
@@ -112,6 +114,8 @@ image_spec() {
     # is also put to that pool's steps (HW.26 to HW.30 for tx, HW.31 to HW.35 for rx), which the program
     # judges from the console, its own output and a capture of the node's frames at this host's wire.
     POOLS=""
+    # The C program an image compiles, under deploy/, when it is not the application's own src/main.c.
+    PROGRAM=""
     case "$1" in
         # COMPARE images (docs/upstream-parity.md M1): they answer the same two GETs with the same keys,
         # bodies and encoding as zephyr-client-fixed, and are run by `compare` beside it. They have no
@@ -127,6 +131,24 @@ image_spec() {
             ;;
         zephyr-pico-queryable-st)
             APP=zephyr-pico-compare
+            OVERLAYS=""
+            KIND=answer
+            READY_TAG="ZEPHYR-PICO READY"
+            ;;
+        # The same program over the pico C ABI of wz (docs/upstream-parity.md section 5a): compiled against
+        # zenoh-pico's headers and linked to wz-capi-pico without std, on the cooperative engine over
+        # Zephyr's sockets, in pico's two arms, so a compare run holds the library to zenoh-pico's under one
+        # program. The application compiles the comparison image's program, which PROGRAM names.
+        zephyr-wz-pico-queryable)
+            APP=zephyr-capi-pico
+            PROGRAM=zephyr-pico-compare/src/main.c
+            OVERLAYS="overlays/multi_thread.conf"
+            KIND=answer
+            READY_TAG="ZEPHYR-PICO READY"
+            ;;
+        zephyr-wz-pico-queryable-st)
+            APP=zephyr-capi-pico
+            PROGRAM=zephyr-pico-compare/src/main.c
             OVERLAYS=""
             KIND=answer
             READY_TAG="ZEPHYR-PICO READY"
@@ -210,7 +232,7 @@ ADMIN_IMAGES=(zephyr-admin-fixed-tls)
 # budget (the table declares them not measured on the kit until a run sets one).
 NODE_IMAGES=(zephyr-fixed zephyr-fixed-tcp)
 # The compare images: run only by `compare`, beside the images above.
-COMPARE_IMAGES=(zephyr-pico-queryable zephyr-pico-queryable-st)
+COMPARE_IMAGES=(zephyr-pico-queryable zephyr-pico-queryable-st zephyr-wz-pico-queryable zephyr-wz-pico-queryable-st)
 is_compare_image() { [[ " ${COMPARE_IMAGES[*]} " == *" $1 "* ]]; }
 # The port a verify image's router listens on for `tls/` (the image's CONFIG_WZ_CLIENT_ENDPOINT).
 TLS_PORT=7448
@@ -1566,7 +1588,7 @@ PY
         done
         # The tag the lane waits for and takes the node's key id from must be one the image prints.
         if grep -rqF "$READY_TAG {}" "$ROOT/deploy/$APP/rust/src" 2>/dev/null \
-            || grep -qF "$READY_TAG %s" "$ROOT/deploy/$APP/src/main.c" 2>/dev/null; then
+            || grep -qF "$READY_TAG %s" "$ROOT/deploy/${PROGRAM:-$APP/src/main.c}" 2>/dev/null; then
             ok selftest "$key is a compare image of deploy/$APP that prints '$READY_TAG <id>'"
         else
             bad selftest "$key waits for '$READY_TAG', which deploy/$APP never prints with an id"

@@ -52,7 +52,17 @@
 //!
 //! The design and grounding are recorded in the round ledger; the async-drive
 //! bridge (the crux — wz has no self-driving session) lives in [`session`].
+//!
+//! ## Where it builds
+//!
+//! On a host with `std` (a default feature), and without it `no_std` with `alloc`, so that the
+//! pico C ABI on an MCU is this crate and not a copy of it (`docs/upstream-parity.md` section 5a).
+//! What the ABI layer asks of an operating system beyond `alloc` (a mutex, a condition variable,
+//! the calling thread's identity) is the engine port's `os`, whose host half is `std`'s; what the
+//! platform exports hand to the system is the host layer of this build (`os`). A capability whose
+//! module still names the host's library selects `std` in the manifest.
 
+#![cfg_attr(not(feature = "std"), no_std)]
 // pico's C type names are snake_case (`z_owned_session_t`,
 // `z_closure_sample_callback_t`); reproducing the ABI names verbatim is the
 // point, so the camel-case convention does not apply to this crate's surface.
@@ -67,13 +77,49 @@
 // doc records how each maps to its pico counterpart.
 #![allow(clippy::missing_safety_doc)]
 
+extern crate alloc;
+
+/// What `std`'s prelude gave every module and `alloc` does not: brought in by the modules that
+/// use it, so a build without `std` reads the same source. A build's features decide which of
+/// these it names, so one that names none of an item is not an error.
+#[allow(unused_imports)]
+mod prelude {
+    pub(crate) use alloc::borrow::ToOwned;
+    pub(crate) use alloc::boxed::Box;
+    pub(crate) use alloc::format;
+    pub(crate) use alloc::string::{String, ToString};
+    pub(crate) use alloc::vec;
+    pub(crate) use alloc::vec::Vec;
+}
+
 // A session runs on an engine (`docs/capi-pico-on-coop-engine.md`, decision D4), so a build
 // that names neither has no `z_open` to give; it is refused here, by name, rather than by the
 // unresolved crates of the engine the open would have reached.
-#[cfg(not(any(feature = "engine-tokio", feature = "engine-coop")))]
+#[cfg(not(any(
+    feature = "engine-tokio",
+    feature = "engine-coop",
+    feature = "os-zephyr"
+)))]
 compile_error!(
     "wz-capi-pico: a build needs an engine to run its sessions: `engine-tokio` for the session \
-     on its own thread and runtime, `engine-coop` for the one the program steps"
+     on its own thread and runtime, `engine-coop` for the one the program steps, `os-zephyr` for \
+     that one in a Zephyr image"
+);
+
+// `os-zephyr` is the image's engine and host, and an image has no standard library: a capability
+// that still selects `std` (scouting, the requesting end of a query, the unstable surface, ...) is
+// a host's alone until its module stands without it. Such a build is refused by name here, rather
+// than by the missing `std` of the bare core or by a host layer the image cannot link. A build that
+// names a host engine as well keeps that host's (features add, and the host wins).
+#[cfg(all(
+    feature = "os-zephyr",
+    feature = "std",
+    not(any(feature = "engine-tokio", feature = "engine-coop"))
+))]
+compile_error!(
+    "wz-capi-pico: `os-zephyr` builds without `std`, and a feature of this build selects it; \
+     the capabilities a Zephyr image carries are those whose features do not select `std` \
+     (see Cargo.toml)"
 );
 
 pub mod abi;
@@ -88,6 +134,10 @@ mod advanced_plane;
 pub mod bytes;
 // The conformance digest of this build (decision C15), handed out by `wz_ext_conformance_digest`.
 pub mod conformance;
+// What the cooperative engine is given by the system the build runs on (the tokio engine brings
+// its own runtime's).
+#[cfg(not(feature = "engine-tokio"))]
+mod coop_host;
 pub mod revision;
 // pico implements the token only with both the unstable API and the query plane: its
 // `vendor/zenoh-pico/src/api/api.c` @ `_Z_OWNED_FUNCTIONS_RC_IMPL(cancellation_token)` sits
@@ -184,6 +234,13 @@ pub use session::*;
 // Compile-time byte-compat guard: turn the "byte-match" size claims (see
 // [`abi`]) into an enforced gate, so a future field/padding drift fails the
 // build instead of silently diverging from zenoh-pico's LP64 layouts.
+//
+// Every number pinned this way in the crate is a measurement of pico's header on a 64-bit host,
+// so each such block holds on a 64-bit target only. The types are `repr(C)` over pointer-sized
+// words, as pico's are, and follow a 32-bit core by construction; what a 32-bit image's program
+// allocates is pinned by that image against pico's own header as it compiles it
+// (`csrc/pico_layout_pins.c`, which the tests of `layout_pins` below hold to these declarations).
+#[cfg(target_pointer_width = "64")]
 const _: () = {
     use core::mem::size_of;
     assert!(size_of::<session::z_owned_session_t>() == 16);
@@ -202,7 +259,7 @@ const _: () = {
 // closure_sample; `z_queryable_options_t` is `{ bool complete; }` in a
 // default pico build (`Z_FEATURE_LOCAL_QUERYABLE` = 0) and gains a 4-byte
 // `allowed_origin` with the switch.
-#[cfg(feature = "queryable")]
+#[cfg(all(feature = "queryable", target_pointer_width = "64"))]
 const _: () = {
     use core::mem::size_of;
     assert!(size_of::<query::z_owned_closure_query_t>() == 24);
@@ -248,7 +305,7 @@ const _: () = {
 };
 
 // The requesting end of a query.
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", target_pointer_width = "64"))]
 const _: () = {
     use core::mem::size_of;
     // R3b get plane. `z_owned_closure_reply_t` is the same
@@ -284,3 +341,68 @@ const _: () = {
     );
     assert!(core::mem::align_of::<get::z_get_options_t>() == 8);
 };
+
+// The pins a 32-bit image compiles against pico's header (`csrc/pico_layout_pins.c`), held to the
+// declarations they name: each count of words is the Rust type's size in words on this host, which
+// is the same count on any word size because the types are `repr(C)` over words.
+#[cfg(all(test, feature = "queryable"))]
+mod layout_pins {
+    use crate::prelude::Vec;
+    use core::mem::{offset_of, size_of};
+
+    const PINS: &str = include_str!("../csrc/pico_layout_pins.c");
+    const WORD: usize = size_of::<*const ()>();
+
+    /// The Rust type's size, by the C name a pin gives it.
+    fn rust_bytes(name: &str) -> Option<usize> {
+        Some(match name {
+            "z_owned_session_t" => size_of::<crate::session::z_owned_session_t>(),
+            "z_owned_config_t" => size_of::<crate::abi::z_owned_config_t>(),
+            "z_owned_bytes_t" => size_of::<crate::abi::z_owned_bytes_t>(),
+            "z_owned_string_t" => size_of::<crate::abi::z_owned_string_t>(),
+            "z_view_keyexpr_t" => size_of::<crate::abi::z_view_keyexpr_t>(),
+            "z_view_string_t" => size_of::<crate::abi::z_view_string_t>(),
+            "z_owned_encoding_t" => size_of::<crate::encoding::z_owned_encoding_t>(),
+            "z_owned_closure_query_t" => size_of::<crate::query::z_owned_closure_query_t>(),
+            "z_owned_queryable_t" => size_of::<crate::query::z_owned_queryable_t>(),
+            _ => return None,
+        })
+    }
+
+    /// The `(type, argument)` of every line of the file that opens with `pin`.
+    fn pins(pin: &str) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
+        PINS.lines().filter_map(move |line| {
+            let rest = line.trim().strip_prefix(pin)?.strip_suffix(");")?;
+            Some(rest.split_once(',').unwrap_or((rest, "")))
+        })
+    }
+
+    #[test]
+    fn every_pinned_count_is_the_rust_declarations_size_in_words() {
+        let mut checked = 0;
+        for (name, words) in pins("WZ_PIN_WORDS(") {
+            let words: usize = words.trim().parse().expect("a pin states a count of words");
+            let bytes = rust_bytes(name.trim()).unwrap_or_else(|| panic!("{name} names no type"));
+            assert_eq!(bytes % WORD, 0, "{name} is a whole number of words");
+            assert_eq!(bytes / WORD, words, "{name}");
+            checked += 1;
+        }
+        assert_eq!(checked, 9, "every pin of the file was read");
+    }
+
+    #[test]
+    fn an_element_pinned_by_its_handle_holds_the_handle_first() {
+        let named: Vec<&str> = pins("WZ_PIN_HANDLE(").map(|(name, _)| name).collect();
+        assert_eq!(named, ["z_owned_sample_t", "z_owned_query_t"]);
+        assert_eq!(offset_of!(crate::pubsub::z_owned_sample_t, handle), 0);
+        assert_eq!(offset_of!(crate::query::z_owned_query_t, handle), 0);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn an_element_block_is_picos_measured_size_on_a_64_bit_host() {
+        assert_eq!(crate::abi::element_bytes(224), 224);
+        assert_eq!(size_of::<crate::pubsub::z_owned_sample_t>(), 224);
+        assert_eq!(size_of::<crate::query::z_owned_query_t>(), 16);
+    }
+}

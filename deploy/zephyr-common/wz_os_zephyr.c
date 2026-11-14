@@ -4,8 +4,9 @@
  * The operating system an engine runs on, answered by the Zephyr kernel (CONFIG_WZ_OS).
  *
  * `wz-capi-port`'s `os` module (crates/wz-capi-port/src/os.rs) names these functions when it is
- * built without `std`: the mutex a session is stepped under, the calling thread's identity, a
- * thread of the engine's own (zenoh-pico's read task) and a sleep. The mutex is the kernel's
+ * built without `std`: the mutex a session is stepped under and a condition variable waited on
+ * with it, the calling thread's identity, a thread of the engine's own (zenoh-pico's read task)
+ * and a sleep. The mutex is the kernel's
  * blocking `k_mutex`, not a critical section: a session holds it while it reads and dispatches a
  * message, and masking interrupts for that long would hold off the network driver. A thread's
  * stack and its `k_thread` come from the kernel's dynamic thread pool and are given back when the
@@ -40,6 +41,37 @@ void wz_os_mutex_unlock(void *mutex)
 void wz_os_mutex_free(void *mutex)
 {
 	k_free(mutex);
+}
+
+/* The condition variable a C ABI's channels and undeclares wait on, with a mutex above held. */
+void *wz_os_condvar_new(void)
+{
+	struct k_condvar *condvar = k_malloc(sizeof(*condvar));
+
+	if (condvar != NULL) {
+		k_condvar_init(condvar);
+	}
+	return condvar;
+}
+
+void wz_os_condvar_wait(void *condvar, void *mutex)
+{
+	(void)k_condvar_wait(condvar, mutex, K_FOREVER);
+}
+
+void wz_os_condvar_notify_one(void *condvar)
+{
+	(void)k_condvar_signal(condvar);
+}
+
+void wz_os_condvar_notify_all(void *condvar)
+{
+	(void)k_condvar_broadcast(condvar);
+}
+
+void wz_os_condvar_free(void *condvar)
+{
+	k_free(condvar);
 }
 
 uintptr_t wz_os_thread_current(void)

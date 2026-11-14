@@ -57,10 +57,13 @@
 //! the read task pushes, the application thread `recv`s), and narrowing the
 //! assertion to "these are opaque bits we move" keeps that visible.
 
-use std::collections::VecDeque;
-use std::ffi::c_void;
-use std::sync::atomic::{fence, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use alloc::collections::VecDeque;
+use core::ffi::c_void;
+use core::sync::atomic::{fence, AtomicUsize, Ordering};
+
+use wz_capi_port::os::{Condvar, Mutex};
+
+use crate::prelude::*;
 
 use crate::ffi::{guard_val, guarded};
 use crate::result::{
@@ -190,7 +193,7 @@ pub unsafe extern "C" fn _z_rc_decrease_weak(cnt: *mut *mut c_void) -> bool {
         // counters once we free them.
         fence(Ordering::Acquire);
         drop(Box::from_raw(raw.cast::<RcBlock>()));
-        *cnt = std::ptr::null_mut();
+        *cnt = core::ptr::null_mut();
         true
     })
 }
@@ -326,9 +329,10 @@ impl Channel {
 
 /// pico `_z_fifo_mt_t`: `{ _z_fifo_t _fifo; bool is_closed; }` and, in the
 /// multi-threaded arm, a mutex and two condvars after them
-/// (`vendor/zenoh-pico/include/zenoh-pico/collections/fifo_mt.h`). 184 B measured
-/// in the multi-threaded arm, 48 B in the single-threaded one (the 40-byte ring
-/// and the flag). Slot 0 is this crate's `Channel` handle; the remainder is
+/// (`vendor/zenoh-pico/include/zenoh-pico/collections/fifo_mt.h`), as this host's
+/// header lays them out (`FifoMtLayout`): on 64-bit Linux 184 B measured in the
+/// multi-threaded arm, 48 B in the single-threaded one (the 40-byte ring and the
+/// flag). Slot 0 is this crate's `Channel` handle; the remainder is
 /// inert padding that keeps the C-side `sizeof` and the `memcpy` relocation exact.
 ///
 /// The size is the header arm's because pico's channel macros allocate the struct
@@ -338,26 +342,68 @@ impl Channel {
 #[repr(C)]
 pub struct _z_fifo_mt_t {
     handle: *mut c_void,
-    _pad: [u8; FIFO_MT_BYTES - std::mem::size_of::<*mut c_void>()],
+    _pad: [u8; FIFO_MT_BYTES - core::mem::size_of::<*mut c_void>()],
 }
 
 /// pico `_z_ring_mt_t`: `{ _z_ring_t _ring; bool is_closed; }` plus a mutex and a
-/// condvar in the multi-threaded arm (`collections/ring_mt.h`). 136 B measured in
-/// that arm, 48 B in the single-threaded one. Same shape as [`_z_fifo_mt_t`].
+/// condvar in the multi-threaded arm (`collections/ring_mt.h`). On 64-bit Linux 136 B
+/// measured in that arm, 48 B in the single-threaded one. Same shape as [`_z_fifo_mt_t`].
 #[repr(C)]
 pub struct _z_ring_mt_t {
     handle: *mut c_void,
-    _pad: [u8; RING_MT_BYTES - std::mem::size_of::<*mut c_void>()],
+    _pad: [u8; RING_MT_BYTES - core::mem::size_of::<*mut c_void>()],
 }
 
+// The two collections as pico's header declares them, field for field, over this host's mutex and
+// condvar types (`os`): their size is the size the C program allocates, on every host and word
+// size, and is measured, not written down. They are layouts only and are never built.
+
+/// pico's `_z_ring_t` (`collections/ring.h`): the values' pointer and four `size_t` counts.
+#[allow(dead_code)]
+#[repr(C)]
+struct RingLayout {
+    values: *mut *mut c_void,
+    counts: [usize; 4],
+}
+
+/// `_z_fifo_mt_t` in the multi-threaded arm.
 #[cfg(feature = "multi-thread")]
-const FIFO_MT_BYTES: usize = 184;
+#[allow(dead_code)]
+#[repr(C)]
+struct FifoMtLayout {
+    fifo: RingLayout,
+    is_closed: bool,
+    mutex: crate::os::RawMutex,
+    cv_not_full: crate::os::RawCondvar,
+    cv_not_empty: crate::os::RawCondvar,
+}
+
+/// `_z_ring_mt_t` in the multi-threaded arm.
 #[cfg(feature = "multi-thread")]
-const RING_MT_BYTES: usize = 136;
+#[allow(dead_code)]
+#[repr(C)]
+struct RingMtLayout {
+    ring: RingLayout,
+    is_closed: bool,
+    mutex: crate::os::RawMutex,
+    cv_not_empty: crate::os::RawCondvar,
+}
+
+/// `_z_fifo_mt_t` in the single-threaded arm: the ring and the flag.
 #[cfg(not(feature = "multi-thread"))]
-const FIFO_MT_BYTES: usize = 48;
+#[allow(dead_code)]
+#[repr(C)]
+struct FifoMtLayout {
+    fifo: RingLayout,
+    is_closed: bool,
+}
+
+/// `_z_ring_mt_t` in the single-threaded arm, which has the fifo's fields.
 #[cfg(not(feature = "multi-thread"))]
-const RING_MT_BYTES: usize = 48;
+type RingMtLayout = FifoMtLayout;
+
+const FIFO_MT_BYTES: usize = core::mem::size_of::<FifoMtLayout>();
+const RING_MT_BYTES: usize = core::mem::size_of::<RingMtLayout>();
 
 /// Install a fresh channel into a C-allocated collection slot.
 ///
@@ -371,7 +417,7 @@ unsafe fn install(slot: *mut c_void, capacity: usize, size: usize) -> ZResult {
     // Zero the WHOLE struct first: the padding is never read by this crate but
     // it is `memcpy`d around by pico's inline code, and leaving it as
     // uninitialised stack bytes would make that copy read indeterminate values.
-    std::ptr::write_bytes(slot.cast::<u8>(), 0, size);
+    core::ptr::write_bytes(slot.cast::<u8>(), 0, size);
     let channel = Box::new(Channel::new(capacity));
     slot.cast::<*mut c_void>()
         .write(Box::into_raw(channel).cast::<c_void>());
@@ -411,23 +457,14 @@ unsafe fn push(
     let Some(channel) = channel(context) else {
         return Z_ERR_GENERIC;
     };
-    let Ok(state) = channel.state.lock() else {
-        return Z_ERR_GENERIC;
-    };
+    let mut state = channel.state.lock();
     // A blocking push waits until there is room or the channel closes.
     #[cfg(feature = "multi-thread")]
-    let state = if policy == FullPolicy::Block {
-        let Ok(state) = channel
-            .not_full
-            .wait_while(state, |s| !s.closed && s.items.len() >= channel.capacity)
-        else {
-            return Z_ERR_GENERIC;
-        };
-        state
-    } else {
-        state
-    };
-    let mut state = state;
+    if policy == FullPolicy::Block {
+        while !state.closed && state.items.len() >= channel.capacity {
+            state = channel.not_full.wait(state);
+        }
+    }
     if state.closed {
         // A closed channel accepts nothing more. The element is the caller's to
         // release; report the closure rather than leaking it into a collection
@@ -483,18 +520,12 @@ unsafe fn pull(dst: *mut c_void, context: *mut c_void, move_f: z_element_move_f)
     let Some(channel) = channel(context) else {
         return Z_ERR_GENERIC;
     };
-    let Ok(state) = channel.state.lock() else {
-        return Z_ERR_GENERIC;
-    };
+    let mut state = channel.state.lock();
     // The multi-threaded arm waits for an element or the close.
     #[cfg(feature = "multi-thread")]
-    let Ok(state) = channel
-        .not_empty
-        .wait_while(state, |s| s.items.is_empty() && !s.closed)
-    else {
-        return Z_ERR_GENERIC;
-    };
-    let mut state = state;
+    while state.items.is_empty() && !state.closed {
+        state = channel.not_empty.wait(state);
+    }
     let Some(bits) = state.items.pop_front() else {
         // Empty: closed, or (single-threaded only) nothing yet, which upstream
         // answers with `_Z_RES_OK` and the destination untouched.
@@ -523,9 +554,7 @@ unsafe fn try_pull(dst: *mut c_void, context: *mut c_void, move_f: z_element_mov
     let Some(channel) = channel(context) else {
         return Z_ERR_GENERIC;
     };
-    let Ok(mut state) = channel.state.lock() else {
-        return Z_ERR_GENERIC;
-    };
+    let mut state = channel.state.lock();
     let popped = state.items.pop_front();
     let closed = state.closed;
     drop(state);
@@ -550,9 +579,7 @@ unsafe fn close(slot: *mut c_void) -> ZResult {
     let Some(channel) = channel(slot) else {
         return Z_ERR_INVALID;
     };
-    let Ok(mut state) = channel.state.lock() else {
-        return Z_ERR_GENERIC;
-    };
+    let mut state = channel.state.lock();
     state.closed = true;
     drop(state);
     channel.not_empty.notify_all();
@@ -572,15 +599,11 @@ unsafe fn clear(slot: *mut c_void, free_f: z_element_free_f) {
     if handle.is_null() {
         return;
     }
-    slot.cast::<*mut c_void>().write(std::ptr::null_mut());
-    let channel = Box::from_raw(handle.cast::<Channel>());
-    let drained: Vec<usize> = match channel.state.lock() {
-        Ok(mut state) => state.items.drain(..).collect(),
-        // A poisoned mutex means a panic unwound while an element was in
-        // flight. The elements are still ours to release, so recover them
-        // rather than leaking on top of the panic.
-        Err(poisoned) => poisoned.into_inner().items.drain(..).collect(),
-    };
+    slot.cast::<*mut c_void>().write(core::ptr::null_mut());
+    let mut channel = Box::from_raw(handle.cast::<Channel>());
+    // The only reference there is: no lock to take. A mutex a panic left poisoned on a host still
+    // holds the elements, which are ours to release.
+    let drained: Vec<usize> = channel.state.get_mut().items.drain(..).collect();
     drop(channel);
     if let Some(free) = free_f {
         for bits in drained {
@@ -599,7 +622,7 @@ pub unsafe extern "C" fn _z_fifo_mt_init(fifo: *mut _z_fifo_mt_t, capacity: usiz
         install(
             fifo.cast::<c_void>(),
             capacity,
-            std::mem::size_of::<_z_fifo_mt_t>(),
+            core::mem::size_of::<_z_fifo_mt_t>(),
         )
     })
 }
@@ -607,15 +630,15 @@ pub unsafe extern "C" fn _z_fifo_mt_init(fifo: *mut _z_fifo_mt_t, capacity: usiz
 /// pico `_z_fifo_mt_new`: heap-allocate and initialise, `NULL` on failure.
 #[no_mangle]
 pub unsafe extern "C" fn _z_fifo_mt_new(capacity: usize) -> *mut _z_fifo_mt_t {
-    guard_val(std::ptr::null_mut(), || {
-        let raw = crate::platform::z_malloc(std::mem::size_of::<_z_fifo_mt_t>());
+    guard_val(core::ptr::null_mut(), || {
+        let raw = crate::platform::z_malloc(core::mem::size_of::<_z_fifo_mt_t>());
         if raw.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let fifo = raw.cast::<_z_fifo_mt_t>();
         if _z_fifo_mt_init(fifo, capacity) != Z_OK {
             crate::platform::z_free(raw);
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         fifo
     })
@@ -683,7 +706,7 @@ pub unsafe extern "C" fn _z_ring_mt_init(ring: *mut _z_ring_mt_t, capacity: usiz
         install(
             ring.cast::<c_void>(),
             capacity,
-            std::mem::size_of::<_z_ring_mt_t>(),
+            core::mem::size_of::<_z_ring_mt_t>(),
         )
     })
 }
@@ -691,15 +714,15 @@ pub unsafe extern "C" fn _z_ring_mt_init(ring: *mut _z_ring_mt_t, capacity: usiz
 /// pico `_z_ring_mt_new`.
 #[no_mangle]
 pub unsafe extern "C" fn _z_ring_mt_new(capacity: usize) -> *mut _z_ring_mt_t {
-    guard_val(std::ptr::null_mut(), || {
-        let raw = crate::platform::z_malloc(std::mem::size_of::<_z_ring_mt_t>());
+    guard_val(core::ptr::null_mut(), || {
+        let raw = crate::platform::z_malloc(core::mem::size_of::<_z_ring_mt_t>());
         if raw.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let ring = raw.cast::<_z_ring_mt_t>();
         if _z_ring_mt_init(ring, capacity) != Z_OK {
             crate::platform::z_free(raw);
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         ring
     })
@@ -763,9 +786,21 @@ pub unsafe extern "C" fn _z_ring_mt_try_pull(
 const _: () = {
     use core::mem::{align_of, size_of};
     assert!(size_of::<_z_fifo_mt_t>() == FIFO_MT_BYTES);
-    assert!(align_of::<_z_fifo_mt_t>() == 8);
+    assert!(align_of::<_z_fifo_mt_t>() == align_of::<FifoMtLayout>());
     assert!(size_of::<_z_ring_mt_t>() == RING_MT_BYTES);
-    assert!(align_of::<_z_ring_mt_t>() == 8);
+    assert!(align_of::<_z_ring_mt_t>() == align_of::<RingMtLayout>());
+};
+
+// The figures `tests/header_arm_layout.rs` measures on the x86_64 Linux host, which the layouts
+// above reproduce there.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const _: () = {
+    use core::mem::size_of;
+    #[cfg(feature = "multi-thread")]
+    assert!(FIFO_MT_BYTES == 184 && RING_MT_BYTES == 136);
+    #[cfg(not(feature = "multi-thread"))]
+    assert!(FIFO_MT_BYTES == 48 && RING_MT_BYTES == 48);
+    assert!(size_of::<_z_fifo_mt_t>() == FIFO_MT_BYTES);
 };
 
 #[cfg(test)]
@@ -778,7 +813,7 @@ mod tests {
             return;
         }
         drop(Box::from_raw((*slot).cast::<usize>()));
-        *slot = std::ptr::null_mut();
+        *slot = core::ptr::null_mut();
     }
 
     /// The channel macro's mover: copy the element out and release the box.
@@ -793,7 +828,7 @@ mod tests {
 
     #[test]
     fn rc_starts_at_one_strong_and_frees_on_the_last_drop() {
-        let mut cnt: *mut c_void = std::ptr::null_mut();
+        let mut cnt: *mut c_void = core::ptr::null_mut();
         unsafe {
             assert_eq!(_z_rc_init(&mut cnt), Z_OK);
             assert_eq!(_z_rc_strong_count(cnt), 1);
@@ -809,7 +844,7 @@ mod tests {
 
     #[test]
     fn a_weak_outlives_the_last_strong() {
-        let mut cnt: *mut c_void = std::ptr::null_mut();
+        let mut cnt: *mut c_void = core::ptr::null_mut();
         unsafe {
             assert_eq!(_z_rc_init(&mut cnt), Z_OK);
             assert_eq!(_z_rc_increase_weak(cnt), Z_OK);
@@ -827,8 +862,8 @@ mod tests {
     #[test]
     fn a_fifo_pulls_in_order_and_reports_closure_when_drained() {
         let mut fifo = _z_fifo_mt_t {
-            handle: std::ptr::null_mut(),
-            _pad: [0; FIFO_MT_BYTES - std::mem::size_of::<*mut c_void>()],
+            handle: core::ptr::null_mut(),
+            _pad: [0; FIFO_MT_BYTES - core::mem::size_of::<*mut c_void>()],
         };
         unsafe {
             assert_eq!(_z_fifo_mt_init(&mut fifo, 4), Z_OK);
@@ -873,8 +908,8 @@ mod tests {
     #[test]
     fn a_full_ring_keeps_the_newest_and_a_full_fifo_would_block() {
         let mut ring = _z_ring_mt_t {
-            handle: std::ptr::null_mut(),
-            _pad: [0; RING_MT_BYTES - std::mem::size_of::<*mut c_void>()],
+            handle: core::ptr::null_mut(),
+            _pad: [0; RING_MT_BYTES - core::mem::size_of::<*mut c_void>()],
         };
         unsafe {
             assert_eq!(_z_ring_mt_init(&mut ring, 2), Z_OK);
@@ -909,8 +944,8 @@ mod tests {
             free_usize(slot);
         }
         let mut fifo = _z_fifo_mt_t {
-            handle: std::ptr::null_mut(),
-            _pad: [0; FIFO_MT_BYTES - std::mem::size_of::<*mut c_void>()],
+            handle: core::ptr::null_mut(),
+            _pad: [0; FIFO_MT_BYTES - core::mem::size_of::<*mut c_void>()],
         };
         unsafe {
             assert_eq!(_z_fifo_mt_init(&mut fifo, 2), Z_OK);
@@ -949,8 +984,8 @@ mod tests {
             _z_fifo_mt_clear(&mut fifo, Some(free_usize));
         }
         let mut ring = _z_ring_mt_t {
-            handle: std::ptr::null_mut(),
-            _pad: [0; RING_MT_BYTES - std::mem::size_of::<*mut c_void>()],
+            handle: core::ptr::null_mut(),
+            _pad: [0; RING_MT_BYTES - core::mem::size_of::<*mut c_void>()],
         };
         unsafe {
             assert_eq!(_z_ring_mt_init(&mut ring, 2), Z_OK);
@@ -974,8 +1009,8 @@ mod tests {
         // read task pushes. A non-blocking stand-in would pass every ordering
         // test above and still spin a real program at 100% CPU.
         let fifo = Box::into_raw(Box::new(_z_fifo_mt_t {
-            handle: std::ptr::null_mut(),
-            _pad: [0; FIFO_MT_BYTES - std::mem::size_of::<*mut c_void>()],
+            handle: core::ptr::null_mut(),
+            _pad: [0; FIFO_MT_BYTES - core::mem::size_of::<*mut c_void>()],
         }));
         unsafe {
             assert_eq!(_z_fifo_mt_init(fifo, 4), Z_OK);
@@ -1014,8 +1049,8 @@ mod tests {
         // what they push. A channel dropped with elements in flight (the
         // ordinary `z_drop(handler)` path) must free them.
         let mut fifo = _z_fifo_mt_t {
-            handle: std::ptr::null_mut(),
-            _pad: [0; FIFO_MT_BYTES - std::mem::size_of::<*mut c_void>()],
+            handle: core::ptr::null_mut(),
+            _pad: [0; FIFO_MT_BYTES - core::mem::size_of::<*mut c_void>()],
         };
         static FREED: AtomicUsize = AtomicUsize::new(0);
         unsafe extern "C" fn counting_free(slot: *mut *mut c_void) {

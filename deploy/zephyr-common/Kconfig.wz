@@ -131,10 +131,10 @@ config WZ_OS
 	select THREAD_NAME
 	help
 	  An image whose Rust half builds `wz-capi-port` without `std` (the pico C ABI on the
-	  cooperative engine, docs/upstream-parity.md section 5a) links the mutex, the thread
-	  identity, the threads and the sleep its `os` module names from
-	  deploy/zephyr-common/wz_os_zephyr.c: a `k_mutex` from the kernel heap, `k_current_get`,
-	  a dynamic thread, `k_msleep`.
+	  cooperative engine, docs/upstream-parity.md section 5a) links the mutex, the condition
+	  variable, the thread identity, the threads and the sleep its `os` module names from
+	  deploy/zephyr-common/wz_os_zephyr.c: a `k_mutex` and a `k_condvar` from the kernel heap,
+	  `k_current_get`, a dynamic thread, `k_msleep`.
 
 config WZ_OS_THREAD_STACK_SIZE
 	int "The stack of a thread the engine starts, in bytes"
@@ -148,6 +148,19 @@ config WZ_OS_THREAD_PRIORITY
 	int "The priority of a thread the engine starts"
 	depends on WZ_OS
 	default 5
+
+config WZ_PICO_OS
+	bool "The kernel answers the pico C ABI's host layer (wz_pico_*)"
+	depends on WZ_OS && POSIX_API
+	help
+	  An image whose Rust half is `wz-capi-pico` with `os-zephyr` (the pico C ABI on the
+	  cooperative engine, docs/upstream-parity.md section 5a) links the platform exports'
+	  host layer (crates/wz-capi-pico/src/os/zephyr.rs), which calls the kernel heap, Zephyr's
+	  POSIX clocks, mutexes, condition variables and threads, and the C library's local time,
+	  as zenoh-pico's own Zephyr backend does. What the kernel has only as a system call or an
+	  inline (its sleeps, its random source, a condition variable on the monotonic clock) is
+	  answered by deploy/zephyr-common/wz_pico_os_zephyr.c, which also pins each size and
+	  constant the Rust half states against the headers the image compiles.
 
 config WZ_MEMORY_REPORT
 	bool "Report the kernel heap's peak and every thread's stack (a compare build)"

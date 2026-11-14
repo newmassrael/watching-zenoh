@@ -529,12 +529,11 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
         }
     }
 
+    // The batch it advertises is bounded by its receive buffer whether or not it lends frame
+    // storage: a buffer sized below the largest datagram (`IpLinks::with_rx_capacity`) must not
+    // invite a peer's batch it would cut short.
     fn link_rx_capacity(&self) -> usize {
-        if self.tx.lends() {
-            self.rx_len
-        } else {
-            DEFAULT_LINK_MTU
-        }
+        self.rx_len
     }
 }
 
@@ -1097,11 +1096,15 @@ mod tests {
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
-    fn a_driver_with_no_storage_lends_nothing_and_states_the_default_bounds() {
+    fn a_driver_with_no_storage_lends_nothing_and_receives_what_its_buffer_holds() {
         let link = UdpDriver::acceptor_with_capacity(Loop::default(), 64);
         assert!(link.tx_slot_acquire(10, Priority::Data).is_none());
         assert_eq!(link.link_mtu(), DEFAULT_LINK_MTU);
-        assert_eq!(link.link_rx_capacity(), DEFAULT_LINK_MTU);
+        assert_eq!(
+            link.link_rx_capacity(),
+            64,
+            "the advertised batch is held to the receive buffer, lent storage or not"
+        );
     }
 
     #[test]

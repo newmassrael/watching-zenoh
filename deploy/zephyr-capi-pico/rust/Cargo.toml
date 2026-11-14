@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zephyr-capi-pico/rust -- the MCU staticlib of the pico C ABI: `wz-capi-pico` built without `std`
+# for the image (`os-zephyr`), with the planes of the comparison image's pico build (the queryable
+# and liveliness; publication, subscription and the requesting end are not in it), and the image's
+# glue around it: the allocator over the kernel heap, the critical section over the kernel's IRQ
+# lock, the panic handler, and the CYT4BF's MAC behind the Zephyr Ethernet driver, as the
+# comparison image's staticlib carries it. The C ABI's `#[no_mangle]` exports are the library the
+# zenoh-pico program links in place of zenoh-pico.
+#
+# Standalone workspace (the empty `[workspace]` table) so cargo does not pull it into
+# crates/Cargo.toml's member build, where a thumb target is not the host.
+
+[workspace]
+
+[package]
+name = "wz-zephyr-capi-pico"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+publish = false
+description = "wz Rust staticlib for the pico C ABI image: wz-capi-pico without std on Zephyr, and the CYT4BF MAC."
+
+[lib]
+name = "wz_zephyr_capi_pico"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[features]
+# zenoh-pico's multi-threaded arm (`Z_FEATURE_MULTI_THREAD`), which the image's header is built for
+# when its CONFIG_WZ_PICO_ABI_MULTI_THREAD is on (the CMake passes this feature then).
+multi-thread = ["wz-capi-pico/multi-thread"]
+
+[dependencies]
+# The pico C ABI on the cooperative engine over Zephyr's sockets, with no capability that needs the
+# host's library. The engine's base (sessions, the client's pub/sub surface) is in every build.
+wz-capi-pico = { path = "../../../crates/wz-capi-pico", default-features = false, features = [
+    "os-zephyr",
+    "queryable",
+    "liveliness",
+] }
+# critical-section IMPL provider: the staticlib root defines it over Zephyr's irq_lock
+# (`wz_runtime_zephyr::zephyr_image!`), so the key is the kernel's `unsigned int`.
+critical-section = { version = "1", features = ["restore-state-u32"] }
+# AtomicU64 is not native on thumbv7em: the engine's counters and the coop clock route it through
+# the fallback and critical-section, matching wz-runtime-coop and wz-capi-coop.
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+# The Zephyr profile's seams (clock, glue, the image's allocator, panic handler and critical
+# section) and the MAC trait, as the comparison image's staticlib takes them.
+wz = { path = "../../../crates/wz", default-features = false, features = [
+    "runtime-coop",
+    "platform-zephyr",
+] }
+wz-session-core = { path = "../../../crates/wz-session-core", default-features = false, features = [
+    "session-unicast",
+    "no_std",
+    "alloc",
+] }
+wz-eth-mac-cyt4bf = { path = "../../../crates/wz-eth-mac-cyt4bf" }
+
+# The MAC glue is the admin node's source, compiled here as it is there; the features it names for
+# its lwIP backend and its pools are that image's, and this image has none of them.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("net-lwip-mac", "tx-pool", "rx-pool"))'] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

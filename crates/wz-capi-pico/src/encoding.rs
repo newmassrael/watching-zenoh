@@ -33,7 +33,9 @@
 //! and a schema-present flag that disagreed with the schema actually stored is
 //! unrepresentable when the flag is derived at pack time.
 
-use std::ffi::{c_char, c_void, CStr};
+use core::ffi::{c_char, c_void, CStr};
+
+use crate::prelude::*;
 
 use wz_session_core::sample::EncodingHint;
 
@@ -122,8 +124,8 @@ impl z_owned_encoding_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 4],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 4],
         }
     }
 }
@@ -152,7 +154,7 @@ impl_handle_ownership7!(
 pub(crate) unsafe fn store_encoding(dst: *mut z_owned_encoding_t, hint: EncodingHint) {
     *dst = z_owned_encoding_t {
         handle: Box::into_raw(Box::new(EncodingState { hint })) as *mut c_void,
-        _pad: [std::ptr::null_mut(); 4],
+        _pad: [core::ptr::null_mut(); 4],
     };
 }
 
@@ -197,7 +199,7 @@ pub(crate) unsafe fn take_moved_encoding(moved: *mut c_void) -> Option<EncodingH
     if handle.is_null() {
         return None;
     }
-    *slot = std::ptr::null_mut();
+    *slot = core::ptr::null_mut();
     Some(Box::from_raw(handle as *mut EncodingState).hint)
 }
 
@@ -248,8 +250,8 @@ pub unsafe extern "C" fn z_encoding_from_substr(
         if s.is_null() {
             return Z_OK;
         }
-        let bytes = std::slice::from_raw_parts(s as *const u8, len);
-        let text = match std::str::from_utf8(bytes) {
+        let bytes = core::slice::from_raw_parts(s as *const u8, len);
+        let text = match core::str::from_utf8(bytes) {
             Ok(t) => t,
             Err(_) => return crate::result::Z_ERR_INVALID,
         };
@@ -331,8 +333,8 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
         let text = if schema.is_null() || len == 0 {
             String::new()
         } else {
-            let bytes = std::slice::from_raw_parts(schema as *const u8, len);
-            match std::str::from_utf8(bytes) {
+            let bytes = core::slice::from_raw_parts(schema as *const u8, len);
+            match core::str::from_utf8(bytes) {
                 Ok(t) => t.to_owned(),
                 Err(_) => return crate::result::Z_ERR_INVALID,
             }
@@ -365,7 +367,7 @@ unsafe impl Sync for StaticLoanedEncoding {}
 const fn static_view(state: &'static EncodingState) -> StaticLoanedEncoding {
     StaticLoanedEncoding(z_loaned_encoding_t {
         handle: state as *const EncodingState as *mut c_void,
-        _pad: [std::ptr::null_mut(); 4],
+        _pad: [core::ptr::null_mut(); 4],
     })
 }
 
@@ -534,8 +536,8 @@ pub unsafe extern "C" fn z_encoding_take_from_loaned(
             handle: (*src).handle,
             _pad: (*src)._pad,
         };
-        (*src).handle = std::ptr::null_mut();
-        (*src)._pad = [std::ptr::null_mut(); 4];
+        (*src).handle = core::ptr::null_mut();
+        (*src)._pad = [core::ptr::null_mut(); 4];
         Z_OK
     })
 }
@@ -650,8 +652,8 @@ mod tests {
     /// The ABI size a C program stack-allocates through pico's own header.
     #[test]
     fn encoding_abi_size_matches_pico() {
-        assert_eq!(std::mem::size_of::<z_owned_encoding_t>(), 40);
-        assert_eq!(std::mem::size_of::<z_moved_encoding_t>(), 40);
+        assert_eq!(core::mem::size_of::<z_owned_encoding_t>(), 40);
+        assert_eq!(core::mem::size_of::<z_moved_encoding_t>(), 40);
     }
 
     /// The packed id is the WIRE word, and bit 0 is derived from the schema
