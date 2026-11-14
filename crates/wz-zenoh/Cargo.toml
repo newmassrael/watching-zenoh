@@ -185,6 +185,8 @@ zenoh-shm = { path = "../wz-zenoh-shm", optional = true }
 # Upstream's `zenoh` takes it always: `zenoh::internal` re-exports its controller, and
 # `tracing-instrument` forwards to it whatever else depends on it.
 zenoh-task = { path = "../wz-zenoh-task" }
+# Upstream's `zenoh` takes it always: `zenoh::internal` re-exports its `Condition`.
+zenoh-sync = { path = "../wz-zenoh-sync" }
 zenoh-util = { path = "../wz-zenoh-util" }
 
 # The tests of the cancellation token run on a runtime of several threads.

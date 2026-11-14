@@ -916,6 +916,17 @@ impl Engine {
         }
     }
 
+    /// The node's clock, as a session lends it ([`Session::hlc`]), or `None` for a node that
+    /// holds none.
+    #[cfg(feature = "internal")]
+    fn node_hlc(&self) -> Option<NodeHlc> {
+        match self {
+            // Owed with the router's clock, as `node_timestamp` is.
+            Engine::Router(_) => None,
+            Engine::Tokio(state) => NodeHlc::over(state.shared.node_hlc().clone()),
+        }
+    }
+
     /// The next timestamp off the node's clock, or `None` for a node that holds none.
     fn node_timestamp(&self) -> Option<uhlc::Timestamp> {
         match self {
@@ -1712,6 +1723,11 @@ impl Engine {
     }
 
     fn node_timestamp(&self) -> Option<uhlc::Timestamp> {
+        match *self {}
+    }
+
+    #[cfg(feature = "internal")]
+    fn node_hlc(&self) -> Option<NodeHlc> {
         match *self {}
     }
 
@@ -4107,6 +4123,10 @@ pub(crate) struct SessionInner {
     /// session was opened with one, and the clock of a node that holds none.
     #[cfg(feature = "unstable")]
     timestamps: Arc<TimestampSource>,
+    /// The node's clock as the session lends it ([`Session::hlc`]), `None` for a node that holds
+    /// none.
+    #[cfg(feature = "internal")]
+    hlc: Option<NodeHlc>,
     /// The provider of shared memory the configuration asks the session to have, made when it is
     /// first asked for ([`Session::get_shm_provider`]); `None` when it asks for none.
     #[cfg(all(feature = "unstable", feature = "shared-memory"))]
@@ -5045,8 +5065,21 @@ pub struct Session(Arc<SessionInner>);
 impl Session {
     /// A reference to the session that does not keep it open: what the entities of a session hold,
     /// and what a close is run through.
+    #[cfg(not(feature = "internal"))]
     pub(crate) fn downgrade(&self) -> WeakSession {
-        WeakSession(self.0.clone())
+        WeakSession {
+            inner: std::mem::ManuallyDrop::new(Session(self.0.clone())),
+        }
+    }
+
+    /// A reference to the session that does not keep it open: what the entities of a session hold,
+    /// and what a close is run through. Public with `internal`, as upstream's is, for the crates
+    /// that hold a session's entities beside it (`zenoh-ext`).
+    #[zenoh_macros::internal]
+    pub fn downgrade(&self) -> WeakSession {
+        WeakSession {
+            inner: std::mem::ManuallyDrop::new(Session(self.0.clone())),
+        }
     }
 
     /// A group for the callback of one entity of the session ([`WeakSession::callback_group`]).
@@ -5090,6 +5123,8 @@ impl Session {
     /// share is the node, the identity, the configuration and the clocks.
     pub(crate) fn on(core: RuntimeCore, owns_engine: bool) -> Session {
         let id = u32::try_from(core.engine.next_entity_id()).unwrap_or(u32::MAX);
+        #[cfg(feature = "internal")]
+        let hlc = core.engine.node_hlc();
         Session(Arc::new(SessionInner {
             strong_counter: AtomicUsize::new(1),
             engine: core.engine,
@@ -5104,6 +5139,8 @@ impl Session {
             config: core.config,
             #[cfg(feature = "unstable")]
             timestamps: core.timestamps,
+            #[cfg(feature = "internal")]
+            hlc,
             #[cfg(all(
                 feature = "unstable",
                 feature = "shared-memory",
@@ -5276,14 +5313,141 @@ impl Drop for Session {
     }
 }
 
+/// The clock of the node a session is on, as the session lends it ([`Session::hlc`]): the node's
+/// own, the one every session and entity of the node stamps with, with the public methods of
+/// upstream's `uhlc::HLC` under the same signatures and with the same meaning.
+///
+/// It is not a `uhlc::HLC` because the node's clock is not one. The engine keeps `uhlc`'s
+/// arithmetic in one atomic word, held to `uhlc` by a differential test over random clock traces
+/// (`wz-node-time`), because a `uhlc::HLC` holds its last stamp behind a lock and takes its
+/// physical clock as a `fn` with no state; a `uhlc::HLC` beside the node's clock, with the same
+/// identity and a last stamp of its own, would be the second clock of one identity that breaks the
+/// uniqueness of the stamps both make. `Default`, which makes a clock of its own, has no
+/// counterpart: this clock is the node's, and a session lends it.
+#[zenoh_macros::internal]
+pub struct NodeHlc {
+    clock: Box<dyn EngineClock>,
+    id: uhlc::ID,
+    delta: uhlc::NTP64,
+}
+
+/// What the lent clock asks of the engine's: a stamp and an absorption, as time words.
+#[cfg(feature = "internal")]
+trait EngineClock: Send + Sync {
+    fn stamp_word(&self) -> u64;
+    fn absorb(&self, remote: u64) -> bool;
+}
+
+#[cfg(all(feature = "internal", feature = "engine-tokio"))]
+impl EngineClock for wz_capi_core::runtime::node_clock::NodeHlc {
+    fn stamp_word(&self) -> u64 {
+        // The lent clock is made only over a node that holds a clock (`NodeHlc::over`), and the
+        // node holds it for its life.
+        self.next_word().unwrap_or_default()
+    }
+
+    fn absorb(&self, remote: u64) -> bool {
+        self.absorb_word(remote).unwrap_or(false)
+    }
+}
+
+#[cfg(feature = "internal")]
+impl NodeHlc {
+    /// The lent clock over the engine's, or `None` for a node that holds none, as upstream's runtime
+    /// holds `None` for a role that does not timestamp.
+    #[cfg(feature = "engine-tokio")]
+    fn over(clock: wz_capi_core::runtime::node_clock::NodeHlc) -> Option<Self> {
+        let id = uhlc::ID::try_from(clock.stamp_zid()?).ok()?;
+        let delta = uhlc::NTP64(clock.max_delta_word()?);
+        Some(Self {
+            clock: Box::new(clock),
+            id,
+            delta,
+        })
+    }
+
+    /// Generate a new timestamp, unique in the system and above every timestamp this clock made
+    /// and every one it was updated with: `uhlc::HLC::new_timestamp`.
+    pub fn new_timestamp(&self) -> uhlc::Timestamp {
+        uhlc::Timestamp::new(uhlc::NTP64(self.clock.stamp_word()), self.id)
+    }
+
+    /// The identity of the clock, which is the node's: `uhlc::HLC::get_id`.
+    pub fn get_id(&self) -> &uhlc::ID {
+        &self.id
+    }
+
+    /// How far ahead of the clock a timestamp it is updated with may be: `uhlc::HLC::get_delta`.
+    pub fn get_delta(&self) -> &uhlc::NTP64 {
+        &self.delta
+    }
+
+    /// Update the clock with a timestamp another clock made, so that its next timestamp is above
+    /// it; refused with the reason, and the clock unchanged, when the timestamp is more than
+    /// [`get_delta`](Self::get_delta) ahead of the clock: `uhlc::HLC::update_with_timestamp`.
+    pub fn update_with_timestamp(&self, timestamp: &uhlc::Timestamp) -> Result<(), String> {
+        if self.clock.absorb(timestamp.get_time().as_u64()) {
+            return Ok(());
+        }
+        let reason = format!(
+            "incoming timestamp from {} exceeding delta {}ms is rejected: {:#}",
+            timestamp.get_id(),
+            self.delta.to_duration().as_millis(),
+            timestamp.get_time(),
+        );
+        tracing::warn!("{reason}");
+        Err(reason)
+    }
+}
+
+#[cfg(feature = "internal")]
+impl fmt::Debug for NodeHlc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeHlc")
+            .field("id", &self.id)
+            .field("delta", &self.delta)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A reference to the session that does not keep it open.
 ///
 /// It is not a `Weak` of the `Arc`: the entities of a session hold it, so a session that closed
 /// itself when its handles were counted by the `Arc` would never close while one of them lived.
 /// The handles count themselves (`SessionInner::strong_counter`, private) and the last one to be dropped
 /// closes the session, whatever references remain.
-#[derive(Debug, Clone)]
-pub struct WeakSession(Arc<SessionInner>);
+///
+/// It holds a [`Session`] that is never dropped as one, so that it dereferences to the session as
+/// upstream's does (the same `ManuallyDrop` and the same drop of the `Arc` alone): a crate that holds a session's entities beside it calls the
+/// session's methods through it. The fields of the session are reached through that dereference
+/// too, which is how `self.0` below is the session's `Arc`.
+#[derive(Debug)]
+pub struct WeakSession {
+    inner: std::mem::ManuallyDrop<Session>,
+}
+
+impl Clone for WeakSession {
+    fn clone(&self) -> Self {
+        self.inner.downgrade()
+    }
+}
+
+impl Drop for WeakSession {
+    fn drop(&mut self) {
+        // SAFETY: the `Session` is never dropped as one, so its `Drop`, which counts the handles
+        // and closes the session at the last, does not run for a reference that is no handle. Its
+        // one field is the `Arc`, dropped here in place once, and `inner` is not used after.
+        unsafe { std::ptr::drop_in_place(&mut self.inner.0 as *mut Arc<SessionInner>) };
+    }
+}
+
+impl std::ops::Deref for WeakSession {
+    type Target = Session;
+
+    fn deref(&self) -> &Session {
+        &self.inner
+    }
+}
 
 impl WeakSession {
     /// The id the session stands on.
@@ -5829,6 +5993,16 @@ impl Session {
                 Timestamp::new(now, self.zid().into())
             }
         }
+    }
+
+    /// The clock of the node this session is on, the one its timestamps come from, or `None` when
+    /// the node's role does not timestamp (`timestamping/enabled`): upstream's `Session::hlc`.
+    /// The clock is lent as a [`NodeHlc`], which has every public method of `uhlc::HLC`; it is not
+    /// that type because the node's clock is not one (see [`NodeHlc`]). A router node lends none
+    /// yet: its clock is not read off the node.
+    #[zenoh_macros::internal]
+    pub fn hlc(&self) -> Option<&NodeHlc> {
+        self.0.hlc.as_ref()
     }
 
     /// Returns the [`EntityGlobalId`] of this Session.
@@ -6784,6 +6958,61 @@ mod tests {
         assert!(!weak.0.is_closed(), "a handle is still held");
         drop(clone);
         assert!(weak.0.is_closed(), "the last handle closed it");
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn the_clock_a_session_lends_is_the_one_its_timestamps_come_from() {
+        let stamping = Config::from_json5(
+            r#"{ id: "a1b2d2", mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                 scouting: { multicast: { enabled: false } }, timestamping: { enabled: true } }"#,
+        )
+        .expect("a configuration zenoh reads");
+        let session = open(stamping).wait().expect("opens");
+        let hlc = session
+            .hlc()
+            .expect("a node that timestamps lends its clock");
+        // One clock: the session's stamps and the lent clock's interleave strictly.
+        let before = session.new_timestamp();
+        let lent = hlc.new_timestamp();
+        let after = session.new_timestamp();
+        assert!(before < lent && lent < after, "{before} {lent} {after}");
+        assert_eq!(hlc.get_id(), before.get_id());
+        assert_eq!(lent.get_id(), before.get_id());
+        let other = uhlc::ID::try_from(&[7u8][..]).expect("an id");
+        // A remote stamp within the bound is taken, and the next stamp is above it.
+        let near = uhlc::Timestamp::new(*after.get_time() + 1_000_000u64, other);
+        assert!(hlc.update_with_timestamp(&near).is_ok());
+        assert!(hlc.new_timestamp() > near);
+        // One past the bound is refused, and moves nothing.
+        let far = uhlc::Timestamp::new(*after.get_time() + hlc.get_delta().as_u64() * 4, other);
+        assert!(hlc.update_with_timestamp(&far).is_err());
+        assert!(hlc.new_timestamp() < far);
+        assert!(session.new_timestamp() < far);
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn a_node_whose_role_does_not_timestamp_lends_no_clock() {
+        let session = open(peer("a1b2d3")).wait().expect("opens");
+        assert!(session.hlc().is_none());
+    }
+
+    #[test]
+    fn a_weak_reference_dereferences_to_its_session_and_is_no_handle_of_it() {
+        let session = open(peer("a1b2d1")).wait().expect("opens");
+        let weak = session.downgrade();
+        let copy = weak.clone();
+        assert_eq!(*copy, session);
+        assert_eq!(weak, session);
+        drop(weak);
+        drop(copy);
+        // A reference that is dropped is no handle that was released: the session stays open.
+        assert!(!session.is_closed());
+        let weak = session.downgrade();
+        drop(session);
+        // The session's own method, reached through the dereference, sees the close.
+        assert!(weak.is_closed(), "the last handle closed it");
     }
 
     #[test]

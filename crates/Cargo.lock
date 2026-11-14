@@ -656,6 +656,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "event-listener"
+version = "5.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
+dependencies = [
+ "parking",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1595,6 +1605,12 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "parking"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
 
 [[package]]
 name = "parking_lot"
@@ -3791,6 +3807,7 @@ dependencies = [
  "zenoh-result",
  "zenoh-runtime",
  "zenoh-shm",
+ "zenoh-sync",
  "zenoh-task",
  "zenoh-util",
 ]
@@ -4714,6 +4731,7 @@ dependencies = [
  "zenoh-result",
  "zenoh-runtime",
  "zenoh-shm",
+ "zenoh-sync",
  "zenoh-task",
  "zenoh-util",
 ]
@@ -4873,6 +4891,20 @@ dependencies = [
  "zenoh-buffers",
  "zenoh-core",
  "zenoh-macros",
+ "zenoh-result",
+]
+
+[[package]]
+name = "zenoh-sync"
+version = "1.10.2"
+dependencies = [
+ "arc-swap",
+ "event-listener",
+ "futures",
+ "tokio",
+ "zenoh-buffers",
+ "zenoh-collections",
+ "zenoh-core",
  "zenoh-result",
 ]
 

@@ -36,6 +36,7 @@ use zenoh_protocol::core::{CongestionControl, Locator, Reliability};
 use crate::{
     self as zenoh,
     api::{
+        admin_keys::{KE_ADV_PREFIX, KE_AT, KE_EMPTY, KE_PUB, KE_STARSTAR},
         encoding::Encoding,
         handlers::Callback,
         info::{Link, LinkEvent, Transport, TransportEvent},
@@ -47,11 +48,6 @@ use crate::{
     },
 };
 
-static KE_AT: &keyexpr = ke!("@");
-static KE_ADV_PREFIX: &keyexpr = ke!("@adv");
-static KE_PUB: &keyexpr = ke!("pub");
-static KE_EMPTY: &keyexpr = ke!("_");
-static KE_STARSTAR: &keyexpr = ke!("**");
 static KE_SESSION: &keyexpr = ke!("session");
 static KE_TRANSPORT_UNICAST: &keyexpr = ke!("transport/unicast");
 static KE_TRANSPORT_MULTICAST: &keyexpr = ke!("transport/multicast");

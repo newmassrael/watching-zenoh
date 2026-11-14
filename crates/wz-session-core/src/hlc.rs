@@ -184,6 +184,12 @@ impl<S: EpochSource> Hlc<S> {
     pub fn core(&self) -> &HlcCore {
         &self.core
     }
+
+    /// How far ahead of a reading a remote timestamp may be before it is refused: `uhlc`'s
+    /// `get_delta`.
+    pub fn max_delta(&self) -> Ntp64 {
+        self.max_delta
+    }
 }
 
 #[cfg(test)]

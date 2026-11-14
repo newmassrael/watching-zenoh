@@ -1235,6 +1235,64 @@ Each lands whole with its surface lines, tests and faults in one round.
       minutes (three green; the fourth lost one test of `regions`, a registration that a late peer
       of the scenario 7 group did not count, and ran to the end), so the job's ceiling is 60 minutes and it carries the margin gate of the
       other jobs (alarm at 90%, floor at 20%). It was 150 minutes with no gate.
+  - **Z8b. The ecosystem crate and the examples (harness written, not measured).** The other two
+    thirds of the gate. `zenoh-ext` is not a member of the family: it is the crate the family must
+    meet, so the harness copies its source at the pin into a workspace of its own beside the suite
+    (`zenoh-ext-suite`, sharing the suite's build directory), resolves its manifest's workspace
+    inheritance to the registry and patches the family in, and runs its library's unit tests with
+    and without its unstable half (`zenoh-ext.lib`, `zenoh-ext.lib-stable`) and its two test files,
+    as rows of the suite's report and of `docs/z8-expected.tsv`. A workspace of its own, because a
+    crate that does not resolve against the family must not stop the files of `zenoh/tests`.
+    The examples are run by `z8_upstream_suite.py examples-run`: upstream's examples package is
+    generated twice, over upstream's crates (the control) and with the family patched in, every one
+    of its 31 programs declared and compiled on its own, and `zenoh-ext` made optional behind a
+    feature that the three programs naming it require, so that crate's compile hides none of the
+    other 28. The ecosystem crate's own examples package (`zenoh-ext/examples`: the advanced
+    publisher and subscriber, and two programs of the group), which takes the first package's
+    arguments, is a member of the same generated workspace, so its 4 programs are built in the same
+    graph. `docs/z8-examples-expected.tsv` declares 31 scenarios that together run all 35 (a
+    subscriber and the put, delete or publisher it hears, a queryable and the get or querier it
+    answers, a storage between a put and a get, a forward, a pull, the three liveliness programs,
+    ping and pong, the two throughput pairs, info, scout, the programs that run alone, the advanced
+    publisher and subscriber, and two groups), each with
+    what it must show: a count of the lines that hold a text, or how a program ended. A scenario is
+    `same` when the family's run shows what the control's does, line shapes and endings included;
+    `z8_expectation_gate.py --check-examples` grades the report, and a control that does not show its
+    row fails the row. Every new row is `unmeasured`, a status that turns a measurement into a note
+    and never into a failure; the rows of the ecosystem crate are in the hosted lane, the scenarios
+    are not until a build host has measured both arms once. **What `zenoh-ext`'s unstable half
+    names of the family, read from its source; each is built, and a compiler has yet to say
+    whether anything else is owed:** the helpers `internal` re-exports from the family's own crates
+    (`bail`, `zerror`, `zlock`, `zread`, `zwrite`, `zasynclock`, `ztimeout`, `ResolveFuture`,
+    `ErrNo`) and `internal::runtime::ZRuntime`; `TaskController` and `TerminatableTask`, of the
+    member `zenoh-task`; `Condition`, of the member `zenoh-sync`, which is whole because upstream's
+    transport and links, built over the patched graph in the suite, take its event, mvar, signal and
+    object pool; the `KE_*` chunks of the admin space at the crate's root with `internal`, as
+    upstream's cfg states them (`api::admin_keys`, apart from the admin module that only `unstable`
+    compiles); `Session::downgrade` public with `internal`; a `WeakSession` that holds a `Session`
+    it never drops as one and dereferences to it, upstream's ownership; and `Session::hlc`, below.
+  - **`internal`: the one difference from upstream's surface, the type of the clock a session
+    lends.** Upstream's `Session::hlc` returns `Option<&uhlc::HLC>`, the runtime's clock. The node's
+    clock here is not a `uhlc::HLC`: the engine keeps `uhlc`'s arithmetic in one atomic word
+    (`wz_session_core::hlc`, held to `uhlc` by a differential test over random clock traces), which
+    stamps from four threads in 29 ns where `uhlc`'s lock costs 52 ns, and a refused remote stamp in
+    13 ns where `uhlc` formats a message in 78 ns (the measurements of `wz-node-time`'s
+    `node_clock`). A `uhlc::HLC` cannot be laid over that clock: its physical clock is a `fn` with
+    no state and its last stamp sits behind its own lock, so a `uhlc::HLC` beside the node's clock
+    would be a second clock of one identity with a last stamp of its own, the defect `node_clock`
+    was written to remove (two clocks of one `uhlc::ID` break the uniqueness of the stamps both
+    make). The session therefore lends the node's own clock as `zenoh::internal::NodeHlc`, with every
+    public method of `uhlc::HLC` 0.8.2 under the same signature and the same meaning
+    (`new_timestamp`, `get_id`, `get_delta`, `update_with_timestamp`; `Default`, which makes a
+    clock of its own, has no counterpart, since this clock is the node's). Its stamps, its refusals
+    and its bound are held to `uhlc::HLC` over the same traces (`wz-node-time`'s
+    `the_node_clock_lent_as_uhlc`), and a unit test of `zenoh` holds that the lent clock and
+    `Session::new_timestamp` are one clock. The text of a refusal names the remote stamp and the
+    bound, not the reading `uhlc`'s also prints, which the engine's clock does not hand out. What
+    remains different is the type's name and path; the surface gate does not read the `internal`
+    arm (its arms are the default, `unstable` and `unstable` with `shared-memory`), so there is no
+    data of it to declare the difference in, and this paragraph is where it is declared. A router
+    node lends no clock yet, as it stamps nothing through the API yet (`node_timestamp`).
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

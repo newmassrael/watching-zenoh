@@ -3,6 +3,9 @@
 # Columns: name <TAB> status <TAB> min_passed <TAB> lane <TAB> reason. Measured 2026-10-30 on the tree of round 3931.
 # `lane` says whether the hosted lane runs the file (`yes`) or only a person does (`no`).
 # A file that does better than its row is a line to raise in the commit that made it better.
+# The rows that begin with `zenoh-ext.` are upstream's ecosystem crate built over the family in a workspace of its own:
+# `lib` and `lib-stable` are its library's unit tests with and without its unstable half, the others its test files.
+# `unmeasured` is a row declared and not yet measured: a measurement of it is a note that says what to set, never a failure.
 acl	pass	10	yes	all of it
 adminspace	pass	6	yes	all of it
 atexit	pass	4	yes	4 tests are ignored upstream (the mains each runs in a process of its own); run with `internal`, which compiles in the close that runs in the background
@@ -36,3 +39,7 @@ source_info	pass	4	yes	all of it
 tcp_buffers	pass	4	yes	all of it
 timestamp_instrumentation	pass	48	yes	all of it
 unicity	pass	2	yes	all of it
+zenoh-ext.lib	unmeasured	0	yes	the unit tests of the library with its unstable half, as upstream's CI runs them; not measured yet: what that half names of the family was read from its source and built (the task controller of zenoh-task, the condition of zenoh-sync, the helpers of `zenoh::internal`, the `KE_*` chunks at the root, `Session::hlc` and a `WeakSession` that dereferences to its `Session`), and a compiler has not yet said whether anything else is owed
+zenoh-ext.lib-stable	unmeasured	0	yes	the unit tests of the library without its unstable half: the serialization alone, over the family's `ZBytes`, its reader and its writer; not measured yet
+zenoh-ext.advanced	unmeasured	0	yes	the advanced publisher and subscriber (history, recovery, miss detection) of the unstable half; not measured yet, as zenoh-ext.lib
+zenoh-ext.liveliness	unmeasured	0	yes	the fetching subscriber over liveliness, of the unstable half; not measured yet, as zenoh-ext.lib

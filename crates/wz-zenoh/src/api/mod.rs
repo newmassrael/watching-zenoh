@@ -26,6 +26,9 @@ pub(crate) mod admin;
 // features: a build with an engine to open a session on starts it.
 #[cfg(feature = "engine-tokio")]
 pub(crate) mod runtime_admin;
+// The chunks of the admin space's keys, which the root exposes with `internal` as upstream's does.
+#[cfg(any(feature = "internal", feature = "unstable"))]
+pub(crate) mod admin_keys;
 
 // R3706: `SampleBuilder::qos` and the timestamp instrumentation trait are used by the builders of a
 // reply and of the timestamp stack, which are slices Z3 and Z6b of docs/zenoh-api-on-the-engine.md.
