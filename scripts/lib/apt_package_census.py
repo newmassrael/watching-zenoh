@@ -697,7 +697,10 @@ _add(
     "depends on. DERIVED by the SHORTFALL and EXCESS arms.",
     # R3016 -- Layer B2 moved to `codegen-verify`, and with it the `xtask` build
     # this row exists for: the one job is now that one.
-    ["codegen-verify"],
+    # 2026-11-14 -- `gate-provenance` builds a member of the `xtask` workspace
+    # too (the SHORTFALL arm found it once that job's packages moved into their
+    # own list), so it joins the row by the rule above.
+    ["codegen-verify", "gate-provenance"],
 )
 _add(
     "protobuf-compiler",
