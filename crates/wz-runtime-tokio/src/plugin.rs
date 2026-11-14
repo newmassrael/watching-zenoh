@@ -365,12 +365,13 @@ impl DynamicPlugin {
 /// discovers the hard way.
 ///
 /// WHICH KEYS THIS ANSWERS. Upstream configures the same host under `plugins`
-/// (the per-plugin config map) and `plugins_loading/enabled`. wz's config reader
-/// honours neither, so both are carried in `UNHONOURED_READER_GAP` — the host is
-/// HERE, driven today by the demo's repeated `--plugin <path>`, and what is
-/// missing is the reader. `plugins_loading/search_dirs` is honoured beside it:
-/// a plugin named without a path is found through
-/// [`crate::plugin_search_dirs::LibSearchDirs`] and loaded here.
+/// (the per-plugin config map) and `plugins_loading/enabled` (whether a plugin
+/// named with no path is looked up by name). wz's config reader honours both:
+/// the plugin plane runs the section's plugins in this registry and takes the
+/// by-name switch as `crate::plugin_plane::PluginsLoading`.
+/// `plugins_loading/search_dirs` is honoured beside them: a plugin named without
+/// a path is found through [`crate::plugin_search_dirs::LibSearchDirs`] and
+/// loaded here.
 /// R2673 — one registry slot: a plugin the operator NAMED, and the library
 /// behind it once it loads.
 ///

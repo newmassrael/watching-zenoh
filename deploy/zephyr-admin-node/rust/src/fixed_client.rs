@@ -33,7 +33,7 @@
 #[cfg(feature = "tls")]
 use wz::runtime_zephyr::glue::log_args;
 use wz::runtime_zephyr::glue::{log, log_parts, stack_usage, yield_us};
-use wz::runtime_zephyr::net::await_board_ipv4;
+use wz::runtime_zephyr::net::await_board_ip;
 #[cfg(not(feature = "tls"))]
 use wz::runtime_zephyr::net::{board_zid_fixed, ZephyrStack};
 use wz::runtime_zephyr::stack::StackWatch;
@@ -370,8 +370,8 @@ fn start(port: &mut ZephyrPort) -> Result<impl NodeLoop<ZephyrPort>, i32> {
         log(c"wz: FAIL - the kernel heap has no room for the node's storage");
         return Err(3);
     };
-    let Some(address) = await_board_ipv4(ADDRESS_WAIT_MS) else {
-        log(c"wz: FAIL - the board's interface never got an IPv4 address");
+    let Some(address) = await_board_ip(ADDRESS_WAIT_MS) else {
+        log(c"wz: FAIL - the board's interface never got an address of its family");
         return Err(1);
     };
     // Over the secure channel the node's zid is the one its key names (decision D1), and its

@@ -96,8 +96,9 @@ use wz::runtime_tokio::session_glue::{
 };
 use wz::runtime_tokio::session_open::{
     accept_and_open_session_with_offer, accept_endpoint, dial_endpoint,
-    initiate_and_open_session_with_offer, offer_for_connect, AcceptConfig, DialConfig, DialedLink,
-    OpenError, OpenedSession, OpenedSessionParts, SessionOffer, DEFAULT_OPEN_TICK_MS,
+    initiate_and_open_session_with_staging, offer_for_connect, open_within, AcceptConfig,
+    DialConfig, DialedLink, OpenError, OpenedSession, OpenedSessionParts, SessionOffer,
+    DEFAULT_OPEN_TICK_MS,
 };
 
 // R2592 — the node's per-link-kind socket configuration, carried in
@@ -288,12 +289,17 @@ struct SpawnedTasks {
 /// configuration (`--link-config`), so no dial path this binary has can open a
 /// link without it: this builder is the only place a non-default `DialConfig`
 /// is made.
+///
+/// And every dial config carries the node's `transport/unicast/open_timeout`
+/// (`--open-timeout-ms`), the bound each open of an endpoint it dials runs within.
 fn build_dial_config(
     tls_ca: &Option<String>,
     quic_ca: &Option<String>,
-    link_defaults: &LinkDefaults,
+    tuning: &TransportTuning,
 ) -> io::Result<DialConfig> {
-    let cfg = DialConfig::default().with_link_defaults(link_defaults.clone());
+    let cfg = DialConfig::default()
+        .with_link_defaults(tuning.link_defaults.clone())
+        .with_open_timeout(tuning.open_timeout);
     let cfg = apply_tls_ca(cfg, tls_ca)?;
     let cfg = apply_quic_ca(cfg, quic_ca)?;
     Ok(cfg)
@@ -737,8 +743,8 @@ pub(crate) struct DialCertPaths {
 
 #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
 impl DialCertPaths {
-    fn build(&self, link_defaults: &LinkDefaults) -> io::Result<DialConfig> {
-        build_dial_config(&self.tls_ca, &self.quic_ca, link_defaults)
+    fn build(&self, tuning: &TransportTuning) -> io::Result<DialConfig> {
+        build_dial_config(&self.tls_ca, &self.quic_ca, tuning)
     }
 }
 
@@ -1459,9 +1465,10 @@ async fn dial_candidate(
 /// acceptor's offer returns unchanged.
 async fn establish_link(
     role: &Role,
-    link_defaults: &LinkDefaults,
+    tuning: &TransportTuning,
     offer: SessionOffer,
 ) -> io::Result<(DialedLink, SessionOffer)> {
+    let link_defaults = &tuning.link_defaults;
     match role {
         Role::Acceptor {
             listen,
@@ -1497,7 +1504,7 @@ async fn establish_link(
             // R311y365/y366 — a `tls/...` / `quic/...` --connect threads its
             // `--tls-ca` / `--quic-ca` root-CA into the matching `DialConfig` slot;
             // every cert-free transport takes the default.
-            let dial_cfg = build_dial_config(tls_ca, quic_ca, link_defaults)?;
+            let dial_cfg = build_dial_config(tls_ca, quic_ca, tuning)?;
             // R2099 (open-debt item 512, the `connect/endpoints` residue) — try
             // EVERY candidate in order and take the first that opens, which is
             // upstream's client: `connect_peers_single_link`
@@ -2651,14 +2658,32 @@ fn acceptor_offer(#[allow(unused)] shm: bool) -> SessionOffer {
 /// One call for every combination: the per-mode match this replaced could not
 /// express two offers at once, which is exactly why the demo used to reject
 /// `--lowlatency --compression`.
+///
+/// `south_partition` is set before the first wire byte, as a mesh node sets it
+/// on each session it opens: the session's Open then announces the bound the
+/// partition gives the remote, and a remote the rules refuse fails the
+/// handshake, which is upstream's client (`zenoh/src/net/runtime/mod.rs` @
+/// `move |p| region::compute_transient_bound_of(&p, &config)`).
 async fn open_initiator_with_offer(
     offer: SessionOffer,
     dialed: DialedLink,
     params: SessionInitParams,
     clock: TokioTime,
+    south_partition: wz::runtime_tokio::region_partition::SouthPartition,
 ) -> Result<OpenedSession, OpenError> {
-    initiate_and_open_session_with_offer(dialed, params, offer, clock, None, DEFAULT_OPEN_TICK_MS)
-        .await
+    initiate_and_open_session_with_staging(
+        dialed,
+        params,
+        offer,
+        move |actions| {
+            actions.set_south_partition(south_partition);
+            Ok(())
+        },
+        clock,
+        None,
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await
 }
 
 /// A one-shot client's dial and open, run as upstream's client
@@ -2679,7 +2704,7 @@ async fn open_initiator_with_offer(
 /// existed.
 async fn open_initiator_in_connect_phase(
     role: &Role,
-    link_defaults: &LinkDefaults,
+    tuning: &TransportTuning,
     offer: SessionOffer,
     params: SessionInitParams,
     clock: TokioTime,
@@ -2690,6 +2715,7 @@ async fn open_initiator_in_connect_phase(
         connect,
         tls_ca,
         quic_ca,
+        south_partition,
         ..
     } = role
     else {
@@ -2704,7 +2730,7 @@ async fn open_initiator_in_connect_phase(
             "wz-ap-demo: --connect named no endpoint to dial",
         ));
     }
-    let dial_cfg = build_dial_config(tls_ca, quic_ca, link_defaults)?;
+    let dial_cfg = build_dial_config(tls_ca, quic_ca, tuning)?;
     // R2948 — each candidate on its own schedule: `connect/retry` with the
     // endpoint's `#retry_period_*` tail on top, raced by the runtime's
     // `drive_connect_phase` as upstream's single-link connect races them.
@@ -2715,14 +2741,28 @@ async fn open_initiator_in_connect_phase(
     let dial_cfg = &dial_cfg;
     let outcome = drive_connect_phase(phase.budget, &scheduled, |endpoint, attempt| {
         let params = params.clone();
+        // Every attempt is a new session, and each one carries the partition.
+        let south_partition = south_partition.clone();
         async move {
             if attempt > 1 {
                 log::info!("wz-ap-demo: connect attempt {attempt} to {endpoint}");
             }
-            let (dialed, offer) = dial_candidate(endpoint, dial_cfg, offer).await?;
-            open_initiator_with_offer(offer, dialed, params, clock)
-                .await
-                .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))
+            // The dial and the handshake are one open, held to
+            // `transport/unicast/open_timeout` as upstream's `open_transport_unicast` is.
+            let open = async {
+                let (dialed, offer) = dial_candidate(endpoint, dial_cfg, offer)
+                    .await
+                    .map_err(OpenError::Dial)?;
+                open_initiator_with_offer(offer, dialed, params, clock, south_partition).await
+            };
+            match open_within(dial_cfg.open_timeout, open).await {
+                Ok(opened) => Ok(opened),
+                // A dial that failed reports its own error, as it did before the bound.
+                Err(OpenError::Dial(e)) => Err(e),
+                Err(e) => Err(io::Error::other(format!(
+                    "wz-ap-demo: session open failed: {e:?}"
+                ))),
+            }
         }
     })
     .await;
@@ -3153,7 +3193,7 @@ pub(crate) async fn run_demo(
                 primary.clone(),
                 endpoint_schedule(connect_retry.unwrap_or(RetryPolicy::ZENOH_DEFAULT), primary),
             )];
-            let link_defaults = &tuning.link_defaults;
+            let dial_tuning = &tuning;
             let mut recon = drive_connect_phase(
                 first_open_phase.budget,
                 &first_open_schedule,
@@ -3163,7 +3203,7 @@ pub(crate) async fn run_demo(
                         if attempt > 1 {
                             log::info!("wz-ap-demo: connect attempt {attempt} to {endpoint}");
                         }
-                        let dial_config = build_dial_config(&None, &None, link_defaults)
+                        let dial_config = build_dial_config(&None, &None, dial_tuning)
                             .map_err(|e| e.to_string())?;
                         supervise_reconnect(
                             endpoint,
@@ -3210,7 +3250,7 @@ pub(crate) async fn run_demo(
                 // itself a thin wrapper over the same `_with_offer` entrypoint).
                 Role::Acceptor { shm, .. } => {
                     let (dialed, offer) =
-                        establish_link(&role, &tuning.link_defaults, acceptor_offer(*shm)).await?;
+                        establish_link(&role, &tuning, acceptor_offer(*shm)).await?;
                     accept_and_open_session_with_offer(
                         dialed,
                         params,
@@ -3259,7 +3299,7 @@ pub(crate) async fn run_demo(
                     };
                     open_initiator_in_connect_phase(
                         &role,
-                        &tuning.link_defaults,
+                        &tuning,
                         offer,
                         params,
                         session_clock,
@@ -5474,7 +5514,7 @@ async fn run_peer_until(
             // makes; the default (both CAs absent) is the cert-free mesh, under
             // which a `tls/` or `quic/` target dials to the runtime's typed
             // `Unsupported` rather than to a silent TCP connect.
-            dial_config: std::sync::Arc::new(opts.dial_certs.build(&tuning.link_defaults)?),
+            dial_config: std::sync::Arc::new(opts.dial_certs.build(&tuning)?),
             dial_intents,
             // A peer node hosts no router multicast ingress plane.
             mcast_ingress: None,
@@ -6828,6 +6868,18 @@ async fn run_router_hat_until(
                 compression: false,
                 tx_queue: params.tx_queue,
                 link_rx: params.link_rx,
+                // The demo's group is zenoh-pico's: its batch is pico's multicast batch
+                // (`Z_BATCH_MULTICAST_SIZE`), which every member of the group states alike.
+                // Its sequence numbers are the width the node's unicast sessions offer
+                // (`transport/link/tx/sequence_number_resolution`).
+                beacon: wz::runtime_tokio::multicast_glue::GroupBeacon {
+                    lease_ms: 5_000,
+                    join_interval_ms: 100,
+                    seq_num_res: params.seq_num_res,
+                    req_id_res: 0x02,
+                    batch_size: 2_048,
+                },
+                join_rule: wz::runtime_tokio::multicast_glue::GroupJoinRule::Pico,
             },
             mcast_opts.clone(),
             node_stats.clone(),
@@ -6838,7 +6890,9 @@ async fn run_router_hat_until(
         forwarder.set_mcast_group_link(wz::runtime_tokio::link_interfaces::multicast_link_subject(
             mcast_opts.iface.as_deref(),
         ));
-        forwarder.attach_mcast_group(face.outbound);
+        // The demo's router holds no shared memory of its own session, so its group is a plain
+        // one: a chunk goes to it as its bytes.
+        forwarder.attach_mcast_group(face.outbound, false);
         #[cfg(feature = "resource-snapshot")]
         {
             let meter = std::sync::Arc::clone(&face.messages);
@@ -7615,7 +7669,7 @@ async fn run_router_hat_until(
             // material, the dial mirror of the cert its listen presents. One
             // build, shared by the static federation dials, the reconcile-added
             // ones, and every re-dial.
-            dial_config: std::sync::Arc::new(opts.dial_certs.build(&opts.tuning.link_defaults)?),
+            dial_config: std::sync::Arc::new(opts.dial_certs.build(&opts.tuning)?),
             // No gossip-autoconnect on a router (zenoh: routers are reached via
             // configured links, `default_autoconnect_matcher(Router)` is empty) —
             // so no dial-intent stream, exactly run_peer's `--autoconnect`-off arm.
@@ -8509,8 +8563,12 @@ pub(crate) struct StorageHostOpts {
     /// text, which this host runs its storage manager from. A `--config` file
     /// naming `plugins` expands to it.
     pub plugins: Option<String>,
-    /// `--plugin-search-dirs <list>`: where a plugin the section names without
-    /// a `__path__` is searched for. `None` searches upstream's default list.
+    /// `--plugins-loading`: a plugin the section names with no `__path__` is
+    /// looked up by name (`plugins_loading/enabled: true`). Absent is the
+    /// library's default, under which such a plugin is left unloaded.
+    pub plugins_loading: bool,
+    /// `--plugin-search-dirs <list>`: where that by-name lookup searches.
+    /// `None` searches upstream's default list.
     pub plugin_search_dirs: Option<wz::runtime_tokio::plugin_search_dirs::LibSearchDirs>,
     /// `--aggregation-subscribers` / `--aggregation-publishers`: what each client session's
     /// storages declare their subscribers under.
@@ -8533,6 +8591,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         no_admin_read,
         config_write_permit,
         plugins: startup_plugins,
+        plugins_loading,
         plugin_search_dirs,
         aggregation,
         metadata,
@@ -8591,9 +8650,13 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // leak below used to state.
     #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
     let library_plane = {
-        let mut plane = wz::runtime_tokio::plugin_plane::DynamicPluginPlane::new();
-        // `plugins_loading/search_dirs`: where a section entry naming no
-        // `__path__` is searched for, by this plane's every start.
+        // `plugins_loading/enabled` as the library reads it: this host is configured by its
+        // file, unlike zenohd, which turns by-name loading on whatever its file says.
+        let mut plane = wz::runtime_tokio::plugin_plane::DynamicPluginPlane::new(
+            wz::runtime_tokio::plugin_plane::PluginsLoading::from_config(Some(plugins_loading)),
+        );
+        // `plugins_loading/search_dirs`: where that by-name lookup searches, by
+        // this plane's every start.
         if let Some(dirs) = plugin_search_dirs {
             plane.set_search_dirs(dirs);
         }
@@ -8669,6 +8732,12 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
             log::warn!(
                 "wz-ap-demo storage-host: --plugin given but this binary lacks the \
                  `plugin-dynamic-loading` feature — INERT, nothing was loaded"
+            );
+        }
+        if plugins_loading {
+            log::warn!(
+                "wz-ap-demo storage-host: --plugins-loading given but this binary lacks the \
+                 `plugin-dynamic-loading` feature — INERT, no plugin is looked up"
             );
         }
         if plugin_search_dirs.is_some() {
@@ -10050,6 +10119,112 @@ mod node_zid_tests {
             draws.len(),
             "64 draws are pairwise distinct"
         );
+    }
+}
+
+/// Item 751 — a one-shot client's partition reaches its session's Open, as
+/// upstream's client runs its rules on every Open it sends. The partitions are
+/// read by the config reader, which is what hands the client one.
+#[cfg(all(test, feature = "zenoh-config"))]
+mod client_partition_tests {
+    use super::open_initiator_with_offer;
+    use crate::args::{demo_session_init_params, NodeKind, TransportTuning};
+    use wz::runtime_tokio::region_partition::SouthPartition;
+    use wz::runtime_tokio::runtime_impl::TokioTime;
+    use wz::runtime_tokio::session_open::{
+        accept_and_open_session_with_offer, DialedLink, OpenError, OpenedSession, SessionOffer,
+        DEFAULT_OPEN_TICK_MS,
+    };
+
+    fn partition(text: &str) -> SouthPartition {
+        let value = wz::runtime_tokio::json5::parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        wz::runtime_tokio::zenoh_config::gateway_south_of(&value)
+            .unwrap_or_else(|e| panic!("{text}: {e}"))
+    }
+
+    /// A one-shot client opens to an in-process acceptor of `acceptor` kind with
+    /// `south` staged; the client's open result, and whether the acceptor opened.
+    async fn open_with(
+        acceptor: NodeKind,
+        south: SouthPartition,
+    ) -> (Result<OpenedSession, OpenError>, bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback listener");
+        let addr = listener.local_addr().expect("its address");
+        let tuning = TransportTuning::default();
+        let acceptor_params =
+            demo_session_init_params(acceptor, vec![0xa1, 0xb2, 0xc3, 0xd4], &tuning)
+                .expect("acceptor params");
+        let client_params =
+            demo_session_init_params(NodeKind::Initiator, vec![0xc1, 0xb2, 0xc3, 0xd4], &tuning)
+                .expect("client params");
+        let accept = async move {
+            let (stream, _) = listener.accept().await.expect("the client's link");
+            accept_and_open_session_with_offer(
+                DialedLink::Tcp(stream),
+                acceptor_params,
+                SessionOffer::universal(),
+                TokioTime::new(),
+                None,
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .is_ok()
+        };
+        let dial = async move {
+            let stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("a loopback dial");
+            open_initiator_with_offer(
+                SessionOffer::universal(),
+                DialedLink::Tcp(stream),
+                client_params,
+                TokioTime::new(),
+                south,
+            )
+            .await
+        };
+        let (accepted, opened) = tokio::join!(accept, dial);
+        (opened, accepted)
+    }
+
+    /// The bound the client's Open announced for a peer acceptor, as its wire
+    /// value: `None` is no `RemoteBound` extension, the `auto` preset.
+    async fn announced_for_a_peer(south: SouthPartition) -> Option<u8> {
+        let (opened, accepted) = open_with(NodeKind::Acceptor, south).await;
+        let opened = opened.unwrap_or_else(|e| panic!("the client opens: {e:?}"));
+        assert!(accepted, "the acceptor opens");
+        opened.actions.local_remote_bound().map(|bound| bound as u8)
+    }
+
+    #[tokio::test]
+    async fn the_auto_preset_announces_no_bound() {
+        assert_eq!(announced_for_a_peer(SouthPartition::Auto).await, None);
+    }
+
+    /// A subregion whose filter matches the peer puts it south (wire value 1).
+    #[tokio::test]
+    async fn a_subregion_that_matches_the_remote_announces_it_south() {
+        let south = partition(r#"[{ filters: [{ modes: ["peer"] }] }]"#);
+        assert_eq!(announced_for_a_peer(south).await, Some(1));
+    }
+
+    /// A partition none of whose subregions matches the peer leaves it north
+    /// (wire value 0), which is still an announcement, unlike the preset.
+    #[tokio::test]
+    async fn a_partition_that_matches_nothing_announces_the_remote_north() {
+        let south = partition(r#"[{ filters: [{ modes: ["router"] }] }]"#);
+        assert_eq!(announced_for_a_peer(south).await, Some(0));
+    }
+
+    /// A router the client's rules would make a subregion fails the open, as
+    /// upstream's client refuses a router region below a non-router one.
+    #[cfg(feature = "router-hat-router")]
+    #[tokio::test]
+    async fn a_router_the_rules_would_place_south_refuses_the_open() {
+        let (opened, _) = open_with(NodeKind::RouterHat, partition("[{}]")).await;
+        assert!(opened.is_err(), "a client does not hold a router south");
     }
 }
 

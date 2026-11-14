@@ -568,6 +568,76 @@ pub enum RoomWait {
     },
 }
 
+/// How long a link's writer holds an open batch back for producers that are still adding to
+/// it, at most, when the configuration states no `transport/link/tx/queue/batching/time_limit`:
+/// 200 microseconds.
+///
+/// Upstream's default is a millisecond (`commons/zenoh-config/src/defaults.rs` @
+/// `time_limit: 1,`). The writer waits only while the producers are seen still to be staging
+/// (it reads their count a few microseconds apart), so a lone message or the end of a burst
+/// leaves at once whatever the bound, and the bound is reached only by a stream that does not
+/// stop; this is the bound the writer kept before the key was read.
+pub const BATCHING_TIME_LIMIT_US: u64 = 200;
+
+/// When a link's queue takes the memory of its batches: `transport/link/tx/queue/allocation/mode`,
+/// upstream's `QueueAllocMode` (`commons/zenoh-config/src/lib.rs` @ `pub enum QueueAllocMode {`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueAllocation {
+    /// Every batch the queue's lanes may hold is allocated when the queue is shaped, so the
+    /// first messages of a session allocate nothing: upstream fills each priority's refill
+    /// ring at construction (`io/zenoh-transport/src/common/pipeline.rs` @
+    /// `if *config.queue_alloc.mode() == QueueAllocMode::Init {`).
+    Init,
+    /// A batch is allocated the first time one is wanted and kept for the next: upstream's
+    /// default.
+    Lazy,
+}
+
+impl QueueAllocation {
+    /// The mode as zenoh's configuration spells it (`#[serde(rename_all = "snake_case")]`).
+    pub const fn zenoh_name(self) -> &'static str {
+        match self {
+            Self::Init => "init",
+            Self::Lazy => "lazy",
+        }
+    }
+
+    /// The mode zenoh's configuration names `text`, or `None` for a text it refuses.
+    pub fn from_zenoh_name(text: &str) -> Option<Self> {
+        [Self::Init, Self::Lazy]
+            .into_iter()
+            .find(|mode| mode.zenoh_name() == text)
+    }
+}
+
+/// What a link's writer does with the batches of its queue, beside the lanes' bounds: the half
+/// of upstream's `TransmissionPipelineConf` that is not a queue size
+/// (`io/zenoh-transport/src/common/pipeline.rs` @ `pub(crate) batching_time_limit: Duration,`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxPipeline {
+    /// `transport/link/tx/queue/batching/time_limit`, in microseconds: the longest the writer
+    /// holds an open batch back while producers keep adding to it, upstream's backoff threshold
+    /// (`io/zenoh-transport/src/common/pipeline.rs` @ `if diff >= self.backoff.threshold {`).
+    /// `0` holds nothing back: the writer flushes as soon as it falls idle.
+    pub batching_time_limit_us: u64,
+    /// `transport/link/tx/queue/allocation/mode`: when the queue's batches are allocated.
+    pub allocation: QueueAllocation,
+}
+
+impl TxPipeline {
+    /// The writer's own settings when the configuration states none.
+    pub const DEFAULT: Self = Self {
+        batching_time_limit_us: BATCHING_TIME_LIMIT_US,
+        allocation: QueueAllocation::Lazy,
+    };
+}
+
+impl Default for TxPipeline {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// R2924 — the shape of a link's outbound queue once its session is
 /// established: how many batches each priority's queue holds, and whether the
 /// session negotiated QoS at all.
@@ -608,6 +678,8 @@ pub struct TxQueueShape {
     /// memory policy, so it follows the sender's configuration and not the
     /// size of the datagram the peer can read.
     pub queue_unit_bytes: usize,
+    /// What the writer does with the batches, beside the bounds above.
+    pub pipeline: TxPipeline,
 }
 
 impl TxQueueShape {
@@ -2262,6 +2334,26 @@ pub enum LostCause {
 mod tests {
     use super::*;
 
+    /// Each allocation mode reads back from zenoh's spelling of it, and nothing else names one.
+    #[test]
+    fn each_allocation_mode_reads_back_from_zenohs_spelling_and_nothing_else_does() {
+        for mode in [QueueAllocation::Init, QueueAllocation::Lazy] {
+            assert_eq!(
+                QueueAllocation::from_zenoh_name(mode.zenoh_name()),
+                Some(mode)
+            );
+        }
+        assert_eq!(QueueAllocation::Lazy.zenoh_name(), "lazy");
+        for refused in ["Init", "eager", ""] {
+            assert_eq!(
+                QueueAllocation::from_zenoh_name(refused),
+                None,
+                "{refused:?}"
+            );
+        }
+        assert_eq!(TxPipeline::default().allocation, QueueAllocation::Lazy);
+    }
+
     /// A lane's bound is its size in units, and a session that negotiated no QoS has the one
     /// queue its DEFAULT priority is sized by, whatever priority a frame has.
     #[test]
@@ -2275,6 +2367,7 @@ mod tests {
             qos: true,
             batch_bytes: 1_000,
             queue_unit_bytes: 4_000,
+            pipeline: TxPipeline::DEFAULT,
         };
         assert_eq!(qos.lane_bytes(Priority::DEFAULT), 12_000);
         assert_eq!(qos.lane_bytes(Priority::DataHigh), 20_000);

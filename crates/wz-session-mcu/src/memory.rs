@@ -21,12 +21,12 @@
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, OnceCell, RefCell};
+use core::net::{IpAddr, SocketAddr};
 
 use wz_runtime_coop::session_drive::{
-    IpEndpoint, LinkOpenError, LinkProto, Locator, OpenedLink, SessionDatagramLink, SessionLinks,
+    LinkOpenError, LinkProto, Locator, OpenedLink, SessionDatagramLink, SessionLinks,
 };
 use wz_session_core::datagram_peer::{DatagramVerdict, ForeignCounts, PeerBinding};
 use wz_session_core::link::{
@@ -36,7 +36,7 @@ use wz_session_core::reliability::Reliability;
 
 /// One datagram waiting at an end: who sent it and what it carries.
 struct Waiting {
-    from: IpEndpoint,
+    from: SocketAddr,
     bytes: Vec<u8>,
 }
 
@@ -44,7 +44,7 @@ struct Waiting {
 const FIRST_EPHEMERAL_PORT: u16 = 49152;
 
 /// The datagrams waiting at each bound end, by the address and port it is bound on.
-type Queues = BTreeMap<([u8; 4], u16), VecDeque<Waiting>>;
+type Queues = BTreeMap<SocketAddr, VecDeque<Waiting>>;
 
 /// A network of in-memory ends. Shared by `Rc`: every end holds the network it
 /// was bound on.
@@ -67,11 +67,11 @@ impl MemoryNetwork {
     /// already bound there.
     pub fn bind(
         self: &Rc<Self>,
-        local: IpEndpoint,
-        peer: Option<IpEndpoint>,
+        local: SocketAddr,
+        peer: Option<SocketAddr>,
     ) -> Result<Rc<MemoryEnd>, LinkOpenError> {
         let mut queues = self.queues.borrow_mut();
-        if queues.contains_key(&(local.addr, local.port)) {
+        if queues.contains_key(&local) {
             return Err(LinkOpenError::Exhausted);
         }
         Ok(self.claim(&mut queues, local, peer))
@@ -83,14 +83,14 @@ impl MemoryNetwork {
     /// handed out: what comes back is an end that already owns its port.
     pub fn bind_ephemeral(
         self: &Rc<Self>,
-        addr: [u8; 4],
-        peer: Option<IpEndpoint>,
+        addr: IpAddr,
+        peer: Option<SocketAddr>,
     ) -> Result<Rc<MemoryEnd>, LinkOpenError> {
         let mut queues = self.queues.borrow_mut();
         let port = self
             .next_unclaimed_port(&queues, addr)
             .ok_or(LinkOpenError::Exhausted)?;
-        Ok(self.claim(&mut queues, IpEndpoint { addr, port }, peer))
+        Ok(self.claim(&mut queues, SocketAddr::new(addr, port), peer))
     }
 
     /// Register `local`'s queue and build the end that owns it. The caller has
@@ -98,10 +98,10 @@ impl MemoryNetwork {
     fn claim(
         self: &Rc<Self>,
         queues: &mut Queues,
-        local: IpEndpoint,
-        peer: Option<IpEndpoint>,
+        local: SocketAddr,
+        peer: Option<SocketAddr>,
     ) -> Rc<MemoryEnd> {
-        queues.insert((local.addr, local.port), VecDeque::new());
+        queues.insert(local, VecDeque::new());
         let end = MemoryEnd {
             net: self.clone(),
             local,
@@ -118,7 +118,7 @@ impl MemoryNetwork {
     /// The next port on `addr`, from the ephemeral range, that `queues` does not
     /// hold. Only [`Self::bind_ephemeral`] calls it, with the borrow it then
     /// claims under.
-    fn next_unclaimed_port(&self, queues: &Queues, addr: [u8; 4]) -> Option<u16> {
+    fn next_unclaimed_port(&self, queues: &Queues, addr: IpAddr) -> Option<u16> {
         for _ in 0..=u16::MAX - FIRST_EPHEMERAL_PORT {
             let port = self.next_ephemeral.get();
             self.next_ephemeral.set(if port == u16::MAX {
@@ -126,35 +126,26 @@ impl MemoryNetwork {
             } else {
                 port + 1
             });
-            if !queues.contains_key(&(addr, port)) {
+            if !queues.contains_key(&SocketAddr::new(addr, port)) {
                 return Some(port);
             }
         }
         None
     }
 
-    /// How many datagrams are waiting at `addr:port`, for a test that asserts a
-    /// send reached an end nobody has read yet.
-    pub fn waiting_at(&self, addr: [u8; 4], port: u16) -> usize {
-        self.queues
-            .borrow()
-            .get(&(addr, port))
-            .map_or(0, VecDeque::len)
+    /// How many datagrams are waiting at `at`, for a test that asserts a send
+    /// reached an end nobody has read yet.
+    pub fn waiting_at(&self, at: SocketAddr) -> usize {
+        self.queues.borrow().get(&at).map_or(0, VecDeque::len)
     }
-}
-
-/// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator.
-fn udp_locator(at: IpEndpoint) -> String {
-    let [a, b, c, d] = at.addr;
-    format!("udp/{a}.{b}.{c}.{d}:{}", at.port)
 }
 
 /// One end of a link on a [`MemoryNetwork`]: the session's outbound sink and the
 /// drive loop's inbound pump in one object, as Zephyr's socket driver is.
 pub struct MemoryEnd {
     net: Rc<MemoryNetwork>,
-    local: IpEndpoint,
-    binding: PeerBinding<IpEndpoint>,
+    local: SocketAddr,
+    binding: PeerBinding<SocketAddr>,
     endpoints: OnceCell<LinkEndpoints>,
 }
 
@@ -166,13 +157,13 @@ impl MemoryEnd {
             return;
         };
         let _ = self.endpoints.set(LinkEndpoints::new(
-            udp_locator(self.local),
-            udp_locator(peer),
+            format!("{}", Locator::udp(self.local)),
+            format!("{}", Locator::udp(peer)),
         ));
     }
 
     /// Where this end sends, once it has a peer.
-    pub fn peer(&self) -> Option<IpEndpoint> {
+    pub fn peer(&self) -> Option<SocketAddr> {
         self.binding.peer()
     }
 
@@ -182,17 +173,14 @@ impl MemoryEnd {
     }
 
     /// This end's own address and port.
-    pub fn local(&self) -> IpEndpoint {
+    pub fn local(&self) -> SocketAddr {
         self.local
     }
 }
 
 impl Drop for MemoryEnd {
     fn drop(&mut self) {
-        self.net
-            .queues
-            .borrow_mut()
-            .remove(&(self.local.addr, self.local.port));
+        self.net.queues.borrow_mut().remove(&self.local);
     }
 }
 
@@ -203,12 +191,7 @@ impl BoxedLinkDriver for MemoryEnd {
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         };
         // A datagram for an end nobody bound is dropped silently, as UDP does.
-        if let Some(queue) = self
-            .net
-            .queues
-            .borrow_mut()
-            .get_mut(&(peer.addr, peer.port))
-        {
+        if let Some(queue) = self.net.queues.borrow_mut().get_mut(&peer) {
             queue.push_back(Waiting {
                 from: self.local,
                 bytes: bytes.to_vec(),
@@ -235,7 +218,7 @@ impl SessionDatagramLink for MemoryEnd {
                 .net
                 .queues
                 .borrow_mut()
-                .get_mut(&(self.local.addr, self.local.port))?
+                .get_mut(&self.local)?
                 .pop_front()?;
             // The peer's datagrams only; the InitSyn that binds an acceptor is
             // how it learns its peer, and anyone else's is let go.
@@ -254,13 +237,16 @@ impl SessionDatagramLink for MemoryEnd {
 /// its links through, bound at one address.
 pub struct MemoryLinks {
     net: Rc<MemoryNetwork>,
-    host: [u8; 4],
+    host: IpAddr,
 }
 
 impl MemoryLinks {
     /// The links of the host at `host` on `net`.
-    pub fn new(net: Rc<MemoryNetwork>, host: [u8; 4]) -> Self {
-        Self { net, host }
+    pub fn new(net: Rc<MemoryNetwork>, host: impl Into<IpAddr>) -> Self {
+        Self {
+            net,
+            host: host.into(),
+        }
     }
 
     /// The network this host is on.
@@ -280,13 +266,7 @@ impl SessionLinks for MemoryLinks {
     type Pump = Rc<MemoryEnd>;
 
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
-        let end = self.net.bind(
-            IpEndpoint {
-                addr: self.host,
-                port,
-            },
-            None,
-        )?;
+        let end = self.net.bind(SocketAddr::new(self.host, port), None)?;
         Ok(Self::opened(end))
     }
 
@@ -323,10 +303,7 @@ mod tests {
             .open_acceptor(7447)
             .expect("bind");
         let dialling = MemoryLinks::new(net.clone(), HOST_B)
-            .open_initiator(Locator::udp(IpEndpoint {
-                addr: HOST_A,
-                port: 7447,
-            }))
+            .open_initiator(Locator::udp(SocketAddr::from((HOST_A, 7447))))
             .expect("open");
 
         std::assert!(
@@ -372,10 +349,7 @@ mod tests {
         let accepting = MemoryLinks::new(net.clone(), HOST_A)
             .open_acceptor(7447)
             .expect("bind");
-        let to_acceptor = Locator::udp(IpEndpoint {
-            addr: HOST_A,
-            port: 7447,
-        });
+        let to_acceptor = Locator::udp(SocketAddr::from((HOST_A, 7447)));
         let peer = MemoryLinks::new(net.clone(), HOST_B)
             .open_initiator(to_acceptor)
             .expect("open");
@@ -420,35 +394,48 @@ mod tests {
         drop(first);
         std::assert!(links.open_acceptor(7447).is_ok(), "free once it is dropped");
 
-        let out = links
-            .open_initiator(Locator::udp(IpEndpoint {
-                addr: HOST_B,
-                port: 9,
-            }))
-            .expect("open");
+        let discard = SocketAddr::from((HOST_B, 9));
+        let out = links.open_initiator(Locator::udp(discard)).expect("open");
         std::assert!(matches!(
             out.sink.send_blocking(b"x", Reliability::Reliable),
             LinkSendOutcome::Sent
         ));
-        std::assert_eq!(net.waiting_at(HOST_B, 9), 0, "nobody bound there");
+        std::assert_eq!(net.waiting_at(discard), 0, "nobody bound there");
 
-        let second = links
-            .open_initiator(Locator::udp(IpEndpoint {
-                addr: HOST_B,
-                port: 9,
-            }))
-            .expect("open");
+        let second = links.open_initiator(Locator::udp(discard)).expect("open");
         std::assert!(
             matches!(
-                links.open_initiator(Locator::tcp(IpEndpoint {
-                    addr: HOST_B,
-                    port: 9,
-                })),
+                links.open_initiator(Locator::tcp(discard)),
                 Err(LinkOpenError::Unsupported)
             ),
             "a network of datagrams has no stream to give"
         );
-        std::assert_ne!(out.pump.local().port, second.pump.local().port);
+        std::assert_ne!(out.pump.local().port(), second.pump.local().port());
+    }
+
+    /// The network names an IPv6 end in zenoh's bracketed text and carries its datagrams as
+    /// any other's.
+    #[test]
+    fn an_ipv6_host_dials_an_ipv6_acceptor_and_both_ends_are_named_in_brackets() {
+        use core::net::Ipv6Addr;
+        let net = MemoryNetwork::new();
+        let accepting = MemoryLinks::new(net.clone(), Ipv6Addr::LOCALHOST)
+            .open_acceptor(7447)
+            .expect("bind");
+        let dialling = MemoryLinks::new(net.clone(), Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2))
+            .open_initiator(Locator::udp(SocketAddr::from((Ipv6Addr::LOCALHOST, 7447))))
+            .expect("open");
+        std::assert!(matches!(
+            dialling.sink.send_blocking(SYN, Reliability::Reliable),
+            LinkSendOutcome::Sent
+        ));
+        std::assert_eq!(frame_bytes(accepting.pump.try_recv()), Some(SYN.to_vec()));
+        let link = accepting
+            .sink
+            .link_endpoints()
+            .expect("the InitSyn bound it");
+        std::assert_eq!(link.src, "udp/[::1]:7447");
+        std::assert!(link.dst.starts_with("udp/[fd00::2]:"), "{}", link.dst);
     }
 
     /// An initiator's port is one nobody holds, wherever the counter stands: it
@@ -458,28 +445,25 @@ mod tests {
     fn an_initiator_gets_a_free_port_stepping_over_taken_ones_and_wrapping() {
         let net = MemoryNetwork::new();
         let links = MemoryLinks::new(net.clone(), HOST_A);
-        let peer = Locator::udp(IpEndpoint {
-            addr: HOST_B,
-            port: 9,
-        });
+        let peer = Locator::udp(SocketAddr::from((HOST_B, 9)));
 
         let _taken = links
             .open_acceptor(FIRST_EPHEMERAL_PORT)
             .expect("bind inside the range");
         let first = links.open_initiator(peer).expect("open");
         std::assert_eq!(
-            first.pump.local().port,
+            first.pump.local().port(),
             FIRST_EPHEMERAL_PORT + 1,
             "steps over the taken port"
         );
 
         net.next_ephemeral.set(u16::MAX);
         let last = links.open_initiator(peer).expect("open");
-        std::assert_eq!(last.pump.local().port, u16::MAX);
+        std::assert_eq!(last.pump.local().port(), u16::MAX);
         drop(first);
         let wrapped = links.open_initiator(peer).expect("open");
         std::assert_eq!(
-            wrapped.pump.local().port,
+            wrapped.pump.local().port(),
             FIRST_EPHEMERAL_PORT + 1,
             "back to the start of the range, past the port still taken there"
         );

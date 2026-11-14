@@ -35,12 +35,11 @@ use std::{
 };
 
 use async_trait::async_trait;
-use zenoh_config::qos::{PublisherQoSConfList, PublisherQoSConfig};
+use zenoh_config::qos::PublisherQoSConfig;
 #[cfg(feature = "unstable")]
 use zenoh_config::wrappers::EntityGlobalId;
 use zenoh_config::wrappers::ZenohId;
 use zenoh_core::{Resolve, ResolveClosure, Wait};
-use zenoh_keyexpr::keyexpr_tree::{IKeyExprTree, IKeyExprTreeNode, KeBoxTree};
 #[cfg(any(feature = "unstable", feature = "internal"))]
 use zenoh_protocol::core::Locator;
 #[cfg(feature = "unstable")]
@@ -792,6 +791,39 @@ impl Engine {
         }
     }
 
+    /// What the session applies itself above its links, as the open compiled it from the
+    /// configuration: the one value the C ABI reads as well.
+    fn session_defaults(&self) -> &wz_capi_core::session_defaults::SessionDefaults {
+        match self {
+            Engine::Tokio(state) => state.session_defaults(),
+            Engine::Router(router) => router.node.session_defaults(),
+        }
+    }
+
+    /// The quality of service `qos/publication` sets for a publication on `key_expr`: the
+    /// settings of the first rule whose key expression includes it, or none set. When several
+    /// include it, the others are said, as upstream's session says them.
+    fn publisher_qos_overwrite(&self, key_expr: &str) -> PublisherQoSConfig {
+        let Some(found) = self.session_defaults().publication_qos.find(key_expr) else {
+            return PublisherQoSConfig::default();
+        };
+        if !found.also_including.is_empty() {
+            tracing::warn!(
+                "Publisher declared on `{}` which is included by multiple key_exprs in qos config ({}). Using qos config for `{}`",
+                key_expr,
+                found.also_including.join(", "),
+                found.key_expr,
+            );
+        }
+        tokio_engine::publisher_qos_of(&found.defaults)
+    }
+
+    /// Which large payloads the session copies into its provider, as the open compiled it.
+    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    fn shm_promotion(&self) -> wz_capi_core::session_defaults::ShmPromotion {
+        self.session_defaults().shm_promotion
+    }
+
     /// Close the session and wait for its drive to stop: every callback has returned when this
     /// does. Closing a closed session does nothing.
     fn close(&self) {
@@ -901,8 +933,14 @@ impl Engine {
     #[cfg(feature = "unstable")]
     fn node_clock(&self) -> Box<dyn Fn() -> Option<uhlc::Timestamp> + Send + Sync> {
         match self {
-            // Owed: the router's clock is not read off the node yet.
-            Engine::Router(_) => Box::new(|| None),
+            Engine::Router(router) => {
+                let hlc = router.node.node_hlc();
+                Box::new(move || {
+                    hlc.clock_stamp()
+                        .as_ref()
+                        .and_then(tokio_engine::timestamp_from)
+                })
+            }
             Engine::Tokio(state) => {
                 let shared = state.shared.clone();
                 Box::new(move || {
@@ -921,16 +959,22 @@ impl Engine {
     #[cfg(feature = "internal")]
     fn node_hlc(&self) -> Option<NodeHlc> {
         match self {
-            // Owed with the router's clock, as `node_timestamp` is.
-            Engine::Router(_) => None,
+            Engine::Router(router) => NodeHlc::over(router.node.node_hlc()),
             Engine::Tokio(state) => NodeHlc::over(state.shared.node_hlc().clone()),
         }
     }
 
-    /// The next timestamp off the node's clock, or `None` for a node that holds none.
+    /// The next timestamp off the node's clock, or `None` for a node that holds none: a read of the
+    /// clock, to which no stamping policy applies (upstream's `Session::new_timestamp` reads its
+    /// runtime's clock whatever it is).
     fn node_timestamp(&self) -> Option<uhlc::Timestamp> {
         match self {
-            Engine::Router(_) => None,
+            Engine::Router(router) => router
+                .node
+                .node_hlc()
+                .clock_stamp()
+                .as_ref()
+                .and_then(tokio_engine::timestamp_from),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -1697,6 +1741,10 @@ impl Engine {
         match *self {}
     }
 
+    fn publisher_qos_overwrite(&self, _key_expr: &str) -> PublisherQoSConfig {
+        match *self {}
+    }
+
     fn close(&self) {
         match *self {}
     }
@@ -1868,8 +1916,10 @@ mod tokio_engine {
     use wz_capi_core::runtime::Reliability as EngineReliability;
     use wz_capi_core::{
         drive::OpenError,
-        open_plan::{key_state, KeyState, OpenRefusal},
+        open_plan::{key_state, KeyState, OpenRefusal, SessionReach},
         runtime::session_glue::WhatAmI as EngineWhatAmI,
+        runtime::zenoh_config::SESSION_HONOURED_KEYS,
+        session_defaults::PromotedMessages,
     };
     // A build with shared memory gives every session a reader.
     #[cfg(not(feature = "shared-memory"))]
@@ -2217,21 +2267,42 @@ mod tokio_engine {
         Ok(())
     }
 
-    /// Decision D6: refuse, by name, the keys of `document` that `ignored` says the engine does not
-    /// act on, that upstream acts on, and whose value is not the default's.
+    /// What a session of this crate applies itself of the keys only a session applies: the QoS
+    /// `qos/publication` gives its publications, always; shared memory in a build with it, whose
+    /// open makes the subsystem when asked; and, with the provider of the session as well
+    /// (`unstable`), the copy of a large put, query value and reply (`api::shm::transport::Promoter`).
+    pub(super) const SESSION_REACH: SessionReach = SessionReach {
+        publication_qos: true,
+        shared_memory: cfg!(feature = "shared-memory"),
+        promotion: if cfg!(all(feature = "shared-memory", feature = "unstable")) {
+            PromotedMessages::ALL
+        } else {
+            PromotedMessages::NONE
+        },
+    };
+
+    /// Decision D6: refuse, by name, the keys of `document` the engine does not act on for this
+    /// crate's session, that upstream acts on, and whose value is not the default's.
     ///
-    /// `ignored` lists every leaf the document carries that the engine does not act on, and the
-    /// document is the whole configuration, so most of them hold the default. A key that upstream
-    /// itself does nothing with ([`KeyState::Inert`]) is accepted whatever its value, and a key no
-    /// list knows ([`None`]) is refused as the unmapped ones are.
+    /// They are the keys `ignored` lists, every leaf the document carries that the engine does not
+    /// act on, and the keys only a session applies that this crate's session does not
+    /// ([`SESSION_REACH`]); the document is the whole configuration, so most of them hold the
+    /// default. A key that upstream itself does nothing with ([`KeyState::Inert`]) is accepted
+    /// whatever its value, and a key no list knows ([`None`]) is refused as the unmapped ones are.
     pub(super) fn refuse_unmapped(ignored: &[String], document: &serde_json::Value) -> ZResult<()> {
         // The default in the shape the document has, nulls left out, or a key whose default is
         // `null` would differ from the document that states nothing.
         let default = rendered(&zenoh_config::Config::default())?;
         let unmapped: Vec<String> = ignored
             .iter()
-            .filter(|key| key_state(key) != Some(KeyState::Inert))
-            .filter(|key| !acted_on_by_the_session(key))
+            .map(String::as_str)
+            .chain(SESSION_HONOURED_KEYS.iter().copied())
+            .filter(|key| {
+                !matches!(
+                    key_state(key, SESSION_REACH),
+                    Some(KeyState::Inert | KeyState::Mapped)
+                )
+            })
             .filter(|key| !inert_in_this_build(key))
             .filter(|key| {
                 let pointer = format!("/{key}");
@@ -2260,22 +2331,6 @@ mod tokio_engine {
     fn inert_in_this_build(key: &str) -> bool {
         !cfg!(feature = "plugins")
             && (key.starts_with("plugins/") || key.starts_with("plugins_loading/"))
-    }
-
-    /// Whether a key the engine does not act on is one this crate acts on itself, so that the
-    /// engine's ignoring it is no reason to refuse it. `transport/shared_memory/mode`, which the
-    /// session reads as it opens (`api::shm::init_if_asked`) in a build with shared memory, and
-    /// `qos/publication`, the per-key defaults of the publications, which the session holds as
-    /// a tree of keys and applies to every publisher and put it builds
-    /// ([`Session::get_publisher_qos_overwrite`]).
-    fn acted_on_by_the_session(key: &str) -> bool {
-        key == "qos/publication"
-            || (cfg!(feature = "shared-memory") && key == "transport/shared_memory/mode")
-            // The implicit optimisation of large messages, which `api::shm::transport::Promoter`
-            // carries out for a put, the value of a query and a reply, as the list names them.
-            || (cfg!(all(feature = "shared-memory", feature = "unstable"))
-                && (key == "transport/shared_memory/transport_optimization/message_size_threshold"
-                    || key == "transport/shared_memory/transport_optimization/messages"))
     }
 
     /// An open the plan refuses, in the words upstream refuses it in where it does, and by the key
@@ -2457,6 +2512,55 @@ mod tokio_engine {
                 CongestionControl::BlockFirst => EngineCongestion::BlockFirst,
             })
             .with_express(qos.express())
+    }
+
+    /// What the configuration gives a publication (the engine's one reading of `qos/publication`,
+    /// `wz_capi_core::session_defaults::PublicationDefaults`), in the form this crate's builders
+    /// write over what the application states (`PublisherBuilder::apply_qos_overwrites`).
+    pub(super) fn publisher_qos_of(
+        defaults: &wz_capi_core::session_defaults::PublicationDefaults,
+    ) -> zenoh_config::qos::PublisherQoSConfig {
+        use zenoh_config::qos::{CongestionControlConf, PriorityConf};
+        zenoh_config::qos::PublisherQoSConfig {
+            congestion_control: defaults.congestion_control.and_then(|congestion| {
+                match congestion {
+                    EngineCongestion::Drop => Some(CongestionControlConf::Drop),
+                    EngineCongestion::Block => Some(CongestionControlConf::Block),
+                    #[cfg(feature = "unstable")]
+                    EngineCongestion::BlockFirst => Some(CongestionControlConf::BlockFirst),
+                    // Without `unstable` the configuration of this crate cannot state it.
+                    #[cfg(not(feature = "unstable"))]
+                    EngineCongestion::BlockFirst => None,
+                }
+            }),
+            priority: defaults.priority.and_then(|priority| match priority {
+                // The configuration names no control band.
+                EnginePriority::Control => None,
+                EnginePriority::RealTime => Some(PriorityConf::RealTime),
+                EnginePriority::InteractiveHigh => Some(PriorityConf::InteractiveHigh),
+                EnginePriority::InteractiveLow => Some(PriorityConf::InteractiveLow),
+                EnginePriority::DataHigh => Some(PriorityConf::DataHigh),
+                EnginePriority::Data => Some(PriorityConf::Data),
+                EnginePriority::DataLow => Some(PriorityConf::DataLow),
+                EnginePriority::Background => Some(PriorityConf::Background),
+            }),
+            express: defaults.express,
+            #[cfg(feature = "unstable")]
+            reliability: defaults.reliability.map(|reliability| match reliability {
+                EngineReliability::BestEffort => zenoh_config::qos::ReliabilityConf::BestEffort,
+                EngineReliability::Reliable => zenoh_config::qos::ReliabilityConf::Reliable,
+            }),
+            #[cfg(feature = "unstable")]
+            allowed_destination: defaults.allowed_destination.map(
+                |destination| match destination {
+                    EngineLocality::Any => zenoh_config::qos::PublisherLocalityConf::Any,
+                    EngineLocality::SessionLocal => {
+                        zenoh_config::qos::PublisherLocalityConf::SessionLocal
+                    }
+                    EngineLocality::Remote => zenoh_config::qos::PublisherLocalityConf::Remote,
+                },
+            ),
+        }
     }
 
     /// The engine's source information for `info`.
@@ -4112,9 +4216,6 @@ pub(crate) struct SessionInner {
     callbacks_drop_sync_group: SyncGroup,
     /// How long a query waits for its replies when it does not say, from the configuration.
     queries_default_timeout: Duration,
-    /// The quality of service the configuration (`qos/publication`) sets for the publications on
-    /// the keys it names, which a publisher or a put takes in place of what its builder says.
-    publisher_qos_tree: Arc<KeBoxTree<PublisherQoSConfig>>,
     /// The configuration the session was opened with, as the application reads it
     /// ([`Session::config`]).
     #[cfg(feature = "unstable")]
@@ -5134,7 +5235,6 @@ impl Session {
             zid: core.zid,
             callbacks_drop_sync_group: SyncGroup::default(),
             queries_default_timeout: core.queries_default_timeout,
-            publisher_qos_tree: core.publisher_qos_tree,
             #[cfg(feature = "unstable")]
             config: core.config,
             #[cfg(feature = "unstable")]
@@ -5174,7 +5274,6 @@ pub(crate) struct RuntimeCore {
     engine: Arc<Engine>,
     zid: ZenohId,
     queries_default_timeout: Duration,
-    publisher_qos_tree: Arc<KeBoxTree<PublisherQoSConfig>>,
     #[cfg(feature = "unstable")]
     config: crate::api::config::Notifier<zenoh_config::ExpandedConfig>,
     #[cfg(feature = "unstable")]
@@ -5262,18 +5361,22 @@ impl RuntimeCore {
         // The clock of the node stamps what it intercepts, whichever session the message is of.
         #[cfg(feature = "unstable")]
         engine.install_interception_source(&timestamps);
+        // The copy of a large message decides by what the engine's open compiled, the decision the
+        // C ABI takes as well, and copies into this crate's provider.
+        #[cfg(all(
+            feature = "unstable",
+            feature = "shared-memory",
+            feature = "engine-tokio"
+        ))]
+        let shm_promoter = crate::api::shm::transport::Promoter::new(
+            engine.shm_promotion(),
+            shm_provider.as_ref(),
+        )
+        .map(Arc::new);
         Ok(RuntimeCore {
             engine: Arc::new(engine),
             zid,
             queries_default_timeout,
-            publisher_qos_tree: Arc::new(
-                config
-                    .0
-                    .get_json("qos/publication")
-                    .ok()
-                    .and_then(|json| serde_json::from_str::<PublisherQoSConfList>(&json).ok())
-                    .map_or_else(KeBoxTree::new, Into::into),
-            ),
             #[cfg(feature = "unstable")]
             config: crate::api::config::Notifier::new(config.0.clone().expanded()),
             #[cfg(feature = "unstable")]
@@ -5283,11 +5386,7 @@ impl RuntimeCore {
                 feature = "shared-memory",
                 feature = "engine-tokio"
             ))]
-            shm_promoter: crate::api::shm::transport::Promoter::new(
-                &expanded,
-                shm_provider.as_ref(),
-            )
-            .map(Arc::new),
+            shm_promoter,
             #[cfg(all(feature = "unstable", feature = "shared-memory"))]
             shm_provider,
             #[cfg(feature = "shared-memory")]
@@ -5998,8 +6097,8 @@ impl Session {
     /// The clock of the node this session is on, the one its timestamps come from, or `None` when
     /// the node's role does not timestamp (`timestamping/enabled`): upstream's `Session::hlc`.
     /// The clock is lent as a [`NodeHlc`], which has every public method of `uhlc::HLC`; it is not
-    /// that type because the node's clock is not one (see [`NodeHlc`]). A router node lends none
-    /// yet: its clock is not read off the node.
+    /// that type because the node's clock is not one (see [`NodeHlc`]). A router node lends the
+    /// clock its data plane stamps with, which timestamps by default, as upstream's router does.
     #[zenoh_macros::internal]
     pub fn hlc(&self) -> Option<&NodeHlc> {
         self.0.hlc.as_ref()
@@ -6575,36 +6674,14 @@ impl Session {
         self.0.queries_default_timeout
     }
 
-    /// The quality of service `qos/publication` sets for a publication on `key_expr`: the entry
-    /// of the first key the configuration names that includes it, or none set. When several
-    /// include it, one is used and the others are said.
+    /// The quality of service `qos/publication` sets for a publication on `key_expr`, from the
+    /// rules the engine's open compiled for the session, which the C ABI applies as well: the
+    /// settings of the first rule written whose key expression includes it, or none set.
     pub(crate) fn get_publisher_qos_overwrite(
         &self,
         key_expr: &zenoh_keyexpr::keyexpr,
     ) -> PublisherQoSConfig {
-        let mut nodes_including = self
-            .0
-            .publisher_qos_tree
-            .nodes_including(key_expr)
-            .filter(|n| n.weight().is_some())
-            .peekable();
-        if let Some(node) = nodes_including.next() {
-            if nodes_including.peek().is_some() {
-                let others: Vec<String> =
-                    nodes_including.map(|n| n.keyexpr().to_string()).collect();
-                tracing::warn!(
-                    "Publisher declared on `{}` which is included by multiple key_exprs in qos config ({}). Using qos config for `{}`",
-                    key_expr,
-                    others.join(", "),
-                    node.keyexpr(),
-                );
-            }
-            return node
-                .weight()
-                .expect("first node weight should not be None")
-                .clone();
-        }
-        PublisherQoSConfig::default()
+        self.0.engine.publisher_qos_overwrite(key_expr.as_str())
     }
 
     /// Hand a query to the engine, with its replies going to `callback`.
@@ -6998,6 +7075,44 @@ mod tests {
         assert!(session.hlc().is_none());
     }
 
+    /// A router timestamps by default, as upstream's does, and its session lends the clock its data
+    /// plane stamps with: the one `Session::new_timestamp` reads too.
+    #[cfg(feature = "internal")]
+    #[test]
+    fn a_router_lends_the_clock_of_its_data_plane() {
+        let router = open(
+            Config::from_json5(
+                r#"{ id: "a1b2d4", mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     scouting: { multicast: { enabled: false } } }"#,
+            )
+            .expect("a configuration zenoh reads"),
+        )
+        .wait()
+        .expect("a router opens");
+        let hlc = router.hlc().expect("a router timestamps by default");
+        let before = router.new_timestamp();
+        let lent = hlc.new_timestamp();
+        let after = router.new_timestamp();
+        assert!(before < lent && lent < after, "{before} {lent} {after}");
+        assert_eq!(hlc.get_id(), before.get_id());
+        assert_eq!(after.get_id(), before.get_id());
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn a_router_told_not_to_timestamp_lends_no_clock() {
+        let router = open(
+            Config::from_json5(
+                r#"{ id: "a1b2d5", mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     scouting: { multicast: { enabled: false } }, timestamping: { enabled: false } }"#,
+            )
+            .expect("a configuration zenoh reads"),
+        )
+        .wait()
+        .expect("a router opens");
+        assert!(router.hlc().is_none());
+    }
+
     #[test]
     fn a_weak_reference_dereferences_to_its_session_and_is_no_handle_of_it() {
         let session = open(peer("a1b2d1")).wait().expect("opens");
@@ -7071,20 +7186,100 @@ mod tests {
             .cloned()
             .collect();
         assert!(keys.len() > 100, "{} keys", keys.len());
+        let state = |key: &str| key_state(key, tokio_engine::SESSION_REACH);
         let stateless: Vec<&String> = keys
             .iter()
-            .filter(|key| key_state(key).is_none() && !is_section_of_keys_with_a_state(key))
+            .filter(|key| state(key.as_str()).is_none() && !is_section_of_keys_with_a_state(key))
             .collect();
         assert!(stateless.is_empty(), "keys with no state: {stateless:#?}");
         let count = |wanted| {
             keys.iter()
-                .filter(|key| key_state(key) == Some(wanted))
+                .filter(|key| state(key.as_str()) == Some(wanted))
                 .count()
         };
         // The three states are all in use: a table whose refused state is empty refuses nothing.
         assert!(count(KeyState::Mapped) > 0);
         assert!(count(KeyState::Inert) > 0);
         assert!(count(KeyState::Unmapped) > 0);
+    }
+
+    /// `qos/publication` on this crate: every case the surfaces of the key are held to (the C ABI
+    /// runs the same ones), through a publisher declared with nothing of its own, on the registry
+    /// of faces and on a node. A setting the case leaves unset is the builder's own.
+    #[test]
+    fn a_publisher_is_given_what_its_key_is_configured_with() {
+        use wz_capi_core::runtime::qos::{CongestionControl as Wire, Priority as Band};
+        use wz_capi_core::session_defaults::PUBLICATION_QOS_CASES;
+
+        let band = |band: Band| band as u8;
+        let congestion = |wire: Wire| match wire {
+            Wire::Drop => CongestionControl::Drop,
+            Wire::Block => CongestionControl::Block,
+            #[cfg(feature = "unstable")]
+            Wire::BlockFirst => CongestionControl::BlockFirst,
+            #[cfg(not(feature = "unstable"))]
+            Wire::BlockFirst => unreachable!("no case states it"),
+        };
+        for on_a_node in [false, true] {
+            for case in PUBLICATION_QOS_CASES {
+                if case.unstable && !cfg!(feature = "unstable") {
+                    continue;
+                }
+                let label = format!("node={on_a_node}: {} on {}", case.rules, case.key);
+                let config = peer_with("qos/publication", case.rules);
+                let session = if on_a_node {
+                    with_the_node(|| open(config).wait())
+                } else {
+                    open(config).wait()
+                }
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+                let publisher = session
+                    .declare_publisher(case.key)
+                    .wait()
+                    .unwrap_or_else(|error| panic!("{label}: {error}"));
+                let expected = &case.expected;
+                assert_eq!(
+                    publisher.priority as u8,
+                    expected.priority.map_or(Priority::DEFAULT as u8, band),
+                    "{label}"
+                );
+                assert_eq!(
+                    publisher.congestion_control,
+                    expected
+                        .congestion_control
+                        .map_or(CongestionControl::DEFAULT, congestion),
+                    "{label}"
+                );
+                assert_eq!(
+                    publisher.is_express,
+                    expected.express.unwrap_or(false),
+                    "{label}"
+                );
+                #[cfg(feature = "unstable")]
+                {
+                    use wz_capi_core::runtime::{locality::Locality as Reach, Reliability as Kind};
+                    assert_eq!(
+                        publisher.reliability,
+                        match expected.reliability {
+                            Some(Kind::BestEffort) => Reliability::BestEffort,
+                            Some(Kind::Reliable) | None => Reliability::Reliable,
+                        },
+                        "{label}"
+                    );
+                    assert_eq!(
+                        publisher.destination,
+                        match expected.allowed_destination {
+                            Some(Reach::SessionLocal) => Locality::SessionLocal,
+                            Some(Reach::Remote) => Locality::Remote,
+                            Some(Reach::Any) | None => Locality::Any,
+                        },
+                        "{label}"
+                    );
+                }
+                drop(publisher);
+                session.close().wait().expect("closes");
+            }
+        }
     }
 
     /// A configuration with `key` set to the json5 `value` and a peer that listens on the loopback.
@@ -7096,23 +7291,23 @@ mod tests {
 
     #[test]
     fn a_key_the_engine_does_not_act_on_is_refused_by_its_name_unless_it_is_the_default() {
-        // `transport/unicast/open_timeout` is upstream's (10 s by default) and this engine's
-        // handshake does not read it: stating another value asks for what will not happen. (The
-        // key is one the engine does not act on; the example moves to the next one when the
-        // engine comes to act on this one, as it did for `accept_timeout`.)
-        let error = open(peer_with("transport/unicast/open_timeout", "1234"))
+        // `transport/link/tx/threads` is upstream's and this engine does not read it: stating
+        // another value asks for what will not happen. (The key is one the engine does not act
+        // on; the example moves to the next one when the engine comes to act on this one, as it
+        // did for `accept_timeout` and `open_timeout`.)
+        let error = open(peer_with("transport/link/tx/threads", "1234"))
             .wait()
             .expect_err("an unmapped key with a value of its own");
         let text = error.to_string();
         assert!(
-            text.contains("`transport/unicast/open_timeout` = 1234"),
+            text.contains("`transport/link/tx/threads` = 1234"),
             "{text}"
         );
         // CONTROL: the same key at its default is no instruction, and the session opens.
         let default = Config::default()
-            .get_json("transport/unicast/open_timeout")
+            .get_json("transport/link/tx/threads")
             .expect("a default");
-        open(peer_with("transport/unicast/open_timeout", &default))
+        open(peer_with("transport/link/tx/threads", &default))
             .wait()
             .expect("the default of an unmapped key opens");
     }
@@ -7697,7 +7892,8 @@ mod tests {
             who: &str,
         ) -> ((Vec<u8>, bool), (Vec<u8>, bool)) {
             let deadline = Instant::now() + Duration::from_secs(10);
-            let (mut got_remote, mut got_own) = (None, None);
+            let (mut got_remote, mut got_own): (Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>) =
+                (None, None);
             loop {
                 if let (Some(told_remote), Some(told_own)) = (&got_remote, &got_own) {
                     return (told_remote.clone(), told_own.clone());
@@ -8156,7 +8352,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|seen| seen.what == what && seen.zid == zid)
-            .map(|seen| seen.within.iter().any(|name| *name == span))
+            .map(|seen| seen.within.contains(&span))
             .collect()
     }
 

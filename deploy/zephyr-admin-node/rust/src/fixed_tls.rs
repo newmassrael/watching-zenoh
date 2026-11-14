@@ -79,7 +79,7 @@ pub fn identity(subject: &CStr) -> Result<&'static Identity, &'static CStr> {
 /// `tls/` links present `identity`.
 #[cfg(feature = "tls")]
 pub fn stack(
-    address: [u8; 4],
+    address: core::net::IpAddr,
     rx: &'static dyn ByteSource,
     tx: &'static dyn ByteSource,
     identity: &'static Identity,
@@ -92,7 +92,7 @@ pub fn stack(
 /// that has none).
 #[cfg(feature = "fixed-admin")]
 pub fn accepting_stack(
-    address: [u8; 4],
+    address: core::net::IpAddr,
     rx: &'static dyn ByteSource,
     tx: &'static dyn ByteSource,
     identity: &'static Identity,

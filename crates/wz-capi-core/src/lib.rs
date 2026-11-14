@@ -86,6 +86,9 @@ pub mod scouting;
 pub mod scouting_node;
 #[cfg(feature = "peer")]
 pub mod scouting_responder;
+// What a session applies itself above its links, compiled once from its configuration and read
+// by every ABI that publishes through the session.
+pub mod session_defaults;
 
 /// The runtime this engine runs its sessions on, for an ABI's modules that reach past the port
 /// (queries, liveliness, the advanced plane, ...): they name the runtime through the engine they

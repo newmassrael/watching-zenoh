@@ -1632,7 +1632,15 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// [`WZ_CAPI_C_CONFIG_NOT_IN_BUILD`], and [`wz_capi_c_config_honoured`] lists the keys THIS
 /// library honours, which leaves out the keys of a capability it was built without (the traffic
 /// policy's in a build without `interceptors`, for one).
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 15;
+///
+/// It moves to 16 with no new symbol: the rule `wz_capi_c.h` states for the clock a program
+/// registers changed. `z_timestamp_new` gives a program the node clock's time (the registered
+/// clock where one is), whatever the clock's standing, and the `clock-quality-stamping` policy
+/// holds back only the data the node stamps; before it, `z_timestamp_new` read the system clock.
+/// Under that policy an advanced publisher, every sample of which carries a time, refuses its put
+/// (`Z_EGENERIC`) and its delete until the clock is reported synchronised, and sends nothing;
+/// before it, the sample went out stamped with the system clock.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 16;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;
@@ -1872,16 +1880,38 @@ pub unsafe extern "C" fn wz_capi_c_config_disposition(
         let Ok(path) = (unsafe { std::ffi::CStr::from_ptr(path) }).to_str() else {
             return Z_EPARSE;
         };
-        let answer = match wz_runtime_tokio::zenoh_config::config_key_disposition(path) {
-            D::Honoured => WZ_CAPI_C_CONFIG_HONOURED,
-            D::DeclaredUnhonoured => WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED,
-            D::Unknown => WZ_CAPI_C_CONFIG_UNKNOWN,
-            D::NotInBuild => WZ_CAPI_C_CONFIG_NOT_IN_BUILD,
+        let answer = match session_key_answer(path) {
+            Some(answer) => answer,
+            None => match wz_runtime_tokio::zenoh_config::config_key_disposition(path) {
+                D::Honoured => WZ_CAPI_C_CONFIG_HONOURED,
+                D::DeclaredUnhonoured => WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED,
+                D::Unknown => WZ_CAPI_C_CONFIG_UNKNOWN,
+                D::NotInBuild => WZ_CAPI_C_CONFIG_NOT_IN_BUILD,
+            },
         };
         // SAFETY: checked non-null above.
         unsafe { *out = answer };
         Z_OK
     })
+}
+
+/// What [`wz_capi_c_config_disposition`] answers for a key only a session applies
+/// (`wz_runtime_tokio::zenoh_config::SESSION_HONOURED_KEYS`), which the reader's disposition
+/// cannot answer for this library: whether THIS library's session acts on it is a fact of its
+/// build ([`crate::session::SESSION_REACH`]). Acted on is honoured; a key this library has
+/// looked at and does not act on, though its build carries shared memory, is declared
+/// unhonoured; a shared-memory key in a library built without shared memory is not in the
+/// build, and a configuration that states it opens and applies nothing, as upstream's library
+/// built so does. `None` for any other key.
+fn session_key_answer(path: &str) -> Option<i32> {
+    use wz_capi_core::open_plan::{session_key_state, KeyState};
+    Some(
+        match session_key_state(path, crate::session::SESSION_REACH)? {
+            KeyState::Mapped => WZ_CAPI_C_CONFIG_HONOURED,
+            KeyState::Unmapped => WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED,
+            KeyState::Inert => WZ_CAPI_C_CONFIG_NOT_IN_BUILD,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1923,6 +1953,57 @@ mod config_disposition_tests {
         assert!(
             !found,
             "the enumeration now carries {leaf}, so this witness proves nothing"
+        );
+    }
+
+    /// A key only a session applies is answered for THIS library's session: the per-key
+    /// publication QoS is honoured in every build, the shared-memory subsystem where the library
+    /// has shared memory, the copy's threshold where it also has the session's provider, and the
+    /// list of messages, whose query and reply this library sends as bytes, never. A
+    /// shared-memory key in a library without shared memory is out of its build.
+    #[test]
+    fn a_session_key_is_answered_for_this_librarys_session() {
+        let shm = cfg!(feature = "zenoh-c-shared-memory");
+        let provider = cfg!(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ));
+        let not_acted_on = if shm {
+            WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED
+        } else {
+            WZ_CAPI_C_CONFIG_NOT_IN_BUILD
+        };
+        assert_eq!(ask("qos/publication"), (Z_OK, WZ_CAPI_C_CONFIG_HONOURED));
+        assert_eq!(
+            ask("transport/shared_memory/mode"),
+            (
+                Z_OK,
+                if shm {
+                    WZ_CAPI_C_CONFIG_HONOURED
+                } else {
+                    WZ_CAPI_C_CONFIG_NOT_IN_BUILD
+                }
+            )
+        );
+        assert_eq!(
+            ask("transport/shared_memory/transport_optimization/message_size_threshold"),
+            (
+                Z_OK,
+                if provider {
+                    WZ_CAPI_C_CONFIG_HONOURED
+                } else {
+                    not_acted_on
+                }
+            )
+        );
+        assert_eq!(
+            ask("transport/shared_memory/transport_optimization/messages"),
+            (Z_OK, not_acted_on)
+        );
+        // CONTROL: a key that is not a session's is answered by the reader, as before.
+        assert_eq!(
+            ask("transport/unicast/open_timeout"),
+            (Z_OK, WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED)
         );
     }
 

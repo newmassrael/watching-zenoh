@@ -1,0 +1,129 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The protocol implementation extra information for testing proforma of the zenoh conformance
+# test suite (ISO/IEC 9646-4 and -5): what the test system needs to know about one test
+# environment to run the selected tests there. A PICS answer says what the implementation is; a
+# PIXIT answer says where and how it is tested, and it changes no verdict's meaning.
+# docs/conformance-suite.md section 5 defines every field; crates/wz-conformance-suite holds the
+# proforma to it.
+#
+# `answer` is "text", "integer" or "choice" (one of `values`). `distinct_from` names another
+# item whose answer this one's must differ from: the test system refuses a test environment
+# where the two are equal, before any test runs.
+
+format = "wz-conformance-pixit-proforma"
+format_version = 1
+
+# ---------------------------------------------------------------------------------------------
+# The test method and the two points of control and observation
+
+[[item]]
+id = "X-TEST-METHOD"
+question = "Which abstract test method does this environment realise?"
+answer = "choice"
+values = ["coordinated", "distributed", "local", "remote"]
+
+[[item]]
+id = "X-IUT-LOCATORS"
+question = "Which locators does the implementation under test listen on, or dial, for the test link?"
+answer = "text"
+
+[[item]]
+id = "X-LT-LOCATORS"
+question = "Which locators does the lower tester listen on, or dial, for the test link?"
+answer = "text"
+
+[[item]]
+id = "X-TEST-LINK-INTERFACE"
+question = "Which network interface carries the test link, on the implementation's side?"
+answer = "text"
+
+[[item]]
+id = "X-TMP-CHANNEL-KIND"
+question = "Over what does the test management protocol run between the lower and the upper tester?"
+answer = "choice"
+values = ["network-interface", "uart", "usb-cdc", "swo-rtt"]
+
+[[item]]
+id = "X-TMP-CHANNEL"
+question = "Which interface or port carries the test management protocol, on the implementation's side?"
+answer = "text"
+distinct_from = "X-TEST-LINK-INTERFACE"
+
+# ---------------------------------------------------------------------------------------------
+# How the implementation under test is configured for this environment
+#
+# A protocol parameter that an implementation reads from its configuration when a session opens is
+# not a property of the build: the PICS item that asks for it is answered, for that
+# implementation, from these items (an answer row `pixit = "<id>"`), and the value admitted is the
+# PICS item's.
+
+[[item]]
+id = "X-IUT-BATCH-UNICAST"
+question = "Which batch size, in bytes, is the implementation configured to state in its Init?"
+answer = "integer"
+unit = "byte"
+
+[[item]]
+id = "X-IUT-BATCH-MCAST"
+question = "Which batch size, in bytes, is the implementation configured to state in its Join?"
+answer = "integer"
+unit = "byte"
+
+[[item]]
+id = "X-IUT-LEASE"
+question = "Which lease, in milliseconds, is the implementation configured to state?"
+answer = "integer"
+unit = "millisecond"
+
+[[item]]
+id = "X-IUT-KA-PER-LEASE"
+question = "How many keepalives in one lease is the implementation configured to send on an idle link?"
+answer = "integer"
+
+[[item]]
+id = "X-IUT-FRAG-MAX"
+question = "What is the largest message, in bytes, the implementation is configured to rejoin from fragments?"
+answer = "integer"
+unit = "byte"
+
+# ---------------------------------------------------------------------------------------------
+# The upper tester's share of the implementation's resources
+
+[[item]]
+id = "X-UT-STACK-BYTES"
+question = "How many bytes of stack does the upper tester use, at its peak?"
+answer = "integer"
+unit = "byte"
+
+[[item]]
+id = "X-UT-HEAP-BYTES"
+question = "How many bytes of heap does the upper tester hold, at its peak?"
+answer = "integer"
+unit = "byte"
+
+[[item]]
+id = "X-UT-TASKS"
+question = "How many tasks or threads does the upper tester run beside the implementation?"
+answer = "integer"
+
+# ---------------------------------------------------------------------------------------------
+# Congestion below the implementation, and time
+
+[[item]]
+id = "X-LINK-RATE-CONTROL"
+question = "How does the test system slow the test link below the implementation?"
+answer = "choice"
+values = ["receive-window", "pause-frames", "link-speed", "rts-cts", "none"]
+
+[[item]]
+id = "X-PAUSE-SENDER"
+question = "Which device sends the PAUSE frames to the implementation's interface, when the rate control is pause-frames?"
+answer = "text"
+
+[[item]]
+id = "X-TIMER-TOLERANCE-MS"
+question = "By how many milliseconds may an observed instant differ from the instant a test expects, in this environment?"
+answer = "integer"
+unit = "millisecond"

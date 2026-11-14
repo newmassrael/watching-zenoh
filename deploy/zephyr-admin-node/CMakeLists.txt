@@ -56,12 +56,14 @@ macro(wz_secure_channel)
 endmacro()
 
 if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
-  # The POSIX socket layer the sockets seam calls (`zephyr_sys::socket`) and the
-  # two board hooks that read the interface (wz_board_hooks.c).
+  # The POSIX socket layer the sockets seam calls (`zephyr_sys::socket`), the socket hooks, and
+  # the two board hooks that read the interface (wz_board_hooks.c): the node's own address, of the
+  # family the image chose for it (IPv4, IPv6, or IPv6 on a stack with both), and its zid.
+  wz_node_address_hooks(node_address_hooks)
   set(backend_undefined
     socket bind getsockname sendto recvfrom poll close
-    wz_net_set_rcvtimeo_ms wz_net_recv_timed_out
-    wzApplicationGetIpv4Address wzApplicationGetZid)
+    ${WZ_SOCKET_HOOKS}
+    ${node_address_hooks} wzApplicationGetZid)
 
   # The session reads each datagram where the link holds it (CONFIG_WZ_RX_IN_PLACE).
   if(CONFIG_WZ_RX_IN_PLACE)

@@ -181,6 +181,7 @@ mod ffi;
 pub mod get;
 pub mod handlers;
 pub mod keyexpr;
+mod last_timestamp;
 #[cfg(any(feature = "connectivity", feature = "admin-space"))]
 mod link_properties;
 #[cfg(feature = "liveliness")]

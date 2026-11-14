@@ -294,7 +294,7 @@ impl<const N: usize> core::fmt::Write for PemText<N> {
 /// The stack of a node at `local` whose links take their buffers from `rx` and `tx`, and whose
 /// `tls/` links present `identity`.
 pub fn stack(
-    local: [u8; 4],
+    local: core::net::IpAddr,
     rx: &'static dyn ByteSource,
     tx: &'static dyn ByteSource,
     identity: &'static Identity,

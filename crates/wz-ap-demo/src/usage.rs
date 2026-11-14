@@ -179,6 +179,11 @@ pub(crate) fn print_usage() {
     eprintln!("                             default 65535). zenoh transport/link/tx/batch_size");
     eprintln!("    --lease-ms <ms>          OpenSyn session lease announced to the peer");
     eprintln!("                             (default 10000). zenoh transport/link/tx/lease");
+    eprintln!("    --sn-resolution <8bit|16bit|32bit|64bit>");
+    eprintln!("                             width of the frame sequence numbers the InitSyn");
+    eprintln!("                             offers; the session takes the smaller of it and the");
+    eprintln!("                             peer's (default the build's, 32bit).");
+    eprintln!("                             zenoh transport/link/tx/sequence_number_resolution");
     eprintln!("    --tx-queue-size-control <n>, --tx-queue-size-real-time <n>,");
     eprintln!("    --tx-queue-size-interactive-high <n>, --tx-queue-size-interactive-low <n>,");
     eprintln!("    --tx-queue-size-data-high <n>, --tx-queue-size-data <n>,");
@@ -199,16 +204,46 @@ pub(crate) fn print_usage() {
     eprintln!("                             how long a blocking message waits before the session");
     eprintln!("                             closes (default 5000000).");
     eprintln!("                             zenoh transport/link/tx/queue/congestion_control/block/wait_before_close");
+    eprintln!("    --tx-batching <true|false>");
+    eprintln!("                             whether a session coalesces a burst into few frames");
+    eprintln!("                             (default true); false sends each message as a frame");
+    eprintln!(
+        "                             of its own. zenoh transport/link/tx/queue/batching/enabled"
+    );
+    eprintln!("    --tx-batching-time-limit-ms <ms>");
+    eprintln!("                             the longest a link's writer holds a burst back for");
+    eprintln!("                             senders still adding to it (default the writer's");
+    eprintln!("                             200 us; 0 holds nothing back).");
+    eprintln!("                             zenoh transport/link/tx/queue/batching/time_limit");
+    eprintln!("    --open-timeout-ms <ms>");
+    eprintln!("                             how long one open of an endpoint, its dial and its");
+    eprintln!("                             handshake, may take (default 10000).");
+    eprintln!("                             zenoh transport/unicast/open_timeout");
+    eprintln!("    --tx-queue-allocation <init|lazy>");
+    eprintln!("                             whether a link's queue allocates every batch it may");
+    eprintln!("                             hold when its session is established, or each when");
+    eprintln!("                             first wanted (default lazy).");
+    eprintln!("                             zenoh transport/link/tx/queue/allocation/mode");
     eprintln!("    --rx-max-message-size <bytes>");
     eprintln!("                             the largest message a session rejoins from fragments");
     eprintln!("                             (default 1073741824, read as at most the build's");
     eprintln!("                             reassembly slot).");
     eprintln!("                             zenoh transport/link/rx/max_message_size");
+    eprintln!("    --rx-buffer-size <bytes>");
+    eprintln!("                             the read storage each stream link pools, in");
+    eprintln!("                             buffers of the widest batch (default 65535, one).");
+    eprintln!("                             zenoh transport/link/rx/buffer_size");
     eprintln!("    --link-config <kind>#<k=v;...>");
-    eprintln!("                             socket options every <kind> link takes unless its");
-    eprintln!("                             locator names the same key (repeatable). tcp and tls");
+    eprintln!("                             options every <kind> link takes unless its locator");
+    eprintln!("                             names the same key (repeatable). tcp and tls");
     eprintln!("                             carry so_rcvbuf and so_sndbuf. zenoh");
     eprintln!("                             transport/link/<kind>/so_rcvbuf and so_sndbuf");
+    eprintln!("                             unixpipe carries file_mask, the FIFO mode, decimal:");
+    eprintln!("                             zenoh transport/link/unixpipe/file_access_mask");
+    eprintln!("                             tls, quic and quic-datagram carry");
+    eprintln!("                             close_link_on_expiration: a link closes when");
+    eprintln!("                             its peer's certificate chain expires:");
+    eprintln!("                             zenoh transport/link/tls/close_link_on_expiration");
     eprintln!("    --timestamping <bool>    whether THIS node stamps the un-timestamped data");
     eprintln!("                             it relays. zenoh timestamping/enabled, which is a");
     eprintln!("                             PER-ROLE default: a router stamps, a peer and a");
@@ -390,15 +425,18 @@ pub(crate) fn print_usage() {
     eprintln!("                             links carry zenoh's default 100. Two entries naming");
     eprintln!("                             one destination are REFUSED, as a zenohd refuses");
     eprintln!("                             the same config. Requires --router-hat.");
-    eprintln!("    --gateway-south <json5>  how this ROUTER or PEER partitions its south into subregions,");
+    eprintln!("    --gateway-south <json5>  how this node partitions its south into subregions,");
     eprintln!("                             in the shape of the upstream gateway south value:");
     eprintln!("                             \"auto\" (the default), or a list of subregions, each");
     eprintln!("                             with filters on modes, zids, interfaces and region");
     eprintln!("                             names. A remote is placed in the first subregion it");
     eprintln!("                             matches, and every session announces the bound that");
-    eprintln!("                             gives it. Requires --router-hat or --peer and the");
-    eprintln!("                             zenoh-config build feature; refused on every other");
-    eprintln!("                             run mode.");
+    eprintln!(
+        "                             gives it. Requires --router-hat, --peer, --client-node"
+    );
+    eprintln!("                             or a one-shot --connect, and the zenoh-config build");
+    eprintln!("                             feature; refused on every other run mode and with");
+    eprintln!("                             --reconnect.");
     eprintln!(
         "    --govern-multicast       hold this ROUTER's multicast group to the node's access"
     );

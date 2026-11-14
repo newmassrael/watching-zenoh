@@ -283,7 +283,12 @@ fn rig<const S: usize>(s: &'static Statics<S>, link: LinkRef, zid: u8, port: u16
         .expect("the observer is installed once");
 
     listen(&s.listener, port, &s.accept_cells).expect("the node listens");
-    let stack = Stack::new([127, 0, 0, 1], &s.rx, &s.tx, dial(link, &s.dial_cells));
+    let stack = Stack::new(
+        std::net::IpAddr::from([127, 0, 0, 1]),
+        &s.rx,
+        &s.tx,
+        dial(link, &s.dial_cells),
+    );
     let acceptor = stack.acceptor(LwipTcpListen::new(link, &s.listener));
     let host: &'static Host<S> = Box::leak(Box::new(SessionHost::new(
         CoopLocalSet::new(&runtime),

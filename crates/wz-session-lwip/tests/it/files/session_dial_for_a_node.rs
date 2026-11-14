@@ -30,7 +30,7 @@ use std::rc::Rc;
 use wz_codecs::wire_const::{T_MID_CLOSE, T_MID_OPEN};
 use wz_link_lwip::rx_sockets::{SessionRxPool, SessionRxSocket};
 use wz_link_lwip::LwipLink;
-use wz_runtime_coop::session_drive::{IpEndpoint, PumpSlots, SessionDriveConfig, SessionRole};
+use wz_runtime_coop::session_drive::{PumpSlots, SessionDriveConfig, SessionRole};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopTime, RuntimeCell};
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::datagram_peer::is_init_syn;
@@ -127,10 +127,7 @@ fn next_datagram_after_the_init_ack(
         .dial(
             &links,
             DialTarget::node(
-                IpEndpoint {
-                    addr: [127, 0, 0, 1],
-                    port: sink_port,
-                },
+                std::net::SocketAddr::from(([127, 0, 0, 1], sink_port)),
                 expected,
             ),
             Counting(0xb0),

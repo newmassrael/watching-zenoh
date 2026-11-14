@@ -118,8 +118,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use wz_runtime_coop::session_drive::{
-        spawn_session, IpEndpoint, Locator, OpenedLink, SessionDriveConfig, SessionLinks,
-        SessionRole,
+        spawn_session, Locator, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
     };
     use wz_runtime_coop::session_runtime::new_session_actions;
     use wz_runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
@@ -198,10 +197,7 @@ mod tests {
         );
 
         let OpenedLink { sink, pump } = MemoryLinks::new(net, INITIATOR)
-            .open_initiator(Locator::udp(IpEndpoint {
-                addr: ACCEPTOR,
-                port: 7447,
-            }))
+            .open_initiator(Locator::udp(std::net::SocketAddr::from((ACCEPTOR, 7447))))
             .expect("open the initiator's end");
         let initiator = new_session_actions(
             sink,

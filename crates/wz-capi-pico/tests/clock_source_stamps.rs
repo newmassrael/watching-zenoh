@@ -7,12 +7,13 @@
 //! One test, in a process of its own, because the registry is the process's: the arms run in
 //! order against it, and a second test in this binary would see what the first registered.
 //!
-//! * ARM 1, nothing registered: the stamp is the system clock's, as it always was.
+//! * ARM 1, nothing registered: the stamp is the system clock's, and the next one is later.
 //! * ARM 2, a clock registered: the stamp carries that clock's seconds, and two stamps made while
 //!   the clock stands still still strictly increase.
 //! * ARM 3, the registered clock cannot say what time it is: there is no stamp to give, and the
 //!   system clock is not the fallback of a clock the program chose.
-//! * ARM 4, the clock removed: the system clock again.
+//! * ARM 4, the clock removed: the system clock is read again, and as it is behind the last stamp
+//!   the session gave, the stamp goes on from that one rather than back to the system clock.
 
 #![cfg(feature = "clock-source")]
 
@@ -89,6 +90,8 @@ fn a_registered_clock_is_the_clock_z_timestamp_new_stamps_with() {
             "the system clock's seconds, not any registered one's: {}",
             system >> 32
         );
+        let later = stamp(&session).expect("the system clock stamps again");
+        assert!(later > system, "one session's stamps strictly increase");
 
         // ARM 2
         CLOCK_SECS.store(AHEAD, Ordering::SeqCst);
@@ -116,7 +119,11 @@ fn a_registered_clock_is_the_clock_z_timestamp_new_stamps_with() {
         assert_eq!(wz_ext_clock_source_unregister(handle), Z_OK);
         assert_eq!(wz_ext_clock_source_unregister(handle), Z_ERR_INVALID);
         let back = stamp(&session).expect("the system clock again");
-        assert!(back >> 32 > 1_700_000_000 && back >> 32 < AHEAD);
+        assert_eq!(
+            back,
+            second + 1,
+            "the system clock is behind the last stamp, so the stamp goes on from it"
+        );
 
         z_session_drop(z_session_move(&mut session));
     }

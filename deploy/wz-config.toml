@@ -80,10 +80,14 @@ catalog_version = 2
 # is not a capability: no build chooses it, the zenoh-c ABI and the Rust API always have it, and
 # the pico ABI, which reads no zenoh configuration, names the features it wants and so never does.
 core = ["rx-busy-poll", "open-plan"]
+# `std`: the pico ABI layer on the host's standard library (its locks, condition variables and
+# allocator), which the crate's default names first. It is not a capability: no plane comes or
+# goes with it, every host engine selects it, and only a Zephyr image builds the layer without it
+# (`os-zephyr`), from a manifest of its own.
 # `engine-tokio`: the engine a pico build runs its sessions on (docs/capi-pico-on-coop-engine.md).
 # Every build this declaration configures is on the tokio engine; the cooperative engine is not
 # an axis here yet (that note's decision D5).
-pico = ["engine-tokio", "serial-drive-own-thread", "rx-busy-poll"]
+pico = ["std", "engine-tokio", "serial-drive-own-thread", "rx-busy-poll"]
 c = []
 
 # The operating-system facilities every HOST build asks for whatever its capabilities
@@ -2735,19 +2739,22 @@ kind = "choice"
 kconfig = "WZ_POLICY_SN_RESOLUTION"
 choices = ["bits-32", "bits-8", "bits-16", "bits-64"]
 default = "bits-32"
-upstream = "Advertises the 32-bit sequence-number resolution in its InitSyn and in the Join of a group, and has no setting for another: zenoh's `Resolution` default and zenoh-pico's `Z_SN_RESOLUTION 0x02`."
+upstream = "Advertises the 32-bit sequence-number resolution in its InitSyn and in the Join of a group unless its configuration states another: zenoh reads `transport/link/tx/sequence_number_resolution`, whose default is 32 bits, and zenoh-pico builds in `Z_SN_RESOLUTION 0x02` with no setting for another."
 since = 2
 help = '''
-The width of the sequence numbers the sessions of the C interfaces advertise: in
-the InitSyn of a unicast session, where the two sides take the smaller of the
-two advertised widths, and in the Join of a multicast group, where a member
-refuses a Join that states another width than its own, so every member of a
-group states the same. `bits-32` is what zenoh and zenoh-pico advertise.
+The width of the sequence numbers the sessions of the C interfaces advertise
+when their configuration states none: in the InitSyn of a unicast session,
+where the two sides take the smaller of the two advertised widths, and in the
+Join of a multicast group, where a member refuses a Join that states another
+width than its own, so every member of a group states the same. `bits-32` is
+what zenoh advertises by default and what zenoh-pico always advertises.
 `bits-8`, `bits-16` and `bits-64` state that width instead, for a peer built
-with a sequence-number width of its own. A session that negotiates a width
-below its peer's runs the narrower ring of the two; a ring of 8 bits wraps
-after 128 frames in flight, so a narrow width asks a deployment to know its
-traffic. The request-id resolution is not part of this policy.
+with a sequence-number width of its own. A configuration that states
+`transport/link/tx/sequence_number_resolution` with a width other than 32 bits
+is followed instead of this policy, as zenoh follows the key. A session that
+negotiates a width below its peer's runs the narrower ring of the two; a ring
+of 8 bits wraps after 128 frames in flight, so a narrow width asks a deployment
+to know its traffic. The request-id resolution is not part of this policy.
 '''
 
 [[policy]]
@@ -2844,6 +2851,82 @@ link after a declaration that change sends to the same link, an order no rule
 of the protocol sets. `snapshot` is the value to choose for a router whose
 sessions come and go while it routes: a change waits for no message being
 routed, and a message costs what it costs under `rwlock`.
+'''
+
+# ─── Protocol facts (docs/build-configuration.md, decision C15) ──────────────────────────────
+#
+# A protocol fact is something a session of an ABI states on the wire that no switch of this
+# declaration moves: it is the same for every build of the ABI at this catalogue version. The
+# conformance statement lists the facts of its ABI beside its values, so a test system reads the
+# PICS items they answer from the build (conformance/suite/answers/wz.toml). They are not in the
+# statement's digest: the ABI and the catalogue version already are, and they fix every fact, so
+# a fact whose value changes moves `catalog_version` with it. crates/wz-conformance-suite holds
+# that: `facts_pin.toml` there pins the facts' canonical digest at a catalogue version, and its
+# test fails when the facts move and the version does not.
+#
+# Each fact names, per ABI, its value (`pico`, `c`; an ABI it does not name has no such fact),
+# and where this tree holds it: each entry of `holds` is `<file of this tree> @ <text>`, a text
+# that must occur in that file, and each of `lacks` one that must not. crates/wz-conformance-suite
+# checks every entry, so a change of the code the fact rests on is a red test, not a statement
+# that has quietly become false.
+[[protocol_fact]]
+id = "patch"
+pico = "1"
+c = "1"
+holds = ["crates/wz-session-core/src/extpatch.rs @ pub const CURRENT_PATCH: u8 = 1;"]
+help = '''
+The protocol patch level a session states in its Init and its Join: 1, so the
+first and drop markers of a Fragment are used when the peer states 1 too.
+'''
+
+[[protocol_fact]]
+id = "batch-compression"
+pico = "no"
+lacks = ["crates/wz-capi-pico/Cargo.toml @ compression"]
+help = '''
+Whether a session offers and accepts batch compression. The pico ABI never
+compiles the compression handshake: its crate takes the session model without
+its default features and forwards no compression feature to it. The zenoh-c ABI
+states it with the transport_compression capability instead.
+'''
+
+[[protocol_fact]]
+id = "request-id-resolution"
+pico = "32"
+c = "32"
+holds = ["crates/wz-capi-core/src/drive.rs @ req_id_res: 2,", "crates/wz-capi-coop/src/engine.rs @ req_id_res: 2,", "crates/wz-session-core/src/handshake_encode.rs @ sn_res: pack_sn_res(caps.seq_num_res, caps.req_id_res),"]
+help = '''
+The request id resolution, in bits, a session states in its Init: 32 (the code
+0b10). Both engines give every session the code 2 (the tokio engine's
+`init_params`, the cooperative engine's session parameters), and the Init
+always carries its size parameters, so the resolution is on the wire whatever
+the frame resolution policy says. An InitAck states the smaller of its own and
+the peer's.
+'''
+
+[[protocol_fact]]
+id = "router-role"
+pico = "no"
+holds = ["crates/wz-capi-pico/src/session.rs @ Some(_) => return Err(crate::result::Z_ERR_CONFIG_INVALID_MODE),", "crates/wz-capi-pico/src/result.rs @ pub const Z_ERR_CONFIG_INVALID_MODE: ZResult = -90;"]
+lacks = ["crates/wz-capi-pico/src/session.rs @ WhatAmI::Router", "crates/wz-capi-coop/src/engine.rs @ WhatAmI::Router"]
+help = '''
+Whether a session of the ABI can take the router role. The pico ABI opens a
+client, or a peer when the configuration's mode is peer or it listens, and
+refuses any other mode, router among them, with zenoh-pico's invalid-mode code
+(-90), as zenoh-pico does; no path of the ABI makes a router. The zenoh-c ABI
+states it with the router-node capability instead.
+'''
+
+[[protocol_fact]]
+id = "tcp-link"
+pico = "yes"
+c = "yes"
+holds = ["crates/wz-capi-core/Cargo.toml @ transport-link-tcp", "crates/wz-runtime-posix/src/links.rs @ pub type PosixLinks = wz_runtime_coop::ip_stack::IpLinks<PosixUdpSocket, PosixTcpDial>;", "crates/wz-runtime-zephyr/src/links.rs @ pub type ZephyrIpLinks = wz_runtime_coop::ip_stack::IpLinks<ZephyrUdpSocket, ZephyrTcpDial>;"]
+help = '''
+Whether a session runs over the tcp link, a link that does not keep message
+boundaries. Every engine and platform the ABIs build for has it: the tokio
+engine takes the tcp link in every build, and the cooperative engine's links on
+a host and on Zephyr dial and accept tcp beside udp.
 '''
 
 # The role of a node in a zenoh network: upstream's `mode`. A global axis (it names no image),

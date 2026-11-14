@@ -15,10 +15,11 @@
 //! `wz-runtime-tokio` is cited by that name in the store's reasons, and a second file of that
 //! name would make every one of those citations ambiguous.
 
+use core::net::SocketAddr;
 use core::ops::Deref;
 
 use wz_link_lwip::LwipLink;
-use wz_runtime_coop::session_drive::{IpEndpoint, PumpSlots, SessionDriveConfig};
+use wz_runtime_coop::session_drive::{PumpSlots, SessionDriveConfig};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
@@ -65,14 +66,14 @@ where
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DialTarget {
     /// The peer's address.
-    pub peer: IpEndpoint,
+    pub peer: SocketAddr,
     /// The node the dial is made for.
     pub expected_zid: Option<[u8; CREDENTIAL_ZID_BYTES]>,
 }
 
 impl DialTarget {
     /// A dial to `peer` that names no node: a configured endpoint's.
-    pub fn address(peer: IpEndpoint) -> Self {
+    pub fn address(peer: SocketAddr) -> Self {
         Self {
             peer,
             expected_zid: None,
@@ -80,7 +81,7 @@ impl DialTarget {
     }
 
     /// A dial to `peer` made for the node `zid` names.
-    pub fn node(peer: IpEndpoint, zid: [u8; CREDENTIAL_ZID_BYTES]) -> Self {
+    pub fn node(peer: SocketAddr, zid: [u8; CREDENTIAL_ZID_BYTES]) -> Self {
         Self {
             peer,
             expected_zid: Some(zid),

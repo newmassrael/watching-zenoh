@@ -1,0 +1,213 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The protocol implementation conformance statement proforma of the zenoh conformance test suite
+# (ISO/IEC 9646-7): the questions an implementation answers about itself, from which the test
+# system selects the test purposes that apply to it. docs/conformance-suite.md section 4 defines
+# every field; crates/wz-conformance-suite holds the proforma to it and to the requirements.
+#
+# An item is a capability (answer "support": yes or no) or a protocol parameter with a value
+# (answer "value"). Its status is written in ISO/IEC 9646-7's notation: m mandatory, o optional,
+# o.<n> optional with at least one item of group <n> supported, x excluded, and c conditional:
+# `condition` is a selection expression over other support items, and `then` and `else` are the
+# status when it holds and when it does not (n/a, not applicable, among them). `reference` names
+# the requirements whose selection or whose value the item decides. A profile adds selections
+# and values to this proforma; it never removes an item.
+
+format = "wz-conformance-pics-proforma"
+format_version = 1
+
+# ---------------------------------------------------------------------------------------------
+# Transports, roles and the ends of a link
+
+[[item]]
+id = "T-UNICAST"
+question = "Does the implementation establish unicast sessions (Init and Open)?"
+status = "o.1"
+answer = "support"
+reference = ["B-INIT-1", "B-INIT-2", "B-INIT-4", "B-INIT-8", "B-OPEN-1", "B-OPEN-6"]
+
+[[item]]
+id = "T-MCAST"
+question = "Does the implementation join multicast groups (Join)?"
+status = "o.1"
+answer = "support"
+reference = ["B-JOIN-1", "B-JOIN-2", "B-JOIN-3", "B-JOIN-4", "B-JOIN-5"]
+
+[[item]]
+id = "T-INITIATOR"
+question = "Does the implementation open links to a locator it is given?"
+status = "c"
+condition = "T-UNICAST"
+then = "o.2"
+else = "n/a"
+answer = "support"
+reference = ["B-INIT-5", "B-OPEN-4"]
+
+[[item]]
+id = "T-ACCEPTOR"
+question = "Does the implementation accept links on a locator it listens on?"
+status = "c"
+condition = "T-UNICAST"
+then = "o.2"
+else = "n/a"
+answer = "support"
+reference = ["B-INIT-6", "B-INIT-7", "B-OPEN-5"]
+
+[[item]]
+id = "T-ROLE-CLIENT"
+question = "Can the implementation take the client role?"
+status = "o.3"
+answer = "support"
+reference = ["B-ENC-5"]
+
+[[item]]
+id = "T-ROLE-PEER"
+question = "Can the implementation take the peer role?"
+status = "o.3"
+answer = "support"
+reference = ["B-ENC-5"]
+
+[[item]]
+id = "T-ROLE-ROUTER"
+question = "Can the implementation take the router role?"
+status = "o.3"
+answer = "support"
+reference = ["B-ENC-5", "B-ROUTE-1", "B-ROUTE-2", "B-ROUTE-3"]
+
+[[item]]
+id = "T-STREAM-LINK"
+question = "Does the implementation run sessions over a link that does not keep message boundaries (tcp, tls, a quic stream, ws, unixsock-stream)?"
+status = "o.4"
+answer = "support"
+reference = ["B-BATCH-1"]
+
+[[item]]
+id = "T-DGRAM-LINK"
+question = "Does the implementation run sessions over a link that keeps message boundaries (udp)?"
+status = "o.4"
+answer = "support"
+reference = ["B-BATCH-2"]
+
+# ---------------------------------------------------------------------------------------------
+# Optional parts of the transport
+
+[[item]]
+id = "T-COMPRESSION"
+question = "Does the implementation offer and accept batch compression?"
+status = "c"
+condition = "T-UNICAST"
+then = "o"
+else = "n/a"
+answer = "support"
+reference = ["B-BATCH-4"]
+
+[[item]]
+id = "T-PATCH"
+question = "Does the implementation state a patch of 1 or more and use the first and drop markers of a Fragment?"
+status = "o"
+answer = "support"
+reference = ["B-FRAG-3"]
+
+# ---------------------------------------------------------------------------------------------
+# The network services an implementation takes part in
+
+[[item]]
+id = "N-QUERY"
+question = "Does the implementation send Requests (a get, a querier)?"
+status = "o"
+answer = "support"
+reference = ["B-REQ-1", "B-REQ-2", "B-REQ-3"]
+
+[[item]]
+id = "N-QUERYABLE"
+question = "Does the implementation declare queryables and answer Requests?"
+status = "o"
+answer = "support"
+reference = ["B-DECL-4", "B-RESP-1", "B-RESP-2", "B-RESP-3"]
+
+[[item]]
+id = "N-TOKEN"
+question = "Does the implementation declare liveliness tokens?"
+status = "o"
+answer = "support"
+reference = ["B-DECL-4", "B-DECL-5"]
+
+# ---------------------------------------------------------------------------------------------
+# Protocol parameters
+
+[[item]]
+id = "T-VERSION"
+question = "Which protocol version does the implementation state in its Init and Join?"
+status = "m"
+answer = "value"
+values = ["9"]
+reference = ["B-INIT-3"]
+
+[[item]]
+id = "T-FSN-RES"
+question = "Which frame sequence number resolution, in bits, does the implementation state?"
+status = "m"
+answer = "value"
+values = ["8", "16", "32", "64"]
+reference = ["B-INIT-1", "B-INIT-2", "B-INIT-8", "B-JOIN-1", "B-JOIN-4", "B-SN-1", "B-SN-2"]
+
+[[item]]
+id = "T-RID-RES"
+question = "Which request id resolution, in bits, does the implementation state?"
+status = "m"
+answer = "value"
+values = ["8", "16", "32", "64"]
+reference = ["B-INIT-1", "B-INIT-2", "B-INIT-8", "B-JOIN-1"]
+
+[[item]]
+id = "T-BATCH-UNICAST"
+question = "Which batch size, in bytes, does the implementation state in its Init?"
+status = "c"
+condition = "T-UNICAST"
+then = "m"
+else = "n/a"
+answer = "value"
+min = 1
+max = 65535
+unit = "byte"
+reference = ["B-INIT-1", "B-INIT-2", "B-BATCH-5"]
+
+[[item]]
+id = "T-BATCH-MCAST"
+question = "Which batch size, in bytes, does the implementation state in its Join?"
+status = "c"
+condition = "T-MCAST"
+then = "m"
+else = "n/a"
+answer = "value"
+min = 1
+max = 65535
+unit = "byte"
+reference = ["B-JOIN-1", "B-JOIN-2", "B-BATCH-5"]
+
+[[item]]
+id = "T-LEASE"
+question = "Which lease, in milliseconds, does the implementation state in its Open and its Join?"
+status = "m"
+answer = "value"
+min = 1
+unit = "millisecond"
+reference = ["B-OPEN-1", "B-JOIN-1", "B-LEASE-1"]
+
+[[item]]
+id = "T-KA-PER-LEASE"
+question = "How many keepalives does the implementation send in one lease on an idle link?"
+status = "m"
+answer = "value"
+min = 1
+reference = ["B-KA-2"]
+
+[[item]]
+id = "T-FRAG-MAX"
+question = "What is the largest message, in bytes, the implementation rejoins from fragments?"
+status = "m"
+answer = "value"
+min = 1
+unit = "byte"
+reference = ["B-FRAG-4"]

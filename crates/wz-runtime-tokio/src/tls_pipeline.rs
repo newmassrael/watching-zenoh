@@ -134,12 +134,15 @@ pub async fn accept_tls(
 /// R2608 — `close_link_on_expiration` arrives as the second argument because
 /// the chain it needs is readable only before the split below, and the LOCATOR
 /// that asked for it is three frames up the stack. The file's
-/// `transport/link/tls/close_link_on_expiration` is upstream's per-link default
-/// for the same flag, and the reader does not render it onto an endpoint yet
-/// (`zenoh_config::UNHONOURED_READER_GAP`).
+/// `transport/link/tls/close_link_on_expiration` is the tls kind's default for
+/// the same flag, laid under the locator's by
+/// `crate::link_socket::LinkDefaults::closes_on_expiration` before the value
+/// arrives here. `rx_buffer_size` is the session's
+/// `transport/link/rx/buffer_size`: the read storage the link pools.
 pub fn wire_tls_stream(
     stream: TlsStream<TcpStream>,
     closes_on_expiration: bool,
+    rx_buffer_size: usize,
 ) -> (TlsReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject: a TLS link is a TCP socket underneath, so
     // its local address comes from the wrapped stream.
@@ -176,8 +179,11 @@ pub fn wire_tls_stream(
     let (reader, writer) = split(stream);
     // transport-lowlatency is a TCP-path negotiation; TLS keeps the universal
     // u16 prefix (an always-false flag).
-    let mut inbound =
-        StreamReadDriver::new(reader, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let mut inbound = StreamReadDriver::new(
+        reader,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        rx_buffer_size,
+    );
     if let Some(deadline) = expiry {
         // An absent chain is NOT an immediate expiry — `peer_chain_deadline`
         // answers `None` there, as upstream does, and this arm never runs.

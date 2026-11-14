@@ -33,6 +33,11 @@ use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use wz_runtime_posix::stream::PosixTcpDial;
 
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+
+/// `port` on the IPv4 loopback.
+fn at(port: u16) -> std::net::SocketAddr {
+    std::net::SocketAddr::from((LOOPBACK, port))
+}
 const ACCEPT_MS: u64 = 5_000;
 /// September 2020, inside the year the lapsed certificate below was valid for.
 const WITHIN_2020: i64 = 1_600_000_000;
@@ -78,9 +83,9 @@ fn provider(config: &CapiTlsConfig) -> Provider {
 fn bind(config: &CapiTlsConfig) -> (Provider, Listener, u16) {
     let server = provider(config);
     let listener = server
-        .listen(LOOPBACK, 0)
+        .listen(at(0))
         .unwrap_or_else(|e| panic!("the listener binds: {e:?}"));
-    let port = listener.local().1;
+    let port = listener.local().port();
     (server, listener, port)
 }
 
@@ -117,7 +122,7 @@ fn read_within(stream: &Stream, len: usize, within: Duration) -> Option<Vec<u8>>
 fn ping(config: CapiTlsConfig, port: u16) -> thread::JoinHandle<Result<Vec<u8>, LinkOpenError>> {
     thread::spawn(move || {
         let client = provider(&config);
-        let stream = client.dial(LOOPBACK, port)?;
+        let stream = client.dial(at(port))?;
         stream
             .send_parts(&[b"ping".as_slice()])
             .expect("the stream takes bytes");
@@ -225,12 +230,9 @@ fn a_config_with_no_material_carries_no_tls_link() {
     let _library = library();
     let none = provider(&CapiTlsConfig::default());
     assert!(!none.carries_any());
+    assert!(matches!(none.dial(at(1)), Err(LinkOpenError::Unsupported)));
     assert!(matches!(
-        none.dial(LOOPBACK, 1),
-        Err(LinkOpenError::Unsupported)
-    ));
-    assert!(matches!(
-        none.listen(LOOPBACK, 0),
+        none.listen(at(0)),
         Err(LinkOpenError::Unsupported)
     ));
 
@@ -239,13 +241,13 @@ fn a_config_with_no_material_carries_no_tls_link() {
     let dial_only = provider(&dial_config(&authority, None, false));
     assert!(dial_only.carries_any());
     assert!(matches!(
-        dial_only.listen(LOOPBACK, 0),
+        dial_only.listen(at(0)),
         Err(LinkOpenError::Unsupported)
     ));
     let server = authority.issue(ExtendedKeyUsagePurpose::ServerAuth);
     let listen_only = provider(&listen_config(&server, None));
     assert!(matches!(
-        listen_only.dial(LOOPBACK, 1),
+        listen_only.dial(at(1)),
         Err(LinkOpenError::Unsupported)
     ));
 }
@@ -318,7 +320,7 @@ fn the_time_of_each_dial_is_stated_to_the_roots() {
             .dial_roots()
             .expect("a dial has roots")
             .set_now(Some(WITHIN_2020));
-        client.dial(LOOPBACK, port).map(|_| ())
+        client.dial(at(port)).map(|_| ())
     });
     assert!(
         accept_within(&listener, Duration::from_millis(1_500)).is_none(),

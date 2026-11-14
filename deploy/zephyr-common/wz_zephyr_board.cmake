@@ -76,6 +76,28 @@ function(wz_rust_target_for_board out)
   set(${out} ${triple} PARENT_SCOPE)
 endfunction()
 
+# The board hooks (wz_board_hooks.c) a Rust side that opens Zephyr's sockets references, for an
+# application's UNDEFINED list: the receive timeout and its expiry (a datagram socket), and the
+# refusal of a family the stack lacks (every socket). Defined under CONFIG_NET_SOCKETS, whatever
+# the family.
+set(WZ_SOCKET_HOOKS wz_net_set_rcvtimeo_ms wz_net_recv_timed_out wz_net_socket_family_refused)
+
+# wz_node_address_hooks(<out>): the board hook a Rust side that reads the node's own address
+# (`wz_runtime_zephyr::net::board_ip`) references, of the family the image chose for it
+# (CONFIG_WZ_NODE_IPV6, else IPv4), and none on an image with neither family. Each hook is defined
+# by wz_board_hooks.c only under its family's CONFIG_NET_IPV*, so an image names the one its family
+# has and never the other: an IPv6-only image (CONFIG_NET_IPV4=n) asking to keep the IPv4 hook
+# would keep a symbol nobody defines.
+function(wz_node_address_hooks out)
+  if(CONFIG_WZ_NODE_IPV6 AND CONFIG_NET_IPV6)
+    set(${out} wzApplicationGetIpv6Address PARENT_SCOPE)
+  elseif(CONFIG_NET_IPV4)
+    set(${out} wzApplicationGetIpv4Address PARENT_SCOPE)
+  else()
+    set(${out} "" PARENT_SCOPE)
+  endif()
+endfunction()
+
 # wz_zephyr_rust_app(
 #   RUST_DIR <dir>            the staticlib crate (holds Cargo.toml)
 #   LIB      <stem>           the staticlib's name: lib<stem>.a
@@ -129,6 +151,26 @@ function(wz_zephyr_rust_app)
     endif()
   endforeach()
 
+  # The IP families of the build (deploy/zephyr-common/Kconfig.wz): whether Zephyr's stack has
+  # IPv4 and IPv6, and whether the node's own address is IPv6. `wz-runtime-zephyr`'s build script
+  # reads them as cfgs, so the calls of one family and the board's address hook of that family are
+  # compiled only into an image whose stack has it.
+  if(CONFIG_NET_IPV4)
+    set(wz_net_ipv4 1)
+  else()
+    set(wz_net_ipv4 0)
+  endif()
+  if(CONFIG_NET_IPV6)
+    set(wz_net_ipv6 1)
+  else()
+    set(wz_net_ipv6 0)
+  endif()
+  if(CONFIG_WZ_NODE_IPV6)
+    set(wz_node_ipv6 1)
+  else()
+    set(wz_node_ipv6 0)
+  endif()
+
   # Always-run (ALL + no OUTPUT) so Rust source edits are picked up; cargo's own
   # incremental check keeps the no-change case cheap. BYPRODUCTS registers the
   # archive as this target's product so ninja can depend on it. The environment
@@ -139,6 +181,9 @@ function(wz_zephyr_rust_app)
     COMMAND ${CMAKE_COMMAND} -E env
             WZ_TICKS_PER_SEC=${CONFIG_SYS_CLOCK_TICKS_PER_SEC}
             WZ_CORE_CLOCK_HZ=${CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC}
+            WZ_NET_IPV4=${wz_net_ipv4}
+            WZ_NET_IPV6=${wz_net_ipv6}
+            WZ_NODE_IPV6=${wz_node_ipv6}
             ${wz_limit_env}
             ${WZ_CARGO_ENV}
             cargo build --release --target ${rust_target}

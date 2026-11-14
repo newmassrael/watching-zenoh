@@ -120,7 +120,12 @@ const fn pico_batch(bytes: usize) -> u16 {
 /// `transport/link/rx/max_message_size` (a chain a fragment would take past it is dropped,
 /// `vendor/zenoh-pico/src/transport/unicast/rx.c` @
 /// `if ((_z_wbuf_len(dbuf) + msg->_payload.len) > Z_FRAG_MAX_SIZE) {`).
+///
+/// The read storage a stream link pools is upstream's default, which pools exactly one buffer:
+/// pico reads each unicast transport into one buffer of its own
+/// (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._zbuf = _z_zbuf_make(zbuf_size);`).
 const PICO_LINK_RX: LinkRxConf = LinkRxConf {
+    buffer_size: wz_session_core::session_init_params::RX_BUFFER_SIZE,
     max_message_size: wz_session_core::caps::PICO_FRAG_MAX_BYTES,
 };
 
@@ -185,6 +190,7 @@ const fn pico_group(
         batch_size: pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES),
         is_qos: false,
         compression: false,
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
     }
 }
 
@@ -550,7 +556,10 @@ pub unsafe extern "C" fn z_open(
         let cfg = Box::from_raw(cfg_handle as *mut ConfigState);
         (*config)._this = z_owned_config_t::null_value();
 
-        let open = open_config(&cfg);
+        let open = match open_config(&cfg) {
+            Ok(open) => open,
+            Err(code) => return code,
+        };
         // The id the session opens on, refused here if the config names one pico's reader cannot
         // take (see [`session_zid`]).
         let zid = match session_zid(&open) {
@@ -607,12 +616,7 @@ pub unsafe extern "C" fn z_open(
         // (`vendor/zenoh-pico/src/net/session.c` @ `static z_result_t _z_locators_by_config(`).
         // The core runs it (a listener bound before the dial, an accept loop beside the dial
         // face), so it is not refused. Until R3090 it was, with `Z_ERR_INVALID`, and the comment
-        // called it a follow-up.
-        let dial_whatami = if listen.is_some() {
-            WhatAmI::Peer
-        } else {
-            dial_whatami
-        };
+        // called it a follow-up. Its role is a peer's: `open_config` reads a listen config so.
         let request = OpenRequest {
             connect,
             listen,
@@ -746,19 +750,90 @@ mod zid_tests {
     }
 }
 
-/// Read [`OpenConfig`] off `cfg`. The dial role's whatami is config-driven, mirroring pico's
-/// `_z_config_get_mode` (`~/zenoh-pico/src/net/session.c:120-140`, default CLIENT): `mode=peer`
-/// opens a dialing PEER, otherwise CLIENT. (The listen role forces PEER regardless — pico
-/// force-inserts `MODE=PEER` for any listen config, session.c:98.)
-pub(crate) fn open_config(cfg: &ConfigState) -> OpenConfig {
-    OpenConfig {
+/// Read [`OpenConfig`] off `cfg`, refusing a mode pico refuses.
+///
+/// The dial role's whatami is the config's mode, as pico's `_z_config_get_mode` reads it: none or
+/// `client` opens a client, `peer` a peer, and any other value, `router` among them, is refused
+/// with `_Z_ERR_CONFIG_INVALID_MODE` (`vendor/zenoh-pico/src/net/session.c` @
+/// `ret = _Z_ERR_CONFIG_INVALID_MODE;`): pico has no router role. A config with a listen locator
+/// is a peer whatever its mode said, because pico writes `peer` over the mode before it reads it
+/// (`vendor/zenoh-pico/src/net/session.c` @
+/// `_zp_config_insert(config, Z_CONFIG_MODE_KEY, Z_CONFIG_MODE_PEER);`), so its mode is never
+/// refused.
+pub(crate) fn open_config(cfg: &ConfigState) -> Result<OpenConfig, ZResult> {
+    let listen = cfg.get(Z_CONFIG_LISTEN_KEY).map(str::to_owned);
+    let dial_whatami = match cfg.get(Z_CONFIG_MODE_KEY) {
+        _ if listen.is_some() => WhatAmI::Peer,
+        None | Some("client") => WhatAmI::Client,
+        Some("peer") => WhatAmI::Peer,
+        Some(_) => return Err(crate::result::Z_ERR_CONFIG_INVALID_MODE),
+    };
+    Ok(OpenConfig {
         connect: cfg.get(Z_CONFIG_CONNECT_KEY).map(str::to_owned),
-        listen: cfg.get(Z_CONFIG_LISTEN_KEY).map(str::to_owned),
-        dial_whatami: match cfg.get(Z_CONFIG_MODE_KEY) {
-            Some("peer") => WhatAmI::Peer,
-            _ => WhatAmI::Client,
-        },
+        listen,
+        dial_whatami,
         zid: cfg.get(Z_CONFIG_SESSION_ZID_KEY).map(str::to_owned),
+    })
+}
+
+#[cfg(test)]
+mod open_config_tests {
+    use super::{open_config, ConfigState, WhatAmI, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY};
+    use crate::result::Z_ERR_CONFIG_INVALID_MODE;
+
+    fn config(entries: &[(u8, &str)]) -> ConfigState {
+        let mut cfg = ConfigState::default();
+        for (key, value) in entries {
+            cfg.insert(*key, value);
+        }
+        cfg
+    }
+
+    fn role(entries: &[(u8, &str)]) -> Result<WhatAmI, i8> {
+        open_config(&config(entries)).map(|open| open.dial_whatami)
+    }
+
+    /// zenoh-pico has no router role: its open refuses `mode=router` with
+    /// `_Z_ERR_CONFIG_INVALID_MODE` (-90), and so does this ABI.
+    #[test]
+    fn the_router_mode_is_refused_as_pico_refuses_it() {
+        assert_eq!(Z_ERR_CONFIG_INVALID_MODE, -90);
+        assert_eq!(
+            role(&[(Z_CONFIG_MODE_KEY, "router")]),
+            Err(Z_ERR_CONFIG_INVALID_MODE)
+        );
+    }
+
+    /// pico compares the mode with `client` and `peer` exactly, so any other text is refused.
+    #[test]
+    fn a_mode_pico_does_not_know_is_refused() {
+        for mode in ["", "Peer", "CLIENT", "gateway", "peer "] {
+            assert_eq!(
+                role(&[(Z_CONFIG_MODE_KEY, mode)]),
+                Err(Z_ERR_CONFIG_INVALID_MODE),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_peer_and_no_mode_are_taken() {
+        assert_eq!(role(&[]), Ok(WhatAmI::Client));
+        assert_eq!(role(&[(Z_CONFIG_MODE_KEY, "client")]), Ok(WhatAmI::Client));
+        assert_eq!(role(&[(Z_CONFIG_MODE_KEY, "peer")]), Ok(WhatAmI::Peer));
+    }
+
+    /// pico writes `peer` over the mode of a config that listens before it reads the mode, so a
+    /// listener is a peer and its mode, whatever it said, is never refused.
+    #[test]
+    fn a_listening_config_is_a_peer_whatever_its_mode() {
+        for mode in [None, Some("client"), Some("router")] {
+            let mut entries = vec![(Z_CONFIG_LISTEN_KEY, "tcp/127.0.0.1:7447")];
+            if let Some(mode) = mode {
+                entries.push((Z_CONFIG_MODE_KEY, mode));
+            }
+            assert_eq!(role(&entries), Ok(WhatAmI::Peer), "{mode:?}");
+        }
     }
 }
 
@@ -944,6 +1019,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             gateway_south: wz_session_core::region_partition::SouthPartition::Auto,
             // The group its listen endpoint names, when it names one.
             groups,
+            // pico's config has no `qos/publication` and no `transport/shared_memory` keys, so
+            // its session applies nothing above its links.
+            session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
         },
     ) {
         Ok(state) => {

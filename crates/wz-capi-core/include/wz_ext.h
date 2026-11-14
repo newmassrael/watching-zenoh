@@ -65,8 +65,11 @@ z_result_t wz_ext_clock_source_unregister(uint32_t handle);
 
 /* What the program tells the library about the registered clock. The library
  * cannot know whether the clock follows a reference; the program can. A build
- * whose clock-quality-stamping policy is trusted-only stamps nothing until the
- * program has reported WZ_EXT_CLOCK_SYNC_ACQUIRED. */
+ * whose clock-quality-stamping policy is trusted-only stamps no data until the
+ * program has reported WZ_EXT_CLOCK_SYNC_ACQUIRED: an advanced publisher, every
+ * sample of which carries a time, refuses its put and delete until then, and
+ * nothing is sent. z_timestamp_new, a program reading the clock, is given its
+ * time whatever its standing. */
 typedef uint8_t wz_ext_clock_event_t;
 #define WZ_EXT_CLOCK_SYNC_ACQUIRED 0     /* it follows a reference */
 #define WZ_EXT_CLOCK_SYNC_LOST 1         /* the reference is gone */

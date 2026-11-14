@@ -51,6 +51,27 @@ impl SnResolution {
 
     /// Every width, in the order a test walks them.
     pub const WIDTHS: [Self; 4] = [Self::Bits32, Self::Bits8, Self::Bits16, Self::Bits64];
+
+    /// The width as zenoh's configuration spells it, the value of
+    /// `transport/link/tx/sequence_number_resolution`
+    /// (`commons/zenoh-protocol/src/core/resolution.rs` @ `const S8: &'static str = "8bit";`
+    /// and its three siblings).
+    pub const fn zenoh_name(self) -> &'static str {
+        match self {
+            Self::Bits8 => "8bit",
+            Self::Bits16 => "16bit",
+            Self::Bits32 => "32bit",
+            Self::Bits64 => "64bit",
+        }
+    }
+
+    /// The width zenoh's configuration names `text`, or `None` for a text it refuses: the four
+    /// spellings of [`Self::zenoh_name`] and nothing else, as upstream's deserializer takes them.
+    pub fn from_zenoh_name(text: &str) -> Option<Self> {
+        Self::WIDTHS
+            .into_iter()
+            .find(|width| width.zenoh_name() == text)
+    }
 }
 
 /// The value of a bool policy: `on` or `off` as the build states it, or `off`, which is
@@ -158,6 +179,23 @@ mod tests {
         assert_eq!(SnResolution::Bits8.wire_code(), 0);
         assert_eq!(SnResolution::Bits64.wire_code(), 3);
         assert_eq!(SnResolution::Bits16.id(), "bits-16");
+    }
+
+    /// Each width reads back from zenoh's spelling of it, and the texts zenoh refuses (the
+    /// declaration's own spelling, a bare number, a different case) name no width.
+    #[test]
+    fn each_sn_width_reads_back_from_zenohs_spelling_and_nothing_else_does() {
+        for width in SnResolution::WIDTHS {
+            assert_eq!(
+                SnResolution::from_zenoh_name(width.zenoh_name()),
+                Some(width)
+            );
+        }
+        assert_eq!(SnResolution::Bits16.zenoh_name(), "16bit");
+        assert_eq!(SnResolution::Bits32.zenoh_name(), "32bit");
+        for refused in ["bits-16", "16", "16BIT", "", "128bit"] {
+            assert_eq!(SnResolution::from_zenoh_name(refused), None, "{refused:?}");
+        }
     }
 
     #[test]

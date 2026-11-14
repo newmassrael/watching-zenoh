@@ -493,11 +493,12 @@ mod tests {
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
+    use core::net::SocketAddr;
     use wz_codecs::lent::{
         Push, PushVariant, Query, Request, RequestVariant, Wireexpr, WireexprNonlocal,
         WireexprVariant,
     };
-    use wz_runtime_coop::session_drive::{IpEndpoint, SessionDatagramLink};
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::link::BoxedLinkDriver;
     use wz_session_core::network_message::NetworkMessage;
@@ -563,14 +564,8 @@ mod tests {
     #[test]
     fn a_push_reaches_its_subscriber_and_a_reply_leaves_on_the_session() {
         let net = MemoryNetwork::new();
-        let node_at = IpEndpoint {
-            addr: [10, 0, 0, 1],
-            port: 7471,
-        };
-        let peer_at = IpEndpoint {
-            addr: [10, 0, 0, 2],
-            port: 7472,
-        };
+        let node_at = SocketAddr::from(([10, 0, 0, 1], 7471));
+        let peer_at = SocketAddr::from(([10, 0, 0, 2], 7472));
         let driver = net.bind(node_at, Some(peer_at)).expect("bind node end");
         let peer = net.bind(peer_at, Some(node_at)).expect("bind peer end");
 

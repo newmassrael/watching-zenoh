@@ -23,7 +23,38 @@
 //! performs its `open_multicast_link` and `release_multicast_link` duties, so a
 //! transport is the session's link only between the two.
 
-use core::net::SocketAddr;
+use core::net::{Ipv4Addr, SocketAddr};
+
+/// The interface a group is joined on and sent out of, in the form the group's family names one:
+/// IPv4 by an address the interface holds (`IP_ADD_MEMBERSHIP`'s `imr_interface`,
+/// `IP_MULTICAST_IF`), IPv6 by its index (`IPV6_JOIN_GROUP`'s `ipv6mr_interface`,
+/// `IPV6_MULTICAST_IF`), as upstream zenoh joins an IPv6 group
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `.join_multicast_v6(&dst_ip6, 0)`) and
+/// sends out of an interface it names by index (`.set_multicast_if_v6(idx)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupInterface {
+    /// The interface the stack's routing picks for the group, of either family.
+    Routing,
+    /// The IPv4 interface that holds this address.
+    V4(Ipv4Addr),
+    /// The interface of this index, for an IPv6 group. Zero is the stack's choice, as
+    /// [`Self::Routing`] is.
+    Index(u32),
+}
+
+impl GroupInterface {
+    /// Whether the interface can be named to a group of `group`'s family: an IPv4 address names
+    /// an interface to an IPv4 group only, an index to an IPv6 group only, and the routing's
+    /// choice to either.
+    pub const fn names_for(self, group: &SocketAddr) -> bool {
+        matches!(
+            (self, group),
+            (GroupInterface::Routing, _)
+                | (GroupInterface::V4(_), SocketAddr::V4(_))
+                | (GroupInterface::Index(_), SocketAddr::V6(_))
+        )
+    }
+}
 
 /// One group session's whole I/O seam: the socket joined to the group, the group
 /// address the loop multicasts to, and whatever the stack needs pumped.
@@ -68,4 +99,26 @@ pub trait GroupTransport {
     /// only requirement is that one peer's datagrams always carry the same one.
     /// `f` must not call back into the transport.
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::net::Ipv6Addr;
+
+    /// An interface is named to a group in the group's own family, and the routing's choice to
+    /// either: an address to an IPv6 group, or an index to an IPv4 one, names nothing.
+    #[test]
+    fn an_interface_is_named_to_a_group_of_its_own_family() {
+        let v4 = SocketAddr::from(([224, 0, 0, 224], 7446));
+        let v6 = SocketAddr::from((Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1), 7446));
+        let address = GroupInterface::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let index = GroupInterface::Index(2);
+        assert!(GroupInterface::Routing.names_for(&v4));
+        assert!(GroupInterface::Routing.names_for(&v6));
+        assert!(address.names_for(&v4));
+        assert!(!address.names_for(&v6));
+        assert!(index.names_for(&v6));
+        assert!(!index.names_for(&v4));
+    }
 }

@@ -32,8 +32,10 @@
 //! date, the socket and the entry point (`wz-runtime-posix`).
 //!
 //! ```text
-//! host-slot-node [<router [udp/|tcp/|tls/]a.b.c.d:port>] [--peer ZID=LOCATOR]...
-//!                [--local a.b.c.d] [--doc KEY:BYTES]...
+//! host-slot-node [<router [udp/|tcp/|tls/]ADDRESS:port>] [--peer ZID=LOCATOR]...
+//!                [--local IP] [--doc KEY:BYTES]...
+//!
+//! ADDRESS is `a.b.c.d` or a bracketed IPv6 address, `[x:y::z]`; IP is either family, unbracketed.
 //! ```
 //!
 //! It dials the router (over UDP when the address names no scheme), declares a queryable under
@@ -54,6 +56,8 @@
 #![no_main]
 
 use core::ffi::{c_char, c_int, CStr};
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::str::FromStr;
 
 #[cfg(not(feature = "tls"))]
 use host_slot_node_glue::fresh_zid;
@@ -63,7 +67,7 @@ use host_slot_node_glue::tuning::{
     BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RUN, RX, SESSIONS, TASKS, TIMERS, TX,
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
-use wz_runtime_coop::session_drive::{pump_task_cell_bytes, IpEndpoint, Locator, SlotStack};
+use wz_runtime_coop::session_drive::{pump_task_cell_bytes, Locator, SlotStack};
 use wz_runtime_posix::glue::{log, log_args};
 #[cfg(not(feature = "tls"))]
 use wz_runtime_posix::slot::PosixStack;
@@ -166,7 +170,7 @@ struct Args {
     /// The peers it holds by their zid, the first `peer_count` of the table.
     peers: [DeclaredPeer; LAUNCHED],
     peer_count: usize,
-    local: [u8; 4],
+    local: IpAddr,
     docs: [Option<(&'static str, usize)>; DOCS],
     /// The key to ask, how many times, and how long a query may stay pending (zero is the
     /// default).
@@ -183,26 +187,13 @@ fn argument(argv: *const *const c_char, at: c_int) -> Option<&'static str> {
     text.to_str().ok()
 }
 
-fn parse_ipv4(text: &str) -> Option<[u8; 4]> {
-    let mut out = [0u8; 4];
-    let mut parts = text.split('.');
-    for octet in &mut out {
-        *octet = parts.next()?.parse().ok()?;
-    }
-    parts.next().is_none().then_some(out)
-}
-
-/// `udp/a.b.c.d:port`, `tcp/a.b.c.d:port`, or `a.b.c.d:port`, which is UDP: the locator the
-/// connect manager dials, read by the dialler's own reader.
+/// `udp/a.b.c.d:port`, `tcp/[x:y::z]:port`, or a bare `a.b.c.d:port` / `[x:y::z]:port`, which is
+/// UDP: the locator the connect manager dials, read by the dialler's own reader.
 fn parse_router(text: &str) -> Option<Locator> {
     if text.contains('/') {
         parse_locator(text).ok()
     } else {
-        let (ip, port) = text.rsplit_once(':')?;
-        Some(Locator::udp(IpEndpoint {
-            addr: parse_ipv4(ip)?,
-            port: port.parse().ok()?,
-        }))
+        SocketAddr::from_str(text).ok().map(Locator::udp)
     }
 }
 
@@ -222,12 +213,12 @@ fn parse_peer(text: &'static str) -> Option<DeclaredPeer> {
 
 fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static str> {
     #[cfg(not(feature = "get"))]
-    const USAGE: &str = "usage: host-slot-node [<router [udp/|tcp/|tls/]a.b.c.d:port>] \
-                         [--peer ZID=LOCATOR]... [--local a.b.c.d] [--doc KEY:BYTES]...";
+    const USAGE: &str = "usage: host-slot-node [<router [udp/|tcp/|tls/]ADDRESS:port>] \
+                         [--peer ZID=LOCATOR]... [--local IP] [--doc KEY:BYTES]...";
     #[cfg(feature = "get")]
     const USAGE: &str =
-        "usage: host-slot-node [<router [udp/|tcp/|tls/]a.b.c.d:port>] [--peer ZID=LOCATOR]... \
-                         [--local a.b.c.d] \
+        "usage: host-slot-node [<router [udp/|tcp/|tls/]ADDRESS:port>] [--peer ZID=LOCATOR]... \
+                         [--local IP] \
                          [--doc KEY:BYTES]... [--get KEY --count N [--warmup N] [--timeout-ms MS] \
                          [--inflight K] [--mailbox]]";
     let mut router = None;
@@ -236,7 +227,7 @@ fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static 
         locator: "",
     }; LAUNCHED];
     let mut peer_count = 0;
-    let mut local = [0u8; 4];
+    let mut local = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
     let mut docs = [None; DOCS];
     let mut taken = 0;
     #[cfg(feature = "get")]
@@ -294,7 +285,7 @@ fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static 
             "--local" => {
                 at += 1;
                 let value = if at < argc { argument(argv, at) } else { None };
-                local = parse_ipv4(value.ok_or(USAGE)?).ok_or(USAGE)?;
+                local = IpAddr::from_str(value.ok_or(USAGE)?).map_err(|_| USAGE)?;
             }
             "--doc" => {
                 at += 1;

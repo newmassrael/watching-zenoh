@@ -95,7 +95,7 @@ pub fn join_message_len(bytes: &[u8]) -> Option<usize> {
 /// `T` header flag's seconds form is projected back here (R311kr), so
 /// consumers never see the wire unit. The caller validates the
 /// announcement (§3.2 rejection rules —
-/// [`validate_join`](crate::multicast_join::validate_join)) before
+/// [`judge_join`](crate::multicast_join::judge_join)) before
 /// feeding it to
 /// [`MulticastDispatcher::ingest_join`](crate::multicast_dispatch::MulticastDispatcher::ingest_join).
 pub fn decode_join(bytes: &[u8]) -> Option<Join<'_>> {

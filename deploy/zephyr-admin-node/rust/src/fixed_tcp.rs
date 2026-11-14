@@ -401,7 +401,12 @@ fn start(net: &LwipMacNet) -> Result<Running, i32> {
         return Err(3);
     }
     let dial = LwipTcpDial::new(link, &STORAGE.connections).with_service(service_ports);
-    let stack: Stack = Stack::new(address, &STORAGE.rx, &STORAGE.tx, dial);
+    let stack: Stack = Stack::new(
+        core::net::IpAddr::from(address),
+        &STORAGE.rx,
+        &STORAGE.tx,
+        dial,
+    );
     let acceptor =
         stack.acceptor(LwipTcpListen::new(link, &STORAGE.listener).with_service(service_ports));
 

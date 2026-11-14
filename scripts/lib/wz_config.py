@@ -305,6 +305,7 @@ def decl_of(data: dict) -> dict:
         "order": [c["id"] for c in data["capability"]],
         "limits": list(data["limit"]),
         "policies": list(data.get("policy", [])),
+        "facts": list(data.get("protocol_fact", [])),
         "policy_images": list(data.get("policy_image", [])),
         "images": [i["id"] for i in data.get("image", [])],
         "image_dirs": {i["id"]: i["dir"] for i in data.get("image", [])},
@@ -344,6 +345,7 @@ def validate_decl(data: dict) -> list[str]:
     out += validate_artifacts(data)
     out += validate_limits(data["limit"])
     out += validate_policies(data.get("policy", []), data["catalog_version"])
+    out += validate_facts(data.get("protocol_fact", []))
     out += validate_images(data)
     out += validate_policy_images(data)
     out += validate_switches(data)
@@ -1329,6 +1331,51 @@ def policy_symbols(pol: dict) -> list[str]:
     return [kconfig]
 
 
+FACT_KEYS = {"id", "pico", "c", "holds", "lacks", "help"}
+FACT_ABIS = ("pico", "c")
+
+
+def fact_entry_ok(entry: object) -> bool:
+    """A `holds` or `lacks` entry: `<file of this tree> @ <text>`, both halves non-empty."""
+    if not isinstance(entry, str) or " @ " not in entry:
+        return False
+    path, text = entry.split(" @ ", 1)
+    return bool(path) and bool(text) and not path.startswith("/")
+
+
+def validate_facts(facts: list[dict]) -> list[str]:
+    """A protocol fact is what a session of an ABI states on the wire that no switch moves
+    (deploy/wz-config.toml, "Protocol facts"): a value per ABI that has it, and where this tree
+    holds it, as texts that must occur in files of the tree (`holds`) or must not (`lacks`).
+    Whether the files still say so is checked by crates/wz-conformance-suite; here only the
+    shape."""
+    out: list[str] = []
+    ids = [f.get("id") for f in facts]
+    if len(ids) != len(set(ids)):
+        out.append("a protocol fact id is declared twice")
+    for fact in facts:
+        fid = fact.get("id", "?")
+        for key in sorted(set(fact) - FACT_KEYS):
+            out.append(f"protocol fact `{fid}`: `{key}` is not a key a protocol fact has")
+        if not POLICY_ID_RE.fullmatch(str(fid)):
+            out.append(f"protocol fact `{fid}`: an id is lowercase words joined by `-`")
+        if not any(abi in fact for abi in FACT_ABIS):
+            out.append(f"protocol fact `{fid}`: names a value for no ABI ({', '.join(FACT_ABIS)})")
+        for abi in FACT_ABIS:
+            if abi in fact and (not isinstance(fact[abi], str) or not fact[abi]):
+                out.append(f"protocol fact `{fid}`: its {abi} value is not a non-empty string")
+        entries = [e for key in ("holds", "lacks") for e in fact.get(key, [])]
+        if not entries:
+            out.append(f"protocol fact `{fid}`: names nothing of this tree that holds it "
+                       "(`holds`, `lacks`)")
+        for entry in entries:
+            if not fact_entry_ok(entry):
+                out.append(f"protocol fact `{fid}`: {entry!r} is not `<file of this tree> @ <text>`")
+        if not isinstance(fact.get("help"), str) or not fact.get("help", "").strip():
+            out.append(f"protocol fact `{fid}`: has no help")
+    return out
+
+
 def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
     """A policy is behaviour upstream does not have (docs/build-configuration.md, C2 and
     section 5): it is declared with the upstream behaviour it departs from, and it defaults to that
@@ -1767,6 +1814,17 @@ def emit_rust_conformance_items(decl: dict) -> str:
         "/// The declaration's `catalog_version`.",
         f"pub const CATALOG_VERSION: u32 = {decl['catalog_version']};",
         "",
+        "/// The features of the pico ABI's crate that run its sessions on the cooperative engine, when",
+        "/// the tokio engine is not in the build; every other build runs them on the tokio engine.",
+        "pub const COOP_ENGINE_FEATURES: &[&str] = "
+        f"{rust_word_list(list(STATEMENT_COOP_FEATURES))};",
+        "/// The features that build a library for a platform other than a host, each with its word.",
+        # One line, as rustfmt lays out a short array; the list is one row per platform.
+        "pub const PLATFORM_FEATURES: &[(&str, &str)] = &["
+        + ", ".join(f"({rust_word(feature)}, {rust_word(platform)})"
+                    for feature, platform in STATEMENT_PLATFORM_FEATURES)
+        + "];",
+        "",
         "/// Each capability and the ABIs that export it: its cargo feature in those crates has its id.",
         "pub const CAPABILITIES: &[(&str, &[&str])] = &[",
     ]
@@ -1856,6 +1914,11 @@ def statement_vectors(decl: dict) -> list[dict]:
         add("every limit and policy stated at its default", abi, [], defaults)
         for name in names(abi):
             add(f"{name} alone", abi, [name], {})
+    # The engine and the platform, read from the pico crate's features by the same rule on both
+    # sides (`statement_engine`, `statement_platform`).
+    add("the cooperative engine", "pico", ["engine-coop"], {})
+    add("the zephyr platform", "pico", ["os-zephyr"], {})
+    add("the tokio engine beside a cooperative feature", "pico", ["engine-tokio", "engine-coop"], {})
     for i, lim in enumerate(decl["limits"]):
         add(f"{lim['id']} one above its default", ABIS[i % len(ABIS)], [],
             {lim["kconfig"]: str(lim["default"] + 1)})
@@ -2627,7 +2690,38 @@ def resolved_policy_env(decl: dict, kconf) -> list[str]:
 STATEMENT_FORMAT = "wz-conformance-statement"
 # 2 (2026-11-07): `arm`, the layout switches that are not capabilities, joined the identity; a
 # version-1 digest could not tell two zenoh-c drop-ins of different type layouts apart.
-STATEMENT_FORMAT_VERSION = 2
+# 3 (2026-11-14): `engine` and `platform` joined the identity; a version-2 digest could not tell
+# a pico build on the tokio engine from one on the cooperative engine, or a host library from a
+# Zephyr one, when their capabilities were the same, and those builds run differently.
+STATEMENT_FORMAT_VERSION = 3
+
+# The features of the pico ABI's crate that run its sessions on the cooperative engine
+# (docs/capi-pico-on-coop-engine.md): `engine-coop` on a host, `os-zephyr` in a Zephyr image. A
+# build that names neither runs them on the tokio engine, and so does every build of the other
+# ABIs, whose crates have no other engine.
+STATEMENT_COOP_FEATURES = ("engine-coop", "os-zephyr")
+# The features that build a library for a platform other than a host, each with the platform's
+# word in the statement; a build that names none is a host's.
+STATEMENT_PLATFORM_FEATURES = (("os-zephyr", "zephyr"),)
+
+
+def statement_engine(abi: str, have: set[str]) -> str:
+    """The engine a build of `abi` with the features `have` runs its sessions on: the pico
+    crate's rule, the tokio engine whenever it is in the build, else the cooperative one when a
+    feature selects it."""
+    if (abi == "pico" and "engine-tokio" not in have
+            and any(f in have for f in STATEMENT_COOP_FEATURES)):
+        return "coop"
+    return "tokio"
+
+
+def statement_platform(abi: str, have: set[str]) -> str:
+    """The platform a build of `abi` with the features `have` is a library for."""
+    if abi == "pico":
+        for feature, platform in STATEMENT_PLATFORM_FEATURES:
+            if feature in have:
+                return platform
+    return "host"
 
 
 def arm_switches(decl: dict, abi: str) -> list[str]:
@@ -2663,6 +2757,8 @@ def conformance_statement(decl: dict, abi: str, features: list[str], limits: dic
         "format_version": STATEMENT_FORMAT_VERSION,
         "catalog_version": decl["catalog_version"],
         "abi": abi,
+        "engine": statement_engine(abi, have),
+        "platform": statement_platform(abi, have),
         "arm": [{"id": switch, "on": switch in have} for switch in arm_switches(decl, abi)],
         "capabilities": [{"id": cid, "supported": cid in have} for cid in decl["order"]
                          if abi in decl["caps"][cid]["abis"]],
@@ -2671,7 +2767,11 @@ def conformance_statement(decl: dict, abi: str, features: list[str], limits: dic
         "policies": [{"id": pol["id"], "value": policies[pol["id"]], "upstream": pol["default"]}
                      for pol in decl["policies"]],
     }
-    return {**body, "derived_from": derived_from, "digest": statement_digest(body)}
+    # The ABI's protocol facts: fixed by the ABI and the catalogue version, which the digest
+    # already covers, so they are stated beside the body and left out of what is hashed.
+    facts = [{"id": f["id"], "value": f[abi]} for f in decl.get("facts", []) if abi in f]
+    return {**body, "facts": facts, "derived_from": derived_from,
+            "digest": statement_digest(body)}
 
 
 def policy_values(pol: dict) -> list[str]:
@@ -2716,6 +2816,8 @@ def statement_digest(body: dict) -> str:
         "format_version": body["format_version"],
         "catalog_version": body["catalog_version"],
         "abi": body["abi"],
+        "engine": body["engine"],
+        "platform": body["platform"],
         "arm": [[a["id"], a["on"]] for a in body["arm"]],
         "capabilities": [[c["id"], c["supported"]] for c in body["capabilities"]],
         "limits": [[x["id"], x["value"]] for x in body["limits"]],
@@ -3342,6 +3444,17 @@ def cmd_selftest() -> int:
     expect("a statement lists every limit and every policy with its value",
            [x["id"] for x in stated["limits"]] == [lim["id"] for lim in decl["limits"]]
            and [p["id"] for p in stated["policies"]] == [pol["id"] for pol in decl["policies"]])
+    moved = dict(decl, facts=[dict(f, pico="moved") for f in decl.get("facts", []) if "pico" in f])
+    expect("a statement lists its ABI's protocol facts, and they are outside the digest",
+           [f["id"] for f in stated["facts"]] == [f["id"] for f in decl.get("facts", []) if "pico" in f]
+           and conformance_statement(moved, "pico", arm, defaults, upstream, {"kind": "test"})["digest"]
+           == stated["digest"])
+    expect("a protocol fact without a value, or without a file that holds it, is refused",
+           len(validate_facts([{"id": "x", "help": "h"}])) == 2
+           and len(validate_facts([{"id": "x", "pico": "1", "holds": ["a/b"], "help": "h"}])) == 1
+           and len(validate_facts([{"id": "x", "pico": "1", "lacks": ["/a @ t"], "help": "h"}])) == 1
+           and not validate_facts([{"id": "x", "pico": "1", "holds": ["a/b @ n"],
+                                    "lacks": ["a/c @ m"], "help": "h"}]))
     expect("a statement of the cooperative build states what that build has, not what was asked",
            {c["id"]: c["supported"] for c in conformance_statement(
                decl, "pico", coop, defaults, upstream, {"kind": "test"})["capabilities"]}
@@ -3366,13 +3479,30 @@ def cmd_selftest() -> int:
     # and_digest_wz_config_gives_it`) asserts this same value of this same fixture: the two
     # writers of the canonical form cannot drift apart unseen.
     fixture = {"format": STATEMENT_FORMAT, "format_version": 1, "catalog_version": 7, "abi": "pico",
+               "engine": "tokio", "platform": "host",
                "arm": [{"id": "x-arm", "on": True}],
                "capabilities": [{"id": "a-cap", "supported": True}, {"id": "b-cap", "supported": False}],
                "limits": [{"id": "L_ONE", "value": 256}, {"id": "L_TWO", "value": 0}],
                "policies": [{"id": "p-one", "value": "on"}, {"id": "p-two", "value": "os-default"}]}
     expect("the build script's digest form gives the fixture the digest this one does",
            statement_digest(fixture)
-           == "sha256:f503a3f077f1fd6a8b6fd97ae6281ba9bb81e628f2680ce70ab248a31fd51387")
+           == "sha256:1504af20a23a543a7613580140ff56e39f4f6324c8f15588f62ebc5d245da4bf")
+    on_coop = conformance_statement(decl, "pico", coop, defaults, upstream, {})
+    same_on_tokio = conformance_statement(
+        decl, "pico", ["engine-tokio"] + [f for f in coop if f != "engine-coop"], defaults,
+        upstream, {})
+    on_zephyr = conformance_statement(
+        decl, "pico", ["os-zephyr"] + [f for f in coop if f != "engine-coop"], defaults,
+        upstream, {})
+    expect("a statement names its engine and platform, and each moves the digest alone",
+           stated["engine"] == "tokio" and stated["platform"] == "host"
+           and on_coop["engine"] == "coop" and same_on_tokio["engine"] == "tokio"
+           and on_coop["capabilities"] == same_on_tokio["capabilities"]
+           and on_coop["digest"] != same_on_tokio["digest"]
+           and on_zephyr["engine"] == "coop" and on_zephyr["platform"] == "zephyr"
+           and on_zephyr["digest"] != on_coop["digest"]
+           and conformance_statement(decl, "c", ["engine-coop", "os-zephyr"], defaults,
+                                     upstream, {})["engine"] == "tokio")
     # The zenoh-c drop-in (decision C15, step 15c): the arm its header selects is in the statement
     # and in the digest, and nothing else of the header is read.
     c_arm = arm_switches(decl, "c")
@@ -3433,12 +3563,29 @@ def cmd_selftest() -> int:
                        for name, value in stated_env) for lim in decl["limits"])
            and all((pol["kconfig"], value) in stated_env
                    for pol in decl["policies"] for value in policy_values(pol)))
+    # Three kinds of case state a build another case already states, on purpose: every limit and
+    # policy at its default is the build that states nothing; every name of every ABI is every
+    # name of the ABI (the other ABIs' names count for nothing); and the tokio engine beside a
+    # cooperative feature is the tokio engine, whose build with nothing else is the one that
+    # states nothing (`statement_engine`). They are left out of the count of distinct digests and
+    # held to equal their twin instead, so a change of the engine rule turns one of them red.
+    same_as = {"every limit and policy stated at its default": "nothing stated",
+               "every name of every ABI on": "every name of the ABI on",
+               "the tokio engine beside a cooperative feature": "nothing stated"}
+    by_case = {(v["abi"], v["case"]): v["digest"] for v in vectors}
+    twins = [(abi, case, twin) for (abi, case) in by_case for c, twin in same_as.items()
+             if case == c]
     expect("the statement vectors are the same on every run and every digest is distinct where "
            "the build differs",
            emit_statement_vectors(decl) == emit_statement_vectors(decl)
-           and len({v["digest"] for v in vectors if v["case"] != "every limit and policy stated "
-                    "at its default" and not v["case"].startswith("every name of every ABI")})
-           == len(vectors) - 2 * len(ABIS))
+           and len({v["digest"] for v in vectors if v["case"] not in same_as})
+           == len(vectors) - len(twins))
+    expect("each vector that states a build another states has that build's digest",
+           len(twins) == 2 * len(ABIS) + 1
+           and all(by_case[(abi, case)] == by_case[(abi, twin)] for abi, case, twin in twins))
+    expect("the cooperative engine and the zephyr platform each state a build of their own",
+           len({by_case[("pico", "nothing stated")], by_case[("pico", "the cooperative engine")],
+                by_case[("pico", "the zephyr platform")]}) == 3)
     expect("a statement's digest does not count the catalogue's defaults beside the values",
            statement_digest({**stated, "limits": [{**x, "default": 0} for x in stated["limits"]]})
            == stated["digest"])

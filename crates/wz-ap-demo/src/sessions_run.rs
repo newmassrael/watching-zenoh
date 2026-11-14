@@ -637,6 +637,8 @@ fn group_params(
         compression: false,
         tx_queue: Default::default(),
         link_rx: Default::default(),
+        // The demo's group is zenoh-pico's, as its batch is.
+        join_rule: wz::runtime_tokio::multicast_glue::GroupJoinRule::Pico,
     }
 }
 

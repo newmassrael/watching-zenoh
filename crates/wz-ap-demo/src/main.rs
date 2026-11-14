@@ -448,23 +448,52 @@ fn demo_main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // Item 751 — a south partition is held by the two modes that run the region-hat
-    // forwarder: the router hat and the peer (step 7d). The forwarder builds a hat for every
-    // region a partition can place a remote in, whatever its node mode
-    // (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Custom(subregions) => {`).
+    // Item 751 — a south partition is held by the modes that run the region-hat forwarder,
+    // the router hat, the peer and the client node (step 7d), and by a one-shot client's
+    // session. Upstream builds a hat for every region a partition can place a remote in,
+    // whatever its node mode (`zenoh/src/net/routing/gateway.rs` @
+    // `GatewaySouthConf::Custom(subregions) => {`), and decides on every Open, a client's
+    // included, the bound the partition gives the remote
+    // (`zenoh/src/net/runtime/mod.rs` @ `move |p| region::compute_transient_bound_of(&p, &config)`).
     // Refused rather than ignored on every other mode, so a node never runs on the `auto`
     // preset while its operator asked for a partition.
     if parse_pair(rest, "--gateway-south").is_some()
         && parse_pair(rest, "--router-hat").is_none()
         && parse_pair(rest, "--peer").is_none()
         && parse_pair(rest, "--client-node").is_none()
+        && parse_pair(rest, "--connect").is_none()
     {
         eprintln!(
-            "wz-ap-demo: --gateway-south requires --router-hat, --peer or --client-node \
-             (only the region-hat forwarder serves a partitioned south)"
+            "wz-ap-demo: --gateway-south requires --router-hat, --peer, --client-node or \
+             --connect (an acceptor or a scout run holds no partition)"
         );
         return ExitCode::from(2);
     }
+    // The reconnect supervisor reopens each link through its own open, which stages no
+    // partition, so a `--reconnect` client would announce none after asking for one.
+    if parse_pair(rest, "--gateway-south").is_some()
+        && rest.iter().any(|a| a == "--reconnect")
+        && parse_pair(rest, "--peer").is_none()
+        && parse_pair(rest, "--client-node").is_none()
+        && parse_pair(rest, "--router-hat").is_none()
+    {
+        eprintln!(
+            "wz-ap-demo: --gateway-south is not carried by a --reconnect client: its \
+             supervisor reopens the link without a partition"
+        );
+        return ExitCode::from(2);
+    }
+    // The partition every run mode that holds one is handed, read once by the config
+    // reader's own `gateway/south` reader and REFUSED loudly rather than degraded: a
+    // partition the operator asked for and did not get places remotes in regions nobody
+    // chose.
+    let south_partition = match crate::args::parse_gateway_south(rest) {
+        Ok(partition) => partition,
+        Err(msg) => {
+            eprintln!("wz-ap-demo: {msg}");
+            return ExitCode::from(2);
+        }
+    };
 
     // `--govern-multicast` holds the router's multicast GROUP to the node's policy, which
     // upstream does not (it installs no interceptor on a multicast transport). Only the router
@@ -637,17 +666,8 @@ fn demo_main() -> ExitCode {
                 );
                 return ExitCode::from(2);
             }
-            // Item 751, step 7d — `--gateway-south <partition>`, read by the config reader's
-            // own `gateway/south` reader and REFUSED loudly rather than degraded, as the router
-            // hat's is: a partition the operator asked for and did not get places remotes in
-            // regions nobody chose.
-            let south_partition = match crate::args::parse_gateway_south(rest) {
-                Ok(v) => v,
-                Err(msg) => {
-                    eprintln!("wz-ap-demo: {msg}");
-                    return ExitCode::from(2);
-                }
-            };
+            // Item 751, step 7d — `--gateway-south <partition>`, parsed once above.
+            let south_partition = south_partition.clone();
             // R311tt (§5.16 access control) — `--acl-deny <keyexpr>` opts this
             // peer into ACL enforcement: an allow-default policy with one ingress
             // Put deny rule on the keyexpr (every peer subject). A Put a neighbour
@@ -1213,17 +1233,8 @@ fn demo_main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            // Item 751 — `--gateway-south <partition>`, read by the config
-            // reader's own `gateway/south` reader and REFUSED loudly rather than
-            // degraded: a partition the operator asked for and did not get places
-            // remotes in regions nobody chose.
-            let south_partition = match crate::args::parse_gateway_south(rest) {
-                Ok(v) => v,
-                Err(msg) => {
-                    eprintln!("wz-ap-demo: {msg}");
-                    return ExitCode::from(2);
-                }
-            };
+            // Item 751 — `--gateway-south <partition>`, parsed once above.
+            let south_partition = south_partition.clone();
             // `--cpu-share` / `--max-data-wait` — what the operator declares about the CPU this
             // router may count on. REFUSED loudly rather than degraded: a promise the operator
             // asked for and did not get would read as the promise holding.
@@ -1428,6 +1439,8 @@ fn demo_main() -> ExitCode {
                     // R2788 — the `plugins` section as JSON5 text, which a
                     // `--config` file's `plugins` key expands to.
                     plugins: parse_pair(rest, "--plugins"),
+                    // `plugins_loading/enabled`, a bare presence flag like the two above.
+                    plugins_loading: rest.iter().any(|a| a == "--plugins-loading"),
                     plugin_search_dirs,
                     aggregation: aggregation.clone(),
                     // §5.23 `adminspace-core` — the one value read above.
@@ -1766,6 +1779,10 @@ fn demo_main() -> ExitCode {
                 zid: node_zid.clone(),
                 socket: scout_socket.clone(),
             }),
+            // Item 751 — `--gateway-south`, which a one-shot client's session
+            // carries to its Open; refused above on a `--reconnect` or `--scout`
+            // run, so those carry the `auto` preset.
+            south_partition: south_partition.clone(),
         },
         (Some(_), Some(_)) => {
             eprintln!("wz-ap-demo: --listen and --connect are mutually exclusive");
@@ -2566,6 +2583,8 @@ fn demo_main() -> ExitCode {
             compression,
             shm,
             rescout,
+            // Carried to the session by the open rather than printed here.
+            south_partition: _,
         } => {
             // R2099 — the whole candidate list, in dial order; `establish_link`
             // takes the first that opens.

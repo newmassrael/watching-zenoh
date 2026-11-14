@@ -69,6 +69,13 @@ pub const Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION: ZResult = -70;
 /// see this rather than a generic failure or a success.
 pub const Z_ERR_CANCELLED: ZResult = -69;
 
+/// `z_timestamp_new` has no time left to give: the session already gave the greatest one there
+/// is, and every time it gives is greater than the last. Matches pico
+/// (`vendor/zenoh-pico/include/zenoh-pico/utils/result.h` @
+/// `_Z_ERR_TIMESTAMP_GENERATION_FAILED = -68,`) EXACTLY, the code pico's own `z_timestamp_new`
+/// returns for it.
+pub const Z_ERR_TIMESTAMP_GENERATION_FAILED: ZResult = -68;
+
 /// The session this call names is closed, or is not a session at all. Matches
 /// pico `_Z_ERR_SESSION_CLOSED` (`utils/result.h`) EXACTLY: a caller declaring a
 /// listener branches on it to learn the declaration was refused for want of a
@@ -95,6 +102,12 @@ pub const Z_ERR_SCOUT_NO_RESULTS: ZResult = -87;
 /// multicast transport, a scheme no link serves (MEASURED on the real library: `nope/...` and,
 /// in a build without its raweth transport, `reth/...`).
 pub const Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN: ZResult = -92;
+
+/// A `z_open` whose config's mode is neither `client` nor `peer` (`router` among them: pico has
+/// no router role). Matches pico `_Z_ERR_CONFIG_INVALID_MODE` (`utils/result.h`), which its
+/// open answers for such a mode (`vendor/zenoh-pico/src/net/session.c` @
+/// `ret = _Z_ERR_CONFIG_INVALID_MODE;`).
+pub const Z_ERR_CONFIG_INVALID_MODE: ZResult = -90;
 
 /// The session has no transport to do this on: a client whose link is gone and has not come
 /// back. Matches pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE` (`utils/result.h`), which its three

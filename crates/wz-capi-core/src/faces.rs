@@ -2471,9 +2471,11 @@ impl SharedSession {
 
     /// The next timestamp off this node's clock, or `None` when the node holds none (its role does
     /// not stamp, or the build has no clock): upstream's `runtime.hlc()` followed by
-    /// `new_timestamp`. Strictly increasing from one call to the next.
+    /// `new_timestamp`, for a caller that reads the clock for itself. No stamping policy applies
+    /// to it, as none applies to upstream's clock; the publications this node stamps take theirs
+    /// from [`NodeHlc::stamp`]. Strictly increasing from one call to the next.
     pub fn node_timestamp(&self) -> Option<wz_session_core::sample::TimestampHint> {
-        self.node_hlc.stamp()
+        self.node_hlc.clock_stamp()
     }
 
     /// This node's clock itself, for a host that lends it as upstream's runtime lends its
@@ -3774,9 +3776,10 @@ impl SharedSession {
         // Measured: a publication cache stores the local copy and a querying subscriber hears
         // the wire one, and with two times they were two samples, so the value was delivered
         // twice (`z_int_pub_cache_query_sub_test` under load).
+        // The node stamps its own publication here, so the stamping policy is applied here.
         let stamped;
         let opts = match opts.timestamp {
-            None => match self.node_timestamp() {
+            None => match self.node_hlc.stamp() {
                 Some(timestamp) => {
                     stamped = opts.clone().with_timestamp(timestamp);
                     &stamped

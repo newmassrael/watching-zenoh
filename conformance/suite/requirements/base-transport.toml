@@ -1,0 +1,866 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The conformance requirements of the zenoh conformance test suite: the base layer, transport
+# part.
+# docs/conformance-suite.md section 3 defines every field; crates/wz-conformance-suite holds the
+# list to it.
+#
+# Each requirement is a statement about what an implementation sends or accepts on the wire,
+# written so that a codec and a test purpose can be written from it alone, without reading any
+# implementation. Its sources are the pinned upstream's protocol definition and codec, cited by
+# anchor (the path holds at the pin and the needle occurs in it, graded by the upstream citation
+# gate). A requirement whose only source is an implementation's behaviour, or whose sources
+# disagree, carries an `issue`; a test of it is inconclusive until the issue is settled.
+
+format = "wz-conformance-requirements"
+format_version = 1
+layer = "base"
+part = "transport"
+base = "zenoh 1.10.2"
+
+# ---------------------------------------------------------------------------------------------
+# Common encodings
+
+[[requirement]]
+id = "B-ENC-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A variable-length integer (written %name% in the message layouts) is little-endian base 128:
+each byte carries seven bits of the value, the least significant group first, and bit 7 is set
+on every byte but the last. A 64-bit value takes at most nine bytes; when a ninth byte is
+present, all eight of its bits are value bits and none is a continuation bit.
+'''
+sources = [
+    '`commons/zenoh-codec/src/core/zint.rs` @ `const VLE_LEN_MAX: usize = vle_len(u64::MAX);`',
+    '`commons/zenoh-codec/src/core/zint.rs` @ `while (b & 0x80_u8) != 0 && i != 7 * (VLE_LEN_MAX - 1) {`',
+]
+
+[[requirement]]
+id = "B-ENC-2"
+strength = "SHOULD"
+kind = "dynamic"
+aspect = "encoding"
+binds = "sender"
+text = '''
+A sender writes a variable-length integer in the fewest bytes that hold its value.
+'''
+sources = [
+    '`commons/zenoh-codec/src/core/zint.rs` @ `while (x & !0x7f_u64) != 0 {`',
+]
+issue = '''
+The base codec writes only the shortest form and reads a longer one (a byte 0x80 followed by
+0x00 reads as zero). Whether a longer form is conformant is not stated anywhere in the base.
+'''
+
+[[requirement]]
+id = "B-ENC-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A byte sequence written <u8;zN> is a variable-length integer length followed by that many
+bytes, and the length fits in N bits. A receiver refuses the message that holds a length that
+does not fit.
+'''
+sources = [
+    '`commons/zenoh-codec/src/core/zint.rs` @ `if (x & !(<$bound>::MAX as u64)) != 0 {`',
+    '`commons/zenoh-codec/src/core/zslice.rs` @ `let zslice = reader.read_zslice(len)?;`',
+]
+
+[[requirement]]
+id = "B-ENC-4"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A zenoh id is a non-zero unsigned 128-bit integer. It is written as its significant bytes in
+little-endian order, from one to sixteen bytes. Where a message carries its length in a 4-bit
+field, the field holds the length minus one.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/core/mod.rs` @ `pub const MAX_SIZE: usize = 16;`',
+    '`commons/zenoh-codec/src/core/zenohid.rs` @ `writer.write_exact(&x.to_le_bytes()[..x.size()])`',
+    '`commons/zenoh-protocol/src/transport/init.rs` @ `real_zid_len := 1 + zid_len`',
+]
+
+[[requirement]]
+id = "B-ENC-5"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+The role field of an Init or a Join is two bits: 0b00 router, 0b01 peer, 0b10 client. 0b11 is
+reserved, and a receiver refuses the message that holds it.
+'''
+sources = [
+    '`commons/zenoh-codec/src/transport/init.rs` @ `WhatAmI::Client => 0b10,`',
+    '`commons/zenoh-codec/src/transport/init.rs` @ `0b10 => WhatAmI::Client,`',
+]
+
+[[requirement]]
+id = "B-ENC-6"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A transport message starts with one header byte: its low five bits are the message id and its
+high three bits are the message's flags. On every transport message bit 7 is the flag Z: when it
+is set, an extension chain follows the message's fixed fields.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/common/mod.rs` @ `pub const HEADER_BITS: u8 = 5;`',
+    '`commons/zenoh-protocol/src/transport/init.rs` @ `pub const Z: u8 = 1 << 7;`',
+]
+
+[[requirement]]
+id = "B-ENC-7"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+The transport message ids are: OAM 0x00, Init 0x01, Open 0x02, Close 0x03, KeepAlive 0x04,
+Frame 0x05, Fragment 0x06, Join 0x07. No network message id is one of them.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/mod.rs` @ `pub const KEEP_ALIVE: u8 = 0x04;`',
+    '`commons/zenoh-protocol/src/transport/mod.rs` @ `crucial that these IDs do NOT collide with the IDs`',
+]
+
+# ---------------------------------------------------------------------------------------------
+# Extension chain
+
+[[requirement]]
+id = "B-EXT-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+An extension starts with one header byte: bit 7 is Z (another extension follows this one), bits
+6 and 5 are the body's encoding (0b00 unit, 0b01 64-bit integer, 0b10 byte sequence, 0b11
+reserved), bit 4 is M (the extension is mandatory) and bits 3 to 0 are the extension id.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/common/extension.rs` @ `pub const FLAG_M: u8 = 1 << 4;`',
+    '`commons/zenoh-protocol/src/common/extension.rs` @ `pub const ENC_ZBUF: u8 = 0b10 << 5;`',
+]
+
+[[requirement]]
+id = "B-EXT-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A unit extension has no body. A 64-bit integer extension's body is one variable-length integer.
+A byte-sequence extension's body is a variable-length integer length that fits in 32 bits
+followed by that many bytes.
+'''
+sources = [
+    '`commons/zenoh-codec/src/common/extension.rs` @ `let bodec = Zenoh080Bounded::<u32>::new();`',
+    '`commons/zenoh-protocol/src/common/extension.rs` @ `If ENC == Z64 || ENC == ZBuf (z32)`',
+]
+
+[[requirement]]
+id = "B-EXT-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "receiver"
+text = '''
+An extension is known by its header without the Z bit: the id, the M bit and the encoding
+together. A receiver that does not know an extension whose M bit is 0 reads its body by its
+encoding, discards it, and goes on with the rest of the message.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/common/extension.rs` @ `pub const fn eid(header: u8) -> u8 {`',
+    '`commons/zenoh-codec/src/common/extension.rs` @ `tracing::debug!("Unknown {_s} ext: {u:?}");`',
+]
+
+[[requirement]]
+id = "B-EXT-4"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "receiver"
+text = '''
+A receiver that does not know an extension whose M bit is 1 refuses the message that carries
+it.
+'''
+sources = [
+    '`commons/zenoh-codec/src/common/extension.rs` @ `if u.is_mandatory() {`',
+]
+
+[[requirement]]
+id = "B-EXT-5"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "receiver"
+text = '''
+A receiver refuses a message that carries an extension of the reserved encoding 0b11, known or
+not: its body cannot be delimited.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/common/extension.rs` @ `/// - 0b11: Reserved`',
+    '`commons/zenoh-codec/src/common/extension.rs` @ `let body = match self.header & iext::ENC_MASK {`',
+]
+
+# ---------------------------------------------------------------------------------------------
+# Batches
+
+[[requirement]]
+id = "B-BATCH-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-STREAM-LINK"
+text = '''
+On a link that does not keep message boundaries (a byte stream), every batch is preceded by its
+length in two bytes, little-endian. A batch is at most 65535 bytes.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/mod.rs` @ `pub type BatchSize = u16;`',
+    '`commons/zenoh-protocol/src/transport/mod.rs` @ `The length is encoded as little-endian.`',
+]
+
+[[requirement]]
+id = "B-BATCH-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-DGRAM-LINK"
+text = '''
+On a link that keeps message boundaries (a datagram link), a batch is one datagram, with no
+length before it.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/mod.rs` @ `This is necessary in those stream-oriented transports (e.g., TCP) that do not preserve`',
+    '`io/zenoh-transport/src/common/batch.rs` @ `2 bytes are reserved to encode the total amount of serialized bytes as 16-bits little endian.`',
+]
+issue = '''
+The definition says the two length bytes may be prepended and are needed on stream links; it
+does not say that a datagram carries none. The pinned implementation writes them only on stream
+links.
+'''
+
+[[requirement]]
+id = "B-BATCH-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+A batch holds one or more transport messages back to back. A Frame's network messages run from
+the end of its header to the end of the batch, or to the first byte that does not begin a
+network message, where the next transport message begins.
+'''
+sources = [
+    '`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`',
+    '`commons/zenoh-protocol/src/transport/mod.rs` @ `crucial that these IDs do NOT collide with the IDs`',
+]
+
+[[requirement]]
+id = "B-BATCH-4"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-COMPRESSION"
+text = '''
+On a session that agreed on compression, every batch begins with one header byte whose bit 0 is
+set when the rest of the batch is compressed.
+'''
+sources = [
+    '`io/zenoh-transport/src/common/batch.rs` @ `const COMPRESSION: u8 = 1; // 1 << 0`',
+]
+issue = '''
+Only the pinned implementation defines the batch header and the compressed form; the protocol
+definition has no text for either, so the compression algorithm is not part of the base yet.
+'''
+
+[[requirement]]
+id = "B-BATCH-5"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+text = '''
+A sender sends no batch larger than the batch size its peer stated: in the peer's Init, or in
+the peer's Join on a multicast group. A peer that stated none stated the default of its
+transport (B-INIT-2, B-JOIN-2).
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/init.rs` @ `It indicates the maximum size of a batch the sender of the INIT message is willing`',
+    '`commons/zenoh-protocol/src/transport/join.rs` @ `It indicates the maximum size of a batch the sender of the JOIN message is willing`',
+]
+
+# ---------------------------------------------------------------------------------------------
+# Init (unicast)
+
+[[requirement]]
+id = "B-INIT-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-UNICAST"
+text = '''
+Init: header flags A (bit 5, set on InitAck), S (bit 6, size parameters follow) and Z. Then the
+version byte; one byte holding the zenoh id length minus one in bits 7 to 4 and the role in bits
+1 and 0 (bits 3 and 2 reserved); the zenoh id. When S is set: one byte of resolutions (bits 1
+and 0 the frame sequence number resolution, bits 3 and 2 the request id resolution, bits 7 to 4
+reserved) and the batch size as two bytes, little-endian. On InitAck only, the cookie as
+<u8;z16>. Then the extensions when Z is set.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/init.rs` @ `pub const S: u8 = 1 << 6;`',
+    '`commons/zenoh-codec/src/transport/init.rs` @ `self.write(&mut *writer, batch_size.to_le_bytes())?;`',
+    '`commons/zenoh-codec/src/transport/init.rs` @ `let cookie: ZSlice = zodec.read(&mut *reader)?;`',
+]
+
+[[requirement]]
+id = "B-INIT-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-UNICAST"
+text = '''
+A resolution is two bits: 0b00 8 bits, 0b01 16 bits, 0b10 32 bits, 0b11 64 bits. An Init
+without S states the defaults: 32-bit frame sequence numbers, 32-bit request ids and a batch
+size of 65535 bytes.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/core/resolution.rs` @ `let frame_sn = Bits::from(TransportSn::MAX) as u8;`',
+    '`commons/zenoh-protocol/src/transport/mod.rs` @ `pub const UNICAST: BatchSize = BatchSize::MAX;`',
+    '`commons/zenoh-codec/src/transport/init.rs` @ `let mut batch_size = batch_size::UNICAST.to_le_bytes();`',
+]
+
+[[requirement]]
+id = "B-INIT-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "sender"
+text = '''
+The version byte of an Init or a Join is 0x09.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/lib.rs` @ `pub const VERSION: u8 = 0x09;`',
+]
+
+[[requirement]]
+id = "B-INIT-4"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-UNICAST"
+text = '''
+The Init extensions, every one with M = 0: QoS id 0x1 unit, QoS link id 0x1 64-bit integer,
+shared memory id 0x2 byte sequence, authentication id 0x3 byte sequence, multilink id 0x4 byte
+sequence, low latency id 0x5 unit, compression id 0x6 unit, patch id 0x7 64-bit integer, region
+name id 0x8 byte sequence.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/init.rs` @ `pub type Patch = zextz64!(0x7, false);`',
+    '`commons/zenoh-protocol/src/transport/init.rs` @ `pub type RegionName = zextzbuf!(0x8, false);`',
+]
+
+[[requirement]]
+id = "B-INIT-5"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "T-UNICAST and T-INITIATOR"
+text = '''
+The node that opens a link sends an InitSyn (A = 0) as its first message on it.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/init.rs` @ `The initiator MUST send an INIT message with the A flag set to 0.`',
+]
+
+[[requirement]]
+id = "B-INIT-6"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "T-UNICAST and T-ACCEPTOR"
+text = '''
+A node that accepts an InitSyn answers with an InitAck (A = 1). It may answer with a Close
+instead.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/init.rs` @ `peer MUST reply with an INIT message with the A flag set to 1. Alternatively, it MAY reply with`',
+]
+
+[[requirement]]
+id = "B-INIT-7"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "receiver"
+applies = "T-UNICAST and T-ACCEPTOR"
+text = '''
+A node that receives an InitSyn of another version than its own does not answer it with an
+InitAck; it closes the link with a Close of reason invalid (0x02).
+'''
+sources = [
+    '`io/zenoh-transport/src/unicast/establishment/accept.rs` @ `if init_syn.version != input.mine_version {`',
+]
+issue = '''
+The definition carries the version and states no rule for a version other than the receiver's;
+the rule here is the pinned implementation's.
+'''
+
+[[requirement]]
+id = "B-INIT-8"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "both"
+applies = "T-UNICAST"
+text = '''
+For each of the two resolutions, the InitAck states no more than the InitSyn did, and the
+session runs at the value the InitAck states. The node that opened the link refuses an InitAck
+that states more, with a Close of reason invalid (0x02).
+'''
+sources = [
+    '`io/zenoh-transport/src/unicast/establishment/accept.rs` @ `res.set(Field::FrameSN, i_fsn_res.min(m_fsn_res));`',
+    '`io/zenoh-transport/src/unicast/establishment/open.rs` @ `if i_fsn_res > m_fsn_res {`',
+]
+issue = '''
+The definition says only that an InitAck without S accepts the InitSyn's parameters; the
+smaller-of-the-two rule and the refusal are the pinned implementation's.
+'''
+
+# ---------------------------------------------------------------------------------------------
+# Open (unicast)
+
+[[requirement]]
+id = "B-OPEN-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-UNICAST"
+text = '''
+Open: header flags A (bit 5, set on OpenAck), T (bit 6, the lease is in seconds) and Z. Then the
+lease as a variable-length integer, in seconds when T is set and in milliseconds otherwise; the
+initial sequence number as a variable-length integer; on OpenSyn only, the cookie as a byte
+sequence; then the extensions when Z is set.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/open.rs` @ `pub const T: u8 = 1 << 6;`',
+    '`commons/zenoh-codec/src/transport/open.rs` @ `Duration::from_secs(lease)`',
+    '`commons/zenoh-codec/src/transport/open.rs` @ `let cookie: ZSlice = self.codec.read(&mut *reader)?;`',
+]
+
+[[requirement]]
+id = "B-OPEN-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-UNICAST"
+text = '''
+The cookie of an OpenSyn is no longer than 65535 bytes (<u8;z16>).
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/open.rs` @ `~    <u8;z16>   ~ if Flag(A)==0 (**) -- Cookie`',
+]
+issue = '''
+The definition bounds the OpenSyn cookie to a 16-bit length; the base codec reads the OpenSyn
+cookie with a length of any width. The two sources disagree on whether a longer cookie is
+refused.
+'''
+
+[[requirement]]
+id = "B-OPEN-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-UNICAST"
+text = '''
+The Open extensions, every one with M = 0: QoS id 0x1 unit, shared memory id 0x2 byte sequence,
+authentication id 0x3 byte sequence, multilink id 0x4 (a byte sequence on OpenSyn, a unit on
+OpenAck), low latency id 0x5 unit, compression id 0x6 unit, remote bound id 0x7 64-bit integer.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/open.rs` @ `pub type MultiLinkAck = zextunit!(0x4, false);`',
+    '`commons/zenoh-protocol/src/transport/open.rs` @ `pub type RemoteBound = zextz64!(0x7, false);`',
+]
+
+[[requirement]]
+id = "B-OPEN-4"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "T-UNICAST and T-INITIATOR"
+text = '''
+The cookie of an OpenSyn is the cookie of the InitAck it follows, byte for byte.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/open.rs` @ `The cookie MUST be the same received in the`',
+]
+
+[[requirement]]
+id = "B-OPEN-5"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "receiver"
+applies = "T-UNICAST and T-ACCEPTOR"
+text = '''
+A node that receives an OpenSyn whose cookie is not the one it sent in its InitAck does not
+answer it with an OpenAck, and the session is not established.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/open.rs` @ `The cookie MUST be the same received in the`',
+    '`io/zenoh-transport/src/unicast/establishment/accept.rs` @ `if input.cookie_nonce != cookie.nonce {`',
+]
+issue = '''
+The definition binds the sender of the OpenSyn; what the receiver does with another cookie is
+the pinned implementation's.
+'''
+
+[[requirement]]
+id = "B-OPEN-6"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "T-UNICAST"
+text = '''
+The initial sequence number an Open states fits the frame sequence number resolution the Init
+exchange agreed on, and it is the sequence number of the sender's first Frame or Fragment on
+each channel.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/open.rs` @ `The initial sequence number MUST be compatible with the sequence number resolution agreed in the`',
+    '`commons/zenoh-protocol/src/transport/open.rs` @ `Initial SN proposed by the sender of the OPEN`',
+]
+
+# ---------------------------------------------------------------------------------------------
+# Close and KeepAlive
+
+[[requirement]]
+id = "B-CLOSE-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+Close: header flags S (bit 5, the whole session closes; clear, only the link) and Z, bit 6
+reserved. Then one reason byte, then the extensions when Z is set.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/close.rs` @ `pub const S: u8 = 1 << 5;`',
+    '`commons/zenoh-protocol/src/transport/close.rs` @ `/// |Z|X|S|  CLOSE  |`',
+]
+
+[[requirement]]
+id = "B-CLOSE-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+The Close reasons: generic 0x00, unsupported 0x01, invalid 0x02, maximum sessions 0x03, maximum
+links 0x04, expired 0x05, unresponsive 0x06, connection to self 0x07.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/close.rs` @ `pub const GENERIC: u8 = 0x00;`',
+    '`commons/zenoh-protocol/src/transport/close.rs` @ `pub const CONNECTION_TO_SELF: u8 = 0x07;`',
+]
+
+[[requirement]]
+id = "B-KA-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+KeepAlive: the header byte alone, with flag Z (bits 6 and 5 reserved), then the extensions when
+Z is set.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/keepalive.rs` @ `/// |Z|X|X| KALIVE  |`',
+]
+
+[[requirement]]
+id = "B-KA-2"
+strength = "SHOULD"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+text = '''
+A node sends a KeepAlive on a link when it has sent nothing else for a quarter of its lease.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/keepalive.rs` @ `SHOULD be set to one fourth of`',
+]
+
+[[requirement]]
+id = "B-LEASE-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "receiver"
+text = '''
+A node that receives nothing on a link for the lease its peer stated considers the link failed
+and closes it.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/keepalive.rs` @ `connectivity check which considers a link as failed when no messages are received in`',
+    '`io/zenoh-transport/src/multicast/transport.rs` @ `let _ = c_self.del_peer(&c_locator, close::reason::EXPIRED);`',
+]
+issue = '''
+The definition names the lease and the keepalive interval but states no expiry rule of its own;
+it cites a link check that fails after three and a half intervals. The rule here is the pinned
+implementation's.
+'''
+
+# ---------------------------------------------------------------------------------------------
+# Frame and Fragment
+
+[[requirement]]
+id = "B-FRAME-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+Frame: header flags R (bit 5, the reliable channel; clear, the best-effort channel) and Z, bit 6
+reserved. Then the sequence number as a variable-length integer, the extensions when Z is set,
+and the network messages (B-BATCH-3).
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/frame.rs` @ `pub const R: u8 = 1 << 5;`',
+    '`commons/zenoh-codec/src/transport/frame.rs` @ `let sn: TransportSn = self.codec.read(&mut *reader)?;`',
+]
+
+[[requirement]]
+id = "B-FRAME-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+The QoS extension of a Frame or a Fragment is id 0x1, a 64-bit integer, M = 1. Its value's bits
+2 to 0 are the priority (0 control to 7 background); its other bits are reserved. A Frame or a
+Fragment without it is of priority 5 (data).
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/frame.rs` @ `pub type QoS = zextz64!(0x1, true);`',
+    '`commons/zenoh-protocol/src/transport/mod.rs` @ `const P_MASK: u8 = 0b00000111;`',
+    '`commons/zenoh-protocol/src/core/mod.rs` @ `pub const DEFAULT: Self = Self::Data;`',
+]
+
+[[requirement]]
+id = "B-SN-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+text = '''
+A channel is one reliability and one priority. On each channel the sequence number of a Frame or
+a Fragment is one more than that of the one before it on the same channel, modulo two to the
+power of the agreed resolution.
+'''
+sources = [
+    '`io/zenoh-transport/src/common/seq_num.rs` @ `/// Sequence Number Generator`',
+]
+issue = '''
+The definition gives the field and its resolution, not the increment; the rule here is the
+pinned implementation's sequence number generator.
+'''
+
+[[requirement]]
+id = "B-SN-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "receiver"
+text = '''
+A receiver discards a Frame whose sequence number does not come after the last one it accepted
+on the same channel, where b comes after a when (b - a) modulo the resolution is not zero and is
+less than half the resolution.
+'''
+sources = [
+    '`io/zenoh-transport/src/common/seq_num.rs` @ `let gap = value.wrapping_sub(self.value) & self.mask;`',
+    '`io/zenoh-transport/src/unicast/universal/rx.rs` @ `let precedes = guard.sn.roll(sn)?;`',
+]
+issue = '''
+The definition states no receiver rule for sequence numbers; the half-window rule is the pinned
+implementation's.
+'''
+
+[[requirement]]
+id = "B-FRAG-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+Fragment: header flags R (bit 5, the reliable channel), M (bit 6, more fragments follow) and Z.
+Then the sequence number as a variable-length integer, the extensions when Z is set, and the
+fragment's bytes, which run to the end of the batch.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/fragment.rs` @ `pub const M: u8 = 1 << 6;`',
+    '`commons/zenoh-codec/src/transport/fragment.rs` @ `let payload = reader.read_zslice(reader.remaining())?;`',
+]
+
+[[requirement]]
+id = "B-FRAG-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+text = '''
+The Fragment extensions: QoS id 0x1 64-bit integer with M = 1 (B-FRAME-2), first id 0x2 unit
+with M = 0, drop id 0x3 unit with M = 0.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/fragment.rs` @ `pub type First = zextunit!(0x2, false);`',
+    '`commons/zenoh-protocol/src/transport/fragment.rs` @ `pub type Drop = zextunit!(0x3, false);`',
+]
+
+[[requirement]]
+id = "B-FRAG-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "both"
+applies = "T-PATCH"
+text = '''
+The first and drop markers of a Fragment are used only on a session whose two sides both stated
+a patch of 1 or more in their Init or Join.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/init.rs` @ `/// if >= 1, then fragmentation first/drop markers`',
+]
+
+[[requirement]]
+id = "B-FRAG-4"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "receiver"
+text = '''
+A message sent in fragments is the bytes of consecutive Fragments of one channel, in sequence
+number order, up to and including the first whose M is clear, and is read as one network
+message.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/fragment.rs` @ `/// - M: More           If M==1 then other fragments will follow`',
+]
+
+# ---------------------------------------------------------------------------------------------
+# Join (multicast)
+
+[[requirement]]
+id = "B-JOIN-1"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-MCAST"
+text = '''
+Join: header flags T (bit 5, the lease is in seconds), S (bit 6, size parameters follow) and Z.
+Then the version byte; the byte of the zenoh id length and the role, as in Init; the zenoh id;
+when S is set, the byte of resolutions and the batch size, as in Init; the lease as a
+variable-length integer; the next sequence numbers as two variable-length integers, the reliable
+channel's then the best-effort channel's; then the extensions when Z is set.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/join.rs` @ `pub const T: u8 = 1 << 5;`',
+    '`commons/zenoh-codec/src/transport/join.rs` @ `let next_sn: PrioritySn = self.codec.read(&mut *reader)?;`',
+    '`commons/zenoh-codec/src/transport/join.rs` @ `let best_effort: TransportSn = self.read(&mut *reader)?;`',
+]
+
+[[requirement]]
+id = "B-JOIN-2"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-MCAST"
+text = '''
+A Join without S states the defaults: 32-bit frame sequence numbers, 32-bit request ids and a
+batch size of 8192 bytes.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/mod.rs` @ `pub const MULTICAST: BatchSize = 8_192;`',
+    '`commons/zenoh-codec/src/transport/join.rs` @ `let mut batch_size = batch_size::MULTICAST.to_le_bytes();`',
+]
+
+[[requirement]]
+id = "B-JOIN-3"
+strength = "MUST"
+kind = "dynamic"
+aspect = "encoding"
+binds = "both"
+applies = "T-MCAST"
+text = '''
+The Join extensions: QoS id 0x1 byte sequence with M = 1, whose bytes are eight pairs of
+variable-length integers, the next reliable and best-effort sequence numbers of priorities 0 to
+7 in order; shared memory id 0x2 byte sequence with M = 1; patch id 0x7 64-bit integer with
+M = 0.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/join.rs` @ `pub type QoS = zextzbuf!(0x1, true);`',
+    '`commons/zenoh-protocol/src/transport/join.rs` @ `pub type QoSType = Box<[PrioritySn; Priority::NUM]>;`',
+    '`commons/zenoh-protocol/src/transport/join.rs` @ `pub type Patch = zextz64!(0x7, false); // use the same id as Init`',
+]
+
+[[requirement]]
+id = "B-JOIN-4"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "sender"
+applies = "T-MCAST"
+text = '''
+The next sequence numbers a Join states fit the frame sequence number resolution it states.
+'''
+sources = [
+    '`commons/zenoh-protocol/src/transport/join.rs` @ `The next sequence number MUST be compatible with the adverstised Sequence Number resolution`',
+]
+
+[[requirement]]
+id = "B-JOIN-5"
+strength = "MUST"
+kind = "dynamic"
+aspect = "procedure"
+binds = "receiver"
+applies = "T-MCAST"
+text = '''
+A member of a group ignores a Join whose version, resolutions or batch size differ from its own:
+it does not take the sender as a member.
+'''
+sources = [
+    '`io/zenoh-transport/src/multicast/rx.rs` @ `if join.resolution != self.manager.config.resolution {`',
+    '`io/zenoh-transport/src/multicast/rx.rs` @ `if join.batch_size != batch_size {`',
+]
+issue = '''
+The definition states no rule for a Join of other parameters; the rule here is the pinned
+implementation's, and the implementations measured against it apply the same one.
+'''

@@ -239,6 +239,22 @@ pub enum TimestampVerdict {
     Drop,
 }
 
+/// What a node's clock gives data the node passes on as its own ([`NodeHlc::data_stamp`]), with
+/// the reason when it gives none: a stamper that cannot go out without a time (an advanced
+/// publisher, whose every sample carries one) answers the policy's refusal differently from a node
+/// that holds no clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataStamp {
+    /// The clock's stamp.
+    Stamped(wz_session_core::sample::TimestampHint),
+    /// The `clock-quality-stamping` policy is `trusted-only` and the clock is not trusted: the
+    /// node stamps no data with it.
+    Withheld,
+    /// The node holds no clock (its role does not stamp, or the build has none), or its source
+    /// cannot say what time it is. A caller falls back as it does for a node with no clock.
+    NoClock,
+}
+
 /// The clock plus the identity its stamps carry. Held behind one `Arc` so a
 /// clone cannot separate the two: a stamp pairing one node's time word with
 /// another's zid would be the same uniqueness break this module exists to remove.
@@ -531,25 +547,58 @@ impl NodeHlc {
         }
     }
 
-    /// Mint the next timestamp off this node's clock, or `None` when the node
-    /// does not stamp. The stamp pairs the HLC's NTP64 time word with the NODE's
-    /// zid, which is what zenoh's `hlc.new_timestamp()` carries (the HLC's
-    /// `uhlc::ID` IS the node zid).
+    /// The stamp for data this node passes on as its own (a publication of its session, a reply,
+    /// a cached sample, a put it forwards), or `None` when the node does not stamp such data: its
+    /// role does not, or the `clock-quality-stamping` policy is `trusted-only` and the clock is
+    /// not trusted. The stamp pairs the HLC's NTP64 time word with the NODE's zid, which is what
+    /// zenoh's `hlc.new_timestamp()` carries (the HLC's `uhlc::ID` IS the node zid).
+    ///
+    /// The policy is here and not in the clock because upstream decides at the place that stamps:
+    /// its clock always gives a time (`uhlc`'s `HLC::new_timestamp`), and each stamper decides
+    /// whether to take one (`treat_timestamp!` in the dispatcher, `resolve_put` for a publication
+    /// of the session). A caller that reads the clock for itself (`Session::new_timestamp`, the
+    /// clock a session lends) takes [`Self::clock_stamp`].
     ///
     /// Successive calls strictly increase even within one physical instant —
     /// that is the logical counter in the low `uhlc::CSIZE` bits of the NTP64
     /// fraction, and it is the whole reason a node prefers this over the bare
     /// wall clock.
     pub fn stamp(&self) -> Option<wz_session_core::sample::TimestampHint> {
+        match self.data_stamp() {
+            DataStamp::Stamped(stamp) => Some(stamp),
+            DataStamp::Withheld | DataStamp::NoClock => None,
+        }
+    }
+
+    /// [`Self::stamp`] with the reason when there is none: whether the `trusted-only` policy
+    /// withheld it, or the node holds no clock that can say the time. The policy is read once, so
+    /// a standing reported in between cannot make the answer and its reason disagree.
+    pub fn data_stamp(&self) -> DataStamp {
+        #[cfg(feature = "time-hlc")]
+        {
+            let Some(clock) = self.clock.as_deref() else {
+                return DataStamp::NoClock;
+            };
+            if self.quality_forbids_stamping(clock) {
+                return DataStamp::Withheld;
+            }
+        }
+        match self.clock_stamp() {
+            Some(stamp) => DataStamp::Stamped(stamp),
+            None => DataStamp::NoClock,
+        }
+    }
+
+    /// The next timestamp of this node's clock, for a caller that reads the clock for itself
+    /// (upstream's `runtime.hlc()` followed by `new_timestamp`), or `None` when the node holds no
+    /// clock. No stamping policy is applied: the policy is the stamper's ([`Self::stamp`]).
+    ///
+    /// A source that cannot say what time it is stamps nothing: a node that does not know the date
+    /// does not invent one, and its caller falls back as it does for a node with no clock.
+    pub fn clock_stamp(&self) -> Option<wz_session_core::sample::TimestampHint> {
         #[cfg(feature = "time-hlc")]
         {
             let clock = self.clock.as_deref()?;
-            if self.quality_forbids_stamping(clock) {
-                return None;
-            }
-            // A source that cannot say what time it is stamps nothing: a node that does not know
-            // the date does not invent one, and its caller falls back as it does for a node with
-            // no clock.
             let time = clock.hlc.new_timestamp().ok()?.as_word();
             Some(wz_session_core::sample::TimestampHint {
                 time,
@@ -566,10 +615,11 @@ impl NodeHlc {
     /// itself as upstream's crates hold `uhlc`'s (`HLC::new_timestamp`), or `None` for a node that
     /// holds no clock.
     ///
-    /// It is the clock and not the policy over it: [`Self::stamp`] passes on unstamped what a
-    /// `trusted-only` node would not stamp, and a caller of the clock decides that for itself. A
-    /// source that cannot say what time it is reads as a time behind every stamp, so the stamp is
-    /// the last one plus one: what `uhlc` gives for a physical clock that reads behind.
+    /// It is the clock and not the policy over it, as `uhlc`'s `HLC::new_timestamp` always gives a
+    /// time: the `trusted-only` policy belongs to the places that stamp data the node passes on
+    /// ([`Self::stamp`]). A source that cannot say what time it is reads as a time behind every
+    /// stamp, so the stamp is the last one plus one: what `uhlc` gives for a physical clock that
+    /// reads behind.
     pub fn next_word(&self) -> Option<u64> {
         #[cfg(feature = "time-hlc")]
         {

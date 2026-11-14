@@ -5580,6 +5580,9 @@ EOF
     list_dir="$(mktemp -d)"
     list_log="$(mktemp)"
     list_stub="$(mktemp)"
+    # The stub's own `$*` and `$WZ_LIST_LOG` are expanded when the STUB runs, so they are
+    # written out literally here.
+    # shellcheck disable=SC2016
     printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$WZ_LIST_LOG"\nexit 0\n' >"$list_stub"
     chmod +x "$list_stub"
     printf 'image ubuntu22\nclang\ncmake\npkg-config\n' >"${list_dir}/good.list"
@@ -5947,10 +5950,10 @@ layer_c1_cargo_test() {
     # that CANNOT join the workspace build, and a shard must still be checked
     # there.
     local nostd excludes=()
-    local -a shards=(--exclude wz-capture)
+    local -a sharded_out=(--exclude wz-capture)
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do excludes+=(--exclude "$member"); done
-    (cd crates && cargo test --workspace "${excludes[@]}" "${shards[@]}" \
+    (cd crates && cargo test --workspace "${excludes[@]}" "${sharded_out[@]}" \
         --exclude wz-runtime-tokio-multicast-tests --quiet)
 }
 
@@ -7467,9 +7470,12 @@ layer_c1ay_cargo_test_router_hat() {
     # and the retired versions freed by the writer (a pair test). PRINTED by each command on pc2.
     # Section 6.8: +1 on every arm, ungated: a reader of an older version is served its version's
     # routes (a pair test). PRINTED by each command on pc2.
-    _runci_guarded_test "C1AY router_forward 310" 310 \
+    # The c2 integration (client hat and admin, router clock): 310 -> 324.
+    # MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward 324" 324 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward qos 315" 315 \
+    # The c2 integration: 315 -> 329. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward qos 329" 329 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
@@ -7506,7 +7512,8 @@ layer_c1ay_cargo_test_router_hat() {
     # The network gate: 264 -> 266.
     # Step (b), step 5: 266 -> 267.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 324 -> 334 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward mcast-faces 338" 338 \
+    # The c2 integration: 338 -> 353. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward mcast-faces 353" 353 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -7531,7 +7538,8 @@ layer_c1ay_cargo_test_router_hat() {
     # moved from the retired single-net peer forwarder. Ungated apart from `access-acl`, and
     # `config-mutate-runtime` must be OFF, which this arm and the hotreload arm below both are.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 305 -> 314 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward 318" 318 \
+    # The c2 integration: 318 -> 332. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward 332" 332 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -7551,7 +7559,8 @@ layer_c1ay_cargo_test_router_hat() {
     # tests nothing.
     # Item 751 step 7c -- 255 -> 256, the same inert witness as the arm above.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 308 -> 317 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward hotreload 321" 321 \
+    # The c2 integration: 321 -> 335. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward hotreload 335" 335 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -7570,14 +7579,16 @@ layer_c1ay_cargo_test_router_hat() {
     # (`ask_local_tokens`, `forget_local_tokens`, `local_tokens_alive`); each is cfg(routing-token-tables),
     # so this arm alone moves. Measured on the build host.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 355 -> 364 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward 368" 368 \
+    # The c2 integration: 368 -> 382. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward 382" 382 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
     # tests that ran in this broad-feature lane now need the atom and no longer
     # appear here. The number moves because the plane correctly is not there.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 297 -> 306 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward multicast 310" 310 \
+    # The c2 integration: 310 -> 324. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward multicast 324" 324 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -7591,7 +7602,8 @@ layer_c1ay_cargo_test_router_hat() {
     # machine at load 37 — so the one guard predicted to move and the one predicted
     # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 299 -> 308 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward linkstate 312" 312 \
+    # The c2 integration: 312 -> 328. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward linkstate 328" 328 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
     # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
@@ -7613,7 +7625,8 @@ layer_c1ay_cargo_test_router_hat() {
     # interest that finalized it ends; an interest that never finalized clears nothing), gated
     # on this feature through the same fixture. PRINTED by the command.
     # Phases 3 and 4 of docs/router-table-snapshots.md: 310 -> 319 (see the first arm). PRINTED.
-    _runci_guarded_test "C1AY router_forward interest broker 323" 323 \
+    # The c2 integration: 323 -> 338. MEASURED on pc2 on this exact command.
+    _runci_guarded_test "C1AY router_forward interest broker 338" 338 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
@@ -8675,13 +8688,10 @@ layer_c1ak_cargo_test_transport_stats() {
     # registry has its own guard below, where its number can move alone.
     # R2843 — 10 -> 7. The report's OpenMetrics renderer is gone (the metrics
     # leg serves the registry), and with it its three `alloc` tests.
-    # 7 -> 8: `a_key_set_is_carried_by_a_payload_class_alone` (`stats/filters`).
-    _runci_guarded_test C1ak 8 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
+    _runci_guarded_test C1ak 7 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
         || return 1
     # R2930 — 8 -> 9: `a_multicast_congestion_drop_is_observed_and_not_counted_sent`.
-    # 9 -> 12: the three `stats/filters` tests (the filter list, a classified payload
-    # counted under its keys, a new list dropping the old per-key series).
-    _runci_guarded_test C1ak 12 cargo test -p wz-session-core --lib stats_registry:: --quiet \
+    _runci_guarded_test C1ak 9 cargo test -p wz-session-core --lib stats_registry:: --quiet \
         || return 1
     # R2825 (open-debt item 820) — payload SIZE is upstream's `payload_size()`.
     # The classifier arms compile only with their codecs, so the features are
@@ -8698,8 +8708,7 @@ layer_c1ak_cargo_test_transport_stats() {
     # R2844 — the NODE registry: its lifecycle (open, closed, retired after the
     # collection delay) and the face loop recording into it. Needs the loop,
     # so `routing-peer`, which no other leg here composes with the counters.
-    # 3 -> 4: `the_nodes_stats_filters_reach_every_transport` (`stats/filters`).
-    _runci_guarded_test C1ak 4 cargo test -p wz-runtime-tokio --features transport-stats,routing-peer --lib --quiet \
+    _runci_guarded_test C1ak 3 cargo test -p wz-runtime-tokio --features transport-stats,routing-peer --lib --quiet \
         -- node_stats:: the_face_loop_records_each_face_into_the_node_registry \
         || return 1
     # R2848/R2849 — the MULTICAST transport's counts: the drive loop recording
@@ -8722,8 +8731,7 @@ layer_c1ak_cargo_test_transport_stats() {
     # field in every feature combination.
     # R2372 — 3 -> 6, the same R2371 arithmetic on the alloc-only arm.
     # R2843 — 6 -> 3: the three renderer tests were all this arm's `alloc` ones.
-    # 3 -> 4: `a_key_set_is_carried_by_a_payload_class_alone`, ungated like the class it holds.
-    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
+    _runci_guarded_test C1ak 3 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
         || return 1
     # R311y811 — the BARE arm: no `alloc`, no `transport-stats`. R311y810 un-gated
     # this module precisely so its report type could be named in EVERY feature
@@ -8742,8 +8750,7 @@ layer_c1ak_cargo_test_transport_stats() {
     # whole job is the no-allocation build was allocating. The 12 was the
     # allocating arm's count, written to match the red tree. The feature
     # implies nothing now, and this arm reads its three again.
-    # 3 -> 4: `a_key_set_is_carried_by_a_payload_class_alone`, which needs no allocator.
-    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
+    _runci_guarded_test C1ak 3 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
         || return 1
     # R311y810 — adminspace-metrics AND transport-stats together: the combination
     # a deployment actually runs, which no lane composed before. The metrics leg's
@@ -10265,11 +10272,13 @@ layer_c1bm_cargo_test_pico_failfast() {
 # a memo of its own and leaves the old one whole (the memo brought to no version replaces the
 # changed-inputs witness). PRINTED by each command on pc2.
 layer_c1x_cargo_test_routing_routes() {
-    _runci_guarded_test "C1X route cache peer 12" 12 \
+    # The c2 integration (route memo index): 12 -> 18. MEASURED on pc2.
+    _runci_guarded_test "C1X route cache peer 18" 18 \
         cargo test -p wz-runtime-tokio --features routing-routes --lib --quiet -- \
         route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
         a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
-    _runci_guarded_test "C1X route cache router 16" 16 \
+    # The c2 integration (route memo index): 16 -> 22. MEASURED on pc2.
+    _runci_guarded_test "C1X route cache router 22" 22 \
         cargo test -p wz-runtime-tokio --features routing-routes,routing-router-hat --lib --quiet -- \
         route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
         a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
@@ -26822,7 +26831,7 @@ layer_e18_zenoh_family_conformance() {
         --test zenoh_session_shm || return 1
     # Sessions of both crates in one process, linked over TCP and in a multicast group, hand each
     # other shared memory.
-    _runci_guarded_test "Layer E18 (differential, zenoh transport shared-memory)" 4 \
+    _runci_guarded_test "Layer E18 (differential, zenoh transport shared-memory)" 5 \
         cargo test --locked --manifest-path ../conformance/differential-shm/Cargo.toml \
         --test zenoh_transport_shm || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-buffers)" 5 \

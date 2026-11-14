@@ -389,6 +389,28 @@ fn store() -> &'static Mutex<Option<MetadataStore>> {
     STORE.get_or_init(|| Mutex::new(None))
 }
 
+/// Make the shared-memory subsystem of this process now rather than at its first use: the
+/// metadata segment every provider of the process draws its slots from, and the thread that
+/// confirms and validates the chunks. Upstream's `zenoh_shm::init::init`
+/// (`commons/zenoh-shm/src/init.rs` @ `pub fn init() {`), which the open of a session whose
+/// configuration says `transport/shared_memory/mode` = `init` calls. Calling it again makes
+/// nothing twice.
+pub fn init() {
+    let _ = crate::shm_watchdog::confirmator();
+    if let Ok(mut store) = store().lock() {
+        if store.is_none() {
+            // A segment that cannot be made now is tried again at the first allocation, as one
+            // made at its first use is.
+            *store = MetadataStore::create().ok();
+        }
+    }
+}
+
+/// Whether this process's metadata segment has been made, by [`init`] or by a first allocation.
+pub fn is_initialised() -> bool {
+    existing_metadata().is_some()
+}
+
 // ---------------------------------------------------------------------------
 // the provider
 // ---------------------------------------------------------------------------
@@ -2007,6 +2029,23 @@ mod tests {
         assert_eq!(size_of::<ChunkHeader>(), 32);
         assert_eq!(offset_of!(Metadata, watchdogs), 32 * METADATA_SLOTS);
         assert_eq!(size_of::<Metadata>(), (32 + 8) * METADATA_SLOTS);
+    }
+
+    /// `init` makes the metadata segment a first allocation would have made, and a second
+    /// call, or an allocation after it, draws from that one segment and makes no other.
+    #[test]
+    fn init_makes_the_subsystem_once() {
+        init();
+        assert!(is_initialised(), "init made no metadata segment");
+        let first = existing_metadata().expect("the segment init made").id();
+        init();
+        let payload = ShmBackedPayload::alloc(8).expect("alloc");
+        assert_eq!(
+            existing_metadata().expect("the segment").id(),
+            first,
+            "a second init or an allocation made another segment"
+        );
+        assert_eq!(u64::from(payload.descriptor().metadata_id), first);
     }
 
     /// A descriptor sent the way production sends one: the reference is taken

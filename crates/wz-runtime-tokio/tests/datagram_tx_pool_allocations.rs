@@ -184,6 +184,7 @@ fn udp_shape() -> TxQueueShape {
         qos: false,
         batch_bytes: 1450,
         queue_unit_bytes: 1450,
+        pipeline: wz_session_core::link::TxPipeline::DEFAULT,
     }
 }
 
@@ -782,6 +783,7 @@ mod multicast {
             compression: false,
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         }
     }
 

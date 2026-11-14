@@ -34,20 +34,26 @@ use core::cell::Cell;
 use core::ffi::{c_int, c_void};
 use core::mem::size_of;
 
-use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use wz_runtime_coop::group_transport::GroupTransport;
+use wz_runtime_coop::group_transport::{GroupInterface, GroupTransport};
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
     pub use wz_runtime_coop::link_storage::HeapTx;
 }
 pub use wz_runtime_coop::link_storage::TxStore;
+use wz_runtime_coop::udp_link::Received;
 pub use wz_runtime_coop::udp_link::{DatagramSocket, SERVICE_WAIT_MS, UDP_RX_CAPACITY};
 use wz_session_core::byte_cells::ByteBuf;
 use zephyr_sys::socket::{
     bind, getsockname, poll, recvfrom, sendto, setsockopt, socket, IpMreqn, PollFd, SockLen,
-    SockaddrIn, AF_INET, IPPROTO_IP, IPPROTO_UDP, IP_ADD_MEMBERSHIP, IP_DROP_MEMBERSHIP, POLLIN,
-    SOCK_DGRAM,
+    Sockaddr, SockaddrIn, SockaddrIn6, SockaddrStorage, AF_INET, AF_INET6, IPPROTO_IP, IPPROTO_UDP,
+    IP_ADD_MEMBERSHIP, IP_DROP_MEMBERSHIP, IP_MULTICAST_TTL, POLLIN, SOCK_DGRAM,
+};
+#[cfg(wz_net_ipv6)]
+use zephyr_sys::socket::{
+    Ipv6Mreq, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, IPV6_DROP_MEMBERSHIP, IPV6_MULTICAST_HOPS,
+    IPV6_MULTICAST_IF,
 };
 
 extern "C" {
@@ -55,13 +61,6 @@ extern "C" {
     /// supplies it as a real symbol; the deploy's cooperative loop yields
     /// through the same seam.
     fn wz_yield_ms(ms: i32);
-
-    /// The board's own IPv4 address on the interface the sessions run on: write
-    /// its four octets, most significant first, to `out[0..4]` and return 1, or
-    /// return 0 while it has none (a DHCP lease not yet granted, a link not up).
-    /// A board serves it from the net stack's interface, so the address is
-    /// whatever the interface really holds, never a constant of the firmware.
-    fn wzApplicationGetIpv4Address(out: *mut u8) -> i32;
 
     /// The node's zenoh id: write up to `cap` bytes to `out` and return how many
     /// (1 to 16), or return 0 when the board has no identity to give. A board
@@ -77,19 +76,103 @@ extern "C" {
     /// Whether the `recvfrom` that just returned -1 did so because its timeout ran out (a quiet
     /// link), not because it failed. `errno` is out of the FFI's reach.
     fn wz_net_recv_timed_out() -> c_int;
+
+    /// Whether the `socket` that just returned -1 did so because the image's stack has no
+    /// socket of the family asked for: Zephyr's `net_context_get` sets `EPFNOSUPPORT` for an
+    /// IPv6 socket on an image built without `CONFIG_NET_IPV6`
+    /// (`subsys/net/ip/net_context.c`, "IPv6 disabled"), and `EAFNOSUPPORT` for a family it does
+    /// not know. `errno` is a macro Rust cannot read, so the board answers it from C.
+    fn wz_net_socket_family_refused() -> c_int;
+}
+
+#[cfg(wz_net_ipv4)]
+extern "C" {
+    /// The board's own IPv4 address on the interface the sessions run on: write
+    /// its four octets, most significant first, to `out[0..4]` and return 1, or
+    /// return 0 while it has none (a DHCP lease not yet granted, a link not up).
+    /// A board serves it from the net stack's interface, so the address is
+    /// whatever the interface really holds, never a constant of the firmware.
+    /// Defined by the board on an image with `CONFIG_NET_IPV4`.
+    fn wzApplicationGetIpv4Address(out: *mut u8) -> i32;
+}
+
+#[cfg(wz_net_ipv6)]
+extern "C" {
+    /// The board's own global IPv6 address, preferred, on the interface the sessions run on:
+    /// write its sixteen bytes to `out[0..16]` and return 1, or return 0 while it has none
+    /// (autoconfiguration not done, a link not up). The IPv6 twin of
+    /// `wzApplicationGetIpv4Address`, defined by the board on an image with `CONFIG_NET_IPV6`.
+    fn wzApplicationGetIpv6Address(out: *mut u8) -> i32;
 }
 
 /// The longest zenoh id: 16 bytes.
 pub const ZID_MAX: usize = 16;
 
-/// How often [`await_board_ipv4`] asks the board again.
+/// How often [`await_board_ip`] asks the board again.
 const ADDRESS_POLL_MS: u32 = 100;
+
+/// The board's global IPv6 address, if its interface has one now. Only on an image whose stack
+/// has IPv6 (`CONFIG_NET_IPV6`); the unspecified address is read as none, as for IPv4.
+#[cfg(wz_net_ipv6)]
+pub fn board_ipv6() -> Option<Ipv6Addr> {
+    let mut octets = [0u8; 16];
+    // SAFETY: the hook writes sixteen bytes through a pointer to a live local of that size.
+    let have = unsafe { wzApplicationGetIpv6Address(octets.as_mut_ptr()) };
+    let address = Ipv6Addr::from(octets);
+    (have == 1 && !address.is_unspecified()).then_some(address)
+}
+
+/// The node's own address, of the family the image's Kconfig chose for it
+/// (`CONFIG_WZ_NODE_IPV4` or `CONFIG_WZ_NODE_IPV6`): what the node binds its links on and
+/// advertises as its locators.
+pub fn board_ip() -> Option<IpAddr> {
+    #[cfg(wz_node_ipv6)]
+    {
+        board_ipv6().map(IpAddr::V6)
+    }
+    #[cfg(all(not(wz_node_ipv6), wz_net_ipv4))]
+    {
+        board_ipv4().map(IpAddr::from)
+    }
+    // A stack with neither family (an lwIP image, whose Zephyr has no networking) has no address
+    // of Zephyr's to give.
+    #[cfg(all(not(wz_node_ipv6), not(wz_net_ipv4)))]
+    {
+        None
+    }
+}
+
+/// Wait up to `budget_ms` for the board to have its own address, of the family the image chose
+/// ([`board_ip`]), yielding to the net stack between asks, and return it. `None` is a board that
+/// never got one (no DHCP server or router answered, no link): the caller reports that, since a
+/// node with no address has nothing to listen on and no locator to advertise.
+pub fn await_board_ip(budget_ms: u32) -> Option<IpAddr> {
+    await_board(budget_ms, board_ip)
+}
+
+/// Ask `read` for the board's address until it has one or `budget_ms` has passed.
+fn await_board<T>(budget_ms: u32, read: fn() -> Option<T>) -> Option<T> {
+    let mut waited = 0;
+    loop {
+        if let Some(address) = read() {
+            return Some(address);
+        }
+        if waited >= budget_ms {
+            return None;
+        }
+        // SAFETY: the board's `k_msleep` seam; blocks this thread for the poll.
+        unsafe { wz_yield_ms(ADDRESS_POLL_MS as i32) };
+        waited += ADDRESS_POLL_MS;
+    }
+}
 
 /// The board's IPv4 address, if its interface has one now.
 ///
 /// The board answering 1 with 0.0.0.0 is read as no address: an unspecified
 /// address is what a bound-to-nothing interface reports, and a link that names
-/// itself `udp/0.0.0.0:<port>` is not one a peer can reach.
+/// itself `udp/0.0.0.0:<port>` is not one a peer can reach. Only on an image whose stack has
+/// IPv4 (`CONFIG_NET_IPV4`).
+#[cfg(wz_net_ipv4)]
 pub fn board_ipv4() -> Option<[u8; 4]> {
     let mut octets = [0u8; 4];
     // SAFETY: the hook writes four bytes through a pointer to a live local.
@@ -115,23 +198,12 @@ pub fn board_zid_fixed() -> Option<([u8; ZID_MAX], usize)> {
     (1..=ZID_MAX).contains(&len).then_some((id, len))
 }
 
-/// Wait up to `budget_ms` for the board to have an IPv4 address, yielding to the
-/// net stack between asks, and return it. `None` is a board that never got one
-/// (no DHCP server answered, no link): the caller reports that, since a node
-/// with no address has nothing to listen on and no locator to advertise.
+/// Wait up to `budget_ms` for the board to have an IPv4 address, as [`await_board_ip`] waits for
+/// the address of the node's family: what an image whose interface is configured in IPv4 by its
+/// own Kconfig reads.
+#[cfg(wz_net_ipv4)]
 pub fn await_board_ipv4(budget_ms: u32) -> Option<[u8; 4]> {
-    let mut waited = 0;
-    loop {
-        if let Some(address) = board_ipv4() {
-            return Some(address);
-        }
-        if waited >= budget_ms {
-            return None;
-        }
-        // SAFETY: the board's `k_msleep` seam; blocks this thread for the poll.
-        unsafe { wz_yield_ms(ADDRESS_POLL_MS as i32) };
-        waited += ADDRESS_POLL_MS;
-    }
+    await_board(budget_ms, board_ipv4)
 }
 
 /// Why a socket call failed. Zephyr reports the cause through `errno`, which
@@ -139,8 +211,21 @@ pub fn await_board_ipv4(budget_ms: u32) -> Option<[u8; 4]> {
 /// CALL and keeps its return value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZephyrNetError {
-    /// `socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)` returned this.
+    /// `socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)` (or a stream's, or `AF_INET6`'s) returned this.
+    /// An `AF_INET6` socket on an image without `CONFIG_NET_IPV6` is refused here.
     Socket(c_int),
+    /// `socket` refused the family asked for: the image's stack was built without it (an IPv6
+    /// socket on an image without `CONFIG_NET_IPV6`). No later call opens one.
+    NoFamily,
+    /// An IPv6 address whose scope is above 255: Zephyr's `sin6_scope_id` is one byte, so the
+    /// stack cannot be told the interface, and the call is not made.
+    ScopeTooWide(u32),
+    /// A multicast interface named in the other family than the group's (an IPv4 address for an
+    /// IPv6 group, an index for an IPv4 one), or an index above Zephyr's 255: no call was made.
+    InterfaceFamily,
+    /// `setsockopt` of a multicast egress option (`IP_MULTICAST_TTL`, `IPV6_MULTICAST_HOPS`,
+    /// `IPV6_MULTICAST_IF`) returned this.
+    MulticastOption(c_int),
     /// `bind` returned this.
     Bind(c_int),
     /// `getsockname` returned this when the port a bind on port 0 was given
@@ -177,13 +262,182 @@ pub enum ZephyrNetError {
     Accept(c_int),
 }
 
-/// One IPv4 UDP socket on Zephyr's net stack, bound to an explicit local
-/// address — the address the link's locator names, as zenoh-pico listens on
+/// Zephyr's family number of `at`: [`AF_INET`] or [`AF_INET6`] (Zephyr's own values, not a host's).
+pub(crate) fn family_of(at: &SocketAddr) -> c_int {
+    match at {
+        SocketAddr::V4(_) => AF_INET,
+        SocketAddr::V6(_) => AF_INET6,
+    }
+}
+
+/// The interface index Zephyr's IPv6 options take for `interface`: its own index, or 0 (the
+/// socket's own or the default interface) for the routing's choice. Zephyr's indices are 1 to 255;
+/// one above, or an IPv4 address, names no IPv6 interface.
+#[cfg(any(wz_net_ipv6, test))]
+pub(crate) fn interface_index(interface: GroupInterface) -> Result<c_int, ZephyrNetError> {
+    match interface {
+        GroupInterface::Routing => Ok(0),
+        GroupInterface::Index(index) if index <= 255 => Ok(index as c_int),
+        _ => Err(ZephyrNetError::InterfaceFamily),
+    }
+}
+
+/// A socket of `at`'s family and of `kind` and `proto`: its descriptor, or why the stack gave
+/// none. A family the image's stack was built without is [`ZephyrNetError::NoFamily`], read off
+/// `errno` by the board (`wz_net_socket_family_refused`); any other refusal keeps the call's value.
+pub(crate) fn open_socket(
+    at: &SocketAddr,
+    kind: c_int,
+    proto: c_int,
+) -> Result<c_int, ZephyrNetError> {
+    // SAFETY: plain FFI with value arguments.
+    let fd = unsafe { socket(family_of(at), kind, proto) };
+    if fd >= 0 {
+        return Ok(fd);
+    }
+    // SAFETY: reads the calling thread's `errno`, set by the `socket` above.
+    if unsafe { wz_net_socket_family_refused() } != 0 {
+        Err(ZephyrNetError::NoFamily)
+    } else {
+        Err(ZephyrNetError::Socket(fd))
+    }
+}
+
+/// A socket address as Zephyr's stack reads and writes it, of either family: a
+/// [`SockaddrStorage`] holding a [`SockaddrIn`] or a [`SockaddrIn6`], and the length of the one it
+/// holds. The one conversion between it and [`SocketAddr`], both ways, which every call that
+/// passes or reads an address here and in `stream` goes through, so a socket opens and names the
+/// family its locator's address is, as zenoh-pico's Zephyr links open the family their locator
+/// resolved to (`vendor/zenoh-pico/src/link/transport/udp/udp_zephyr.c` @
+/// `socket(endpoint._iptcp->ai_family`).
+pub(crate) struct RawAddr {
+    storage: SockaddrStorage,
+    len: SockLen,
+}
+
+impl RawAddr {
+    /// `at` in the stack's form, for a call that reads an address (`bind`, `connect`, `sendto`).
+    /// An IPv6 scope above 255 has no form ([`ZephyrNetError::ScopeTooWide`]). The flow label has
+    /// none either: Zephyr's IPv6 socket address carries no such field.
+    pub(crate) fn of(at: SocketAddr) -> Result<Self, ZephyrNetError> {
+        let mut storage = SockaddrStorage::default();
+        let target = (&mut storage as *mut SockaddrStorage).cast::<u8>();
+        let len = match at {
+            SocketAddr::V4(v4) => {
+                let sin = SockaddrIn {
+                    sin_family: AF_INET as u16,
+                    sin_port: v4.port().to_be(),
+                    sin_addr: u32::from_ne_bytes(v4.ip().octets()),
+                };
+                // SAFETY: the storage is as large as the largest address and 4-aligned, as a
+                // `SockaddrIn` is, so writing one at its start is in bounds and aligned.
+                unsafe { core::ptr::write(target.cast::<SockaddrIn>(), sin) };
+                size_of::<SockaddrIn>()
+            }
+            SocketAddr::V6(v6) => {
+                let scope = u8::try_from(v6.scope_id())
+                    .map_err(|_| ZephyrNetError::ScopeTooWide(v6.scope_id()))?;
+                let sin6 = SockaddrIn6 {
+                    sin6_family: AF_INET6 as u16,
+                    sin6_port: v6.port().to_be(),
+                    sin6_addr: v6.ip().octets(),
+                    sin6_scope_id: scope,
+                };
+                // SAFETY: as for the IPv4 form: the storage holds an IPv6 address and is aligned
+                // for it.
+                unsafe { core::ptr::write(target.cast::<SockaddrIn6>(), sin6) };
+                size_of::<SockaddrIn6>()
+            }
+        };
+        Ok(Self {
+            storage,
+            len: len as SockLen,
+        })
+    }
+
+    /// Room for an address of either family, for a call that writes one (`recvfrom`,
+    /// `getsockname`, `getpeername`, `accept`).
+    pub(crate) fn empty() -> Self {
+        Self {
+            storage: SockaddrStorage::default(),
+            len: size_of::<SockaddrStorage>() as SockLen,
+        }
+    }
+
+    /// The address, for a call that reads it.
+    pub(crate) fn as_ptr(&self) -> *const Sockaddr {
+        (&self.storage as *const SockaddrStorage).cast()
+    }
+
+    /// The address, for a call that writes it.
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut Sockaddr {
+        (&mut self.storage as *mut SockaddrStorage).cast()
+    }
+
+    /// The length a call reads.
+    pub(crate) fn size(&self) -> SockLen {
+        self.len
+    }
+
+    /// The length a call that writes the address reads as the room it has and sets to the length
+    /// it wrote.
+    pub(crate) fn size_mut(&mut self) -> &mut SockLen {
+        &mut self.len
+    }
+
+    /// The address the stack wrote, or `None` for another family (no socket here has one) or a
+    /// length short of the family's form.
+    pub(crate) fn to_socket_addr(&self) -> Option<SocketAddr> {
+        let source = (&self.storage as *const SockaddrStorage).cast::<u8>();
+        match c_int::from(self.storage.ss_family) {
+            AF_INET if self.len as usize >= size_of::<SockaddrIn>() => {
+                // SAFETY: the stack wrote an `AF_INET` address, which is a `SockaddrIn`, at the
+                // start of storage aligned for it.
+                let sin = unsafe { core::ptr::read(source.cast::<SockaddrIn>()) };
+                Some(SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::from(sin.sin_addr.to_ne_bytes()),
+                    u16::from_be(sin.sin_port),
+                )))
+            }
+            AF_INET6 if self.len as usize >= size_of::<SockaddrIn6>() => {
+                // SAFETY: the stack wrote an `AF_INET6` address, which is a `SockaddrIn6`, at the
+                // start of storage aligned for it.
+                let sin6 = unsafe { core::ptr::read(source.cast::<SockaddrIn6>()) };
+                Some(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::from(sin6.sin6_addr),
+                    u16::from_be(sin6.sin6_port),
+                    0,
+                    u32::from(sin6.sin6_scope_id),
+                )))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The address a `getsockname` or `getpeername` of `fd` reports: the call's return value when it
+/// fails, -1 when it names a family other than the two.
+pub(crate) fn name_of(
+    fd: c_int,
+    call: unsafe extern "C" fn(c_int, *mut Sockaddr, *mut SockLen) -> c_int,
+) -> Result<SocketAddr, c_int> {
+    let mut name = RawAddr::empty();
+    // SAFETY: `name`'s storage and length are live and writable, and the length is its size.
+    let rc = unsafe { call(fd, name.as_mut_ptr(), name.size_mut()) };
+    if rc != 0 {
+        return Err(rc);
+    }
+    name.to_socket_addr().ok_or(-1)
+}
+
+/// One UDP socket on Zephyr's net stack, of the family of the address it is bound to, bound to an
+/// explicit local address — the address the link's locator names, as zenoh-pico listens on
 /// `udp/<ip>:<port>`. A bind on port 0 lets the stack choose, and
-/// [`ZephyrUdpSocket::local`] then names the port it chose, never the 0.
+/// [`ZephyrUdpSocket::local`] then names the port it chose, never the 0. An IPv6 socket opens
+/// only on an image built with `CONFIG_NET_IPV6`.
 pub struct ZephyrUdpSocket {
     fd: c_int,
-    local: ([u8; 4], u16),
+    local: SocketAddr,
     /// The last [`Self::wait_readable`] returned with a datagram queued, and no receive has taken
     /// it since: the next [`Self::try_recv`] reads it without asking `poll` again. Only the one
     /// thread that drives the link touches the socket, so nothing else takes the datagram
@@ -198,116 +452,216 @@ pub struct ZephyrUdpSocket {
     _close: crate::fd::FdClose,
 }
 
-pub(crate) fn sockaddr(addr: [u8; 4], port: u16) -> SockaddrIn {
-    SockaddrIn {
-        sin_family: AF_INET as u16,
-        sin_port: port.to_be(),
-        sin_addr: u32::from_ne_bytes(addr),
-    }
-}
-
 impl ZephyrUdpSocket {
-    /// Open a UDP socket and bind it to `addr:port`; port 0 has the stack
-    /// choose one, as a dialling link needs.
-    pub fn bind(addr: [u8; 4], port: u16) -> Result<Self, ZephyrNetError> {
-        // SAFETY: plain FFI with value arguments.
-        let fd = unsafe { socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) };
-        if fd < 0 {
-            return Err(ZephyrNetError::Socket(fd));
-        }
+    /// Open a UDP socket of `at`'s family and bind it to `at`; port 0 has the stack choose one,
+    /// as a dialling link needs.
+    pub fn bind(at: SocketAddr) -> Result<Self, ZephyrNetError> {
+        let local = RawAddr::of(at)?;
+        let fd = open_socket(&at, SOCK_DGRAM, IPPROTO_UDP)?;
         // Owned from here, so an early return closes it.
         // SAFETY: plain FFI with value arguments, on the descriptor just opened.
         let times_out = unsafe { wz_net_set_rcvtimeo_ms(fd, SERVICE_WAIT_MS) } == 0;
         let mut this = Self {
             fd,
-            local: (addr, port),
+            local: at,
             readable: Cell::new(false),
             times_out,
             _close: crate::fd::FdClose::new(fd),
         };
-        let local = sockaddr(addr, port);
-        // SAFETY: `local` is a live `sockaddr_in` of the length passed.
-        let rc = unsafe { bind(fd, &local, size_of::<SockaddrIn>() as SockLen) };
+        // SAFETY: `local` is a live socket address of the length passed.
+        let rc = unsafe { bind(fd, local.as_ptr(), local.size()) };
         if rc != 0 {
             return Err(ZephyrNetError::Bind(rc));
         }
-        if port == 0 {
+        if at.port() == 0 {
             // The locators the link reports and the source every reply comes
             // from name this port; keeping the 0 that was asked for would
             // render `udp/<ip>:0` for a link that has a real one.
-            this.local.1 = this.chosen_port()?;
+            this.local.set_port(this.chosen_port()?);
         }
         Ok(this)
     }
 
     /// The port the stack bound this socket to.
     fn chosen_port(&self) -> Result<u16, ZephyrNetError> {
-        let mut name = SockaddrIn::default();
-        let mut len = size_of::<SockaddrIn>() as SockLen;
-        // SAFETY: `name` and `len` are live and writable, `len` is `name`'s size.
-        let rc = unsafe { getsockname(self.fd, &mut name, &mut len) };
-        if rc != 0 {
-            return Err(ZephyrNetError::SockName(rc));
-        }
-        match u16::from_be(name.sin_port) {
+        match name_of(self.fd, getsockname)
+            .map_err(ZephyrNetError::SockName)?
+            .port()
+        {
             0 => Err(ZephyrNetError::NoPortChosen),
             port => Ok(port),
         }
     }
 
-    /// The `(address, port)` this socket is bound to.
-    pub fn local(&self) -> ([u8; 4], u16) {
+    /// The address and port this socket is bound to.
+    pub fn local(&self) -> SocketAddr {
         self.local
     }
 
-    /// Join the IPv4 multicast `group` on the interface that holds `interface`.
+    /// Join the multicast `group` on `interface`: an IPv4 group with IGMP
+    /// (`IP_ADD_MEMBERSHIP`) on the interface that holds an address, an IPv6 one with MLD
+    /// (`IPV6_ADD_MEMBERSHIP`) on the interface of an index, either on the socket's own or the
+    /// default interface for [`GroupInterface::Routing`], as zenoh-pico's Zephyr link joins on the
+    /// default interface (`vendor/zenoh-pico/src/link/transport/udp/udp_multicast_zephyr.c` @
+    /// `net_if_ipv6_maddr_join(ifa, mcast);`). An IPv6 group joins only on an image whose stack
+    /// has IPv6; on another it is [`ZephyrNetError::NoFamily`], with no call made.
     ///
     /// The membership belongs to the INTERFACE, not to this socket: Zephyr's
-    /// handler calls `net_ipv4_igmp_join` on the interface it resolves, so closing
-    /// the socket does not leave the group (see [`Self::leave_group`], which
+    /// handler calls `net_ipv4_igmp_join` (`net_ipv6_mld_join`) on the interface it resolves,
+    /// so closing the socket does not leave the group (see [`Self::leave_group`], which
     /// [`ZephyrGroupTransport`] calls when it drops).
-    pub fn join_group(&self, group: [u8; 4], interface: [u8; 4]) -> Result<(), ZephyrNetError> {
-        self.membership(IP_ADD_MEMBERSHIP, group, interface)
+    pub fn join_group(
+        &self,
+        group: IpAddr,
+        interface: GroupInterface,
+    ) -> Result<(), ZephyrNetError> {
+        self.membership(true, group, interface)
     }
 
-    /// Leave a group [`Self::join_group`] joined.
-    pub fn leave_group(&self, group: [u8; 4], interface: [u8; 4]) -> Result<(), ZephyrNetError> {
-        self.membership(IP_DROP_MEMBERSHIP, group, interface)
+    /// Leave a group [`Self::join_group`] joined, on the interface it was joined on.
+    pub fn leave_group(
+        &self,
+        group: IpAddr,
+        interface: GroupInterface,
+    ) -> Result<(), ZephyrNetError> {
+        self.membership(false, group, interface)
     }
 
     fn membership(
         &self,
-        option: c_int,
-        group: [u8; 4],
-        interface: [u8; 4],
+        join: bool,
+        group: IpAddr,
+        interface: GroupInterface,
     ) -> Result<(), ZephyrNetError> {
-        let mreqn = IpMreqn {
-            imr_multiaddr: u32::from_ne_bytes(group),
-            imr_address: u32::from_ne_bytes(interface),
-            imr_ifindex: 0,
+        match (group, interface) {
+            (IpAddr::V4(group), GroupInterface::Routing | GroupInterface::V4(_)) => {
+                let address = match interface {
+                    GroupInterface::V4(address) => address,
+                    _ => Ipv4Addr::UNSPECIFIED,
+                };
+                let mreqn = IpMreqn {
+                    imr_multiaddr: u32::from_ne_bytes(group.octets()),
+                    imr_address: u32::from_ne_bytes(address.octets()),
+                    imr_ifindex: 0,
+                };
+                let option = if join {
+                    IP_ADD_MEMBERSHIP
+                } else {
+                    IP_DROP_MEMBERSHIP
+                };
+                self.set(IPPROTO_IP, option, &mreqn)
+                    .map_err(ZephyrNetError::Membership)
+            }
+            (IpAddr::V6(group), GroupInterface::Routing | GroupInterface::Index(_)) => {
+                self.membership_v6(join, group, interface)
+            }
+            _ => Err(ZephyrNetError::InterfaceFamily),
+        }
+    }
+
+    /// The IPv6 half of [`Self::membership`], on an image whose stack has IPv6.
+    #[cfg(wz_net_ipv6)]
+    fn membership_v6(
+        &self,
+        join: bool,
+        group: Ipv6Addr,
+        interface: GroupInterface,
+    ) -> Result<(), ZephyrNetError> {
+        let mreq = Ipv6Mreq {
+            ipv6mr_multiaddr: group.octets(),
+            ipv6mr_ifindex: interface_index(interface)?,
         };
-        // SAFETY: `mreqn` is a live `net_ip_mreqn` and the length passed is its
-        // size, the one length the stack accepts.
+        let option = if join {
+            IPV6_ADD_MEMBERSHIP
+        } else {
+            IPV6_DROP_MEMBERSHIP
+        };
+        self.set(IPPROTO_IPV6, option, &mreq)
+            .map_err(ZephyrNetError::Membership)
+    }
+
+    /// The IPv6 half of [`Self::membership`] on an image whose stack has no IPv6: no group of
+    /// that family is joined, and no symbol of it is referenced.
+    #[cfg(not(wz_net_ipv6))]
+    fn membership_v6(
+        &self,
+        _join: bool,
+        _group: Ipv6Addr,
+        _interface: GroupInterface,
+    ) -> Result<(), ZephyrNetError> {
+        Err(ZephyrNetError::NoFamily)
+    }
+
+    /// Send multicast datagrams out of `interface`: Zephyr has the interface option for IPv6
+    /// alone (`IPV6_MULTICAST_IF`, an index); an IPv4 socket sends out of the interface its
+    /// route picks, as [`GroupInterface::Routing`] does for either.
+    pub fn set_multicast_interface(&self, interface: GroupInterface) -> Result<(), ZephyrNetError> {
+        match (self.local, interface) {
+            (_, GroupInterface::Routing) | (SocketAddr::V4(_), GroupInterface::V4(_)) => Ok(()),
+            (SocketAddr::V6(_), GroupInterface::Index(_)) => self.multicast_if_v6(interface),
+            _ => Err(ZephyrNetError::InterfaceFamily),
+        }
+    }
+
+    #[cfg(wz_net_ipv6)]
+    fn multicast_if_v6(&self, interface: GroupInterface) -> Result<(), ZephyrNetError> {
+        let index = interface_index(interface)?;
+        self.set(IPPROTO_IPV6, IPV6_MULTICAST_IF, &index)
+            .map_err(ZephyrNetError::MulticastOption)
+    }
+
+    #[cfg(not(wz_net_ipv6))]
+    fn multicast_if_v6(&self, _interface: GroupInterface) -> Result<(), ZephyrNetError> {
+        Err(ZephyrNetError::NoFamily)
+    }
+
+    /// The hop limit of the multicast datagrams this socket sends, in the option of its family:
+    /// `IP_MULTICAST_TTL` or `IPV6_MULTICAST_HOPS`, each an `int`.
+    pub fn set_multicast_hops(&self, hops: u8) -> Result<(), ZephyrNetError> {
+        let hops = c_int::from(hops);
+        match self.local {
+            SocketAddr::V4(_) => self
+                .set(IPPROTO_IP, IP_MULTICAST_TTL, &hops)
+                .map_err(ZephyrNetError::MulticastOption),
+            SocketAddr::V6(_) => self.multicast_hops_v6(hops),
+        }
+    }
+
+    #[cfg(wz_net_ipv6)]
+    fn multicast_hops_v6(&self, hops: c_int) -> Result<(), ZephyrNetError> {
+        self.set(IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops)
+            .map_err(ZephyrNetError::MulticastOption)
+    }
+
+    #[cfg(not(wz_net_ipv6))]
+    fn multicast_hops_v6(&self, _hops: c_int) -> Result<(), ZephyrNetError> {
+        Err(ZephyrNetError::NoFamily)
+    }
+
+    /// Set the socket option `name` of `level` to `value`, of exactly its size, which is the one
+    /// length each option here accepts: the call's value when the stack refuses.
+    fn set<T>(&self, level: c_int, name: c_int, value: &T) -> Result<(), c_int> {
+        // SAFETY: `value` is a live `T` and the length passed is its size.
         let rc = unsafe {
             setsockopt(
                 self.fd,
-                IPPROTO_IP,
-                option,
-                &mreqn as *const IpMreqn as *const c_void,
-                size_of::<IpMreqn>() as SockLen,
+                level,
+                name,
+                (value as *const T).cast::<c_void>(),
+                size_of::<T>() as SockLen,
             )
         };
         if rc == 0 {
             Ok(())
         } else {
-            Err(ZephyrNetError::Membership(rc))
+            Err(rc)
         }
     }
 
-    /// Send one datagram to `addr:port`. A short or refused send is an error:
+    /// Send one datagram to `to`. A short or refused send is an error:
     /// UDP either takes the whole datagram or none of it.
-    pub fn send_to(&self, addr: [u8; 4], port: u16, bytes: &[u8]) -> Result<(), ZephyrNetError> {
-        let dest = sockaddr(addr, port);
+    pub fn send_to(&self, to: SocketAddr, bytes: &[u8]) -> Result<(), ZephyrNetError> {
+        let dest = RawAddr::of(to)?;
         // SAFETY: `bytes` and `dest` are live for the call, lengths match.
         let sent = unsafe {
             sendto(
@@ -315,8 +669,8 @@ impl ZephyrUdpSocket {
                 bytes.as_ptr() as *const c_void,
                 bytes.len(),
                 0,
-                &dest,
-                size_of::<SockaddrIn>() as SockLen,
+                dest.as_ptr(),
+                dest.size(),
             )
         };
         if sent == bytes.len() as isize {
@@ -353,16 +707,12 @@ impl ZephyrUdpSocket {
     /// stack where [`Self::wait_readable`] and [`Self::try_recv`] make two, which is what
     /// zenoh-pico's read does. Only for a socket whose [`Self::times_out`] is true: without the
     /// timeout the read would block for ever.
-    pub fn recv_waiting(
-        &self,
-        buf: &mut [u8],
-    ) -> Result<Option<(usize, [u8; 4], u16)>, ZephyrNetError> {
+    pub fn recv_waiting(&self, buf: &mut [u8]) -> Result<Option<Received>, ZephyrNetError> {
         debug_assert!(
             self.times_out,
             "a read without a timeout would block for ever"
         );
-        let mut src = SockaddrIn::default();
-        let mut src_len = size_of::<SockaddrIn>() as SockLen;
+        let mut src = RawAddr::empty();
         // SAFETY: `buf` and `src` are live and writable for the lengths given.
         let got = unsafe {
             recvfrom(
@@ -370,8 +720,8 @@ impl ZephyrUdpSocket {
                 buf.as_mut_ptr() as *mut c_void,
                 buf.len(),
                 0,
-                &mut src,
-                &mut src_len,
+                src.as_mut_ptr(),
+                src.size_mut(),
             )
         };
         if got < 0 {
@@ -382,11 +732,7 @@ impl ZephyrUdpSocket {
                 Err(ZephyrNetError::Recv(got))
             };
         }
-        Ok(Some((
-            got as usize,
-            src.sin_addr.to_ne_bytes(),
-            u16::from_be(src.sin_port),
-        )))
+        received(got, &src).map(Some)
     }
 
     /// Take one queued datagram into `buf` without blocking: `Ok(None)` when
@@ -396,10 +742,7 @@ impl ZephyrUdpSocket {
     /// `recvfrom`'s `EAGAIN`, because `errno` is out of the FFI's reach and
     /// "nothing yet" must not look like a failure — or a failure like
     /// "nothing yet".
-    pub fn try_recv(
-        &self,
-        buf: &mut [u8],
-    ) -> Result<Option<(usize, [u8; 4], u16)>, ZephyrNetError> {
+    pub fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, ZephyrNetError> {
         // A wait that just reported a datagram has answered the question: the read below cannot
         // block, and asking `poll` again is a second pass through the stack for nothing. The
         // flag is spent by this read, so the next receive asks.
@@ -418,8 +761,7 @@ impl ZephyrUdpSocket {
                 return Ok(None);
             }
         }
-        let mut src = SockaddrIn::default();
-        let mut src_len = size_of::<SockaddrIn>() as SockLen;
+        let mut src = RawAddr::empty();
         // SAFETY: `buf` and `src` are live and writable for the lengths given.
         let got = unsafe {
             recvfrom(
@@ -427,19 +769,22 @@ impl ZephyrUdpSocket {
                 buf.as_mut_ptr() as *mut c_void,
                 buf.len(),
                 0,
-                &mut src,
-                &mut src_len,
+                src.as_mut_ptr(),
+                src.size_mut(),
             )
         };
         if got < 0 {
             return Err(ZephyrNetError::Recv(got));
         }
-        Ok(Some((
-            got as usize,
-            src.sin_addr.to_ne_bytes(),
-            u16::from_be(src.sin_port),
-        )))
+        received(got, &src).map(Some)
     }
+}
+
+/// A datagram of `got` bytes `recvfrom` took from `src`: its length and source. A source in a
+/// family other than the two is a failed receive, since there is no end to judge it by.
+fn received(got: isize, src: &RawAddr) -> Result<Received, ZephyrNetError> {
+    let from = src.to_socket_addr().ok_or(ZephyrNetError::Recv(-1))?;
+    Ok((got as usize, from))
 }
 
 /// The session's link driver reaches this socket through the shared seam. Each method is the
@@ -448,16 +793,16 @@ impl ZephyrUdpSocket {
 impl DatagramSocket for ZephyrUdpSocket {
     type Error = ZephyrNetError;
 
-    fn bind(addr: [u8; 4], port: u16) -> Result<Self, ZephyrNetError> {
-        ZephyrUdpSocket::bind(addr, port)
+    fn bind(at: SocketAddr) -> Result<Self, ZephyrNetError> {
+        ZephyrUdpSocket::bind(at)
     }
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         ZephyrUdpSocket::local(self)
     }
 
-    fn send_to(&self, addr: [u8; 4], port: u16, bytes: &[u8]) -> Result<(), ZephyrNetError> {
-        ZephyrUdpSocket::send_to(self, addr, port, bytes)
+    fn send_to(&self, to: SocketAddr, bytes: &[u8]) -> Result<(), ZephyrNetError> {
+        ZephyrUdpSocket::send_to(self, to, bytes)
     }
 
     fn wait_readable(&self, timeout_ms: c_int) {
@@ -478,15 +823,22 @@ impl DatagramSocket for ZephyrUdpSocket {
         self.times_out && unsafe { wz_net_set_rcvtimeo_ms(self.fd, ms) } == 0
     }
 
-    fn recv_waiting(
-        &self,
-        buf: &mut [u8],
-    ) -> Result<Option<(usize, [u8; 4], u16)>, ZephyrNetError> {
+    fn recv_waiting(&self, buf: &mut [u8]) -> Result<Option<Received>, ZephyrNetError> {
         ZephyrUdpSocket::recv_waiting(self, buf)
     }
 
-    fn try_recv(&self, buf: &mut [u8]) -> Result<Option<(usize, [u8; 4], u16)>, ZephyrNetError> {
+    fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, ZephyrNetError> {
         ZephyrUdpSocket::try_recv(self, buf)
+    }
+
+    /// A family the image's stack was built without, read off `errno` by the board when `socket`
+    /// refused ([`open_socket`]), and an address the stack cannot name, stay refused: no retry
+    /// opens either.
+    fn refuses_address(error: &ZephyrNetError) -> bool {
+        matches!(
+            error,
+            ZephyrNetError::NoFamily | ZephyrNetError::ScopeTooWide(_)
+        )
     }
 
     // Zephyr's `poll` is a call any thread may make on a descriptor, so the owner of a session
@@ -553,29 +905,56 @@ pub type ZephyrStack = wz_runtime_coop::udp_link::UdpStack<ZephyrUdpSocket>;
 /// are read from `include/zephyr/net/socket.h`, `net_ip.h` and
 /// `subsys/net/lib/sockets/sockets_inet.c`), and it compiles for the target; it
 /// has not run against a real IGMP exchange, which needs a board and a switch
-/// that forwards the group. The firmware turns on `CONFIG_NET_IPV4_IGMP`.
+/// that forwards the group. The firmware turns on `CONFIG_NET_IPV4_IGMP`, and for an IPv6
+/// group `CONFIG_NET_IPV6` with its MLD (`CONFIG_NET_IPV6_MLD`, Zephyr's default with IPv6).
 pub struct ZephyrGroupTransport<const RX: usize> {
     /// `None` once the session has released its link.
     socket: Option<ZephyrUdpSocket>,
-    group: ([u8; 4], u16),
-    interface: [u8; 4],
+    /// The group, IPv4 (IGMP) or IPv6 (MLD), and its port.
+    group: SocketAddr,
+    interface: GroupInterface,
     rx: [u8; RX],
     rx_error: Option<ZephyrNetError>,
 }
 
 impl<const RX: usize> ZephyrGroupTransport<RX> {
-    /// Bind the wildcard address on `port` and join `group` on the interface
-    /// holding `interface` (the board's own address, see [`board_ipv4`]).
-    pub fn join(group: [u8; 4], port: u16, interface: [u8; 4]) -> Result<Self, ZephyrNetError> {
-        let socket = ZephyrUdpSocket::bind([0; 4], port)?;
-        socket.join_group(group, interface)?;
-        Ok(Self {
+    /// Bind the wildcard address of the group's family on the group's port, join `group` on
+    /// `interface` (for IPv4 the board's own address, see `board_ipv4`; for IPv6 an index, or
+    /// the routing's choice, which is the default interface), and send to it with the hop limit
+    /// `hops` when one is stated; `None` leaves the stack's own, as zenoh sets the TTL only when
+    /// its endpoint states `ttl` (the same rule as `wz_runtime_posix::group`). An interface named
+    /// in the other family is [`ZephyrNetError::InterfaceFamily`], before a socket is opened, and
+    /// an IPv6 group on an image without IPv6 [`ZephyrNetError::NoFamily`], from the bind.
+    pub fn join(
+        group: SocketAddr,
+        interface: GroupInterface,
+        hops: Option<u8>,
+    ) -> Result<Self, ZephyrNetError> {
+        if !interface.names_for(&group) {
+            return Err(ZephyrNetError::InterfaceFamily);
+        }
+        // An IPv6 group on an image without IPv6 meets `NoFamily` at the bind, before any join.
+        let wildcard = SocketAddr::new(
+            wz_runtime_coop::udp_link::unspecified_like(group.ip()),
+            group.port(),
+        );
+        let socket = ZephyrUdpSocket::bind(wildcard)?;
+        socket.join_group(group.ip(), interface)?;
+        // Joined: from here a failure leaves the group before the socket closes.
+        let transport = Self {
             socket: Some(socket),
-            group: (group, port),
+            group,
             interface,
             rx: [0; RX],
             rx_error: None,
-        })
+        };
+        if let Some(socket) = &transport.socket {
+            socket.set_multicast_interface(interface)?;
+            if let Some(hops) = hops {
+                socket.set_multicast_hops(hops)?;
+            }
+        }
+        Ok(transport)
     }
 
     /// The most recent receive failure, if the socket has failed: the seam the
@@ -591,7 +970,7 @@ impl<const RX: usize> ZephyrGroupTransport<RX> {
     /// second time. Best-effort: a failed leave leaves nothing to do.
     fn leave(&mut self) {
         if let Some(socket) = self.socket.take() {
-            let _ = socket.leave_group(self.group.0, self.interface);
+            let _ = socket.leave_group(self.group.ip(), self.interface);
         }
     }
 }
@@ -620,16 +999,26 @@ impl<const RX: usize> GroupTransport for ZephyrGroupTransport<RX> {
     /// answer is 0 for a link that is down or has no lease, which is the
     /// condition the loop must read as a lost link. Zephyr reports an interface
     /// going down through events this thread does not wait on, and the address
-    /// hook is the one read the profile already has.
+    /// hook is the one read the profile already has: the one of the group's family.
     fn carrier_up(&self) -> bool {
-        board_ipv4().is_some()
+        // `join` makes no group of a family the image's stack has not: its bind is refused.
+        match self.group {
+            #[cfg(wz_net_ipv4)]
+            SocketAddr::V4(_) => board_ipv4().is_some(),
+            #[cfg(not(wz_net_ipv4))]
+            SocketAddr::V4(_) => false,
+            #[cfg(wz_net_ipv6)]
+            SocketAddr::V6(_) => board_ipv6().is_some(),
+            #[cfg(not(wz_net_ipv6))]
+            SocketAddr::V6(_) => false,
+        }
     }
 
     fn send_to_group(&mut self, datagram: &[u8]) {
         // Best-effort, as the trait says: multicast UDP has no acknowledgement
         // and the next cadence retries.
         if let Some(socket) = &self.socket {
-            let _ = socket.send_to(self.group.0, self.group.1, datagram);
+            let _ = socket.send_to(self.group, datagram);
         }
     }
 
@@ -638,11 +1027,8 @@ impl<const RX: usize> GroupTransport for ZephyrGroupTransport<RX> {
             return false;
         };
         match socket.try_recv(&mut self.rx) {
-            Ok(Some((len, addr, port))) => {
-                f(
-                    &self.rx[..len],
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::from(addr)), port),
-                );
+            Ok(Some((len, from))) => {
+                f(&self.rx[..len], from);
                 true
             }
             Ok(None) => false,
@@ -658,5 +1044,97 @@ impl<const RX: usize> Drop for ZephyrGroupTransport<RX> {
     fn drop(&mut self) {
         // A transport dropped while its session still held it leaves too.
         self.leave();
+    }
+}
+
+// The conversion between an address and Zephyr's form is arithmetic on structs this crate
+// declares, so it is witnessed on the host; the socket calls it feeds are witnessed on target.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An address goes into Zephyr's form and comes back as it was, on either family: Zephyr's
+    /// own family numbers, the port in network order, the scope of a link-local end in its one
+    /// byte, and the length of the form the family is.
+    #[test]
+    fn an_address_round_trips_through_zephyrs_form_on_either_family() {
+        let scoped = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            7446,
+            0,
+            2,
+        ));
+        for (at, family, size) in [
+            (SocketAddr::from(([10, 0, 0, 2], 7447)), 1, 8),
+            (SocketAddr::from((Ipv6Addr::LOCALHOST, 7447)), 2, 24),
+            (scoped, 2, 24),
+        ] {
+            let raw = RawAddr::of(at).expect("an address Zephyr can name");
+            assert_eq!(family_of(&at), family);
+            assert_eq!(c_int::from(raw.storage.ss_family), family);
+            assert_eq!(raw.size(), size);
+            assert_eq!(raw.to_socket_addr(), Some(at));
+        }
+        let raw = RawAddr::of(SocketAddr::from(([10, 0, 0, 2], 0x1f90))).expect("IPv4");
+        // SAFETY: the storage holds the `SockaddrIn` just written, aligned for it.
+        let sin = unsafe { core::ptr::read(raw.as_ptr().cast::<SockaddrIn>()) };
+        assert_eq!(sin.sin_port, 0x1f90u16.to_be(), "the port in network order");
+        assert_eq!(sin.sin_addr.to_ne_bytes(), [10, 0, 0, 2]);
+    }
+
+    /// An IPv6 option is given the index Zephyr takes: 0 for the routing's choice, the index for
+    /// one of 1 to 255; an index past Zephyr's and an IPv4 address name no IPv6 interface.
+    #[test]
+    fn an_ipv6_interface_is_the_index_zephyr_takes() {
+        assert_eq!(interface_index(GroupInterface::Routing), Ok(0));
+        assert_eq!(interface_index(GroupInterface::Index(1)), Ok(1));
+        assert_eq!(interface_index(GroupInterface::Index(255)), Ok(255));
+        assert_eq!(
+            interface_index(GroupInterface::Index(256)),
+            Err(ZephyrNetError::InterfaceFamily)
+        );
+        assert_eq!(
+            interface_index(GroupInterface::V4(Ipv4Addr::LOCALHOST)),
+            Err(ZephyrNetError::InterfaceFamily)
+        );
+    }
+
+    /// A family the image lacks and an address it cannot name are the refusals no retry mends;
+    /// a socket the stack had none of now is not.
+    #[test]
+    fn a_missing_family_is_refused_for_good_and_a_full_table_is_not() {
+        assert!(ZephyrUdpSocket::refuses_address(&ZephyrNetError::NoFamily));
+        assert!(ZephyrUdpSocket::refuses_address(
+            &ZephyrNetError::ScopeTooWide(300)
+        ));
+        assert!(!ZephyrUdpSocket::refuses_address(&ZephyrNetError::Socket(
+            -1
+        )));
+        assert!(!ZephyrUdpSocket::refuses_address(&ZephyrNetError::Bind(-1)));
+    }
+
+    /// What Zephyr's form cannot carry is refused or left behind, never sent wrong: a scope above
+    /// its one byte is refused, a flow label is dropped, and a family other than the two names no
+    /// end.
+    #[test]
+    fn what_zephyrs_form_cannot_carry_is_refused_or_left_behind() {
+        let wide = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 7447, 0, 256));
+        assert!(matches!(
+            RawAddr::of(wide),
+            Err(ZephyrNetError::ScopeTooWide(256))
+        ));
+        let labelled = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 7447, 0x1234, 0));
+        assert_eq!(
+            RawAddr::of(labelled).expect("an address").to_socket_addr(),
+            Some(SocketAddr::from((Ipv6Addr::LOCALHOST, 7447)))
+        );
+        assert_eq!(RawAddr::empty().to_socket_addr(), None);
+        let mut short = RawAddr::of(SocketAddr::from((Ipv6Addr::LOCALHOST, 7447))).expect("IPv6");
+        *short.size_mut() = 8;
+        assert_eq!(
+            short.to_socket_addr(),
+            None,
+            "a length short of the family's form names no end"
+        );
     }
 }

@@ -17,13 +17,15 @@
 use alloc::rc::Rc;
 use core::ops::Deref;
 
+use core::net::SocketAddr;
 #[cfg(not(feature = "static-link-storage"))]
 use wz_link_lwip::rx_sockets::bind_session_rx;
 use wz_link_lwip::rx_sockets::SessionRxSocket;
 #[cfg(feature = "static-link-storage")]
 use wz_link_lwip::rx_sockets::SessionSocketSource;
 use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
-use wz_runtime_coop::session_drive::{IpEndpoint, LinkOpenError};
+
+use wz_runtime_coop::session_drive::LinkOpenError;
 #[cfg(not(feature = "session-slot"))]
 use wz_runtime_coop::session_drive::{LinkProto, Locator, OpenedLink, SessionLinks};
 
@@ -87,13 +89,18 @@ impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
     /// profiles `SessionLinks` wraps it in an `Rc`.
     ///
     /// `peer` is the link's peer, which the initiator dialled; an acceptor's link
-    /// has none until its first `InitSyn` ([`Self::bind_accepting_driver`]).
-    pub fn bind_driver(&self, port: u16, peer: IpEndpoint) -> Result<LwipUdpDriver, LinkOpenError> {
+    /// has none until its first `InitSyn` ([`Self::bind_accepting_driver`]). The
+    /// port's lwIP has no IPv6, so an IPv6 peer is
+    /// [`LinkOpenError::Unsupported`], before a socket is bound.
+    pub fn bind_driver(&self, port: u16, peer: SocketAddr) -> Result<LwipUdpDriver, LinkOpenError> {
+        let SocketAddr::V4(peer) = peer else {
+            return Err(LinkOpenError::Unsupported);
+        };
         let socket = self.bind_socket(port)?;
         Ok(LwipUdpDriver::new(
             share_socket(socket),
-            ipv4_addr_from_octets(peer.addr),
-            peer.port,
+            ipv4_addr_from_octets(peer.ip().octets()),
+            peer.port(),
         ))
     }
 
@@ -203,6 +210,27 @@ mod tests {
         );
     }
 
+    /// The port's lwIP has no IPv6: an IPv6 locator is refused as one this stack never dials,
+    /// and no socket is bound for it.
+    #[test]
+    fn an_ipv6_locator_is_unsupported_and_binds_no_socket() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let links = test_links(Rc::new(link));
+        let v6 = SocketAddr::from((core::net::Ipv6Addr::LOCALHOST, 7552));
+        std::assert!(matches!(
+            links.open_initiator(Locator::udp(v6)),
+            Err(LinkOpenError::Unsupported)
+        ));
+        std::assert!(matches!(
+            links.bind_driver(7553, v6),
+            Err(LinkOpenError::Unsupported)
+        ));
+        std::assert!(
+            links.open_acceptor(7553).is_ok(),
+            "the refused dial bound nothing on the port"
+        );
+    }
+
     // A handshake needs the unicast open and accept emitters and the Init / Open
     // body codecs, which this crate compiles in only with the node's write
     // surface (`adminspace-write` forwards all four). Without them the initiator
@@ -303,10 +331,7 @@ mod tests {
                 sink: initiator_sink,
                 pump: initiator_pump,
             } = links
-                .open_initiator(Locator::udp(IpEndpoint {
-                    addr: [127, 0, 0, 1],
-                    port: 7541,
-                }))
+                .open_initiator(Locator::udp(SocketAddr::from(([127, 0, 0, 1], 7541))))
                 .expect("open initiator");
             let initiator_link: Rc<dyn BoxedLinkDriver> = initiator_sink.clone();
             let initiator_actions = SessionLinkActions::<
