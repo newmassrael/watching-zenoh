@@ -2183,4 +2183,17 @@ mod build_numbers {
             assert_eq!(profile.lease_ms, default.lease_ms);
         }
     }
+
+    /// Pico states no cap on a group's members, and neither does its preset, whatever the width:
+    /// the face it joins then holds the rows of its table and no more, which is where the preset
+    /// departs from pico by decision (`docs/upstream-parity.md` section 7).
+    #[cfg(feature = "multicast-transport")]
+    #[test]
+    fn the_pico_group_states_no_member_cap() {
+        use wz_session_core::policy::SnResolution;
+        assert_eq!(PICO_GROUP.max_sessions, None);
+        for width in [SnResolution::Bits8, SnResolution::Bits64] {
+            assert_eq!(pico_group(width).max_sessions, None, "{}", width.id());
+        }
+    }
 }
