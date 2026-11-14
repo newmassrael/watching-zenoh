@@ -378,6 +378,14 @@ pub(crate) struct PublisherState {
     /// `base` is not plain, or the build has no Push codec; a session whose lane is closed is
     /// asked when the put is sent.
     plain: Option<wz_runtime_tokio::session::PlainPutParams>,
+    /// What the session copies a large put into its provider by, kept from the declaration
+    /// because a put on the publisher is made without the session handle; `None` for a session
+    /// opened without a provider.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    promotion: Option<crate::shm::PutPromotion>,
 }
 
 impl Drop for PublisherState {
@@ -597,6 +605,12 @@ pub(crate) struct NodePublisher {
     interest: u64,
     /// The background matching listener this publisher declared, if any: retired with it.
     matching: std::sync::Mutex<Option<crate::matching::MatchingHold>>,
+    /// What the node's session copies a large put into its provider by, as on the registry.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    promotion: Option<crate::shm::PutPromotion>,
 }
 
 #[cfg(feature = "router-node")]
@@ -806,8 +820,11 @@ pub(crate) unsafe fn declare_publisher_stated(
             // puts start from, and the data plane it puts through.
             #[cfg(feature = "router-node")]
             SessionHandle::Node(node) => {
+                // The QoS the configuration gives the key is the publisher's, over what the
+                // declaration states, as upstream's declaration takes it.
                 // SAFETY: the caller's contract for `options`.
-                let base = unsafe { resolve_publisher_options(options) };
+                let base = held
+                    .publication_options(&keyexpr, unsafe { resolve_publisher_options(options) });
                 // The node writes to its faces by its own tables and reads none of what a
                 // statement asks of the links: it does not carry the call, and declares nothing.
                 if statement != PublishStatement::default() {
@@ -832,6 +849,11 @@ pub(crate) unsafe fn declare_publisher_stated(
                     },
                     loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
                     base,
+                    #[cfg(all(
+                        feature = "zenoh-c-shared-memory",
+                        not(feature = "zenoh-c-no-unstable-api")
+                    ))]
+                    promotion: crate::shm::PutPromotion::of(held),
                 }));
                 boxed.bind();
                 // SAFETY: the caller's contract; the slot was gravestoned above.
@@ -850,16 +872,20 @@ pub(crate) unsafe fn declare_publisher_stated(
         // (`PublisherState::drop`); a session that has no id left publishes the literal.
         // SAFETY: the caller's contract for `key_expr`, already read above by `keyexpr_str`.
         let declared = unsafe { crate::keyexpr::keyexpr_mapping(key_expr) };
-        let held = if declared.is_none() {
+        let own_declaration = if declared.is_none() {
             state.shared.acquire_keyexpr(keyexpr.clone())
         } else {
             None
         };
         // What the declaration stated is part of the options every put on the handle starts from,
         // and a statement of links, a retry or all-or-none is what makes `plain_put_params`
-        // answer `None`, so no put on this publisher takes the plain lane past it.
+        // answer `None`, so no put on this publisher takes the plain lane past it. The QoS the
+        // configuration gives the key is the publisher's, over what the declaration states, as
+        // upstream's declaration takes it.
         // SAFETY: the caller's contract for `options`.
-        let base = statement.apply(unsafe { resolve_publisher_options(options) });
+        let base = statement.apply(
+            held.publication_options(&keyexpr, unsafe { resolve_publisher_options(options) }),
+        );
         let plain = base.plain_put_params();
         let mut boxed = Box::new(PublisherHandle::Registry(PublisherState {
             shared: state.shared.clone(),
@@ -872,11 +898,16 @@ pub(crate) unsafe fn declare_publisher_stated(
                 keyexpr,
                 mapping: declared,
             },
-            held_declaration: held,
+            held_declaration: own_declaration,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             matching: std::sync::Mutex::new(None),
             base,
             plain,
+            #[cfg(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            ))]
+            promotion: crate::shm::PutPromotion::of(held),
         }));
         // Bind AFTER the box, never before: the cached view must point at the
         // state's final address.
@@ -919,21 +950,61 @@ pub unsafe extern "C" fn z_publisher_put(
             not(feature = "router-node"),
             allow(clippy::infallible_destructuring_match)
         )]
-        let state = match held {
-            PublisherHandle::Registry(state) => state,
-            // The put starts from the options the publisher was declared with, as the
-            // publisher of the registry does.
-            #[cfg(feature = "router-node")]
-            PublisherHandle::Node(node) => {
-                let publish = overrides.apply(node.base.clone());
-                return crate::put::node_publish_payload(
-                    &node.node,
-                    &node.keyexpr.keyexpr,
-                    &payload,
-                    &publish,
-                );
-            }
-        };
+        let state =
+            match held {
+                PublisherHandle::Registry(state) => state,
+                // The put starts from the options the publisher was declared with, as the
+                // publisher of the registry does.
+                #[cfg(feature = "router-node")]
+                PublisherHandle::Node(node) => {
+                    let publish = overrides.apply(node.base.clone());
+                    // A large plain payload the session copies into its provider, as a put made
+                    // on the session itself is.
+                    #[cfg(all(
+                        feature = "zenoh-c-shared-memory",
+                        not(feature = "zenoh-c-no-unstable-api")
+                    ))]
+                    if let Some(handle) = node.promotion.as_ref().and_then(|promotion| {
+                        promotion.promote(&payload, || node.node.has_shm_peer())
+                    }) {
+                        return crate::put::node_publish_handle(
+                            &node.node,
+                            &node.keyexpr.keyexpr,
+                            handle,
+                            &publish,
+                        );
+                    }
+                    return crate::put::node_publish_payload(
+                        &node.node,
+                        &node.keyexpr.keyexpr,
+                        &payload,
+                        &publish,
+                    );
+                }
+            };
+        // A large plain payload the session copies into its provider, as a put made on the
+        // session itself is. Asked before the plain lane, which sends bytes.
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        if let Some(handle) = state
+            .promotion
+            .as_ref()
+            .and_then(|promotion| promotion.promote(&payload, || state.shared.has_shm_peer()))
+        {
+            let publish = overrides.apply(state.base.clone());
+            return match crate::put::publish_promoted(
+                &state.shared,
+                &state.keyexpr.keyexpr,
+                state.wire_mapping(),
+                handle,
+                &publish,
+            ) {
+                Ok(_) => Z_OK,
+                Err(why) => publish_refusal(why),
+            };
+        }
         // A put on a declared key that brings nothing of its own, from a publisher whose
         // options are plain, is sent from the facts worked out at declare time: no clone of
         // the options, no list of faces built. A put this node's own subscriber wants, or one
@@ -1362,5 +1433,168 @@ mod congestion_tests {
             congestion_to_c(CongestionControl::BlockFirst),
             Z_CONGESTION_CONTROL_DROP
         );
+    }
+}
+
+/// `qos/publication` on this ABI: the session a configuration opens holds the rules, a put or a
+/// delete is published with what they give its key, and a publisher is declared with it. Each
+/// case is one the Rust API preset is held to as well
+/// (`wz_capi_core::session_defaults::PUBLICATION_QOS_CASES`), on the registry and on a node.
+#[cfg(test)]
+mod publication_qos_tests {
+    use std::ffi::CString;
+
+    use super::*;
+    use crate::abi::{
+        z_moved_config_t, z_moved_session_t, z_owned_config_t, z_owned_session_t, z_view_keyexpr_t,
+    };
+    use crate::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
+    use crate::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
+    use crate::session::{z_close, z_open, z_session_drop, z_session_loan, z_session_loan_mut};
+    use wz_capi_core::session_defaults::{PublicationQosCase, PUBLICATION_QOS_CASES};
+    use wz_runtime_tokio_test_support::free_port;
+
+    /// A session of `mode` that listens on the loopback and scouts for nobody, configured with
+    /// `rules` as its `qos/publication`.
+    unsafe fn open(mode: &str, rules: &str) -> z_owned_session_t {
+        let entries = [
+            ("scouting/multicast/enabled", String::from("false")),
+            ("mode", format!("\"{mode}\"")),
+            (
+                "listen/endpoints",
+                format!("[\"tcp/127.0.0.1:{}\"]", free_port()),
+            ),
+            ("qos/publication", rules.to_owned()),
+        ];
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        for (key, value) in entries {
+            let key = CString::new(key).unwrap();
+            let value = CString::new(value).unwrap();
+            assert_eq!(
+                zc_config_insert_json5(z_config_loan_mut(&mut cfg), key.as_ptr(), value.as_ptr()),
+                Z_OK,
+                "{rules}"
+            );
+        }
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        assert_eq!(
+            z_open(
+                &mut session,
+                (&mut cfg as *mut z_owned_config_t).cast::<z_moved_config_t>(),
+                std::ptr::null()
+            ),
+            Z_OK,
+            "{mode} with {rules}"
+        );
+        session
+    }
+
+    /// `given` is `stated` with what `case` gives its key written over it, and nothing else.
+    fn holds(case: &PublicationQosCase, stated: &PublishOptions, given: &PublishOptions, on: &str) {
+        let label = format!("{on}: {} on {}", case.rules, case.key);
+        let stated_qos = stated.qos.expect("a publication carries its QoS");
+        let qos = given.qos.expect("a publication carries its QoS");
+        let expected = &case.expected;
+        assert_eq!(
+            qos.priority(),
+            expected.priority.unwrap_or(stated_qos.priority()),
+            "{label}"
+        );
+        assert_eq!(
+            qos.congestion(),
+            expected
+                .congestion_control
+                .unwrap_or(stated_qos.congestion()),
+            "{label}"
+        );
+        assert_eq!(
+            qos.is_express(),
+            expected.express.unwrap_or(stated_qos.is_express()),
+            "{label}"
+        );
+        assert_eq!(
+            given.reliability,
+            expected.reliability.unwrap_or(stated.reliability),
+            "{label}"
+        );
+        assert_eq!(
+            given.allowed_destination,
+            expected
+                .allowed_destination
+                .unwrap_or(stated.allowed_destination),
+            "{label}"
+        );
+    }
+
+    /// Every shared case, on a session of `mode`: the rules the open compiled, a put's options,
+    /// and the options a publisher is declared with.
+    fn every_case_on(mode: &str) {
+        for case in PUBLICATION_QOS_CASES {
+            // SAFETY: a session this test opens and closes, loaned for each call; every owned
+            // out-parameter is a local.
+            unsafe {
+                let mut session = open(mode, case.rules);
+                let loaned = z_session_loan(&session);
+                let held = session_handle(loaned).expect("an open session");
+                assert_eq!(
+                    held.session_defaults()
+                        .publication_qos
+                        .defaults_for(case.key),
+                    case.expected,
+                    "{mode}: the rules the open compiled"
+                );
+
+                // A put, with the options a NULL `z_put_options_t` resolves to.
+                let stated = publisher_put_options();
+                let put = held.publication_options(case.key, stated.clone());
+                holds(case, &stated, &put, &format!("{mode} put"));
+
+                // A publisher declared with NULL options.
+                let key = CString::new(case.key).unwrap();
+                let mut view: z_view_keyexpr_t = std::mem::zeroed();
+                assert_eq!(z_view_keyexpr_from_str(&mut view, key.as_ptr()), Z_OK);
+                let mut publisher: z_owned_publisher_t = std::mem::zeroed();
+                assert_eq!(
+                    z_declare_publisher(
+                        loaned,
+                        &mut publisher,
+                        z_view_keyexpr_loan(&view),
+                        std::ptr::null_mut()
+                    ),
+                    Z_OK
+                );
+                let declared = match publisher_handle(z_publisher_loan(&publisher))
+                    .expect("a declared publisher")
+                {
+                    PublisherHandle::Registry(state) => state.base.clone(),
+                    #[cfg(feature = "router-node")]
+                    PublisherHandle::Node(node) => node.base.clone(),
+                };
+                holds(case, &stated, &declared, &format!("{mode} publisher"));
+                assert_eq!(
+                    z_undeclare_publisher(
+                        (&mut publisher as *mut z_owned_publisher_t).cast::<z_moved_publisher_t>()
+                    ),
+                    Z_OK
+                );
+
+                let _ = z_close(z_session_loan_mut(&mut session), std::ptr::null_mut());
+                z_session_drop(
+                    (&mut session as *mut z_owned_session_t).cast::<z_moved_session_t>(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_registry_gives_each_publication_what_its_key_is_configured_with() {
+        every_case_on("peer");
+    }
+
+    #[cfg(feature = "router-node")]
+    #[test]
+    fn a_node_gives_each_publication_what_its_key_is_configured_with() {
+        every_case_on("router");
     }
 }
