@@ -243,6 +243,30 @@ impl ::sce_forge_runtime::codec::HoldsBytes<super::timestamp::TimestampZidField>
     type Bytes = ::sce_forge_runtime::codec::InlineBytes<16>;
 }
 
+// `transport_close`
+#[cfg(feature = "codec-close")]
+impl ::sce_forge_runtime::codec::HoldsList<super::transport_close::TransportCloseExtensionsField> for Node {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
+// `transport_init`
+#[cfg(feature = "codec-init-body")]
+impl ::sce_forge_runtime::codec::HoldsList<super::transport_init::TransportInitExtensionsField> for Node {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
+// `transport_keep_alive`
+#[cfg(feature = "codec-keep-alive")]
+impl ::sce_forge_runtime::codec::HoldsList<super::transport_keep_alive::TransportKeepAliveExtensionsField> for Node {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
+// `transport_open`
+#[cfg(feature = "codec-open-body")]
+impl ::sce_forge_runtime::codec::HoldsList<super::transport_open::TransportOpenExtensionsField> for Node {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
 // `undecl_kexpr`
 #[cfg(feature = "codec-declare")]
 impl ::sce_forge_runtime::codec::HoldsList<super::undecl_kexpr::UndeclKexprExtensionsField> for Node {
