@@ -938,8 +938,9 @@ struct HeldNode {
     /// The node's intent is the passive form of `open` (decision D10): it is waited for, and
     /// an `open` that dials is a change to make.
     passive: bool,
-    /// Sessions the row holds: one while there is a session, none while it waits to dial again.
-    /// A session an endpoint's dial reached is the endpoint's row, not counted here.
+    /// Sessions the node is held by: the one its dial opened and the one it opened to this node
+    /// under a passive intent, none while it waits. A session an endpoint's dial reached is the
+    /// endpoint's row, not counted here.
     #[cfg(feature = "lifecycle-verbs")]
     links: u32,
     /// The state of the node's machine, as of the manager's last tick.
@@ -1248,6 +1249,11 @@ type Rows<S> = BoundedVec<Row<S>, PEERS>;
 /// The retry schedule of each peer that is in an outage.
 type Periods = BoundedVec<(Key, RetryPeriod), PEERS>;
 
+/// The sessions nodes opened that their machines hold, by node and face. Only a node is waited for
+/// (an endpoint is dialled), and each is held once, so there are no more than the nodes the node
+/// was built to hold.
+type Inbound = FixedVec<(DirectoryZid, u64), MAX_PEER_NODES>;
+
 /// What this profile answers for the planner.
 struct Ports<'a, D: Dialer> {
     /// What the dialer type can dial is its own and is asked of the type.
@@ -1345,6 +1351,14 @@ pub struct ConnectManager<D: Dialer> {
     /// node's storage and `drive` is on the stack of the thread that ticks it, under `reconcile`.
     /// Empty between two calls of `drive`, which is not its own callee.
     actions: Actions,
+    /// The sessions nodes opened to this node that their machines hold (decision D10), each by
+    /// the face the planner holds it as. The sessions are the shell's, which accepted them: the
+    /// manager holds the face and not the session.
+    inbound: Inbound,
+    /// The nodes whose sessions to this node their machines let go of (a `close`, a `reset`) since
+    /// the shell last took them: the shell holds those sessions, so it is the one that ends them
+    /// ([`Self::take_inbound_hang_ups`]).
+    hang_ups: FixedVec<DirectoryZid, MAX_PEER_NODES>,
 }
 
 impl<D: Dialer> ConnectManager<D> {
@@ -1395,6 +1409,8 @@ impl<D: Dialer> ConnectManager<D> {
             store,
             next_id: 0,
             actions: Actions::new(),
+            inbound: Inbound::new(),
+            hang_ups: FixedVec::new(),
         }
     }
 
@@ -1623,7 +1639,8 @@ impl<D: Dialer> ConnectManager<D> {
                             t.planner.state(&row.key),
                             Some(PeerConnectionState::Passive | PeerConnectionState::PassiveUp)
                         ),
-                        links: u32::from(row.held.is_some()),
+                        links: u32::from(row.held.is_some())
+                            + u32::from(self.inbound.iter().any(|(node, _)| node == zid)),
                         #[cfg(feature = "lifecycle-status")]
                         state: t
                             .planner
@@ -1760,6 +1777,9 @@ impl<D: Dialer> ConnectManager<D> {
                 planner.dial_ended(face, DialEnd::Failed, ports, next_id, emit);
             });
         }
+        // The machine's stop closed the session the node opened here, if it held one; a node that
+        // leaves the table leaves no session behind it whatever state its machine was in.
+        let _ = self.release_inbound(zid);
         self.store.get().with(|t| t.planner.forget(&key));
         self.periods.retain(|(k, _)| *k != key);
         self.rows.retain(|row| row.key != key);
@@ -1767,7 +1787,8 @@ impl<D: Dialer> ConnectManager<D> {
     }
 
     /// End the session the node `zid` holds and keep the node in the intent (decision D6: a
-    /// lifecycle `reset`): its machine is told the dial was lost, and dials again after its wait.
+    /// lifecycle `reset`): its machine is told the session was lost, and dials again after its
+    /// wait, or, held under a passive intent, waits for the node's next session (decision D10).
     /// A node with no session is unchanged.
     #[cfg(feature = "lifecycle-reset")]
     pub fn reset_node(&mut self, zid: &DirectoryZid, now_ms: u64) {
@@ -1784,38 +1805,85 @@ impl<D: Dialer> ConnectManager<D> {
                     planner.dial_ended(face, DialEnd::Failed, ports, next_id, emit);
                 }
             });
+        } else if let Some(face) = self.release_inbound(zid) {
+            self.drive(now_ms, &mut |planner, ports, next_id, emit| {
+                planner.face_down(face, ports, next_id, emit);
+            });
         }
         self.mirror_held();
     }
 
+    /// Let go of the session the node `zid` opened to this node, if its machine holds one: the
+    /// order to end it is kept for the shell, which holds the session, and the face the planner
+    /// held it as is handed back.
+    fn release_inbound(&mut self, zid: &DirectoryZid) -> Option<u64> {
+        let at = self.inbound.iter().position(|(node, _)| node == zid)?;
+        let (_, face) = self.inbound.swap_remove(at);
+        if !self.hang_ups.contains(zid) {
+            // One order per node, and each node is held once.
+            let _ = self.hang_ups.push(*zid);
+        }
+        Some(face)
+    }
+
+    /// Hand `hang_up` each node whose session to this node, which the node opened and its
+    /// machine held, the machines let go of since the last call (a `close`, or a `reset`, of a
+    /// node held under a passive intent: decision D10). Those sessions were accepted by the
+    /// shell and are not the manager's, so ending them is the shell's: it ends every running
+    /// session whose link's key proved that zid, before it next reports the sessions it holds
+    /// ([`Self::inbound_sessions`]), so a session on its way out is not held again.
+    pub fn take_inbound_hang_ups(&mut self, mut hang_up: impl FnMut(&DirectoryZid)) {
+        for zid in self.hang_ups.iter() {
+            hang_up(zid);
+        }
+        self.hang_ups.clear();
+    }
+
     /// Say which nodes have a session of their own to this node whose key proved their zid, as
-    /// of now (decision D10): `zids` is every such node, from the sessions the node accepted. A
-    /// node waiting under a passive intent whose zid is among them holds that session, and one
-    /// that held it and is not among them goes back to waiting. A node in any other state is
-    /// left as it is: the accept policy admitted or refused the session before this was asked.
+    /// of now (decision D10): `zids` is every such node, from the running sessions the node
+    /// accepted. A node waiting under a passive intent whose zid is among them holds that
+    /// session. A session a machine holds that is no longer among them has ended, and its
+    /// machine is told it was lost, whatever state the machine has moved to since it took the
+    /// session (a dialling `open` of a node held this way keeps the session as its own). A node
+    /// in any other state is left as it is: the accept policy admitted or refused the session
+    /// before this was asked.
     pub fn inbound_sessions(&mut self, zids: &[DirectoryZid], now_ms: u64) {
+        let mut at = 0;
+        while at < self.inbound.len() {
+            let (zid, face) = self.inbound[at];
+            if zids.contains(&zid) {
+                at += 1;
+                continue;
+            }
+            self.inbound.swap_remove(at);
+            self.drive(now_ms, &mut |planner, ports, next_id, emit| {
+                planner.face_down(face, ports, next_id, emit);
+            });
+        }
         for at in 0..self.rows.len() {
             let Key::Node(zid) = self.rows[at].key else {
                 continue;
             };
             let key = Key::Node(zid);
-            let present = zids.contains(&zid);
-            match self.store.get().with(|t| t.planner.state(&key)) {
-                Some(PeerConnectionState::Passive) if present => {
-                    self.drive(now_ms, &mut |planner, ports, next_id, emit| {
-                        // A face of the planner's own numbering, as a dial is given: the
-                        // planner holds the session by it until the session is gone.
-                        let id = *next_id;
-                        *next_id += 1;
-                        planner.inbound_up(key, id, ports, next_id, emit);
-                    });
+            if !zids.contains(&zid)
+                || self.store.get().with(|t| t.planner.state(&key))
+                    != Some(PeerConnectionState::Passive)
+            {
+                continue;
+            }
+            let mut held = None;
+            self.drive(now_ms, &mut |planner, ports, next_id, emit| {
+                // A face of the planner's own numbering, as a dial is given: the planner holds
+                // the session by it until the session is gone.
+                let id = *next_id;
+                *next_id += 1;
+                if planner.inbound_up(key, id, ports, next_id, emit) {
+                    held = Some(id);
                 }
-                Some(PeerConnectionState::PassiveUp) if !present => {
-                    self.drive(now_ms, &mut |planner, ports, next_id, emit| {
-                        planner.inbound_down(&key, ports, next_id, emit);
-                    });
-                }
-                _ => {}
+            });
+            if let Some(face) = held {
+                // A node waits once, so it takes one of the places the nodes it holds have.
+                let _ = self.inbound.push((zid, face));
             }
         }
         self.mirror_held();
@@ -1976,7 +2044,8 @@ impl<D: Dialer> ConnectManager<D> {
         (0..=u8::MAX).find(|slot| !self.rows.iter().any(|row| row.key == Key::Endpoint(*slot)))
     }
 
-    /// Hang up the session held as face `id`, if a row holds it.
+    /// Hang up the session held as face `id`: one a row's dial opened here, one a node opened to
+    /// this node by the shell that holds it.
     fn hang_up_face(&mut self, id: u64) {
         let held = self
             .rows
@@ -1985,6 +2054,15 @@ impl<D: Dialer> ConnectManager<D> {
             .and_then(|row| row.held.take());
         if let Some(held) = held {
             self.dialer.hang_up(held.session);
+            return;
+        }
+        let node = self
+            .inbound
+            .iter()
+            .find(|(_, face)| *face == id)
+            .map(|(node, _)| *node);
+        if let Some(node) = node {
+            let _ = self.release_inbound(&node);
         }
     }
 
@@ -2842,6 +2920,88 @@ mod tests {
         std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
     }
 
+    /// The orders to end a session a node opened, as the shell that holds those sessions takes them.
+    fn hang_ups(m: &mut ConnectManager<FakeDialer>) -> Vec<DirectoryZid> {
+        let mut taken = Vec::new();
+        m.take_inbound_hang_ups(|zid| taken.push(*zid));
+        taken
+    }
+
+    /// Decision D10: the session a node opened to this one and its machine holds is the shell's,
+    /// which accepted it, so a `close` of the node hands the shell the order to end it, once. A
+    /// session of a node nobody waits for is no order, the dialer holds none of these sessions,
+    /// and the session reported again before the shell has ended it is held by nobody.
+    #[test]
+    fn a_close_of_a_passive_node_orders_the_shell_to_end_the_session_it_opened() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        if !nodes_asked_for() {
+            return;
+        }
+        std::assert_eq!(m.open_node_passive(NODE_A, 0), Ok(()));
+        m.inbound_sessions(&[NODE_A, NODE_B], 1_000);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
+        std::assert!(
+            hang_ups(&mut m).is_empty(),
+            "nothing is let go of while the node is held"
+        );
+
+        m.close_node(&NODE_A, 2_000);
+        std::assert_eq!(
+            hang_ups(&mut m),
+            [NODE_A],
+            "the closed node's session, and not the session of a node nobody waits for"
+        );
+        std::assert!(hang_ups(&mut m).is_empty(), "an order is handed over once");
+        std::assert_eq!(m.node_states().count(), 0);
+        std::assert!(
+            m.dialer().hang_ups.is_empty(),
+            "the dialer holds no session a node opened"
+        );
+
+        m.inbound_sessions(&[NODE_A], 3_000);
+        std::assert_eq!(m.node_states().count(), 0, "the node left the intent");
+        std::assert!(hang_ups(&mut m).is_empty());
+    }
+
+    /// Decision D10: a dialling `open` of a node that holds the session it opened keeps that
+    /// session as its own, and when the shell no longer reports the session the machine is told it
+    /// was lost and dials the node after its wait. A machine that was not told would hold the node
+    /// by a session that no longer exists.
+    #[test]
+    fn a_session_a_dialling_open_took_over_from_a_passive_one_is_lost_when_it_ends() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        if !nodes_asked_for() {
+            return;
+        }
+        declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
+        std::assert_eq!(m.open_node_passive(NODE_A, 0), Ok(()));
+        m.inbound_sessions(&[NODE_A], 1_000);
+        std::assert_eq!(m.open_node(NODE_A, 2_000), Ok(()));
+        std::assert!(
+            m.dialer().dials_for.borrow().is_empty(),
+            "the session the node holds is the one the open asks for"
+        );
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
+
+        m.inbound_sessions(&[], 3_000);
+        std::assert!(
+            matches!(m.node_states().next().unwrap().1, NodeState::Waiting { .. }),
+            "the session is lost, and the machine waits to dial the node"
+        );
+        std::assert!(
+            hang_ups(&mut m).is_empty(),
+            "a session that ended is no order"
+        );
+        m.tick(60_000);
+        let made: Vec<(String, DirectoryZid)> =
+            m.dialer().dials_for.borrow_mut().drain(..).collect();
+        std::assert_eq!(made, [(String::from("udp/10.0.0.9:7447"), NODE_A)]);
+    }
+
     /// A dialer that does not hold a session to the node it was made for is not asked to dial one:
     /// the session would be to whichever node answered the hint.
     #[test]
@@ -3298,6 +3458,108 @@ mod tests {
                 2,
                 "and nothing dials it again"
             );
+        }
+
+        /// The answer of the node to one command of the owner of its pipe.
+        fn verdict(
+            node: &StoreNode<CasePermits>,
+            command: wz_session_core::lifecycle_node::Command<'_>,
+        ) -> String {
+            let mut out = wz_session_core::text_out::FixedText::<256>::new();
+            wz_session_core::lifecycle_node::lifecycle_verdict(
+                node,
+                command,
+                Commander::Pipe,
+                &mut out,
+            );
+            std::assert!(!out.overflowed());
+            String::from(out.prefix())
+        }
+
+        /// Decision D10 through the verbs: a node held by the session it opened to this node has
+        /// that session as its link in the status read, a reset ends it through the shell and
+        /// leaves the node waiting for the next, which it holds again, and a close ends it and
+        /// takes the node out. A session that is no link of the node would answer the reset and
+        /// the close with nothing to end.
+        #[test]
+        fn the_verbs_reach_the_session_a_passive_node_opened() {
+            use wz_session_core::lifecycle_node::Command;
+            static CONTROL: ConnectControl = ConnectControl::new(true);
+            static STORE: PeerStore = PeerStore::new();
+            const PEER: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+            if !nodes_asked_for() {
+                return;
+            }
+            let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+            let node = StoreNode::new(&STORE, CasePermits(all_permits()));
+            std::assert_eq!(
+                verdict(
+                    &node,
+                    Command::Open {
+                        peer: PEER,
+                        mode: OpenMode::Passive
+                    }
+                ),
+                "{\"verdict\":\"opening\"}"
+            );
+            m.tick(1);
+            std::assert_eq!(
+                verdict(&node, Command::Status { peer: PEER }),
+                "{\"verdict\":\"status\",\"links\":{\"open\":0,\"closing\":0},\"intent\":true,\
+                 \"machines\":[{\"state\":\"passive\"}]}",
+                "waited for, and no session yet"
+            );
+
+            m.inbound_sessions(&[NODE_A], 2);
+            m.tick(2);
+            std::assert_eq!(
+                verdict(&node, Command::Status { peer: PEER }),
+                "{\"verdict\":\"status\",\"links\":{\"open\":1,\"closing\":0},\"intent\":true,\
+                 \"machines\":[{\"state\":\"established\",\"cause\":\"passive\"}]}",
+                "the session the node opened is its link"
+            );
+
+            // A reset ends that session once, through the shell, and keeps the node waiting.
+            std::assert_eq!(
+                verdict(
+                    &node,
+                    Command::Reset {
+                        peer: PEER,
+                        generation: "1"
+                    }
+                ),
+                "{\"verdict\":\"resetting\",\"links\":1}"
+            );
+            std::assert!(
+                hang_ups(&mut m).is_empty(),
+                "nothing is let go of outside the loop"
+            );
+            m.tick(3);
+            std::assert_eq!(hang_ups(&mut m), [NODE_A]);
+            std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Passive);
+            m.inbound_sessions(&[], 4);
+            std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Passive);
+            std::assert!(
+                m.dialer().dials_for.borrow().is_empty(),
+                "nothing is dialled"
+            );
+            m.inbound_sessions(&[NODE_A], 5);
+            std::assert_eq!(
+                m.node_states().next().unwrap().1,
+                NodeState::Live,
+                "the node's next session is held"
+            );
+
+            // A close ends it and takes the node out.
+            m.tick(6);
+            std::assert_eq!(
+                verdict(&node, Command::Close { peer: PEER }),
+                "{\"verdict\":\"closing\",\"links\":1}"
+            );
+            m.tick(7);
+            std::assert_eq!(hang_ups(&mut m), [NODE_A]);
+            std::assert_eq!(m.node_states().count(), 0);
+            std::assert!(m.dialer().hang_ups.is_empty());
         }
 
         /// Decision D12: a list of commanders is per verb and default deny; only a zid the link's
