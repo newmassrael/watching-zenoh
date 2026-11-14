@@ -53,7 +53,7 @@ Every anchor is a HARD FAIL when it does not match. A gate that cannot find its
 subject must not report on it — and a silently empty population is the shape
 this file's sibling (`count_guard_lint.py`) had to be taught to refuse.
 
-## The three sites, and why they accumulate here
+## The sites, and why they accumulate here
 
 Each is a different obligation the SAME pair of files carries, and each was
 added by the round that found it. They share this gate because they share the
@@ -65,7 +65,15 @@ leg that would otherwise notice needs a built zenohd and runs only hosted.
     the round that moved two keys updated the first site and not this one, so
     this gate went green while hosted Layer Z went red);
   * the CENSUS fixture must fill NO key that would move the denominator
-    (R2147, item 217).
+    (R2147, item 217);
+  * a WIRE claim must be measured by a lane whose build keeps the key's sink
+    (R2202, item 220);
+  * every honoured key must have a row in the EFFECT-WITNESS table,
+    `docs/config-key-effect-witnesses.tsv`, naming the test that shows the key
+    changing what a node does and whether an upstream implementation was handed
+    the same document first. Honoured is a claim about the reader; the table is
+    the claim about the behaviour, and the count of keys whose behaviour no
+    upstream run adjudicates may only go down (`UNPROVEN_BUDGET`).
 
 Usage:
     python3 scripts/lib/config_key_fixture_gate.py [--verbose]
@@ -352,6 +360,280 @@ DROPS_FN_RE = re.compile(
 # of the facade, which no `cfg!` in the demo's own source can read.
 MANIFEST_FEATURES_RE = re.compile(r"^\[features\]$(.*?)^\[", re.S | re.M)
 MANIFEST_ROW_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*=\s*\[(.*?)\]", re.S | re.M)
+
+
+# ── the FIFTH site: the EFFECT WITNESS of every honoured key ──
+#
+# `HONOURED_CONFIG_KEYS` says the reader takes a key. Whether the key then
+# changes what a node does the way it changes what an upstream node does is a
+# different claim, and it lives per key in a table a reader can grep and this
+# gate can grade. The table is the SSOT for that claim; this site holds its key
+# column to the honoured surface, its witnesses to tests that exist, and the
+# number of keys no upstream run adjudicates to a budget that only goes down.
+EFFECT_TABLE = REPO_ROOT / "docs" / "config-key-effect-witnesses.tsv"
+EFFECT_HEADER = ("key", "verdict", "witness", "host", "upstream", "note")
+# The one verdict that counts as proven: the same document handed to an upstream
+# implementation and to wz, the upstream effect asserted first.
+PROVEN_VERDICT = "differential"
+# Verdicts that name a witness test.
+WITNESSED_VERDICTS = ("differential", "foreign", "wz-effect")
+# Verdicts whose witness is an upstream implementation, which the row names.
+UPSTREAM_VERDICTS = ("differential", "foreign")
+# A wz extension the pinned upstream discards: there is no upstream effect to
+# compare, so it is neither proven nor counted against the budget, and only the
+# keys of `WZ_EXTENSION_HONOURED_KEYS` may carry it.
+EXTENSION_VERDICT = "no-upstream-effect"
+VERDICTS = WITNESSED_VERDICTS + ("reader-only", "unsurveyed", EXTENSION_VERDICT)
+# What a witness file must contain to be the upstream side the row names. A
+# structural check: it says the file reaches that implementation at all, and the
+# row's review says the reaching is the positive control.
+UPSTREAM_TOKENS = {
+    "zenohd": ("zenohd",),
+    "zenoh-c": ("zenoh_c_oracle", "libzenohc"),
+    "zenoh-pico": ("pico",),
+}
+# The number of honoured keys whose row is not `differential` (extensions
+# aside), measured on the commit that introduced the table. Both directions
+# fail: above it, a key was honoured or downgraded without an upstream witness;
+# below it, a witness landed and this number must come down in the same commit.
+UNPROVEN_BUDGET = 62
+# How far above a fn declaration its attribute block may reach. A doc comment,
+# a `wz-proves:` line and a two-line `#[ignore]` fit with room to spare.
+ATTRIBUTE_WINDOW = 40
+
+
+def effect_rows(text: str) -> tuple[list[dict[str, str]], list[str]]:
+    """The table's rows as `{column: cell}`, plus every shape problem.
+
+    `#` lines and blank lines are commentary. The first other line must be the
+    header, spelled exactly, so a reordered column cannot be read as another.
+    """
+    rows: list[dict[str, str]] = []
+    problems: list[str] = []
+    header_seen = False
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        cells = line.split("\t")
+        if not header_seen:
+            if tuple(cells) != EFFECT_HEADER:
+                problems.append(
+                    f"{rel(EFFECT_TABLE)}:{number}: the first row is not the "
+                    f"header ({', '.join(EFFECT_HEADER)}, tab-separated)"
+                )
+                return rows, problems
+            header_seen = True
+            continue
+        if len(cells) != len(EFFECT_HEADER):
+            problems.append(
+                f"{rel(EFFECT_TABLE)}:{number}: {len(cells)} cell(s) where the "
+                f"header has {len(EFFECT_HEADER)}"
+            )
+            continue
+        row = dict(zip(EFFECT_HEADER, (c.strip() for c in cells)))
+        row["line"] = str(number)
+        rows.append(row)
+    if not header_seen:
+        problems.append(f"{rel(EFFECT_TABLE)} has no header row")
+    return rows, problems
+
+
+def declared_test(lines: list[str], fn: str) -> bool | None:
+    """Whether `fn` is declared in `lines` under a test attribute.
+
+    `None` when no fn of that name is declared, `False` when one is and its
+    attribute block carries no test attribute. The block is the run of
+    non-blank lines above the declaration, stopped by a closing brace or the
+    window; only lines that START with `#[` are read as attributes, so prose in
+    a doc comment that spells the attribute does not make a helper a test.
+    """
+    decl = re.compile(
+        r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(fn) + r"\s*[(<]"
+    )
+    for index, line in enumerate(lines):
+        if not decl.search(line):
+            continue
+        above = index - 1
+        while above >= max(0, index - ATTRIBUTE_WINDOW):
+            text = lines[above].strip()
+            if not text or text.startswith("}"):
+                break
+            # The end of the previous item: a statement or a body closing on
+            # the line, which no attribute or comment line of this block does.
+            if not text.startswith("//") and text.endswith((";", "}")):
+                break
+            if text.startswith("#[") and TEST_ATTR_RE.match(text):
+                return True
+            above -= 1
+        return False
+    return None
+
+
+def names_the_key(text: str, key: str) -> bool:
+    """Whether a witness file names `key`, whole or by its last segment.
+
+    The leaf is accepted because the tree spells a key in three ways -- the
+    path, the JSON5 nesting, and a `(kind, leaf)` row -- and only the leaf is in
+    all three. It is a floor, not the claim: the claim is the row's review.
+    """
+    if key in text:
+        return True
+    leaf = key.rsplit("/", 1)[-1]
+    return re.search(r"\b" + re.escape(leaf) + r"\b", text) is not None
+
+
+def effect_witness_site(
+    surface: list[str], extensions: list[str], wire_keys: list[str]
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Grade the effect-witness table. Returns failures and the keys by verdict."""
+    failures: list[str] = []
+    by_verdict: dict[str, list[str]] = {v: [] for v in VERDICTS}
+    if not EFFECT_TABLE.is_file():
+        return [f"{rel(EFFECT_TABLE)} is missing"], by_verdict
+    rows, problems = effect_rows(EFFECT_TABLE.read_text())
+    failures.extend(problems)
+    if not rows:
+        failures.append(
+            f"{rel(EFFECT_TABLE)} read as EMPTY -- a table of nothing would "
+            f"pass every check below"
+        )
+        return failures, by_verdict
+
+    population = surface + extensions
+    keys = [row["key"] for row in rows]
+    dupes = sorted({k for k in keys if keys.count(k) > 1})
+    if dupes:
+        failures.append(
+            f"{rel(EFFECT_TABLE)} carries {', '.join(dupes)} twice; one key has "
+            f"one witness verdict"
+        )
+    missing = [k for k in population if k not in keys]
+    if missing:
+        failures.append(
+            f"{rel(EFFECT_TABLE)} has no row for {len(missing)} honoured key(s): "
+            f"{', '.join(missing)}. A key the reader honours needs a row saying "
+            f"what shows its effect, `unsurveyed` if nothing has looked yet"
+        )
+    stale = sorted({k for k in keys if k not in population})
+    if stale:
+        failures.append(
+            f"{rel(EFFECT_TABLE)} has a row for {', '.join(stale)}, which the "
+            f"honoured surface no longer carries"
+        )
+
+    # The resolver's NEGATIVE CONTROL: `operator_config` is a fixture builder in
+    # the drop-in file, anchored by the census site above, and not a test. A
+    # resolver that called it one would credit any helper as a witness.
+    fixture_lines = FIXTURE_TEST.read_text().splitlines()
+    if declared_test(fixture_lines, "operator_config") is not False:
+        failures.append(
+            f"the witness resolver did not read `operator_config` in "
+            f"{rel(FIXTURE_TEST)} as a declared non-test fn, so it cannot tell a "
+            f"test from a helper and every witness below is ungraded"
+        )
+
+    sources: dict[str, str] = {}
+    for row in rows:
+        where = f"{rel(EFFECT_TABLE)}:{row['line']} `{row['key']}`"
+        verdict = row["verdict"]
+        if verdict not in VERDICTS:
+            failures.append(
+                f"{where}: verdict `{verdict}` is not one of {', '.join(VERDICTS)}"
+            )
+            continue
+        by_verdict[verdict].append(row["key"])
+        is_extension = row["key"] in extensions
+        if (verdict == EXTENSION_VERDICT) != is_extension:
+            failures.append(
+                f"{where}: `{EXTENSION_VERDICT}` is the verdict of exactly the "
+                f"keys of WZ_EXTENSION_HONOURED_KEYS, which the pinned upstream "
+                f"discards"
+            )
+        if verdict in UPSTREAM_VERDICTS:
+            if row["upstream"] not in UPSTREAM_TOKENS:
+                failures.append(
+                    f"{where}: a `{verdict}` row names its upstream side, one of "
+                    f"{', '.join(UPSTREAM_TOKENS)}, not `{row['upstream']}`"
+                )
+        elif row["upstream"] != "-":
+            failures.append(
+                f"{where}: a `{verdict}` row has no upstream side, so its "
+                f"upstream cell is `-`, not `{row['upstream']}`"
+            )
+        if verdict not in WITNESSED_VERDICTS:
+            if row["witness"] != "-":
+                failures.append(
+                    f"{where}: a `{verdict}` row names no witness, so its witness "
+                    f"cell is `-`"
+                )
+            continue
+        if row["host"] in ("", "-"):
+            failures.append(f"{where}: a witnessed row names the wz host it drives")
+        path_text, sep, fn = row["witness"].partition("::")
+        path = REPO_ROOT / path_text
+        if not sep or not fn or path_text.startswith("/") or ".." in path_text:
+            failures.append(
+                f"{where}: the witness is `<path from the repository root>::<test "
+                f"fn>`, not `{row['witness']}`"
+            )
+            continue
+        if not path.is_file():
+            failures.append(f"{where}: the witness file {path_text} does not exist")
+            continue
+        text = sources.setdefault(path_text, path.read_text())
+        declared = declared_test(text.splitlines(), fn)
+        if declared is None:
+            failures.append(f"{where}: {path_text} declares no fn `{fn}`")
+        elif not declared:
+            failures.append(
+                f"{where}: `{fn}` in {path_text} is not a test, so nothing runs it "
+                f"as the witness"
+            )
+        if not names_the_key(text, row["key"]):
+            failures.append(
+                f"{where}: {path_text} names neither the key nor its leaf, so it "
+                f"is not about this key"
+            )
+        if verdict in UPSTREAM_VERDICTS and row["upstream"] in UPSTREAM_TOKENS:
+            if not any(t in text for t in UPSTREAM_TOKENS[row["upstream"]]):
+                failures.append(
+                    f"{where}: {path_text} never reaches {row['upstream']}, so it "
+                    f"cannot be the upstream side of a `{verdict}` row"
+                )
+
+    unwitnessed_wire = [
+        k
+        for k in wire_keys
+        if k in keys and next(r for r in rows if r["key"] == k)["verdict"]
+        not in WITNESSED_VERDICTS
+    ]
+    if unwitnessed_wire:
+        failures.append(
+            f"{', '.join(unwitnessed_wire)} is in CONFIG_KEYS_PROVEN_ON_THE_WIRE and "
+            f"its row in {rel(EFFECT_TABLE)} names no witness; a wire leg reads its "
+            f"effect, so the row names that leg at least"
+        )
+
+    unproven = [
+        row["key"]
+        for row in rows
+        if row["verdict"] not in (PROVEN_VERDICT, EXTENSION_VERDICT)
+    ]
+    if len(unproven) > UNPROVEN_BUDGET:
+        failures.append(
+            f"{len(unproven)} honoured key(s) have no differential witness, above "
+            f"the budget of {UNPROVEN_BUDGET}: a key was honoured or downgraded "
+            f"without an upstream run adjudicating its effect. Witness it; do not "
+            f"raise the budget"
+        )
+    elif len(unproven) < UNPROVEN_BUDGET:
+        failures.append(
+            f"{len(unproven)} honoured key(s) have no differential witness, below "
+            f"the budget of {UNPROVEN_BUDGET}: lower UNPROVEN_BUDGET to "
+            f"{len(unproven)} in this commit, so the number keeps counting what it "
+            f"says"
+        )
+    return failures, by_verdict
 
 
 def drop_guards(src: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
@@ -801,7 +1083,22 @@ def main() -> int:
                 f"everything reports every lane clean."
             )
 
+    # ── the FIFTH site: the EFFECT WITNESS of every honoured key ──
+    #
+    # The population is the honoured surface the census counts plus the wz
+    # extensions the reader honours, so a key that becomes honoured owes a row
+    # the day it does.
+    surface = deepenable_audit.honoured_surface()
+    extensions = deepenable_audit.rust_const("WZ_EXTENSION_HONOURED_KEYS")
+    effect_failures, by_verdict = effect_witness_site(surface, extensions, wire_keys)
+    failures.extend(effect_failures)
+
     if args.verbose:
+        for verdict in VERDICTS:
+            if verdict in (PROVEN_VERDICT, EXTENSION_VERDICT):
+                continue
+            for key in by_verdict[verdict]:
+                print(f"  unproven {key} — {verdict}")
         for f, ln, name, _ig, used in ignored:
             print(f"  guard {f}:{ln} {name} <- {','.join(used)}")
         for f, ln, name, _ig, used in reachable:
@@ -858,6 +1155,18 @@ def main() -> int:
             f"the manifest's own closure; control drops "
             f"{len(control_dropped)} key(s) at no features"
         )
+
+    unproven_count = sum(
+        len(keys)
+        for verdict, keys in by_verdict.items()
+        if verdict not in (PROVEN_VERDICT, EXTENSION_VERDICT)
+    )
+    print(
+        f"  effect witnesses: {len(surface) + len(extensions)} honoured key(s) in "
+        f"{rel(EFFECT_TABLE)} -- "
+        + ", ".join(f"{v}={len(by_verdict[v])}" for v in VERDICTS)
+        + f"; unproven {unproven_count} against a budget of {UNPROVEN_BUDGET}"
+    )
 
     if failures:
         print("config-key-fixture FAIL:", file=sys.stderr)
