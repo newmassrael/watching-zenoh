@@ -335,15 +335,6 @@ fn demo_main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // A build that compiles none of the run-modes below still READS and CHECKS
-    // the value — a malformed flag is refused whatever the build — and then has
-    // nowhere to hand it.
-    #[cfg(not(any(
-        feature = "routing-peer",
-        feature = "router-hat-router",
-        feature = "adminspace-config-hotreload"
-    )))]
-    let _ = metadata;
 
     // R2112 (open-debt items 102 + 210) — `--timestamping <true|false>`, read
     // ONCE beside the tuning above and for the same reason: it is a NODE-scoped
@@ -1488,6 +1479,24 @@ fn demo_main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // §5.23 `adminspace-core` — the admin space this single-session node hosts on
+    // its own session (`--config-queryable`), read and refused BEFORE a scout
+    // goes out or a link opens: a run that cannot host it says so by name rather
+    // than coming up without the keys the operator asked it to answer.
+    let single_session_flag = if listen_opt.is_some() {
+        "--listen"
+    } else if scout_requested {
+        "--scout"
+    } else {
+        "--connect"
+    };
+    let admin_host = match crate::args::session_admin_spec(rest, single_session_flag, metadata) {
+        Ok(spec) => spec,
+        Err(message) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+    };
 
     // env_logger reads RUST_LOG (defaults to off). The integration
     // test fixture (R121c) sets RUST_LOG=info to surface subscriber-
@@ -2162,12 +2171,15 @@ fn demo_main() -> ExitCode {
         // first fixture run die here with "at least one of ..." rather than at
         // the assertion it was written for.
         && querier_matching_log_opt.is_none()
+        // An admin space is work of its own: a client that only answers its
+        // `@/<zid>/client/**` keys is the node another client asks.
+        && admin_host.is_none()
     {
         eprintln!(
             "wz-ap-demo: at least one of --key / --publish / --delete / --queryable / --query / \
              --declare-token / --liveliness-subscribe / --liveliness-get / \
              --advanced-subscribe / --advanced-publish / --group-join / \
-             --querier-matching-log / --on-remote-* must be supplied",
+             --querier-matching-log / --config-queryable / --on-remote-* must be supplied",
         );
         eprintln!();
         print_usage();
@@ -2770,6 +2782,7 @@ fn demo_main() -> ExitCode {
             connect_timeout,
             #[cfg(feature = "scouting-responder")]
             scout_listen_requested.then_some(scout_socket),
+            admin_host,
         )
         .await
     });

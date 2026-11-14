@@ -3024,6 +3024,10 @@ pub(crate) async fn run_demo(
     // `--scout-listen` on the `--connect` client: the socket the
     // client's Scout responder joins. `None` is the run without one.
     #[cfg(feature = "scouting-responder")] scout_listen: Option<crate::args::ScoutSocketArgs>,
+    // `--config-queryable` on a single-session run: the admin space this
+    // session hosts. `main` refuses it in a build that compiles no host, so a
+    // `Some` reaches here only where one exists.
+    admin_host: Option<crate::args::SessionAdminSpec>,
 ) -> io::Result<()> {
     let QueryRoleSpec {
         queryable: queryable_spec,
@@ -3453,6 +3457,15 @@ pub(crate) async fn run_demo(
         matching_poll_on,
         matching_listener_on,
     );
+
+    // §5.23 `adminspace-core` — the admin space, declared before the drive loop
+    // serves a frame for the reason the handles above are: a GET routed here
+    // the moment the router learns the queryable must find it registered. Held
+    // to the end of this scope with the handles.
+    #[cfg(feature = "adminspace-core")]
+    let _admin_space = admin_host.and_then(|spec| host_session_adminspace(&session, spec));
+    #[cfg(not(feature = "adminspace-core"))]
+    let _ = admin_host;
 
     // R311ot / R311oy — declare the outbound liveliness TOKEN SYNCHRONOUSLY in
     // this pre-drive registration phase, BEFORE `drive_session_until_terminal`
@@ -8231,7 +8244,8 @@ fn admin_config_json_of(
 #[cfg(any(
     feature = "routing-peer",
     feature = "adminspace-router-linkstate",
-    feature = "adminspace-config-hotreload"
+    feature = "adminspace-config-hotreload",
+    feature = "adminspace-core"
 ))]
 fn with_metadata_flag(
     cfg: wz::runtime_tokio::config::WzConfig,
@@ -8242,6 +8256,55 @@ fn with_metadata_flag(
             .with_metadata(value)
             .expect("--metadata was refused by args::metadata_flag if upstream cannot read it"),
         None => cfg,
+    }
+}
+
+/// §5.23 `adminspace-core` — host a single-session node's admin space on its
+/// own session: the `@/<zid>/<whatami>/**` queryable and the `config/**`
+/// subscriber upstream's `AdminSpace::start` declares in every mode, both
+/// routed, so another node reaches them through the router this session holds.
+///
+/// The library's pair, not a handler of this binary's: the key, the answerer
+/// and the role in the key (the session's own, `client` for a dialled or
+/// scouted run) are the ones every other wz admin host uses. The config is
+/// seeded from the session's handshake params with the operator's permits and
+/// `metadata`, and is the one the GET reads and a permitted PUT writes.
+///
+/// The locator list is empty: a client binds nothing, and upstream's client
+/// lists none (`zenoh/src/net/runtime/adminspace.rs` @
+/// `.get_locators_noloopback()`). A refusal is logged and leaves the session
+/// running without the admin space, as a refused `--queryable` does.
+#[cfg(feature = "adminspace-core")]
+fn host_session_adminspace(
+    session: &TokioSession,
+    spec: crate::args::SessionAdminSpec,
+) -> Option<wz::runtime_tokio::session::AdminSpace> {
+    use wz::runtime_tokio::adminspace::{admin_queryable_key, AdminSpacePermissions};
+    use wz::runtime_tokio::config::WzConfig;
+    use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
+
+    let params = &session.actions().params;
+    let key = admin_queryable_key(&zid_to_zenoh_hex(&params.zid), params.whatami.to_str());
+    let config = with_metadata_flag(
+        WzConfig::from_init_params(params).with_admin_permissions(AdminSpacePermissions {
+            read: spec.read,
+            write: spec.write,
+        }),
+        spec.metadata.as_ref(),
+    );
+    match session.declare_adminspace_with_config(env!("CARGO_PKG_VERSION"), Vec::new(), config) {
+        Ok(admin) => {
+            log::info!(
+                "wz-ap-demo: adminspace hosted at {key} (read permit = {}, write permit = {})",
+                spec.read,
+                spec.write
+            );
+            Some(admin)
+        }
+        Err(e) => {
+            log::warn!("wz-ap-demo: adminspace declare at {key} rejected: {e}");
+            None
+        }
     }
 }
 

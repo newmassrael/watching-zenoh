@@ -228,6 +228,7 @@ preset-ap-full = [
     "switchboard",
     "advanced",
     "group",
+    "adminspace-core",
     "adminspace-read",
     "adminspace-write",
     "adminspace-metrics",
@@ -645,7 +646,9 @@ routing-peer = [
     # R311y45 (§5.23 Phase 2b) — a routing peer can host its OWN adminspace
     # (the `--config-queryable` opt-in registers a forwarder-local admin
     # queryable reading the node's live shared WzConfig); pull the admin SSOT.
-    "wz/adminspace-core",
+    # The demo key rather than the facade's, so a binary whose peer hosts an
+    # admin space lets its single-session client host one too.
+    "adminspace-core",
     # R311y48 (§5.23 Phase 3b) — the LIVE leg of the config write: a
     # `--config-writable` peer reconfigures its forwarder from a remote PUT, so
     # the typed WzConfig mutation must actually re-drive the interceptor chain
@@ -743,6 +746,14 @@ session-extqos = ["transport-qos", "wz/session-extqos"]
 # inert. The old second arm applied every write unpermitted, which upstream never
 # does. Layer E6 builds the binary with this feature.
 adminspace-write = ["wz/adminspace-write"]
+# §5.23 adminspace-core — the admin space of a single-session node: `--connect`
+# (or `--scout`) with `--config-queryable` declares the `@/<zid>/<whatami>/**`
+# queryable and the `config/**` subscriber on its own session, routed, so another
+# node reaches it through the router the way it reaches a zenohd client's
+# (`zenoh/src/net/runtime/adminspace.rs` @ `pub async fn start(runtime: &Runtime)`
+# declares both in every mode). The role in the keys is the session's. A build
+# without the key refuses `--config-queryable` on those run-modes by name.
+adminspace-core = ["wz/adminspace-core"]
 # The session lifecycle queries -- a GET that closes the session with a peer and is
 # answered with a verdict, and a GET that lists the verbs the node has. Forwards the
 # facade's `session-close-ingress` (the seam; `wz-session-core::lifecycle_query` is

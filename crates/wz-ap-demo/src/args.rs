@@ -655,6 +655,74 @@ pub(crate) fn metadata_flag(
     Ok(Some(value))
 }
 
+/// §5.23 `adminspace-core` — the admin space a single-session run hosts on its
+/// own session (`--config-queryable`): the read and write permits it starts
+/// with and the `metadata` its `local_data` serves. The role in its keys is not
+/// here: it is the session's, read off the handshake params by the library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionAdminSpec {
+    /// `permissions.read`; `--no-admin-read` clears it.
+    pub(crate) read: bool,
+    /// `permissions.write`; `--config-write-permit` sets it.
+    pub(crate) write: bool,
+    /// `--metadata`, already refused by [`metadata_flag`] if upstream cannot
+    /// read it.
+    pub(crate) metadata: Option<wz::runtime_tokio::json5::Json5Value>,
+}
+
+/// What keeps the single-session run-mode `flag` from hosting an admin space,
+/// or `None` when it hosts one (and for every other run-mode, whose hosts are
+/// their own arms').
+///
+/// The one-shot acceptor hosts none: its listener is bound and held inside the
+/// open helper, so its `local_data` could not list the locator it accepts on,
+/// and a document listing no locator for a node that listens would be wrong
+/// rather than incomplete. A client binds nothing, so its empty list is
+/// upstream's answer too.
+///
+/// One answer for the expansion, which withholds the admin keys from such a
+/// run, and for `main`, which refuses the typed flag: a stock config the
+/// expansion hands over must never be one this binary exits(2) on.
+pub(crate) fn single_session_admin_refusal(flag: &str) -> Option<&'static str> {
+    match flag {
+        "--listen" => Some("an adminspace host (the one-shot acceptor serves none; --peer does)"),
+        "--connect" | "--scout" if !cfg!(feature = "adminspace-core") => Some(
+            "an adminspace host (this build's single-session run-modes serve none; \
+             the adminspace-core feature compiles one)",
+        ),
+        _ => None,
+    }
+}
+
+/// §5.23 `adminspace-core` — the admin space the single-session run `flag`
+/// hosts, read off `args`: `None` without `--config-queryable`.
+///
+/// Without it the permit flags and `--metadata` are inert, as they are on a
+/// `--peer` that hosts none: a stock config whose block names a permit and not
+/// `enabled` expands to the permit alone, and refusing that would stop a node
+/// on a document upstream starts. `--config-writable` is accepted beside it and
+/// adds nothing: the single-session host declares the config-write subscriber
+/// with the queryable, as upstream's admin space always does, and the permit is
+/// what decides whether a write is applied.
+pub(crate) fn session_admin_spec(
+    args: &[String],
+    flag: &str,
+    metadata: Option<wz::runtime_tokio::json5::Json5Value>,
+) -> Result<Option<SessionAdminSpec>, String> {
+    let typed = |name: &str| args.iter().any(|a| a == name);
+    if !typed("--config-queryable") {
+        return Ok(None);
+    }
+    if let Some(missing) = single_session_admin_refusal(flag) {
+        return Err(format!("--config-queryable on {flag} needs {missing}"));
+    }
+    Ok(Some(SessionAdminSpec {
+        read: !typed("--no-admin-read"),
+        write: typed("--config-write-permit"),
+        metadata,
+    }))
+}
+
 /// R2099 (open-debt item 512) — one spelling of "an endpoint LIST on argv":
 /// comma-separated, each member trimmed, empty members dropped.
 ///
@@ -2174,26 +2242,40 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             .unwrap_or_default();
         exp.pair("plugins", "--plugins", section, blocked);
     }
+    // The run-mode the expanded argv runs, typed or selected by the file, and,
+    // when it is a single-session run that cannot host the admin space a
+    // document enables, the verdict its admin keys get instead of a flag it
+    // would exit(2) on.
+    let run_flag = typed_role
+        .map(|(flag, _)| flag)
+        .or(selected.as_ref().map(|s| s.flag));
+    let admin_withheld = run_flag
+        .and_then(single_session_admin_refusal)
+        .map(KeyEffect::WithheldFromThisRun);
     // §5.23 `adminspace-core` — `metadata`, onto `--metadata <value>`: the whole
     // value as JSON5 text, taken VERBATIM like `--plugins`, so nothing is
     // approximated. Every run-mode that hosts an adminspace takes it; the value
     // is served as `local_data`'s `metadata`.
     if named("metadata") {
         // The per-build sink list says whether ANY run-mode of this binary can
-        // serve the value; this says whether THIS run does. Three run-modes host
-        // an adminspace, and `--router-hat` only in a build with its admin host,
-        // so a one-shot client (the drop-in's shape) or a `--router` run is told
-        // the value was withheld rather than reported applied to a node that has
-        // nowhere to serve it.
-        let run_flag = typed_role
-            .map(|(flag, _)| flag)
-            .or(selected.as_ref().map(|s| s.flag));
+        // serve the value; this says whether THIS run does. `--peer` and
+        // `--storage-host` host an adminspace, `--router-hat` in a build with its
+        // admin host, and a single-session client when this run enables one and
+        // the build compiles its host; any other run is told the value was
+        // withheld rather than reported applied to a node with nowhere to serve it.
+        // The client hosts exactly when `--config-queryable` reaches its argv:
+        // typed, or expanded from an enabled block below.
+        let single_session_host = matches!(run_flag, Some("--connect") | Some("--scout"))
+            && admin_withheld.is_none()
+            && (exp.typed("--config-queryable")
+                || (cfg.adminspace.is_some() && named("adminspace/enabled")));
         // A boolean rather than a `match`: with the router's admin host compiled
         // in, the `cfg!` arm is the constant `true`, and clippy then reads the
         // three arms as a `matches!` (R2859 paid that red in the all-features
         // lane).
         let hosts_an_adminspace = matches!(run_flag, Some("--peer") | Some("--storage-host"))
-            || (run_flag == Some("--router-hat") && cfg!(feature = "adminspace-router-linkstate"));
+            || (run_flag == Some("--router-hat") && cfg!(feature = "adminspace-router-linkstate"))
+            || single_session_host;
         let blocked = no_sink("metadata").or_else(|| {
             (!hosts_an_adminspace).then_some(KeyEffect::WithheldFromThisRun(
                 "an adminspace host (this run-mode serves none)",
@@ -2216,8 +2298,19 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // the write (`--config-write-permit`), so the single upstream key expands
     // to both — either alone yields a node that does not do what the operator's
     // file says, which is why the key's verdict below is the WEAKER of the two.
-    match &cfg.adminspace {
-        Some(admin) => {
+    match (&cfg.adminspace, admin_withheld) {
+        (Some(_), Some(withheld)) => {
+            for key in [
+                "adminspace/enabled",
+                "adminspace/permissions/read",
+                "adminspace/permissions/write",
+            ] {
+                if named(key) {
+                    exp.record(key, withheld);
+                }
+            }
+        }
+        (Some(admin), None) => {
             if named("adminspace/enabled") {
                 exp.presence("adminspace/enabled", "--config-queryable", true, None);
             }
@@ -2244,7 +2337,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                 exp.record("adminspace/permissions/write", effect);
             }
         }
-        None => {
+        (None, _) => {
             // `enabled: false` is read as no admin space at all, and no admin
             // space is what this binary does with none of the four flags — so
             // the file's sentence IS this node's behaviour.
@@ -3884,15 +3977,17 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         out.push("plugins");
     }
     // §5.23 `adminspace-core` — `metadata`'s sink is an adminspace host's
-    // `local_data`, and this binary has three: `--peer` (`routing-peer`),
+    // `local_data`, and this binary has four: `--peer` (`routing-peer`),
     // `--router-hat` (its admin host is `adminspace-router-linkstate`, not the
-    // bare `router-hat-router`) and `--storage-host`
-    // (`adminspace-config-hotreload`). A build with none of them has nowhere to
-    // serve the value from.
+    // bare `router-hat-router`), `--storage-host`
+    // (`adminspace-config-hotreload`) and the single-session client
+    // (`adminspace-core`). A build with none of them has nowhere to serve the
+    // value from.
     if !cfg!(any(
         feature = "routing-peer",
         feature = "adminspace-router-linkstate",
-        feature = "adminspace-config-hotreload"
+        feature = "adminspace-config-hotreload",
+        feature = "adminspace-core"
     )) {
         out.push("metadata");
     }
@@ -4179,6 +4274,89 @@ mod stock_config_tests {
             !ex.added.iter().any(|a| a == "--connect"),
             "no dial reaches the host: {:?}",
             ex.added
+        );
+    }
+
+    /// §5.23 `adminspace-core` — a client document that enables the admin space
+    /// hands the single-session client `--config-queryable`, its permits and its
+    /// `metadata` in a build that hosts one, and the argv it hands over is one
+    /// `main` accepts. In a build that hosts none every admin key is withheld by
+    /// name and no admin flag reaches the argv, so a valid stock config never
+    /// becomes a node that exits(2).
+    #[test]
+    fn a_client_document_enables_its_admin_space_where_the_build_hosts_one() {
+        let doc = r#"{ mode: "client", connect: { endpoints: ["tcp/127.0.0.1:7447"] },
+                       metadata: { name: "client-a" },
+                       adminspace: { enabled: true, permissions: { read: true, write: true } } }"#;
+        let ex = expand(&["--config", "z.json5"], doc).expect("a valid file");
+        let carried = |flag: &str| ex.added.iter().any(|a| a == flag);
+        assert!(carried("--connect"), "the client run: {:?}", ex.added);
+        let admin_flags = [
+            "--config-queryable",
+            "--config-writable",
+            "--config-write-permit",
+            "--metadata",
+        ];
+        if cfg!(feature = "adminspace-core") {
+            for flag in admin_flags {
+                assert!(
+                    carried(flag),
+                    "{flag} must reach the client: {:?}",
+                    ex.added
+                );
+            }
+            for key in [
+                "adminspace/enabled",
+                "adminspace/permissions/write",
+                "metadata",
+            ] {
+                assert!(
+                    ex.effect(key).is_some_and(|e| e.reached_the_node()),
+                    "{key}: {:?}",
+                    ex.effects
+                );
+            }
+            let spec = session_admin_spec(&ex.argv, "--connect", None)
+                .expect("main accepts what the expansion hands over")
+                .expect("and hosts the admin space");
+            assert!(spec.read && spec.write, "{spec:?}");
+        } else {
+            for flag in admin_flags {
+                assert!(!carried(flag), "{flag} reached a client that hosts none");
+            }
+            let withheld = KeyEffect::WithheldFromThisRun(
+                single_session_admin_refusal("--connect").expect("this build hosts none"),
+            );
+            for key in [
+                "adminspace/enabled",
+                "adminspace/permissions/read",
+                "adminspace/permissions/write",
+            ] {
+                assert_eq!(ex.effect(key), Some(withheld), "{key}: {:?}", ex.effects);
+            }
+        }
+    }
+
+    /// The one-shot acceptor hosts no admin space in any build, so a document
+    /// enabling one beside a typed `--listen` has its admin keys withheld in the
+    /// acceptor's own words rather than handed a flag `main` refuses.
+    #[test]
+    fn an_acceptor_run_has_the_admin_keys_withheld() {
+        let doc = r#"{ mode: "peer", adminspace: { enabled: true } }"#;
+        let ex = expand(&["--config", "z.json5", "--listen", "tcp/127.0.0.1:0"], doc)
+            .expect("a valid file");
+        assert!(
+            !ex.added.iter().any(|a| a == "--config-queryable"),
+            "{:?}",
+            ex.added
+        );
+        assert_eq!(
+            ex.effect("adminspace/enabled"),
+            Some(KeyEffect::WithheldFromThisRun(
+                single_session_admin_refusal("--listen").expect("the acceptor hosts none")
+            )),
+            "{:?}",
+            ex.effects
         );
     }
 
@@ -10357,6 +10535,98 @@ mod accept_bound_flag_tests {
                 AcceptBounds::default(),
                 "{bad:?}"
             );
+        }
+    }
+}
+
+/// §5.23 `adminspace-core` — what a single-session run makes of
+/// `--config-queryable` and the flags that qualify it.
+#[cfg(test)]
+mod session_admin_tests {
+    use super::{session_admin_spec, single_session_admin_refusal, SessionAdminSpec};
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Without `--config-queryable` nothing is hosted, and the permits are
+    /// inert as they are on a `--peer` that hosts nothing, in every build.
+    #[test]
+    fn without_config_queryable_nothing_is_hosted() {
+        for args in [
+            argv(&["--connect", "tcp/r:7447"]),
+            argv(&[
+                "--connect",
+                "tcp/r:7447",
+                "--no-admin-read",
+                "--config-write-permit",
+            ]),
+        ] {
+            assert_eq!(session_admin_spec(&args, "--connect", None), Ok(None));
+        }
+    }
+
+    /// A client (dialled or scouted) hosts its admin space where the build
+    /// compiles the host, with the permits the flags state, and is refused by
+    /// the feature's name where it does not.
+    #[test]
+    fn a_client_hosts_its_admin_space_where_the_build_compiles_one() {
+        let metadata = wz::runtime_tokio::json5::parse("{ name: 'client-a' }").expect("JSON5");
+        for flag in ["--connect", "--scout"] {
+            let args = argv(&[
+                flag,
+                "--config-queryable",
+                "--no-admin-read",
+                "--config-write-permit",
+            ]);
+            let got = session_admin_spec(&args, flag, Some(metadata.clone()));
+            if cfg!(feature = "adminspace-core") {
+                assert_eq!(
+                    got,
+                    Ok(Some(SessionAdminSpec {
+                        read: false,
+                        write: true,
+                        metadata: Some(metadata.clone()),
+                    })),
+                    "{flag}"
+                );
+            } else {
+                let refused = got.expect_err("no host in this build");
+                assert!(refused.contains("adminspace-core"), "{flag}: {refused}");
+            }
+        }
+    }
+
+    /// The defaults are upstream's `PermissionsConf`: read granted, write not.
+    #[cfg(feature = "adminspace-core")]
+    #[test]
+    fn the_permits_default_to_upstreams() {
+        let args = argv(&["--connect", "tcp/r:7447", "--config-queryable"]);
+        assert_eq!(
+            session_admin_spec(&args, "--connect", None),
+            Ok(Some(SessionAdminSpec {
+                read: true,
+                write: false,
+                metadata: None,
+            }))
+        );
+    }
+
+    /// The one-shot acceptor is refused in every build, and the refusal names
+    /// the run-mode that does host a peer's admin space.
+    #[test]
+    fn the_one_shot_acceptor_hosts_none() {
+        let args = argv(&["--listen", "tcp/127.0.0.1:0", "--config-queryable"]);
+        let refused = session_admin_spec(&args, "--listen", None).expect_err("refused");
+        assert!(refused.contains("--peer"), "{refused}");
+    }
+
+    /// The mesh run-modes host their admin space in their own arms, so this
+    /// refusal has nothing to say about them.
+    #[test]
+    fn the_mesh_run_modes_are_not_refused_here() {
+        for flag in ["--peer", "--router-hat", "--storage-host"] {
+            assert_eq!(single_session_admin_refusal(flag), None, "{flag}");
         }
     }
 }
