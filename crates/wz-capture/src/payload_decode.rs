@@ -371,8 +371,13 @@ impl<'a> Declarations<'a> {
     /// recognise the payload": every other payload on a key a segment rule
     /// covers is an ordinary message. `key` is the resolved key or the id and
     /// suffix of an unresolved reference (see [`crate::payload::formats::SegmentKey`]
-    /// for which rules cover that), and `from_low` the direction the sample
-    /// travelled, which with the list names the sender.
+    /// for which rules cover that), `carrier` what carried the sample (which
+    /// with the key and the sender names its stream), and `from_low` the
+    /// direction the sample travelled, which with the list names the sender.
+    ///
+    /// The rule is matched against `key` as the wire wrote it, whatever carried
+    /// the sample: a reply is covered by a rule whose pattern covers the
+    /// reply's own key, and no part of that key is stripped or read.
     ///
     /// Joined in the order the caller hands pieces in, exactly as
     /// [`Self::judge_e2e`] judges frames: a row behind the list's frontier is
@@ -380,6 +385,7 @@ impl<'a> Declarations<'a> {
     pub fn judge_segment(
         &self,
         key: crate::segment_chain::KeyRef,
+        carrier: crate::segment_chain::Carrier,
         payload: &[u8],
         from_low: Option<bool>,
     ) -> Option<SegmentJudged<'a>> {
@@ -410,10 +416,14 @@ impl<'a> Declarations<'a> {
         let verdict = match kept {
             Some(verdict) => verdict,
             None => {
-                let verdict =
-                    ledger
-                        .segments_mut()
-                        .receive(matched.profile, &piece, list, from_low, key);
+                let verdict = ledger.segments_mut().receive(
+                    matched.profile,
+                    &piece,
+                    list,
+                    from_low,
+                    key,
+                    carrier,
+                );
                 if let Some((produced, ordinal)) = at {
                     ledger
                         .segments_mut()

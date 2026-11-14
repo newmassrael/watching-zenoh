@@ -9,8 +9,9 @@
 //!
 //! * a STREAM is the sender (the list the sample travelled and its direction
 //!   there), the key it was published on (the resolved key expression, or the
-//!   id and suffix of a reference this capture cannot resolve) and the values
-//!   of the profile's `stream` fields;
+//!   id and suffix of a reference this capture cannot resolve), what carried
+//!   it ([`Carrier`]: a published sample, or the replies to one query) and the
+//!   values of the profile's `stream` fields;
 //! * a TRANSFER is one message of a stream, numbered by the profile's
 //!   `transfer` field. A piece with a new number ends the stream's previous
 //!   transfer, whether or not it was joined, and starts the next.
@@ -82,6 +83,28 @@ pub enum KeyRef {
     },
 }
 
+/// What carried a piece: a sample published on its key, or a reply to one
+/// query.
+///
+/// Part of the stream and not a detail of it, because the two are not one
+/// sequence. A responder that answers a query with pieces numbers those
+/// transfers apart from the ones it publishes live, so a reply's transfer can
+/// carry the number of a live one on the same key without being the same
+/// message, and the replies to two queries are two streams for the same
+/// reason. Joined into one, a reply piece would end the live transfer it
+/// interleaves with, or be joined into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Carrier {
+    /// A `Push` carrying a `put`: a sample published on its key.
+    Push,
+    /// A `Reply` carrying a `put`, inside a `Response`.
+    Reply {
+        /// The request id the `Response` echoes, which names the query it
+        /// answers on the direction it travelled.
+        request: u64,
+    },
+}
+
 /// Which stream of transfers a piece belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StreamKey {
@@ -91,6 +114,9 @@ pub struct StreamKey {
     pub from_low: Option<bool>,
     /// The key it was published on.
     pub key: KeyRef,
+    /// What carried it: the live stream of the key, or the replies to one
+    /// query.
+    pub carrier: Carrier,
     /// The values of the profile's `stream` fields, in the profile's order.
     pub stream: Vec<u64>,
 }
@@ -389,8 +415,9 @@ impl SegmentLedger {
         }
     }
 
-    /// Join one payload `profile` recognised as a piece, published on `key`
-    /// and travelling `list` in the direction `from_low` says.
+    /// Join one payload `profile` recognised as a piece, published on `key`,
+    /// carried by `carrier` and travelling `list` in the direction `from_low`
+    /// says.
     pub fn receive(
         &mut self,
         profile: &SegmentProfile,
@@ -398,6 +425,7 @@ impl SegmentLedger {
         list: usize,
         from_low: Option<bool>,
         key: KeyRef,
+        carrier: Carrier,
     ) -> Verdict {
         self.clock += 1;
         let mut verdict = Verdict {
@@ -428,6 +456,7 @@ impl SegmentLedger {
             list,
             from_low,
             key,
+            carrier,
             stream: profile.stream().iter().map(|&i| piece.values[i]).collect(),
         };
 

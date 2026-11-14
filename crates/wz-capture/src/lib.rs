@@ -160,6 +160,9 @@ pub mod segment_profile;
 mod segment_profile_tests;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod segment_row_tests;
+// Pieces carried in query replies, beside the live ones, through every door.
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod reply_segment_tests;
 pub mod segment_sender;
 #[cfg(test)]
 mod segment_sender_tests;

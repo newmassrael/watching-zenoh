@@ -174,6 +174,9 @@ struct Held {
     missed: Option<(u64, Option<String>)>,
     /// Whether it travelled from the low end of its list.
     from_low: bool,
+    /// What carried it, when a piece may ride in it: a published sample or a
+    /// reply to one query, each its own stream of pieces.
+    carrier: Option<crate::segment_chain::Carrier>,
     declared: HeldEncoding,
     /// The payload's bytes; emptied once joining has taken it as a piece, whose
     /// bytes are in the message it joins and are never read alone.
@@ -220,8 +223,10 @@ impl ValuesFold {
     /// ledger, and every other payload is an ordinary message.
     ///
     /// The order taken is capture order, and the ledger keys a stream by its
-    /// list, so the pieces of one stream meet in the order the field document
-    /// meets them and join to the same messages.
+    /// list and its carrier, so the pieces of one stream meet in the order the
+    /// field document meets them and join to the same messages. A payload no
+    /// piece may ride in (a request's put, an error's) is joined into nothing,
+    /// as the field document joins nothing out of it.
     fn join(&mut self, map: &FormatMap<'_>) {
         let Self { held, segments, .. } = self;
         for held in held.iter_mut().filter(|h| !h.fed) {
@@ -229,6 +234,9 @@ impl ValuesFold {
             if held.elsewhere || !map.has_segment_rules() {
                 continue;
             }
+            let Some(carrier) = held.carrier else {
+                continue;
+            };
             let covering = match &held.keyexpr {
                 Some(keyexpr) => crate::payload::formats::SegmentKey::Resolved(keyexpr),
                 None => crate::payload::formats::SegmentKey::Unresolved,
@@ -247,8 +255,14 @@ impl ValuesFold {
                 },
                 (None, None) => continue,
             };
-            let verdict =
-                segments.receive(matched.profile, &piece, held.list, Some(held.from_low), key);
+            let verdict = segments.receive(
+                matched.profile,
+                &piece,
+                held.list,
+                Some(held.from_low),
+                key,
+                carrier,
+            );
             held.piece = Some(HeldPiece {
                 profile: String::from(matched.profile.name()),
                 transfer: verdict.values[matched.profile.transfer()],
@@ -292,6 +306,7 @@ impl crate::ordered_fold::OrderedFold for ValuesFold {
                     .missed
                     .map(|(id, suffix)| (id, suffix.map(String::from))),
                 from_low: payload.from_low,
+                carrier: payload.carrier,
                 declared: HeldEncoding::of(payload.declared),
                 bytes: payload.bytes.to_vec(),
                 elsewhere: payload.elsewhere,

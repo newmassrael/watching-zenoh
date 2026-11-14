@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::segment_chain::{Ended, KeyRef, Place, SegmentLedger, Unjoined, Verdict};
+use crate::segment_chain::{Carrier, Ended, KeyRef, Place, SegmentLedger, Unjoined, Verdict};
 use crate::segment_profile::{Misplaced, SegmentProfile};
 use crate::segment_profile_tests::{demo_piece, demo_profile};
 
@@ -36,6 +36,20 @@ fn feed_on(
     number: u8,
     range: core::ops::Range<usize>,
 ) -> Verdict {
+    feed_carried(ledger, profile, Carrier::Push, key, (origin, number), range)
+}
+
+/// [`feed_on`], carried by `carrier`; `transfer` is the origin and the
+/// transfer number.
+fn feed_carried(
+    ledger: &mut SegmentLedger,
+    profile: &SegmentProfile,
+    carrier: Carrier,
+    key: KeyRef,
+    transfer: (u16, u8),
+    range: core::ops::Range<usize>,
+) -> Verdict {
+    let (origin, number) = transfer;
     let bytes = demo_piece(
         origin,
         number,
@@ -44,7 +58,7 @@ fn feed_on(
         &MESSAGE[range],
     );
     let piece = profile.recognise(&bytes).expect("a piece");
-    ledger.receive(profile, &piece, 0, Some(true), key)
+    ledger.receive(profile, &piece, 0, Some(true), key, carrier)
 }
 
 #[test]
@@ -104,7 +118,7 @@ fn an_overlapping_piece_says_so_and_the_first_copy_wins() {
     altered[5] = b'y';
     let bytes = demo_piece(1, 1, 12, 4, &altered[4..8]);
     let piece = p.recognise(&bytes).expect("a piece");
-    let v = l.receive(&p, &piece, 0, Some(true), key());
+    let v = l.receive(&p, &piece, 0, Some(true), key(), Carrier::Push);
     assert!(v.overlap && !v.out_of_order, "{v:?}");
     let last = feed(&mut l, &p, 1, 8..12);
     assert_eq!(
@@ -143,7 +157,7 @@ fn a_piece_with_a_wrong_crc_joins_nothing_and_moves_no_state() {
     let mut bytes = demo_piece(1, 1, 12, 4, &MESSAGE[4..8]);
     *bytes.last_mut().expect("a chunk") ^= 0x01;
     let piece = p.recognise(&bytes).expect("still a piece");
-    let v = l.receive(&p, &piece, 0, Some(true), key());
+    let v = l.receive(&p, &piece, 0, Some(true), key(), Carrier::Push);
     assert_eq!((v.unjoined, v.place), (Some(Unjoined::CrcMismatch), None));
     // The transfer still misses 4..8: the damaged copy filled nothing.
     let c = feed(&mut l, &p, 1, 8..12);
@@ -155,12 +169,12 @@ fn a_piece_that_cannot_be_placed_or_disagrees_on_the_total_joins_nothing() {
     let (p, mut l) = (demo_profile(), SegmentLedger::new());
     let bytes = demo_piece(1, 1, 4, 2, b"abc");
     let piece = p.recognise(&bytes).expect("a piece");
-    let v = l.receive(&p, &piece, 0, Some(true), key());
+    let v = l.receive(&p, &piece, 0, Some(true), key(), Carrier::Push);
     assert_eq!(v.unjoined, Some(Unjoined::Misplaced(Misplaced::PastTotal)));
     let _ = feed(&mut l, &p, 1, 0..4);
     let bytes = demo_piece(1, 1, 20, 4, b"abcd");
     let piece = p.recognise(&bytes).expect("a piece");
-    let v = l.receive(&p, &piece, 0, Some(true), key());
+    let v = l.receive(&p, &piece, 0, Some(true), key(), Carrier::Push);
     assert_eq!(v.unjoined, Some(Unjoined::TotalDisagrees));
 }
 
@@ -194,6 +208,58 @@ fn streams_are_kept_apart_by_origin_key_and_suffix() {
     for (k, origin) in [(by_id(Some("/@history")), 1u16), (key(), 2)] {
         let v = feed_on(&mut l, &p, k, origin, 1, 6..12);
         assert_eq!(v.place, Some(Place::Closing));
+    }
+}
+
+/// A responder numbers the transfers of its replies apart from its live ones,
+/// and anew for each query, so the live stream and the replies to two queries
+/// carry the same transfer number at once. Interleaved, each joins its own
+/// message and ends none of the others.
+#[test]
+fn the_live_stream_and_each_querys_replies_are_three_streams() {
+    let (p, mut l) = (demo_profile(), SegmentLedger::new());
+    let carriers = [
+        Carrier::Push,
+        Carrier::Reply { request: 1 },
+        Carrier::Reply { request: 2 },
+    ];
+    for range in [0..4, 4..8] {
+        for carrier in carriers {
+            let v = feed_carried(&mut l, &p, carrier, key(), (1, 1), range.clone());
+            assert_eq!(v.ended, Vec::new(), "{carrier:?} ended another stream");
+            assert!(v.unjoined.is_none() && v.joined.is_none(), "{carrier:?}");
+        }
+    }
+    for carrier in carriers {
+        let v = feed_carried(&mut l, &p, carrier, key(), (1, 1), 8..12);
+        assert_eq!(v.place, Some(Place::Closing), "{carrier:?}");
+        assert_eq!(v.joined.as_deref(), Some(MESSAGE), "{carrier:?}");
+    }
+}
+
+/// A reply piece is placed by the rules a published one is: a first piece not
+/// at the start lists what is missing before it, a new transfer number ends
+/// the unjoined one, and a piece that cannot be placed says why in the same
+/// word.
+#[test]
+fn a_reply_piece_is_judged_by_the_rules_a_published_piece_is() {
+    let p = demo_profile();
+    for carrier in [Carrier::Push, Carrier::Reply { request: 9 }] {
+        let mut l = SegmentLedger::new();
+        let v = feed_carried(&mut l, &p, carrier, key(), (1, 1), 4..8);
+        assert_eq!(v.place, Some(Place::First), "{carrier:?}");
+        assert_eq!(v.missing, [(0, 4)], "{carrier:?}");
+        let w = feed_carried(&mut l, &p, carrier, key(), (1, 2), 0..4);
+        assert_eq!(w.ended.len(), 1, "{carrier:?}");
+        assert_eq!(w.ended[0].received, 4, "{carrier:?}");
+        let bytes = demo_piece(1, 3, 4, 2, b"abc");
+        let piece = p.recognise(&bytes).expect("a piece");
+        let x = l.receive(&p, &piece, 0, Some(true), key(), carrier);
+        assert_eq!(
+            x.unjoined,
+            Some(Unjoined::Misplaced(Misplaced::PastTotal)),
+            "{carrier:?}"
+        );
     }
 }
 

@@ -3378,7 +3378,12 @@ fn judge_record<'d>(
             // A reference that resolved is read as itself, above.
             (None, Ok(_)) => return none,
         };
-        if let Some(segment) = declarations.judge_segment(key, payload, source.from_low) {
+        if let Some(segment) = declarations.judge_segment(
+            key,
+            crate::segment_chain::Carrier::Push,
+            payload,
+            source.from_low,
+        ) {
             let joined_e2e = match (&segment.verdict.joined, read_as) {
                 (Some(joined), Some(keyexpr)) => declarations.judge_e2e(
                     keyexpr,

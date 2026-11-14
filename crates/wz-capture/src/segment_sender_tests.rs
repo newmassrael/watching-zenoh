@@ -10,7 +10,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::e2e_profile::DocError;
-use crate::segment_chain::{KeyRef, SegmentLedger};
+use crate::segment_chain::{Carrier, KeyRef, SegmentLedger};
 use crate::segment_profile_tests::{demo_piece, demo_profile, DEMO};
 use crate::segment_sender::{Refusal, Rollover, SegmentSender, Split, SplitError};
 
@@ -83,6 +83,7 @@ fn the_reader_joins_what_the_sender_wrote() {
                 0,
                 Some(true),
                 KeyRef::Resolved("demo/large".into()),
+                Carrier::Push,
             );
             assert_eq!(v.unjoined, None, "chunk {chunk} piece {i}");
             if i + 1 < got.len() {

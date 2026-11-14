@@ -47,7 +47,7 @@ use crate::e2e_profile::Profile;
 use crate::e2e_slots::{Outcome, Reception, SlotLedger, UNREADABLE_PAYLOAD};
 use crate::e2e_words::E2eWords;
 use crate::payload::formats::{first_covering, first_segment_covering, SegmentKey};
-use crate::segment_chain::{KeyRef, SegmentLedger};
+use crate::segment_chain::{Carrier, KeyRef, SegmentLedger};
 use crate::segment_profile::SegmentProfile;
 
 /// What judging a sample end to end needs of a declaration text, owned: see
@@ -168,9 +168,15 @@ impl E2eJudging {
         };
         let profile = self.rules.segment_for(covering)?;
         let piece = profile.recognise(sample.payload)?;
-        let verdict = self
-            .pieces
-            .receive(profile, &piece, sample.list, Some(sample.from_low), key);
+        // Only published samples reach this plane (`is_published_sample`).
+        let verdict = self.pieces.receive(
+            profile,
+            &piece,
+            sample.list,
+            Some(sample.from_low),
+            key,
+            Carrier::Push,
+        );
         Some(match (verdict.joined, sample.keyexpr) {
             // The message it completed, judged at this piece's instant.
             (Some(joined), Some(keyexpr)) => Some(self.frame(keyexpr, Some(&*joined), sample)),

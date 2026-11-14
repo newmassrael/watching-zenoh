@@ -1545,6 +1545,7 @@ impl PayloadCensus {
                 bytes,
                 elsewhere: shm,
                 observed_at_ns: frame.observed_at_ns,
+                carrier: sample_carrier(message),
             });
             return;
         }
@@ -1651,6 +1652,48 @@ pub(crate) struct SelectedPayload<'a> {
     pub(crate) elsewhere: bool,
     /// The capture's instant for the row, where it has one.
     pub(crate) observed_at_ns: Option<u64>,
+    /// What carried it when a piece of a split message may ride in it (a
+    /// `Push`'s put, or a reply's put inside a `Response`), and `None` for
+    /// every other payload, which no stream of pieces is joined from.
+    pub(crate) carrier: Option<crate::segment_chain::Carrier>,
+}
+
+/// What carried `message`'s payload, when it is one a piece of a split message
+/// may ride in: a `Push` carrying a `put`, or a `Response` whose `Reply`
+/// carries a `put`, named by the request id it echoes. `None` for every other
+/// record: a request's put and an error's payload are not samples of the key,
+/// and the field document joins no piece out of them either.
+#[cfg(feature = "network-codecs")]
+pub(crate) fn sample_carrier(
+    message: &wz_session_core::network_message::NetworkMessage,
+) -> Option<crate::segment_chain::Carrier> {
+    use crate::segment_chain::Carrier;
+    use wz_codecs::push::PushOwnedVariant;
+    use wz_codecs::reply::ReplyOwnedVariant;
+    use wz_codecs::response::ResponseOwnedVariant;
+    use wz_session_core::network_message::NetworkMessage;
+
+    match message {
+        NetworkMessage::Push(p) => match &p.body {
+            PushOwnedVariant::CodecZenohMsgPut(_) | PushOwnedVariant::Default { .. } => {
+                Some(Carrier::Push)
+            }
+            PushOwnedVariant::CodecZenohMsgDel(_) => None,
+        },
+        NetworkMessage::Response(r) => match &r.body {
+            ResponseOwnedVariant::CodecZenohReply(reply)
+            | ResponseOwnedVariant::Default { body: reply, .. } => match &reply.body {
+                ReplyOwnedVariant::CodecZenohMsgPut(_) | ReplyOwnedVariant::Default { .. } => {
+                    Some(Carrier::Reply {
+                        request: r.request_id,
+                    })
+                }
+                ReplyOwnedVariant::CodecZenohMsgDel(_) => None,
+            },
+            ResponseOwnedVariant::CodecZenohErr(_) => None,
+        },
+        _ => None,
+    }
 }
 
 /// What [`PayloadCensus::observe_message`] is told about the record beside the

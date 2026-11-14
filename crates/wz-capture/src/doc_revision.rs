@@ -4361,6 +4361,29 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELD_VALUES_R2_CARRIES,
     },
+    // Revision 3 moves which payloads are joined as pieces, and no key or word:
+    // the pieces are joined from a `Push`'s put and from a reply's put inside a
+    // `Response`, as the field document joins them, and the replies to each
+    // query (named by the request id the `Response` echoes) are a stream of
+    // their own, apart from the sender's live pieces on any key and from the
+    // replies to every other query. A responder that answers a history query
+    // with one piece per reply numbers those transfers anew per query, so at
+    // revision 2 its replies were joined into whichever stream shared their key
+    // and transfer number. A request's put and an error's payload are no longer
+    // joined at all; one a segment profile recognises is a piece no message
+    // completes here, and its record is no longer written.
+    //
+    // ⚠ A VALUE MOVES: a record of a reply piece may change `place`, `unjoined`
+    // and `state`, and a record of a request's or an error's piece is gone.
+    DocumentShape {
+        document: FIELD_VALUES,
+        revision: 3,
+        keys: FIELD_VALUES_R2_KEYS,
+        retiring: &[],
+        families: FIELD_VALUES_R2_FAMILIES,
+        planes: &[],
+        carries: FIELD_VALUES_R2_CARRIES,
+    },
     // THE FIELD DOCUMENT'S ROWS WITHOUT THEIR TREES, in CBOR.
     //
     // A document of its own because it is the answer of a door of its own
@@ -31785,7 +31808,9 @@ mod tests {
             // What a live handle holds in memory, by structure.
             (MEMORY, 1),
             // The typed values of a few payload field paths.
-            (FIELD_VALUES, 2),
+            // To 3 when a reply's pieces were joined per query, apart from the
+            // live ones, and a request's or an error's were joined no more.
+            (FIELD_VALUES, 3),
             // The field document's rows without their trees; to 5 with the
             // field document's 64, to 6 with its 65.
             (ROW_FACTS, 6),

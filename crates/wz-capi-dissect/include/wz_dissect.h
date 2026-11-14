@@ -7215,7 +7215,7 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * writes them (`1`, `4.1`, `$.x`), at most 64. `after_seq` is the cursor, as
  * for wz_dissect_live_fields_since.
  *
- *     {"document":{"name":"field_values","revision":2},
+ *     {"document":{"name":"field_values","revision":3},
  *      "window":{"after_seq":0,"through_seq":2},"paths":["1"],
  *      "records":[{"seq":1,"record":0,"time_ns":1000000,"keyexpr":"demo/pose",
  *                  "keyexpr_source":"wire","segment":null,
@@ -7269,6 +7269,17 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * message's first pieces still gets its value on the piece that completes it;
  * another text of fixed ids or segment declarations walks from the first
  * message, as another selector does.
+ *
+ * WHICH PAYLOADS ARE PIECES, at values-document revision 3. Pieces are joined
+ * from a `Push`'s put and from a reply's put inside a `Response`, as the field
+ * document joins them (field-document revision 66). The replies to one query
+ * (the request id the `Response` echoes) are a stream of their own, apart from
+ * the sender's live pieces and from the replies to any other query, so a
+ * responder that numbers its reply transfers anew per query has each answer
+ * joined whole. A request's put and an error's payload are joined into
+ * nothing, and one a segment profile recognises is no longer written. Before
+ * revision 3 a reply's pieces joined whichever stream shared their key and
+ * transfer number.
  *
  * @values field_values keyexpr_source
  * @values field_values place
