@@ -3328,13 +3328,51 @@ fn record_word<'f>(bytes: &[u8], record: &'f wz_session_core::dissect::Field) ->
         .map_or(record.name.as_ref(), |m| m.name())
 }
 
+/// What carried a walked record's payload, when a piece or a frame may ride in
+/// it: a `Push` carrying a `put`, or a `Response` whose `Reply` carries a
+/// `put`, named by the `request_id` the `Response` echoes. `None` for every
+/// other record: a `del` has no payload, a request's put and an error are not
+/// samples of a key, and a query is not an answer.
+fn piece_carrier(
+    record: &wz_session_core::dissect::Field,
+    word: &str,
+) -> Option<crate::segment_chain::Carrier> {
+    use crate::segment_chain::Carrier;
+    use wz_session_core::dissect::{BodyName, FieldValue, MessageName};
+    if word == MessageName::Push.name() {
+        return (record.body() == Some(BodyName::Put)).then_some(Carrier::Push);
+    }
+    if word != MessageName::Response.name() {
+        return None;
+    }
+    let reply = record
+        .body_field()
+        .filter(|body| body.name == BodyName::Reply.name())?;
+    if reply.body() != Some(BodyName::Put) {
+        return None;
+    }
+    let FieldValue::Nested(children) = &record.value else {
+        return None;
+    };
+    children
+        .iter()
+        .find_map(|child| match (child.name.as_ref(), &child.value) {
+            ("request_id", FieldValue::Uint(request)) => Some(Carrier::Reply { request: *request }),
+            _ => None,
+        })
+}
+
 /// Judge ONE carried record under the end-to-end rule that governs its key, or
 /// answer `None` when none does.
 ///
-/// Only a `Push` carrying a `put` is a frame: a `del` has no payload, and a
-/// query or a reply is not what a rule about published samples was written for.
-/// A record whose key did not resolve has no key to match a rule against, and
-/// is not judged; its `keyexpr_cause` already says why.
+/// A `Push` carrying a `put` and a `Reply` carrying one (inside a `Response`)
+/// are read, and nothing else ([`piece_carrier`]). A reply is matched against
+/// the rules by its own key, as the wire wrote it, exactly as a `Push` is; its
+/// pieces join a stream of their own per query, and its frame is read with its
+/// counter and timeout not judged (`unjudged_reason` `reply`), because an
+/// answer is not the live counter stream. A record whose key did not resolve
+/// has no key to match a rule against, and is not judged; its `keyexpr_cause`
+/// already says why.
 ///
 /// The one place a record is handed to the judge, so the entry that prints its
 /// verdict and the pass that judges a row without printing it ask the same
@@ -3346,16 +3384,16 @@ fn judge_record<'d>(
     declarations: &Declarations<'d>,
     source: E2eSource<'_>,
 ) -> RecordJudged<'d> {
-    use wz_session_core::dissect::{BodyName, FieldValue, MessageName};
+    use wz_session_core::dissect::FieldValue;
     let none = RecordJudged::default();
     // A run whose rules name no profile judges nothing, and does not pay for
     // looking at a payload to find that out.
     if !declarations.has_stateful_rules() {
         return none;
     }
-    if word != MessageName::Push.name() || record.body() != Some(BodyName::Put) {
+    let Some(carrier) = piece_carrier(record, word) else {
         return none;
-    }
+    };
     let payload =
         crate::payload_decode::subtree_payload_bytes(record).and_then(|f| match &f.value {
             FieldValue::Bytes(bytes) => Some(bytes.as_slice()),
@@ -3378,19 +3416,11 @@ fn judge_record<'d>(
             // A reference that resolved is read as itself, above.
             (None, Ok(_)) => return none,
         };
-        if let Some(segment) = declarations.judge_segment(
-            key,
-            crate::segment_chain::Carrier::Push,
-            payload,
-            source.from_low,
-        ) {
+        if let Some(segment) = declarations.judge_segment(key, carrier, payload, source.from_low) {
             let joined_e2e = match (&segment.verdict.joined, read_as) {
-                (Some(joined), Some(keyexpr)) => declarations.judge_e2e(
-                    keyexpr,
-                    Some(joined),
-                    source.sender,
-                    source.observed_at_ns,
-                ),
+                (Some(joined), Some(keyexpr)) => {
+                    judge_frame(declarations, carrier, keyexpr, Some(joined), source)
+                }
                 _ => None,
             };
             return RecordJudged {
@@ -3406,8 +3436,28 @@ fn judge_record<'d>(
         return none;
     };
     RecordJudged {
-        e2e: declarations.judge_e2e(keyexpr, payload, source.sender, source.observed_at_ns),
+        e2e: judge_frame(declarations, carrier, keyexpr, payload, source),
         segment: None,
+    }
+}
+
+/// Judge one frame under the profile rule `keyexpr` falls to, as `carrier`
+/// brought it: a published one against its slot, a reply's read and left
+/// unjudged for its counter and its timeout.
+fn judge_frame<'d>(
+    declarations: &Declarations<'d>,
+    carrier: crate::segment_chain::Carrier,
+    keyexpr: &str,
+    payload: Option<&[u8]>,
+    source: E2eSource<'_>,
+) -> Option<crate::payload_decode::E2eJudged<'d>> {
+    match carrier {
+        crate::segment_chain::Carrier::Push => {
+            declarations.judge_e2e(keyexpr, payload, source.sender, source.observed_at_ns)
+        }
+        crate::segment_chain::Carrier::Reply { .. } => {
+            declarations.judge_e2e_reply(keyexpr, payload, source.sender)
+        }
     }
 }
 
@@ -10732,6 +10782,9 @@ mod tests {
         // profile brings, over every place and every reason a piece joins
         // nothing.
         rendered.extend(crate::segment_row_tests::pin_documents());
+        // Revision 66 — a reply's pieces and frames, which only a reply under a
+        // declared rule brings: `unjudged_reason` says `reply` there.
+        rendered.extend(crate::reply_segment_tests::pin_documents());
         // Revision 60 — a datagram flow's `disagreements` group with a frame
         // named in it: the dissection of three frames, and a container cut after
         // the first, so the second read of the later ones finds no packet.
@@ -10843,7 +10896,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 94] = [
+        let live: [(&str, &str, Vec<&'static str>); 95] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -10955,6 +11008,17 @@ mod tests {
                 rev::FIELDS,
                 "unopened_reason",
                 crate::e2e_slots::Unopened::ALL
+                    .iter()
+                    .map(|r| r.word())
+                    .collect(),
+            ),
+            // Revision 66 — why a frame that was read was not judged for its
+            // counter. The walk is the ledger's own enum, whose word is an
+            // exhaustive match.
+            (
+                rev::FIELDS,
+                "unjudged_reason",
+                crate::e2e_slots::Unjudged::ALL
                     .iter()
                     .map(|r| r.word())
                     .collect(),
@@ -11905,6 +11969,10 @@ mod tests {
         // Revision 59 — the documents that carry the `segment` block and the
         // payload state `segment_piece`.
         e2e_docs.extend(crate::segment_row_tests::pin_documents());
+        // Revision 66 — `unjudged_reason` over both its words: `reply` here and
+        // `sender_unknown` in the end-to-end documents above, each beside a
+        // rule that names a body schema, so the two are measured in one shape.
+        e2e_docs.extend(crate::reply_segment_tests::pin_documents());
         // Revision 37 — the documents that carry `closes`, and `request_kind` over
         // two of its words.
         let mut closes_docs = crate::closes_tests::pin_documents();

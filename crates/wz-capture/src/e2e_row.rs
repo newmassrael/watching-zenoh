@@ -2,11 +2,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The `e2e` block of a field-document entry: what the end-to-end judge made of
-//! one `Push` whose key a profile rule covers.
+//! one `Push`, or one `Reply` carrying a `put`, whose key a profile rule covers.
 //!
 //! # Where it hangs
 //!
-//! On the `carried` entry of the `Push`, beside `payload`, and on the entries of
+//! On the `carried` entry of the `Push` or the `Response`, beside `payload`, on
+//! the `joined` message of the piece that completed a split one, and on the entries of
 //! `above_transport.carried` for a message that arrived as fragments. The entry
 //! and not the row, for the reason the entry's `keyexpr` is there: a `Frame`
 //! batches several messages, and a counter is a fact about ONE of them. The key
@@ -29,7 +30,7 @@
 //!        "counter_error":false,"timeout_error":false,"counter_reason":"none",
 //!        "silence_ms":12,
 //!        "previous_counter":6,"first":false,"counter_step":1,
-//!        "max_gap":3,"timeout_ms":100,
+//!        "max_gap":3,"timeout_ms":100,"unjudged_reason":null,
 //!        "slot":{"keyexpr":"demo/a","zid":"...","identity":[{"name":"ident","value":N}]}}
 //! ```
 //!
@@ -71,9 +72,17 @@
 //!   or not one run of bytes in the capture. Its block carries `why`, the
 //!   sentence, and `unopened_reason`, the word (`payload_shorter_than_header`
 //!   or `payload_not_contiguous`; the first alone also carries `payload_bytes`),
-//!   and the keys above that need a frame are absent. A history reply is not
-//!   either of these: only a `Push` carrying a `put` is read as a frame, so a
-//!   reply entry carries no `e2e` block at all.
+//!   and the keys above that need a frame are absent.
+//! * **`unjudged_reason`** (field document 66) says why a frame that was read
+//!   was not judged for its counter and its timeout, on every opened block:
+//!   `sender_unknown` where there is no slot (`slot.zid` is `null`), `reply`
+//!   for a frame that came in a reply to a query, and `null` where the counter
+//!   was judged. A reply is read by the rule its own key falls to and its CRC
+//!   and length are judged, being properties of its bytes; its counter is not,
+//!   because a responder answering from what it holds sends frames of the
+//!   past, which are not the live stream. Its `slot` names the slot its key,
+//!   sender and identity select, and that slot does not move. Every cell the
+//!   `slot.zid == null` case nulls is `null` for a reply too.
 //!
 //! 64-bit values that can pass 2^53 (a CRC, a wide header field) are decimal
 //! strings beyond it, by the integer rule every document here keeps.
@@ -228,6 +237,15 @@ fn push_opened(judged: &E2eJudged<'_>, opened: &Opened, out: &mut String) {
             .map(|_| profile.counter().timeout_ms),
         out,
     );
+    out.push_str(",\"unjudged_reason\":");
+    match opened.unjudged {
+        Some(why) => {
+            out.push('"');
+            out.push_str(why.word());
+            out.push('"');
+        }
+        None => out.push_str("null"),
+    }
 
     out.push_str(",\"slot\":{\"keyexpr\":");
     escape_into(&opened.slot.keyexpr, out);

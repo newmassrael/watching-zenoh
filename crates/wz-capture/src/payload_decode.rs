@@ -518,6 +518,50 @@ impl<'a> Declarations<'a> {
         })
     }
 
+    /// [`Self::judge_e2e`] for a frame that came in a REPLY to a query: the
+    /// same rule and the same profile, the frame read and its CRC and length
+    /// judged, and its counter and timeout not judged
+    /// ([`crate::e2e_slots::Unjudged::Reply`]). A responder answering from what
+    /// it holds sends frames of the past, which are not the live counter
+    /// stream; no slot moves, so the live frames after the answer are judged
+    /// as if it had not come.
+    ///
+    /// Asks nothing of the row the walker is at: what it answers needs no
+    /// state, so a row read again answers the same without having kept it.
+    pub fn judge_e2e_reply(
+        &self,
+        keyexpr: &str,
+        payload: Option<&[u8]>,
+        sender: Option<&[u8]>,
+    ) -> Option<E2eJudged<'a>> {
+        let map: &'a FormatMap<'a> = self.map;
+        if !map.has_e2e_rules() {
+            return None;
+        }
+        let matched = map.e2e_for_keyexpr(keyexpr)?;
+        self.record_applied(matched.id);
+        let outcome = match payload {
+            Some(payload) => crate::e2e_slots::read_unjudged(
+                &crate::e2e_slots::Reception {
+                    profile: matched.format.profile(),
+                    keyexpr,
+                    payload,
+                    sender,
+                    observed_at_ns: None,
+                },
+                crate::e2e_slots::Unjudged::Reply,
+            ),
+            None => crate::e2e_slots::Outcome::Unreadable {
+                why: crate::e2e_slots::UNREADABLE_PAYLOAD,
+            },
+        };
+        Some(E2eJudged {
+            rule: matched.rule,
+            format: matched.format,
+            outcome,
+        })
+    }
+
     /// How many slots the end-to-end judge holds a counter for.
     pub fn e2e_slots(&self) -> usize {
         self.e2e.borrow().slots()

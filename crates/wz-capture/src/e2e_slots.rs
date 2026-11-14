@@ -83,6 +83,37 @@ impl Unopened {
     }
 }
 
+/// Why a frame that was read was not judged for its counter and its timeout,
+/// as a closed set a machine reads: the `unjudged_reason` of a capture row's
+/// `e2e` block. Its CRC and its length are a property of its bytes and are
+/// judged whatever this says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unjudged {
+    /// The profile separates senders and the capture never named this one:
+    /// there is no slot to judge against, and sharing one with every other
+    /// unnamed sender would charge one with another's counter.
+    SenderUnknown,
+    /// The frame came in a reply to a query. A responder answering from what
+    /// it holds sends frames it published before, so they are not the live
+    /// counter stream, and judging them against it would report every
+    /// answered frame as a repetition and move the live slot.
+    Reply,
+}
+
+impl Unjudged {
+    /// Every reason, so the vocabulary a document declares and a test's walk
+    /// of it are one list.
+    pub const ALL: [Self; 2] = [Self::SenderUnknown, Self::Reply];
+
+    /// The word a machine reads for this reason.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::SenderUnknown => "sender_unknown",
+            Self::Reply => "reply",
+        }
+    }
+}
+
 /// Who a slot's frames are from.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SlotSender {
@@ -169,6 +200,9 @@ pub struct Opened {
     /// from, and when the CRC did not match (the counter of a damaged frame is
     /// not read).
     pub step: Option<u64>,
+    /// Why the counter and the timeout were not judged, when they were not:
+    /// `None` on a frame judged against its slot.
+    pub unjudged: Option<Unjudged>,
 }
 
 impl Outcome {
@@ -329,49 +363,12 @@ impl SlotLedger {
     /// the ledger remembers as the owner of the slot (see the type's note).
     pub fn receive_from(&mut self, list: usize, reception: &Reception<'_>) -> Outcome {
         let profile = reception.profile;
-        let frame = match e2e_frame::open(profile, reception.payload) {
-            Ok(frame) => frame,
-            Err(_) => {
-                return Outcome::TooShort {
-                    payload_bytes: reception.payload.len(),
-                    header_bytes: profile.header_bytes(),
-                }
-            }
+        let (frame, slot) = match read(reception) {
+            Ok(read) => read,
+            Err(outcome) => return outcome,
         };
-        let spec = profile.slot();
-        let sender = if !spec.by_zid {
-            SlotSender::Pooled
-        } else {
-            match reception.sender.map(canonical_zid) {
-                Some(zid) if !zid.is_empty() => SlotSender::Zid(zid.to_vec()),
-                _ => SlotSender::Unknown,
-            }
-        };
-        let identity = spec
-            .message
-            .iter()
-            .map(|&index| {
-                (
-                    profile.fields()[index].name.clone(),
-                    frame.fields[index].value,
-                )
-            })
-            .collect();
-        let slot = Slot {
-            keyexpr: String::from(reception.keyexpr),
-            sender,
-            identity,
-        };
-
         if slot.sender == SlotSender::Unknown {
-            return Outcome::Opened(Box::new(Opened {
-                frame,
-                slot,
-                judgment: None,
-                timed: false,
-                previous: None,
-                step: None,
-            }));
+            return unjudged(frame, slot, Unjudged::SenderUnknown);
         }
         match self.owners.get(&slot) {
             Some(&owner) if owner != list => self.crossed = true,
@@ -413,6 +410,68 @@ impl SlotLedger {
             judgment,
             previous,
             step,
+            unjudged: None,
         }))
     }
+}
+
+/// Read `reception.payload` under its profile and name the slot it belongs
+/// to, judging nothing that needs a slot's state: what a frame that is not
+/// part of its slot's live stream is given, for the reason `why` states. No
+/// slot moves, and none is created.
+pub fn read_unjudged(reception: &Reception<'_>, why: Unjudged) -> Outcome {
+    match read(reception) {
+        Ok((frame, slot)) => unjudged(frame, slot, why),
+        Err(outcome) => outcome,
+    }
+}
+
+/// The frame `reception` carries and the slot it belongs to, or the outcome
+/// of a payload too short to be one.
+fn read(reception: &Reception<'_>) -> Result<(OpenedFrame, Slot), Outcome> {
+    let profile = reception.profile;
+    let Ok(frame) = e2e_frame::open(profile, reception.payload) else {
+        return Err(Outcome::TooShort {
+            payload_bytes: reception.payload.len(),
+            header_bytes: profile.header_bytes(),
+        });
+    };
+    let spec = profile.slot();
+    let sender = if !spec.by_zid {
+        SlotSender::Pooled
+    } else {
+        match reception.sender.map(canonical_zid) {
+            Some(zid) if !zid.is_empty() => SlotSender::Zid(zid.to_vec()),
+            _ => SlotSender::Unknown,
+        }
+    };
+    let identity = spec
+        .message
+        .iter()
+        .map(|&index| {
+            (
+                profile.fields()[index].name.clone(),
+                frame.fields[index].value,
+            )
+        })
+        .collect();
+    let slot = Slot {
+        keyexpr: String::from(reception.keyexpr),
+        sender,
+        identity,
+    };
+    Ok((frame, slot))
+}
+
+/// A frame that was read and not judged against its slot, for `why`.
+fn unjudged(frame: OpenedFrame, slot: Slot, why: Unjudged) -> Outcome {
+    Outcome::Opened(Box::new(Opened {
+        frame,
+        slot,
+        judgment: None,
+        timed: false,
+        previous: None,
+        step: None,
+        unjudged: Some(why),
+    }))
 }

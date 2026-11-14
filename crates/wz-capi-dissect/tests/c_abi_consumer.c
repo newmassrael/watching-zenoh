@@ -4347,8 +4347,12 @@ int main(void) {
      * retires.
      * 65: every `carried` entry's `keyexpr_carriage` (`whole_key`, `id`,
      * `id_and_suffix`, or null), how the wire carried the key, resolved or
-     * not. A key arrives; nothing retires. */
-    revisioned[2].revision = 65;
+     * not. A key arrives; nothing retires.
+     * 66: a reply carrying a put is read as a published sample is, its
+     * pieces joined per query, and every opened `e2e` block gains
+     * `unjudged_reason` (`reply`, `sender_unknown`, or null). A key arrives;
+     * nothing retires. */
+    revisioned[2].revision = 66;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

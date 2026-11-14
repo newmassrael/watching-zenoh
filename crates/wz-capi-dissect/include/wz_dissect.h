@@ -455,7 +455,16 @@
  * fields that, with the sender and the key, tell one stream of transfers from
  * another; `transfer` numbers the messages of a stream; `total` and `offset`
  * place the chunk; `total_max` bounds what one transfer may make this library
- * hold (at most 64 MiB). A payload is a piece when it is at least a header long
+ * hold (at most 64 MiB). Since field-document revision 66 a piece may ride in
+ * a `Reply`'s `put` as well as in a `Push`'s: a responder that answers a query
+ * with one piece per reply is joined like a live sender, under the rule that
+ * covers the reply's own key, in a stream of its own per query (the request id
+ * the `Response` echoes), apart from the sender's live pieces and from every
+ * other query's replies, so a transfer number reused across them joins each
+ * message apart. A `ResponseFinal` ends nothing; a reply transfer that never
+ * completes is ended as a live one is, by the bound on bytes held. The joined
+ * message of a reply is decoded as a live one is, and its `e2e` says
+ * `unjudged_reason` `reply`. A payload is a piece when it is at least a header long
  * and every `equals` field holds; the CRC is then a verdict, and a profile with
  * no `equals` field is recognised by its CRC alone. The rule `**` covers a
  * reference this capture cannot resolve as well (any other pattern cannot be
@@ -763,21 +772,43 @@
  *            "counter_error":false,"timeout_error":false,
  *            "counter_reason":"none","silence_ms":12,
  *            "previous_counter":6,"first":false,"counter_step":1,
- *            "max_gap":3,"timeout_ms":100,
+ *            "max_gap":3,"timeout_ms":100,"unjudged_reason":null,
  *            "slot":{"keyexpr":"demo/a","zid":"...",
  *                    "identity":[{"name":"ident","value":N}]}}
  *
  * It is on the ENTRY, for the reason `payload` is: a `Frame` batches several
  * messages and a counter is a fact about one. A message that arrived as
  * fragments is judged where its chain completed, and its block is on the
- * entry under `above_transport.carried`. Only a `Push` carrying a `put` is a
- * frame; a key a rule covers whose payload is not a frame says why:
+ * entry under `above_transport.carried`. A `Push` carrying a `put` and, since
+ * field-document revision 66, a `Response` whose `Reply` carries a `put` are
+ * read; a key a rule covers whose payload is not a frame says why:
  * `"opened":false`, a `why` (a sentence for a person) and an
  * `unopened_reason` (a closed word for a machine: `payload_shorter_than_header`
  * or `payload_not_contiguous`), and the keys that need a frame are absent.
  * The first word also brings `payload_bytes`, how long the payload was, and the
- * second never does. A history reply is neither: it is not a `Push`, so the
- * entry that carries it has no `e2e` block at all.
+ * second never does.
+ *
+ * A REPLY'S FRAME, at field-document revision 66. A reply is matched against
+ * the rules by its OWN key, as the wire wrote it, exactly as a `Push` is: a
+ * responder that answers `demo/a/@history` writes that key, `demo/**` does not
+ * cover a verbatim `@` chunk, and a rule whose pattern covers the reply's key
+ * is the one that applies. Nothing in the key is stripped or interpreted. Its
+ * frame is read, and its CRC and length are judged (they are properties of its
+ * bytes); its counter and its timeout are NOT, because a responder answering
+ * from what it holds sends frames it published before, which are not the live
+ * stream. Its block says so in a closed word, on every opened block after
+ * `timeout_ms`:
+ *
+ *     `unjudged_reason`  `reply` (the frame came in a reply), `sender_unknown`
+ *                        (there is no slot: `slot.zid` is `null`), or `null`
+ *                        (the counter was judged)
+ *
+ * On a `reply` block every key the no-slot case makes `null` is `null` too,
+ * `slot` names the slot the frame's key, sender and identity select, and that
+ * slot does not move: the live frames after an answer are judged as if it had
+ * not come.
+ *
+ * @values fields unjudged_reason
  *
  * WHAT A FRAME WAS JUDGED AGAINST (field document 35). `previous_counter` is
  * the counter the frame's slot had last ACCEPTED before it: a CRC error and a
@@ -1634,7 +1665,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":65,"key":"kind","values":[...],
+ *     {"name":"fields","revision":66,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1698,6 +1729,7 @@
  * @carries fields strength passenger
  * @carries fields under passenger
  * @carries fields unjoined passenger
+ * @carries fields unjudged_reason passenger
  * @carries fields unopened_reason discriminant
  * @carries fields verdict passenger
  * @carries fields wrong passenger
@@ -5791,7 +5823,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":65,"key":"state",
+ *     "value_families":[{"name":"fields","revision":66,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -7404,6 +7436,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @values row_facts strength
  * @values row_facts under
  * @values row_facts unjoined
+ * @values row_facts unjudged_reason
  * @values row_facts unopened_reason
  * @values row_facts verdict
  * @values row_facts wrong
@@ -7439,6 +7472,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @carries row_facts strength passenger
  * @carries row_facts under passenger
  * @carries row_facts unjoined passenger
+ * @carries row_facts unjudged_reason passenger
  * @carries row_facts unopened_reason discriminant
  * @carries row_facts verdict passenger
  * @carries row_facts wrong passenger
