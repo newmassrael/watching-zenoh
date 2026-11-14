@@ -422,6 +422,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     subscribers: Vec<SubEntry>,
     keyexprs: Vec<KexprEntry>,
     next_mapping: ExprId,
+    /// The next request id of a get's leg to the session's own queryables, counted apart from
+    /// the ids the links hand out (`local-queryable`).
+    #[cfg(feature = "local-queryable")]
+    next_local_request: wz_session_core::wire_id::RequestId,
     filters: Vec<FilterEntry>,
     next_filter: FilterId,
     interests: Vec<InterestHold>,
@@ -638,13 +642,6 @@ struct MatchEntry {
     watch: u64,
     keyexpr: String,
 }
-
-/// The high bit of a request id taken by the leg of a get that the session's own queryables
-/// answer (`local-queryable`). A request id is the wire's `RequestId`, and the ids the links'
-/// actions hand out count up from 0, so none of them has the bit until a link has asked 2^31
-/// queries.
-#[cfg(feature = "local-queryable")]
-const LOCAL_REQUEST: wz_session_core::wire_id::RequestId = 1 << 31;
 
 /// The locality a matching criterion carries: what the entity counts. The session's own
 /// entities of `plane`'s kind count (`Any`) only for one that asked them to and in a build that
@@ -1484,6 +1481,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             subscribers: Vec::new(),
             keyexprs: Vec::new(),
             next_mapping: 1,
+            #[cfg(feature = "local-queryable")]
+            next_local_request: 0,
             filters: Vec::new(),
             next_filter: 1,
             interests: Vec::new(),
@@ -2812,8 +2811,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             core.pending_gets.push(PendingGet {
                 face,
                 leg: leg_id,
-                rid,
-                kind: GetKind::Query,
+                kind: GetKind::Query(rid),
             });
             drop(guard);
             issued += 1;
@@ -2829,10 +2827,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 return Some(issued);
             };
             let core = &mut guard.0;
-            // An id no link will ever hand out, so no peer's answer can be taken for the session's
-            // own (`LOCAL_REQUEST`).
-            let rid = LOCAL_REQUEST
-                | (self.next_entity_id() as wz_session_core::wire_id::RequestId & !LOCAL_REQUEST);
+            // The session's own request ids are a space of their own: the leg is registered in
+            // the session's own pending gets (`Registry::local`) and answered under the local
+            // generation (`query::LOCAL_QUERY`), so no table a link's ids reach holds it, and
+            // the two counters never meet.
+            let rid = core.next_local_request;
+            core.next_local_request = rid.wrapping_add(1);
             let timeout_ms = opts.effective_timeout_ms();
             let deadline_ms = (timeout_ms > 0)
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
@@ -2852,8 +2852,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 core.pending_gets.push(PendingGet {
                     face: LOCAL_FACE,
                     leg: leg_id,
-                    rid,
-                    kind: GetKind::Query,
+                    kind: GetKind::Query(rid),
                 });
                 // Asked once the legs to the peers were, as zenoh-pico asks it only once the send
                 // succeeded.
@@ -2944,8 +2943,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             core.pending_gets.push(PendingGet {
                 face,
                 leg: leg_id,
-                rid: interest_id,
-                kind: GetKind::Liveliness,
+                kind: GetKind::Liveliness(interest_id),
             });
             drop(guard);
             issued += 1;
