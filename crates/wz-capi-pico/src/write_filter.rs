@@ -88,6 +88,10 @@ pub(crate) struct PicoSession {
     /// publisher stamps with it.
     #[cfg(feature = "advanced")]
     pub(crate) hlc: NodeHlc,
+    /// Every time the session gives, which the advanced plane's publisher stamps through, as a
+    /// program's `z_timestamp_new` does.
+    #[cfg(feature = "advanced")]
+    pub(crate) time: crate::last_timestamp::SessionTime,
 }
 
 impl PicoSession {
@@ -98,6 +102,8 @@ impl PicoSession {
             mode: session_mode(handle),
             #[cfg(feature = "advanced")]
             hlc: handle.ext.hlc.clone(),
+            #[cfg(feature = "advanced")]
+            time: handle.ext.time.clone(),
         }
     }
 }

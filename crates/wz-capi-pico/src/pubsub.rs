@@ -679,7 +679,9 @@ fn wall_clock_ntp64() -> u64 {
 ///
 /// A program may register a clock and remove it while the session is open, so one session's stamps
 /// can come from both; the one last time given is what keeps them strictly increasing across that,
-/// as pico's keeps them across a clock that steps back.
+/// as pico's keeps them across a clock that steps back. The session's advanced publisher stamps its
+/// samples through the same last time given, as pico's stamps them with this function, and the
+/// session's node clock learns every time given (`SessionTime`).
 #[no_mangle]
 pub unsafe extern "C" fn z_timestamp_new(
     ts: *mut z_timestamp_t,
@@ -710,7 +712,7 @@ pub unsafe extern "C" fn z_timestamp_new(
         };
         #[cfg(not(feature = "clock-source"))]
         let reading = Some(wall_clock_ntp64());
-        match session_timestamp(reading, &state.ext.last_timestamp, state.drive.zid()) {
+        match session_timestamp(reading, &state.ext.time, state.drive.zid()) {
             Ok(given) => {
                 *ts = given;
                 Z_OK
@@ -720,17 +722,17 @@ pub unsafe extern "C" fn z_timestamp_new(
     })
 }
 
-/// What [`z_timestamp_new`] gives a session whose last time given is `last` and whose id is
+/// What [`z_timestamp_new`] gives a session whose times given are `session_time` and whose id is
 /// `zid`, for a clock that reads `reading` (`None` when it cannot say what time it is): pico's rule
 /// (`vendor/zenoh-pico/src/api/api.c` @ `if (time > s->_last_timestamp) {`), with pico's codes for
 /// a time that cannot be read and for a session with no greater time left to give.
 fn session_timestamp(
     reading: Option<u64>,
-    last: &crate::last_timestamp::LastTimestamp,
+    session_time: &crate::last_timestamp::SessionTime,
     zid: [u8; crate::zid::Z_ID_SIZE],
 ) -> Result<z_timestamp_t, ZResult> {
     let reading = reading.ok_or(Z_ERR_GENERIC)?;
-    let time = last
+    let time = session_time
         .give(reading)
         .ok_or(Z_ERR_TIMESTAMP_GENERATION_FAILED)?;
     Ok(z_timestamp_t {
@@ -743,12 +745,12 @@ fn session_timestamp(
 #[cfg(test)]
 mod session_timestamp_tests {
     use super::session_timestamp;
-    use crate::last_timestamp::LastTimestamp;
+    use crate::last_timestamp::SessionTime;
     use crate::result::{Z_ERR_GENERIC, Z_ERR_TIMESTAMP_GENERATION_FAILED};
 
     const ZID: [u8; crate::zid::Z_ID_SIZE] = [0x3a; crate::zid::Z_ID_SIZE];
 
-    fn time_of(reading: Option<u64>, last: &LastTimestamp) -> u64 {
+    fn time_of(reading: Option<u64>, last: &SessionTime) -> u64 {
         match session_timestamp(reading, last, ZID) {
             Ok(given) => {
                 assert!(given.valid, "a given timestamp is valid");
@@ -763,7 +765,7 @@ mod session_timestamp_tests {
     /// stamp is the first plus one, not a duplicate.
     #[test]
     fn a_wall_clock_that_reads_the_same_twice_gives_strictly_increasing_stamps() {
-        let last = LastTimestamp::new();
+        let last = SessionTime::new();
         let wall = 0x6900_0000_8000_0000;
         let first = time_of(Some(wall), &last);
         let second = time_of(Some(wall), &last);
@@ -776,7 +778,7 @@ mod session_timestamp_tests {
     /// given rather than back to the wall clock.
     #[test]
     fn a_stamp_after_a_clock_ahead_is_removed_does_not_go_back() {
-        let last = LastTimestamp::new();
+        let last = SessionTime::new();
         let wall = 0x6900_0000_0000_0000;
         let registered = 0xEE6B_2800_0000_0010;
         assert_eq!(time_of(Some(wall), &last), wall);
@@ -788,7 +790,7 @@ mod session_timestamp_tests {
     /// leaves the last time given as it was.
     #[test]
     fn a_clock_that_cannot_be_read_is_refused_and_moves_nothing() {
-        let last = LastTimestamp::new();
+        let last = SessionTime::new();
         assert_eq!(time_of(Some(50), &last), 50);
         assert_eq!(
             session_timestamp(None, &last, ZID).err(),
@@ -801,12 +803,164 @@ mod session_timestamp_tests {
     /// pico's own code.
     #[test]
     fn a_session_with_no_greater_time_left_is_refused_with_picos_code() {
-        let last = LastTimestamp::new();
+        let last = SessionTime::new();
         assert_eq!(time_of(Some(u64::MAX), &last), u64::MAX);
         assert_eq!(
             session_timestamp(Some(u64::MAX), &last, ZID).err(),
             Some(Z_ERR_TIMESTAMP_GENERATION_FAILED)
         );
+    }
+}
+
+/// A program's stamps (`z_timestamp_new`) and the session's advanced publisher's are one order:
+/// both pass through the session's last time given, which the node clock learns.
+#[cfg(all(test, feature = "advanced"))]
+mod one_session_time_tests {
+    use alloc::vec::Vec;
+
+    use wz_node_time::node_clock::{NodeHlc, TimestampingEnabled};
+    use wz_node_time::timestamp_source::FallbackStamp;
+    use wz_session_core::epoch::{EpochSource, EpochUnavailable, SinceEpoch};
+    use wz_session_core::ntp64::Ntp64;
+    use wz_session_core::WhatAmI;
+
+    use super::session_timestamp;
+    use crate::last_timestamp::SessionTime;
+
+    const ZID: [u8; crate::zid::Z_ID_SIZE] = [0x4b; crate::zid::Z_ID_SIZE];
+
+    /// The seconds the session's node clock reads.
+    const CLOCK_SECS: u64 = 1_000_000;
+
+    /// A clock of the program's that stands still, so every step forward is the clocks' order and
+    /// not time passing.
+    struct StandingClock;
+
+    impl EpochSource for StandingClock {
+        fn try_since_epoch(&self) -> Result<SinceEpoch, EpochUnavailable> {
+            Ok(SinceEpoch {
+                secs: CLOCK_SECS,
+                nanos: 0,
+            })
+        }
+    }
+
+    fn node_clock() -> NodeHlc {
+        NodeHlc::for_node_over_source(
+            &ZID,
+            WhatAmI::Peer,
+            TimestampingEnabled::all(true),
+            StandingClock,
+        )
+        .with_trusted_only_stamping(false)
+    }
+
+    /// What `z_timestamp_new` gives for a clock that reads `reading`.
+    fn program(reading: Option<u64>, time: &SessionTime) -> u64 {
+        session_timestamp(reading, time, ZID)
+            .expect("the program is given a time")
+            .time
+    }
+
+    /// What the advanced publisher stamps a sample with: the node clock's proposal, as the
+    /// composite makes it, ordered as the pico plane orders it. Both words, the proposal first.
+    fn sample(publisher: &FallbackStamp, time: &SessionTime) -> (u64, u64) {
+        let proposed = publisher.stamp().time;
+        (proposed, time.order_data_stamp(proposed))
+    }
+
+    /// A program stamp from the wall clock, a sample, a program stamp from the node clock (a
+    /// registered clock is read through it), the wall clock again far behind once the clock is
+    /// removed, and a sample: each strictly after the one before, and each sample is the node
+    /// clock's own proposal, because the clock learned every program stamp before it.
+    #[test]
+    fn a_programs_and_a_publishers_stamps_are_one_order_across_a_change_of_clock() {
+        let hlc = node_clock();
+        let time = SessionTime::new().learned_by(hlc.clone());
+        let publisher = FallbackStamp::new(ZID.to_vec(), hlc.clone());
+        let clock = Ntp64::from_unix(CLOCK_SECS, 0).as_word();
+        let within_bound = hlc.max_delta_word().expect("the node holds a clock") / 2;
+
+        let p1 = program(Some(clock + within_bound), &time);
+        assert_eq!(p1, clock + within_bound, "the wall clock, as it reads");
+        let (proposed, d1) = sample(&publisher, &time);
+        assert!(
+            proposed > p1,
+            "the node clock learned the program's stamp: {proposed} after {p1}"
+        );
+        assert_eq!(d1, proposed, "and the sample carries the clock's own time");
+
+        let p2 = program(hlc.clock_stamp().map(|stamp| stamp.time), &time);
+        assert!(
+            p2 > d1,
+            "the node clock read for the program: {p2} after {d1}"
+        );
+
+        let p3 = program(Some(clock - 3_600 * (1u64 << 32)), &time);
+        assert_eq!(p3, p2 + 1, "the wall clock is behind: the stamp goes on");
+        let (proposed, d2) = sample(&publisher, &time);
+        assert!(
+            proposed > p3,
+            "the node clock learned that stamp too: {proposed} after {p3}"
+        );
+        assert_eq!(d2, proposed);
+    }
+
+    /// A time the node clock cannot learn (further ahead of its reading than it accepts) still
+    /// orders the next sample: the last time given steps in where the clock could not.
+    #[test]
+    fn a_sample_after_a_stamp_the_clock_could_not_learn_still_comes_after_it() {
+        let hlc = node_clock();
+        let time = SessionTime::new().learned_by(hlc.clone());
+        let publisher = FallbackStamp::new(ZID.to_vec(), hlc.clone());
+        let clock = Ntp64::from_unix(CLOCK_SECS, 0).as_word();
+        let beyond_bound = hlc.max_delta_word().expect("the node holds a clock") * 4;
+
+        let p1 = program(Some(clock + beyond_bound), &time);
+        let (proposed, d1) = sample(&publisher, &time);
+        assert!(proposed < p1, "the clock did not learn it: {proposed} {p1}");
+        assert_eq!(d1, p1 + 1);
+    }
+
+    /// Programs and publishers stamping one session from threads of their own are each given
+    /// times no other stamp of the session has, and each thread's own go forward.
+    #[test]
+    fn programs_and_publishers_on_threads_are_given_distinct_increasing_times() {
+        const EACH: usize = 1_000;
+        let hlc = node_clock();
+        let time = SessionTime::new().learned_by(hlc.clone());
+        let wall = Ntp64::from_unix(CLOCK_SECS, 0).as_word();
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let program_time = time.clone();
+            threads.push(std::thread::spawn(move || {
+                (0..EACH)
+                    .map(|_| program(Some(wall), &program_time))
+                    .collect::<Vec<u64>>()
+            }));
+            let sample_time = time.clone();
+            let publisher = FallbackStamp::new(ZID.to_vec(), hlc.clone());
+            threads.push(std::thread::spawn(move || {
+                (0..EACH)
+                    .map(|_| sample(&publisher, &sample_time).1)
+                    .collect::<Vec<u64>>()
+            }));
+        }
+        let mut all = Vec::new();
+        for thread in threads {
+            let mine = thread.join().expect("the stamping thread ends");
+            assert!(
+                mine.windows(2).all(|pair| pair[0] < pair[1]),
+                "one thread's stamps go forward"
+            );
+            all.extend(mine);
+        }
+        all.sort_unstable();
+        assert!(
+            all.windows(2).all(|pair| pair[0] < pair[1]),
+            "no two stamps of the session are the same time"
+        );
+        assert_eq!(all.len(), 8 * EACH);
     }
 }
 

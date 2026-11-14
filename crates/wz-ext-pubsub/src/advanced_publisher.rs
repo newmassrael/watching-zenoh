@@ -33,7 +33,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::reliability::Reliability;
-use wz_session_core::sample::{SampleKind, SourceInfo};
+use wz_session_core::sample::{SampleKind, SourceInfo, TimestampHint};
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 #[cfg(feature = "ext-pubsub-sample-miss-detection")]
@@ -460,6 +460,19 @@ pub trait AdvancedPublisherPlane: Send + Sync + 'static {
     /// timestamps never depended on that says so.
     fn stamps(&self) -> bool {
         self.node_hlc().is_stamping()
+    }
+
+    /// The time word a sample of this publisher carries, given the word the node's clock proposes
+    /// for it (the node clock's stamp, or the wall clock where the node does not stamp:
+    /// [`FallbackStamp::stamp`]). The default carries the proposal as it is.
+    ///
+    /// A host whose session orders every timestamp it gives through one value of its own answers
+    /// here: zenoh-pico stamps an advanced publisher's samples with the session's
+    /// `z_timestamp_new` (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+    /// `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`),
+    /// so a sample's time and a program's are one sequence of that session.
+    fn order_stamp(&self, proposed: u64) -> u64 {
+        proposed
     }
 
     /// Declare the plain publisher on `keyexpr`. The wire knobs in `options` are
@@ -980,6 +993,14 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         self.put_sample(SamplePayload::Chunk(payload), options)
     }
 
+    /// The timestamp of the next sample, a Put's or a Del's: the node clock's proposal, as the
+    /// plane orders it ([`AdvancedPublisherPlane::order_stamp`]), with this publisher's zid.
+    fn next_timestamp(&self) -> TimestampHint {
+        let mut timestamp = self.stamp.stamp();
+        timestamp.time = self.plane.order_stamp(timestamp.time);
+        timestamp
+    }
+
     /// The one body of [`Self::put_with`] and `put_shm_with`: what a put stamps and
     /// retains is written once, so a chunk and bytes cannot be sequenced differently.
     fn put_sample(
@@ -993,7 +1014,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
             .seqnum
             .as_ref()
             .map(|counter| counter.fetch_add(1, Ordering::Relaxed));
-        let timestamp = self.stamp.stamp();
+        let timestamp = self.next_timestamp();
 
         // Construct the SourceInfo ONCE (SSOT): the same `(zid, eid, sn)` rides
         // BOTH the wire publish (pubsub-source-info) AND the cache ring, so a
@@ -1095,7 +1116,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
             .seqnum
             .as_ref()
             .map(|counter| counter.fetch_add(1, Ordering::Relaxed));
-        let timestamp = self.stamp.stamp();
+        let timestamp = self.next_timestamp();
         let source_info = sn.map(|sn| SourceInfo::new(&self.zid, self.eid, sn));
 
         // R2618 — the SAME fold as the Put arm. The encoding / attachment chain

@@ -13,14 +13,82 @@
 //! and pico refuses (`vendor/zenoh-pico/src/api/api.c` @
 //! `_Z_ERROR_RETURN(_Z_ERR_TIMESTAMP_GENERATION_FAILED);`).
 //!
-//! Every time `z_timestamp_new` gives passes through this one value, whichever clock it was read
-//! from: a program may register a clock and remove it again on a live session, and the session's
-//! stamps go forward across that as they do across a clock that steps.
+//! Every time the session gives passes through this one value ([`SessionTime`]), whichever clock
+//! it was read from and whoever asked: a program (`z_timestamp_new`) and the session's advanced
+//! publisher alike, as pico's advanced publisher stamps each sample with `z_timestamp_new`
+//! (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+//! `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`).
+//! A program may register a clock and remove it again on a live session, and the session's stamps
+//! go forward across that as they do across a clock that steps.
+//!
+//! pico has no node clock beside it; wz's session has one (the HLC its advanced publisher
+//! proposes stamps from, and a registered clock is read through), so the session's node clock
+//! learns every time given (`NodeHlc::absorb_word`), and its own next reading is past it: the two
+//! are one order, and the last time given has to step in only where the clock could not learn.
 //!
 //! The lock is the port's short one ([`Lock`]) rather than the kernel's mutex: the work under it is
 //! one comparison and one store, and an MCU image then needs no kernel object per session for it.
 
+use alloc::sync::Arc;
+
 use wz_capi_port::sync::Lock;
+#[cfg(any(feature = "advanced", feature = "clock-source"))]
+use wz_node_time::node_clock::NodeHlc;
+
+/// Every time one session gives, and the node clock that learns them; see the module doc.
+///
+/// Cloned into each handle of the session that stamps (the advanced publisher's plane), and every
+/// clone is the same session's: one last time given.
+#[derive(Clone)]
+pub(crate) struct SessionTime {
+    last: Arc<LastTimestamp>,
+    /// The session's node clock, which learns every time given. `None` for a session whose
+    /// stamps no node clock proposes.
+    #[cfg(any(feature = "advanced", feature = "clock-source"))]
+    clock: Option<NodeHlc>,
+}
+
+impl SessionTime {
+    /// A session that has given no time yet, whose stamps no node clock learns.
+    pub(crate) fn new() -> Self {
+        Self {
+            last: Arc::new(LastTimestamp::new()),
+            #[cfg(any(feature = "advanced", feature = "clock-source"))]
+            clock: None,
+        }
+    }
+
+    /// The same session, whose node clock `clock` learns every time it gives.
+    #[cfg(any(feature = "advanced", feature = "clock-source"))]
+    pub(crate) fn learned_by(mut self, clock: NodeHlc) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// The time to give for a clock that reads `reading` ([`LastTimestamp::give`]), which the
+    /// session's node clock then learns. `None` when the session has no greater time to give.
+    pub(crate) fn give(&self, reading: u64) -> Option<u64> {
+        let given = self.last.give(reading)?;
+        // A time further ahead of the clock's own reading than the clock accepts leaves the clock
+        // as it was; the last time given still orders the next stamp, whichever clock reads it.
+        #[cfg(any(feature = "advanced", feature = "clock-source"))]
+        if let Some(clock) = &self.clock {
+            let _ = clock.absorb_word(given);
+        }
+        Some(given)
+    }
+
+    /// The time word a sample of the session's advanced publisher carries, for the word its node
+    /// clock proposes: the next time the session gives, as pico's sample takes the session's
+    /// `z_timestamp_new`.
+    ///
+    /// Where pico refuses the put of a session with no greater time left, this stamps it with the
+    /// greatest time there is: the composite that asks has no refusal to give for a stamp.
+    #[cfg(feature = "advanced")]
+    pub(crate) fn order_data_stamp(&self, proposed: u64) -> u64 {
+        self.give(proposed).unwrap_or(u64::MAX)
+    }
+}
 
 /// The last time a session gave; see the module doc.
 pub(crate) struct LastTimestamp(Lock<u64>);
@@ -54,7 +122,17 @@ mod tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
 
-    use super::LastTimestamp;
+    use super::{LastTimestamp, SessionTime};
+
+    /// A clone of a session's times is the same session's: what one gives, the other gives after.
+    #[test]
+    fn every_clone_of_a_sessions_time_gives_after_the_others() {
+        let program = SessionTime::new();
+        let publisher = program.clone();
+        assert_eq!(program.give(9), Some(9));
+        assert_eq!(publisher.give(9), Some(10));
+        assert_eq!(program.give(3), Some(11));
+    }
 
     #[test]
     fn a_reading_later_than_the_last_is_given_as_it_is() {

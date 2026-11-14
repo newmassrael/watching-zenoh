@@ -1312,7 +1312,12 @@ Each lands whole with its surface lines, tests and faults in one round.
     through the session's last time given, as pico keeps `_last_timestamp` in its session: one
     session's stamps strictly increase whichever clock they come from, a clock registered or
     removed while the session is open included, and run out only past the greatest time there is
-    (`Z_ERR_TIMESTAMP_GENERATION_FAILED`).
+    (`Z_ERR_TIMESTAMP_GENERATION_FAILED`). The session's advanced publisher stamps through the
+    same last time given (the plane's `AdvancedPublisherPlane::order_stamp`), as pico's stamps
+    each sample with `z_timestamp_new`, and the session's node clock learns every time given
+    (`NodeHlc::absorb_word`): a program's stamps and the samples' are one order, and the node
+    clock's own proposal is that order wherever it could learn the time before it. The other
+    planes (the runtime's, zenoh-c's) carry the node clock's proposal as it is.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

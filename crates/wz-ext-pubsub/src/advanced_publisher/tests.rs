@@ -10,6 +10,11 @@ struct RecordingPlane {
     stamps: bool,
     /// The ticks the composite handed the plane's timer, so a test can be the clock.
     ticks: std::sync::Mutex<Vec<Arc<dyn Fn() -> bool + Send + Sync>>>,
+    /// The next word `order_stamp` answers, counting up, for a plane that orders the stamps of
+    /// its session itself; `None` carries the proposal, as the default does.
+    order_from: Option<std::sync::atomic::AtomicU64>,
+    /// The time word of each sample sent, in order.
+    stamped: std::sync::Mutex<Vec<Option<u64>>>,
 }
 
 /// A handle that writes its own name when it is dropped.
@@ -33,6 +38,16 @@ impl RecordingPlane {
             events: Arc::new(std::sync::Mutex::new(Vec::new())),
             stamps,
             ticks: std::sync::Mutex::new(Vec::new()),
+            order_from: None,
+            stamped: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A plane that orders its session's stamps itself, from `word` up.
+    fn ordering_from(word: u64) -> Self {
+        Self {
+            order_from: Some(std::sync::atomic::AtomicU64::new(word)),
+            ..Self::new(true)
         }
     }
 
@@ -79,6 +94,13 @@ impl AdvancedPublisherPlane for RecordingPlane {
 
     fn stamps(&self) -> bool {
         self.stamps
+    }
+
+    fn order_stamp(&self, proposed: u64) -> u64 {
+        match &self.order_from {
+            Some(next) => next.fetch_add(1, Ordering::SeqCst),
+            None => proposed,
+        }
     }
 
     fn declare_publisher(
@@ -132,9 +154,13 @@ impl AdvancedPublisherPlane for RecordingPlane {
         _publisher: &Named,
         _keyexpr: &str,
         payload: &[u8],
-        _options: PublishOptions,
+        options: PublishOptions,
     ) -> Result<usize, PublishError> {
         self.events.lock().unwrap().push(String::from("publish"));
+        self.stamped
+            .lock()
+            .unwrap()
+            .push(options.timestamp.map(|timestamp| timestamp.time));
         Ok(payload.len())
     }
 
@@ -359,6 +385,48 @@ fn timestamp_sequencing_follows_the_planes_answer_and_not_the_node_clock() {
         )
         .is_ok(),
         "a plane that stamps must accept it with no node clock at all"
+    );
+}
+
+/// A plane that orders its session's stamps itself is what a Put and a Del carry: the
+/// composite asks it for every sample, and sends the word it answers rather than the node
+/// clock's proposal (here the wall clock, the plane having no node clock).
+#[test]
+fn a_put_and_a_delete_carry_the_time_the_plane_orders() {
+    let plane = Arc::new(RecordingPlane::ordering_from(42));
+    let options = AdvancedPublisherOptions {
+        cache: None,
+        publisher_detection: false,
+        ..AdvancedPublisherOptions::default()
+    };
+    let publisher =
+        AdvancedPublisherOn::declare_on(Arc::clone(&plane), "demo/ordered", options, vec![0x01])
+            .expect("the declaration is accepted");
+    publisher.put(b"x").expect("a put is accepted");
+    publisher.delete().expect("a delete is accepted");
+    assert_eq!(*plane.stamped.lock().unwrap(), [Some(42), Some(43)]);
+}
+
+/// A plane that does not order stamps carries the node clock's proposal as it is.
+#[test]
+fn a_plane_that_orders_nothing_carries_the_proposal() {
+    let plane = Arc::new(RecordingPlane::new(true));
+    let options = AdvancedPublisherOptions {
+        cache: None,
+        publisher_detection: false,
+        ..AdvancedPublisherOptions::default()
+    };
+    let publisher =
+        AdvancedPublisherOn::declare_on(Arc::clone(&plane), "demo/proposed", options, vec![0x01])
+            .expect("the declaration is accepted");
+    publisher.put(b"x").expect("a put is accepted");
+    let stamped = plane.stamped.lock().unwrap().clone();
+    assert_eq!(stamped.len(), 1);
+    let time = stamped[0].expect("an advanced put is stamped");
+    assert!(
+        time >> 32 > 1_700_000_000,
+        "the wall clock's seconds, the plane having no node clock: {}",
+        time >> 32
     );
 }
 
