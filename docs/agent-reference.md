@@ -128,6 +128,20 @@ git config core.hooksPath .githooks
   waiting for a hosted run; read its result when it arrives. Never skip a
   failing gate and never bypass the hooks.
 
+**A lane's legs (open-debt item 938).** A lane of `scripts/run-ci.sh` either
+stops at its first red (`|| return 1`, the right shape when each step reads the
+previous one's build) or declares its legs in a leg ledger:
+`_runci_legs_open <lane> || return 1`, then
+`_runci_leg <leg> [--after <leg>,...] -- <command>` per leg, then
+`_runci_legs_close` as the lane's last command. A leg whose dependency did not
+pass is recorded `skipped: depends on <dep>`; every other leg runs; the close
+fails the lane once and names every failed and skipped leg, and so do the
+run's final verdict line and its `::error` annotation. Repairing a red in a
+ledger lane therefore shows the lane's other reds on the same run. A gate's
+grade leans on its own `.selftest` leg. `scripts/lib/runci_leg_ledger_gate.py`
+(Layer C0) holds these rules and refuses a lane whose stop-at-first legs run two
+or more independent gates, except the lanes in its shrinking `BASELINE`.
+
 `pre-commit` and `pre-push` require `mnemosyne-cli` on `PATH`
 (install via
 `cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli`).

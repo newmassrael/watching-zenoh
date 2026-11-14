@@ -1,0 +1,14 @@
+image ubuntu22
+bubblewrap
+clang
+cmake
+libbz2-dev
+libclang-dev
+liblz4-dev
+libsnappy-dev
+libzstd-dev
+perl
+pkg-config
+strace
+valgrind
+zlib1g-dev

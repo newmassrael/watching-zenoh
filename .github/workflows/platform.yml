@@ -132,6 +132,8 @@ jobs:
   leg:
     name: leg (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 30
     strategy:
       # Each host is its own signal: a macOS stall must not hide the Windows result.
@@ -186,6 +188,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output; see
+        # that job, and the same step in ci.yml.
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        id: cache-series
+        shell: bash
+        run: python scripts/lib/cache_prune.py --saver-spec "platform.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       - name: platform surface matrix selftest, on this host
         # The gate's own verdicts, driven on the host the leg will run on: the
@@ -341,6 +351,8 @@ jobs:
   interop:
     name: interop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -494,6 +506,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output; see
+        # that job, and the same step in ci.yml.
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        id: cache-series
+        shell: bash
+        run: python scripts/lib/cache_prune.py --saver-spec "platform.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
 
       # The promoted tests are the GATE half of this job. The step above observes and
       # cannot fail the run; this one has no `continue-on-error`, so a red here fails the
@@ -807,3 +827,81 @@ jobs:
         timeout-minutes: 25
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_session_loopback.c "a pico C program that opens two sessions over loopback"
+
+  # The superseded generations of this workflow's two saved classes, deleted as
+  # soon as the savers finish. The why, the least-privilege argument and the
+  # rule are written once, on the `evict-superseded` job of ci.yml, and
+  # `workflow_cache_budget_gate.py` holds this job's script to that one.
+  evict-superseded:
+    name: evict superseded cache generations
+    needs:
+      - leg
+      - interop
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+      - name: Delete the generations this run's saves superseded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+          # What each saver handed over: its job name and its classes' series.
+          SAVERS_JQ: >-
+            to_entries[]
+            | select((.value.outputs.cache_spec // "") != "")
+            | {job: .key, spec: (.value.outputs.cache_spec | fromjson)}
+          # The pruner's superseded pass (cache_prune.py `plan`, pass 3) over the
+          # series the savers name: group a class's default-branch keys by the key
+          # with its generation suffix removed, keep the newest `keep`, and only
+          # in a series whose newest entry this run attempt created.
+          EVICT_JQ: >-
+            def t: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+            [ $savers[] as $s
+              | $s.spec[] as $c
+              | [ $caches[]
+                  | select(.key as $k | any($c.prefixes[]; . as $p | $k | startswith($p)))
+                  | select(.key as $k | all($c.stale[]; . as $re | ($k | test($re)) | not)) ]
+              | group_by(if $c.suffix then (.key | sub($c.suffix; "")) else $c.cls end)[]
+              | sort_by([(.created_at | t), .id]) | reverse
+              | select((.[0].created_at | t) >= ($started | t))
+              | .[$c.keep:][]
+            ] | unique_by(.id)[] | "\(.id)\t\(.size_in_bytes)\t\(.key)"
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/evict"
+          mkdir -p "$work"
+          printf '%s' "$NEEDS" | jq -c "$SAVERS_JQ" >"$work/savers.jsonl"
+          if [ ! -s "$work/savers.jsonl" ]; then
+            echo "no saving job handed over a series definition; nothing to evict"
+            exit 0
+          fi
+          if ! started="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}" --jq .run_started_at)" \
+            || ! gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/caches?ref=refs/heads/main&per_page=100" \
+              --jq '.actions_caches[]' >"$work/caches.jsonl"; then
+            echo "::warning title=evict-superseded::the run or the cache list could not be read; nothing deleted, cache-prune.yml will apply the same rule after the run"
+            exit 0
+          fi
+          jq -rn --arg started "$started" \
+            --slurpfile savers "$work/savers.jsonl" --slurpfile caches "$work/caches.jsonl" \
+            "$EVICT_JQ" >"$work/evict.tsv"
+          deleted=0
+          failed=0
+          while IFS=$'\t' read -r id size key; do
+            if ! [[ "$id" =~ ^[0-9]+$ ]]; then
+              echo "::warning title=evict-superseded::refusing a cache id that is not a number: $id"
+              failed=$((failed + 1))
+              continue
+            fi
+            echo "superseded: $id ($((size / 1000000)) MB) $key"
+            if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/caches/${id}" >/dev/null; then
+              deleted=$((deleted + 1))
+            else
+              failed=$((failed + 1))
+            fi
+          done <"$work/evict.tsv"
+          echo "evicted $deleted superseded generation(s) right after the saves"
+          if [ "$failed" -gt 0 ]; then
+            echo "::warning title=evict-superseded::$failed deletion(s) failed; cache-prune.yml applies the same rule after the run"
+          fi

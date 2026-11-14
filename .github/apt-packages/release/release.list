@@ -1,0 +1,8 @@
+image ubuntu22
+clang
+cmake
+libclang-dev
+perl
+pkg-config
+protobuf-compiler
+python3-yaml
