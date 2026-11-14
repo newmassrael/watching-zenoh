@@ -477,6 +477,16 @@ async fn join_group(
             compression: join.profile.compression,
             tx_queue: link_conf.tx.queue,
             link_rx: link_conf.rx,
+            // The beacon the configuration states, as a session that is not a node states it on
+            // its group: a member ignores a beacon whose resolutions or batch size differ from
+            // its own.
+            beacon: wz_runtime_tokio::multicast_glue::GroupBeacon {
+                lease_ms: join.profile.lease_ms,
+                join_interval_ms: join.profile.join_interval_ms,
+                seq_num_res: join.profile.seq_num_res,
+                req_id_res: join.profile.req_id_res,
+                batch_size: join.profile.batch_size,
+            },
         },
         opts,
         None,

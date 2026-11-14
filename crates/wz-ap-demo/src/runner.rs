@@ -6793,6 +6793,15 @@ async fn run_router_hat_until(
                 compression: false,
                 tx_queue: params.tx_queue,
                 link_rx: params.link_rx,
+                // The demo's group is zenoh-pico's: its batch is pico's multicast batch
+                // (`Z_BATCH_MULTICAST_SIZE`), which every member of the group states alike.
+                beacon: wz::runtime_tokio::multicast_glue::GroupBeacon {
+                    lease_ms: 5_000,
+                    join_interval_ms: 100,
+                    seq_num_res: 0x02,
+                    req_id_res: 0x02,
+                    batch_size: 2_048,
+                },
             },
             mcast_opts.clone(),
             node_stats.clone(),
@@ -6803,7 +6812,9 @@ async fn run_router_hat_until(
         forwarder.set_mcast_group_link(wz::runtime_tokio::link_interfaces::multicast_link_subject(
             mcast_opts.iface.as_deref(),
         ));
-        forwarder.attach_mcast_group(face.outbound);
+        // The demo's router holds no shared memory of its own session, so its group is a plain
+        // one: a chunk goes to it as its bytes.
+        forwarder.attach_mcast_group(face.outbound, false);
         #[cfg(feature = "resource-snapshot")]
         {
             let meter = std::sync::Arc::clone(&face.messages);
