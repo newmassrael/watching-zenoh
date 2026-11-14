@@ -308,12 +308,16 @@ const INIT: &[Row] = &[
     (0x8, OPT, EXT_ENC_ZBUF, "region_name"),
 ];
 
-/// `transport/open.rs` — `0x4` twice, told apart by encoding. `shm` is a `ZBuf`
-/// here as on `Init`, holding the Open half of the negotiation, and `0x7` is the
-/// remote bound where `Init` has the patch level.
+/// `transport/open.rs` — `0x4` twice, told apart by encoding. The shared-memory
+/// extension is a `ZBuf` here as on `Init`, holding the Open half of the
+/// negotiation, and `0x7` is the remote bound where `Init` has the patch level.
+///
+/// It is named `shm_body` and not `shm`: this table once typed it a `Z64`, and
+/// a reading named `shm` at that kind was published as a selector path, so the
+/// `ZBuf` reading takes a name of its own rather than changing that path's kind.
 const OPEN: &[Row] = &[
     (0x1, OPT, EXT_ENC_UNIT, "qos"),
-    (0x2, OPT, EXT_ENC_ZBUF, "shm"),
+    (0x2, OPT, EXT_ENC_ZBUF, "shm_body"),
     (0x3, OPT, EXT_ENC_ZBUF, AUTH),
     (0x4, OPT, EXT_ENC_ZBUF, MULTI_LINK_SYN),
     (0x4, OPT, EXT_ENC_UNIT, "multi_link_ack"),

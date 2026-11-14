@@ -635,7 +635,7 @@ EXT BODIES READ:
           Open/multi_link_syn, Push/timestamp, Put/source_info,
           Query/query_body, Query/source_info, Request/timestamp,
           Response/responder_id, Response/timestamp,
-          ResponseFinal/responder_id, ResponseFinal/timestamp
+          ResponseFinal/timestamp
     Z64   Declare/node_id, Declare/qos,
           DeclareQueryable/queryable_info, Fragment/qos, Frame/qos,
           Init/patch, Interest/node_id, Interest/qos, Join/patch,

@@ -8940,7 +8940,7 @@ mod tests {
         ),
         (
             crate::ext_name::ExtCarrier::Open,
-            "shm",
+            "shm_body",
             "two layouts under one identity: the OpenSyn body is the challenge \
              and the handoff counters, the OpenAck body the counters alone \
              (`crate::extshm`), and a ZBuf body walker is handed the body and \
@@ -11382,15 +11382,10 @@ mod tests {
             cite: "zenoh::ext::SourceInfoType<ID> at put.rs:68, del.rs:57, \
                    query.rs:98 and err.rs:63",
         },
-        UpstreamTypeGroups {
-            ext: "responder_id",
-            groups: &[&[
-                crate::ext_name::ExtCarrier::Response,
-                crate::ext_name::ExtCarrier::ResponseFinal,
-            ]],
-            cite: "network::ext::EntityGlobalIdType<ID> at response.rs:70, \
-                   whose `ext` module both carriers share",
-        },
+        // `responder_id` is walked by `Response` alone: `ResponseFinal`'s struct
+        // carries `ext_qos` and `ext_tstamp` only
+        // (`commons/zenoh-protocol/src/network/response.rs` @ `pub ext_tstamp: Option<ext::TimestampType>,`),
+        // so it is no longer a name more than one carrier walks.
         UpstreamTypeGroups {
             ext: "auth",
             groups: &[&[
