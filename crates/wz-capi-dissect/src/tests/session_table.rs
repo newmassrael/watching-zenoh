@@ -182,14 +182,14 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
         doc.contains(&format!(
             "\"frames\":6,\"bytes\":{want_bytes},\"zenoh\":\"undecided\",\
              \"announced_version\":\"own\",\"zenoh_evidence\":{{\
-             \"log2_lr_millibits\":362,\"log2_lr_no_millibits\":14909,\
+             \"log2_lr_millibits\":362,\"log2_lr_no_millibits\":17927,\
              \"yes_at_millibits\":20000,\
              \"no_at_millibits\":-20000,\"model\":7,\"crossed_at_packet\":null,\
              \"log2_lr_max_millibits\":363,\"log2_lr_min_millibits\":-2,\
-             \"log2_lr_no_max_millibits\":14909,\"log2_lr_no_min_millibits\":0,\
+             \"log2_lr_no_max_millibits\":17927,\"log2_lr_no_min_millibits\":0,\
              \"checks\":[\
              {{\"check\":\"unit_reading\",\"strength\":\"unit\",\"confirmed\":4,\
-             \"violated\":0,\"millibits\":365,\"no_millibits\":13189,\
+             \"violated\":0,\"millibits\":365,\"no_millibits\":16207,\
              \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}},\
              {{\"check\":\"wire_front\",\"strength\":\"header\",\"confirmed\":4,\
              \"violated\":0,\"millibits\":-3,\"no_millibits\":1720,\

@@ -1512,9 +1512,17 @@ measurements moved, and both were readings of bytes upstream never reads as a
   steps follow. The SN prior fitted on the zenoh flows moves from a mean break
   rate of 0.0044 to 0.0037 at the same concentration of 2.
 
+The second half of the rule (a record that fails the batch, below) moves four
+more null members from whole to residual: `lan-mdns.pcap` from 13, 8, 15 to
+2, 19, 15, `busylan-dhcp.pcap` from 6, 108, 133 to 4, 110, 133,
+`busylan-ntp.pcap` from 5, 183, 0 to 0, 188, 0 and `stack-ssh.pcap` from 33,
+20, 40 to 17, 36, 40. No zenoh unit moves under it either: the zenoh files'
+49505 units read whole, so no record of the corpus's zenoh is one wz fails to
+decode. Model 7's calibration, regenerated under both halves:
+
 | measured null | `yes` bound per outcome | `no` mean per outcome |
 |---|---|---|
-| unit readings | 7.7639e-1, 1.0000e0, 9.0270e-1 | 1.0173e-1, 5.0256e-1, 3.9571e-1 |
+| unit readings | 7.7639e-1, 1.0000e0, 9.0270e-1 | 6.0305e-2, 5.4398e-1, 3.9571e-1 |
 
 SN prior: Beta(74/10000, 19926/10000), a mean break rate of 0.0037 at a
 concentration of 2.
@@ -1532,11 +1540,11 @@ chance that it is wrong. Every number on a rejected side (the null bounds, the
 regions, the derived chances and the alteration bounds) is the same under both
 readings. So model 6's error guarantee did not rest on that misreading; its
 operating characteristics and the observations its validation corpus was read
-with did. The second half (below) can move a rejected side as well: a null
-member's share of units read whole bounds the `yes` sum's null side. A bound
-counted again on the corrected measurement is the bound of that measurement,
-so it moves the guarantee to the reading upstream makes rather than away from
-it; what it moves is read off the regenerated calibration.
+with did. The second half (below) could have moved a rejected side as well,
+since a null member's share of units read whole bounds the `yes` sum's null
+side; the regenerated calibration shows it did not (the bounds above are
+model 6's). Both halves together move only the units' `no` mean and the SN
+prior.
 
 **D16. A model whose measurement was wrong is superseded, not amended.** The
 freeze of section 6.12 registered model 6 "as the reader at this entry
@@ -1606,11 +1614,19 @@ The walk and the probe that infers a batch header ask one rule
 (`BatchParse::fails_the_frames_batch`, `frame_reach` in `passive.rs`), so a
 unit cannot read whole in one and not in the other. The bytes after the halt
 are not counted unaccounted as well: they are the record walk's unparsed tail,
-which the capture report counts already. The calibration above is regenerated
-with this reading; where its numbers and this section's differ, the generated
-file is the model. A zenoh file whose units move from whole under this reading
-is a record wz does not decode and upstream does, which is a codec defect to
-repair and not a parameter to fit.
+which the capture report counts already. The calibration above is the one
+regenerated with this reading. A zenoh file whose units moved from whole under
+it would be a record wz does not decode and upstream does, a codec defect to
+repair and not a parameter to fit; none of the corpus's did.
+
+The repository's raweth sample held one such unit, and it was the sample's: its
+`Frame` carried the two bytes `0xDE 0xAD` as its records, written by hand, and
+`0xDE` is a `Declare` header whose body those bytes cannot be, so upstream drops
+that batch. The sample's `Frame` now carries an OAM record built by its codec.
+mDNS flows generated with a fixed id read whole half as often as they did
+(`structured_datagrams_of_other_protocols_read_by_their_first_byte`), for the
+same reason: their records come to bytes upstream reads as neither a network
+message nor a transport one.
 
 A lowlatency unit is not part of this rule: upstream reads such a unit as a
 run of messages until it ends
@@ -1646,6 +1662,6 @@ freezing entry, before any of its files exists):
 
 **Pins that move with model 7.** The examples of the session table
 (`session_table_tests`, `wz_dissect.h`, `wz-capi-dissect`'s session table test
-and the C consumer) state `model` 7 and the units' `no` part at 3.2972 bits a
+and the C consumer) state `model` 7 and the units' `no` part at 4.0516 bits a
 unit where it was 3.1678.
 

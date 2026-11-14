@@ -2343,26 +2343,26 @@ fn the_headers_example_is_the_document_of_a_real_session() {
     // without a SYN, so its framing is not weighed.
     let row = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
                \"zenoh_evidence\":{\"log2_lr_millibits\":64363,\
-               \"log2_lr_no_millibits\":90379,\
+               \"log2_lr_no_millibits\":96414,\
                \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":7,\
                \"crossed_at_packet\":2,\
                \"log2_lr_max_millibits\":64363,\"log2_lr_min_millibits\":0,\
-               \"log2_lr_no_max_millibits\":90379,\"log2_lr_no_min_millibits\":0,\
+               \"log2_lr_no_max_millibits\":96414,\"log2_lr_no_min_millibits\":0,\
                \"checks\":[{\"check\":\"cookie_echo\",\"strength\":\"handshake\",\
                \"confirmed\":1,\"violated\":0,\"millibits\":63998,\"no_millibits\":64001,\
                \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
                {\"check\":\"unit_reading\",\"strength\":\"unit\",\
-               \"confirmed\":8,\"violated\":0,\"millibits\":365,\"no_millibits\":26378,\
+               \"confirmed\":8,\"violated\":0,\"millibits\":365,\"no_millibits\":32413,\
                \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     // The FLOW: the same, and the two Inits' version headers, their roles and
     // their units.
     let flow = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
                 \"zenoh_evidence\":{\"log2_lr_millibits\":81360,\
-                \"log2_lr_no_millibits\":113976,\
+                \"log2_lr_no_millibits\":121519,\
                 \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":7,\
                 \"crossed_at_packet\":2,\
                 \"log2_lr_max_millibits\":81360,\"log2_lr_min_millibits\":0,\
-                \"log2_lr_no_max_millibits\":113976,\"log2_lr_no_min_millibits\":0,\
+                \"log2_lr_no_max_millibits\":121519,\"log2_lr_no_min_millibits\":0,\
                 \"checks\":[{\"check\":\"cookie_echo\",\"strength\":\"handshake\",\
                 \"confirmed\":1,\"violated\":0,\"millibits\":63998,\"no_millibits\":64001,\
                 \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
@@ -2373,7 +2373,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
                 \"confirmed\":2,\"violated\":0,\"millibits\":15999,\"no_millibits\":16001,\
                 \"q_basis\":\"derived\",\"eps_basis\":\"derived\"},\
                 {\"check\":\"unit_reading\",\"strength\":\"unit\",\
-                \"confirmed\":10,\"violated\":0,\"millibits\":365,\"no_millibits\":32973,\
+                \"confirmed\":10,\"violated\":0,\"millibits\":365,\"no_millibits\":40516,\
                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
         "{{\"document\":{{\"name\":\"session_table\",\"revision\":13}},\"ok\":true,\
@@ -3685,33 +3685,42 @@ fn read_structured_flow(
 ///
 /// | n | mDNS | DNS | CoAP | NTP | SSDP, syslog |
 /// |---|---|---|---|---|---|
-/// | 1 | 0.185 / 1.00 / 1.00 / 1.00 / 111 | 0.060 / 1.00 / 1.00 / 1.00 / 36 | 0.002 / 0 / 0 / 1.00 / 1 | 0 / 0 / 0 / 0 / 0 | 0 |
-/// | 2 | 0.158 / 0.50 / 1.00 / 1.00 / 171 | 0.066 / 1.00 / 1.00 / 1.00 / 42 | 0.120 / 0.50 / 0.50 / 0.50 / 144 | 0.012 / 0 / 0.50 / 0.50 / 14 | 0 |
-/// | 3 | 0.166 / 0.67 / 0.67 / 1.00 / 43 | 0.067 / 0.67 / 0.67 / 1.00 / 39 | 0.082 / 0.33 / 0.33 / 0.33 / 0 | 0.010 / 0 / 0.33 / 0.33 / 0 | 0 |
-/// | 5 | 0.168 / 0.40 / 0.60 / 0.80 / 22 | 0.081 / 0.40 / 0.40 / 0.80 / 6 | 0.103 / 0.40 / 0.40 / 0.40 / 0 | 0.008 / 0 / 0.20 / 0.20 / 0 | 0 |
-/// | 10 | 0.164 / 0.40 / 0.40 / 0.50 / 5 | 0.078 / 0.40 / 0.40 / 0.60 / 2 | 0.135 / 0.30 / 0.40 / 0.50 / 1 | 0.012 / 0.10 / 0.10 / 0.20 / 0 | 0 |
-/// | 20 | 0.164 / 0.30 / 0.35 / 0.45 / 0 | 0.070 / 0.20 / 0.30 / 0.30 / 0 | 0.129 / 0.25 / 0.30 / 0.40 / 0 | 0.011 / 0.05 / 0.10 / 0.15 / 0 | 0 |
-/// | 50 | 0.160 / 0.24 / 0.30 / 0.32 / 0 | 0.071 / 0.16 / 0.20 / 0.28 / 0 | 0.132 / 0.20 / 0.24 / 0.26 / 0 | 0.010 / 0.04 / 0.06 / 0.06 / 0 | 0 |
+/// | 1 | 0.088 / 1.00 / 1.00 / 1.00 / 53 | 0.060 / 1.00 / 1.00 / 1.00 / 36 | 0.002 / 0 / 0 / 1.00 / 1 | 0 / 0 / 0 / 0 / 0 | 0 |
+/// | 2 | 0.067 / 0.50 / 0.50 / 1.00 / 74 | 0.066 / 1.00 / 1.00 / 1.00 / 42 | 0.120 / 0.50 / 0.50 / 0.50 / 144 | 0.012 / 0 / 0.50 / 0.50 / 14 | 0 |
+/// | 3 | 0.078 / 0.33 / 0.67 / 1.00 / 9 | 0.067 / 0.67 / 0.67 / 1.00 / 39 | 0.082 / 0.33 / 0.33 / 0.33 / 0 | 0.010 / 0 / 0.33 / 0.33 / 0 | 0 |
+/// | 5 | 0.077 / 0.40 / 0.40 / 0.40 / 0 | 0.081 / 0.40 / 0.40 / 0.80 / 6 | 0.103 / 0.40 / 0.40 / 0.40 / 0 | 0.008 / 0 / 0.20 / 0.20 / 0 | 0 |
+/// | 10 | 0.081 / 0.20 / 0.30 / 0.40 / 0 | 0.078 / 0.40 / 0.40 / 0.60 / 2 | 0.135 / 0.30 / 0.40 / 0.50 / 1 | 0.012 / 0.10 / 0.10 / 0.20 / 0 | 0 |
+/// | 20 | 0.077 / 0.20 / 0.25 / 0.30 / 0 | 0.070 / 0.20 / 0.30 / 0.30 / 0 | 0.129 / 0.25 / 0.30 / 0.40 / 0 | 0.011 / 0.05 / 0.10 / 0.15 / 0 | 0 |
+/// | 50 | 0.074 / 0.14 / 0.16 / 0.20 / 0 | 0.071 / 0.16 / 0.20 / 0.28 / 0 | 0.132 / 0.20 / 0.24 / 0.26 / 0 | 0.010 / 0.04 / 0.06 / 0.06 / 0 | 0 |
 ///
 /// Each cell reads mean / p95 / p99 / max / flows at or above 0.5 (SSDP and
 /// syslog read every unit `undecoded`, 54600 of 54600 each, so their cell is
 /// zero throughout). Over all 54600 datagrams of a protocol the three classes
-/// split `explained` / `residual` / `undecoded` as: mDNS 8847 / 45753 / 0, DNS
+/// split `explained` / `residual` / `undecoded` as: mDNS 4151 / 50449 / 0, DNS
 /// 3926 / 5927 / 44747, CoAP 6929 / 11796 / 35875, NTP 575 / 38160 / 15865.
+///
+/// The mDNS column is measured with a `Frame`'s records read as upstream
+/// reads a batch (`docs/flow-zenoh-verdict.md` §6.14): its records end at a
+/// transport id, and a record that does not decode, or whose id is in neither
+/// space, fails the batch. The DNS, CoAP and NTP columns were measured before
+/// that reading. It can only move a unit from `explained` to `residual`, never
+/// back, so their `explained` shares are bounds from above until they are
+/// measured again (the test prints every protocol's rows).
 ///
 /// What it says against the random table (n = 10: mean 0.061, max 0.40):
 ///
-/// * A flow of ten or more datagrams CAN reach a share of 0.5 on structured
-///   bytes that are not zenoh: mDNS in 5 of 600 flows of ten, DNS in 2 (up to
-///   0.60) and CoAP in 1. None does at twenty or more, where the widest is mDNS
-///   at 0.45 (n = 20) and 0.32 (n = 50). So a sentence bounded by "ten units,
-///   half read whole" is crossed by real protocols, and one bounded by twenty is
-///   not, with a margin of 0.05 at its narrowest.
-/// * The mean share is no better than random: mDNS and CoAP sit at 0.16 and
+/// * Under the earlier reading a flow of ten datagrams could reach a share of
+///   0.5 on structured bytes that are not zenoh: DNS in 2 of 600 (up to 0.60)
+///   and CoAP in 1. mDNS reached it in 5 of 600 then and reaches it in none
+///   now (at most 0.40 at ten): of the 8847 units the earlier reading took
+///   for whole, 4696 are batches upstream drops, a `Frame` whose records come
+///   to bytes of the names or the counts that upstream reads as neither a
+///   network message nor a transport one. None reaches 0.5 at twenty or more.
+/// * The mean share is no better than random: mDNS and CoAP sit at 0.08 and
 ///   0.13 against random's 0.06. The mDNS id is always 0, so every datagram
-///   starts with the same byte pair and reads the same way: 84% `residual`, 16%
-///   `explained`, never `undecoded`. The unit count does not separate it from
-///   zenoh as well as it separates random bytes.
+///   starts with the same byte pair: 92% `residual`, 8% `explained`, never
+///   `undecoded`. The unit count does not separate it from zenoh as well as it
+///   separates random bytes.
 /// * The share alone is no verdict, and the sequential test does not read it as
 ///   one: see `the_sequential_test_says_yes_to_no_generated_flow_of_another_protocol`.
 #[test]
@@ -3738,6 +3747,7 @@ fn structured_datagrams_of_other_protocols_read_by_their_first_byte() {
         // A failing bound prints the protocol's whole row set, so the table
         // above is regenerated from the message and not from a debugger.
         let rows_text = alloc::format!("{name}: {all:?}: {rows:?}");
+        std::println!("{rows_text}");
         for (n, mean, _, _, max, over) in &rows {
             if *n >= 20 {
                 assert!(
@@ -3754,8 +3764,12 @@ fn structured_datagrams_of_other_protocols_read_by_their_first_byte() {
             "ssdp" | "syslog" => assert_eq!(all.0 + all.1, 0, "text reads undecoded: {rows_text}"),
             "mdns" => {
                 let ten = rows.iter().find(|r| r.0 == 10).unwrap();
-                assert!(ten.5 >= 1, "mdns no longer reaches 0.5 at ten: {rows_text}");
-                assert_eq!(all.2, 0, "{rows_text}");
+                assert_eq!(
+                    ten.5, 0,
+                    "an mDNS flow of ten reaches 0.5 again, which only a unit read whole \
+                     where upstream drops its batch can do: {rows_text}"
+                );
+                assert_eq!(all, (4151, 50449, 0), "{rows_text}");
             }
             _ => {}
         }
