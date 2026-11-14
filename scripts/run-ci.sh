@@ -5580,6 +5580,9 @@ EOF
     list_dir="$(mktemp -d)"
     list_log="$(mktemp)"
     list_stub="$(mktemp)"
+    # The stub's own `$*` and `$WZ_LIST_LOG` are expanded when the STUB runs, so they are
+    # written out literally here.
+    # shellcheck disable=SC2016
     printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$WZ_LIST_LOG"\nexit 0\n' >"$list_stub"
     chmod +x "$list_stub"
     printf 'image ubuntu22\nclang\ncmake\npkg-config\n' >"${list_dir}/good.list"
@@ -5947,10 +5950,10 @@ layer_c1_cargo_test() {
     # that CANNOT join the workspace build, and a shard must still be checked
     # there.
     local nostd excludes=()
-    local -a shards=(--exclude wz-capture)
+    local -a sharded_out=(--exclude wz-capture)
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do excludes+=(--exclude "$member"); done
-    (cd crates && cargo test --workspace "${excludes[@]}" "${shards[@]}" \
+    (cd crates && cargo test --workspace "${excludes[@]}" "${sharded_out[@]}" \
         --exclude wz-runtime-tokio-multicast-tests --quiet)
 }
 

@@ -7697,7 +7697,8 @@ mod tests {
             who: &str,
         ) -> ((Vec<u8>, bool), (Vec<u8>, bool)) {
             let deadline = Instant::now() + Duration::from_secs(10);
-            let (mut got_remote, mut got_own) = (None, None);
+            let (mut got_remote, mut got_own): (Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>) =
+                (None, None);
             loop {
                 if let (Some(told_remote), Some(told_own)) = (&got_remote, &got_own) {
                     return (told_remote.clone(), told_own.clone());
@@ -8156,7 +8157,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|seen| seen.what == what && seen.zid == zid)
-            .map(|seen| seen.within.iter().any(|name| *name == span))
+            .map(|seen| seen.within.contains(&span))
             .collect()
     }
 
