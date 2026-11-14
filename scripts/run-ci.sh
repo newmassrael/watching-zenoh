@@ -2646,6 +2646,12 @@ layer_c0_test_discipline() {
     # `status` that DISAGREES with their jobs — so an implementation that
     # reaches for the word fails here instead of passing quietly.
     python3 scripts/lib/hosted_pending_kind.py --selftest || return 1
+    # Open-debt item 944: a run that ended `cancelled` is read by its jobs.
+    # Started and past its `timeout-minutes` is red; never started is a
+    # replacement. Offline for the same reason as the line above: the fixtures
+    # are three real runs, and the network stays in pre-push gate 2c.
+    python3 scripts/lib/hosted_cancelled_kind.py --selftest || return 1
+    python3 scripts/lib/newest_completed_ancestor_run.py --selftest || return 1
     # R2193 (open-debt item 532) — how many of this workspace's non-default
     # features gate a public item, DERIVED rather than estimated.
     #

@@ -40,6 +40,16 @@ history graded anything the answer is NONE, which the gate announces as "measure
 nothing" rather than as a pass. Earlier this module reported a cancelled run as
 AMBER, which was right while a cancellation could only be an anomaly.
 
+## Unless its jobs say it graded something (open-debt item 944)
+
+"Cancelled" is also the word for a run whose job STARTED and ran into its
+`timeout-minutes`, and for a run in which jobs failed and others then timed out
+(run 43058242762). With `--resolve-cancelled` each cancelled candidate is read
+through `hosted_cancelled_kind.py`, newest first and only until a graded run is
+found: a run whose jobs never started is still stepped over, a timed-out or
+failed one is graded red, a run stopped part way amber, and a run whose jobs
+could not be read is answered `UNREAD` rather than stepped over.
+
 ## Why the ancestor set is required
 
 A run's `headSha` may belong to another branch or to a commit this history never
@@ -53,12 +63,18 @@ Output (one TSV line):
     RED     <workflow>  <run id>  <conclusion>  <head sha>
     AMBER   <workflow>  <run id>  <conclusion>  <head sha>
     NONE    <number of runs considered>
+    UNREAD  <run id>  <why its jobs could not be read>
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import hosted_cancelled_kind  # noqa: E402
 
 GREEN = {"success"}
 RED = {"failure", "timed_out", "startup_failure"}
@@ -70,7 +86,7 @@ def classify(conclusion):
     return "RED" if conclusion in RED else "AMBER"
 
 
-def newest_completed(runs, ancestors):
+def newest_completed(runs, ancestors, resolve=None):
     """The newest completed run whose head commit is in `ancestors`.
 
     `runs` is what `gh run list --json` gives. Order is not trusted: gh returns
@@ -79,7 +95,9 @@ def newest_completed(runs, ancestors):
     present and input order only breaks ties.
 
     A cancelled run is skipped, like a pending one: it executed nothing, so it
-    is the newest run that GRADED something this function is asked for.
+    is the newest run that GRADED something this function is asked for. With
+    `resolve` (a run -> run function) a cancelled run is first read by its jobs,
+    newest first, and skipped only when they say it was replaced.
     """
     considered = []
     for i, r in enumerate(runs):
@@ -87,22 +105,28 @@ def newest_completed(runs, ancestors):
             continue
         if r.get("status") != "completed":
             continue
-        if r.get("conclusion") == "cancelled":
+        if r.get("conclusion") == "cancelled" and resolve is None:
             continue
         head = r.get("headSha") or ""
         if head not in ancestors:
             continue
         considered.append((r.get("createdAt") or "", -i, r))
-    if not considered:
-        return None
     considered.sort(key=lambda t: (t[0], t[1]), reverse=True)
-    return considered[0][2]
+    for _, _, r in considered:
+        if r.get("conclusion") == "cancelled":
+            r = resolve(r)
+            if r.get("conclusion") == "cancelled":
+                continue
+        return r
+    return None
 
 
-def verdict_line(runs, ancestors):
-    r = newest_completed(runs, ancestors)
+def verdict_line(runs, ancestors, resolve=None):
+    r = newest_completed(runs, ancestors, resolve)
     if r is None:
         return "NONE\t%d" % len(runs)
+    if r.get("conclusion") == "cancelled_unread":
+        return "UNREAD\t%s\t%s" % (r.get("databaseId"), r.get("cancelledDetail") or "")
     kind = classify(r.get("conclusion"))
     rid = str(r.get("databaseId"))
     head = (r.get("headSha") or "")[:12]
@@ -117,9 +141,9 @@ def selftest() -> int:
     A, B, C = "a" * 40, "b" * 40, "c" * 40
     anc = {A, B, C}
 
-    def case(label, runs, ancestors, want_prefix):
+    def case(label, runs, ancestors, want_prefix, resolve=None):
         nonlocal ok
-        got = verdict_line(runs, ancestors)
+        got = verdict_line(runs, ancestors, resolve)
         if not got.startswith(want_prefix):
             ok = False
             print("selftest FAIL: %s: want %s, got %s" % (label, want_prefix, got),
@@ -174,9 +198,39 @@ def selftest() -> int:
         run(1, "completed", "success", A, "2026-09-15T02:00:00Z"),
     ], set(), "NONE\t1"))
 
+    # Item 944: the cancelled runs read by their jobs. The payloads are the
+    # real ones `hosted_cancelled_kind.py` carries (a replaced run with no job,
+    # 42929004554's attempt that ran into its limit); run 7 cannot be read.
+    fx = hosted_cancelled_kind._fixtures()
+    payloads = {
+        "5": fx["real 43546308708: replaced, no job materialised"][0],
+        "6": fx["real 42929004554 attempt 1: one job past its limit"][0],
+    }
+
+    def reader(rid):
+        if rid not in payloads:
+            raise hosted_cancelled_kind.ReadError("run %s: no answer" % rid)
+        return payloads[rid]
+
+    def resolve(r):
+        return hosted_cancelled_kind.resolve_run(r, reader)
+
+    seen.add(case("a timed-out cancelled run is red, not a replacement", [
+        run(6, "completed", "cancelled", B, "2026-09-15T07:00:00Z"),
+        run(1, "completed", "success", A, "2026-09-15T02:00:00Z"),
+    ], anc, "RED\tCI\t6\ttimed_out", resolve))
+    seen.add(case("a replaced run is still stepped over when read by its jobs", [
+        run(5, "completed", "cancelled", C, "2026-09-15T08:00:00Z"),
+        run(1, "completed", "success", A, "2026-09-15T02:00:00Z"),
+    ], anc, "GREEN\t1", resolve))
+    seen.add(case("a cancelled run whose jobs cannot be read is not stepped over", [
+        run(7, "completed", "cancelled", C, "2026-09-15T08:00:00Z"),
+        run(1, "completed", "success", A, "2026-09-15T02:00:00Z"),
+    ], anc, "UNREAD\t7", resolve))
+
     # Anti-vacuity: a classifier that answered one word for everything would
     # pass a case list that happened to expect only that word.
-    if seen != {"GREEN", "RED", "AMBER", "NONE"}:
+    if seen != {"GREEN", "RED", "AMBER", "NONE", "UNREAD"}:
         ok = False
         print("selftest FAIL: the cases exercised only %s" % sorted(seen), file=sys.stderr)
 
@@ -189,6 +243,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--ancestors-file",
                    help="file of candidate commit shas, one per line; a run is "
                         "considered only when its headSha is one of them")
+    p.add_argument("--resolve-cancelled", action="store_true",
+                   help="read each cancelled candidate by its jobs (gh api) "
+                        "before stepping over it")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args(argv)
     if args.selftest:
@@ -205,7 +262,8 @@ def main(argv: list[str]) -> int:
     if not isinstance(runs, list):
         print("NONE\t0")
         return 0
-    print(verdict_line(runs, ancestors))
+    resolve = hosted_cancelled_kind.resolve_run if args.resolve_cancelled else None
+    print(verdict_line(runs, ancestors, resolve))
     return 0
 
 
