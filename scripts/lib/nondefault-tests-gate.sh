@@ -244,6 +244,12 @@ router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast
 accept_loop::tests::an_added_node_is_handed_to_the_planner_and_added_locators_name_no_node"
     "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
 router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast|--test=node_peer_open_e2e"
+    # Decision D10 over a real secure channel: two loops over mutual TLS, the waiting node's
+    # lifecycle queries asked in process, the hold, the reset and the close of a peer held by the
+    # session it opens, and the control of a peer whose key does not name its claim. The feature
+    # list is the file's own `cfg(all(..))`.
+    "wz-runtime-tokio|hook|router-connect-reconcile,session-close-ingress,transport-link-tls|\
+--test=passive_hold_over_mtls_e2e"
     # The close verb as a QUERY: the runtime half of it, in two rows for the reason
     # the row above gives (an integration TARGET and lib unit tests share no
     # build filter). The census reported five of them `unclaimed` on the hosted

@@ -31,6 +31,7 @@ mod open_remote_bound;
 mod outbound_dial;
 mod packed_writer_e2e;
 mod passive_dissect_e2e;
+mod passive_hold_over_mtls_e2e;
 mod pcap_dissect_e2e;
 mod pubkey_handshake_e2e;
 mod qos_e2e;
