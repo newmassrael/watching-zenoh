@@ -59,8 +59,9 @@ upstream citation form, the doc-link lane C0d, the cached count guards and the
 home-path range stay; the store-reason and prose-feature siblings, the C0e and
 C0f lanes, the two run-ci lints and this gate itself moved to DEFERRED, where
 the rule above (a default-region run of a deferred check is a finding) holds
-the move. The same decision added the push-lock row: a push to main holds the
-clone's push lock, which `scripts/land.sh` takes.
+the move. The same decision added the row that serialises pushes to main: today
+main has one writer, the landing queue's integrator, whose clone is marked
+`wz.land-integrator`, and `scripts/land.sh` submits to that queue.
 
 ## What this does NOT claim
 
@@ -152,12 +153,13 @@ REQUIRED: tuple[Required, ...] = (
         judges=True,
     ),
     Required(
-        ("wz-push.lock",),
-        "0.0 (one flock probe)",
-        "owner decision 2026-10-27: a push to main that did not hold the "
-        "clone's push lock raced another session's ledger round through this "
-        "hook's minute, and origin refused it after the hook passed; one batch "
-        "went round six times. `scripts/land.sh` takes the lock",
+        ("wz.land-integrator",),
+        "0.0 (one git config read)",
+        "owner decision 2026-10-27: a push to main raced another session's "
+        "ledger round through this hook's minute, and origin refused it after "
+        "the hook passed; one batch went round six times. Main has one writer, "
+        "the landing queue's integrator (bx RFC 0024), whose clone carries the "
+        "marker; `scripts/land.sh` submits to it",
     ),
 )
 
