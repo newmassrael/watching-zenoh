@@ -1149,13 +1149,12 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                 // nothing to dial runs no node here: upstream's would scout for a
                 // router, and this expansion emits no scouting run.
                 //
-                // R2091b read the opposite off a live zenohd, which named no
-                // locator for `{ mode: "client", listen: [..] }`. A zenohd prints
-                // only the locators that are not loopback
-                // (`zenoh/src/net/runtime/orchestrator.rs` @
-                // `for locator in &locators_noloopback {`), and the endpoint read
-                // was a loopback one, so the reading did not show whether it bound;
-                // the source binds it before it dials.
+                // R2091b read the opposite off a live zenohd. Measured again on a
+                // zenohd 1.10.2 (2026-11-14, a build machine): a client given
+                // `listen: ["tcp/127.0.0.1:17449"]` and a router to connect to holds
+                // a socket listening on 17449 and logs `Zenoh can be reached at:
+                // tcp/127.0.0.1:17449`; the same client with no listen list holds
+                // none. The source binds the listeners before it dials.
                 (false, WhatAmI::Client, false) if selected.is_none() => {
                     KeyEffect::WithheldFromThisRun(
                         "a client with nothing to dial runs no node here",

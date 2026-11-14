@@ -4706,9 +4706,13 @@ const MODE_TABLE_FIELDS: &[&str] = &["router", "peer", "client"];
 /// it is what a real zenohd does with the very same file, and wz's silence was
 /// the divergence. Measured against a real zenohd rather than inferred: given
 /// `{ mode: "router", connect: [..] }` it answers on port 7447 on every
-/// interface; given the same document as `peer` it answers on an ephemeral port;
-/// and given `{ mode: "client", listen: [..] }` it starts and binds NOTHING,
-/// naming no locator at all.
+/// interface; given the same document as `peer` it answers on an ephemeral port.
+/// A client has no default listener: given `{ mode: "client", connect: [..] }` a
+/// zenohd 1.10.2 holds no listening socket. A client that NAMES a listen list binds
+/// it: given `{ mode: "client", listen: ["tcp/127.0.0.1:17449"], connect: [..] }`
+/// it holds a socket listening on 17449 and logs it as a locator (measured
+/// 2026-11-14 on a build machine; the reading of round R2091b, whose document named
+/// no router to connect to, saw no locator).
 ///
 /// A document that NAMES the key -- including as an explicitly EMPTY list --
 /// suppresses this, and that is upstream's behaviour too (measured: an empty
