@@ -286,6 +286,51 @@ fn a_client_node_refuses_a_second_north_bound_remote() {
     );
 }
 
+/// The end of the initial declarations, the `DeclareFinal` of interest id 0, passes between two
+/// peers of the north region of a peer node and on no other face: the pin's peer hat sends it on
+/// a face of its north region whose remote is north-bound as well
+/// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`). A peer the partition
+/// places south of a client node, or south of a peer node, is sent none and owes none; a peer of a
+/// peer node's own region, the control, is sent one and owes one. Turned red by a rule that reads
+/// the two modes and the announced bound alone, which places the south peer north.
+#[test]
+fn only_a_peer_of_a_peer_nodes_north_region_ends_its_initial_declarations() {
+    let ends_sent = |sink: &RecordingLinkDriver| {
+        messages(sink)
+            .iter()
+            .filter(|m| match m {
+                NetworkMessage::Declare(declare) => {
+                    declare.interest_id == Some(INITIAL_INTEREST_ID)
+                        && matches!(declare.body, DeclareOwnedVariant::CodecZenohDeclFinal(_))
+                }
+                _ => false,
+            })
+            .count()
+    };
+    let peer_face_of = |node: RouterForwarder| {
+        let (peer, sink) = face(zid(0xCC), WIRE_PEER);
+        node.register(FaceId(1), &peer);
+        (ends_sent(&sink), node.initial_declares_pending())
+    };
+    assert_eq!(
+        peer_face_of(client_node()),
+        (0, 0),
+        "a peer south of a client node"
+    );
+    assert_eq!(
+        peer_face_of(
+            RouterForwarder::peer(zid(0x05)).with_south_partition(south_of_clients_and_peers())
+        ),
+        (0, 0),
+        "a peer south of a peer node"
+    );
+    assert_eq!(
+        peer_face_of(RouterForwarder::peer(zid(0x05))),
+        (1, 1),
+        "a peer of a peer node's own region"
+    );
+}
+
 /// The client hat sends north every Put whose source is south, as the node it is attached to
 /// declares only what the client asked for (`zenoh/src/net/routing/hat/client/pubsub.rs` @
 /// `dst.has_unfinalized_subscriber_interest = true`), and sends it no Put that came from it.

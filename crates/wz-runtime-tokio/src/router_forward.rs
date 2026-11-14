@@ -378,7 +378,7 @@ use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::driver_loop::MulticastPeerId;
 #[cfg(feature = "router-multicast-faces")]
 use wz_session_core::extbound::multicast_region_and_bound_of;
-use wz_session_core::extbound::{sends_initial_interest_final, Bound, Region, INITIAL_INTEREST_ID};
+use wz_session_core::extbound::{Bound, Region, INITIAL_INTEREST_ID};
 use wz_session_core::face::{FaceEventKind, FaceEventSink, FaceSnapshot};
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::linkstate_oam::{
@@ -5082,25 +5082,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// held, and a subscriber declared after the open is told of what comes alive after it and
     /// not of what was already there.
     ///
-    /// The expectation is the sender's decision seen from the receiving end
-    /// ([`sends_initial_interest_final`] with the roles swapped), and it is zero on a node that is
-    /// not a peer and on a peer hat that runs wz's link-state extension, which neither sends nor
-    /// expects the message.
+    /// The expectation is the sender's decision, which is one decision for both ends of the face
+    /// ([`exchanges_initial_declarations`](Self::exchanges_initial_declarations)), and it is zero
+    /// on a node that is not a peer and on a peer hat that runs wz's link-state extension, which
+    /// neither sends nor expects the message.
     pub fn initial_declares_pending(&self) -> usize {
-        if self.tables.node_mode != WhatAmI::Peer {
-            return 0;
-        }
         self.tables
             .faces
             .values()
             .filter(|state| {
                 !state.initial_final
-                    && self.tables.face_based(state.tier)
-                    && sends_initial_interest_final(
-                        peer_whatami_routing(&state.runtime.actions),
-                        self.tables.node_mode,
-                        state.runtime.actions.peer_remote_bound(),
-                    )
+                    && self.exchanges_initial_declarations(state.tier, &state.runtime.actions)
             })
             .count()
     }
@@ -12656,29 +12648,46 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// That message is what the other end's open waits for, so that every declaration this node
     /// held when the link came up has reached it before its program can declare anything. It is
     /// sent where the replay is, in the same order on the same face, and by the same decision:
-    /// two peers that meet north-bound ([`sends_initial_interest_final`]) in a peer hat that
-    /// replays. A peer hat running wz's link-state extension replays nothing (the tree's
-    /// re-advertise tells the remote), so it ends nothing, and a router, a client and a pair that
-    /// is not mutually north-bound are in pull mode, where the remote asks and is answered.
+    /// two peers that meet north-bound in a peer hat that replays
+    /// ([`exchanges_initial_declarations`](Self::exchanges_initial_declarations)). A peer hat
+    /// running wz's link-state extension replays nothing (the tree's re-advertise tells the
+    /// remote), so it ends nothing, and a router, a client and a pair that is not mutually
+    /// north-bound are in pull mode, where the remote asks and is answered.
     fn end_initial_declarations(&self, face: FaceId, tier: Region) {
-        if self.tables.node_mode != WhatAmI::Peer || !self.tables.face_based(tier) {
-            return;
-        }
         let Some(state) = self.tables.faces.get(&face) else {
             return;
         };
-        let remote = peer_whatami_routing(&state.runtime.actions);
-        if !sends_initial_interest_final(
-            self.tables.node_mode,
-            remote,
-            state.runtime.actions.peer_remote_bound(),
-        ) {
+        if !self.exchanges_initial_declarations(tier, &state.runtime.actions) {
             return;
         }
         self.send_one_to_face(
             face,
             NetworkMessage::Declare(Box::new(build_declare_final_reply(INITIAL_INTEREST_ID))),
         );
+    }
+
+    /// Whether this node and the remote of a face of `tier` end their initial declarations to each
+    /// other with the `DeclareFinal` of [`INITIAL_INTEREST_ID`]. The pin's peer hat does on a face
+    /// of its NORTH region whose remote it placed north-bound as well
+    /// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`), which is a face
+    /// between two peers of one region on the node of mode Peer and on no other node: a peer
+    /// region south of a node (a router's, a client node's, a subregion of a peer node's custom
+    /// partition) is in pull mode, and so is a gateway. A peer hat running wz's link-state
+    /// extension neither sends nor expects the message.
+    ///
+    /// The remote's bound is placed again from `actions` by the rules that placed the face in
+    /// `tier` ([`place_face`](Self::place_face)): the partition they read is fixed before any face
+    /// registers, so the answer is the one the face was held by. The two modes and the bound the
+    /// remote announced are not enough on their own: on a custom partition they place a peer of a
+    /// south subregion north, and the node would send that peer a message it never answers and
+    /// wait for one it never sends.
+    fn exchanges_initial_declarations(&self, tier: Region, actions: &SessionLinkActions) -> bool {
+        is_peer_hat(tier, self.tables.node_mode)
+            && tier.bound().is_north()
+            && self.tables.face_based(tier)
+            && self
+                .place_face(actions)
+                .is_ok_and(|(_, remote_bound)| remote_bound.is_north())
     }
 
     fn send_one_to_face(&self, face: FaceId, msg: NetworkMessage) {

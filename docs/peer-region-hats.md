@@ -979,12 +979,21 @@ client hat's own gateway view is never asked, by the pin or by wz: a message fro
 filtered by the view of the region it enters, and one into the north by the view of the region
 it leaves.
 
+### The initial declarations follow the face's placement
+
+Found while comparing the row of `DeclareFinal(0)`: the forwarder decided it from the two modes
+and the bound the remote announced (`sends_initial_interest_final`, the auto preset's rule),
+which on a custom partition places a peer of a south subregion north. A peer node with such a
+subregion sent its peers the message, which a pin peer never answers, and its open waited out
+the window for theirs. `OnTables::exchanges_initial_declarations` asks what the pin's peer hat
+asks (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`): a face of the
+north region of the peer hat whose remote the node placed north-bound, by the same `place_face`
+that placed the face. The send (`end_initial_declarations`) and the wait
+(`initial_declares_pending`) both read it, and on the auto preset it answers as the old rule
+did. `only_a_peer_of_a_peer_nodes_north_region_ends_its_initial_declarations` holds it.
+
 ### Open
 
-- **A peer node with a south peer subregion still sends `DeclareFinal(0)` to the peers of
-  that subregion**, and its open waits for theirs: `sends_initial_interest_final` reads the
-  two modes and the remote's bound and not the face's region, where the pin's peer hat asks
-  for a north-bound face. A client node no longer does either.
 - Regions scenario 1 is the end-to-end witness of the whole hat, the token plane included;
   run it before and after (`Z8_ONLY=scenario1:: Z8_REPEAT=<n>` on the `regions` file,
   section 13's lane notes).
