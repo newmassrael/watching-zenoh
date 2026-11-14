@@ -5410,10 +5410,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // its cookie's length is a `usize`.
         let head_len = if echo_inbound_cookie {
             R::with_mutex_mut(&self.inbound_cookie, |cookie| {
-                open_head_len(&self.params, initial_sn, is_ack, cookie.as_deref(), has_ext)
+                open_head_len(&self.params, initial_sn, is_ack, cookie.as_deref())
             })
         } else {
-            open_head_len(&self.params, initial_sn, is_ack, None, has_ext)
+            open_head_len(&self.params, initial_sn, is_ack, None)
         };
         let want = head_len + chain_len;
         self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {

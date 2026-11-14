@@ -95,6 +95,12 @@ const CODECS: &[&str] = &[
     "hello",
     "ext_entry",
     "ext_envelope",
+    // The whole transport messages: the header, the body document above and
+    // the extension chain, so no transport header or chain is written by hand.
+    "transport_init",
+    "transport_open",
+    "transport_close",
+    "transport_keep_alive",
     "msg_put",
     "msg_del",
     "wireexpr_local",
@@ -279,6 +285,10 @@ const CODEC_GATES: &[(&str, &str)] = &[
     ("join", "codec-join"),
     ("hello", "codec-hello"),
     ("keep_alive", "codec-keep-alive"),
+    ("transport_init", "codec-init-body"),
+    ("transport_open", "codec-open-body"),
+    ("transport_close", "codec-close"),
+    ("transport_keep_alive", "codec-keep-alive"),
     ("push", "codec-push"),
     ("response_final", "codec-response-final"),
     ("query_value_zbuf", "codec-request"),

@@ -1066,6 +1066,19 @@ pub mod frame_encode;
 ))]
 pub mod handshake_encode;
 
+/// The handshake's transport messages as `handshake_encode` writes them and
+/// `inbound` reads them, against the documents that state each whole message.
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive",
+    feature = "transport-keepalive"
+))]
+mod transport_message_parity;
+
 /// Item 895 — transport messages written from EXPLICIT fields (every semantic
 /// field set by the caller, every derived byte computed here) and the stream
 /// prefix a link puts in front of them. The session TX path's
