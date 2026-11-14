@@ -4584,9 +4584,11 @@ int main(void) {
      * memory or began it. A key arrives; nothing retires.
      * 3: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
      * flow. A key arrives; nothing retires.
-     * 4: every row is judged. Values move; no key arrives. */
+     * 4: every row is judged. Values move; no key arrives.
+     * 5: a query reply carrying a put is read as a published sample is (its
+     * CRC judged, its counter and timeout not). Values move; no key arrives. */
     revisioned[18].name = "selection_since";
-    revisioned[18].revision = 4;
+    revisioned[18].revision = 5;
     revisioned[18].doc = NULL;
     {
         wz_dissect_live *quiet = NULL;
