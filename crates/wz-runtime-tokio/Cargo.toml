@@ -82,6 +82,12 @@ path = "src/lib.rs"
 # (`docs/zenoh-api-on-the-engine.md`, Z8). Off the data path, and not even a check made where no
 # subscriber of `tracing` is installed. Turned on by the facade crate, `wz-zenoh`.
 tracing-spans = ["dep:tracing"]
+# Every task the engine spawns carries the tracing span of the code that spawned it, as upstream's
+# `tracing-instrument` makes `zenoh-runtime` and `zenoh-task` do for upstream's transport and routing
+# tasks: the futures handed to a subsystem runtime, to the ambient one and to the writer and service
+# seams that take a runtime handle (`runtime_pool::in_caller_span`). Turned on by the facade's
+# `tracing-instrument`.
+tracing-instrument = ["dep:tracing"]
 # R311y492 (§5.22) — the DYNAMIC PLUGIN HOST, and with it the four atoms
 # R311y256 deprecated. That round's reasoning was correct and conditional: the
 # other four "exist only to SERVE dynamic loading, so if this is ever built they
@@ -2363,6 +2369,9 @@ default-features = false
 features = ["reassembly"]
 
 [dev-dependencies]
+# The witness of `tracing-instrument` (`runtime_pool`'s span test) needs a subscriber that gives
+# spans ids; the registry is the smallest, and the family's runtime crate takes the same one.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 # DEV-ONLY, for the witness that a base64-wrapped PEM (pico's `*_BASE64` key shape) reaches the
 # TLS config through `decode_base64_pem` (`tests/tls_pem_mtls_e2e.rs`), which encodes the token.
 # The production side decodes through `wz-tls-pem`.

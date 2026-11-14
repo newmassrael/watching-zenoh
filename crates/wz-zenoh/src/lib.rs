@@ -405,10 +405,13 @@ pub mod timestamp_stack {
 }
 
 /// What zenoh's own crates and the language bindings reach into. Of it the traits of the builders
-/// are here, which the builders of a sample implement; the rest (the runtime, the plugins, the
-/// helpers re-exported from the family's crates) arrives with the slices that give them a body.
+/// are here, which the builders of a sample implement, and the task controller of `zenoh-task`,
+/// which the ecosystem's crates spawn and stop their tasks through; the rest (the plugins, the
+/// other helpers re-exported from the family's crates) arrives with the slices that give them a
+/// body.
 #[zenoh_macros::internal]
 pub mod internal {
+    pub use zenoh_task::{TaskController, TerminatableTask};
     /// The node several sessions share, and the session that is made on it
     /// ([`session::init`](crate::session::init)).
     pub mod runtime {

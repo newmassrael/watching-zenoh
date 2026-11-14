@@ -75,6 +75,7 @@ members = [
     "wz-zenoh-result",
     "wz-zenoh-runtime",
     "wz-zenoh-core",
+    "wz-zenoh-task",
     "wz-zenoh-keyexpr",
     "wz-zenoh-macros",
     "wz-zenoh-collections",

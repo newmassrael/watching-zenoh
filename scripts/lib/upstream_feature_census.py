@@ -245,12 +245,14 @@ ANSWERS: tuple[tuple[str, str | None, str], ...] = (
     (
         "tracing-instrument",
         "tracing-instrument",
-        "the facade's forwarding feature, to `zenoh-runtime`'s: the caller's "
-        "tracing span rides onto the runtime a future is spawned on. An "
-        "instrumentation axis, not a protocol capability, and the one the "
-        "family crates carried before the facade did: `zenoh-runtime`'s own "
-        "test runs the spawn with the feature on and off, so a feature that "
-        "toggles nothing would red there",
+        "the facade's forwarding feature, to `zenoh-runtime`'s, `zenoh-task`'s "
+        "and the engine's (`wz-runtime-tokio`): the caller's tracing span rides "
+        "onto the runtime a future is spawned on, for every spawn of the "
+        "family's pool, of a `TaskController` or `TerminatableTask`, and of the "
+        "engine crate, whose spawns of a future all go through "
+        "`runtime_pool::in_caller_span`. An instrumentation axis, not a "
+        "protocol capability: the three crates' own tests run a spawn with the "
+        "feature on and off, so a feature that toggles nothing would red there",
     ),
     (
         "unstable",
@@ -297,11 +299,14 @@ ANSWERS: tuple[tuple[str, str | None, str], ...] = (
 # than upstream's: a PARTIAL row is one whose missing part is KNOWN and named.
 PARTIAL: dict[str, str] = {
     "tracing-instrument": (
-        "open-debt item 201 owns the half that is not here: upstream's feature "
-        "also forwards to `zenoh-task`, which the family has no crate for, and "
-        "its transport and routing tasks run on the engine, whose spawns on "
-        "`wz-runtime-tokio` carry no span. What is here is the spawns the "
-        "facade makes through `ZRuntime`"
+        "open-debt item 201 owns the half that is not here: the facade opens "
+        "its session on the C ABI drive (`wz-capi-core`), which runs it on a "
+        "thread and a runtime of its own and spawns its dial legs and faces "
+        "there, so the span current at `open` reaches none of them, and what "
+        "they spawn on the engine carries the drive thread's span, which is "
+        "none. Upstream's `open` spawns its transport tasks from the caller's "
+        "context. What is here is every spawn of the family's crates and of "
+        "the engine crate"
     ),
 }
 

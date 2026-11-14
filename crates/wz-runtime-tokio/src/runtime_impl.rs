@@ -110,7 +110,7 @@ impl Runtime for TokioRuntime {
         F::Output: Send + 'static,
     {
         TokioJoinHandle {
-            inner: tokio::spawn(fut),
+            inner: tokio::spawn(crate::runtime_pool::in_caller_span(fut)),
         }
     }
 
