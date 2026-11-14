@@ -188,7 +188,8 @@ pub enum OpenRefusal {
     /// mechanism. A node told to demand credentials that starts and admits everyone is worse than
     /// one that does not start.
     Security,
-    /// A certificate or key file `transport/link/tls` names cannot be read.
+    /// A certificate or key file `transport/link/tls` names cannot be read, or the document
+    /// states `transport/link/tls` in a build with neither a `tls/` nor a `quic/` link.
     TlsMaterial,
     /// `id` is not text zenoh accepts as an identity. A config that named an identity and got
     /// another would be a silent fallback.
@@ -498,11 +499,16 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePol
 /// The refusal of a document that states an instruction to `path`, a key whose reader the runtime
 /// was built without ([`ConfigIngestError::NotInBuild`]): the refusal a build that read the key and
 /// could not hold its mechanism gives, so the open answers the same code whichever half is missing.
-/// The traffic policy's keys are [`OpenRefusal::Security`], as [`node_security_of`] refuses them.
+/// The traffic policy's keys are [`OpenRefusal::Security`], as [`node_security_of`] refuses them;
+/// the certificate material of a build with no `tls/` or `quic/` link is
+/// [`OpenRefusal::TlsMaterial`]; a south kept apart in a build with no region hat is
+/// [`OpenRefusal::GatewayNotCarried`], as [`OpenPlan::refuse_uncarried_south`] refuses it.
 fn refusal_of_unbuilt_key(path: &str) -> OpenRefusal {
     match path {
-        "low_pass_filter" | "downsampling" => OpenRefusal::Security,
+        "low_pass_filter" | "downsampling" | "qos/network" => OpenRefusal::Security,
         _ if path.starts_with("access_control/") => OpenRefusal::Security,
+        _ if path.starts_with("transport/link/tls/") => OpenRefusal::TlsMaterial,
+        "gateway/south" => OpenRefusal::GatewayNotCarried,
         _ => OpenRefusal::DocumentUnreadable,
     }
 }
@@ -1378,21 +1384,34 @@ mod tests {
     use super::*;
 
     /// A key whose reader the runtime was built without draws the refusal of its mechanism: the
-    /// traffic policy's keys are a security refusal, and no other key is.
+    /// traffic policy's keys are a security refusal, the certificate material a TLS one, a south
+    /// kept apart the gateway's, and any other key the unreadable document's.
     #[test]
-    fn the_traffic_policy_keys_are_refused_as_security_and_no_other_key_is() {
-        for key in [
-            "low_pass_filter",
-            "downsampling",
-            "access_control/enabled",
-            "access_control/rules",
+    fn a_key_out_of_the_build_draws_the_refusal_of_its_mechanism() {
+        for (key, refusal) in [
+            ("low_pass_filter", OpenRefusal::Security),
+            ("downsampling", OpenRefusal::Security),
+            ("qos/network", OpenRefusal::Security),
+            ("access_control/enabled", OpenRefusal::Security),
+            ("access_control/rules", OpenRefusal::Security),
+            (
+                "transport/link/tls/root_ca_certificate",
+                OpenRefusal::TlsMaterial,
+            ),
+            ("transport/link/tls/so_rcvbuf", OpenRefusal::TlsMaterial),
+            ("gateway/south", OpenRefusal::GatewayNotCarried),
+            ("transport/link/protocols", OpenRefusal::DocumentUnreadable),
         ] {
-            assert_eq!(refusal_of_unbuilt_key(key), OpenRefusal::Security, "{key}");
+            assert_eq!(refusal_of_unbuilt_key(key), refusal, "{key}");
         }
-        assert_eq!(
-            refusal_of_unbuilt_key("transport/link/tls/root_ca_certificate"),
-            OpenRefusal::DocumentUnreadable
-        );
+        // Every key a build can be made without is given one of the mechanism refusals.
+        for (key, _, _) in wz_runtime_tokio::zenoh_config::CAPABILITY_HONOURED_KEYS {
+            assert_ne!(
+                refusal_of_unbuilt_key(key),
+                OpenRefusal::DocumentUnreadable,
+                "{key} has no mechanism refusal"
+            );
+        }
     }
 
     /// The node a config document reads as, through the one reader an open uses.

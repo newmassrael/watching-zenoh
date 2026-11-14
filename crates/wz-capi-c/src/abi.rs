@@ -1630,8 +1630,8 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 ///
 /// It moves to 15 with no new symbol: [`wz_capi_c_config_disposition`] has a fourth answer,
 /// [`WZ_CAPI_C_CONFIG_NOT_IN_BUILD`], and [`wz_capi_c_config_honoured`] lists the keys THIS
-/// library honours, which leaves out the keys of a capability it was built without (the access
-/// control, low-pass and downsampling keys in a build without `interceptors`).
+/// library honours, which leaves out the keys of a capability it was built without (the traffic
+/// policy's in a build without `interceptors`, for one).
 pub const WZ_CAPI_C_ABI_REVISION: i32 = 15;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
@@ -1728,9 +1728,11 @@ pub unsafe extern "C" fn wz_capi_c_layout(out: *mut usize, cap: usize) -> usize 
 ///
 /// The list is what this library honours, which is `HONOURED_CONFIG_KEYS` less the keys whose
 /// reader is a capability the library was built without
-/// ([`wz_runtime_tokio::zenoh_config::CAPABILITY_HONOURED_KEYS`]; `access_control`,
-/// `low_pass_filter` and `downsampling` in a build without `interceptors`). Two libraries built with different capabilities answer
-/// different lists, and that difference is the one the door exists to report. For such a key
+/// ([`wz_runtime_tokio::zenoh_config::CAPABILITY_HONOURED_KEYS`]): the traffic policy's keys in
+/// a build without `interceptors`, `transport/link/tls` in one with neither a `tls/` nor a `quic/`
+/// link, `gateway/south` in one without `router-node`. Two libraries built with different
+/// capabilities answer different lists, and that difference is the one the door exists to
+/// report. For such a key
 /// [`wz_capi_c_config_disposition`] answers [`WZ_CAPI_C_CONFIG_NOT_IN_BUILD`].
 ///
 /// # Safety

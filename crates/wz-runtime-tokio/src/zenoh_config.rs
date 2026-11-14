@@ -2460,12 +2460,8 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
 /// ([`ConfigKeyDisposition::NotInBuild`]).
 ///
 /// The flag is `cfg!` of the feature, so the table is the same text in every build and the one
-/// fact it varies by is stated beside the feature's name.
-///
-/// `qos/network` is not a row although its enforcer is a capability (`access-qos-overwrite`): the
-/// facade offers no feature that selects it, so a node built through the facade, which reads
-/// the key today and drops it for want of a sink, would refuse every document that states it.
-/// Its reader stays in every build until the facade can select the capability.
+/// fact it varies by is stated beside the feature's name. The certificate material of
+/// `transport/link/tls` is the `quic/` link's as well, so its keys are built with either link.
 pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
     (
         "low_pass_filter",
@@ -2476,6 +2472,64 @@ pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
         "downsampling",
         "access-downsampling",
         cfg!(feature = "access-downsampling"),
+    ),
+    (
+        "qos/network",
+        "access-qos-overwrite",
+        cfg!(feature = "access-qos-overwrite"),
+    ),
+    (
+        "transport/link/tls/root_ca_certificate",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/listen_certificate",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/listen_private_key",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/connect_certificate",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/connect_private_key",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/enable_mtls",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    (
+        "transport/link/tls/verify_name_on_connect",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
+    // The socket buffers of a `tls/` link, which the `quic/` link does not have.
+    (
+        "transport/link/tls/so_rcvbuf",
+        "transport-link-tls",
+        cfg!(feature = "transport-link-tls"),
+    ),
+    (
+        "transport/link/tls/so_sndbuf",
+        "transport-link-tls",
+        cfg!(feature = "transport-link-tls"),
+    ),
+    // The partition a node places its remotes by, which only the region hats hold
+    // (`RouterForwarder::with_south_partition`).
+    (
+        "gateway/south",
+        "routing-router-hat",
+        cfg!(feature = "routing-router-hat"),
     ),
     (
         "access_control/default_permission",
@@ -2503,6 +2557,15 @@ pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
         cfg!(feature = "access-acl"),
     ),
 ];
+
+/// The capability of the certificate material's keys in [`CAPABILITY_HONOURED_KEYS`]: either link
+/// that reads it.
+const TLS_MATERIAL_CAPABILITY: &str = "transport-link-tls or transport-link-quic";
+/// Whether this build has [`TLS_MATERIAL_CAPABILITY`].
+const TLS_MATERIAL_BUILT: bool = cfg!(any(
+    feature = "transport-link-tls",
+    feature = "transport-link-quic"
+));
 
 /// The capability `path`'s reader is compiled under, when it is one of
 /// [`CAPABILITY_HONOURED_KEYS`]: the feature, and whether this build has it.
@@ -4463,7 +4526,8 @@ pub enum ConfigIngestError {
     NotInBuild {
         /// The key path.
         path: &'static str,
-        /// The feature of this crate the key's reader is compiled under.
+        /// The feature of this crate the key's reader is compiled under, or the features
+        /// either of which compiles it.
         capability: &'static str,
     },
 }
@@ -4526,7 +4590,10 @@ fn honoured<'a>(doc: &'a Json5Value, path: &str) -> Option<&'a Json5Value> {
 #[cfg(not(all(
     feature = "access-acl",
     feature = "access-downsampling",
-    feature = "access-quota"
+    feature = "access-quota",
+    feature = "access-qos-overwrite",
+    feature = "transport-link-tls",
+    feature = "routing-router-hat"
 )))]
 fn refuse_unbuilt_instruction(
     doc: &Json5Value,
@@ -4546,10 +4613,18 @@ fn refuse_unbuilt_instruction(
 #[cfg(not(all(
     feature = "access-acl",
     feature = "access-downsampling",
-    feature = "access-quota"
+    feature = "access-quota",
+    feature = "access-qos-overwrite"
 )))]
 fn is_empty_list(value: &Json5Value) -> bool {
     matches!(value, Json5Value::Array(items) if items.is_empty())
+}
+
+/// The value of a key whose every spelling is an instruction: a path, a size. Only its absence,
+/// or `null`, states nothing, and those never reach the predicate.
+#[cfg(not(feature = "transport-link-tls"))]
+fn never_states_nothing(_: &Json5Value) -> bool {
+    false
 }
 
 /// The honoured keys upstream spells as `ModeDependentValue<T>` — either the
@@ -6359,6 +6434,14 @@ fn string_list_of(
 /// This is where wz stays exactly as strict as upstream rather than more
 /// permissive: upstream deserializes these into enums, so an unknown literal is
 /// a parse error there and must be one here.
+///
+/// The interceptor keys' readers are its callers, each compiled with its capability.
+#[cfg(any(
+    feature = "access-acl",
+    feature = "access-downsampling",
+    feature = "access-quota",
+    feature = "access-qos-overwrite"
+))]
 fn enum_list_of(
     value: &Json5Value,
     path: &'static str,
@@ -6579,6 +6662,7 @@ pub struct QosNetworkItemConf {
 /// `"a..b"`, `"a.."`, `"..b"` or `".."`: an inclusive range of sizes whose bounds may each be
 /// left out. Upstream's `ConfRange` reads it the same way, and refuses a text without `..` and a
 /// bound that is not an unsigned integer.
+#[cfg(feature = "access-qos-overwrite")]
 fn payload_range_of(text: &str) -> Option<(Option<u64>, Option<u64>)> {
     let (start, end) = text.split_once("..")?;
     let bound = |b: &str| -> Option<Option<u64>> {
@@ -6592,6 +6676,7 @@ fn payload_range_of(text: &str) -> Option<(Option<u64>, Option<u64>)> {
 }
 
 /// The literal `value` spells in `table`, or `None`.
+#[cfg(feature = "access-qos-overwrite")]
 fn literal_in<T: Copy>(value: &Json5Value, table: &[(&str, T)]) -> Option<T> {
     let Json5Value::String(text) = value else {
         return None;
@@ -6600,6 +6685,7 @@ fn literal_in<T: Copy>(value: &Json5Value, table: &[(&str, T)]) -> Option<T> {
 }
 
 /// `qos/network` as a list of [`QosNetworkItemConf`].
+#[cfg(feature = "access-qos-overwrite")]
 fn qos_network_items_of(
     value: &Json5Value,
     path: &'static str,
@@ -7365,10 +7451,19 @@ impl ZenohNodeConfig {
         // Item 751 — the partition, read whole by `gateway_south_of`. `honoured`
         // is right here: `null` is the preset's own spelling and so, like an
         // absent key, leaves the default standing.
+        #[cfg(feature = "routing-router-hat")]
         if let Some(value) = honoured(&doc, "gateway/south") {
             out.gateway_south = gateway_south_of(value)?;
             named.push("gateway/south");
         }
+        // A build without the region hats holds no partition, and reads only the
+        // `auto` preset, in either of its spellings.
+        #[cfg(not(feature = "routing-router-hat"))]
+        refuse_unbuilt_instruction(&doc, "gateway/south", |value| match value {
+            Json5Value::String(preset) => preset == "auto",
+            Json5Value::Object(fields) => is_the_tagged_auto_preset(fields),
+            _ => false,
+        })?;
         if let Some(v) = want_u64(&doc, "transport/unicast/accept_timeout")? {
             out.accept_timeout_ms = v;
             named.push("transport/unicast/accept_timeout");
@@ -7536,11 +7631,14 @@ impl ZenohNodeConfig {
         refuse_unbuilt_instruction(&doc, "downsampling", is_empty_list)?;
         // `qos/network`, the third list of the interceptor keys, and an empty list is NAMED for
         // the reason its siblings' are: the schema default is the empty list, so "no rule" and
-        // "said nothing" are one instruction. Read in every build (see `CAPABILITY_HONOURED_KEYS`).
+        // "said nothing" are one instruction.
+        #[cfg(feature = "access-qos-overwrite")]
         if let Some(value) = honoured(&doc, "qos/network") {
             out.qos_network = qos_network_items_of(value, "qos/network")?;
             named.push("qos/network");
         }
+        #[cfg(not(feature = "access-qos-overwrite"))]
+        refuse_unbuilt_instruction(&doc, "qos/network", is_empty_list)?;
         // R2652 — the five `access_control/*` keys. Read INDIVIDUALLY, because
         // each is its own honoured key and a document may name any subset; they
         // become one unit only at expansion, where upstream's own `init` builds
@@ -7683,33 +7781,63 @@ impl ZenohNodeConfig {
             out.shm_pool_size = v;
             named.push("transport/shared_memory/transport_optimization/pool_size");
         }
-        if let Some(v) = want_string(&doc, "transport/link/tls/root_ca_certificate", "a path")? {
-            out.tls_root_ca = Some(v);
-            named.push("transport/link/tls/root_ca_certificate");
+        // The certificate material of the `tls/` and `quic/` links, read where the
+        // build has either link (`CAPABILITY_HONOURED_KEYS`).
+        #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
+        {
+            if let Some(v) = want_string(&doc, "transport/link/tls/root_ca_certificate", "a path")?
+            {
+                out.tls_root_ca = Some(v);
+                named.push("transport/link/tls/root_ca_certificate");
+            }
+            if let Some(v) = want_string(&doc, "transport/link/tls/listen_certificate", "a path")? {
+                out.tls_listen_certificate = Some(v);
+                named.push("transport/link/tls/listen_certificate");
+            }
+            if let Some(v) = want_string(&doc, "transport/link/tls/listen_private_key", "a path")? {
+                out.tls_listen_private_key = Some(v);
+                named.push("transport/link/tls/listen_private_key");
+            }
+            if let Some(v) = want_string(&doc, "transport/link/tls/connect_certificate", "a path")?
+            {
+                out.tls_connect_certificate = Some(v);
+                named.push("transport/link/tls/connect_certificate");
+            }
+            if let Some(v) = want_string(&doc, "transport/link/tls/connect_private_key", "a path")?
+            {
+                out.tls_connect_private_key = Some(v);
+                named.push("transport/link/tls/connect_private_key");
+            }
+            if let Some(v) = want_bool(&doc, "transport/link/tls/enable_mtls")? {
+                out.tls_enable_mtls = Some(v);
+                named.push("transport/link/tls/enable_mtls");
+            }
+            if let Some(v) = want_bool(&doc, "transport/link/tls/verify_name_on_connect")? {
+                out.tls_verify_name_on_connect = Some(v);
+                named.push("transport/link/tls/verify_name_on_connect");
+            }
         }
-        if let Some(v) = want_string(&doc, "transport/link/tls/listen_certificate", "a path")? {
-            out.tls_listen_certificate = Some(v);
-            named.push("transport/link/tls/listen_certificate");
-        }
-        if let Some(v) = want_string(&doc, "transport/link/tls/listen_private_key", "a path")? {
-            out.tls_listen_private_key = Some(v);
-            named.push("transport/link/tls/listen_private_key");
-        }
-        if let Some(v) = want_string(&doc, "transport/link/tls/connect_certificate", "a path")? {
-            out.tls_connect_certificate = Some(v);
-            named.push("transport/link/tls/connect_certificate");
-        }
-        if let Some(v) = want_string(&doc, "transport/link/tls/connect_private_key", "a path")? {
-            out.tls_connect_private_key = Some(v);
-            named.push("transport/link/tls/connect_private_key");
-        }
-        if let Some(v) = want_bool(&doc, "transport/link/tls/enable_mtls")? {
-            out.tls_enable_mtls = Some(v);
-            named.push("transport/link/tls/enable_mtls");
-        }
-        if let Some(v) = want_bool(&doc, "transport/link/tls/verify_name_on_connect")? {
-            out.tls_verify_name_on_connect = Some(v);
-            named.push("transport/link/tls/verify_name_on_connect");
+        // Upstream's defaults: no file named, no client certificate asked for, and the
+        // dialled name verified.
+        #[cfg(not(any(feature = "transport-link-tls", feature = "transport-link-quic")))]
+        {
+            for path in [
+                "transport/link/tls/root_ca_certificate",
+                "transport/link/tls/listen_certificate",
+                "transport/link/tls/listen_private_key",
+                "transport/link/tls/connect_certificate",
+                "transport/link/tls/connect_private_key",
+            ] {
+                refuse_unbuilt_instruction(&doc, path, never_states_nothing)?;
+            }
+            refuse_unbuilt_instruction(&doc, "transport/link/tls/enable_mtls", |value| {
+                matches!(value, Json5Value::Bool(false))
+            })?;
+            refuse_unbuilt_instruction(
+                &doc,
+                "transport/link/tls/verify_name_on_connect",
+                |value| matches!(value, Json5Value::Bool(true)),
+            )?;
         }
         // `transport/link/protocols` is `Option<Vec<String>>` upstream: absent is every protocol,
         // and a list that names none leaves none open.
@@ -7724,10 +7852,20 @@ impl ZenohNodeConfig {
         // R2593 — the four per-link-kind socket buffers, each a `u32` upstream.
         {
             let buffers = &mut out.link_socket_buffers;
+            // A `tls/` link's pair is read where the build has the link.
+            #[cfg(not(feature = "transport-link-tls"))]
+            for path in [
+                "transport/link/tls/so_rcvbuf",
+                "transport/link/tls/so_sndbuf",
+            ] {
+                refuse_unbuilt_instruction(&doc, path, never_states_nothing)?;
+            }
             for (path, slot) in [
                 ("transport/link/tcp/so_rcvbuf", &mut buffers.tcp_so_rcvbuf),
                 ("transport/link/tcp/so_sndbuf", &mut buffers.tcp_so_sndbuf),
+                #[cfg(feature = "transport-link-tls")]
                 ("transport/link/tls/so_rcvbuf", &mut buffers.tls_so_rcvbuf),
+                #[cfg(feature = "transport-link-tls")]
                 ("transport/link/tls/so_sndbuf", &mut buffers.tls_so_sndbuf),
             ] {
                 if let Some(v) = want_u64(&doc, path)? {
@@ -7852,6 +7990,7 @@ mod tests {
     /// Item 751 — a partition a file states reaches the config's field, and the
     /// emitter writes it back: the key is read, named, and not lost on a round
     /// trip. A silent file leaves the preset.
+    #[cfg(feature = "routing-router-hat")]
     #[test]
     fn the_south_partition_is_read_from_a_file_and_survives_the_emitter() {
         let silent = ZenohNodeConfig::from_json5("{}").expect("an empty document reads");
@@ -9491,6 +9630,11 @@ mod tests {
     }
 
     /// A key wz does not model is APPLIED BY NOBODY and SAID OUT LOUD.
+    ///
+    /// The fixture states the TLS root CA, whose reader is a link's capability
+    /// (`CAPABILITY_HONOURED_KEYS`), so it reads in a build with a link that holds
+    /// certificate material.
+    #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
     #[test]
     fn an_unmodelled_key_is_reported_rather_than_refused_or_swallowed() {
         let ingest = ZenohNodeConfig::from_json5(
@@ -9966,6 +10110,7 @@ mod tests {
     /// `QosOverwriteMessage`, so a reader that reused the other interceptors' four kinds would
     /// accept an item a real zenohd refuses; a priority is a name or a number within `-7..=7`,
     /// and `control` is not one of the names.
+    #[cfg(feature = "access-qos-overwrite")]
     #[test]
     fn the_qos_network_reader_refuses_exactly_what_upstream_refuses() {
         let ok = ZenohNodeConfig::from_json5(
@@ -12385,15 +12530,36 @@ mod tests {
                 "access-acl",
                 cfg!(feature = "access-acl"),
             ),
+            (
+                "qos/network",
+                "access-qos-overwrite",
+                cfg!(feature = "access-qos-overwrite"),
+            ),
+            (
+                "transport/link/tls/root_ca_certificate",
+                "transport-link-tls or transport-link-quic",
+                cfg!(any(
+                    feature = "transport-link-tls",
+                    feature = "transport-link-quic"
+                )),
+            ),
+            (
+                "transport/link/tls/so_rcvbuf",
+                "transport-link-tls",
+                cfg!(feature = "transport-link-tls"),
+            ),
+            (
+                "gateway/south",
+                "routing-router-hat",
+                cfg!(feature = "routing-router-hat"),
+            ),
         ] {
             assert_eq!(config_key_capability(key), Some((feature, built)), "{key}");
             assert_eq!(config_key_in_build(key), built, "{key}");
         }
-        // A key no capability holds is in every build, and `qos/network` is one of them.
-        for key in ["mode", "qos/network"] {
-            assert_eq!(config_key_capability(key), None, "{key}");
-            assert!(config_key_in_build(key), "{key}");
-        }
+        // A key no capability holds is in every build.
+        assert_eq!(config_key_capability("mode"), None);
+        assert!(config_key_in_build("mode"));
 
         let in_build: Vec<&str> = honoured_config_keys_in_build().collect();
         let missing: Vec<&str> = CAPABILITY_HONOURED_KEYS
@@ -12419,14 +12585,35 @@ mod tests {
         let ingest = ZenohNodeConfig::from_json5(
             r#"{ low_pass_filter: [], downsampling: [], qos: { network: [] },
                  access_control: { enabled: false, default_permission: "deny",
-                                   rules: [], subjects: [], policies: [] } }"#,
+                                   rules: [], subjects: [], policies: [] },
+                 transport: { link: { tls: { enable_mtls: false, verify_name_on_connect: true } } },
+                 gateway: { south: "auto" } }"#,
         )
         .expect("upstream's defaults state no instruction");
-        for (key, _, built) in CAPABILITY_HONOURED_KEYS {
-            assert_eq!(ingest.named.contains(key), *built, "{key} named");
+        // Every capability key whose default is a value; the others default to their absence.
+        let stated = [
+            "low_pass_filter",
+            "downsampling",
+            "qos/network",
+            "access_control/enabled",
+            "access_control/default_permission",
+            "access_control/rules",
+            "access_control/subjects",
+            "access_control/policies",
+            "transport/link/tls/enable_mtls",
+            "transport/link/tls/verify_name_on_connect",
+            "gateway/south",
+        ];
+        for key in stated {
+            let built = config_key_in_build(key);
+            assert!(
+                config_key_capability(key).is_some(),
+                "{key} is a capability's key"
+            );
+            assert_eq!(ingest.named.contains(&key), built, "{key} named");
             assert_eq!(
                 ingest.ignored.iter().any(|leaf| leaf == key),
-                !*built,
+                !built,
                 "{key} ignored"
             );
         }
@@ -12453,6 +12640,26 @@ mod tests {
             (
                 "access_control/default_permission",
                 r#"{ access_control: { default_permission: "allow" } }"#,
+            ),
+            (
+                "qos/network",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: { express: true } } ] } }"#,
+            ),
+            (
+                "transport/link/tls/root_ca_certificate",
+                r#"{ transport: { link: { tls: { root_ca_certificate: "/etc/ca.pem" } } } }"#,
+            ),
+            (
+                "transport/link/tls/verify_name_on_connect",
+                r#"{ transport: { link: { tls: { verify_name_on_connect: false } } } }"#,
+            ),
+            (
+                "transport/link/tls/so_rcvbuf",
+                r#"{ transport: { link: { tls: { so_rcvbuf: 4096 } } } }"#,
+            ),
+            (
+                "gateway/south",
+                r#"{ gateway: { south: [{ filters: [{ modes: ["peer"] }] }] } }"#,
             ),
         ] {
             let read = ZenohNodeConfig::from_json5(doc);

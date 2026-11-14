@@ -140,10 +140,11 @@ const char *wz_capi_c_layout_name(size_t index);
 
 /* How many config keys THIS LIBRARY honours when reading a stock zenoh
  * config. A key whose reader is a capability the library was built
- * without (access_control, low_pass_filter and downsampling in a build
- * without `interceptors`) is
- * not counted, and wz_capi_c_config_disposition answers
- * WZ_CAPI_C_CONFIG_NOT_IN_BUILD for it. Since revision 15. */
+ * without is not counted: the traffic policy's keys in a build without
+ * `interceptors`, transport/link/tls in one with no tls/ or quic/ link,
+ * gateway/south in one without `router-node`. For such a key
+ * wz_capi_c_config_disposition answers WZ_CAPI_C_CONFIG_NOT_IN_BUILD.
+ * Since revision 15. */
 size_t wz_capi_c_config_honoured_count(void);
 
 /* The name of honoured key `index`, or NULL past the end. Walk it until
