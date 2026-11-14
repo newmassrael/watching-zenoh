@@ -277,12 +277,18 @@ impl ChainHeaders for ReceivedExtChain {
     }
 }
 
-/// [`decode_ext_chain`] into the form a received handshake message holds its
-/// chain in ([`ExtChainOwned`]), read into a chain the caller already holds (empty, as
-/// [`ExtChainOwned::new`] makes it): the caller builds the message the chain belongs to first,
-/// so that the chain (520 bytes on `session-slot`) is read where it will stay and is not a value
-/// of its own on the way there. On an error the chain holds the entries read so far, which the
-/// caller discards with the message.
+/// The chain of a received handshake message as its document read it
+/// (`sources/codecs/transport_{init,open,close,keep_alive}.scxml`), into the form the
+/// message holds it in ([`ExtChainOwned`]), and into a chain the caller already holds (empty,
+/// as [`ExtChainOwned::new`] makes it): the caller builds the message the chain belongs to
+/// first, so that the chain (520 bytes on `session-slot`) is filled where it will stay and is
+/// not a value of its own on the way there. On an error the chain holds the entries taken so
+/// far, which the caller discards with the message.
+///
+/// `walked` yields the entries of the document's view, in order. The view holds no list and
+/// reads a chain of any length, so the bound a node reads of a transport chain
+/// ([`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)) is kept here: the entry
+/// past it refuses the message as `ExtChainOverflow`.
 ///
 /// An entry's own body is a separate matter: an owned entry carries its bytes
 /// in the SCE default storage, so an extension whose body is a byte string (the
@@ -295,44 +301,56 @@ impl ChainHeaders for ReceivedExtChain {
     feature = "codec-close",
     feature = "codec-keep-alive"
 ))]
-pub(crate) fn decode_handshake_ext_chain_into(
-    cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,
+pub(crate) fn collect_handshake_ext_chain<'a>(
+    walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
     entries: &mut ExtChainOwned,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    #[cfg(not(feature = "session-slot"))]
-    {
-        *entries = decode_ext_chain(cursor)?;
-        Ok(())
-    }
-    #[cfg(feature = "session-slot")]
-    {
-        use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
-        use wz_codecs::lent::ExtEntry;
+    use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
 
-        for _ in 0..MAX_EXT_CHAIN_DEPTH {
-            let entry = ExtEntry::decode(cursor).map_err(InboundParseError::Codec)?;
-            let z = entry.z();
-            // Cannot overflow: the loop's bound is the array's.
+    for (at, entry) in walked.enumerate() {
+        if at == MAX_EXT_CHAIN_DEPTH {
+            return Err(InboundParseError::ExtChainOverflow);
+        }
+        #[cfg(not(feature = "session-slot"))]
+        entries.push(received_entry(&entry)?);
+        #[cfg(feature = "session-slot")]
+        {
+            // Cannot overflow: the walk's bound above is the array's.
             if entries.headers.push(entry.header).is_err() {
                 return Err(InboundParseError::ExtChainOverflow);
             }
             // An extension this build does not read is judged by its header and not kept.
-            if reads_received_ext(entry.ext_id()) {
-                let owned = entry
-                    .try_into_owned_in::<crate::transport_profile::TransportStorage>()
-                    .map_err(InboundParseError::Codec)?;
-                // One entry for each extension a build reads: a peer that repeats one fills
-                // the chain and is refused, as a chain past the bound is.
-                if entries.entries.push(owned).is_err() {
-                    return Err(InboundParseError::ExtChainOverflow);
-                }
-            }
-            if !z {
-                return Ok(());
+            // One entry for each extension a build reads: a peer that repeats one fills
+            // the chain and is refused, as a chain past the bound is.
+            if reads_received_ext(entry.ext_id())
+                && entries.entries.push(received_entry(&entry)?).is_err()
+            {
+                return Err(InboundParseError::ExtChainOverflow);
             }
         }
-        Err(InboundParseError::ExtChainOverflow)
     }
+    Ok(())
+}
+
+/// One entry of a received handshake chain, from the view the document read it as to the
+/// lifetime-free owned form the message keeps.
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive"
+))]
+fn received_entry(
+    entry: &wz_codecs::ext_entry::ExtEntryView<'_>,
+) -> Result<ExtEntryOwned, crate::parse_error::InboundParseError> {
+    use crate::parse_error::InboundParseError;
+
+    let mut lent = wz_codecs::lent::ExtEntry::default();
+    entry
+        .into_builder(&mut lent)
+        .map_err(InboundParseError::Codec)?;
+    lent.try_into_owned_in::<crate::transport_profile::TransportStorage>()
+        .map_err(InboundParseError::Codec)
 }
 
 /// How many entries a wz node stores of every entry-flag ext chain in the
@@ -380,9 +398,9 @@ pub const NETWORK_EXT_CHAIN_DEPTH: usize = 8;
 ///
 /// The vector form: its consumers are the ones that want the chain as bytes of
 /// their own (the auth ext's inner method chain, which is then wrapped in an
-/// outer ext; the transport composer). The handshake encoders write their chain
-/// straight after the body through [`encode_ext_chain_into`] and do not call
-/// this.
+/// outer ext; the transport composer). The handshake messages are written whole
+/// by their documents, and the lend-only Open writes its chain straight after
+/// its head through [`encode_ext_chain_into`]; none of them calls this.
 #[cfg(all(
     feature = "alloc",
     any(
@@ -425,29 +443,37 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
 /// buffer that cannot hold the chain refuses with `BufferOverflow`; the bytes
 /// already written stay, so the caller rolls back with
 /// [`TxBuf::truncate`](crate::tx_buf::TxBuf::truncate) to the length it saw.
-/// The bytes [`encode_ext_chain_into`] writes for `entries`, as each entry's codec
-/// counts it. The continuation bit that encode sets or clears on each header
-/// changes no length.
-// Its readers are the Init and Open sizers, whose one caller is the lend-only
-// send in `session_actions`, so the gate carries that module's too.
-#[cfg(all(
-    feature = "tx-lend-only",
-    feature = "storage-profile",
-    feature = "session-unicast",
-    any(feature = "codec-init-body", feature = "codec-open-body"),
-    any(feature = "session-unicast-open", feature = "session-unicast-accept")
-))]
-pub(crate) fn ext_chain_len(entries: &[ExtEntryOwned]) -> usize {
-    entries
-        .iter()
-        .map(|entry| wz_codecs::ext_entry::ExtEntryWire::measure(entry).len())
-        .sum()
-}
-
+// The Init is written whole by its document, so the chain is written here for
+// the vector form above, for the lend-only Open, which writes its chain after
+// the head where the chain is staged, and for the tests that hold that Open's
+// two halves to the whole one.
 #[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "session-extauth"
+    all(
+        feature = "tx-lend-only",
+        feature = "session-unicast",
+        feature = "codec-open-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ),
+    all(
+        feature = "alloc",
+        any(
+            feature = "session-extauth",
+            feature = "transport-compose",
+            all(
+                test,
+                feature = "codec-init-body",
+                feature = "codec-open-body",
+                feature = "codec-close",
+                feature = "codec-frame"
+            ),
+            all(
+                test,
+                feature = "tx-lend-only",
+                any(feature = "codec-init-body", feature = "codec-open-body")
+            )
+        )
+    ),
+    all(test, feature = "codec-init-body", feature = "codec-open-body")
 ))]
 pub(crate) fn encode_ext_chain_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
@@ -466,6 +492,24 @@ pub(crate) fn encode_ext_chain_into(
     Ok(())
 }
 
+/// The bytes [`encode_ext_chain_into`] writes for `entries`, as each entry's codec
+/// counts it. The continuation bit that encode sets or clears on each header
+/// changes no length.
+// Its reader is the lend-only Open's sizer, the Init being counted whole by its
+// document, so the gate is that send's in `session_actions`.
+#[cfg(all(
+    feature = "tx-lend-only",
+    feature = "session-unicast",
+    feature = "codec-open-body",
+    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+))]
+pub(crate) fn ext_chain_len(entries: &[ExtEntryOwned]) -> usize {
+    entries
+        .iter()
+        .map(|entry| wz_codecs::ext_entry::ExtEntryWire::measure(entry).len())
+        .sum()
+}
+
 /// Decode the Z-flag-gated ext chain into the lifetime-free owned mirror,
 /// bounded by [`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)
 /// so a malformed peer cannot pin the decoder into an unbounded loop.
@@ -477,8 +521,10 @@ pub(crate) fn encode_ext_chain_into(
 /// R311y607) and each growth was a defect until it was found; there is no
 /// longer a list to be short of.
 ///
-/// The heap profile's form: it returns a growable `Vec`. The slot profile reads
-/// its chain through [`decode_handshake_ext_chain_into`], into an array.
+/// The heap profile's form for the messages whose chain is still read here (a
+/// Frame, a Fragment, a Join, a transport OAM): it returns a growable `Vec`. A
+/// handshake message's chain is read by the message's document and kept through
+/// `collect_handshake_ext_chain`.
 #[cfg(feature = "alloc")]
 pub(crate) fn decode_ext_chain(
     cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,

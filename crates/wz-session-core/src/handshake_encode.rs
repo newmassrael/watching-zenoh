@@ -5,10 +5,11 @@
 //!
 //! `encode_init` (InitSyn / InitAck), `encode_open` (OpenSyn / OpenAck)
 //! and `encode_close` build the transport-message wire bytes for the
-//! unicast session handshake and graceful close — each composes the
-//! one-byte transport header (`flags | T_MID_*`) with the wz codec body
-//! (`InitBody` / `OpenBody` / `Close`) and, for Init / Open, the
-//! transport-message extension chain (`encode_ext_chain`). The codec
+//! unicast session handshake and graceful close. Each whole message (header,
+//! body, extension chain) is written by its document
+//! (`sources/codecs/transport_{init,open,close}.scxml`), handed the body and
+//! the chain where the sender holds them; the header's derived flags are the
+//! document's, not this file's. The codec
 //! bodies are verified byte-identical to zenoh-pico's `_z_init_encode` /
 //! `_z_open_encode` / `_z_close_encode` by the Layer 3 wire-interop
 //! tests (`crates/wz-integration-tests/tests/layer3_{init_body,open_body,close}.rs`).
@@ -42,14 +43,16 @@ use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-use crate::ext_chain::encode_ext_chain_into;
-#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 use crate::session_init_params::SessionInitParams;
 // The `_into` encoders write through the buffer seam, which every one of them
 // reaches with `append_byte` and a sink over it. `TxBuf` is needed for the
 // method call only when `EncodeBuf` is a concrete type (no lending); on a
 // `dyn TxBuf` the methods resolve without the import.
-#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close"
+))]
 use crate::transport_profile::ExtEntryOwned;
 #[cfg(any(
     feature = "codec-init-body",
@@ -66,11 +69,32 @@ use crate::tx_buf::{TxBuf, TxSink};
 use sce_forge_runtime::codec::CodecError;
 
 #[cfg(feature = "codec-close")]
-use wz_codecs::close::Close;
+use wz_codecs::close::{Close, CloseSource};
 #[cfg(feature = "codec-init-body")]
-use wz_codecs::init_body::{InitBody, InitBodyS};
+use wz_codecs::init_body::{InitBody, InitBodyS, InitBodySource};
 #[cfg(feature = "codec-open-body")]
-use wz_codecs::open_body::OpenBody;
+use wz_codecs::open_body::{OpenBody, OpenBodySource};
+#[cfg(feature = "codec-close")]
+use wz_codecs::transport_close::{TransportCloseSource, TransportCloseWire};
+#[cfg(feature = "codec-init-body")]
+use wz_codecs::transport_init::{TransportInitSource, TransportInitWire};
+#[cfg(feature = "codec-open-body")]
+use wz_codecs::transport_open::{TransportOpenSource, TransportOpenWire};
+
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+use sce_forge_runtime::codec::Bounded;
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close"
+))]
+use sce_forge_runtime::codec::BoundedIter;
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close"
+))]
+use wz_codecs::ext_entry::ExtEntrySource;
 
 /// Build the wire bytes for an Init frame (InitSyn if `is_ack==false`,
 /// InitAck if `is_ack==true`). The codec body is the wz `InitBody`,
@@ -151,11 +175,12 @@ impl InitCaps {
 /// [`encode_init`] passes) or the slot a link lent, so the frame is written once
 /// where it will be sent and nothing is allocated to build it.
 ///
-/// The body is the codec's BORROWED view over the parameters' own zid and the
-/// cookie, not an owned copy of either, and the extension chain is written
-/// straight after it (`ext_chain::encode_ext_chain_into`). A buffer
-/// that cannot hold the frame refuses with `BufferOverflow` and keeps the bytes
-/// it was given; the caller discards the buffer, or rolls back with
+/// The whole message is written by its document (`sources/codecs/transport_init.scxml`):
+/// the body is the codec's BORROWED view over the parameters' own zid and the
+/// cookie, not an owned copy of either, the extension chain is read where it is
+/// held, and the header's A, S and Z flags are derived from what is presented. A
+/// buffer that cannot hold the frame refuses with `BufferOverflow` and keeps the
+/// bytes it was given; the caller discards the buffer, or rolls back with
 /// `TxBuf::truncate`.
 ///
 /// `caps` is what the message advertises ([`InitCaps::of`] for an InitSyn, the
@@ -171,14 +196,12 @@ pub fn encode_init_into(
     extensions: &[ExtEntryOwned],
     cookie_override: Option<&[u8]>,
 ) -> Result<(), CodecError> {
-    let (header, body) = init_message(params, caps, is_ack, extensions, cookie_override)?;
-    buf.append_byte(header)?;
-    body.encode(&mut TxSink::new(&mut *buf))?;
-    encode_ext_chain_into(buf, extensions)
+    let message = init_message(params, caps, is_ack, extensions, cookie_override)?;
+    TransportInitWire::encode_source(&message, &mut TxSink::new(&mut *buf))
 }
 
-/// The bytes [`encode_init_into`] writes for the same arguments: the header, the
-/// body as the codec counts it, and the extension chain. It is what a lent slot
+/// The bytes [`encode_init_into`] writes for the same arguments, as the message's
+/// document counts them. It is what a lent slot
 /// for the message must hold, and it is exact, since an Init body has no size
 /// constant that bounds it (its cookie's length is upstream's u16). A message
 /// `init_message` refuses counts as zero: the encoder that follows refuses it
@@ -200,33 +223,69 @@ pub(crate) fn init_frame_len(
     cookie_override: Option<&[u8]>,
 ) -> usize {
     match init_message(params, caps, is_ack, extensions, cookie_override) {
-        Ok((_header, body)) => {
-            1 + wz_codecs::init_body::InitBodyWire::measure(&body).len()
-                + crate::ext_chain::ext_chain_len(extensions)
-        }
+        Ok(message) => TransportInitWire::measure(&message).len(),
         Err(_) => 0,
     }
 }
 
-/// The header byte and the body of an Init message, as [`encode_init_into`]
-/// writes them and [`init_frame_len`] counts them. `LengthOutOfRange` for a zid
-/// outside the protocol's 1..=16 bytes or a cookie past its `u16` length.
+/// The extension chain of a transport message as its document is handed it: the
+/// entries a sender holds, read where they are. No entry is no chain, so the
+/// encode clears the header's Z flag; it sets each entry's own Z but the last's,
+/// whatever the held header says.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+struct HeldChain<'e>(Option<Bounded<&'e [ExtEntryOwned], { usize::MAX }, 1>>);
+
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+impl<'e> HeldChain<'e> {
+    fn of(entries: &'e [ExtEntryOwned]) -> Self {
+        Self(Bounded::new(entries))
+    }
+
+    fn entries(
+        &self,
+    ) -> Option<BoundedIter<core::slice::Iter<'e, ExtEntryOwned>, { usize::MAX }, 1>> {
+        self.0.as_ref().map(|chain| chain.iter())
+    }
+}
+
+/// An Init message as `transport_init` writes it: the body, and the chain where
+/// it is held. The header presents the message id alone; A and S follow from the
+/// body (a cookie, the size parameters) and Z from the chain.
 #[cfg(feature = "codec-init-body")]
-fn init_message<'p>(
+struct InitMessage<'p, 'e> {
+    body: InitBody<'p>,
+    extensions: HeldChain<'e>,
+}
+
+#[cfg(feature = "codec-init-body")]
+impl TransportInitSource for InitMessage<'_, '_> {
+    fn header(&self) -> u8 {
+        wire_const::T_MID_INIT
+    }
+
+    fn body(&self) -> &impl InitBodySource {
+        &self.body
+    }
+
+    fn extensions(
+        &self,
+    ) -> Option<BoundedIter<impl Iterator<Item = impl ExtEntrySource> + Clone, { usize::MAX }, 1>>
+    {
+        self.extensions.entries()
+    }
+}
+
+/// The Init message [`encode_init_into`] writes and [`init_frame_len`] counts.
+/// `LengthOutOfRange` for a zid outside the protocol's 1..=16 bytes or a cookie
+/// past its `u16` length.
+#[cfg(feature = "codec-init-body")]
+fn init_message<'p, 'e>(
     params: &'p SessionInitParams,
     caps: InitCaps,
     is_ack: bool,
-    extensions: &[ExtEntryOwned],
+    extensions: &'e [ExtEntryOwned],
     cookie_override: Option<&'p [u8]>,
-) -> Result<(u8, InitBody<'p>), CodecError> {
-    let mut parent_flags = 0;
-    if is_ack {
-        parent_flags |= wire_const::FLAG_T_INIT_A;
-    }
-    if !extensions.is_empty() {
-        parent_flags |= wire_const::FLAG_T_Z;
-    }
-
+) -> Result<InitMessage<'p, 'e>, CodecError> {
     // R86 — cookie carrier rules: InitSyn (is_ack=false) never
     // carries a cookie regardless of override. InitAck (is_ack=true)
     // uses cookie_override when supplied (production peer_zid binding
@@ -253,10 +312,10 @@ fn init_message<'p>(
         cookie_len: cookie.map(|c| c.len() as u64),
         cookie: cookie.map(crate::codec_owned::sent).transpose()?,
     };
-    if body.s.is_some() {
-        parent_flags |= wire_const::FLAG_T_INIT_S;
-    }
-    Ok((parent_flags | wire_const::T_MID_INIT, body))
+    Ok(InitMessage {
+        body,
+        extensions: HeldChain::of(extensions),
+    })
 }
 
 /// Build the wire bytes for an Open frame (OpenSyn / OpenAck). Body
@@ -299,7 +358,8 @@ pub fn encode_open(
 /// the negotiated mask), and a sender that had to put it into a clone of the
 /// parameter bundle to say so would copy the zid, the cookie and the signing key
 /// for one number. Taking it as an argument leaves the bundle where it is. See
-/// [`encode_init_into`] for the buffer contract.
+/// [`encode_init_into`] for the buffer contract; the whole message is written by
+/// its document (`sources/codecs/transport_open.scxml`).
 #[cfg(feature = "codec-open-body")]
 pub fn encode_open_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
@@ -309,15 +369,8 @@ pub fn encode_open_into(
     cookie_override: Option<&[u8]>,
     extensions: &[ExtEntryOwned],
 ) -> Result<(), CodecError> {
-    encode_open_head_into(
-        buf,
-        params,
-        initial_sn,
-        is_ack,
-        cookie_override,
-        !extensions.is_empty(),
-    )?;
-    encode_ext_chain_into(buf, extensions)
+    let message = open_message(params, initial_sn, is_ack, cookie_override, extensions)?;
+    TransportOpenWire::encode_source(&message, &mut TxSink::new(&mut *buf))
 }
 
 /// What [`encode_open_into`] writes before the extension chain: the header byte,
@@ -328,6 +381,11 @@ pub fn encode_open_into(
 /// the chain under two session mutexes and takes them one after the other: the
 /// chain is written where it is staged, and not copied out of its slot to be
 /// handed to an encoder that needs both at once.
+///
+/// The header byte is the one place this file still writes a transport header:
+/// the document derives Z from the chain it is handed, and this half is handed
+/// none. A, T and the message id are the document's own derivation of the body
+/// ([`open_head_byte`]).
 #[cfg(feature = "codec-open-body")]
 pub(crate) fn encode_open_head_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
@@ -337,16 +395,31 @@ pub(crate) fn encode_open_head_into(
     cookie_override: Option<&[u8]>,
     has_ext: bool,
 ) -> Result<(), CodecError> {
-    let (header, body) = open_message(params, initial_sn, is_ack, cookie_override, has_ext)?;
-    buf.append_byte(header)?;
-    body.encode(&mut TxSink::new(&mut *buf))
+    let message = open_message(params, initial_sn, is_ack, cookie_override, &[])?;
+    buf.append_byte(open_head_byte(&message, has_ext))?;
+    message.body.encode(&mut TxSink::new(&mut *buf))
 }
 
-/// The bytes [`encode_open_head_into`] writes for the same arguments: exact, since
-/// an Open body has no size constant (its cookie's length is a `u32`), and zero for
-/// a message `open_message` refuses. With `ext_chain::ext_chain_len` of the chain
-/// it is what a lent slot for the Open must hold, as `init_frame_len` is for
-/// Init.
+/// The header byte of the head [`encode_open_head_into`] writes: what
+/// `transport_open` would write for `message` with a chain when `has_ext`.
+#[cfg(feature = "codec-open-body")]
+fn open_head_byte(message: &OpenMessage<'_, '_>, has_ext: bool) -> u8 {
+    let mut header = TransportOpenSource::header(message);
+    if wz_codecs::open_body::OpenBodyWire::input_a(&message.body) {
+        header |= wire_const::FLAG_T_OPEN_A;
+    }
+    if has_ext {
+        header |= wire_const::FLAG_T_Z;
+    }
+    header
+}
+
+/// The bytes [`encode_open_head_into`] writes for the same arguments, whether or
+/// not a chain follows (its Z flag is a bit of the header, not a byte): exact,
+/// since an Open body has no size constant (its cookie's length is a `u32`), and
+/// zero for a message `open_message` refuses. With `ext_chain::ext_chain_len` of
+/// the chain it is what a lent slot for the Open must hold, as `init_frame_len`
+/// is for Init.
 // Its callers are the lend-only Open sends in `session_actions`, so the gate
 // carries that module's own (`storage-profile` and `session-unicast`).
 #[cfg(all(
@@ -361,41 +434,62 @@ pub(crate) fn open_head_len(
     initial_sn: u64,
     is_ack: bool,
     cookie_override: Option<&[u8]>,
-    has_ext: bool,
 ) -> usize {
-    match open_message(params, initial_sn, is_ack, cookie_override, has_ext) {
-        Ok((_header, body)) => 1 + wz_codecs::open_body::OpenBodyWire::measure(&body).len(),
+    match open_message(params, initial_sn, is_ack, cookie_override, &[]) {
+        Ok(message) => 1 + wz_codecs::open_body::OpenBodyWire::measure(&message.body).len(),
         Err(_) => 0,
     }
 }
 
-/// The header byte and the body of an Open message, as [`encode_open_head_into`]
-/// writes them and `open_head_len` counts them; `has_ext` sets the Z flag.
+/// An Open message as `transport_open` writes it: the body, and the chain where
+/// it is held. The header presents the message id and the lease unit (T); A
+/// follows from the body (no cookie) and Z from the chain.
+#[cfg(feature = "codec-open-body")]
+struct OpenMessage<'p, 'e> {
+    lease_in_seconds: bool,
+    body: OpenBody<'p>,
+    extensions: HeldChain<'e>,
+}
+
+#[cfg(feature = "codec-open-body")]
+impl TransportOpenSource for OpenMessage<'_, '_> {
+    fn header(&self) -> u8 {
+        if self.lease_in_seconds {
+            wire_const::T_MID_OPEN | wire_const::FLAG_T_OPEN_T
+        } else {
+            wire_const::T_MID_OPEN
+        }
+    }
+
+    fn body(&self) -> &impl OpenBodySource {
+        &self.body
+    }
+
+    fn extensions(
+        &self,
+    ) -> Option<BoundedIter<impl Iterator<Item = impl ExtEntrySource> + Clone, { usize::MAX }, 1>>
+    {
+        self.extensions.entries()
+    }
+}
+
+/// The Open message [`encode_open_into`] writes, and whose head
+/// [`encode_open_head_into`] writes and `open_head_len` counts.
 /// `LengthOutOfRange` for a cookie past the protocol's `u32` length.
 #[cfg(feature = "codec-open-body")]
-fn open_message<'p>(
+fn open_message<'p, 'e>(
     params: &'p SessionInitParams,
     initial_sn: u64,
     is_ack: bool,
     cookie_override: Option<&'p [u8]>,
-    has_ext: bool,
-) -> Result<(u8, OpenBody<'p>), CodecError> {
+    extensions: &'e [ExtEntryOwned],
+) -> Result<OpenMessage<'p, 'e>, CodecError> {
     // R311ku — the T flag is DERIVED, not configured: a whole-second
     // lease compacts to the seconds form, pico `_z_t_msg_make_open_syn`
     // / `_ack` parity (definitions/transport.c:196-214; the pre-ku
     // manual `lease_in_seconds` knob let wz send `T=0 + VLE 10000`
     // where pico always compacts to `T=1 + VLE 10`).
     let (lease_in_seconds, wire_lease) = crate::lease::lease_to_wire(params.lease_ms);
-    let mut parent_flags = 0u8;
-    if lease_in_seconds {
-        parent_flags |= wire_const::FLAG_T_OPEN_T;
-    }
-    if is_ack {
-        parent_flags |= wire_const::FLAG_T_OPEN_A;
-    }
-    if has_ext {
-        parent_flags |= wire_const::FLAG_T_Z;
-    }
 
     let cookie_bytes: &[u8] = if !is_ack {
         cookie_override.unwrap_or(&params.cookie)
@@ -416,12 +510,12 @@ fn open_message<'p>(
             None
         },
     };
-    Ok((parent_flags | wire_const::T_MID_OPEN, body))
+    Ok(OpenMessage {
+        lease_in_seconds,
+        body,
+        extensions: HeldChain::of(extensions),
+    })
 }
-
-// R2 (R311ww) — the ext-chain serializer moved to the shared `crate::ext_chain`
-// SSOT (consumed by inbound decode + the extauth dispatch's inner method chain
-// too); imported above. Was an inline `fn` here.
 
 /// Build the wire bytes for a Close frame. Body is the wz `Close`
 /// (single reason byte), verified byte-identical to zenoh-pico's
@@ -477,18 +571,54 @@ fn open_message<'p>(
 #[cfg(all(feature = "alloc", feature = "codec-close"))]
 #[inline(never)]
 pub fn encode_close(reason: u8, session: bool) -> Vec<u8> {
-    let parent_flags = if session {
-        wire_const::FLAG_T_CLOSE_S
-    } else {
-        0
-    };
     let mut wire = Vec::with_capacity(1 + Close::MAX_ENCODED_BYTES);
-    wire.push(parent_flags | wire_const::T_MID_CLOSE);
-    let mut sink = VecSink::new(&mut wire);
-    Close { reason }
-        .encode(&mut sink)
-        .expect("VecSink is infallible");
+    TransportCloseWire::encode_source(
+        &CloseMessage::new(reason, session),
+        &mut VecSink::new(&mut wire),
+    )
+    .expect("VecSink is infallible");
     wire
+}
+
+/// A Close as `transport_close` writes it: the scope (S) on the header, the
+/// reason as the body, and no chain, since a Close declares no extension of its
+/// own; Z is derived from that.
+#[cfg(feature = "codec-close")]
+struct CloseMessage {
+    session: bool,
+    body: Close,
+}
+
+#[cfg(feature = "codec-close")]
+impl CloseMessage {
+    const fn new(reason: u8, session: bool) -> Self {
+        Self {
+            session,
+            body: Close { reason },
+        }
+    }
+}
+
+#[cfg(feature = "codec-close")]
+impl TransportCloseSource for CloseMessage {
+    fn header(&self) -> u8 {
+        if self.session {
+            wire_const::T_MID_CLOSE | wire_const::FLAG_T_CLOSE_S
+        } else {
+            wire_const::T_MID_CLOSE
+        }
+    }
+
+    fn body(&self) -> &impl CloseSource {
+        &self.body
+    }
+
+    fn extensions(
+        &self,
+    ) -> Option<BoundedIter<impl Iterator<Item = impl ExtEntrySource> + Clone, { usize::MAX }, 1>>
+    {
+        None::<BoundedIter<core::slice::Iter<'static, ExtEntryOwned>, { usize::MAX }, 1>>
+    }
 }
 
 /// [`encode_close`] into a buffer the caller chose: the slot a link lent, so a
@@ -505,13 +635,7 @@ pub fn encode_close_into(
     reason: u8,
     session: bool,
 ) -> Result<(), CodecError> {
-    let parent_flags = if session {
-        wire_const::FLAG_T_CLOSE_S
-    } else {
-        0
-    };
-    buf.append_byte(parent_flags | wire_const::T_MID_CLOSE)?;
-    Close { reason }.encode(&mut TxSink::new(buf))
+    TransportCloseWire::encode_source(&CloseMessage::new(reason, session), &mut TxSink::new(buf))
 }
 
 /// R311y782 — the wire bytes a multicast group member puts on the group when
@@ -574,19 +698,10 @@ const MULTICAST_CLOSE_SESSION: bool = false;
 /// departures; `CodecError::BufferOverflow` when `out` has no room for them.
 #[cfg(feature = "codec-close")]
 pub fn encode_multicast_close_into_slice(out: &mut [u8]) -> Result<usize, CodecError> {
-    let (header, body) = out.split_first_mut().ok_or(CodecError::BufferOverflow)?;
-    *header = wire_const::T_MID_CLOSE
-        | if MULTICAST_CLOSE_SESSION {
-            wire_const::FLAG_T_CLOSE_S
-        } else {
-            0
-        };
-    let mut sink = sce_forge_runtime::codec::SliceSink::new(body);
-    Close {
-        reason: MULTICAST_CLOSE_REASON,
-    }
-    .encode(&mut sink)?;
-    Ok(1 + sink.position())
+    TransportCloseWire::write_window(
+        &CloseMessage::new(MULTICAST_CLOSE_REASON, MULTICAST_CLOSE_SESSION),
+        out,
+    )
 }
 
 /// R311kx — wire bytes for a KeepAlive transport message: the bare
@@ -744,7 +859,7 @@ mod tests {
                         any(feature = "session-unicast-open", feature = "session-unicast-accept")
                     ))]
                     assert_eq!(
-                        super::open_head_len(&params, 1234, is_ack, cookie, !chain.is_empty()),
+                        super::open_head_len(&params, 1234, is_ack, cookie),
                         head,
                         "the sizer counts the head it writes"
                     );
