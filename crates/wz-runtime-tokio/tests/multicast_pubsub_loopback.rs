@@ -87,6 +87,14 @@ fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroup
         compression: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+        // The beacon of the group members these witnesses run beside.
+        beacon: wz_runtime_tokio::multicast_glue::GroupBeacon {
+            lease_ms: 5_000,
+            join_interval_ms: 100,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+        },
     }
 }
 

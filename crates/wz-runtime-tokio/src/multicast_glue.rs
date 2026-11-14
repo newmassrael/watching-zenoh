@@ -1465,9 +1465,10 @@ pub fn spawn_router_mcast_egress(
     (producer, stop)
 }
 
-/// R2850 — the group profile a router's face advertises: zenoh's multicast
-/// defaults, `WhatAmI::Router` in the beacon so members attribute the source
-/// tier, and the router's own zid, so the RX self-zid gate drops the face's own
+/// R2850 — the group profile a router's face advertises: the beacon the node's
+/// configuration states (lease, beacon interval, resolutions, batch size),
+/// `WhatAmI::Router` in the beacon so members attribute the source tier, and
+/// the router's own zid, so the RX self-zid gate drops the face's own
 /// looped-back traffic.
 ///
 /// `qos` is the group's per-priority offer (R311y232), the wz seam for zenoh
@@ -1486,20 +1487,48 @@ fn router_group_params(
         compression,
         tx_queue,
         link_rx,
+        beacon:
+            GroupBeacon {
+                lease_ms,
+                join_interval_ms,
+                seq_num_res,
+                req_id_res,
+                batch_size,
+            },
     } = profile;
     wz_session_core::multicast_params::MulticastParams {
         whatami: wz_session_core::WhatAmI::Router,
         zid,
-        lease_ms: 5_000,
-        join_interval_ms: 100,
-        seq_num_res: 0x02,
-        req_id_res: 0x02,
-        batch_size: 2_048,
+        lease_ms,
+        join_interval_ms,
+        seq_num_res,
+        req_id_res,
+        batch_size,
         is_qos: qos,
         compression,
         tx_queue,
         link_rx,
     }
+}
+
+/// What a router's group face states in its beacon besides its identity, from the node's
+/// configuration. A member compares these with its own and ignores the beacon of a router
+/// whose resolutions or batch size differ, upstream's member among them
+/// (`io/zenoh-transport/src/multicast/rx.rs` @ `if join.batch_size != batch_size {`), so a
+/// router that states other values than its group is never heard there.
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupBeacon {
+    /// How long the members hold the router alive after each beacon, in milliseconds.
+    pub lease_ms: u64,
+    /// How often the router beacons, in milliseconds.
+    pub join_interval_ms: u64,
+    /// The 2-bit wire code of the sequence number resolution.
+    pub seq_num_res: u8,
+    /// The 2-bit wire code of the request id resolution.
+    pub req_id_res: u8,
+    /// The largest batch the router sends on the group.
+    pub batch_size: u16,
 }
 
 /// R2938 — what a router's group face takes from the node's configuration.
@@ -1527,6 +1556,8 @@ pub struct RouterGroupProfile {
     /// The node's `transport/link/rx`: the largest message the group rejoins
     /// from fragments, the bound its unicast sessions take too.
     pub link_rx: wz_session_core::session_init_params::LinkRxConf,
+    /// What the router's beacon states besides its identity.
+    pub beacon: GroupBeacon,
 }
 
 /// The future a group face's bind returns, borrowing the face's options.
@@ -2830,11 +2861,52 @@ mod tests {
             compression: true,
             tx_queue: operator,
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+            beacon: GroupBeacon {
+                lease_ms: 5_000,
+                join_interval_ms: 100,
+                seq_num_res: 0x02,
+                req_id_res: 0x02,
+                batch_size: 2_048,
+            },
         });
         assert_eq!(group.tx_queue, operator);
         assert!(group.is_qos);
         assert!(group.compression);
         assert_eq!(group.zid, [0x0A]);
+    }
+
+    /// The beacon of a router's group face is the one the node's configuration states, every
+    /// field of it: a member compares the resolutions and the batch size with its own and ignores
+    /// a beacon whose differ, so a face that stated fixed values was never heard by a member
+    /// configured otherwise, upstream's peer with its 8,192-byte multicast batch among them.
+    #[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+    #[test]
+    fn a_router_group_face_beacons_what_the_node_states() {
+        let beacon = GroupBeacon {
+            lease_ms: 10_000,
+            join_interval_ms: 2_500,
+            seq_num_res: 0x01,
+            req_id_res: 0x03,
+            batch_size: 8_192,
+        };
+        let group = router_group_params(RouterGroupProfile {
+            zid: vec![0x0B],
+            qos: false,
+            compression: false,
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+            beacon,
+        });
+        assert_eq!(
+            (
+                group.lease_ms,
+                group.join_interval_ms,
+                group.seq_num_res,
+                group.req_id_res,
+                group.batch_size
+            ),
+            (10_000, 2_500, 0x01, 0x03, 8_192)
+        );
     }
 
     /// R2376 — a LOST group face is worth re-joining, and the wait grows.

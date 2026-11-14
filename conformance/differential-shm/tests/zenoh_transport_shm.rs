@@ -490,6 +490,47 @@ fn shared_memory_crosses_a_multicast_group_to_and_from_upstream_as_between_two_u
     }
 }
 
+/// The group itself, with shared memory off on both members: a put crosses as its bytes between
+/// every pair of crates and every pair of modes as between two upstream members. What this holds
+/// is the group transport alone, the beacon a member of either crate must accept before it reads
+/// anything the other sends, so a failure of the shared-memory cells above that this passes is
+/// the shared memory's.
+#[test]
+fn a_put_crosses_a_multicast_group_between_the_crates_as_between_two_upstream_members() {
+    let _g = serial();
+    for (sender_mode, receiver_mode) in GROUP_MODES {
+        let members = |sender: Crate, receiver: Crate| {
+            (
+                Member {
+                    of: sender,
+                    mode: sender_mode,
+                    shm: false,
+                },
+                Member {
+                    of: receiver,
+                    mode: receiver_mode,
+                    shm: false,
+                },
+            )
+        };
+        let (sender, receiver) = members(Crate::Up, Crate::Up);
+        let reference = group_line(sender, receiver);
+        assert!(
+            reference.ends_with("as plain bytes"),
+            "two upstream members, a {sender_mode} sending and a {receiver_mode} receiving: \
+             {reference}"
+        );
+        for (sender, receiver) in &PAIRS[1..] {
+            let (sending, receiving) = members(*sender, *receiver);
+            assert_eq!(
+                group_line(sending, receiving),
+                reference,
+                "{sending:?} sending, {receiving:?} receiving"
+            );
+        }
+    }
+}
+
 /// The one place the two crates differ, by decision: a member whose shared memory is disabled
 /// holds no reader, and is sent a descriptor all the same. Upstream's maps nothing and hands the
 /// message up with the descriptor where the data was; wz's refuses the message, as it refuses a
