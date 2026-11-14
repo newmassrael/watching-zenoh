@@ -369,19 +369,9 @@ impl DynamicPlugin {
 /// named with no path is looked up by name). wz's config reader honours both:
 /// the plugin plane runs the section's plugins in this registry and takes the
 /// by-name switch as `crate::plugin_plane::PluginsLoading`.
-/// `plugins_loading/search_dirs` is NOT: wz loads by explicit path and has no
-/// discovery, so it stays among the keys wz cannot act on. R2151 (open-debt item
-/// 540) drew that line; before it, all three sat under "a plugin host [wz does
-/// not have]".
-///
-/// NOT-THIS-KEY: plugins_loading/search_dirs
-///
-/// R2155 (open-debt item 541) — the marker is what makes the line above a
-/// checkable claim rather than a sentence. This type is cited beside all three
-/// keys; for two of them it IS the capability, and for `search_dirs` it is
-/// merely the neighbour. Saying which is which HERE, where the mechanism and the
-/// key meet, is the only place the statement can be read against the code that
-/// would have to implement it.
+/// `plugins_loading/search_dirs` is honoured beside them: a plugin named without
+/// a path is found through [`crate::plugin_search_dirs::LibSearchDirs`] and
+/// loaded here.
 /// R2673 — one registry slot: a plugin the operator NAMED, and the library
 /// behind it once it loads.
 ///
@@ -585,6 +575,23 @@ impl PluginRegistry {
         }
     }
 
+    /// Record `name` as declared and not loaded, `failure` saying why: a plugin
+    /// searched for by name in `plugins_loading/search_dirs` and not found,
+    /// which upstream keeps declared because it declares by name before it
+    /// searches. A name already live is left as it is.
+    pub fn declare_unfound(&mut self, name: &str, failure: String) {
+        if matches!(self.plugins.get(name), Some(Slot::Live(_))) {
+            return;
+        }
+        self.plugins.insert(
+            name.to_string(),
+            Slot::Declared {
+                path: PathBuf::new(),
+                failure: Some(failure),
+            },
+        );
+    }
+
     /// `Loaded -> Started` for one plugin. A slot still `Declared` has nothing
     /// to start and says so by name.
     pub fn start(&mut self, id: &str, config: Option<&str>) -> Result<(), PluginError> {
@@ -684,6 +691,24 @@ mod tests {
             crate::built_fixture::cdylib("wz_plugin_example"),
             "run `cargo build -p wz-plugin-example` (Layer C1bp does)",
         )
+    }
+
+    #[test]
+    fn a_plugin_searched_for_and_not_found_stays_declared_with_why() {
+        let mut registry = PluginRegistry::new();
+        registry.declare_unfound("absent", String::from("Library file 'x' not found"));
+        assert_eq!(registry.state("absent"), Some(AdminPluginState::Declared));
+        assert_eq!(
+            registry.declared_failure("absent"),
+            Some("Library file 'x' not found")
+        );
+        assert_eq!(registry.ids(), vec!["absent"]);
+        registry.declare_unfound("absent", String::from("searched again"));
+        assert_eq!(
+            registry.declared_failure("absent"),
+            Some("searched again"),
+            "a second search that fails records its own refusal"
+        );
     }
 
     #[test]

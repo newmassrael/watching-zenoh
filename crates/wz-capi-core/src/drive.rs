@@ -4573,6 +4573,7 @@ pub fn open_blocking(
                 policy,
                 #[cfg(feature = "routing-namespace")]
                 namespace,
+                aggregation: session_defaults.aggregation.clone(),
             },
         )
         .map_err(|_| OpenError::DriveFailed)?,

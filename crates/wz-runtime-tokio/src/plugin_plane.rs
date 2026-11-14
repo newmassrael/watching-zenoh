@@ -38,9 +38,9 @@
 //! * A request with no `__path__` is upstream's by-name lookup, which
 //!   `plugins_loading/enabled` switches ([`PluginsLoading`]). Switched off, the
 //!   plugin is left unloaded with upstream's warning and fails nothing, as
-//!   upstream's empty loader leaves it. Switched on, it is refused by name:
-//!   the lookup searches `plugins_loading/search_dirs`, which wz does not
-//!   honour, so wz loads by path only.
+//!   upstream's empty loader leaves it. Switched on, it is searched for in
+//!   `plugins_loading/search_dirs` ([`crate::plugin_search_dirs`]), as a zenohd
+//!   searches for it, under wz's plugin prefix rather than upstream's.
 //! * A `__required__` plugin that fails to start is REPORTED as required
 //!   rather than panicking inside the plane; the host decides. Upstream's
 //!   panic lands in the task that runs its plane.
@@ -62,6 +62,7 @@ use wz_session_core::json5::Json5Value;
 use wz_storage::storage_plugin_config::STORAGE_MANAGER_PLUGIN;
 
 use crate::plugin::PluginRegistry;
+use crate::plugin_search_dirs::LibSearchDirs;
 use crate::plugins_config::{PluginLoadRequest, PluginsConfig, PluginsSink};
 
 /// Something a change made happen, or failed to, that refused no write:
@@ -104,8 +105,7 @@ pub enum PluginsLoading {
     /// The key off: a by-name request is left unloaded with upstream's warning.
     #[default]
     Disabled,
-    /// The key on: a by-name request is searched for, which wz cannot do, so it
-    /// is refused by name.
+    /// The key on: a by-name request is searched for in `plugins_loading/search_dirs`.
     Enabled,
 }
 
@@ -133,10 +133,13 @@ pub struct DynamicPluginPlane {
     composed: BTreeSet<String>,
     /// Whether a by-name request is looked up.
     loading: PluginsLoading,
+    /// Where a by-name request is searched for.
+    search_dirs: LibSearchDirs,
 }
 
 impl DynamicPluginPlane {
-    /// A plane running nothing, looking plugins up by name as `loading` says.
+    /// A plane running nothing, looking plugins up by name as `loading` says, in upstream's
+    /// default directories until [`Self::set_search_dirs`] names others.
     ///
     /// It leaves the storage manager to the subsystem composed into this
     /// build: the feature that compiles this module also compiles the storage
@@ -148,7 +151,19 @@ impl DynamicPluginPlane {
             active: BTreeMap::new(),
             composed: BTreeSet::from([String::from(STORAGE_MANAGER_PLUGIN)]),
             loading,
+            search_dirs: LibSearchDirs::default(),
         }
+    }
+
+    /// Search `dirs` for a request that names no `__path__`: the node's
+    /// `plugins_loading/search_dirs`. Every later start searches them.
+    pub fn set_search_dirs(&mut self, dirs: LibSearchDirs) {
+        self.search_dirs = dirs;
+    }
+
+    /// The directories a request naming no `__path__` is searched for in.
+    pub fn search_dirs(&self) -> &LibSearchDirs {
+        &self.search_dirs
     }
 
     /// The registry, for plugins a host loads OUTSIDE the section (a
@@ -265,29 +280,31 @@ impl DynamicPluginPlane {
         document: Option<&Json5Value>,
         reports: &mut Vec<PluginPlaneReport>,
     ) -> Result<(), String> {
-        let Some(paths) = request.paths.as_ref() else {
-            return match self.loading {
-                // Upstream's empty loader: the lookup finds nothing, the plugin is
-                // not started, and nothing fails, `__required__` or not.
-                PluginsLoading::Disabled => {
-                    reports.push(PluginPlaneReport {
-                        plugin: request.id.clone(),
-                        required: false,
-                        message: format!(
-                            "Plugin `{}` will not be loaded as plugin loading is disabled",
-                            request.name
-                        ),
-                    });
-                    Ok(())
+        let paths: Vec<PathBuf> = match (request.paths.as_ref(), self.loading) {
+            (Some(paths), _) => paths.iter().map(PathBuf::from).collect(),
+            // Upstream's empty loader: the lookup finds nothing, the plugin is
+            // not started, and nothing fails, `__required__` or not.
+            (None, PluginsLoading::Disabled) => {
+                reports.push(PluginPlaneReport {
+                    plugin: request.id.clone(),
+                    required: false,
+                    message: format!(
+                        "Plugin `{}` will not be loaded as plugin loading is disabled",
+                        request.name
+                    ),
+                });
+                return Ok(());
+            }
+            // Upstream declares a plugin by name before it looks for it, so one
+            // that is not found stays declared.
+            (None, PluginsLoading::Enabled) => match self.search_dirs.find_plugin(&request.name) {
+                Ok(path) => vec![path],
+                Err(why) => {
+                    self.registry.declare_unfound(&request.id, why.clone());
+                    return Err(why);
                 }
-                PluginsLoading::Enabled => Err(format!(
-                    "no `__path__`: wz loads a plugin from a path only \
-                     (`plugins_loading/search_dirs` is not honoured), so `{}` cannot be found",
-                    request.name
-                )),
-            };
+            },
         };
-        let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
         let was_live = matches!(
             self.registry.state(&request.id),
             Some(AdminPluginState::Loaded | AdminPluginState::Started)
@@ -507,10 +524,12 @@ mod tests {
     /// A start that cannot happen is REPORTED with its `__required__`, and
     /// the section's other plugins still start — upstream logs and runs on.
     /// No example library is needed: the failures are the subject. By-name
-    /// lookup is ON here, so the unnamed plugin is a lookup wz cannot make.
+    /// lookup is ON here over no directory, so the unnamed plugin is searched
+    /// for and not found.
     #[test]
     fn a_plugin_that_cannot_start_is_reported_and_the_rest_run_on() {
         let mut plane = DynamicPluginPlane::new(PluginsLoading::Enabled);
+        plane.set_search_dirs(LibSearchDirs::new(Vec::new()));
         let reports = plane.apply(&section(
             r#"{ missing: { __path__: "/nonexistent/wz-no-such.so", __required__: true },
                  unnamed: {} }"#,
@@ -524,21 +543,75 @@ mod tests {
         );
         let unnamed = reports.iter().find(|r| r.plugin == "unnamed").unwrap();
         assert!(!unnamed.required);
+        assert!(
+            unnamed
+                .message
+                .contains(&crate::plugin_search_dirs::plugin_library_file_name(
+                    "unnamed"
+                )),
+            "{unnamed:?}"
+        );
         assert!(unnamed.message.contains("search_dirs"), "{unnamed:?}");
         assert_eq!(
             state(&plane, "missing"),
             Some(AdminPluginState::Declared),
             "a failed load stays visible as Declared"
         );
+        assert_eq!(
+            state(&plane, "unnamed"),
+            Some(AdminPluginState::Declared),
+            "a plugin searched for and not found stays declared, as upstream declares it first"
+        );
         assert_eq!(plane.running().count(), 0);
+    }
+
+    /// `plugins_loading/search_dirs`: a plugin named without a `__path__` is
+    /// found by its library name in the first directory holding it, and an
+    /// earlier directory that does not hold it is passed over. The CONTROL is
+    /// the same section over directories that do not hold it, which starts
+    /// nothing; without the search the first apply would be that control.
+    #[test]
+    fn a_plugin_named_without_a_path_is_found_in_the_search_dirs() {
+        let Some(so) = example_so() else {
+            return;
+        };
+        let dir = so
+            .parent()
+            .expect("a built library has a directory")
+            .to_path_buf();
+        let empty = tempfile::tempdir().unwrap();
+        let named = r#"{ ex: { __plugin__: "example" } }"#;
+
+        let mut control = DynamicPluginPlane::new(PluginsLoading::Enabled);
+        control.set_search_dirs(LibSearchDirs::new(vec![
+            crate::plugin_search_dirs::LibSearchDir::Path(empty.path().display().to_string()),
+        ]));
+        let reports = control.apply(&section(named));
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(control.running().count(), 0);
+
+        let mut plane = DynamicPluginPlane::new(PluginsLoading::Enabled);
+        plane.set_search_dirs(LibSearchDirs::new(vec![
+            crate::plugin_search_dirs::LibSearchDir::Path(empty.path().display().to_string()),
+            crate::plugin_search_dirs::LibSearchDir::Path(dir.display().to_string()),
+        ]));
+        let reports = plane.apply(&section(named));
+        assert_eq!(reports, Vec::new());
+        assert_eq!(state(&plane, "ex"), Some(AdminPluginState::Started));
+        assert_eq!(
+            plane.registry.path("ex"),
+            Some(so.as_path()),
+            "the name `example` is the built `wz-plugin-example` library"
+        );
     }
 
     /// `plugins_loading/enabled` off, the library's default: a plugin the
     /// section names with no `__path__` is left unloaded with upstream's
     /// warning, which fails nothing even when `__required__`, while one named
-    /// by path is still loaded. On, the same request is a lookup wz cannot
-    /// make and is refused by name. No example library is needed: the path
-    /// arm's subject is that the attempt is made at all.
+    /// by path is still loaded. On, the same request is searched for in
+    /// `plugins_loading/search_dirs`, and one not found there is a failure that
+    /// keeps its `__required__`. No example library is needed: the path arm's
+    /// subject is that the attempt is made at all.
     #[test]
     fn by_name_loading_off_leaves_an_unnamed_plugin_unloaded_and_fails_nothing() {
         assert_eq!(PluginsLoading::from_config(None), PluginsLoading::Disabled);
@@ -574,6 +647,7 @@ mod tests {
         assert_eq!(off.running().count(), 0);
 
         let mut on = DynamicPluginPlane::new(PluginsLoading::Enabled);
+        on.set_search_dirs(LibSearchDirs::new(Vec::new()));
         let reports = on.apply(&section(doc));
         let unnamed = reports.iter().find(|r| r.plugin == "unnamed").unwrap();
         assert!(unnamed.required, "{unnamed:?}");

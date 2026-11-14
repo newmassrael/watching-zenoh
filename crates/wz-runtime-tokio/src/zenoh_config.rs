@@ -1553,6 +1553,22 @@ pub struct ZenohNodeConfig {
     ///
     /// `None` = the document did not say, which upstream resolves to `null`.
     pub metadata: Option<Json5Value>,
+    /// `plugins_loading/search_dirs`, the directories a plugin named without a
+    /// `__path__` is searched for in, in the document's order.
+    ///
+    /// `None` = the document did not say, and a node searches upstream's
+    /// default list ([`crate::plugin_search_dirs::LibSearchDirs::default`]),
+    /// which is also what a running zenohd resolves a silent file to.
+    pub plugin_search_dirs: Option<crate::plugin_search_dirs::LibSearchDirs>,
+    /// `aggregation/subscribers`: the key expressions the node's sessions declare their
+    /// subscribers under, one declaration per aggregate
+    /// ([`crate::declaration_aggregation`]). Empty, upstream's default, aggregates nothing.
+    pub aggregation_subscribers: Vec<String>,
+    /// `aggregation/publishers`: the same for the subscribers interest of a publisher.
+    pub aggregation_publishers: Vec<String>,
+    /// `stats/filters`: the key expressions the node's transports count payloads under, each
+    /// filter's `key` in the document's order. Empty, upstream's default, counts under no key.
+    pub stats_filters: Vec<String>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1726,6 +1742,10 @@ impl Default for ZenohNodeConfig {
             // The library's `false`, not the `true` zenohd sets over its file.
             plugins_loading_enabled: None,
             metadata: None,
+            plugin_search_dirs: None,
+            aggregation_subscribers: Vec::new(),
+            aggregation_publishers: Vec::new(),
+            stats_filters: Vec::new(),
         }
     }
 }
@@ -2279,12 +2299,40 @@ impl ZenohNodeConfig {
                 admin.read, admin.write
             );
         }
-        // Only a value the caller stated: an absent key is the library's `false`.
+        // One `plugins_loading` block for both of its keys, each only as the caller stated it: an
+        // absent `enabled` is the library's `false`, an absent `search_dirs` upstream's default list.
+        let mut loading: Vec<String> = Vec::new();
         if let Some(enabled) = self.plugins_loading_enabled {
+            loading.push(format!("\"enabled\": {enabled}"));
+        }
+        if let Some(dirs) = &self.plugin_search_dirs {
+            loading.push(format!("\"search_dirs\": {}", dirs.to_json5_text()));
+        }
+        if !loading.is_empty() {
             let _ = write!(
                 out,
-                ",\n  \"plugins_loading\": {{ \"enabled\": {enabled} }}"
+                ",\n  \"plugins_loading\": {{ {} }}",
+                loading.join(", ")
             );
+        }
+        if !self.aggregation_subscribers.is_empty() || !self.aggregation_publishers.is_empty() {
+            out.push_str(",\n  \"aggregation\": { \"subscribers\": ");
+            push_endpoints(&self.aggregation_subscribers, &mut out);
+            out.push_str(", \"publishers\": ");
+            push_endpoints(&self.aggregation_publishers, &mut out);
+            out.push_str(" }");
+        }
+        if !self.stats_filters.is_empty() {
+            out.push_str(",\n  \"stats\": { \"filters\": [");
+            for (i, key) in self.stats_filters.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str("{ \"key\": ");
+                escape_into(key, &mut out);
+                out.push_str(" }");
+            }
+            out.push_str("] }");
         }
         out.push_str("\n}\n");
         out
@@ -2627,6 +2675,22 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // and announces each remote's bound. The group said wz had no
     // "gateway region-partitioning plane", and `region_partition` is one.
     "gateway/south",
+    // Where a plugin the `plugins` section names without a `__path__` is
+    // searched for: the storage host's plugin plane searches the list
+    // (`crate::plugin_search_dirs`). Moved from the unhonoured half, so the
+    // surface total is unchanged.
+    "plugins_loading/search_dirs",
+    // The aggregates a node's sessions declare their subscribers and publishers under
+    // (`crate::declaration_aggregation`, applied by `Session::set_declaration_aggregation` and
+    // the peer node's local declarations). Moved from the unhonoured half and its
+    // declaration-aggregation group, so the surface total is unchanged.
+    "aggregation/subscribers",
+    "aggregation/publishers",
+    // The keys a node's transports count payloads under: each session's payload class carries
+    // the filters its key expression meets (`wz_session_core::stats_registry::StatsKeyFilters`).
+    // Moved from the unhonoured half and its per-keyexpr statistics group, so the surface total
+    // is unchanged.
+    "stats/filters",
 ];
 
 /// The keys of [`HONOURED_CONFIG_KEYS`] whose reader is a CAPABILITY of the build: the key, the
@@ -2767,6 +2831,25 @@ pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
         "access_control/subjects",
         "access-acl",
         cfg!(feature = "access-acl"),
+    ),
+    // The aggregates are applied by asking which of them includes a key, the inclusion test
+    // `crate::declaration_aggregation` is built on.
+    (
+        "aggregation/subscribers",
+        crate::declaration_aggregation::AGGREGATION_CAPABILITY,
+        cfg!(feature = "keyexpr-includes"),
+    ),
+    (
+        "aggregation/publishers",
+        crate::declaration_aggregation::AGGREGATION_CAPABILITY,
+        cfg!(feature = "keyexpr-includes"),
+    ),
+    // The filters are counted under by the transport counters, which a build without them
+    // does not have.
+    (
+        "stats/filters",
+        "transport-stats",
+        cfg!(feature = "transport-stats"),
     ),
 ];
 
@@ -2985,8 +3068,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // "`qos/*` and `downsampling` an interceptor chain configured from the same
     // file" — is the sentence that stopped being true: the chain is now
     // configured from the file, for all seven of its keys.
-    "aggregation/publishers",
-    "aggregation/subscribers",
+    // `aggregation/publishers` and `aggregation/subscribers` LEFT this list for
+    // `HONOURED_CONFIG_KEYS`: a node's sessions declare under them.
     // R311y849 removed `connect/retry` from here -- it moved to
     // `HONOURED_CONFIG_KEYS`. Its two siblings STAYED, and not for want of
     // attention: for a peer, upstream resolves `timeout_ms` to -1 (retry
@@ -3027,11 +3110,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // its peers' initial declarations. Same partition, same total.
     // R2788 — `plugins` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader
     // carries the section and the storage host runs the storage manager from
-    // it. Its two `plugins_loading/*` siblings stay: they govern how a zenohd
-    // DISCOVERS plugin libraries, which is a different capability.
-    // `plugins_loading/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: the plugin plane
-    // switches its by-name lookup on it. `search_dirs`, where that lookup would search, stays.
-    "plugins_loading/search_dirs",
+    // it. Its two `plugins_loading/*` siblings followed it: `enabled` switches the plugin
+    // plane's by-name lookup, and `search_dirs` is where that lookup searches.
     // `qos/network` LEFT this list for `HONOURED_CONFIG_KEYS`: the QoS overwrite interceptor is
     // built. Same partition, same total.
     // `qos/publication` LEFT this list for [`SESSION_HONOURED_KEYS`]: a session gives the
@@ -3060,13 +3140,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // command line (`--autoconnect`), not from the file, and moving those keys
     // is a different seam with a different witness.
     //
-    // R2230 (open-debt item 579) — `stats/filters` ARRIVED in 1.10.0. ⚠ Do NOT
-    // read wz's `transport-stats` feature as answering it: that feature answers
-    // upstream's `stats` FEATURE (four per-session counters), and this key is
-    // upstream's per-KEYEXPR statistics selector. wz counts at two wire seams
-    // neither of which sees a key expression, so there is no dimension here to
-    // filter on.
-    "stats/filters",
+    // `stats/filters` LEFT this list for `HONOURED_CONFIG_KEYS`: a session's
+    // payload class now carries the filters its key expression meets, and the
+    // per-key family counts under them.
     // R2626 — `timestamping/drop_future_timestamp` LEFT this list for
     // [`HONOURED_CONFIG_KEYS`]: wz now implements zenoh's drop arm and exposes
     // the knob, so the key is acted on rather than merely accepted.
@@ -3151,12 +3227,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// bullets below are the human half of those rows and name the same anchors —
 /// the gate checks that they do, so the two cannot drift.
 ///
-/// * `aggregation/*` — a declaration-aggregation strategy (`AggregationConf`).
 /// * (`qos/publication` LEFT this list: a session gives the publications of the keys it names
 ///   their QoS, [`SESSION_HONOURED_KEYS`]. Its sibling `qos/network` is the QoS overwrite
 ///   interceptor, which wz has since `interceptor/` gained `qos_overwrite`.)
-/// * `plugins_loading/search_dirs` — plugin auto-discovery from a search path
-///   (`PluginSearchDirs`). wz loads a plugin by explicit path only.
 /// * `transport/auth/*` — a credential store (`CredentialStore`). wz has the
 ///   WIRE half (the auth-body codec has foreign witnesses) and nothing to
 ///   configure it from.
@@ -3185,9 +3258,6 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   no "gateway region-partitioning plane" (`GatewayConf`), and the region-hat
 ///   forwarder applies one. Its other half, `region_name`, left earlier for
 ///   [`UNHONOURED_READER_GAP`].)
-/// * `stats/filters` — per-keyexpr statistics (`StatsFilterConfig`). ⚠ Not
-///   answered by wz's `transport-stats`, which answers upstream's `stats`
-///   FEATURE; see the row's own comment.
 /// * (`transport/shared_memory/transport_optimization/*` LEFT this list. R2957
 ///   moved `enabled` and `pool_size` to [`C_ABI_SESSION_HONOURED_KEYS`], and the
 ///   promotion's threshold and message set followed to
@@ -3232,8 +3302,7 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// need as a name that must not exist in wz's code. That is a claim per row
 /// rather than per sweep, and it is what a future capability reds against.
 pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
-    "aggregation/publishers",
-    "aggregation/subscribers",
+    // The two `aggregation/*` keys LEFT this list: wz declares under aggregates now.
     // R2230 (open-debt item 579) — ARRIVED in 1.10.0. Beyond wz, and the
     // negative is derived rather than grepped once: `gateway`, `south`,
     // `subregion`, `partition`, `federat` and `bridge` were each searched across
@@ -3259,7 +3328,7 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // value, so the capability the row named is one wz has.
     // R2950 — `connect_scouted` left for the honoured list, and `declares` followed it for
     // [`C_ABI_SESSION_HONOURED_KEYS`] once the open held on the end of the peers' declarations.
-    "plugins_loading/search_dirs",
+    // `plugins_loading/search_dirs` LEFT this list: the plugin plane searches by name.
     // `qos/network` LEFT this list as it left its sibling above: wz has the interceptor now.
     // `qos/publication` LEFT it for [`SESSION_HONOURED_KEYS`], with its group.
     // ⚠ R2539 — `region_name` LEFT THIS LIST for [`UNHONOURED_READER_GAP`],
@@ -3284,16 +3353,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // false in the direction this list cannot express.
     // R2950 — `scouting/delay` left for the honoured list.
     // R3075 -- `scouting/gossip/enabled` left for the C ABI session's honoured list.
-    // R2230 (open-debt item 579) — ARRIVED in 1.10.0, and it is the row most at
-    // risk of being read as a reader gap, because wz DOES have a `transport-stats`
-    // feature. That feature answers upstream's `stats` FEATURE. This key is
-    // upstream's `StatsFilterConfig { key: OwnedKeyExpr }` — statistics selected
-    // PER KEY EXPRESSION. wz's `TransportStats` is four `AtomicUsize`
-    // (`tx_bytes`/`tx_msgs`/`rx_bytes`/`rx_msgs`) counted at two wire seams,
-    // neither of which sees a key expression, reported as one flat OpenMetrics
-    // block with no selector. There is no dimension here to filter on; wz's own
-    // doc already records that even a per-priority split is a later extension.
-    "stats/filters",
+    // `stats/filters` LEFT this list: wz's per-key payload family counts under
+    // the filters a message's key expression meets.
     // R2626 — `timestamping/drop_future_timestamp` left this half of the
     // partition too, and for the sharper reason: this list is "beyond wz", and
     // wz now HAS the surface.
@@ -3382,8 +3443,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 ///   `--max-payload`. R2150 moved both: the group sentence that held them
 ///   claimed wz needed an interceptor chain, and wz has one.
 /// * (`plugins_loading/enabled` LEFT this list: the plugin plane switches its by-name lookup on
-///   it, [`HONOURED_CONFIG_KEYS`]. `plugins_loading/search_dirs` stays in
-///   [`UNHONOURED_BEYOND_WZ`]: wz loads by explicit path and has no discovery.)
+///   it, [`HONOURED_CONFIG_KEYS`]. `plugins_loading/search_dirs` left the beyond-wz half beside
+///   it: that lookup searches it.)
 /// * (`transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
 ///   verify_name_on_connect}` LEFT this list: the reader reads them, [`HONOURED_CONFIG_KEYS`].)
 /// * (`transport/link/rx/buffer_size` LEFT this list: a session's `LinkRxConf` carries it to the
@@ -3505,18 +3566,12 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
 /// subsystem"); what they cannot do is leave a key ungrouped or write an anchor
 /// the prose does not carry.
 pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
-    (
-        "a declaration-aggregation strategy",
-        "AggregationConf",
-        &["aggregation/publishers", "aggregation/subscribers"],
-    ),
+    // The declaration-aggregation group is GONE, not emptied: both its keys are honoured,
+    // `crate::declaration_aggregation` being the strategy the row said wz lacked.
     // The per-key publisher QoS group is GONE, not emptied: a session applies its one key
     // ([`SESSION_HONOURED_KEYS`]).
-    (
-        "plugin auto-discovery from a search path",
-        "PluginSearchDirs",
-        &["plugins_loading/search_dirs"],
-    ),
+    // The plugin auto-discovery group is GONE, not emptied: its one key is
+    // honoured, the plugin plane searching `plugins_loading/search_dirs` by name.
     // The "a credential store" group is GONE, not emptied: its history is that
     // `key_size` / `known_keys_file` left it for [`UPSTREAM_INERT_CONFIG_KEYS`] (R2336,
     // upstream reads neither), the usrpwd dictionary left with R2567, the four pubkey
@@ -3616,11 +3671,7 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
     // _gate` checks that claim against wz's own code: it found `RegionName` at
     // three files and refused the push. wz HAS a node region identity now; the
     // key is a reader gap, which is a different list.
-    (
-        "per-keyexpr statistics",
-        "StatsFilterConfig",
-        &["stats/filters"],
-    ),
+    // The per-keyexpr statistics group is GONE, not emptied: its one key is honoured.
     // The implicit large-message promotion group is GONE, not emptied: a session copies a large
     // message into its provider by its two keys ([`SESSION_HONOURED_KEYS`]).
     // R2950 — the `ScoutingDelay` group is GONE, not emptied: wz grew "a
@@ -3773,14 +3824,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // with it.
     // The `plugins_loading/enabled` row is GONE: the reader honours the key now, and this ledger
     // carries evidence for unhonoured keys only.
-    // The citing site is `PluginRegistry`'s doc, drawing the line at this key:
-    // the host is wz's, the DISCOVERY is not. A citation that says "not this
-    // one" is still a citation, and it needs a verdict like any other.
-    (
-        "plugins_loading/search_dirs",
-        "not-this-key",
-        "PluginRegistry",
-    ),
+    // `plugins_loading/search_dirs`' "not this key" row is GONE with the
+    // disclaimer beside `PluginRegistry`: the reader honours the key now.
     // R2200 (open-debt item 558) — the `qos/publication` / `foreign-node-config` row is GONE:
     // wz's source still spells the key to configure the genuine zenoh `z_pub` example
     // (`spawn_publishing_zenoh_zpub`), and a session of wz now applies it for itself
@@ -3881,26 +3926,6 @@ pub const UNHONOURED_DISPOSITION_KINDS: &[&str] = &["build", "exclude"];
 /// runtime whatever the value. There is no behaviour to honour, and wz's own test asserts the
 /// key ignored (the `asserted-ignored` row above).
 pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
-    (
-        "aggregation/publishers",
-        "build",
-        "a session declares one publisher per listed key expression; wz declares each",
-    ),
-    (
-        "aggregation/subscribers",
-        "build",
-        "a session declares one subscriber per listed key expression; wz declares each",
-    ),
-    (
-        "plugins_loading/search_dirs",
-        "build",
-        "finding a plugin library by name in search directories; wz loads by path only",
-    ),
-    (
-        "stats/filters",
-        "build",
-        "statistics per key expression; wz counts per session and sees no key expression",
-    ),
     (
         "transport/link/tx/threads",
         "exclude",
@@ -4878,14 +4903,25 @@ fn honoured<'a>(doc: &'a Json5Value, path: &str) -> Option<&'a Json5Value> {
 /// zenohd's resolved configuration carries for every such key and which asks for nothing, and any
 /// other value is refused by the key's name ([`ConfigIngestError::NotInBuild`]). An absent or
 /// `null` key states nothing either.
-#[cfg(not(all(
-    feature = "access-acl",
-    feature = "access-downsampling",
-    feature = "access-quota",
-    feature = "access-qos-overwrite",
-    feature = "transport-link-tls",
-    feature = "routing-router-hat"
-)))]
+// Compiled exactly when one of its callers is: a build missing any capability whose key it reads
+// in the default's spelling, or a zero-copy build, which pools no per-link read storage.
+#[cfg(any(
+    not(all(
+        feature = "access-acl",
+        feature = "access-downsampling",
+        feature = "access-quota",
+        feature = "access-qos-overwrite",
+        feature = "transport-link-tls",
+        feature = "routing-router-hat",
+        feature = "keyexpr-includes",
+        feature = "transport-stats",
+        feature = "plugin-dynamic-loading",
+        feature = "adminspace-config-hotreload",
+        feature = "transport-link-unixpipe",
+        unix
+    )),
+    feature = "runtime-zero-copy"
+))]
 fn refuse_unbuilt_instruction(
     doc: &Json5Value,
     path: &'static str,
@@ -4905,7 +4941,9 @@ fn refuse_unbuilt_instruction(
     feature = "access-acl",
     feature = "access-downsampling",
     feature = "access-quota",
-    feature = "access-qos-overwrite"
+    feature = "access-qos-overwrite",
+    feature = "keyexpr-includes",
+    feature = "transport-stats"
 )))]
 fn is_empty_list(value: &Json5Value) -> bool {
     matches!(value, Json5Value::Array(items) if items.is_empty())
@@ -6728,6 +6766,61 @@ fn string_list_of(
     Ok(out)
 }
 
+/// A list of key expressions, each checked as upstream's `OwnedKeyExpr` checks it: a member that
+/// is not one refuses the document by the key.
+#[cfg(feature = "keyexpr-includes")]
+fn keyexpr_list_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<String>, ConfigIngestError> {
+    const EXPECTED: &str = "a list of key expressions";
+    let keys = string_list_of(value, path, EXPECTED)?;
+    if keys
+        .iter()
+        .any(|key| wz_session_core::keyexpr_canon::validate_keyexpr(key).is_err())
+    {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: EXPECTED,
+        });
+    }
+    Ok(keys)
+}
+
+/// `stats/filters`: a list of `{ key: "<keyexpr>" }`, as upstream's filter type reads it
+/// (`commons/zenoh-config/src/lib.rs` @ `pub struct StatsFilterConfig {`): `key` is required and
+/// a key expression, and a field it does not know is not refused, the struct naming no
+/// `deny_unknown_fields`. More filters than a transport counts under is refused by the key.
+#[cfg(feature = "transport-stats")]
+fn stats_filters_of(value: &Json5Value) -> Result<Vec<String>, ConfigIngestError> {
+    const PATH: &str = "stats/filters";
+    let refused = || ConfigIngestError::WrongType {
+        path: PATH,
+        expected: "a list of { key: \"<keyexpr>\" }",
+    };
+    let Json5Value::Array(items) = value else {
+        return Err(refused());
+    };
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        // A member that is not an object has no `key` to get.
+        let Some(Json5Value::String(key)) = item.get("key") else {
+            return Err(refused());
+        };
+        if wz_session_core::keyexpr_canon::validate_keyexpr(key).is_err() {
+            return Err(refused());
+        }
+        keys.push(key.clone());
+    }
+    if keys.len() > wz_session_core::stats::StatsKeyMatch::CAPACITY {
+        return Err(ConfigIngestError::OutOfRange {
+            path: PATH,
+            value: format!("{} filters", keys.len()),
+        });
+    }
+    Ok(keys)
+}
+
 /// The same, refusing any member outside `allowed`.
 ///
 /// This is where wz stays exactly as strict as upstream rather than more
@@ -8506,6 +8599,42 @@ impl ZenohNodeConfig {
             "transport/link/unixpipe/file_access_mask",
             never_states_nothing,
         )?;
+        if let Some(value) = honoured(&doc, "plugins_loading/search_dirs") {
+            out.plugin_search_dirs = Some(
+                crate::plugin_search_dirs::LibSearchDirs::from_json5(value).map_err(|_| {
+                    ConfigIngestError::WrongType {
+                        path: "plugins_loading/search_dirs",
+                        expected: crate::plugin_search_dirs::LIB_SEARCH_DIRS_SHAPE,
+                    }
+                })?,
+            );
+            named.push("plugins_loading/search_dirs");
+        }
+        // The aggregates a node's sessions declare under, read where the build has the inclusion
+        // test that applies them (`CAPABILITY_HONOURED_KEYS`).
+        #[cfg(feature = "keyexpr-includes")]
+        for (path, slot) in [
+            ("aggregation/subscribers", &mut out.aggregation_subscribers),
+            ("aggregation/publishers", &mut out.aggregation_publishers),
+        ] {
+            if let Some(value) = honoured(&doc, path) {
+                *slot = keyexpr_list_of(value, path)?;
+                named.push(path);
+            }
+        }
+        #[cfg(not(feature = "keyexpr-includes"))]
+        for path in ["aggregation/subscribers", "aggregation/publishers"] {
+            refuse_unbuilt_instruction(&doc, path, is_empty_list)?;
+        }
+        // The keys a node's transports count payloads under, read where the build counts them
+        // (`CAPABILITY_HONOURED_KEYS`).
+        #[cfg(feature = "transport-stats")]
+        if let Some(value) = honoured(&doc, "stats/filters") {
+            out.stats_filters = stats_filters_of(value)?;
+            named.push("stats/filters");
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        refuse_unbuilt_instruction(&doc, "stats/filters", is_empty_list)?;
         // `adminspace` is a block rather than a field: an absent block is not
         // `enabled: false`, which is why the struct models it as an Option and
         // why `enabled: false` here has to erase the block rather than record
@@ -9712,6 +9841,10 @@ mod tests {
                 scout_multicast_ttl: Some(4),
                 ..ZenohNodeConfig::default()
             },
+            ZenohNodeConfig {
+                plugin_search_dirs: Some(crate::plugin_search_dirs::LibSearchDirs::default()),
+                ..ZenohNodeConfig::default()
+            },
         ] {
             let ingest = ZenohNodeConfig::from_json5(&original.to_json5())
                 .unwrap_or_else(|e| panic!("{e} for {original:?}"));
@@ -10265,6 +10398,22 @@ mod tests {
                 "gateway/south",
                 r#"{ "gateway": { "south": [{ "filters": [{ "modes": ["peer"] }] }] } }"#,
             ),
+            (
+                "plugins_loading/search_dirs",
+                r#"{ "plugins_loading": { "search_dirs": ["/opt/wz/plugins"] } }"#,
+            ),
+            (
+                "aggregation/subscribers",
+                r#"{ "aggregation": { "subscribers": ["demo/**"] } }"#,
+            ),
+            (
+                "aggregation/publishers",
+                r#"{ "aggregation": { "publishers": ["demo/**"] } }"#,
+            ),
+            (
+                "stats/filters",
+                r#"{ "stats": { "filters": [{ "key": "demo/**" }] } }"#,
+            ),
             // R2230 (items 579 / 582) — this row MOVED to the tail of the table
             // when the key left `HONOURED_CONFIG_KEYS` for
             // `WZ_EXTENSION_HONOURED_KEYS`. It is still driven, and driven the
@@ -10320,6 +10469,143 @@ mod tests {
                 ingest.config,
                 ZenohNodeConfig::default(),
                 "{key} parsed but changed nothing"
+            );
+        }
+    }
+
+    /// The two aggregate lists are read in order, a member that is not a key
+    /// expression is refused by the key, and the emitter writes what the reader
+    /// takes back.
+    #[cfg(feature = "keyexpr-includes")]
+    #[test]
+    fn the_aggregates_are_read_checked_and_survive_the_emitter() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ aggregation: { subscribers: ["demo/a/**", "demo/**"], publishers: ["s/*/t"] } }"#,
+        )
+        .expect("two lists of key expressions");
+        assert_eq!(
+            ingest.config.aggregation_subscribers,
+            ["demo/a/**", "demo/**"]
+        );
+        assert_eq!(ingest.config.aggregation_publishers, ["s/*/t"]);
+        assert!(ingest.named.contains(&"aggregation/subscribers"));
+        assert!(ingest.named.contains(&"aggregation/publishers"));
+        let back = ZenohNodeConfig::from_json5(&ingest.config.to_json5()).unwrap();
+        assert_eq!(back.config, ingest.config);
+        assert!(back.ignored.is_empty(), "{:?}", back.ignored);
+
+        for (path, doc) in [
+            (
+                "aggregation/subscribers",
+                r#"{ aggregation: { subscribers: ["demo//x"] } }"#,
+            ),
+            (
+                "aggregation/publishers",
+                r#"{ aggregation: { publishers: ["a/**/*"] } }"#,
+            ),
+            (
+                "aggregation/publishers",
+                r#"{ aggregation: { publishers: "a" } }"#,
+            ),
+        ] {
+            assert_eq!(
+                ZenohNodeConfig::from_json5(doc).err(),
+                Some(ConfigIngestError::WrongType {
+                    path,
+                    expected: "a list of key expressions",
+                }),
+                "{doc}"
+            );
+        }
+    }
+
+    /// `stats/filters` is read as upstream's filter list, its keys in order; a
+    /// member with no key expression for `key` is refused, a field upstream does
+    /// not know is not, and more filters than a transport counts under is refused
+    /// by the key. The emitter writes what the reader takes back.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn the_stats_filters_are_read_as_upstreams_list() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ stats: { filters: [{ key: "home/**" }, { key: "garden/*", note: 1 }] } }"#,
+        )
+        .expect("a list of filters");
+        assert_eq!(ingest.config.stats_filters, ["home/**", "garden/*"]);
+        assert!(ingest.named.contains(&"stats/filters"));
+        let back = ZenohNodeConfig::from_json5(&ingest.config.to_json5()).unwrap();
+        assert_eq!(back.config, ingest.config);
+
+        for bad in [
+            r#"{ stats: { filters: "home/**" } }"#,
+            r#"{ stats: { filters: ["home/**"] } }"#,
+            r#"{ stats: { filters: [{ keys: "home/**" }] } }"#,
+            r#"{ stats: { filters: [{ key: "home//x" }] } }"#,
+        ] {
+            assert!(
+                matches!(
+                    ZenohNodeConfig::from_json5(bad),
+                    Err(ConfigIngestError::WrongType {
+                        path: "stats/filters",
+                        ..
+                    })
+                ),
+                "{bad}"
+            );
+        }
+        let many: Vec<String> = (0..=wz_session_core::stats::StatsKeyMatch::CAPACITY)
+            .map(|i| format!("{{ key: \"k/{i}\" }}"))
+            .collect();
+        assert!(matches!(
+            ZenohNodeConfig::from_json5(&format!(
+                "{{ stats: {{ filters: [{}] }} }}",
+                many.join(", ")
+            )),
+            Err(ConfigIngestError::OutOfRange {
+                path: "stats/filters",
+                ..
+            })
+        ));
+    }
+
+    /// `plugins_loading/search_dirs` is read in both of upstream's spellings, in
+    /// order, and a member upstream's parser refuses is refused by the key.
+    #[test]
+    fn the_plugin_search_dirs_are_read_in_order_and_a_bad_member_is_refused() {
+        use crate::plugin_search_dirs::{LibSearchDir, LibSearchDirs};
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ plugins_loading: { search_dirs:
+                 ["/a", { kind: "current_exe_parent" }, { kind: "path", value: "~/b" }] } }"#,
+        )
+        .expect("both spellings");
+        assert_eq!(
+            ingest.config.plugin_search_dirs,
+            Some(LibSearchDirs::new(vec![
+                LibSearchDir::Path(String::from("/a")),
+                LibSearchDir::CurrentExeParent,
+                LibSearchDir::Path(String::from("~/b")),
+            ]))
+        );
+        assert!(ingest.named.contains(&"plugins_loading/search_dirs"));
+        assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
+
+        let silent = ZenohNodeConfig::from_json5("{}").unwrap();
+        assert_eq!(
+            silent.config.plugin_search_dirs, None,
+            "silence searches the default list, and says so by naming none"
+        );
+
+        for bad in [
+            r#"{ plugins_loading: { search_dirs: "/a" } }"#,
+            r#"{ plugins_loading: { search_dirs: [{ kind: "elsewhere" }] } }"#,
+            r#"{ plugins_loading: { search_dirs: [7] } }"#,
+        ] {
+            assert_eq!(
+                ZenohNodeConfig::from_json5(bad).err(),
+                Some(ConfigIngestError::WrongType {
+                    path: "plugins_loading/search_dirs",
+                    expected: crate::plugin_search_dirs::LIB_SEARCH_DIRS_SHAPE,
+                }),
+                "{bad}"
             );
         }
     }
@@ -13486,6 +13772,21 @@ mod tests {
                 "routing-router-hat",
                 cfg!(feature = "routing-router-hat"),
             ),
+            (
+                "aggregation/subscribers",
+                "keyexpr-includes",
+                cfg!(feature = "keyexpr-includes"),
+            ),
+            (
+                "aggregation/publishers",
+                "keyexpr-includes",
+                cfg!(feature = "keyexpr-includes"),
+            ),
+            (
+                "stats/filters",
+                "transport-stats",
+                cfg!(feature = "transport-stats"),
+            ),
         ] {
             assert_eq!(config_key_capability(key), Some((feature, built)), "{key}");
             assert_eq!(config_key_in_build(key), built, "{key}");
@@ -13521,11 +13822,16 @@ mod tests {
                                    rules: [], subjects: [], policies: [] },
                  transport: { link: { tls: { enable_mtls: false, verify_name_on_connect: true,
                                              close_link_on_expiration: false } } },
-                 gateway: { south: "auto" } }"#,
+                 gateway: { south: "auto" },
+                 aggregation: { subscribers: [], publishers: [] },
+                 stats: { filters: [] } }"#,
         )
         .expect("upstream's defaults state no instruction");
         // Every capability key whose default is a value; the others default to their absence.
         let stated = [
+            "aggregation/subscribers",
+            "aggregation/publishers",
+            "stats/filters",
             "low_pass_filter",
             "downsampling",
             "qos/network",
@@ -13607,6 +13913,18 @@ mod tests {
             (
                 "gateway/south",
                 r#"{ gateway: { south: [{ filters: [{ modes: ["peer"] }] }] } }"#,
+            ),
+            (
+                "aggregation/subscribers",
+                r#"{ aggregation: { subscribers: ["a/**"] } }"#,
+            ),
+            (
+                "aggregation/publishers",
+                r#"{ aggregation: { publishers: ["a/**"] } }"#,
+            ),
+            (
+                "stats/filters",
+                r#"{ stats: { filters: [{ key: "a/**" }] } }"#,
             ),
         ] {
             let read = ZenohNodeConfig::from_json5(doc);

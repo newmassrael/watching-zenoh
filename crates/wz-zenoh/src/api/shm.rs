@@ -480,7 +480,9 @@ pub(crate) mod transport {
             let node = wz_capi_core::runtime::zenoh_config::ZenohNodeConfig::from_json5(&document)
                 .expect("a document the engine reads")
                 .config;
-            let promotion = wz_capi_core::open_plan::session_defaults_of(&node).shm_promotion;
+            let promotion = wz_capi_core::open_plan::session_defaults_of(&node)
+                .expect("defaults the engine compiles")
+                .shm_promotion;
             let provider = super::super::provider_of(&config).expect("a provider");
             let deadline = Instant::now() + Duration::from_secs(5);
             while !matches!(
