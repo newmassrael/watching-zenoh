@@ -76,6 +76,16 @@ impl SessionHandle {
         }
     }
 
+    /// The node's clock, the one the session stamps its data with: the registry's or the node's,
+    /// shared and not copied. It holds no clock where the role does not timestamp.
+    pub(crate) fn node_hlc(&self) -> wz_runtime_tokio::node_clock::NodeHlc {
+        match self {
+            Self::Registry(state) => state.shared.node_hlc().clone(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.node_hlc(),
+        }
+    }
+
     /// The id and the announced role of every established peer, the role in its 2-bit wire form
     /// (0 router, 1 peer, 2 client): the registry's sessions, or the faces a node holds.
     pub(crate) fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
@@ -91,6 +101,29 @@ impl SessionHandle {
         }
     }
 
+    /// What the session applies itself above its links, as its open compiled it from the
+    /// configuration: the registry's or the node's, read the same way.
+    pub(crate) fn session_defaults(&self) -> &wz_capi_core::session_defaults::SessionDefaults {
+        match self {
+            Self::Registry(state) => state.session_defaults(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.session_defaults(),
+        }
+    }
+
+    /// `options` of a publication on `keyexpr`, with the QoS `qos/publication` gives that key
+    /// written over them: what `z_put`, `z_delete` and `z_declare_publisher` publish with, as
+    /// upstream's session overwrites the QoS of each of the three.
+    pub(crate) fn publication_options(
+        &self,
+        keyexpr: &str,
+        options: wz_runtime_tokio::session::PublishOptions,
+    ) -> wz_runtime_tokio::session::PublishOptions {
+        self.session_defaults()
+            .publication_qos
+            .apply(keyexpr, options)
+    }
+
     /// The session's own shared-memory state, which the open attached to the registry or to the
     /// node, or `None` for a session opened without it.
     #[cfg(all(
@@ -104,6 +137,20 @@ impl SessionHandle {
             }
             #[cfg(feature = "router-node")]
             Self::Node(node) => node.abi_extension::<std::sync::Arc<crate::shm::SessionShm>>(),
+        }
+    }
+
+    /// Whether some peer of the session negotiated shared memory, so that a payload copied into
+    /// it would be sent to someone as a descriptor.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    pub(crate) fn has_shm_peer(&self) -> bool {
+        match self {
+            Self::Registry(state) => state.shared.has_shm_peer(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.has_shm_peer(),
         }
     }
 
@@ -270,7 +317,9 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
         | OpenRefusal::TimestampingNotInBuild
         | OpenRefusal::MulticastCompressionNotInBuild
         | OpenRefusal::Namespace
-        | OpenRefusal::GatewayNotCarried => Z_EINVAL,
+        | OpenRefusal::GatewayNotCarried
+        | OpenRefusal::LinkNotInBuild
+        | OpenRefusal::PluginHostNotInBuild => Z_EINVAL,
         OpenRefusal::QosWithLowlatency
         | OpenRefusal::GossipTarget
         | OpenRefusal::NothingToDial
@@ -319,6 +368,26 @@ fn abi_choices(shm_clients: OpenShmClients) -> AbiChoices {
         groups_report_shm: cfg!(feature = "zenoh-c-shared-memory"),
     }
 }
+
+/// What this ABI's session applies itself of the keys only a session applies, for
+/// [`wz_capi_core::open_plan::key_state`]: the QoS `qos/publication` gives its publications,
+/// always; shared memory on the shared-memory arm, where its open makes the subsystem when asked;
+/// and, where it also holds the session's provider (that arm with the unstable API), the copy of
+/// a large put. The value of a query and a reply leave as their bytes on this ABI, so the list of
+/// messages a copy is made for is not acted on whole.
+pub(crate) const SESSION_REACH: wz_capi_core::open_plan::SessionReach =
+    wz_capi_core::open_plan::SessionReach {
+        publication_qos: true,
+        shared_memory: cfg!(feature = "zenoh-c-shared-memory"),
+        promotion: wz_capi_core::session_defaults::PromotedMessages {
+            put: cfg!(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            )),
+            query: false,
+            reply: false,
+        },
+    };
 
 /// The endpoints the flat config store states for this open: `connect/endpoints` is the whole
 /// list (R2948: each endpoint is dialled on its own schedule) and `listen/endpoints` is what the

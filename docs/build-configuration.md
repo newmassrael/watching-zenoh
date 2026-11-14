@@ -542,6 +542,15 @@ arm `--drop-in-features c` adds).
   allocates. The pico ABI's layout switches are capabilities, so its `arm` is empty.
   Version 1 had no `arm`, and its digest could not tell two zenoh-c drop-ins of
   different layouts apart; version 2 adds it.
+- It names the engine the build runs its sessions on (`engine`: `tokio`, or `coop`
+  for a pico build whose features select the cooperative engine and not the tokio
+  one) and the platform it is a library for (`platform`: `host`, or `zephyr` for a
+  pico build with `os-zephyr`). Version 2 had neither, and its digest could not tell a
+  pico build on one engine or platform from one on another with the same
+  capabilities; version 3 adds both.
+- It lists the ABI's protocol facts (`facts`): what a session of the ABI states on
+  the wire that no switch moves, each from a `[[protocol_fact]]` of the declaration.
+  They are outside the digest, which the ABI and the catalogue version already fix.
 - A capability is supported when it is in the build's final feature list, so the
   cooperative engine's build states what it has (its list leaves out what selects
   the tokio engine), not what its header asked for.
@@ -551,7 +560,7 @@ arm `--drop-in-features c` adds).
   read from is beside it in `derived_from` (file names only, never a path of the
   machine that made it).
 
-It is JSON, format `wz-conformance-statement` version 2; a field's meaning changes
+It is JSON, format `wz-conformance-statement` version 3; a field's meaning changes
 only with the version.
 
 The C ABI libraries carry the same digest and hand it out:

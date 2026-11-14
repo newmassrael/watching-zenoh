@@ -399,10 +399,11 @@ mod tests {
     use alloc::rc::Rc;
     use alloc::vec;
 
+    use core::net::SocketAddr;
     use wz_codecs::lent::{
         Query, Request, RequestVariant, Wireexpr, WireexprNonlocal, WireexprVariant,
     };
-    use wz_runtime_coop::session_drive::{IpEndpoint, SessionDatagramLink};
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
     use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
     use wz_session_core::link::BoxedLinkDriver;
@@ -516,14 +517,8 @@ mod tests {
         static WRITES_OFF: WritesOff = WritesOff;
 
         let net = MemoryNetwork::new();
-        let node_at = IpEndpoint {
-            addr: [10, 0, 0, 1],
-            port: 7481,
-        };
-        let peer_at = IpEndpoint {
-            addr: [10, 0, 0, 2],
-            port: 7482,
-        };
+        let node_at = SocketAddr::from(([10, 0, 0, 1], 7481));
+        let peer_at = SocketAddr::from(([10, 0, 0, 2], 7482));
         let driver = net.bind(node_at, Some(peer_at)).expect("bind node end");
         let peer = net.bind(peer_at, Some(node_at)).expect("bind peer end");
         let runtime = CoopRuntime::new(FrozenClock);
@@ -634,14 +629,8 @@ mod tests {
         static CONFIG: FixedConfig = FixedConfig;
         static WRITES_OFF: WritesOff = WritesOff;
         let net = MemoryNetwork::new();
-        let node_at = IpEndpoint {
-            addr: [10, 0, 0, 1],
-            port: 7491,
-        };
-        let peer_at = IpEndpoint {
-            addr: [10, 0, 0, 2],
-            port: 7492,
-        };
+        let node_at = SocketAddr::from(([10, 0, 0, 1], 7491));
+        let peer_at = SocketAddr::from(([10, 0, 0, 2], 7492));
         let driver = net.bind(node_at, Some(peer_at)).expect("bind node end");
         let peer = net.bind(peer_at, Some(node_at)).expect("bind peer end");
         let runtime = CoopRuntime::new(FrozenClock);

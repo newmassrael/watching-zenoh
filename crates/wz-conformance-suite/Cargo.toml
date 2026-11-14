@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-conformance-suite — the front half of the zenoh conformance test suite, as data a test
+# system reads (docs/conformance-suite.md).
+#
+# The conformance requirements, the PICS and PIXIT proformas and wz's answers to the PICS live in
+# `conformance/suite/` as TOML, because they are documents of the suite and not of any one
+# implementation. This crate is what holds them: it reads them, checks each against its format
+# and against the others (a selection names a PICS item that exists, a PICS item names
+# requirements that exist, a wz answer names a capability, limit or policy of
+# `deploy/wz-config.toml`), and answers the PICS for a wz build from its conformance statement
+# (decision C15 of docs/build-configuration.md). Nothing of the engine is linked here: the suite
+# is the same for every implementation it tests.
+
+[package]
+name = "wz-conformance-suite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The conformance requirements, PICS and PIXIT proformas of the zenoh conformance test suite, read and held to their formats."
+
+[lib]
+name = "wz_conformance_suite"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# The digest of the protocol facts' canonical form that `facts_pin.toml` pins.
+sha2 = "0.10"
+toml = "0.9.6"
+
+[lints]
+workspace = true

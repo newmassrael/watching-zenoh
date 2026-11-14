@@ -175,7 +175,7 @@ fn a_prefix_is_stripped_every_way_it_can_match() {
 #[test]
 #[cfg(feature = "internal")]
 fn a_nonwild_prefix_is_stripped_to_the_longest_suffix() {
-    let cases: [(&str, &str, Option<&str>); 29] = [
+    let cases: [(&str, &str, Option<&str>); 30] = [
         ("demo/example/test/**", "demo/example/test", Some("**")),
         ("demo/example/**", "demo/example/test", Some("**")),
         ("**", "demo/example/test", Some("**")),
@@ -236,6 +236,10 @@ fn a_nonwild_prefix_is_stripped_to_the_longest_suffix() {
         // A `**` that ends the key expression cannot stand for a verbatim chunk of the prefix.
         ("demo/**", "demo/@a", None),
         ("a/b", "a", Some("b")),
+        // An `@` that is the second byte of the first chunk of the prefix leaves the `**` nothing
+        // to back off to: it takes none of the prefix, and no suffix is left. Upstream's own
+        // arithmetic overflows here.
+        ("**/a", "a@", None),
     ];
     for (target, prefix, expected) in cases {
         let prefix = nonwild_keyexpr::new(prefix).unwrap();

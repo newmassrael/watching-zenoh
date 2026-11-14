@@ -118,11 +118,13 @@ pub(crate) unsafe fn timestamp_hint(
 
 /// Mint a timestamp from a session (zenoh-c `z_timestamp_new`).
 ///
-/// Upstream's takes the session because the HLC belongs to the node, and it
-/// FAILS when that node has no clock configured. wz's session mints from the
-/// same two inputs — this session's own zid and its monotonic-anchored NTP64
-/// word — so the value a C program stamps is attributable to the session that
-/// stamped it, which is the whole point of the zid half.
+/// Upstream's is `session.new_timestamp()`, which reads the node's clock when the node holds one
+/// and the system time with the session's id when it does not, and answers `Z_OK` either way. So
+/// is this: the session's node clock (the registry's or the node's), read for the program, with no
+/// stamping policy applied. The
+/// `clock-quality-stamping` policy is about the data the node stamps (a publication, a reply, a put
+/// it forwards); a program that asks for the time is given the clock's, so what it is given and
+/// what the node stamps are one clock and interleave.
 ///
 /// # Safety
 /// `this_` must be null or valid and writable; `session` must be null or a live
@@ -142,35 +144,38 @@ pub unsafe extern "C" fn z_timestamp_new(
         // stamp a message with whatever was on its stack.
         unsafe { *this_ = z_timestamp_t::empty() };
         // SAFETY: the caller's contract.
-        // The stamp needs the session's zid and the wall clock, and both exist on a node as well
-        // as on the registry, so the handle is read, not the registry's state.
+        // The clock and the zid exist on a node as well as on the registry, so the handle is
+        // read, not the registry's state.
         let Some(handle) = (unsafe { session_handle(session) }) else {
             return unsafe { not_a_registry(session) };
         };
-        let mut stamped = z_timestamp_t::empty();
-        // R311y569 — the WALL CLOCK, through wz's own NTP64 SSOT.
-        //
-        // This was `ntp64_from_millis(shared.now_monotonic_ms())`, and the debt
-        // ledger carried it from y557 as "the only shipped thing whose VALUE
-        // could be wrong on the wire". It was: `now_monotonic_ms` is
-        // `Instant::elapsed()` from the moment the session was CONSTRUCTED
-        // (`runtime_impl.rs:357`), so the seconds half of the word counted
-        // session uptime rather than time. MEASURED against the real
-        // `libzenohc.so` with one C probe before this line changed — upstream
-        // printed `ntp_secs == time(NULL)` exactly, wz printed `ntp_secs=0`,
-        // a value 56 years adrift on any peer that reads it.
-        //
-        // Routed through [`wall_clock_ntp64`] rather than re-derived: it is the
-        // NTP64 recipe the storage stack, the digest publisher and the aligner
-        // already share, so a timestamp a C program mints and a timestamp wz
-        // stamps itself are now the same units by construction rather than by
-        // coincidence.
-        stamped._time = wz_runtime_tokio::timestamp_source::wall_clock_ntp64();
-        stamped._id = handle.zid();
+        let stamped = session_timestamp(&handle.node_hlc(), handle.zid());
         // SAFETY: checked non-null above.
         unsafe { *this_ = stamped };
         Z_OK
     })
+}
+
+/// What [`z_timestamp_new`] gives a session whose node clock is `hlc` and whose id is `zid`: the
+/// clock's next time, or, for a node that holds no clock (its role does not timestamp) or whose
+/// source cannot say what time it is, the system time, upstream's `None` arm of
+/// `Session::new_timestamp`.
+///
+/// The system time is read through [`wall_clock_ntp64`](wz_runtime_tokio::timestamp_source::wall_clock_ntp64),
+/// the NTP64 recipe the storage stack stamps with, so its seconds half is the Unix epoch's and not
+/// a session uptime, which the real library was measured to print (`ntp_secs == time(NULL)`).
+fn session_timestamp(
+    hlc: &wz_runtime_tokio::node_clock::NodeHlc,
+    zid: [u8; Z_ID_SIZE],
+) -> z_timestamp_t {
+    let time = match hlc.clock_stamp() {
+        Some(stamp) => stamp.time,
+        None => wz_runtime_tokio::timestamp_source::wall_clock_ntp64(),
+    };
+    z_timestamp_t {
+        _time: time,
+        _id: zid,
+    }
 }
 
 /// The NTP64 time word (zenoh-c `z_timestamp_ntp64_time`).
@@ -268,6 +273,54 @@ mod tests {
              the UNIX time {now}. A session-uptime word reads as 1970 on every \
              peer that decodes it — the defect this replaced."
         );
+    }
+
+    /// A node whose clock is not trusted stamps none of its data under `trusted-only`, and a
+    /// program that asks for the time is given the clock's all the same: one clock, so what the
+    /// program is given and what the node stamps once the clock is trusted interleave.
+    #[test]
+    fn a_trusted_only_node_gives_a_program_the_time_of_the_clock_it_stamps_data_with() {
+        use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
+        use wz_runtime_tokio::session_glue::WhatAmI;
+        use wz_runtime_tokio::timestamp_source::SystemEpoch;
+
+        let zid = [0x5a; Z_ID_SIZE];
+        let hlc = NodeHlc::for_node_over_source(
+            &zid,
+            WhatAmI::Router,
+            TimestampingEnabled::all(true),
+            SystemEpoch,
+        )
+        .with_trusted_only_stamping(true);
+        assert!(
+            hlc.stamp().is_none(),
+            "no reference reported: no data is stamped"
+        );
+        let first = session_timestamp(&hlc, zid);
+        assert_eq!(first._id, zid);
+        assert!(hlc.report_sync_acquired());
+        let stamped = hlc.stamp().expect("a trusted clock stamps data").time;
+        let second = session_timestamp(&hlc, zid);
+        assert!(
+            first._time < stamped && stamped < second._time,
+            "one clock: {} {stamped} {}",
+            first._time,
+            second._time
+        );
+    }
+
+    /// A node that holds no clock (its role does not timestamp) gives the system time with the
+    /// session's id, upstream's `None` arm.
+    #[test]
+    fn a_node_that_holds_no_clock_gives_the_system_time() {
+        let zid = [0x5b; Z_ID_SIZE];
+        let given = session_timestamp(&wz_runtime_tokio::node_clock::NodeHlc::disabled(), zid);
+        assert_eq!(given._id, zid);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the system clock is after 1970")
+            .as_secs();
+        assert!((given._time >> 32).abs_diff(now) < 60, "the system time");
     }
 
     /// NULL is answered, not dereferenced — the accessors are the surface a C

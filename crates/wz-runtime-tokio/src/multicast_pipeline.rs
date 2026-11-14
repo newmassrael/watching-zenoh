@@ -967,6 +967,7 @@ mod tests {
                 ..TxQueueConf::default()
             },
             link_rx: LinkRxConf::default(),
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         }
     }
 

@@ -35,8 +35,12 @@
 //!   config write is never stopped by the next one, and is started again by
 //!   every change that still names it. Here a start the plane made is a
 //!   plugin the plane runs.
-//! * A request with no `__path__` is refused by name: wz loads by path only,
-//!   because `plugins_loading/search_dirs` is not honoured.
+//! * A request with no `__path__` is upstream's by-name lookup, which
+//!   `plugins_loading/enabled` switches ([`PluginsLoading`]). Switched off, the
+//!   plugin is left unloaded with upstream's warning and fails nothing, as
+//!   upstream's empty loader leaves it. Switched on, it is refused by name:
+//!   the lookup searches `plugins_loading/search_dirs`, which wz does not
+//!   honour, so wz loads by path only.
 //! * A `__required__` plugin that fails to start is REPORTED as required
 //!   rather than panicking inside the plane; the host decides. Upstream's
 //!   panic lands in the task that runs its plane.
@@ -79,6 +83,44 @@ enum PluginDiff {
     Start(PluginLoadRequest),
 }
 
+/// Whether a plugin the section asks for by NAME (no `__path__`) is looked up:
+/// upstream's `plugins_loading/enabled`.
+///
+/// Upstream's plugin manager is built over the config's library loader, which
+/// is EMPTY when the key is off (`commons/zenoh-config/src/lib.rs` @ `LibLoader::empty()`);
+/// a by-name lookup on an empty loader finds nothing and the plugin is left
+/// unloaded with a warning, never a failure
+/// (`plugins/zenoh-plugin-trait/src/manager/dynamic_plugin.rs` @ `will not be loaded as plugin loading is disabled",`).
+/// A plugin named by path loads either way.
+///
+/// The two defaults differ, and which one a host takes is the host's: a
+/// library session's config leaves the key off (`Config::default()`), while
+/// zenohd turns it on over whatever its file says
+/// (`zenohd/src/main.rs` @ `config.plugins_loading.set_enabled(true).unwrap();`).
+/// [`Self::from_config`] is the library's reading, which is what a host the
+/// file configures takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PluginsLoading {
+    /// The key off: a by-name request is left unloaded with upstream's warning.
+    #[default]
+    Disabled,
+    /// The key on: a by-name request is searched for, which wz cannot do, so it
+    /// is refused by name.
+    Enabled,
+}
+
+impl PluginsLoading {
+    /// The library's reading of `plugins_loading/enabled`: on only when the
+    /// file states `true`.
+    pub fn from_config(stated: Option<bool>) -> Self {
+        if stated == Some(true) {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
 /// The library plugins a node runs, and the plane that keeps them matching
 /// its `plugins` section.
 #[derive(Debug)]
@@ -89,20 +131,23 @@ pub struct DynamicPluginPlane {
     active: BTreeMap<String, PathBuf>,
     /// Keys a build-time subsystem owns; never started here.
     composed: BTreeSet<String>,
+    /// Whether a by-name request is looked up.
+    loading: PluginsLoading,
 }
 
 impl DynamicPluginPlane {
-    /// A plane running nothing.
+    /// A plane running nothing, looking plugins up by name as `loading` says.
     ///
     /// It leaves the storage manager to the subsystem composed into this
     /// build: the feature that compiles this module also compiles the storage
     /// manager's own sink, and a library by that name would be upstream's
     /// plugin, which no wz ABI can load.
-    pub fn new() -> Self {
+    pub fn new(loading: PluginsLoading) -> Self {
         Self {
             registry: PluginRegistry::new(),
             active: BTreeMap::new(),
             composed: BTreeSet::from([String::from(STORAGE_MANAGER_PLUGIN)]),
+            loading,
         }
     }
 
@@ -221,11 +266,26 @@ impl DynamicPluginPlane {
         reports: &mut Vec<PluginPlaneReport>,
     ) -> Result<(), String> {
         let Some(paths) = request.paths.as_ref() else {
-            return Err(format!(
-                "no `__path__`: wz loads a plugin from a path only \
-                 (`plugins_loading/search_dirs` is not honoured), so `{}` cannot be found",
-                request.name
-            ));
+            return match self.loading {
+                // Upstream's empty loader: the lookup finds nothing, the plugin is
+                // not started, and nothing fails, `__required__` or not.
+                PluginsLoading::Disabled => {
+                    reports.push(PluginPlaneReport {
+                        plugin: request.id.clone(),
+                        required: false,
+                        message: format!(
+                            "Plugin `{}` will not be loaded as plugin loading is disabled",
+                            request.name
+                        ),
+                    });
+                    Ok(())
+                }
+                PluginsLoading::Enabled => Err(format!(
+                    "no `__path__`: wz loads a plugin from a path only \
+                     (`plugins_loading/search_dirs` is not honoured), so `{}` cannot be found",
+                    request.name
+                )),
+            };
         };
         let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
         let was_live = matches!(
@@ -263,8 +323,9 @@ impl DynamicPluginPlane {
 }
 
 impl Default for DynamicPluginPlane {
+    /// The library's plane: by-name lookup off, as a config that states nothing leaves it.
     fn default() -> Self {
-        Self::new()
+        Self::new(PluginsLoading::default())
     }
 }
 
@@ -374,7 +435,7 @@ mod tests {
             return;
         };
         let so = so.display().to_string();
-        let mut plane = DynamicPluginPlane::new();
+        let mut plane = DynamicPluginPlane::default();
 
         let reports = plane.apply(&section(&format!(
             r#"{{ ex: {{ __path__: "{so}" }}, storage_manager: {{ storages: {{}} }} }}"#
@@ -424,7 +485,7 @@ mod tests {
             return;
         };
         let so = so.display().to_string();
-        let mut plane = DynamicPluginPlane::new();
+        let mut plane = DynamicPluginPlane::default();
         let new = parse(r#"{ key: 1 }"#).unwrap();
         assert_eq!(
             plane.check_config("ex", &new),
@@ -445,10 +506,11 @@ mod tests {
 
     /// A start that cannot happen is REPORTED with its `__required__`, and
     /// the section's other plugins still start — upstream logs and runs on.
-    /// No example library is needed: the failures are the subject.
+    /// No example library is needed: the failures are the subject. By-name
+    /// lookup is ON here, so the unnamed plugin is a lookup wz cannot make.
     #[test]
     fn a_plugin_that_cannot_start_is_reported_and_the_rest_run_on() {
-        let mut plane = DynamicPluginPlane::new();
+        let mut plane = DynamicPluginPlane::new(PluginsLoading::Enabled);
         let reports = plane.apply(&section(
             r#"{ missing: { __path__: "/nonexistent/wz-no-such.so", __required__: true },
                  unnamed: {} }"#,
@@ -469,6 +531,53 @@ mod tests {
             "a failed load stays visible as Declared"
         );
         assert_eq!(plane.running().count(), 0);
+    }
+
+    /// `plugins_loading/enabled` off, the library's default: a plugin the
+    /// section names with no `__path__` is left unloaded with upstream's
+    /// warning, which fails nothing even when `__required__`, while one named
+    /// by path is still loaded. On, the same request is a lookup wz cannot
+    /// make and is refused by name. No example library is needed: the path
+    /// arm's subject is that the attempt is made at all.
+    #[test]
+    fn by_name_loading_off_leaves_an_unnamed_plugin_unloaded_and_fails_nothing() {
+        assert_eq!(PluginsLoading::from_config(None), PluginsLoading::Disabled);
+        assert_eq!(
+            PluginsLoading::from_config(Some(false)),
+            PluginsLoading::Disabled
+        );
+        assert_eq!(
+            PluginsLoading::from_config(Some(true)),
+            PluginsLoading::Enabled
+        );
+
+        let doc = r#"{ unnamed: { __required__: true },
+                       pathed: { __path__: "/nonexistent/wz-no-such.so" } }"#;
+        let mut off = DynamicPluginPlane::new(PluginsLoading::Disabled);
+        let reports = off.apply(&section(doc));
+        let unnamed = reports.iter().find(|r| r.plugin == "unnamed").unwrap();
+        assert!(
+            !unnamed.required,
+            "upstream fails nothing here: {unnamed:?}"
+        );
+        assert!(
+            unnamed
+                .message
+                .contains("will not be loaded as plugin loading is disabled"),
+            "{unnamed:?}"
+        );
+        let pathed = reports.iter().find(|r| r.plugin == "pathed").unwrap();
+        assert!(
+            pathed.message.contains("/nonexistent/wz-no-such.so"),
+            "a path is tried whatever the switch says: {pathed:?}"
+        );
+        assert_eq!(off.running().count(), 0);
+
+        let mut on = DynamicPluginPlane::new(PluginsLoading::Enabled);
+        let reports = on.apply(&section(doc));
+        let unnamed = reports.iter().find(|r| r.plugin == "unnamed").unwrap();
+        assert!(unnamed.required, "{unnamed:?}");
+        assert!(unnamed.message.contains("search_dirs"), "{unnamed:?}");
     }
 
     /// The combinator asks each sink and the first that refuses decides; the

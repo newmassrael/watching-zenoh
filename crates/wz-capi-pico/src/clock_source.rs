@@ -16,7 +16,10 @@
 //!
 //! The library cannot know whether the registered clock follows a reference. The program can, so it
 //! reports it (`wz_ext_clock_report`), and a build whose `clock-quality-stamping` policy is
-//! `trusted-only` stamps nothing until it has said so.
+//! `trusted-only` stamps no data until it has said so: an advanced publisher, every sample of which
+//! carries a time, refuses its put and delete until then (`Z_ERR_TIMESTAMP_GENERATION_FAILED`,
+//! nothing sent). The policy is the stamper's: a program that reads the clock (`z_timestamp_new`)
+//! is given its time whatever its standing.
 
 use std::ffi::c_void;
 
@@ -86,7 +89,10 @@ pub unsafe extern "C" fn wz_ext_clock_source_register(
 /// Remove a clock registered earlier. `Z_ERR_INVALID` for a handle that is not registered.
 ///
 /// After it returns the library no longer calls the callback, and the program may release the
-/// context. A call already running on another thread may still be inside the callback.
+/// context. A call already running on another thread may still be inside the callback. With no
+/// clock left registered, `z_timestamp_new` reads the system clock again; a session's stamps still
+/// never go back, so while the system clock is behind the last stamp a session gave (to a program
+/// or to a sample of its advanced publisher), its stamps go on from that one.
 #[no_mangle]
 pub extern "C" fn wz_ext_clock_source_unregister(handle: u32) -> ZResult {
     crate::ffi::guarded(|| match clock::unregister(handle) {

@@ -197,6 +197,35 @@ pub struct MulticastParams {
     /// the manager's one `defrag_buff_size`
     /// (`io/zenoh-transport/src/multicast/transport.rs` @ `self.manager.config.defrag_buff_size,`).
     pub link_rx: crate::session_init_params::LinkRxConf,
+    /// Whose rule this node judges a member's Join by: the preset's upstream's
+    /// ([`GroupJoinRule`]).
+    pub join_rule: GroupJoinRule,
+}
+
+/// Whose rule a node judges the Join of a group member by. Both upstreams admit an unknown
+/// member only when its protocol version, its two resolutions and its batch size are the node's
+/// own (zenoh `io/zenoh-transport/src/multicast/rx.rs` @ `if join.batch_size != batch_size {`,
+/// zenoh-pico `src/transport/multicast/rx.c` @ `(msg->_batch_size != Z_BATCH_MULTICAST_SIZE)) {`),
+/// so a member of the other preset's default batch (8,192 against 2,048) is not read by either.
+/// They part over the rest, and a preset follows its upstream:
+///
+/// * QoS: zenoh's node that offers no per-priority conduits ignores a Join that does
+///   (`io/zenoh-transport/src/multicast/rx.rs` @
+///   `if !self.manager.config.multicast.is_qos && join.ext_qos.is_some() {`); zenoh-pico has no
+///   such rule.
+/// * A known member whose Join changes its terms: zenoh-pico drops the member
+///   (`src/transport/multicast/rx.c` @
+///   `_z_transport_peer_multicast_slist_drop_first_filter(ztm->_peers, _z_transport_peer_multicast_eq, entry);`);
+///   zenoh refuses the Join and keeps the member here. Upstream zenoh then ends its whole
+///   multicast transport, because the refusal is an error of its receive task
+///   (`io/zenoh-transport/src/multicast/rx.rs` @
+///   `TransportBody::Join(join) => self.handle_join_from_peer(join, peer)?,`); wz does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupJoinRule {
+    /// zenoh's, the rule of the zenoh and zenoh-c presets and of a node opened from them.
+    Zenoh,
+    /// zenoh-pico's, the rule of the pico preset and of the MCU sessions.
+    Pico,
 }
 
 impl MulticastParams {

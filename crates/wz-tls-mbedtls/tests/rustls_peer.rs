@@ -17,7 +17,7 @@
 #![cfg(feature = "vendored")]
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::{Arc, Mutex, MutexGuard, Once};
 use std::thread;
 
@@ -26,7 +26,7 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 
 use wz_runtime_coop::ip_stack::{IpDriver, IpLinks};
-use wz_runtime_coop::session_drive::{IpEndpoint, LinkOpenError, Locator, SessionLinks};
+use wz_runtime_coop::session_drive::{LinkOpenError, Locator, SessionLinks};
 use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::PosixTcpDial;
@@ -35,7 +35,12 @@ use wz_session_core::link::BoxedLinkDriver;
 use wz_tls_mbedtls::channel::{start, Identity, Zid};
 use wz_tls_mbedtls::stream::{HandshakeBudget, TlsDial};
 
-const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+/// `port` on the IPv4 loopback.
+fn at(port: u16) -> SocketAddr {
+    SocketAddr::new(LOOPBACK, port)
+}
 
 /// The library keeps process-wide state with no lock (its profile has one thread), and the test
 /// harness runs tests on several: a test holds this while it uses the library.
@@ -142,9 +147,7 @@ fn a_device_dials_a_router_that_pins_its_certificate_and_each_names_the_others_k
     let router = RouterIdentity::generate();
     let (port, served) = listen(router_config(&router, device.certificate_der()));
 
-    let stream = dial(device)
-        .dial(LOOPBACK, port)
-        .expect("the channel opens");
+    let stream = dial(device).dial(at(port)).expect("the channel opens");
     assert_eq!(
         stream.peer_zid(),
         Some(router.zid()),
@@ -196,7 +199,7 @@ fn a_router_that_pins_another_certificate_refuses_the_device() {
     // returns (the dial is refused) or just after (the dial returns and the session ends at its
     // first read). Which of the two it sees depends on the scheduling of the two ends, so the test
     // holds what does not: the device is never left with a session that carries data.
-    match dial(device).dial(LOOPBACK, port) {
+    match dial(device).dial(at(port)) {
         Err(error) => assert!(
             matches!(error, LinkOpenError::Refused),
             "the dial of a refused device fails as a refusal"
@@ -236,12 +239,8 @@ fn a_tls_locator_opens_the_stream_link_over_the_channel_on_the_hosts_links() {
     // The heap profile's links over the host's sockets, given the channel for `tls/`.
     let links =
         IpLinks::<PosixUdpSocket, PosixTcpDial>::new(LOOPBACK, PosixTcpDial).with_tls(dial(device));
-    let at = IpEndpoint {
-        addr: LOOPBACK,
-        port,
-    };
     let link = links
-        .open_initiator(Locator::tls(at))
+        .open_initiator(Locator::tls(at(port)))
         .expect("the secure stream link opens")
         .pump;
     let IpDriver::Tls(_) = &*link else {

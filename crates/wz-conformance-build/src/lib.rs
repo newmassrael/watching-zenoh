@@ -35,8 +35,11 @@
 //! SHA-256 over the canonical JSON `wz_config.py` hashes: the object with the keys `abi`, `arm`
 //! (`[switch, on]` pairs: the layout switches that are not capabilities, which select the arm
 //! of the C types a program allocates), `capabilities` (`[id, supported]` pairs),
-//! `catalog_version`, `format`, `format_version`,
-//! `limits` (`[id, value]`) and `policies` (`[id, value]`), keys sorted, no whitespace. Every word
+//! `catalog_version`, `engine` (`tokio` or `coop`), `format`, `format_version`,
+//! `limits` (`[id, value]`), `platform` (`host` or a platform's word) and `policies`
+//! (`[id, value]`), keys sorted, no whitespace. The engine and the platform are read from the
+//! pico crate's features by the rule `wz_config.statement_engine` and `statement_platform`
+//! apply, over the feature lists generated into `items_generated.rs`. Every word
 //! in it is a declaration word (`wz_config.rust_word`), so no escaping arises; one that would
 //! need it is refused rather than escaped differently from the other side. The fixture test below
 //! and the selftest arm of `wz_config.py` assert the same digest of the same fixture, so the two
@@ -69,6 +72,10 @@ pub struct Statement<'a> {
     pub catalog_version: u32,
     /// The ABI the build is of: `core`, `pico` or `c`.
     pub abi: &'a str,
+    /// The engine the build runs its sessions on: `tokio` or `coop`.
+    pub engine: &'a str,
+    /// The platform the build is a library for: `host`, or the word of a platform feature.
+    pub platform: &'a str,
     /// Every layout switch of the ABI that is not a capability, in declared order, on or off.
     pub arm: Vec<(&'a str, bool)>,
     /// Every capability the ABI exports, in declared order, with whether the build has it.
@@ -90,6 +97,8 @@ impl Statement<'_> {
         out.push_str(",\"capabilities\":");
         push_flags(&mut out, &self.capabilities);
         let _ = write!(out, ",\"catalog_version\":{}", self.catalog_version);
+        out.push_str(",\"engine\":");
+        push_word(&mut out, self.engine);
         out.push_str(",\"format\":");
         push_word(&mut out, self.format);
         let _ = write!(out, ",\"format_version\":{}", self.format_version);
@@ -102,7 +111,9 @@ impl Statement<'_> {
             push_word(&mut out, id);
             let _ = write!(out, ",{value}]");
         }
-        out.push_str("],\"policies\":[");
+        out.push_str("],\"platform\":");
+        push_word(&mut out, self.platform);
+        out.push_str(",\"policies\":[");
         for (i, (id, value)) in self.policies.iter().enumerate() {
             if i > 0 {
                 out.push(',');
@@ -208,11 +219,28 @@ pub fn of_build(
             .any(|(_, abis)| abis.contains(&abi)),
         "{abi:?} is not an ABI of the declaration"
     );
+    // The pico crate's own rule: the tokio engine whenever it is in the build, else the
+    // cooperative one when a feature selects it. The other ABIs have only the tokio engine.
+    let coop = abi == "pico"
+        && !has_feature("engine-tokio")
+        && items::COOP_ENGINE_FEATURES
+            .iter()
+            .any(|&feature| has_feature(feature));
+    let platform = if abi == "pico" {
+        items::PLATFORM_FEATURES
+            .iter()
+            .find(|&&(feature, _)| has_feature(feature))
+            .map_or("host", |&(_, platform)| platform)
+    } else {
+        "host"
+    };
     Statement {
         format: items::FORMAT,
         format_version: items::FORMAT_VERSION,
         catalog_version: items::CATALOG_VERSION,
         abi,
+        engine: if coop { "coop" } else { "tokio" },
+        platform,
         arm: items::ARM
             .iter()
             .filter(|(_, abis)| abis.contains(&abi))
@@ -325,6 +353,8 @@ mod tests {
             format_version: 1,
             catalog_version: 7,
             abi: "pico",
+            engine: "tokio",
+            platform: "host",
             arm: vec![("x-arm", true)],
             capabilities: vec![("a-cap", true), ("b-cap", false)],
             limits: vec![("L_ONE", 256), ("L_TWO", 0)],
@@ -338,14 +368,46 @@ mod tests {
             fixture().canonical_json(),
             "{\"abi\":\"pico\",\"arm\":[[\"x-arm\",true]],\
              \"capabilities\":[[\"a-cap\",true],[\"b-cap\",false]],\
-             \"catalog_version\":7,\"format\":\"wz-conformance-statement\",\"format_version\":1,\
-             \"limits\":[[\"L_ONE\",256],[\"L_TWO\",0]],\
+             \"catalog_version\":7,\"engine\":\"tokio\",\
+             \"format\":\"wz-conformance-statement\",\"format_version\":1,\
+             \"limits\":[[\"L_ONE\",256],[\"L_TWO\",0]],\"platform\":\"host\",\
              \"policies\":[[\"p-one\",\"on\"],[\"p-two\",\"os-default\"]]}"
         );
         assert_eq!(
             fixture().digest(),
-            "sha256:f503a3f077f1fd6a8b6fd97ae6281ba9bb81e628f2680ce70ab248a31fd51387"
+            "sha256:1504af20a23a543a7613580140ff56e39f4f6324c8f15588f62ebc5d245da4bf"
         );
+    }
+
+    #[test]
+    fn the_engine_and_the_platform_are_read_from_the_pico_crate_s_features() {
+        let tokio = of_build("pico", |id| id == "engine-tokio", |_| None);
+        assert_eq!((tokio.engine, tokio.platform), ("tokio", "host"));
+        let coop = of_build("pico", |id| id == "engine-coop", |_| None);
+        assert_eq!((coop.engine, coop.platform), ("coop", "host"));
+        assert_ne!(
+            coop.digest(),
+            tokio.digest(),
+            "the engine alone moves the digest"
+        );
+        let zephyr = of_build("pico", |id| id == "os-zephyr", |_| None);
+        assert_eq!((zephyr.engine, zephyr.platform), ("coop", "zephyr"));
+        assert_ne!(
+            zephyr.digest(),
+            coop.digest(),
+            "the platform alone moves the digest"
+        );
+        let both = of_build(
+            "pico",
+            |id| id == "engine-tokio" || id == "engine-coop",
+            |_| None,
+        );
+        assert_eq!(
+            both.engine, "tokio",
+            "the tokio engine wins when it is in the build"
+        );
+        let c = of_build("c", |id| id == "engine-coop" || id == "os-zephyr", |_| None);
+        assert_eq!((c.engine, c.platform), ("tokio", "host"));
     }
 
     /// Every build `wz_config.py --emit statement-vectors` states has, read the way a build script

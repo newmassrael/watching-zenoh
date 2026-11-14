@@ -163,6 +163,54 @@ fn the_policy_always_stamps_with_a_clock_no_reference_was_reported_for() {
     assert_eq!(node.unstamped(), 0);
 }
 
+/// The policy is the stamper's and not the clock's: a node whose untrusted clock stamps none of the
+/// data it passes on still gives a time to a caller that reads the clock, as upstream's clock
+/// always does, and that time is the same clock's, so the next stamp the policy lets through is
+/// above it.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn trusted_only_holds_back_the_stamps_of_data_and_not_the_clock() {
+    let node = frozen_node_with_policy(&[0x01], true);
+    assert!(
+        node.stamp().is_none(),
+        "no reference yet: the node stamps no data"
+    );
+    let read = node.clock_stamp().expect("a reading of the clock").time;
+    let word = node.next_word().expect("the clock lent as uhlc's");
+    assert!(
+        word > read,
+        "one clock: the lent read follows the plain read"
+    );
+    assert!(node.report_sync_acquired());
+    let stamped = node.stamp().expect("a reference is followed").time;
+    assert!(stamped > word, "the stamp of data is the same clock's next");
+}
+
+/// The reason comes with the absence: the policy's refusal is `Withheld`, a node without a clock
+/// is `NoClock`, and once the clock is trusted the stamp is the clock's, as `stamp` gives it.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn the_data_stamp_names_why_there_is_none() {
+    let node = frozen_node_with_policy(&[0x01], true);
+    assert_eq!(node.data_stamp(), DataStamp::Withheld);
+    assert!(node.report_sync_acquired());
+    assert!(matches!(node.data_stamp(), DataStamp::Stamped(_)));
+    assert_eq!(NodeHlc::disabled().data_stamp(), DataStamp::NoClock);
+    assert!(matches!(
+        frozen_node_with_policy(&[0x01], false).data_stamp(),
+        DataStamp::Stamped(_)
+    ));
+}
+
+#[cfg(feature = "time-hlc")]
+#[test]
+fn a_node_that_holds_no_clock_gives_no_reading_either() {
+    let node = NodeHlc::disabled();
+    assert!(node.clock_stamp().is_none());
+    assert!(node.stamp().is_none());
+    assert!(node.next_word().is_none());
+}
+
 #[cfg(feature = "time-hlc")]
 #[test]
 fn the_policy_trusted_only_stamps_nothing_until_a_reference_is_reported_and_after_it_is_lost() {

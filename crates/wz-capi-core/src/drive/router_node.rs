@@ -86,9 +86,18 @@ pub struct RouterState {
     /// provider is one): the one place the shim attaches it, as it does on a
     /// [`SessionState`](super::SessionState). Set once, right after the open.
     abi_extension: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
+    /// What the node's own session applies itself above its faces, as the open was told
+    /// ([`OpenStance::session_defaults`]).
+    session_defaults: crate::session_defaults::SessionDefaults,
 }
 
 impl RouterState {
+    /// What the node's own session applies itself above its faces, which every ABI that
+    /// publishes through the node reads here, as it does on a [`SessionState`](super::SessionState).
+    pub fn session_defaults(&self) -> &crate::session_defaults::SessionDefaults {
+        &self.session_defaults
+    }
+
     /// Attach this ABI's per-node state. Once: a second call is refused and returns the value it
     /// was handed, so a shim cannot silently replace state a live handle already reads.
     pub fn set_abi_extension<E: std::any::Any + Send + Sync>(&self, ext: E) -> Result<(), E> {
@@ -111,6 +120,13 @@ impl RouterState {
     /// holds the node declares and publishes through it while the node's thread serves the faces.
     pub fn forwarder(&self) -> &RouterForwarder {
         &self.forwarder
+    }
+
+    /// This node's clock itself, as [`SharedSession::node_hlc`](crate::faces::SharedSession::node_hlc)
+    /// is a session's: the one the router stamps with, by the role and the timestamping the
+    /// configuration states, shared and never copied.
+    pub fn node_hlc(&self) -> wz_runtime_tokio::node_clock::NodeHlc {
+        self.forwarder.node_hlc()
     }
 
     /// The data plane [`Self::forwarder`] is, counted: what a declaration made on the node holds
@@ -468,9 +484,20 @@ async fn join_group(
             zid: zid.to_vec(),
             qos: join.profile.is_qos,
             compression: join.profile.compression,
-            seq_num_res: join.profile.seq_num_res,
             tx_queue: link_conf.tx.queue,
             link_rx: link_conf.rx,
+            // The beacon the configuration states, as a session that is not a node states it on
+            // its group: a member ignores a beacon whose resolutions or batch size differ from
+            // its own.
+            beacon: wz_runtime_tokio::multicast_glue::GroupBeacon {
+                lease_ms: join.profile.lease_ms,
+                join_interval_ms: join.profile.join_interval_ms,
+                seq_num_res: join.profile.seq_num_res,
+                req_id_res: join.profile.req_id_res,
+                batch_size: join.profile.batch_size,
+            },
+            // The rule of the preset that opened the node.
+            join_rule: join.profile.join_rule,
         },
         opts,
         None,
@@ -525,6 +552,7 @@ pub(crate) fn open_router_blocking(
         namespace,
         gateway_south,
         groups,
+        session_defaults,
         ..
     } = stance;
     // The prefix as the forwarder takes it. The plan validated the text, so one that does not
@@ -756,6 +784,9 @@ pub(crate) fn open_router_blocking(
                 }
                 NodeRole::Peer | NodeRole::Client => {}
             }
+            // Upstream makes the subsystem at the end of an open that succeeded, whatever the
+            // mode of the runtime.
+            crate::session_defaults::init_shared_memory(session_defaults.shm_init);
             Ok(RouterState {
                 zid: wire_zid,
                 forwarder,
@@ -767,6 +798,7 @@ pub(crate) fn open_router_blocking(
                 stop,
                 driver: StdMutex::new(Some(handle)),
                 abi_extension: std::sync::OnceLock::new(),
+                session_defaults,
             })
         }
         Ok(Err(cause)) => {

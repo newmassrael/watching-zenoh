@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 15
+#define WZ_CAPI_C_ABI_REVISION 16
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -980,8 +980,11 @@ bool wz_capi_c_internal_group_check(const wz_capi_c_owned_group_t *this_);
 
 /* ---- The clock a program registers (feature clock-source) ---------- *
  *
- * `z_timestamp_new` stamps with the registered clock in place of the
- * system clock. The read callback returns 0 with `*secs` (since the
+ * The node's clock reads the registered clock in place of the system
+ * clock, and `z_timestamp_new` gives a program that clock's time, as
+ * upstream's gives its node clock's (a session whose role does not
+ * timestamp holds no node clock and is given the system time, as
+ * upstream's is). The read callback returns 0 with `*secs` (since the
  * Unix epoch) and `*nanos` (within the second, below 10^9) written, or
  * any other value when the clock cannot say what time it is; it is
  * called from whichever thread stamps, possibly several at once. After
@@ -990,7 +993,13 @@ bool wz_capi_c_internal_group_check(const wz_capi_c_owned_group_t *this_);
  *
  * The library cannot tell whether the clock follows a reference. The
  * program can, and reports it; a build whose clock-quality-stamping
- * policy is trusted-only stamps nothing until it has. */
+ * policy is trusted-only stamps no data until it has (a publication, a
+ * reply, a put it forwards), and an advanced publisher, every sample of
+ * which carries a time, refuses its put (Z_EGENERIC) and its delete
+ * (Z_EINVAL) until then. `z_timestamp_new` is a program reading the
+ * clock and is answered whatever the clock's standing: the policy is the
+ * stamper's, and upstream's clock always gives a time. Since revision 16;
+ * before it `z_timestamp_new` read the system clock. */
 
 typedef int8_t (*wz_capi_c_clock_read_fn)(void *context, uint64_t *secs, uint32_t *nanos);
 

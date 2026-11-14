@@ -857,6 +857,11 @@ pub struct MulticastDispatcher<const MAX_PEERS: usize> {
     /// dispatcher was built. A peer that is turned away announces itself again each join interval,
     /// so this counts beacons and not peers: it says the table is full, which nothing else does.
     join_refusals: u32,
+    /// How many JOINs the node's rule refused for what they advertise
+    /// ([`crate::multicast_join::judge_join`]) since this dispatcher was built: a member whose
+    /// terms are not the node's is heard from no further, and this is what says so. Beacons, as
+    /// [`Self::join_refusals`] counts them.
+    incompatible_joins: u32,
     /// §5.21 routing-namespace — the per-session EGRESS prefix (the master
     /// namespace value). `None` until [`Self::set_namespace`] installs it at
     /// bring-up (mirrors the unicast `SessionLinkActions::set_namespace`
@@ -926,6 +931,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             addr_of_mut!((*at).config).write(config);
             addr_of_mut!((*at).running).write(false);
             addr_of_mut!((*at).join_refusals).write(0);
+            addr_of_mut!((*at).incompatible_joins).write(0);
             #[cfg(feature = "routing-namespace")]
             addr_of_mut!((*at).namespace).write(None);
             #[cfg(feature = "multicast-ingress-gate")]
@@ -951,6 +957,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             config: _,
             running: _,
             join_refusals: _,
+            incompatible_joins: _,
             #[cfg(feature = "routing-namespace")]
                 namespace: _,
             #[cfg(feature = "multicast-ingress-gate")]
@@ -1630,6 +1637,18 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         self.join_refusals
     }
 
+    /// How many JOINs the node's rule refused for what they advertise: another protocol version,
+    /// resolution or batch size, or a QoS offer the rule refuses
+    /// ([`crate::multicast_join::judge_join`]).
+    pub const fn incompatible_joins(&self) -> u32 {
+        self.incompatible_joins
+    }
+
+    /// Count one JOIN the node's rule refused (see [`Self::incompatible_joins`]).
+    pub fn note_incompatible_join(&mut self) {
+        self.incompatible_joins = self.incompatible_joins.saturating_add(1);
+    }
+
     /// The DEFAULT-band `ingest_join` (no per-priority QoS advertisement) — the
     /// non-qos entry, delegating to [`Self::ingest_join_qos`] with `None`. The
     /// whole pre-R311y227 surface, the MCU non-qos loop, and the tests use this;
@@ -1657,7 +1676,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// ## Why this is a SECOND call and not a `JoinBaseline` field
     ///
     /// [`JoinBaseline`] is built by
-    /// [`validate_join`](crate::multicast_join::validate_join) from the DECODED
+    /// [`judge_join`](crate::multicast_join::judge_join) from the DECODED
     /// `Join`, and the SCXML Join codec has no extension awareness at all — the
     /// per-priority QoS advertisement rides `ingest_join_qos` as its own
     /// argument for that same reason (R311y227). The patch level follows the
@@ -1665,8 +1684,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// trailer it cannot see.
     ///
     /// A `src` with no admitted peer is a NO-OP, which is what makes the call
-    /// order at the RX site safe: a JOIN that `validate_join` refused, or one
-    /// the qos-admission rule declined, leaves no slot for this to write into.
+    /// order at the RX site safe: a JOIN that `judge_join` refused leaves no
+    /// slot for this to write into.
     #[cfg(feature = "reassembly")]
     pub fn record_peer_patch(&mut self, src: SocketAddr, announced: u8) {
         if let Some(idx) = self.find_by_src(src) {

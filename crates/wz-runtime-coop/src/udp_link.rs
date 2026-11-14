@@ -24,6 +24,7 @@
 use core::cell::{Cell, OnceCell, RefCell};
 use core::ffi::c_int;
 use core::fmt::Debug;
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 // The heap profile's forms (`Vec`, `HeapTx`) exist only in the heap profile: under `session-slot`
 // the crate does not link `alloc` at all, which `lib.rs` keeps so that a use creeping back into the
@@ -39,7 +40,6 @@ use core::marker::PhantomData;
 use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
-use wz_session_core::caps::MAX_LOCATOR_LEN;
 use wz_session_core::datagram_peer::{DatagramVerdict, ForeignCounts, PeerBinding};
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
@@ -49,18 +49,15 @@ use wz_session_core::link::{
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
-use wz_session_core::text_out::{FixedText, TextOut};
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::{TxLender, TxStore};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::LinkReadiness;
-use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
-use crate::session_drive::{
-    Bind, DriverPump, IpEndpoint, LinkOpenError, LinkProto, Locator, SlotStack,
-};
+use crate::session_drive::{Bind, DriverPump, LinkOpenError, SlotStack};
+use crate::session_drive::{LinkProto, Locator, SessionDatagramLink};
 
 /// The largest UDP payload the session receives in one datagram: the transport's own ceiling, so a
 /// whole batch always fits.
@@ -75,25 +72,31 @@ pub const SERVICE_WAIT_MS: c_int = 1;
 
 /// A datagram a socket took into the caller's buffer: how many bytes it wrote there, and the
 /// address and port it came from.
-pub type Received = (usize, [u8; 4], u16);
+pub type Received = (usize, SocketAddr);
 
-/// One IPv4 UDP socket of a platform's network stack, bound to an explicit local address (the one
-/// the link's locator names). Only the one thread that drives the link touches it.
+/// One UDP socket of a platform's network stack, IPv4 or IPv6 as the address it is bound to is,
+/// bound to an explicit local address (the one the link's locator names). Only the one thread
+/// that drives the link touches it.
+///
+/// The family is the address's, as zenoh-pico opens a socket of the family its locator resolved
+/// to (`vendor/zenoh-pico/src/link/transport/udp/udp_zephyr.c` @
+/// `socket(endpoint._iptcp->ai_family`): a socket bound to an IPv6 address sends to and receives
+/// from IPv6 addresses, and a stack without the family refuses the bind.
 pub trait DatagramSocket: Sized {
     /// Why a call failed, as the platform reports it. `Copy`, because the driver keeps the last
     /// receive failure for the deploy to report.
     type Error: Copy + Debug;
 
-    /// Open a socket and bind it to `addr:port`; port 0 has the stack choose one, as a dialling
-    /// link needs, and [`Self::local`] then names the port it chose, never the 0.
-    fn bind(addr: [u8; 4], port: u16) -> Result<Self, Self::Error>;
+    /// Open a socket of `at`'s family and bind it to `at`; port 0 has the stack choose one, as a
+    /// dialling link needs, and [`Self::local`] then names the port it chose, never the 0.
+    fn bind(at: SocketAddr) -> Result<Self, Self::Error>;
 
-    /// The `(address, port)` this socket is bound to.
-    fn local(&self) -> ([u8; 4], u16);
+    /// The address and port this socket is bound to.
+    fn local(&self) -> SocketAddr;
 
-    /// Send one datagram to `addr:port`. A short or refused send is an error: UDP either takes
-    /// the whole datagram or none of it.
-    fn send_to(&self, addr: [u8; 4], port: u16, bytes: &[u8]) -> Result<(), Self::Error>;
+    /// Send one datagram to `to`, an address of the socket's family. A short or refused send is
+    /// an error: UDP either takes the whole datagram or none of it.
+    fn send_to(&self, to: SocketAddr, bytes: &[u8]) -> Result<(), Self::Error>;
 
     /// Block until a datagram is queued or `timeout_ms` has passed, and return at once when one
     /// already is. A failed wait is the same as a quiet socket here: the receive that follows
@@ -142,6 +145,26 @@ pub trait DatagramSocket: Sized {
     /// (permanent) and never `LinkOpenError::Exhausted` (retried): the stream twin is
     /// `StreamDial::CARRIED`.
     const CARRIED: bool = true;
+
+    /// Whether `error`, from a [`Self::bind`], says the stack can never open a socket for the
+    /// address (its family is not built in, as an IPv6 address on a stack without IPv6, or the
+    /// stack cannot name it): a dial that meets it is `LinkOpenError::Unsupported` and not
+    /// retried, where any other failed bind is a socket the stack had none of now. The provided
+    /// answer is that it never says so, for a platform whose error does not tell.
+    fn refuses_address(error: &Self::Error) -> bool {
+        let _ = error;
+        false
+    }
+}
+
+/// A failed [`DatagramSocket::bind`] as the stack's refusal to open the link: permanent for an
+/// address the socket can never have ([`DatagramSocket::refuses_address`]), retried otherwise.
+pub fn bind_refused<S: DatagramSocket>(error: S::Error) -> crate::session_drive::LinkOpenError {
+    if S::refuses_address(&error) {
+        crate::session_drive::LinkOpenError::Unsupported
+    } else {
+        crate::session_drive::LinkOpenError::Exhausted
+    }
 }
 
 /// The datagram socket of a stack that carries none: an image whose links are all streams names it
@@ -155,15 +178,15 @@ impl DatagramSocket for NoDatagram {
 
     const CARRIED: bool = false;
 
-    fn bind(_addr: [u8; 4], _port: u16) -> Result<Self, ()> {
+    fn bind(_at: SocketAddr) -> Result<Self, ()> {
         Err(())
     }
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         match *self {}
     }
 
-    fn send_to(&self, _addr: [u8; 4], _port: u16, _bytes: &[u8]) -> Result<(), ()> {
+    fn send_to(&self, _to: SocketAddr, _bytes: &[u8]) -> Result<(), ()> {
         match *self {}
     }
 
@@ -184,23 +207,37 @@ impl DatagramSocket for NoDatagram {
     }
 }
 
-/// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator, written into fixed text: the longest
-/// one, `udp/255.255.255.255:65535`, is 25 bytes of the [`MAX_LOCATOR_LEN`] the text has.
-///
-/// Written with [`TextOut::push_u64`] and not `write!`, so the link does not pull in `core::fmt`.
-/// The longest rendering is shorter than the text's capacity, so the sink never refuses.
-fn udp_locator(addr: [u8; 4], port: u16) -> FixedText<MAX_LOCATOR_LEN> {
-    let mut text = FixedText::new();
-    text.push_str("udp/");
-    for (at, octet) in addr.into_iter().enumerate() {
-        if at > 0 {
-            text.push('.');
-        }
-        text.push_u64(u64::from(octet));
+/// The unspecified address of `ip`'s family: `0.0.0.0` or `::`.
+pub const fn unspecified_like(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
     }
-    text.push(':');
-    text.push_u64(u64::from(port));
-    text
+}
+
+/// What a socket that dials `peer` is bound to, on a node whose own address is `local`: `local`
+/// when it is of the peer's family, else the unspecified address of the peer's family, and port
+/// 0 either way, so the stack chooses the port and, for the unspecified address, the source too.
+/// A node bound to one family still dials the other where its stack carries it, as zenoh-pico's
+/// Zephyr link binds nothing before it sends and its stack picks the source of the peer's family
+/// (`vendor/zenoh-pico/src/link/transport/udp/udp_zephyr.c` @ `_z_udp_zephyr_open`).
+pub const fn dial_bind(local: IpAddr, peer: SocketAddr) -> SocketAddr {
+    let ip = match (local, peer.ip()) {
+        (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_)) => local,
+        (_, other) => unspecified_like(other),
+    };
+    SocketAddr::new(ip, 0)
+}
+
+/// The two ends of a link of `proto` from `local` to `peer`, each zenoh's locator text
+/// ([`Locator::text`]); an end whose text is longer than the build's locator bound reads blank,
+/// which is how [`LinkEndpoints`] names an end it cannot hold.
+pub fn link_endpoints(proto: LinkProto, local: SocketAddr, peer: SocketAddr) -> LinkEndpoints {
+    let (src, dst) = (
+        Locator { proto, at: local }.text(),
+        Locator { proto, at: peer }.text(),
+    );
+    LinkEndpoints::new(src.finish().unwrap_or(""), dst.finish().unwrap_or(""))
 }
 
 /// The session's link over one socket `S`, with its receive buffer in `B` and its outbound frames
@@ -214,7 +251,7 @@ fn udp_locator(addr: [u8; 4], port: u16) -> FixedText<MAX_LOCATOR_LEN> {
 /// frame are the session's open and close.
 pub struct UdpDriver<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> {
     socket: S,
-    binding: PeerBinding<([u8; 4], u16)>,
+    binding: PeerBinding<SocketAddr>,
     /// The link's two ends, `udp/<ip>:<port>` each, written once: when the
     /// peer is known.
     endpoints: OnceCell<LinkEndpoints>,
@@ -223,9 +260,11 @@ pub struct UdpDriver<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> {
     rx_len: usize,
     /// The memory the session encodes its frames into, and which of it is out.
     tx: TxLender<T>,
-    /// A datagram [`SessionDatagramLink::service`] already read into `rx_buf` while it waited
-    /// (length and source), for the next receive to hand out without another call into the stack.
-    stash: Cell<Option<Received>>,
+    /// The length of a datagram [`SessionDatagramLink::service`] already read into `rx_buf` while
+    /// it waited and the binding admitted, for the next receive to hand out without another call
+    /// into the stack. Judged when it is read, so only its length is held and not its source: a
+    /// datagram the binding does not admit is discarded there and holds nothing.
+    stash: Cell<Option<usize>>,
     /// The last receive failure, kept for the deploy to report: the loop's
     /// seam returns a frame or nothing, and a socket that fails must not
     /// read as a quiet one.
@@ -258,7 +297,7 @@ impl<S: DatagramSocket> UdpDriver<S, Vec<u8>, HeapTx> {
     }
 
     /// An initiator's link: replies and first sends go to `peer`.
-    pub fn initiator(socket: S, peer: ([u8; 4], u16)) -> Self {
+    pub fn initiator(socket: S, peer: SocketAddr) -> Self {
         Self::initiator_with_capacity(socket, peer, UDP_RX_CAPACITY)
     }
 
@@ -272,7 +311,7 @@ impl<S: DatagramSocket> UdpDriver<S, Vec<u8>, HeapTx> {
     /// its frames into.
     pub fn initiator_with_buffers(
         socket: S,
-        peer: ([u8; 4], u16),
+        peer: SocketAddr,
         rx_capacity: usize,
         tx: HeapTx,
     ) -> Self {
@@ -289,7 +328,7 @@ impl<S: DatagramSocket> UdpDriver<S, Vec<u8>, HeapTx> {
     }
 
     /// [`Self::initiator`] with a receive buffer of `rx_capacity` bytes.
-    pub fn initiator_with_capacity(socket: S, peer: ([u8; 4], u16), rx_capacity: usize) -> Self {
+    pub fn initiator_with_capacity(socket: S, peer: SocketAddr, rx_capacity: usize) -> Self {
         Self::initiator_in(socket, peer, vec![0u8; rx_capacity], HeapTx::new(0, 0))
     }
 }
@@ -303,11 +342,11 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
 
     /// An initiator's link over the receive buffer `rx_buf`, building its frames in `tx`: replies
     /// and first sends go to `peer`.
-    pub fn initiator_in(socket: S, peer: ([u8; 4], u16), rx_buf: B, tx: T) -> Self {
+    pub fn initiator_in(socket: S, peer: SocketAddr, rx_buf: B, tx: T) -> Self {
         Self::with_peer(socket, Some(peer), rx_buf, tx)
     }
 
-    fn with_peer(socket: S, peer: Option<([u8; 4], u16)>, mut rx_buf: B, tx: T) -> Self {
+    fn with_peer(socket: S, peer: Option<SocketAddr>, mut rx_buf: B, tx: T) -> Self {
         let rx_len = rx_buf.as_mut().len();
         let driver = Self {
             socket,
@@ -364,30 +403,30 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
         took
     }
 
-    /// The next datagram: the one `service` already read into `rx_buf`, if it did, else one the
-    /// stack has queued. `Ok(None)` when there is none.
-    fn next_datagram(&self, buf: &mut [u8]) -> Result<Option<Received>, S::Error> {
-        match self.stash.take() {
-            Some(held) => Ok(Some(held)),
-            None => self.socket.try_recv(buf),
+    /// Whether the session reads `datagram`, taken from `from`. What the binding does not admit (a
+    /// stranger's datagram, another source's `InitSyn`, anything before an accepting link's first
+    /// `InitSyn`) is counted ([`Self::foreign`]) and the caller discards it; the socket is this
+    /// link's alone, so nothing it discards is anyone else's.
+    fn admit(&self, from: SocketAddr, datagram: &[u8]) -> bool {
+        let verdict = self.binding.admit(from, datagram);
+        if verdict == DatagramVerdict::Bound {
+            self.note_endpoints();
         }
+        verdict.is_taken()
     }
 
-    /// The next datagram the session reads, taken into `buf`: its length, or `Ok(None)` when
-    /// nothing the session reads is queued. What the binding does not admit (a stranger's
-    /// datagram, another source's `InitSyn`, anything before an accepting link's first `InitSyn`)
-    /// is discarded and counted on the way ([`Self::foreign`]); the socket is this link's alone,
-    /// so nothing it discards is anyone else's.
+    /// The next datagram the session reads, in `buf`: the one `service` already read and admitted,
+    /// if it did, else the next one the stack has queued that the binding admits. Its length, or
+    /// `Ok(None)` when nothing the session reads is queued.
     fn next_admitted(&self, buf: &mut [u8]) -> Result<Option<usize>, S::Error> {
+        if let Some(len) = self.stash.take() {
+            return Ok(Some(len));
+        }
         loop {
-            let Some((len, addr, port)) = self.next_datagram(buf)? else {
+            let Some((len, from)) = self.socket.try_recv(buf)? else {
                 return Ok(None);
             };
-            let verdict = self.binding.admit((addr, port), &buf[..len]);
-            if verdict == DatagramVerdict::Bound {
-                self.note_endpoints();
-            }
-            if verdict.is_taken() {
+            if self.admit(from, &buf[..len]) {
                 return Ok(Some(len));
             }
         }
@@ -401,16 +440,14 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
             return;
         };
         if self.endpoints.get().is_none() {
-            let (addr, port) = self.socket.local();
-            let _ = self.endpoints.set(LinkEndpoints::new(
-                udp_locator(addr, port).prefix(),
-                udp_locator(peer.0, peer.1).prefix(),
-            ));
+            let _ = self
+                .endpoints
+                .set(link_endpoints(LinkProto::Udp, self.socket.local(), peer));
         }
     }
 
     /// The peer every send goes to, once one is known.
-    pub fn peer(&self) -> Option<([u8; 4], u16)> {
+    pub fn peer(&self) -> Option<SocketAddr> {
         self.binding.peer()
     }
 
@@ -448,8 +485,14 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
             self.socket.wait_readable(SERVICE_WAIT_MS);
             return;
         };
-        match self.socket.recv_waiting(buf.as_mut()) {
-            Ok(held) => self.stash.set(held),
+        let bytes: &mut [u8] = buf.as_mut();
+        match self.socket.recv_waiting(bytes) {
+            Ok(Some((len, from))) => {
+                if self.admit(from, &bytes[..len]) {
+                    self.stash.set(Some(len));
+                }
+            }
+            Ok(None) => {}
             Err(e) => self.rx_error.set(Some(e)),
         }
     }
@@ -458,10 +501,10 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     /// peer yet, or one the stack refuses, is REPORTED (R2371's rule for the lwIP driver), not
     /// swallowed.
     fn send_datagram(&self, bytes: &[u8]) -> LinkSendOutcome {
-        let Some((addr, port)) = self.binding.peer() else {
+        let Some(peer) = self.binding.peer() else {
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         };
-        match self.socket.send_to(addr, port, bytes) {
+        match self.socket.send_to(peer, bytes) {
             Ok(()) => LinkSendOutcome::Sent,
             Err(_) => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
         }
@@ -654,7 +697,7 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
 /// [`LinkOpenError::Exhausted`], and the session host's tables bound how many are open at once.
 #[cfg(feature = "session-slot")]
 pub struct UdpStack<S> {
-    local: [u8; 4],
+    local: IpAddr,
     rx: &'static dyn ByteSource,
     tx: &'static dyn ByteSource,
     /// What each driver this stack opens is allowed to wait for a datagram when its session has
@@ -678,9 +721,10 @@ impl<S> Copy for UdpStack<S> {}
 #[cfg(feature = "session-slot")]
 impl<S: DatagramSocket + 'static> UdpStack<S> {
     /// The stack of a node whose own address is `local`, as its interface holds it, whose links
-    /// take their receive buffers from `rx` and their frame buffers from `tx`.
+    /// take their receive buffers from `rx` and their frame buffers from `tx`. A dial to a peer of
+    /// the other family binds the unspecified address of the peer's ([`dial_bind`]).
     pub const fn new(
-        local: [u8; 4],
+        local: IpAddr,
         rx: &'static dyn ByteSource,
         tx: &'static dyn ByteSource,
     ) -> Self {
@@ -707,14 +751,11 @@ impl<S: DatagramSocket + 'static> UdpStack<S> {
     /// sends going to `peer`. What the session host's `dial` is given to open its socket. A table
     /// with no buffer free, like a platform with no descriptor, is [`LinkOpenError::Exhausted`],
     /// and whatever was claimed before the refusal goes back with it.
-    pub fn bind_initiator(&self, peer: IpEndpoint) -> Result<FixedUdpDriver<S>, LinkOpenError> {
+    pub fn bind_initiator(&self, peer: SocketAddr) -> Result<FixedUdpDriver<S>, LinkOpenError> {
         let rx = self.rx.claim().ok_or(LinkOpenError::Exhausted)?;
         let tx = self.tx.claim().ok_or(LinkOpenError::Exhausted)?;
-        let socket = S::bind(self.local, 0).map_err(|_| LinkOpenError::Exhausted)?;
-        Ok(
-            UdpDriver::initiator_in(socket, (peer.addr, peer.port), rx, tx)
-                .with_idle_wait_ms(self.idle_wait_ms),
-        )
+        let socket = S::bind(dial_bind(self.local, peer)).map_err(bind_refused::<S>)?;
+        Ok(UdpDriver::initiator_in(socket, peer, rx, tx).with_idle_wait_ms(self.idle_wait_ms))
     }
 }
 
@@ -753,27 +794,66 @@ mod tests {
     use std::collections::VecDeque;
     use std::vec::Vec;
 
+    /// The text a link names its ends by is zenoh's locator, the `Display` of the address behind
+    /// the scheme, on either family; the longest IPv6 one still fits the default bound.
     #[test]
-    fn a_udp_locator_is_what_zenoh_prints_for_it() {
-        for (addr, port) in [
-            ([0, 0, 0, 0], 0),
-            ([10, 0, 0, 1], 7447),
-            ([192, 168, 1, 50], 80),
-            ([255, 255, 255, 255], 65535),
+    fn a_locator_is_what_zenoh_prints_for_it() {
+        use core::net::SocketAddrV6;
+        for at in [
+            SocketAddr::from(([0, 0, 0, 0], 0)),
+            SocketAddr::from(([10, 0, 0, 1], 7447)),
+            SocketAddr::from(([255, 255, 255, 255], 65535)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 7447)),
+            SocketAddr::from((Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1), 7446)),
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::new(
+                    0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+                ),
+                65535,
+                0,
+                u32::MAX,
+            )),
         ] {
-            let [a, b, c, d] = addr;
-            let text = udp_locator(addr, port);
-            assert_eq!(
-                text.finish(),
-                Ok(std::format!("udp/{a}.{b}.{c}.{d}:{port}").as_str())
-            );
+            for proto in [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls] {
+                let locator = Locator { proto, at };
+                let printed = std::format!("{}/{at}", proto.scheme());
+                assert_eq!(locator.text().finish(), Ok(printed.as_str()));
+                assert_eq!(std::format!("{locator}"), printed);
+            }
         }
+        let ends = link_endpoints(
+            LinkProto::Udp,
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 4000)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 7447)),
+        );
+        assert_eq!(ends.src.as_str(), "udp/[::1]:4000");
+        assert_eq!(ends.dst.as_str(), "udp/[::1]:7447");
+    }
+
+    /// A dial binds the node's own address when the peer is of its family, and the unspecified
+    /// address of the peer's family when it is not, on a port the stack picks either way.
+    #[test]
+    fn a_dial_binds_the_nodes_address_of_the_peers_family_or_the_unspecified_one() {
+        let v4_node = IpAddr::from([10, 0, 0, 2]);
+        let v6_node = IpAddr::from(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2));
+        let v4_peer = SocketAddr::from(([10, 0, 0, 1], 7447));
+        let v6_peer = SocketAddr::from((Ipv6Addr::LOCALHOST, 7447));
+        assert_eq!(dial_bind(v4_node, v4_peer), SocketAddr::new(v4_node, 0));
+        assert_eq!(dial_bind(v6_node, v6_peer), SocketAddr::new(v6_node, 0));
+        assert_eq!(
+            dial_bind(v4_node, v6_peer),
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+        );
+        assert_eq!(
+            dial_bind(v6_node, v4_peer),
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+        );
     }
 
     /// A datagram the test queues for the driver to receive: its bytes and its source.
-    type Datagram = (Vec<u8>, [u8; 4], u16);
+    type Datagram = (Vec<u8>, SocketAddr);
     /// A datagram the driver sent: where it went and its bytes.
-    type Sent = ([u8; 4], u16, Vec<u8>);
+    type Sent = (SocketAddr, Vec<u8>);
 
     /// A socket that is two queues: what the test queues for the driver to receive, and what the
     /// driver sent. The datagram a `recv_waiting` takes is the same one `try_recv` would, so the
@@ -788,33 +868,35 @@ mod tests {
         /// Whether `set_receive_timeout` takes a value, and the values it was asked to take.
         can_arm: bool,
         arms: core::cell::RefCell<Vec<c_int>>,
+        /// The address the socket names as its own; `None` is [`LOCAL`].
+        local: Option<SocketAddr>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct Refused;
 
     impl Loop {
-        fn take(&self, buf: &mut [u8]) -> Option<(usize, [u8; 4], u16)> {
-            let (bytes, addr, port) = self.inbound.borrow_mut().pop_front()?;
+        fn take(&self, buf: &mut [u8]) -> Option<Received> {
+            let (bytes, from) = self.inbound.borrow_mut().pop_front()?;
             let n = bytes.len().min(buf.len());
             buf[..n].copy_from_slice(&bytes[..n]);
-            Some((n, addr, port))
+            Some((n, from))
         }
     }
 
     impl DatagramSocket for Loop {
         type Error = Refused;
 
-        fn bind(_addr: [u8; 4], _port: u16) -> Result<Self, Refused> {
+        fn bind(_at: SocketAddr) -> Result<Self, Refused> {
             Ok(Loop::default())
         }
 
-        fn local(&self) -> ([u8; 4], u16) {
-            ([10, 0, 0, 2], 4000)
+        fn local(&self) -> SocketAddr {
+            self.local.unwrap_or(LOCAL)
         }
 
-        fn send_to(&self, addr: [u8; 4], port: u16, bytes: &[u8]) -> Result<(), Refused> {
-            self.sent.borrow_mut().push((addr, port, bytes.to_vec()));
+        fn send_to(&self, to: SocketAddr, bytes: &[u8]) -> Result<(), Refused> {
+            self.sent.borrow_mut().push((to, bytes.to_vec()));
             Ok(())
         }
 
@@ -833,20 +915,27 @@ mod tests {
             self.can_arm
         }
 
-        fn recv_waiting(&self, buf: &mut [u8]) -> Result<Option<(usize, [u8; 4], u16)>, Refused> {
+        fn recv_waiting(&self, buf: &mut [u8]) -> Result<Option<Received>, Refused> {
             self.waiting_reads.set(self.waiting_reads.get() + 1);
             Ok(self.take(buf))
         }
 
-        fn try_recv(&self, buf: &mut [u8]) -> Result<Option<(usize, [u8; 4], u16)>, Refused> {
+        fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, Refused> {
             Ok(self.take(buf))
         }
     }
 
-    const PEER: ([u8; 4], u16) = ([10, 0, 0, 1], 7447);
+    const fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(a, b, c, d)), port)
+    }
+
+    /// The address the test socket names as its own.
+    const LOCAL: SocketAddr = v4(10, 0, 0, 2, 4000);
+
+    const PEER: SocketAddr = v4(10, 0, 0, 1, 7447);
 
     /// Another end than [`PEER`], on the peer's port.
-    const STRANGER: ([u8; 4], u16) = ([10, 0, 0, 9], 7447);
+    const STRANGER: SocketAddr = v4(10, 0, 0, 9, 7447);
 
     /// An `InitSyn` header and a byte of body: what binds an accepting link. Only its first byte
     /// is read, by the binding.
@@ -863,14 +952,18 @@ mod tests {
     }
 
     fn queued_from(socket: &Loop, bytes: &[u8], from: Sender) {
-        let (addr, port) = match from {
+        let from = match from {
             Sender::Peer => PEER,
             Sender::Stranger => STRANGER,
         };
+        queued_at(socket, bytes, from);
+    }
+
+    fn queued_at(socket: &Loop, bytes: &[u8], from: SocketAddr) {
         socket
             .inbound
             .borrow_mut()
-            .push_back((bytes.to_vec(), addr, port));
+            .push_back((bytes.to_vec(), from));
     }
 
     /// The driver the tests of the wait and of the link's behaviour are made over, a link that
@@ -956,7 +1049,7 @@ mod tests {
         );
         assert_eq!(
             link.socket.sent.borrow().as_slice(),
-            &[(PEER.0, PEER.1, b"reply".to_vec())]
+            &[(PEER, b"reply".to_vec())]
         );
         assert_eq!(
             link.foreign(),
@@ -965,6 +1058,40 @@ mod tests {
                 refused: 0
             }
         );
+    }
+
+    /// The same binding over IPv6: an accepting link is bound by the first `InitSyn` from an IPv6
+    /// end, names both ends in zenoh's bracketed text, answers that end, and passes over an IPv6
+    /// stranger on the same port as it passes over an IPv4 one.
+    #[test]
+    fn an_ipv6_acceptor_is_bound_by_its_first_init_syn_and_names_its_ends_in_brackets() {
+        let peer = SocketAddr::from((Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1), 7447));
+        let stranger = SocketAddr::from((Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 9), 7447));
+        let link = acceptor(Loop {
+            local: Some(SocketAddr::from((Ipv6Addr::LOCALHOST, 4000))),
+            ..Loop::default()
+        });
+        queued_at(&link.socket, SYN, peer);
+        assert_eq!(received(&link).as_deref(), Some(SYN));
+        assert_eq!(link.peer(), Some(peer));
+        let ends = link
+            .link_endpoints()
+            .expect("endpoints once the peer is known");
+        assert_eq!(ends.src.as_str(), "udp/[::1]:4000");
+        assert_eq!(ends.dst.as_str(), "udp/[fd00::1]:7447");
+
+        queued_at(&link.socket, b"stray", stranger);
+        queued_at(&link.socket, b"peer", peer);
+        assert_eq!(received(&link).as_deref(), Some(&b"peer"[..]));
+        assert_eq!(
+            link.send_blocking(b"reply", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            link.socket.sent.borrow().as_slice(),
+            &[(peer, b"reply".to_vec())]
+        );
+        assert_eq!(link.foreign().strays, 1);
     }
 
     /// The defect this rule exists for: one datagram from another address used to point the
@@ -1000,11 +1127,7 @@ mod tests {
                 LinkSendOutcome::Sent
             );
             assert_eq!(
-                link.socket
-                    .sent
-                    .borrow()
-                    .last()
-                    .map(|sent| (sent.0, sent.1)),
+                link.socket.sent.borrow().last().map(|sent| sent.0),
                 Some(PEER),
                 "the reply goes to the peer, accepted={accepted}"
             );
@@ -1074,7 +1197,7 @@ mod tests {
             link.tx_slot_send(first.slot, 0, 3, Reliability::Reliable, Priority::Data),
             LinkSendOutcome::Sent
         );
-        assert_eq!(link.socket.sent.borrow()[0].2, b"abc");
+        assert_eq!(link.socket.sent.borrow()[0].1, b"abc");
         assert!(
             link.tx_slot_acquire(10, Priority::Data).is_some(),
             "the slot is back once it is sent"
@@ -1300,14 +1423,13 @@ mod tests {
         static RX: ByteCells<64, 1> = ByteCells::new();
         static TX: ByteCells<32, 1> = ByteCells::new();
 
-        const TO_PEER: IpEndpoint = IpEndpoint {
-            addr: PEER.0,
-            port: PEER.1,
-        };
+        const TO_PEER: SocketAddr = PEER;
+
+        const NODE: IpAddr = LOCAL.ip();
 
         #[test]
         fn a_dial_claims_both_buffers_and_a_table_with_none_free_refuses() {
-            let mut stack = UdpStack::<Loop>::new([10, 0, 0, 2], &RX, &TX);
+            let mut stack = UdpStack::<Loop>::new(NODE, &RX, &TX);
             let link = stack.bind(Locator::udp(TO_PEER)).expect("the first dial");
             assert_eq!(link.peer(), Some(PEER));
             assert_eq!(link.link_mtu(), 32);
@@ -1328,7 +1450,7 @@ mod tests {
 
         #[test]
         fn a_stack_of_datagram_sockets_refuses_a_stream_and_claims_nothing() {
-            let mut stack = UdpStack::<Loop>::new([10, 0, 0, 2], &TCP_RX, &TCP_TX);
+            let mut stack = UdpStack::<Loop>::new(NODE, &TCP_RX, &TCP_TX);
             assert!(matches!(
                 stack.bind(Locator::tcp(TO_PEER)),
                 Err(LinkOpenError::Unsupported)
@@ -1344,7 +1466,7 @@ mod tests {
 
         #[test]
         fn the_fixed_driver_lends_its_one_slot_and_takes_it_back_at_the_send() {
-            let mut stack = UdpStack::<Loop>::new([10, 0, 0, 2], &LEND_RX, &LEND_TX);
+            let mut stack = UdpStack::<Loop>::new(NODE, &LEND_RX, &LEND_TX);
             let link = stack.bind(Locator::udp(TO_PEER)).expect("a dial");
             let grant = link
                 .tx_slot_acquire(10, Priority::Data)
@@ -1361,7 +1483,7 @@ mod tests {
                 link.tx_slot_send(grant.slot, 0, 3, Reliability::Reliable, Priority::Data),
                 LinkSendOutcome::Sent
             );
-            assert_eq!(link.socket.sent.borrow()[0].2, b"abc");
+            assert_eq!(link.socket.sent.borrow()[0].1, b"abc");
 
             let again = link
                 .tx_slot_acquire(10, Priority::Data)

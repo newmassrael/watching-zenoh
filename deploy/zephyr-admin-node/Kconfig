@@ -214,8 +214,8 @@ config NETWORKING
 config NET_IPV4
 	default y
 
-config NET_IPV6
-	default n
+# NET_IPV6 is off unless the image asks for it, stated once for every wz image in
+# deploy/zephyr-common/Kconfig.wz.
 
 config NET_UDP
 	default y

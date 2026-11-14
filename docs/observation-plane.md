@@ -160,7 +160,12 @@ timestamp, so the reject path allocates.
   (`NodeHlc::report_sync_acquired`, `report_sync_lost`, `report_holdover_expired`); a node nobody
   reports for stays `Unsynchronized`, so `trusted-only` on a host that never reports stamps
   nothing, which is what it says. A storage that needs a time to order what it keeps still takes
-  one from the system clock. The default stamps, as a node does today. `CLOCK_MAX_FORWARD_STEP_MS`
+  one from the system clock. An advanced publisher cannot: every sample it sends carries a time,
+  its cache keeps and answers by it, and zenoh-pico refuses the put whose time it cannot make, so
+  under `trusted-only` with an untrusted clock its put and delete are refused
+  (`PublishError::ClockUntrusted`), nothing is sent and no sequence number is taken; the system
+  clock in its place would hand a subscriber a time the policy says the node does not stamp data
+  with. The default stamps, as a node does today. `CLOCK_MAX_FORWARD_STEP_MS`
   is landed with it and sets the bound `NodeHlc` was given as a constant; `clock-source` as a
   capability and `CLOCK_SOURCES` wait for the registration door (step 2), because declared before
   it they would configure nothing.

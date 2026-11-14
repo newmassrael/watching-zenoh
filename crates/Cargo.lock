@@ -4050,6 +4050,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-conformance-suite"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sha2",
+ "toml",
+]
+
+[[package]]
 name = "wz-e2e-admin-probe"
 version = "0.1.0"
 dependencies = [
@@ -4360,7 +4369,6 @@ name = "wz-runtime-coop"
 version = "0.1.0"
 dependencies = [
  "critical-section",
- "heapless",
  "portable-atomic",
  "portable-atomic-util",
  "wz-runtime-core",

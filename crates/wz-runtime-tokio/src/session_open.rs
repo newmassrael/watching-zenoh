@@ -99,7 +99,7 @@ use crate::runtime_impl::TokioTime;
 use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
 use crate::session_glue::{
     new_session_actions, new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, CloseReason,
-    DriverLoopOutcome, SessionActionsBinding, SessionInitParams, SessionLinkActions,
+    DriverLoopOutcome, LinkRxConf, SessionActionsBinding, SessionInitParams, SessionLinkActions,
 };
 use crate::writer_queue::WriterHandle;
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
@@ -775,6 +775,7 @@ pub enum DialedLink {
     /// `DialedLink` value (incl. the small `Tcp` arm) to that size on the
     /// stack — boxing keeps the union compact (clippy `large_enum_variant`).
     /// R2608 — the `bool` is `close_link_on_expiration`, read off the LOCATOR
+    /// over its kind's layer in [`DialConfig::link_defaults`]
     /// at dial time and carried here because the peer's certificate chain is
     /// only reachable BEFORE `wire_tls_stream` splits the stream. The same
     /// shape [`BoundListener::Quic`] uses for the same key.
@@ -925,10 +926,12 @@ pub struct TlsAcceptPolicy {
 
 #[cfg(feature = "transport-link-tls")]
 impl TlsAcceptPolicy {
-    /// Read both policies off a locator tail's material.
-    pub fn from_material(material: &LinkTlsMaterial) -> Self {
+    /// Read both policies off a locator tail's material, the expiry flag laid
+    /// over the tls kind's in `defaults` (the handshake bound has no such layer:
+    /// upstream's tls inspector renders no `tls_handshake_timeout_ms`).
+    pub fn from_material(material: &LinkTlsMaterial, defaults: &LinkDefaults) -> Self {
         Self {
-            closes_on_expiration: material.closes_on_expiration(),
+            closes_on_expiration: defaults.closes_on_expiration(Proto::Tls, material),
             handshake_timeout: std::time::Duration::from_millis(material.handshake_timeout_ms()),
         }
     }
@@ -1053,7 +1056,8 @@ pub enum BoundListener {
     /// (via `accept_bound`), and pico's `z_open(listen=quic/)`. So a quic listen binds
     /// whenever a cert is supplied; only a cert-LESS bind (a direct-API caller passing
     /// [`AcceptConfig::default`]) hits `bind_locator`'s cert-absence `Unsupported`.
-    /// R2600 — the `bool` is `close_link_on_expiration`, read off the LOCATOR at
+    /// R2600 — the `bool` is `close_link_on_expiration`, read off the LOCATOR,
+    /// over its kind's layer in [`AcceptConfig::link_defaults`], at
     /// bind time and carried to accept time because that is the only place a
     /// peer chain exists to expire. Upstream does not have to thread it: it
     /// bundles the flag into its `TlsServerConfig` beside the crypto, and wz's
@@ -2248,8 +2252,9 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                         .await?,
                     ),
                     // R2608 — the dial tail decides whether this link watches
-                    // the PEER's chain, exactly as the quic arms read it.
-                    ip.tls().closes_on_expiration(),
+                    // the PEER's chain, exactly as the quic arms read it, over
+                    // the tls kind's own setting.
+                    cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()),
                 )),
                 None => Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -2307,7 +2312,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 // in scope. The peer's chain is only readable once the
                 // handshake has completed, which is why this follows the dial
                 // rather than riding the config.
-                if ip.tls().closes_on_expiration() {
+                if cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()) {
                     arm_expiry_close(&link.connection);
                 }
                 Ok(DialedLink::Quic(Box::new(link)))
@@ -2342,7 +2347,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 // R2600 — the datagram twin arms the same watcher: both schemes
                 // hold a `quinn::Connection`, and an expired peer identity is
                 // no more acceptable under datagrams than under streams.
-                if ip.tls().closes_on_expiration() {
+                if cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()) {
                     arm_expiry_close(&link.connection);
                 }
                 Ok(DialedLink::QuicDatagram(Box::new(link)))
@@ -2523,7 +2528,8 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                             ),
                             // R2608 — a NAMED tail carries the policy too, the
                             // twin of the numeric arm above.
-                            named_tls_material(&tls).closes_on_expiration(),
+                            cfg.link_defaults
+                                .closes_on_expiration(proto, named_tls_material(&tls)),
                         ))
                     }
                     None => Err(io::Error::new(
@@ -2560,7 +2566,10 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 // R2600 — a NAMED locator carries the policy exactly as a
                 // numeric one does; the walk over candidate addresses changes
                 // which address answered, not whose certificate it was.
-                if named_tls(&tls).closes_on_expiration() {
+                if cfg
+                    .link_defaults
+                    .closes_on_expiration(proto, named_tls(&tls))
+                {
                     arm_expiry_close(&link.connection);
                 }
                 Ok(DialedLink::Quic(Box::new(link)))
@@ -2585,7 +2594,10 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                     })
                     .await?;
                 // R2600 — the named datagram twin, same policy, same watcher.
-                if named_tls(&tls).closes_on_expiration() {
+                if cfg
+                    .link_defaults
+                    .closes_on_expiration(proto, named_tls(&tls))
+                {
                     arm_expiry_close(&link.connection);
                 }
                 Ok(DialedLink::QuicDatagram(Box::new(link)))
@@ -2689,9 +2701,15 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // unixsock). ASYNC now (the invitation handshake awaits the peer), running
         // within the tokio runtime this async dial seam provides. No cert config
         // (like unixsock/udp).
+        // The locator's `file_mask` is laid over the unixpipe kind's, as upstream merges an
+        // endpoint's parameters over its kind's configuration.
         #[cfg(all(feature = "transport-link-unixpipe", unix))]
         AnyLocator::Unixpipe(ep) => Ok(DialedLink::Unixpipe(
-            dial_unixpipe(&ep.path, ep.file_mask).await?,
+            dial_unixpipe(
+                &ep.path,
+                ep.file_mask.or(cfg.link_defaults.unixpipe_file_mask()),
+            )
+            .await?,
         )),
         // R311y10 — `AnyLocator::Unixpipe` is an ALWAYS-present, PLATFORM-
         // INDEPENDENT variant (the unixpipe locator leaf is ungated in
@@ -3350,7 +3368,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     server_config,
                     // R2608/R2609 — a listen tail carries BOTH policies, as the
                     // quic bind arms carry their one.
-                    TlsAcceptPolicy::from_material(ip.tls()),
+                    TlsAcceptPolicy::from_material(ip.tls(), &cfg.link_defaults),
                 )),
                 None => Err(unsupported(
                     "tls acceptor requires AcceptConfig.tls (a server cert + key), \
@@ -3404,7 +3422,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     .await?,
                     // R2600 — the policy is read HERE, where the locator is, and
                     // carried to accept time, where the chain to watch exists.
-                    ip.tls().closes_on_expiration(),
+                    cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic"))]
@@ -3434,7 +3452,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     )
                     .await?,
                     // R2600 — the datagram twin carries the same policy.
-                    ip.tls().closes_on_expiration(),
+                    cfg.link_defaults.closes_on_expiration(ip.proto, ip.tls()),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic-datagram"))]
@@ -3515,7 +3533,10 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                         .await?,
                         server_config,
                         // R2608/R2609 — the named bind twin of the numeric arm.
-                        TlsAcceptPolicy::from_material(named_tls_material(&tls)),
+                        TlsAcceptPolicy::from_material(
+                            named_tls_material(&tls),
+                            &cfg.link_defaults,
+                        ),
                     )),
                     None => Err(unsupported(
                         "tls acceptor requires AcceptConfig.tls (a server cert + key), \
@@ -3560,7 +3581,8 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     })
                     .await?,
                     // R2600 — a NAMED listen tail carries the policy too.
-                    named_tls(&tls).closes_on_expiration(),
+                    cfg.link_defaults
+                        .closes_on_expiration(proto, named_tls(&tls)),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic"))]
@@ -3581,7 +3603,8 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     })
                     .await?,
                     // R2600 — the named datagram twin, same policy.
-                    named_tls(&tls).closes_on_expiration(),
+                    cfg.link_defaults
+                        .closes_on_expiration(proto, named_tls(&tls)),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic-datagram"))]
@@ -3700,9 +3723,14 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
         // always-present `AnyLocator::Unixpipe` variant (ungated in
         // wz-session-core) stays exhaustive on every target. `udp` is the remaining
         // acceptor extension point.
+        // The locator's `file_mask` over the unixpipe kind's, as the dial arm lays it.
         #[cfg(all(feature = "transport-link-unixpipe", unix))]
         AnyLocator::Unixpipe(ep) => Ok(BoundListener::Unixpipe(
-            bind_unixpipe(&ep.path, ep.file_mask).await?,
+            bind_unixpipe(
+                &ep.path,
+                ep.file_mask.or(cfg.link_defaults.unixpipe_file_mask()),
+            )
+            .await?,
         )),
         #[cfg(not(all(feature = "transport-link-unixpipe", unix)))]
         AnyLocator::Unixpipe(_ep) => Err(unsupported(
@@ -4008,6 +4036,10 @@ impl LinkDriver for InboundLink {
 /// `Arc<dyn BoxedLinkDriver>` (`send_blocking` for the Lua actions), and the
 /// writer-task join handle. TCP splits the stream (`wire_tcp_stream`); UDP
 /// shares the socket ([`wire_udp_socket`]).
+///
+/// No session parameters reach this form, so its link reads with upstream's
+/// default `transport/link/rx` block; a caller that opens a session wires
+/// with that session's block instead ([`wire_dialed_link_with_rx`]).
 pub fn wire_dialed_link(
     dialed: DialedLink,
 ) -> (
@@ -4015,28 +4047,49 @@ pub fn wire_dialed_link(
     Arc<dyn BoxedLinkDriver + Send + Sync>,
     WriterHandle,
 ) {
-    // Universal framing (u16 prefix). The lowlatency open helpers call
-    // `wire_dialed_link_with_lowlatency` with a flag they flip at Established.
-    wire_dialed_link_with_lowlatency(dialed, Arc::new(AtomicBool::new(false)))
+    wire_dialed_link_with_rx(dialed, LinkRxConf::default())
 }
 
-/// transport-lowlatency — [`wire_dialed_link`] sharing a lowlatency-wire flag
-/// with the TCP link's read + write framing (the only link the lowlatency
-/// negotiation is wired for today). The flag stays false through the handshake
-/// and for every non-TCP link, so those wires are byte-identical to before; the
-/// lowlatency open helper flips it at Established, switching the TCP frame prefix
-/// to the 4-byte u32 zenoh lowlatency form.
-pub fn wire_dialed_link_with_lowlatency(
+/// [`wire_dialed_link`] for a link whose session reads `link_rx`: its
+/// `buffer_size` is the read storage a stream link pools.
+pub fn wire_dialed_link_with_rx(
     dialed: DialedLink,
-    lowlatency: Arc<AtomicBool>,
+    link_rx: LinkRxConf,
 ) -> (
     InboundLink,
     Arc<dyn BoxedLinkDriver + Send + Sync>,
     WriterHandle,
 ) {
+    // Universal framing (u16 prefix). The lowlatency open helpers call
+    // `wire_dialed_link_with_lowlatency` with a flag they flip at Established.
+    wire_dialed_link_with_lowlatency(dialed, Arc::new(AtomicBool::new(false)), link_rx)
+}
+
+/// transport-lowlatency — [`wire_dialed_link_with_rx`] sharing a lowlatency-wire
+/// flag with the TCP link's read + write framing (the only link the lowlatency
+/// negotiation is wired for today). The flag stays false through the handshake
+/// and for every non-TCP link, so those wires are byte-identical to before; the
+/// lowlatency open helper flips it at Established, switching the TCP frame prefix
+/// to the 4-byte u32 zenoh lowlatency form.
+///
+/// The udp, ws, quic-datagram and serial links have readers of their own that
+/// read each message into storage of its own and keep no pool, so
+/// `link_rx.buffer_size` sizes the links that read through
+/// `crate::stream_link`.
+pub fn wire_dialed_link_with_lowlatency(
+    dialed: DialedLink,
+    lowlatency: Arc<AtomicBool>,
+    link_rx: LinkRxConf,
+) -> (
+    InboundLink,
+    Arc<dyn BoxedLinkDriver + Send + Sync>,
+    WriterHandle,
+) {
+    let rx_buffer_size = link_rx.buffer_size;
     match dialed {
         DialedLink::Tcp(stream) => {
-            let (inbound, outbound, handle) = wire_tcp_stream_with_lowlatency(stream, lowlatency);
+            let (inbound, outbound, handle) =
+                wire_tcp_stream_with_lowlatency(stream, lowlatency, rx_buffer_size);
             (InboundLink::Tcp(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-udp")]
@@ -4059,7 +4112,8 @@ pub fn wire_dialed_link_with_lowlatency(
         }
         #[cfg(feature = "transport-link-tls")]
         DialedLink::Tls(stream, closes_on_expiration) => {
-            let (inbound, outbound, handle) = wire_tls_stream(*stream, closes_on_expiration);
+            let (inbound, outbound, handle) =
+                wire_tls_stream(*stream, closes_on_expiration, rx_buffer_size);
             (InboundLink::Tls(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-ws")]
@@ -4069,22 +4123,22 @@ pub fn wire_dialed_link_with_lowlatency(
         }
         #[cfg(all(feature = "transport-link-unixsock", unix))]
         DialedLink::Unixsock(stream) => {
-            let (inbound, outbound, handle) = wire_unixsock_stream(stream);
+            let (inbound, outbound, handle) = wire_unixsock_stream(stream, rx_buffer_size);
             (InboundLink::Unixsock(inbound), outbound, handle)
         }
         #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
         DialedLink::Vsock(stream) => {
-            let (inbound, outbound, handle) = wire_vsock_stream(stream);
+            let (inbound, outbound, handle) = wire_vsock_stream(stream, rx_buffer_size);
             (InboundLink::Vsock(inbound), outbound, handle)
         }
         #[cfg(all(feature = "transport-link-unixpipe", unix))]
         DialedLink::Unixpipe(link) => {
-            let (inbound, outbound, handle) = wire_unixpipe_stream(link);
+            let (inbound, outbound, handle) = wire_unixpipe_stream(link, rx_buffer_size);
             (InboundLink::Unixpipe(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-quic")]
         DialedLink::Quic(link) => {
-            let (inbound, outbound, handle) = wire_quic_stream(*link);
+            let (inbound, outbound, handle) = wire_quic_stream(*link, rx_buffer_size);
             (InboundLink::Quic(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-quic-datagram")]
@@ -4097,7 +4151,7 @@ pub fn wire_dialed_link_with_lowlatency(
         // builds, so no inbound variant of its own is needed.
         #[cfg(feature = "transport-link-udp-reliable")]
         DialedLink::UdpReliable(link) => {
-            let (inbound, outbound, handle) = wire_udp_reliable(*link);
+            let (inbound, outbound, handle) = wire_udp_reliable(*link, rx_buffer_size);
             (InboundLink::Quic(inbound), outbound, handle)
         }
     }
@@ -5080,7 +5134,7 @@ pub async fn initiate_and_open_session(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(connected, params.link_rx);
     let actions = new_session_actions(outbound, params, clock);
     initiator_open(
         inbound,
@@ -5110,7 +5164,7 @@ pub async fn initiate_and_open_session_with_auth(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(connected, params.link_rx);
     let actions = new_session_actions(outbound, params, clock);
     actions.install_auth_dispatch(auth);
     initiator_open(
@@ -5453,12 +5507,12 @@ where
     let lowlatency_wire = Arc::new(AtomicBool::new(false));
     #[cfg(feature = "transport-lowlatency")]
     let (inbound, outbound, writer_handle) = if offer.mode == TransportMode::LowLatency {
-        wire_dialed_link_with_lowlatency(connected, lowlatency_wire.clone())
+        wire_dialed_link_with_lowlatency(connected, lowlatency_wire.clone(), params.link_rx)
     } else {
-        wire_dialed_link(connected)
+        wire_dialed_link_with_rx(connected, params.link_rx)
     };
     #[cfg(not(feature = "transport-lowlatency"))]
-    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(connected, params.link_rx);
     let actions = new_session_actions(outbound, params, clock);
     // Staged BEFORE the handshake drives, and BEFORE any wire byte: an offer
     // this build cannot honour fails here rather than opening a session whose
@@ -5575,7 +5629,7 @@ pub async fn initiate_and_open_session_with_namespace(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(connected, params.link_rx);
     let actions = new_session_actions(outbound, params, clock);
     actions.set_namespace(namespace);
     initiator_open(
@@ -5661,7 +5715,7 @@ pub async fn accept_and_open_session(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(accepted, params.link_rx);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
 
     // Accepting activation -> AwaitingInitSyn, whose onentry arms
@@ -5702,7 +5756,7 @@ pub async fn accept_and_open_session_with_auth(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(accepted, params.link_rx);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.install_auth_dispatch(auth);
 
@@ -5945,12 +5999,12 @@ where
     let lowlatency_wire = Arc::new(AtomicBool::new(false));
     #[cfg(feature = "transport-lowlatency")]
     let (inbound, outbound, writer_handle) = if offer.mode == TransportMode::LowLatency {
-        wire_dialed_link_with_lowlatency(accepted, lowlatency_wire.clone())
+        wire_dialed_link_with_lowlatency(accepted, lowlatency_wire.clone(), params.link_rx)
     } else {
-        wire_dialed_link(accepted)
+        wire_dialed_link_with_rx(accepted, params.link_rx)
     };
     #[cfg(not(feature = "transport-lowlatency"))]
-    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(accepted, params.link_rx);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions
         .apply_offer(&offer)
@@ -6041,7 +6095,7 @@ pub async fn accept_and_open_session_with_namespace(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(accepted, params.link_rx);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.set_namespace(namespace);
 
@@ -6701,6 +6755,43 @@ mod tests {
             .await
             .expect("tcp/ host:port dials");
         assert!(matches!(schemed, DialedLink::Tcp(_)));
+    }
+
+    /// `transport/link/rx/buffer_size`, from a session's `LinkRxConf` to the
+    /// pool of the link it wires: three widest batches of storage pool three
+    /// buffers, the default pools upstream's one, and a link wired with no
+    /// session parameters takes that default too.
+    #[cfg(not(feature = "runtime-zero-copy"))]
+    #[tokio::test]
+    async fn a_sessions_rx_buffer_size_sizes_the_pool_of_the_link_it_wires() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        let pooled = |inbound: &InboundLink| match inbound {
+            InboundLink::Tcp(driver) => driver.pooled_rx_buffers(),
+            #[allow(unreachable_patterns)]
+            _ => panic!("a tcp dial wires a tcp read half"),
+        };
+        let endpoint = format!("tcp/127.0.0.1:{port}");
+        let cfg = DialConfig::default();
+
+        let three = LinkRxConf {
+            buffer_size: 3 * u16::MAX as usize,
+            ..LinkRxConf::default()
+        };
+        let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
+        let (inbound, _outbound, _writer) = wire_dialed_link_with_rx(dialed, three);
+        assert_eq!(pooled(&inbound), 3);
+
+        let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
+        let (inbound, _outbound, _writer) = wire_dialed_link_with_rx(dialed, LinkRxConf::default());
+        assert_eq!(pooled(&inbound), 1);
+
+        let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
+        let (inbound, _outbound, _writer) = wire_dialed_link(dialed);
+        assert_eq!(pooled(&inbound), 1);
+        drop(listener);
     }
 
     // ── R311y809 — the MESH dial target resolution. The mesh hosts parsed their

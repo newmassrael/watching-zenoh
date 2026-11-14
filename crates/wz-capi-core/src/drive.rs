@@ -1083,6 +1083,9 @@ pub struct SessionState {
     /// Whether the session's drive is being run: pico's background executor. See
     /// [`ReadGate`].
     read_gate: Arc<ReadGate>,
+    /// What the session applies itself above its links, as its open was told
+    /// ([`OpenStance::session_defaults`]).
+    session_defaults: crate::session_defaults::SessionDefaults,
 }
 
 impl SessionState {
@@ -1117,6 +1120,12 @@ impl SessionState {
     /// This ABI's per-session state, if the shim attached one of type `E`.
     pub fn abi_extension<E: std::any::Any>(&self) -> Option<&E> {
         self.abi_extension.get()?.downcast_ref::<E>()
+    }
+
+    /// What the session applies itself above its links, which every ABI that publishes through
+    /// it reads here.
+    pub fn session_defaults(&self) -> &crate::session_defaults::SessionDefaults {
+        &self.session_defaults
     }
 
     /// This session's own zid (pico `z_info_zid`). Always the id the INIT
@@ -3749,6 +3758,7 @@ impl ResolvedGroup {
             batch_size,
             is_qos,
             compression,
+            join_rule,
         } = join.profile;
         Some(Self {
             endpoint: join.endpoint.clone(),
@@ -3767,6 +3777,7 @@ impl ResolvedGroup {
                 compression,
                 tx_queue,
                 link_rx,
+                join_rule,
             },
         })
     }
@@ -4196,6 +4207,12 @@ pub struct OpenStance {
     /// a session that joins none. A build without the `multicast-transport` feature refuses
     /// an open that names one.
     pub groups: Vec<GroupJoin>,
+    /// What the session applies itself above its links: the QoS of its publications per key,
+    /// when the shared-memory subsystem is made, and which payloads are copied into shared memory
+    /// ([`SessionDefaults`](crate::session_defaults::SessionDefaults)). zenoh-c's ABI and the Rust
+    /// API compile it from their configuration; zenoh-pico's reads no such keys and says the
+    /// default, which applies nothing.
+    pub session_defaults: crate::session_defaults::SessionDefaults,
 }
 
 /// Open-debt item 913 — whether `endpoint` names a multicast group in zenoh's sense: a `udp/`
@@ -4305,6 +4322,8 @@ pub struct GroupProfile {
     /// when that pays: `transport/multicast/compression/enabled`. Multicast has no handshake
     /// to switch it on, so every member of the group must state the same.
     pub compression: bool,
+    /// Whose rule the session judges a member's Join by: the calling ABI's upstream's.
+    pub join_rule: wz_session_core::multicast_params::GroupJoinRule,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -4452,6 +4471,7 @@ pub fn open_blocking(
         policy,
         namespace,
         groups,
+        session_defaults,
         ..
     } = stance;
     // The prefix as the decorator takes it. The plan validated the text, so a text that does not
@@ -4694,15 +4714,20 @@ pub fn open_blocking(
         .map_err(|_| OpenError::DriveFailed)?;
 
     match rx.recv() {
-        Ok(Ok(())) => Ok(SessionState {
-            shared,
-            zid,
-            shutdown,
-            stop,
-            driver: StdMutex::new(Some(handle)),
-            abi_extension: std::sync::OnceLock::new(),
-            read_gate,
-        }),
+        Ok(Ok(())) => {
+            // Upstream makes the subsystem at the end of an open that succeeded.
+            crate::session_defaults::init_shared_memory(session_defaults.shm_init);
+            Ok(SessionState {
+                shared,
+                zid,
+                shutdown,
+                stop,
+                driver: StdMutex::new(Some(handle)),
+                abi_extension: std::sync::OnceLock::new(),
+                read_gate,
+                session_defaults,
+            })
+        }
         // Open failed (bind / link / handshake error), and the drive role said why. Join the
         // finished thread and report.
         Ok(Err(cause)) => {
@@ -4746,6 +4771,7 @@ mod tests {
                 sn_resolution: SnResolution::Bits8,
             },
             rx: LinkRxConf {
+                buffer_size: 4 * 65_535,
                 max_message_size: 4096,
             },
             accept: AcceptBounds::default(),
@@ -5785,6 +5811,7 @@ mod tests {
             namespace: None,
             gateway_south: wz_session_core::region_partition::SouthPartition::Auto,
             groups: Vec::new(),
+            session_defaults: Default::default(),
         }
     }
 
@@ -6050,6 +6077,7 @@ mod multicast_face_tests {
             compression: false,
             tx_queue: Default::default(),
             link_rx: Default::default(),
+            join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Zenoh,
         }
     }
 

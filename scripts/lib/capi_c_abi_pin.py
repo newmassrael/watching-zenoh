@@ -143,7 +143,11 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # Revision 15 is such a bump: `wz_capi_c_config_disposition` gained a fourth answer
 # (`WZ_CAPI_C_CONFIG_NOT_IN_BUILD`) and `wz_capi_c_config_honoured` lists the keys of the build,
 # without the keys of a capability it was built without. No symbol moved.
-EXPECTED_REVISION = 15
+#
+# Revision 16 is such a bump too: the clock rule `wz_capi_c.h` states changed. `z_timestamp_new`
+# gives a program the node clock's time whatever its standing, and the clock-quality-stamping
+# policy holds back only the data the node stamps. No symbol moved.
+EXPECTED_REVISION = 16
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",

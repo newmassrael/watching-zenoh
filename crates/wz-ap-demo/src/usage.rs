@@ -229,11 +229,21 @@ pub(crate) fn print_usage() {
     eprintln!("                             (default 1073741824, read as at most the build's");
     eprintln!("                             reassembly slot).");
     eprintln!("                             zenoh transport/link/rx/max_message_size");
+    eprintln!("    --rx-buffer-size <bytes>");
+    eprintln!("                             the read storage each stream link pools, in");
+    eprintln!("                             buffers of the widest batch (default 65535, one).");
+    eprintln!("                             zenoh transport/link/rx/buffer_size");
     eprintln!("    --link-config <kind>#<k=v;...>");
-    eprintln!("                             socket options every <kind> link takes unless its");
-    eprintln!("                             locator names the same key (repeatable). tcp and tls");
+    eprintln!("                             options every <kind> link takes unless its locator");
+    eprintln!("                             names the same key (repeatable). tcp and tls");
     eprintln!("                             carry so_rcvbuf and so_sndbuf. zenoh");
     eprintln!("                             transport/link/<kind>/so_rcvbuf and so_sndbuf");
+    eprintln!("                             unixpipe carries file_mask, the FIFO mode, decimal:");
+    eprintln!("                             zenoh transport/link/unixpipe/file_access_mask");
+    eprintln!("                             tls, quic and quic-datagram carry");
+    eprintln!("                             close_link_on_expiration: a link closes when");
+    eprintln!("                             its peer's certificate chain expires:");
+    eprintln!("                             zenoh transport/link/tls/close_link_on_expiration");
     eprintln!("    --timestamping <bool>    whether THIS node stamps the un-timestamped data");
     eprintln!("                             it relays. zenoh timestamping/enabled, which is a");
     eprintln!("                             PER-ROLE default: a router stamps, a peer and a");
@@ -395,15 +405,18 @@ pub(crate) fn print_usage() {
     eprintln!("                             links carry zenoh's default 100. Two entries naming");
     eprintln!("                             one destination are REFUSED, as a zenohd refuses");
     eprintln!("                             the same config. Requires --router-hat.");
-    eprintln!("    --gateway-south <json5>  how this ROUTER or PEER partitions its south into subregions,");
+    eprintln!("    --gateway-south <json5>  how this node partitions its south into subregions,");
     eprintln!("                             in the shape of the upstream gateway south value:");
     eprintln!("                             \"auto\" (the default), or a list of subregions, each");
     eprintln!("                             with filters on modes, zids, interfaces and region");
     eprintln!("                             names. A remote is placed in the first subregion it");
     eprintln!("                             matches, and every session announces the bound that");
-    eprintln!("                             gives it. Requires --router-hat or --peer and the");
-    eprintln!("                             zenoh-config build feature; refused on every other");
-    eprintln!("                             run mode.");
+    eprintln!(
+        "                             gives it. Requires --router-hat, --peer, --client-node"
+    );
+    eprintln!("                             or a one-shot --connect, and the zenoh-config build");
+    eprintln!("                             feature; refused on every other run mode and with");
+    eprintln!("                             --reconnect.");
     eprintln!(
         "    --govern-multicast       hold this ROUTER's multicast group to the node's access"
     );

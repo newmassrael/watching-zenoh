@@ -467,7 +467,7 @@ fn a_client_node_answers_the_linkstate_of_its_south_regions_alone() {
         .collect();
     assert!(!regions.iter().any(|r| r == "north"), "{regions:?}");
     let south_peers = SOUTH_PEERS.to_string();
-    assert!(regions.iter().any(|r| *r == south_peers), "{regions:?}");
+    assert!(regions.contains(&south_peers), "{regions:?}");
 }
 
 /// A declaration the router makes to a client node is named in the admin legs by the mode of

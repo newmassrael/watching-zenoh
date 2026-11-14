@@ -23,12 +23,16 @@ target_sources(app PRIVATE ${tls_src}/csrc/wz_tls.c)
 target_include_directories(app PRIVATE ${tls_src}/csrc)
 target_include_directories(mbedtls_iface INTERFACE ${tls_src}/config/zephyr)
 
+# Besides the sockets and the channel, the board's socket hooks and the hook of the node's own
+# address, of the family the image chose for it: the node waits for that address before it starts.
+wz_node_address_hooks(node_address_hooks)
 wz_zephyr_rust_app(
   RUST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rust
   LIB      wz_zephyr_admin_loopback
   UNDEFINED
     socket bind getsockname sendto recvfrom poll close
     connect send recv getpeername shutdown setsockopt listen accept
+    ${WZ_SOCKET_HOOKS} ${node_address_hooks}
     wz_tls_start wz_tls_arena_peak wz_tls_arena_peak_reset
     wz_tls_identity_generate wz_tls_identity_zid wz_tls_identity_cert wz_tls_identity_free
     wz_tls_session_open wz_tls_session_set_io_ctx wz_tls_session_handshake

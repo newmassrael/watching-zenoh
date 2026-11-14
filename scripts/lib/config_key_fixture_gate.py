@@ -170,6 +170,9 @@ DEFAULT_CLASS_CONSTS = (
     "STATED",
     "THE_TREE_ANSWERS_NULL",
     "A_BLOCK_ON_ONE_SIDE_AND_LEAVES_ON_THE_OTHER",
+    # A key the zenohd BINARY sets over its file, whose resolved value is the
+    # binary's and not a silent file's default (`plugins_loading/enabled`).
+    "THE_ZENOHD_BINARY_SETS_IT",
 )
 # The fourth class is a `Vec` of (key, expected) pairs rather than a `&[&str]`,
 # so it is anchored on its own binding and only the tuple's FIRST position is

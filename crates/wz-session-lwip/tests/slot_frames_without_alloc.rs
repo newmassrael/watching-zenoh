@@ -47,7 +47,7 @@ use wz_runtime_coop::session_runtime::{new_session_in_slot, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_session_core::decl_sink::{DeclSink, DeclView};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
-use wz_session_core::link::LinkSendOutcome;
+use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::{SessionSlots, SlotDriver};

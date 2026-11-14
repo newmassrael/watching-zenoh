@@ -183,7 +183,9 @@ impl Pair {
             zid_to_zenoh_hex(&self.a_zid)
         );
         let mut out = Recorder::default();
-        self.queries.answer(&query(&key), &mut out)
+        // The view borrows `key`; it is bound so that it is dropped before `key` is.
+        let asked = query(&key);
+        self.queries.answer(&asked, &mut out)
     }
 
     /// The dialling node's zid as a key carries it.

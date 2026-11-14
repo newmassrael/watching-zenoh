@@ -25,9 +25,13 @@ mod host {
     /// The host's wall clock.
     pub(crate) type Epoch = wz_runtime_posix::PosixEpoch;
 
-    /// Links bound on every interface of the host, whose `tcp/` dial is the host's.
+    /// Links bound on every IPv4 interface of the host, whose `tcp/` dial is the host's. A dial to
+    /// an IPv6 locator binds the unspecified IPv6 address, so both families are reached.
     pub(crate) fn links() -> Links {
-        Links::new([0; 4], wz_runtime_posix::stream::PosixTcpDial)
+        Links::new(
+            core::net::Ipv4Addr::UNSPECIFIED,
+            wz_runtime_posix::stream::PosixTcpDial,
+        )
     }
 
     pub(crate) fn clock() -> Clock {
@@ -71,7 +75,10 @@ mod host {
     /// Links bound on every interface of the node, as pico's Zephyr links bind (the stack picks
     /// the source address of each dial), whose `tcp/` dial is Zephyr's stream socket.
     pub(crate) fn links() -> Links {
-        Links::new([0; 4], wz_runtime_zephyr::stream::ZephyrTcpDial)
+        Links::new(
+            core::net::Ipv4Addr::UNSPECIFIED,
+            wz_runtime_zephyr::stream::ZephyrTcpDial,
+        )
     }
 
     pub(crate) fn clock() -> Clock {
@@ -99,7 +106,7 @@ pub(crate) use host::*;
 /// this host's socket and clock. A build with `scout` scouts with the host's window instead.
 #[cfg(all(feature = "scout-mcu", not(feature = "scout")))]
 mod scouting {
-    use core::net::IpAddr;
+    use core::net::{IpAddr, SocketAddr};
 
     use wz_session_core::scouting_host::ScoutedHello;
 
@@ -110,15 +117,7 @@ mod scouting {
     /// it, which is what its scout reads into.
     const SCOUT_RX_BYTES: usize = wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES;
 
-    /// The group as a datagram socket of the stacks names it; an IPv6 group has none, and its
-    /// window is one nobody answers.
-    fn ipv4(group: IpAddr) -> Option<[u8; 4]> {
-        match group {
-            IpAddr::V4(addr) => Some(addr.octets()),
-            IpAddr::V6(_) => None,
-        }
-    }
-
+    /// The group is asked from a socket of its family, IPv4 or IPv6, as the window binds it.
     pub(crate) fn run_scout(
         group: IpAddr,
         port: u16,
@@ -127,13 +126,9 @@ mod scouting {
         budget_ms: u64,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
-        let Some(group) = ipv4(group) else {
-            return 0;
-        };
         wz_capi_coop::scout_datagram::run_scout::<host::Datagram, _>(
             &host::clock(),
-            group,
-            port,
+            SocketAddr::new(group, port),
             what,
             zid,
             budget_ms,
@@ -151,24 +146,12 @@ mod scouting {
     ) -> Option<ScoutedHello> {
         wz_capi_coop::scout_datagram::scout_first::<host::Datagram, _>(
             &host::clock(),
-            ipv4(group)?,
-            port,
+            SocketAddr::new(group, port),
             what,
             zid,
             budget_ms,
             SCOUT_RX_BYTES,
         )
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn a_scout_asks_an_ipv4_group_and_has_no_socket_for_another() {
-            assert_eq!(ipv4(IpAddr::from([224, 0, 0, 224])), Some([224, 0, 0, 224]));
-            assert_eq!(ipv4(IpAddr::from([0xff02, 0, 0, 0, 0, 0, 0, 1])), None);
-        }
     }
 }
 #[cfg(all(feature = "scout-mcu", not(feature = "scout")))]

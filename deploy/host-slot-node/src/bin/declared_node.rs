@@ -854,16 +854,19 @@ fn run() -> i32 {
     };
 
     let (subscribed, mirrored) = (subscriptions(), mirrors());
+    // Every IPv4 interface; a dial to an IPv6 locator binds the unspecified IPv6 address.
+    let every = core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED);
     #[cfg(not(feature = "tls"))]
-    let stack =
-        Stack::new([0; 4], &NODE.rx, &NODE.tx, PosixTcpDial).with_idle_wait_ms(IDLE_WAIT_MS);
+    let stack = Stack::new(every, &NODE.rx, &NODE.tx, PosixTcpDial).with_idle_wait_ms(IDLE_WAIT_MS);
     #[cfg(feature = "tls")]
     let stack =
-        tls::stack([0; 4], &NODE.rx, &NODE.tx, channel_identity).with_idle_wait_ms(IDLE_WAIT_MS);
+        tls::stack(every, &NODE.rx, &NODE.tx, channel_identity).with_idle_wait_ms(IDLE_WAIT_MS);
     // The port is bound before the node is built, so the line a lab waits for is said only once a
     // connection to it would be taken.
+    #[cfg(feature = "listen")]
+    let listen_at = core::net::SocketAddr::new(LISTEN_ADDR, LISTEN_PORT);
     #[cfg(all(feature = "listen", not(feature = "listen-tls")))]
-    let listening = match PosixTcpListener::bind(LISTEN_ADDR, LISTEN_PORT) {
+    let listening = match PosixTcpListener::bind(listen_at) {
         Ok(listener) => Listening::<_, ACCEPTS>::new(stack.acceptor(listener)),
         Err(why) => {
             log_args(format_args!(
@@ -875,7 +878,7 @@ fn run() -> i32 {
     // Over the secure channel, each connection is a handshake that proves the zid of the node
     // that opened it before its session is made.
     #[cfg(feature = "listen-tls")]
-    let listening = match PosixTcpListener::bind(LISTEN_ADDR, LISTEN_PORT) {
+    let listening = match PosixTcpListener::bind(listen_at) {
         Ok(port) => match tls::listener(port, channel_identity) {
             Ok(listener) => Listening::<_, ACCEPTS>::new(stack.tls_acceptor(listener)),
             Err(why) => {

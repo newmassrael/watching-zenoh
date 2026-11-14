@@ -793,8 +793,13 @@ use crate::iface_bind::configure_tcp_stream;
 pub fn wire_tcp_stream(stream: TcpStream) -> (TcpReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // Universal framing: a fresh always-false lowlatency flag (the u16 batch
     // prefix). The lowlatency open helpers instead use the _with_lowlatency
-    // variant to share a flag they flip at Established.
-    wire_tcp_stream_with_lowlatency(stream, Arc::new(AtomicBool::new(false)))
+    // variant to share a flag they flip at Established. No session parameters
+    // reach this form, so the RX pool is upstream's default size.
+    wire_tcp_stream_with_lowlatency(
+        stream,
+        Arc::new(AtomicBool::new(false)),
+        wz_session_core::session_init_params::RX_BUFFER_SIZE,
+    )
 }
 
 /// transport-lowlatency — [`wire_tcp_stream`] sharing the link's lowlatency-wire
@@ -802,9 +807,13 @@ pub fn wire_tcp_stream(stream: TcpStream) -> (TcpReadDriver, Arc<StreamWriteDriv
 /// framing, so both switch to the 4-byte LE u32 prefix once the open helper flips
 /// it at Established. The flag stays false through the handshake and for every
 /// universal link, so those wires are byte-identical to before.
+///
+/// `rx_buffer_size` is the session's `transport/link/rx/buffer_size`: the read
+/// storage the link pools.
 pub fn wire_tcp_stream_with_lowlatency(
     stream: TcpStream,
     lowlatency: Arc<AtomicBool>,
+    rx_buffer_size: usize,
 ) -> (TcpReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject is resolved BEFORE the split, while the
     // stream still owns its socket and can report its local address.
@@ -822,7 +831,7 @@ pub fn wire_tcp_stream_with_lowlatency(
     #[cfg(unix)]
     let inline_write = crate::stream_link::inline_write_of(&stream);
     let (reader, writer) = stream.into_split();
-    let inbound = StreamReadDriver::new(TcpRead::new(reader), lowlatency.clone());
+    let inbound = StreamReadDriver::new(TcpRead::new(reader), lowlatency.clone(), rx_buffer_size);
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
     #[cfg(unix)]
     if let Some(sink) = inline_write {

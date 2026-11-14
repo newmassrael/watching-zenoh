@@ -761,9 +761,13 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
 /// *this decoder cannot say where that message ends* — an unrecognised MID has
 /// no length this build knows how to skip — so a caller walking a batch must
 /// stop and report the rest as unaccounted rather than guess a boundary.
-/// [`InboundFrame::Frame`] and `Fragment` legitimately return `bytes.len()`:
-/// they consume the remainder by construction, which is why upstream puts them
-/// last in a batch (`zenoh-codec-1.5.0/src/transport/frame.rs:173`).
+/// [`InboundFrame::Frame`] and `Fragment` legitimately return `bytes.len()`. A
+/// `Fragment`'s payload is the rest of its unit (upstream reads it as
+/// `reader.read_zslice(reader.remaining())`). A `Frame`'s records end where a
+/// message that is not a network one begins, which only a walk of the records
+/// finds (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`):
+/// the payload handed out here is the tail of the unit, and the reader of the
+/// batch cuts it where the walk ended and reads on from there.
 pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
     #[cfg(feature = "alloc")]
     {

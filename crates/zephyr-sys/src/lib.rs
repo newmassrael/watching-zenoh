@@ -44,6 +44,9 @@ pub mod socket {
 
     /// `NET_AF_INET` (`include/zephyr/net/net_ip.h`).
     pub const AF_INET: c_int = 1;
+    /// `NET_AF_INET6` (`include/zephyr/net/net_ip.h`, `NET_PF_INET6`). A socket of it opens only
+    /// on an image built with `CONFIG_NET_IPV6`; without it `socket` fails.
+    pub const AF_INET6: c_int = 2;
     /// `NET_SOCK_STREAM`, the first value of `enum net_sock_type`.
     pub const SOCK_STREAM: c_int = 1;
     /// `NET_SOCK_DGRAM` — the second value of `enum net_sock_type`, which
@@ -78,6 +81,41 @@ pub mod socket {
     pub const IP_ADD_MEMBERSHIP: c_int = 35;
     /// `ZSOCK_IP_DROP_MEMBERSHIP` (`include/zephyr/net/socket.h`): leave one.
     pub const IP_DROP_MEMBERSHIP: c_int = 36;
+    /// `ZSOCK_IP_MULTICAST_TTL`, at level [`IPPROTO_IP`]: the hop limit of the IPv4 multicast
+    /// datagrams a socket sends, an `int` the stack keeps as one byte.
+    pub const IP_MULTICAST_TTL: c_int = 33;
+    /// `NET_IPPROTO_IPV6` (`include/zephyr/net/net_ip.h`), the `level` of the IPv6 socket options
+    /// below. They are taken only on an image built with `CONFIG_NET_IPV6`.
+    pub const IPPROTO_IPV6: c_int = 41;
+    /// `ZSOCK_IPV6_MULTICAST_IF`, at level [`IPPROTO_IPV6`]: the index (an `int`, 1 to 255, or 0
+    /// for the stack's choice) of the interface a socket sends its IPv6 multicast datagrams out of.
+    pub const IPV6_MULTICAST_IF: c_int = 17;
+    /// `ZSOCK_IPV6_MULTICAST_HOPS`, at level [`IPPROTO_IPV6`]: the hop limit of the IPv6 multicast
+    /// datagrams a socket sends, an `int`.
+    pub const IPV6_MULTICAST_HOPS: c_int = 18;
+    /// `ZSOCK_IPV6_ADD_MEMBERSHIP` (`ZSOCK_IPV6_JOIN_GROUP`), at level [`IPPROTO_IPV6`]: join an
+    /// IPv6 multicast group with MLD. Its payload is an [`Ipv6Mreq`].
+    pub const IPV6_ADD_MEMBERSHIP: c_int = 20;
+    /// `ZSOCK_IPV6_DROP_MEMBERSHIP` (`ZSOCK_IPV6_LEAVE_GROUP`): leave one.
+    pub const IPV6_DROP_MEMBERSHIP: c_int = 21;
+
+    /// `struct net_ipv6_mreq` (`include/zephyr/net/net_ip.h`): the group's sixteen bytes and the
+    /// index of the interface, 0 for the socket's own or the default one. 20 bytes, 4-aligned (the
+    /// address is a union with a `uint32_t[4]` member).
+    ///
+    /// ⚠ The handler of both membership options refuses any `optlen` but this struct's size
+    /// (`subsys/net/lib/sockets/sockets_inet.c`, `ipv6_multicast_group`), and an unspecified
+    /// group. The membership, as the IPv4 one, belongs to the interface (`net_ipv6_mld_join`).
+    #[repr(C, align(4))]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Ipv6Mreq {
+        /// The group.
+        pub ipv6mr_multiaddr: [u8; 16],
+        /// The interface index, 0 for the socket's own or the default one.
+        pub ipv6mr_ifindex: c_int,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Ipv6Mreq>() == 20);
 
     /// `struct net_ip_mreqn` (`include/zephyr/net/net_ip.h`): the group, the
     /// local interface's address, and the interface index. 12 bytes.
@@ -100,8 +138,17 @@ pub mod socket {
         pub imr_ifindex: c_int,
     }
 
+    /// `struct net_sockaddr`: the family every socket address starts with, which is what the
+    /// calls below take a pointer to. A caller passes a [`SockaddrIn`], a [`SockaddrIn6`] or a
+    /// [`SockaddrStorage`] cast to it, with that one's length.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Sockaddr {
+        pub sa_family: u16,
+    }
+
     /// `struct net_sockaddr_in`: family, port (network order), IPv4 address
-    /// (network order). 8 bytes, 2-aligned.
+    /// (network order). 8 bytes, 4-aligned (the address is a `uint32_t`).
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct SockaddrIn {
@@ -109,6 +156,35 @@ pub mod socket {
         pub sin_port: u16,
         pub sin_addr: u32,
     }
+
+    /// `struct net_sockaddr_in6` (`include/zephyr/net/net_ip.h`): family, port (network order),
+    /// the 16 address bytes, and the scope as ONE byte (`uint8_t sin6_scope_id`; Zephyr has no
+    /// `sin6_flowinfo`). 24 bytes, 4-aligned: `struct net_in6_addr` is a union with a
+    /// `uint32_t[4]` member, so the struct is padded to a multiple of four, and the stack refuses
+    /// an `addrlen` below this size for an IPv6 socket.
+    #[repr(C, align(4))]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct SockaddrIn6 {
+        pub sin6_family: u16,
+        pub sin6_port: u16,
+        pub sin6_addr: [u8; 16],
+        pub sin6_scope_id: u8,
+    }
+
+    /// `struct net_sockaddr_storage` on an image with IPv6 (`NET_SOCKADDR_MAX_SIZE` is then
+    /// `sizeof(struct net_sockaddr_in6)`): room for an address of either family, for a call that
+    /// writes one (`recvfrom`, `getsockname`, `getpeername`, `accept`). The family is its first
+    /// field, as in every socket address.
+    #[repr(C, align(4))]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct SockaddrStorage {
+        pub ss_family: u16,
+        pub data: [u8; 22],
+    }
+
+    const _: () = assert!(core::mem::size_of::<SockaddrIn>() == 8);
+    const _: () = assert!(core::mem::size_of::<SockaddrIn6>() == 24);
+    const _: () = assert!(core::mem::size_of::<SockaddrStorage>() == 24);
 
     /// `struct zsock_pollfd`.
     #[repr(C)]
@@ -124,17 +200,17 @@ pub mod socket {
 
     extern "C" {
         pub fn socket(family: c_int, kind: c_int, proto: c_int) -> c_int;
-        pub fn bind(sock: c_int, addr: *const SockaddrIn, addrlen: SockLen) -> c_int;
+        pub fn bind(sock: c_int, addr: *const Sockaddr, addrlen: SockLen) -> c_int;
         /// The address a socket is bound to. For a bind on port 0 this is where
         /// the stack's choice of port is read back (`options/net.c`, like the
         /// rest of the group).
-        pub fn getsockname(sock: c_int, addr: *mut SockaddrIn, addrlen: *mut SockLen) -> c_int;
+        pub fn getsockname(sock: c_int, addr: *mut Sockaddr, addrlen: *mut SockLen) -> c_int;
         pub fn sendto(
             sock: c_int,
             buf: *const c_void,
             len: usize,
             flags: c_int,
-            dest: *const SockaddrIn,
+            dest: *const Sockaddr,
             addrlen: SockLen,
         ) -> isize;
         pub fn recvfrom(
@@ -142,7 +218,7 @@ pub mod socket {
             buf: *mut c_void,
             max_len: usize,
             flags: c_int,
-            src: *mut SockaddrIn,
+            src: *mut Sockaddr,
             addrlen: *mut SockLen,
         ) -> isize;
         /// Set a socket option; defined in `subsys/portability/posix/options/net.c`
@@ -160,17 +236,17 @@ pub mod socket {
         /// The stream calls (`options/net.c`, beside the rest of the group):
         /// connect a `SOCK_STREAM` socket, write to and read from it, name its
         /// peer, and end it. A stream needs `CONFIG_NET_TCP`.
-        pub fn connect(sock: c_int, addr: *const SockaddrIn, addrlen: SockLen) -> c_int;
+        pub fn connect(sock: c_int, addr: *const Sockaddr, addrlen: SockLen) -> c_int;
         pub fn send(sock: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize;
         pub fn recv(sock: c_int, buf: *mut c_void, max_len: usize, flags: c_int) -> isize;
-        pub fn getpeername(sock: c_int, addr: *mut SockaddrIn, addrlen: *mut SockLen) -> c_int;
+        pub fn getpeername(sock: c_int, addr: *mut Sockaddr, addrlen: *mut SockLen) -> c_int;
         pub fn shutdown(sock: c_int, how: c_int) -> c_int;
         /// The accepting half of the stream calls: mark a bound `SOCK_STREAM` socket as one that
         /// takes connections (`backlog` of them queued), and take the next connection off it,
         /// which is a new descriptor and names its peer in `addr`. A listener needs
         /// `CONFIG_NET_TCP`, as a connect does.
         pub fn listen(sock: c_int, backlog: c_int) -> c_int;
-        pub fn accept(sock: c_int, addr: *mut SockaddrIn, addrlen: *mut SockLen) -> c_int;
+        pub fn accept(sock: c_int, addr: *mut Sockaddr, addrlen: *mut SockLen) -> c_int;
     }
 }
 

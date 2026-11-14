@@ -444,8 +444,9 @@ async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {
                 .expect("dial the unixpipe rendezvous channel")
         }
     );
-    let (_acc_in, acc_out, _acc_h) = wire_unixpipe_stream(accepted);
-    let (_dial_in, dial_out, _dial_h) = wire_unixpipe_stream(dialed);
+    let rx = wz_session_core::session_init_params::RX_BUFFER_SIZE;
+    let (_acc_in, acc_out, _acc_h) = wire_unixpipe_stream(accepted, rx);
+    let (_dial_in, dial_out, _dial_h) = wire_unixpipe_stream(dialed, rx);
 
     let dial_pair = dial_out
         .link_endpoints()

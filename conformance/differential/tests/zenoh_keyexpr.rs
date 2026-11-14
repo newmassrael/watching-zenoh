@@ -407,7 +407,7 @@ fn both_crates_strip_every_short_prefix_alike() {
         .take(400)
         .map(|k| k.to_string())
         .collect();
-    let (mut several, mut stripped, mut refused) = (0usize, 0usize, 0usize);
+    let (mut several, mut stripped, mut refused, mut overflowed) = (0usize, 0usize, 0usize, 0usize);
     for target in targets.iter().chain(&generated) {
         assert_eq!(
             c_up::nonwild_prefix(target),
@@ -432,11 +432,14 @@ fn both_crates_strip_every_short_prefix_alike() {
         }
         for prefix in &nonwild {
             let wz = c_wz::strip_nonwild_prefix(target, prefix);
-            assert_eq!(
-                c_up::strip_nonwild_prefix(target, prefix),
-                wz,
-                "`{target}` without the namespace `{prefix}`"
-            );
+            // Upstream's search for a verbatim chunk finds any `@`, and one that is the second
+            // byte of the prefix's first chunk overflows its `p -= 2`: there upstream panics, and
+            // wz takes the next step of the same search, the `**` taking none of the prefix. Its
+            // answer is still held to be a key expression below.
+            match catching(|| c_up::strip_nonwild_prefix(target, prefix)) {
+                Some(up) => assert_eq!(up, wz, "`{target}` without the namespace `{prefix}`"),
+                None => overflowed += 1,
+            }
             match &wz {
                 Some(rest) => {
                     stripped += 1;
@@ -456,4 +459,7 @@ fn both_crates_strip_every_short_prefix_alike() {
         several > 0 && stripped > 0 && refused > 0,
         "several {several}, stripped {stripped}, refused {refused}"
     );
+    // The inputs reach upstream's overflow, so the case above is exercised and not assumed: the
+    // target `**/a` without the namespace `a@` is among them.
+    assert!(overflowed > 0, "no input reached upstream's overflow");
 }

@@ -36,7 +36,7 @@ use wz_link_lwip::tcp::LwipTcpListener;
 use wz_link_lwip::tcp::TcpSocketPool;
 use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::{
-    Accept, IpEndpoint, Locator, PumpSlots, SessionDriveConfig, SessionRole, SlotStack,
+    Accept, Locator, PumpSlots, SessionDriveConfig, SessionRole, SlotStack,
 };
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::byte_cells::ByteCells;
@@ -195,14 +195,15 @@ fn a_session_opens_over_tcp_between_a_dialling_node_and_an_accepting_one() {
     let local = CoopLocalSet::new(&runtime);
 
     listen(&LISTENER, PORT, &ACCEPT_CELLS).expect("the node listens");
+    let loopback = std::net::IpAddr::from([127, 0, 0, 1]);
     let accept_stack = Stack::new(
-        [127, 0, 0, 1],
+        loopback,
         &ACCEPT_RX,
         &ACCEPT_TX,
         dial(link, &ACCEPT_DIAL_CELLS),
     );
     let mut acceptor = accept_stack.acceptor(LwipTcpListen::new(link, &LISTENER));
-    let dial_stack = Stack::new([127, 0, 0, 1], &DIAL_RX, &DIAL_TX, dial(link, &DIAL_CELLS));
+    let dial_stack = Stack::new(loopback, &DIAL_RX, &DIAL_TX, dial(link, &DIAL_CELLS));
     let dialler: Host<1, 1> = SessionHost::new(
         CoopLocalSet::new(&runtime),
         &DIAL_SESSIONS,
@@ -217,10 +218,7 @@ fn a_session_opens_over_tcp_between_a_dialling_node_and_an_accepting_one() {
     );
 
     // The dialling node opens a `tcp/` link and a session over it.
-    let router = Locator::tcp(IpEndpoint {
-        addr: [127, 0, 0, 1],
-        port: PORT,
-    });
+    let router = Locator::tcp(std::net::SocketAddr::from(([127, 0, 0, 1], PORT)));
     let dialled = dialler
         .dial(
             || dialler.stack().bind_initiator(router),

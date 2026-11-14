@@ -399,7 +399,12 @@ fn start() -> Running {
         fail("the node could not listen on its tcp port");
     }
     let dial = LwipTcpDial::new(link, &STORAGE.connections).with_service(service);
-    let stack: Stack = Stack::new(ADDRESS, &STORAGE.rx, &STORAGE.tx, dial);
+    let stack: Stack = Stack::new(
+        core::net::IpAddr::from(ADDRESS),
+        &STORAGE.rx,
+        &STORAGE.tx,
+        dial,
+    );
     let acceptor =
         stack.acceptor(LwipTcpListen::new(link, &STORAGE.listener).with_service(service));
 
