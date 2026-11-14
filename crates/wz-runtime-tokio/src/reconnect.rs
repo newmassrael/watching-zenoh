@@ -69,8 +69,8 @@ use crate::session_glue::{
     SessionLinkActions,
 };
 use crate::session_open::{
-    dial_locator, initiator_open, plan_endpoint, wire_dialed_link_with_rx, DialConfig, OpenError,
-    OpenedSession,
+    dial_locator, initiator_open, open_within, plan_endpoint, wire_dialed_link_with_rx, DialConfig,
+    OpenError, OpenedSession,
 };
 use crate::writer_queue::WriterHandle;
 
@@ -488,31 +488,33 @@ impl ReconnectingSession {
             // server name the first dial used, so the supervisor stored it at
             // open (pico retains the session config in its reopen task).
             // Cert-free transports (tcp/udp) hold a default config here, so
-            // this stays behaviour-preserving for them.
-            let dialed = match dial_locator(locator.into(), &self.dial_config).await {
-                Ok(dialed) => dialed,
-                Err(err) => {
-                    last = OpenError::Dial(err);
-                    continue;
-                }
-            };
-            let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(dialed, self.link_rx);
-            let old = self.swappable.swap(outbound);
-            drop(old);
-            // R311ju — engine build + Initiator activation + open loop live
-            // once in `initiator_open` (shared with the first open), so the
-            // protocol-critical activation order cannot drift between the dial
-            // path and the reopen path.
-            match initiator_open(
-                inbound,
-                self.actions.clone(),
-                writer_handle,
-                clock,
-                self.open_max_iters,
-                self.tick_interval_ms,
-            )
-            .await
-            {
+            // this stays behaviour-preserving for them. One candidate's dial and handshake
+            // are one open, bounded by `transport/unicast/open_timeout` as upstream's
+            // `open_transport_unicast` is.
+            let attempt = open_within(self.dial_config.open_timeout, async {
+                let dialed = dial_locator(locator.into(), &self.dial_config)
+                    .await
+                    .map_err(OpenError::Dial)?;
+                let (inbound, outbound, writer_handle) =
+                    wire_dialed_link_with_rx(dialed, self.link_rx);
+                let old = self.swappable.swap(outbound);
+                drop(old);
+                // R311ju — engine build + Initiator activation + open loop live
+                // once in `initiator_open` (shared with the first open), so the
+                // protocol-critical activation order cannot drift between the dial
+                // path and the reopen path.
+                initiator_open(
+                    inbound,
+                    self.actions.clone(),
+                    writer_handle,
+                    clock,
+                    self.open_max_iters,
+                    self.tick_interval_ms,
+                )
+                .await
+            })
+            .await;
+            match attempt {
                 Ok(opened) => return Ok(opened),
                 // A candidate that DIALED but did not reach Established is
                 // spent for this attempt exactly as a refused dial is: pico's
@@ -777,6 +779,9 @@ impl ReconnectingSession {
             OpenError::Dial(_)
                 | OpenError::LinkLost(_)
                 | OpenError::HandshakeTimeout
+                // An open that ran out of `transport/unicast/open_timeout` is a later attempt's
+                // to try again, as a timed-out handshake is.
+                | OpenError::OpenTimeout(_)
                 | OpenError::Terminal
                 // R2376 — pico lists `_Z_ERR_SCOUT_NO_RESULTS` in exactly this
                 // set (`_z_client_reopen_task_fn`'s retry arm). A window in
@@ -828,24 +833,29 @@ pub async fn open_session_with_reconnect(
     // R311pw — `locator` is the reconnectable subset (numeric `Ip` | DNS
     // `Named`); clone it for the initial dial (it widens to `AnyLocator` via
     // `.into()`) and move the original into the supervisor for the re-dials.
-    let dialed = dial_locator(locator.clone().into(), &dial_config)
-        .await
-        .map_err(OpenError::Dial)?;
+    // The dial and the handshake are one open, bounded by `transport/unicast/open_timeout`.
     let link_rx = params.link_rx;
-    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(dialed, link_rx);
-    let swappable = Arc::new(SwappableLink::<TokioRuntime>::new(outbound));
-    let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = swappable.clone();
-    let actions = new_session_actions(sink, params, clock);
-    // R311ju — first open routes through the same shared `initiator_open`
-    // body every reopen attempt uses (engine build + activation + open loop).
-    let opened = initiator_open(
-        inbound,
-        actions,
-        writer_handle,
-        clock,
-        max_iters,
-        tick_interval_ms,
-    )
+    let (swappable, opened) = open_within(dial_config.open_timeout, async {
+        let dialed = dial_locator(locator.clone().into(), &dial_config)
+            .await
+            .map_err(OpenError::Dial)?;
+        let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(dialed, link_rx);
+        let swappable = Arc::new(SwappableLink::<TokioRuntime>::new(outbound));
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = swappable.clone();
+        let actions = new_session_actions(sink, params, clock);
+        // R311ju — first open routes through the same shared `initiator_open`
+        // body every reopen attempt uses (engine build + activation + open loop).
+        let opened = initiator_open(
+            inbound,
+            actions,
+            writer_handle,
+            clock,
+            max_iters,
+            tick_interval_ms,
+        )
+        .await?;
+        Ok((swappable, opened))
+    })
     .await?;
     Ok(ReconnectingSession {
         actions: opened.actions.clone(),

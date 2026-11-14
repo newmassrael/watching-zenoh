@@ -855,6 +855,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "transport/unicast/max_sessions",
             wz.max_sessions.to_string(),
         ),
+        (
+            "transport/unicast/open_timeout",
+            wz.open_timeout_ms.to_string(),
+        ),
         ("transport/unicast/lowlatency", wz.lowlatency.to_string()),
         ("transport/unicast/qos/enabled", wz.qos.to_string()),
         (
@@ -863,6 +867,12 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         ),
         ("transport/link/tx/batch_size", wz.batch_size.to_string()),
         ("transport/link/tx/lease", wz.lease_ms.to_string()),
+        // Upstream serializes its `Bits` by name (32bit, quoted), so a silent file resolves to
+        // the name and wz's struct answers with its own width's.
+        (
+            "transport/link/tx/sequence_number_resolution",
+            quoted(wz.sn_resolution.zenoh_name()),
+        ),
         // R2925 — the queue sizes and the two congestion waits: zenohd resolves
         // a silent file to numbers (2 per priority, 1000 and 5000000
         // microseconds), so each is compared against wz's own default.
@@ -909,6 +919,20 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         (
             "transport/link/tx/queue/congestion_control/block/wait_before_close",
             wz.tx_queue.wait_before_close_us.to_string(),
+        ),
+        (
+            "transport/link/tx/queue/batching/enabled",
+            wz.tx_queue.batching.to_string(),
+        ),
+        // Milliseconds in the tree, microseconds in wz's struct.
+        (
+            "transport/link/tx/queue/batching/time_limit",
+            (wz.tx_queue.batching_time_limit_us / 1_000).to_string(),
+        ),
+        // A snake-case name in the tree, as upstream's serde spells it.
+        (
+            "transport/link/tx/queue/allocation/mode",
+            quoted(wz.tx_queue.allocation.zenoh_name()),
         ),
         (
             "transport/link/rx/max_message_size",
@@ -3618,6 +3642,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
       // exercises. NON-DEFAULT on purpose (upstream's is 1000), so a wz that
       // ignored the document and kept its own default would differ.
       max_sessions: 7,
+      // Half upstream's ten seconds, and far above what a dial to the local router takes.
+      open_timeout: 5000,
       lowlatency: false,
       qos: {{ enabled: true }},
       compression: {{ enabled: true }},
@@ -3686,6 +3712,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
       tx: {{
         batch_size: 4096,
         lease: 3000,
+        // 16 bits against the router's 32: the session settles on the smaller, the file's.
+        sequence_number_resolution: "16bit",
         queue: {{
           size: {{
             control: 3, real_time: 3, interactive_high: 3, interactive_low: 3,
@@ -3695,6 +3723,11 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
             drop: {{ wait_before_drop: 2000, max_wait_before_drop_fragments: 40000 }},
             block: {{ wait_before_close: 6000000 }},
           }},
+          // Off, so each message leaves as a frame of its own: the one put still reaches. The
+          // bound is stated too, off upstream's 1 ms, and holds nothing back with batching off.
+          batching: {{ enabled: false, time_limit: 5 }},
+          // Off upstream's `lazy`: the queue takes its batches when the session is established.
+          allocation: {{ mode: "init" }},
         }},
       }},
       // The largest message a session rejoins from fragments, off its 1 GiB

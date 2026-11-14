@@ -1093,6 +1093,14 @@ pub struct ZenohNodeConfig {
     pub batch_size: u16,
     /// `transport/link/tx/lease` (milliseconds).
     pub lease_ms: u64,
+    /// `transport/link/tx/sequence_number_resolution`: the width of the frame sequence numbers
+    /// this node OFFERS in its InitSyn, which both ends then take the smaller of
+    /// (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
+    /// `res.set(Field::FrameSN, i_fsn_res.min(m_fsn_res));`), and states in the Join of a
+    /// group it is a member of. Upstream's transport manager reads the key into its own resolution
+    /// (`io/zenoh-transport/src/manager.rs` @
+    /// `resolution.set(Field::FrameSN, *link.tx().sequence_number_resolution());`).
+    pub sn_resolution: crate::policy::SnResolution,
     /// `transport/link/tx/keep_alive`: keepalives in one lease, so a session sends one whenever
     /// its line has been idle for the lease divided by this. Read by the zenoh-c session
     /// ([`C_ABI_SESSION_HONOURED_KEYS`]), which divides its own lease as upstream does
@@ -1100,6 +1108,10 @@ pub struct ZenohNodeConfig {
     /// `/ self.manager.config.unicast.keep_alive as u32;`); upstream's default is 4
     /// (`commons/zenoh-config/src/defaults.rs` @ `keep_alive: 4,`).
     pub keep_alive: u32,
+    /// `transport/unicast/open_timeout`, in ms: how long one open of an endpoint, its dial and
+    /// its handshake, may take before it is given up, as upstream bounds `open_transport_unicast`
+    /// (`session_open::open_within`); upstream's default is [`UPSTREAM_OPEN_TIMEOUT_MS`].
+    pub open_timeout_ms: u64,
     /// `transport/unicast/accept_timeout`, in ms: how long an inbound link gets to complete its
     /// handshake. Read by the zenoh-c session's accept loop ([`C_ABI_SESSION_HONOURED_KEYS`]);
     /// upstream's default is ten seconds (`commons/zenoh-config/src/defaults.rs` @
@@ -1581,10 +1593,23 @@ impl Default for ZenohNodeConfig {
             peer_linkstate: false,
             batch_size: 65_535,
             lease_ms: 10_000,
+            // Upstream's default, the width of its transport SN type
+            // (`commons/zenoh-config/src/defaults.rs` @
+            // `sequence_number_resolution: Bits::from(TransportSn::MAX),`, a `u32`), and not the
+            // build's `sn-resolution` policy: this struct is what a zenoh node makes of a file.
+            sn_resolution: crate::policy::SnResolution::Bits32,
             keep_alive: wz_session_core::session_init_params::KEEP_ALIVE_PER_LEASE,
+            open_timeout_ms: UPSTREAM_OPEN_TIMEOUT_MS,
             accept_timeout_ms: crate::config::ACCEPT_TIMEOUT_MS,
             accept_pending: crate::config::ACCEPT_PENDING,
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            // Upstream's batching bound is a millisecond (`commons/zenoh-config/src/defaults.rs`
+            // @ `time_limit: 1,`). This struct is what a zenoh node makes of a file, so it holds
+            // upstream's; a session that is given no bound keeps its writer's own, shorter one
+            // (`wz_session_core::link::BATCHING_TIME_LIMIT_US`).
+            tx_queue: wz_session_core::session_init_params::TxQueueConf {
+                batching_time_limit_us: UPSTREAM_BATCHING_TIME_LIMIT_MS * 1_000,
+                ..wz_session_core::session_init_params::TxQueueConf::default()
+            },
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             max_links: 1,
             max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
@@ -2070,6 +2095,7 @@ impl ZenohNodeConfig {
         out.push_str(" },\n  \"gateway\": { \"south\": ");
         out.push_str(&gateway_south_json(&self.gateway_south));
         out.push_str(" },\n  \"transport\": {\n    \"unicast\": {\n");
+        let _ = writeln!(out, "      \"open_timeout\": {},", self.open_timeout_ms);
         let _ = writeln!(out, "      \"accept_timeout\": {},", self.accept_timeout_ms);
         let _ = writeln!(out, "      \"accept_pending\": {},", self.accept_pending);
         let _ = writeln!(out, "      \"max_links\": {},", self.max_links);
@@ -2099,6 +2125,11 @@ impl ZenohNodeConfig {
         out.push_str("    \"link\": {\n      \"tx\": {\n");
         let _ = writeln!(out, "        \"batch_size\": {},", self.batch_size);
         let _ = writeln!(out, "        \"lease\": {},", self.lease_ms);
+        let _ = writeln!(
+            out,
+            "        \"sequence_number_resolution\": \"{}\",",
+            self.sn_resolution.zenoh_name()
+        );
         let _ = writeln!(out, "        \"keep_alive\": {},", self.keep_alive);
         // R2925 — the queue sizes and the two congestion waits, in upstream's
         // `queue` shape.
@@ -2111,15 +2142,29 @@ impl ZenohNodeConfig {
                 self.tx_queue.sizes[*byte as usize]
             );
         }
-        let _ = writeln!(
+        let _ = write!(
             out,
             " }},\n          \"congestion_control\": {{ \"drop\": {{ \"wait_before_drop\": {}, \
              \"max_wait_before_drop_fragments\": {} }}, \
-             \"block\": {{ \"wait_before_close\": {} }} }}\n        }}",
+             \"block\": {{ \"wait_before_close\": {} }} }}",
             self.tx_queue.wait_before_drop_us,
             self.tx_queue.max_wait_before_drop_fragments_us,
             self.tx_queue.wait_before_close_us
         );
+        // The bound in the file's milliseconds, rounded up: a bound the writer was given in
+        // microseconds is never written as a shorter one.
+        let _ = write!(
+            out,
+            ",\n          \"batching\": {{ \"enabled\": {}, \"time_limit\": {} }}",
+            self.tx_queue.batching,
+            self.tx_queue.batching_time_limit_us.div_ceil(1_000)
+        );
+        let _ = write!(
+            out,
+            ",\n          \"allocation\": {{ \"mode\": \"{}\" }}",
+            self.tx_queue.allocation.zenoh_name()
+        );
+        out.push_str("\n        }\n");
         out.push_str("      }");
         // `buffer_size` only where the build reads it: a build without a per-link pool reports
         // the key ignored, and nothing wz emits may be a key it cannot read back.
@@ -2246,6 +2291,14 @@ impl ZenohNodeConfig {
     }
 }
 
+/// Upstream's `transport/link/tx/queue/batching/time_limit`, in milliseconds, which a file that
+/// states none resolves to.
+pub const UPSTREAM_BATCHING_TIME_LIMIT_MS: u64 = 1;
+
+/// Upstream's `transport/unicast/open_timeout`, in milliseconds, which a file that states none
+/// resolves to (`commons/zenoh-config/src/defaults.rs` @ `open_timeout: 10_000,`).
+pub const UPSTREAM_OPEN_TIMEOUT_MS: u64 = 10_000;
+
 /// R2925 — upstream's `transport/link/tx/queue/size` leaves, each with the
 /// `Priority` wire byte whose queue it sizes, as upstream's transport manager
 /// maps them (`io/zenoh-transport/src/manager.rs` @
@@ -2329,11 +2382,20 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // enforces it: after the dedup-by-zid rule and before the insert
     // (`io/zenoh-transport/src/unicast/manager.rs` @ `max_sessions`).
     "transport/unicast/max_sessions",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, `UNHONOURED_BEYOND_WZ` and the
+    // `TransportUnicastConf` group, so the surface total is unchanged: every open of an endpoint
+    // a node makes, its dial and its handshake, runs within it (`session_open::open_within`), as
+    // upstream's `open_transport_unicast` does.
+    "transport/unicast/open_timeout",
     "transport/unicast/lowlatency",
     "transport/unicast/qos/enabled",
     "transport/unicast/compression/enabled",
     "transport/link/tx/batch_size",
     "transport/link/tx/lease",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, `UNHONOURED_BEYOND_WZ` and the `LinkTxConf`
+    // group, so the surface total is unchanged: the width a node offers, which its sessions
+    // already negotiated down to the peer's and could not be told.
+    "transport/link/tx/sequence_number_resolution",
     // R2925 — the queue sizes (in `TX_QUEUE_SIZE_KEYS` order) and the two
     // congestion waits. They left `UNHONOURED_BEYOND_WZ` because the capability
     // its `LinkTxConf` row said wz lacked — bounded per-priority queues with
@@ -2351,6 +2413,17 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // R2926 — the last queue key: the per-fragment deadline it bounds is built.
     "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
     "transport/link/tx/queue/congestion_control/block/wait_before_close",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, `UNHONOURED_BEYOND_WZ` and the `LinkTxConf`
+    // group, so the surface total is unchanged: a session configured without batching sends each
+    // message as a frame of its own, which upstream's pipeline does with batching off.
+    "transport/link/tx/queue/batching/enabled",
+    // MOVED with it, for the same reason: the bound is the one a link's writer holds a stream
+    // back for, which it took from a constant until the session handed it the file's.
+    "transport/link/tx/queue/batching/time_limit",
+    // MOVED with them: when a link's queue takes its batches, which a heap queue now does at
+    // Established when the file says `init`. With it the `LinkTxConf` group holds only
+    // `threads`, which upstream reads into nothing.
+    "transport/link/tx/queue/allocation/mode",
     // The largest message a session rejoins from fragments. It left
     // `UNHONOURED_BEYOND_WZ` and the `LinkTxConf` group because a session now
     // carries it (`LinkRxConf`) and its reassembly ends a chain past it, as
@@ -3026,10 +3099,14 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // and the open hands them to the tls links.
     // `transport/link/tx/keep_alive` LEFT this list for [`C_ABI_SESSION_HONOURED_KEYS`]: the
     // zenoh-c session's keepalive speaks at its own lease divided by it.
-    "transport/link/tx/queue/allocation/mode",
-    "transport/link/tx/queue/batching/enabled",
-    "transport/link/tx/queue/batching/time_limit",
-    "transport/link/tx/sequence_number_resolution",
+    // `transport/link/tx/queue/allocation/mode` LEFT this list for `HONOURED_CONFIG_KEYS`: a heap
+    // queue takes its batches when it is shaped if the file says `init`.
+    // `transport/link/tx/queue/batching/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: a
+    // session leaves its batching window shut when the file turns batching off.
+    // `transport/link/tx/queue/batching/time_limit` LEFT with it: the writer holds a stream
+    // back for the file's bound.
+    // `transport/link/tx/sequence_number_resolution` LEFT this list for `HONOURED_CONFIG_KEYS`:
+    // the width a node offers comes from the file. Same partition, same total.
     "transport/link/tx/threads",
     // `transport/link/unixpipe/file_access_mask` LEFT this list for `HONOURED_CONFIG_KEYS`: the
     // unixpipe layer of `LinkDefaults` carries it to every unixpipe link.
@@ -3053,7 +3130,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // the two timeouts quantify over a half-open accept pipeline wz did not
     // model, while this one is a comparison against a table the accept loop
     // already kept. See `HONOURED_CONFIG_KEYS`.
-    "transport/unicast/open_timeout",
+    // `transport/unicast/open_timeout` LEFT this list for `HONOURED_CONFIG_KEYS`: a node's every
+    // open of an endpoint runs within it. Same partition, same total.
 ];
 
 /// The unhonoured keys wz genuinely CANNOT act on — the first of the two kinds
@@ -3082,16 +3160,20 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// * `transport/auth/*` — a credential store (`CredentialStore`). wz has the
 ///   WIRE half (the auth-body codec has foreign witnesses) and nothing to
 ///   configure it from.
-/// * `transport/link/*` — a configurable link-TX surface (`LinkTxConf`):
-///   upstream's queue allocation, batching and the remaining link knobs, none
-///   of which wz exposes as configuration. (R2925 — the priority-queue sizes
-///   and the two congestion waits left for `HONOURED_CONFIG_KEYS`; R2926 — the
-///   per-fragment drop cap followed them, and `rx/max_message_size` followed
-///   once a session's reassembly took its bound from it.)
-/// * `transport/{unicast,multicast}/*` — a configurable session table
-///   (`TransportUnicastConf`): accept backlog, session caps, open/accept
-///   timeouts. (`transport/shared_memory/mode` LEFT it: the open of a session
-///   makes the shared-memory subsystem, [`SESSION_HONOURED_KEYS`].)
+/// * `transport/link/*` — a configurable link-TX surface (`LinkTxConf`): the
+///   link knob left, the TX thread count, which wz does not expose as
+///   configuration. (R2925 — the priority-queue sizes and the two congestion
+///   waits left for `HONOURED_CONFIG_KEYS`; R2926 — the per-fragment drop cap
+///   followed them, and `rx/max_message_size` followed once a session's
+///   reassembly took its bound from it; the queue's allocation mode, its
+///   batching switch and bound, and the offered SN width followed once a
+///   session and its writer took each from the file.)
+/// * `transport/multicast/max_sessions` — a configurable session table
+///   (`TransportUnicastConf`): the cap on a multicast group's peer table.
+///   (`transport/shared_memory/mode` LEFT it: the open of a session makes the
+///   shared-memory subsystem, [`SESSION_HONOURED_KEYS`]; and
+///   `transport/unicast/open_timeout` LEFT it: every open of an endpoint runs
+///   within it.)
 /// * `open/return_conditions/*` — a session-open readiness barrier
 ///   (`ReturnConditionsConf`).
 /// * `routing/router/linkstate/*` — configurable link-state weighting
@@ -3240,10 +3322,13 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // asks (R2600, R2608), and the file's key is the per-link default nobody reads.
     // `transport/link/tx/keep_alive` LEFT here, and its group below: the zenoh-c session reads
     // it ([`C_ABI_SESSION_HONOURED_KEYS`]).
-    "transport/link/tx/queue/allocation/mode",
-    "transport/link/tx/queue/batching/enabled",
-    "transport/link/tx/queue/batching/time_limit",
-    "transport/link/tx/sequence_number_resolution",
+    // `transport/link/tx/queue/allocation/mode` LEFT here and its group below: the queue's shape
+    // carries the mode.
+    // `transport/link/tx/queue/batching/enabled` LEFT here and its group below: the session's
+    // batching window is the switch it names. `time_limit` LEFT with it: the writer's bound is
+    // a field of the queue's shape.
+    // `transport/link/tx/sequence_number_resolution` LEFT here and its group below: the width
+    // a node offers is a parameter of its sessions, which negotiate it with the peer.
     "transport/link/tx/threads",
     // R2363 — `transport/link/unixpipe/file_access_mask` LEFT here for
     // [`UNHONOURED_READER_GAP`]. Its `LinkTxConf` group sentence said wz had no
@@ -3271,7 +3356,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // session table, and the accept loop has held one since it existed. What
     // was missing was a bound on it, which is a comparison rather than a
     // subsystem.
-    "transport/unicast/open_timeout",
+    // `transport/unicast/open_timeout` LEFT this list and its group below: the bound on one open
+    // is a timeout around the dial and the handshake, which every opener now runs within.
 ];
 
 /// The unhonoured keys wz ALREADY ACTS ON and the reader was never told — the
@@ -3452,14 +3538,17 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // links close at the peer chain's expiry when the locator asks.
             // `transport/link/tx/keep_alive` LEFT this group: a keepalive's share of a lease is
             // a parameter of the session, as its lease is.
-            "transport/link/tx/queue/allocation/mode",
-            "transport/link/tx/queue/batching/enabled",
-            "transport/link/tx/queue/batching/time_limit",
+            // `transport/link/tx/queue/allocation/mode` LEFT this group: a queue's shape says
+            // when its batches are taken.
+            // `transport/link/tx/queue/batching/enabled` LEFT this group: the session's
+            // batching window opens or stays shut by it. `time_limit` LEFT with it: the
+            // writer takes its bound from the queue's shape.
             // R2925 — the eight sizes and the two waits LEFT this group: wz
             // now has the per-priority bounded queues and the drop-vs-block
             // waits they configure. R2926 — and the per-fragment drop cap
             // followed, once a fragment chain asked for room per fragment.
-            "transport/link/tx/sequence_number_resolution",
+            // `transport/link/tx/sequence_number_resolution` LEFT this group: the width a
+            // session offers is its own parameter, as its lease is.
             "transport/link/tx/threads",
             // R2363 removed `transport/link/unixpipe/file_access_mask` from
             // this group: wz now HAS the surface for it (a per-locator FIFO
@@ -3491,7 +3580,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // This is the outcome the R2159 note below describes, in its own
             // words: the day wz grows a capability, its group reds rather than
             // going quietly stale. It redded, and this is the entry moving out.
-            "transport/unicast/open_timeout",
+            // `transport/unicast/open_timeout` LEFT this group: an open's bound is a timeout
+            // the opener holds, not a table.
         ],
     ),
     // R2159 (open-debt item 229) — the `ListenConfig` group ("a dial/listen
@@ -3567,9 +3657,14 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
 /// has ever run. (R2159 then HONOURED `connect/timeout_ms`, so it is no longer
 /// in this ledger's population at all; the sentence is R2150's reasoning about
 /// a kind that was dropped, not a live classification.)
+///
+/// `foreign-node-config` (wz's source spells the key only to configure a genuine zenohd on the
+/// other side of the wire) LEFT with its last row: `qos/publication` and
+/// `transport/link/tx/sequence_number_resolution` are both honoured now, and a kind with no
+/// population is a branch nobody runs, the reason `upstream-only` was dropped above.
 pub const UNHONOURED_CITATION_KINDS: &[&str] = &[
     "asserted-ignored",
-    "foreign-node-config",
+    // `foreign-node-config` stood here; see above for why it left.
     "not-this-key",
     "wz-has-it",
 ];
@@ -3739,53 +3834,20 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // fixture that spells it (`spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp`)
     // still configures the far side exactly as before.
     //
-    // R2221 (open-debt item 568) — wz's source spells
-    // `transport/link/tx/sequence_number_resolution` to configure the GENUINE
-    // zenohd, never itself: it is the only way to put a non-default value on
-    // the OTHER side of the wire.
-    //
-    // The axis needs that. `Resolution` is `min()`ed by both peers
-    // (`unicast/establishment/accept.rs:198-213` at zenoh 1.5.0), so a small
-    // value advertised by WZ makes the negotiated ring equal wz's own
-    // advertisement — which an implementation that ignored the InitAck entirely
-    // also produces. Only a value that exists on the ROUTER's side until its
-    // InitAck carries it back can measure whether wz ADOPTS it.
-    //
-    // wz honours nothing here: the key stays in the `LinkTxConf` beyond-wz
-    // group, whose subject is a configurable link-TX surface wz does not have.
-    // What wz has is the wire negotiation, which is a different thing from a
-    // config key that sets the local advertisement.
-    // R2224 (open-debt item 572) — the anchor is the helper-name PREFIX, not one
-    // helper. That round needed a router carrying this key AND a named
-    // `qos/enabled`, so the axes fixture moved to
-    // `spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp` and this row went
-    // RED — correctly: it had named an exact function and the function was no
-    // longer what the fixture called.
-    //
-    // Shortening it is not a weakening, and the reason is measurable: nothing
-    // else in the tree begins with these characters, so the prefix names the
-    // FAMILY of helpers that put this key on a genuine router and nothing else.
-    // Keeping the full name would have forced the axes fixture to spawn a
-    // second router to satisfy a table, which is the tail wagging the dog.
-    (
-        "transport/link/tx/sequence_number_resolution",
-        "foreign-node-config",
-        "spawn_zenohd_sn_resolution",
-    ),
+    // `transport/link/tx/sequence_number_resolution`'s row is GONE for the same reason: a
+    // node's own file now sets the width it offers. The zenohd fixtures that spell the key
+    // (`spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp`) still put a width on the far
+    // side, which is the half only a genuine router's InitAck can show wz adopting.
+    // With it the `foreign-node-config` kind had no row left (`qos/publication`, its other
+    // member, is honoured by a session), so the kind left the vocabulary.
     ("transport/link/tx/threads", "asserted-ignored", "ignored"),
     // Open-debt item 913 — `transport/multicast/join_interval`'s row is GONE: the zenoh-c
     // session honours the key now, and this ledger carries evidence for unhonoured keys.
     // Open-debt item 925 -- `transport/unicast/accept_timeout`'s row is GONE too: the zenoh-c
     // session honours the key, so the ledger of unhonoured keys carries no evidence for it.
-    // Open-debt 732 — `link_pipeline` cites this key to explain why the
-    // per-candidate dial bound is NOT derived from it: upstream clocks the whole
-    // walk plus the handshake with it, which cannot bound one candidate. The
-    // anchor is the bound's own constant; the disclaimer sits beside it.
-    (
-        "transport/unicast/open_timeout",
-        "not-this-key",
-        "CANDIDATE_DIAL_TIMEOUT",
-    ),
+    // Open-debt 732 -- `transport/unicast/open_timeout`'s `not-this-key` row is GONE: the key
+    // is honoured, as the bound on a whole open, and the per-candidate dial bound it was cited
+    // beside runs inside that bound rather than in place of it.
 ];
 
 /// The two decisions an [`UNHONOURED_DISPOSITIONS`] row may carry, and the one place a third is
@@ -3840,26 +3902,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "statistics per key expression; wz counts per session and sees no key expression",
     ),
     (
-        "transport/link/tx/queue/allocation/mode",
-        "build",
-        "allocating queue batches at open rather than on demand; wz has no such switch",
-    ),
-    (
-        "transport/link/tx/queue/batching/enabled",
-        "build",
-        "turning back-pressure batching off; wz always coalesces staged frames",
-    ),
-    (
-        "transport/link/tx/queue/batching/time_limit",
-        "build",
-        "the batching retention bound; wz holds it as a fixed writer constant",
-    ),
-    (
-        "transport/link/tx/sequence_number_resolution",
-        "build",
-        "the frame SN resolution a node offers; wz negotiates but offers a fixed one",
-    ),
-    (
         "transport/link/tx/threads",
         "exclude",
         "upstream stores it on its transport manager config and nothing reads it back",
@@ -3868,11 +3910,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "transport/multicast/max_sessions",
         "build",
         "a run-time cap on the peers of a group; wz bounds its peer table at compile time",
-    ),
-    (
-        "transport/unicast/open_timeout",
-        "build",
-        "a deadline over the whole open; wz bounds each dial candidate instead",
     ),
 ];
 
@@ -7914,6 +7951,12 @@ impl ZenohNodeConfig {
             Json5Value::Object(fields) => is_the_tagged_auto_preset(fields),
             _ => false,
         })?;
+        // Any `u64`, as upstream's field takes it: a bound of 0 gives every open up at once,
+        // which is what such a file asks of a zenohd too.
+        if let Some(v) = want_u64(&doc, "transport/unicast/open_timeout")? {
+            out.open_timeout_ms = v;
+            named.push("transport/unicast/open_timeout");
+        }
         if let Some(v) = want_u64(&doc, "transport/unicast/accept_timeout")? {
             out.accept_timeout_ms = v;
             named.push("transport/unicast/accept_timeout");
@@ -7962,6 +8005,19 @@ impl ZenohNodeConfig {
             out.lease_ms = v;
             named.push("transport/link/tx/lease");
         }
+        // One of the four widths upstream's `Bits` deserializes, and nothing else: a width no
+        // session can offer is refused at the key, as a zenohd refuses to start on it.
+        const SN_RESOLUTION: &str = "transport/link/tx/sequence_number_resolution";
+        const SN_RESOLUTION_EXPECTED: &str = "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"";
+        if let Some(text) = want_string(&doc, SN_RESOLUTION, SN_RESOLUTION_EXPECTED)? {
+            out.sn_resolution = crate::policy::SnResolution::from_zenoh_name(&text).ok_or(
+                ConfigIngestError::WrongType {
+                    path: SN_RESOLUTION,
+                    expected: SN_RESOLUTION_EXPECTED,
+                },
+            )?;
+            named.push(SN_RESOLUTION);
+        }
         if let Some(v) = want_u64(&doc, "transport/link/tx/keep_alive")? {
             out.keep_alive = u32::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
                 path: "transport/link/tx/keep_alive",
@@ -8009,6 +8065,33 @@ impl ZenohNodeConfig {
         )? {
             out.tx_queue.wait_before_close_us = v;
             named.push("transport/link/tx/queue/congestion_control/block/wait_before_close");
+        }
+        if let Some(v) = want_bool(&doc, "transport/link/tx/queue/batching/enabled")? {
+            out.tx_queue.batching = v;
+            named.push("transport/link/tx/queue/batching/enabled");
+        }
+        // Milliseconds in the file, as upstream's `u64` field reads them, and microseconds in the
+        // session, which is the unit its writer's bound has.
+        if let Some(v) = want_u64(&doc, "transport/link/tx/queue/batching/time_limit")? {
+            out.tx_queue.batching_time_limit_us =
+                v.checked_mul(1_000)
+                    .ok_or_else(|| ConfigIngestError::OutOfRange {
+                        path: "transport/link/tx/queue/batching/time_limit",
+                        value: v.to_string(),
+                    })?;
+            named.push("transport/link/tx/queue/batching/time_limit");
+        }
+        const ALLOCATION: &str = "transport/link/tx/queue/allocation/mode";
+        const ALLOCATION_EXPECTED: &str = "one of \"init\", \"lazy\"";
+        if let Some(text) = want_string(&doc, ALLOCATION, ALLOCATION_EXPECTED)? {
+            out.tx_queue.allocation = wz_session_core::link::QueueAllocation::from_zenoh_name(
+                &text,
+            )
+            .ok_or(ConfigIngestError::WrongType {
+                path: ALLOCATION,
+                expected: ALLOCATION_EXPECTED,
+            })?;
+            named.push(ALLOCATION);
         }
         // The largest message a session rejoins from fragments. Any `usize` is
         // accepted, as upstream's `usize` field accepts it; the build's
@@ -9607,6 +9690,12 @@ mod tests {
                 mode: WhatAmI::Router,
                 batch_size: 4096,
                 lease_ms: 7000,
+                sn_resolution: crate::policy::SnResolution::Bits8,
+                tx_queue: wz_session_core::session_init_params::TxQueueConf {
+                    batching: false,
+                    allocation: wz_session_core::link::QueueAllocation::Init,
+                    ..ZenohNodeConfig::default().tx_queue
+                },
                 max_links: 4,
                 qos: false,
                 lowlatency: true,
@@ -9781,6 +9870,11 @@ mod tests {
                 "transport/unicast/max_sessions",
                 r#"{ "transport": { "unicast": { "max_sessions": 9 } } }"#,
             ),
+            // 2.5 s against upstream's ten.
+            (
+                "transport/unicast/open_timeout",
+                r#"{ "transport": { "unicast": { "open_timeout": 2500 } } }"#,
+            ),
             (
                 "transport/unicast/lowlatency",
                 r#"{ "transport": { "unicast": { "lowlatency": true } } }"#,
@@ -9800,6 +9894,11 @@ mod tests {
             (
                 "transport/link/tx/lease",
                 r#"{ "transport": { "link": { "tx": { "lease": 7000 } } } }"#,
+            ),
+            // 16 bits against upstream's 32, so the ingest has to move.
+            (
+                "transport/link/tx/sequence_number_resolution",
+                r#"{ "transport": { "link": { "tx": { "sequence_number_resolution": "16bit" } } } }"#,
             ),
             (
                 "transport/link/tx/queue/size/control",
@@ -9844,6 +9943,21 @@ mod tests {
             (
                 "transport/link/tx/queue/congestion_control/block/wait_before_close",
                 r#"{ "transport": { "link": { "tx": { "queue": { "congestion_control": { "block": { "wait_before_close": 6000000 } } } } } } }"#,
+            ),
+            // `false` against upstream's `true`.
+            (
+                "transport/link/tx/queue/batching/enabled",
+                r#"{ "transport": { "link": { "tx": { "queue": { "batching": { "enabled": false } } } } } }"#,
+            ),
+            // 5 ms against upstream's 1.
+            (
+                "transport/link/tx/queue/batching/time_limit",
+                r#"{ "transport": { "link": { "tx": { "queue": { "batching": { "time_limit": 5 } } } } } }"#,
+            ),
+            // `init` against upstream's `lazy`.
+            (
+                "transport/link/tx/queue/allocation/mode",
+                r#"{ "transport": { "link": { "tx": { "queue": { "allocation": { "mode": "init" } } } } } }"#,
             ),
             (
                 "transport/link/rx/max_message_size",
@@ -11717,6 +11831,38 @@ mod tests {
                 ConfigIngestError::OutOfRange {
                     path: "transport/link/tx/queue/size/real_time",
                     value: "17".into(),
+                },
+            ),
+            (
+                // Upstream's `Bits` deserializes four spellings; a width it has no name for, or
+                // the bit count as a number, is not one of them.
+                r#"{ "transport": { "link": { "tx": { "sequence_number_resolution": "128bit" } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: "transport/link/tx/sequence_number_resolution",
+                    expected: "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"",
+                },
+            ),
+            (
+                // A bound in milliseconds whose microseconds a `u64` cannot hold.
+                r#"{ "transport": { "link": { "tx": { "queue": { "batching": { "time_limit": 18446744073709552 } } } } } }"#,
+                ConfigIngestError::OutOfRange {
+                    path: "transport/link/tx/queue/batching/time_limit",
+                    value: "18446744073709552".into(),
+                },
+            ),
+            (
+                // Upstream's serde takes the two snake-case names and nothing else.
+                r#"{ "transport": { "link": { "tx": { "queue": { "allocation": { "mode": "Init" } } } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: "transport/link/tx/queue/allocation/mode",
+                    expected: "one of \"init\", \"lazy\"",
+                },
+            ),
+            (
+                r#"{ "transport": { "link": { "tx": { "sequence_number_resolution": 16 } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: "transport/link/tx/sequence_number_resolution",
+                    expected: "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"",
                 },
             ),
         ] {

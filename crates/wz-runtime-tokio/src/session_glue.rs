@@ -246,6 +246,9 @@ impl wz_session_core::entropy::EntropySource for OsEntropy {
 // callsites (SessionLinkActions::params field, session.rs, wz-ap-demo,
 // the fixture_session_init_params test-support builder) resolve
 // unchanged. DP3 leaf.
+/// The type of [`TxQueueConf::allocation`], so a caller that fills the queue's configuration
+/// names it where it names the configuration.
+pub use wz_session_core::link::QueueAllocation;
 pub use wz_session_core::session_init_params::SessionInitParams;
 /// R2924 — the outbound queue configuration a [`SessionInitParams`] carries.
 pub use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
@@ -420,6 +423,8 @@ pub fn new_session_actions<T: TimeSource>(
     // back-infer `R` the way the former `Arc<Self>` return did.
     #[cfg(feature = "transport-batching")]
     let flushing_driver = driver.clone();
+    #[cfg(feature = "transport-batching")]
+    let batching = params.tx_queue.batching;
     let actions = SessionLinkActions::<TokioRuntime, T>::new_generic(driver, params, clock);
     // R311y813 — bind this bundle's acceptor cookie to one handshake. An
     // entropy failure leaves the slot at its fail-closed `None`: the acceptor
@@ -458,9 +463,11 @@ pub fn new_session_actions<T: TimeSource>(
     // session's batch window open for good: the data plane stages into one open frame per
     // priority and the writer flushes it when it has nothing else to write. The hook holds
     // the session weakly, because the link outlives nothing it needs to keep alive and the
-    // session holds the link.
+    // session holds the link. A session configured without batching
+    // (`transport/link/tx/queue/batching/enabled`) leaves the window shut, and each message
+    // leaves as a frame of its own.
     #[cfg(feature = "transport-batching")]
-    {
+    if batching {
         let staged = Arc::downgrade(&actions);
         let flush: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             if let Some(actions) = staged.upgrade() {
@@ -4582,6 +4589,86 @@ mod batch_tx_tests {
         );
         assert_eq!(count, 2, "both messages coalesced into the one frame");
     }
+
+    /// A link whose writer pulls what the session stages: it keeps the flush the session
+    /// installs, and runs it when the test says the writer fell idle.
+    struct IdleFlushLink {
+        frames: std::sync::Mutex<Vec<Vec<u8>>>,
+        flush: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    }
+
+    impl super::BoxedLinkDriver for IdleFlushLink {
+        fn send_blocking(
+            &self,
+            bytes: &[u8],
+            _reliability: crate::Reliability,
+        ) -> super::LinkSendOutcome {
+            self.frames.lock().expect("frames").push(bytes.to_vec());
+            super::LinkSendOutcome::Sent
+        }
+        fn open_blocking(&self) {}
+        fn close_blocking(&self) {}
+        fn set_idle_flush(&self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) -> bool {
+            *self.flush.lock().expect("flush") = Some(hook);
+            true
+        }
+    }
+
+    /// Three puts over a link whose writer pulls, sent by a session built from `params`: the
+    /// frames the link was handed, decoded, and whether the session installed a flush.
+    fn three_puts_over_a_pulling_link(params: SessionInitParams) -> (Vec<usize>, bool) {
+        use crate::runtime_impl::TokioTime;
+        let link = std::sync::Arc::new(IdleFlushLink {
+            frames: std::sync::Mutex::new(Vec::new()),
+            flush: std::sync::Mutex::new(None),
+        });
+        let actions = super::new_session_actions(link.clone(), params, TokioTime::new());
+        for i in 0..3u8 {
+            actions
+                .send_push_literal("home/batching", &[i], /*reliable=*/ true)
+                .expect("push");
+        }
+        let flush = link.flush.lock().expect("flush").clone();
+        if let Some(flush) = &flush {
+            // The writer fell idle: what the session staged is owed a write now.
+            flush();
+        }
+        let frames = link.frames.lock().expect("frames").clone();
+        let per_frame = frames
+            .iter()
+            .map(|frame| decode_frame(frame).1.len())
+            .collect();
+        (per_frame, flush.is_some())
+    }
+
+    /// `transport/link/tx/queue/batching/enabled`, read off the frames the link is handed. With
+    /// batching on (upstream's default), a burst staged before the writer falls idle leaves as
+    /// one frame of three messages; with it off the session installs no flush and each message
+    /// is a frame of its own, as upstream's pipeline moves each batch out at once when its
+    /// batching is off.
+    #[test]
+    fn a_session_without_batching_sends_each_message_as_a_frame_of_its_own() {
+        let on = fixture_session_init_params();
+        assert!(
+            on.tx_queue.batching,
+            "batching is on unless the file says otherwise"
+        );
+        let (frames, flush_installed) = three_puts_over_a_pulling_link(on);
+        assert!(
+            flush_installed,
+            "a batching session asks the writer to pull"
+        );
+        assert_eq!(frames, [3], "the burst left as one frame of three messages");
+
+        let mut off = fixture_session_init_params();
+        off.tx_queue.batching = false;
+        let (frames, flush_installed) = three_puts_over_a_pulling_link(off);
+        assert!(
+            !flush_installed,
+            "a session without batching stages nothing to pull"
+        );
+        assert_eq!(frames, [1, 1, 1], "each message left as a frame of its own");
+    }
 }
 
 /// R2919 — every frame reaches the link seam carrying the priority its
@@ -5227,6 +5314,7 @@ mod link_congestion_tests {
                 qos: false,
                 batch_bytes: 1_024,
                 queue_unit_bytes: 1_024,
+                pipeline: wz_session_core::link::TxPipeline::DEFAULT,
             }]
         );
     }
@@ -6670,6 +6758,7 @@ mod reconnect_tx_tests {
             qos: true,
             batch_bytes: 512,
             queue_unit_bytes: 512,
+            pipeline: wz_session_core::link::TxPipeline::DEFAULT,
         };
 
         let wait = RoomWait::Drop { wait_us: 0 };
@@ -6834,6 +6923,27 @@ mod init_advertisement_tests {
             panic!("encoded InitSyn must parse as Init");
         };
         assert_eq!(body.s.map(|s| s.batch_size), Some(1024));
+    }
+
+    /// The width a session's parameters carry is the width its InitSyn offers, for each of the
+    /// four, with the request-id half of the byte left alone: what
+    /// `transport/link/tx/sequence_number_resolution` reaches is this field, and before the key
+    /// was read only the 32-bit code was ever put on the wire.
+    #[test]
+    fn an_initsyn_offers_each_width_its_params_carry() {
+        for code in 0..=3u8 {
+            let mut params = fixture_session_init_params();
+            params.seq_num_res = code;
+            params.req_id_res = 2;
+            let wire = encode_init(&params, false, &[], None).expect("encode InitSyn");
+            let InboundFrame::Init { body, .. } = parse_inbound(&wire).expect("parse own InitSyn")
+            else {
+                panic!("encoded InitSyn must parse as Init");
+            };
+            let sn_res = body.s.map(|s| s.sn_res).expect("a sized InitSyn");
+            assert_eq!(sn_res & 0x03, code, "the frame SN width");
+            assert_eq!(sn_res >> 2, 2, "the request-id width is not moved");
+        }
     }
 
     /// The batch a session advertises is capped by the largest frame its link

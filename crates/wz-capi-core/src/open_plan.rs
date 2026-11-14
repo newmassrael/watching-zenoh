@@ -430,6 +430,9 @@ fn dial_phase(node: &ZenohNodeConfig, whatami: WhatAmI) -> DialPhase {
         // `connect_scouted`: it waits for the initial declarations of the peers it met.
         // Upstream's default is true.
         wait_declares: node.open_declares.unwrap_or(true),
+        // `transport/unicast/open_timeout`, upstream's ten seconds unless the document states
+        // another.
+        open_timeout: std::time::Duration::from_millis(node.open_timeout_ms),
     }
 }
 
@@ -518,8 +521,8 @@ const ZENOH_MULTICAST_BATCH: u16 = 8_192;
 /// `join_interval: self.manager.config.multicast.join_interval,`, beside the batch capped at
 /// `batch_size::MULTICAST`): the link lease of `transport/link/tx/lease`, the beacon interval of
 /// `transport/multicast/join_interval`, the default resolution of both sequence numbers and
-/// request ids (32 bits; the build's `sn-resolution` policy states another width of the
-/// sequence number), the session's batch size held to the multicast cap (the UDP link's own
+/// request ids (32 bits; `transport/link/tx/sequence_number_resolution`, or the build's
+/// `sn-resolution` policy, states another width of the sequence number), the session's batch size held to the multicast cap (the UDP link's own
 /// MTU is above it on every target zenoh names), per-priority conduits when
 /// `transport/multicast/qos/enabled` asks for them, and batch compression when
 /// `transport/multicast/compression/enabled` does.
@@ -719,6 +722,50 @@ pub struct ShmKeys {
     pub pool_size: u64,
 }
 
+/// The keys of `transport/link/tx/queue` a document states with a value other than upstream's
+/// default, which the open lays over the transmit model its ABI chose
+/// ([`AbiChoices::tx_queue`]). A key at upstream's default is no instruction: a document
+/// rendered from a whole configuration states every key at its default, and the model then
+/// stands as the ABI chose it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StatedTxQueue {
+    /// `batching/enabled`.
+    pub batching: Option<bool>,
+    /// `batching/time_limit`, in microseconds.
+    pub batching_time_limit_us: Option<u64>,
+    /// `allocation/mode`.
+    pub allocation: Option<wz_session_core::link::QueueAllocation>,
+}
+
+impl StatedTxQueue {
+    /// What `node` states away from upstream's defaults.
+    fn of(node: &ZenohNodeConfig) -> Self {
+        let upstream = ZenohNodeConfig::default().tx_queue;
+        let stated = node.tx_queue;
+        Self {
+            batching: (stated.batching != upstream.batching).then_some(stated.batching),
+            batching_time_limit_us: (stated.batching_time_limit_us
+                != upstream.batching_time_limit_us)
+                .then_some(stated.batching_time_limit_us),
+            allocation: (stated.allocation != upstream.allocation).then_some(stated.allocation),
+        }
+    }
+
+    /// `model` with each stated key laid over it.
+    fn over(self, mut model: TxQueueConf) -> TxQueueConf {
+        if let Some(batching) = self.batching {
+            model.batching = batching;
+        }
+        if let Some(limit_us) = self.batching_time_limit_us {
+            model.batching_time_limit_us = limit_us;
+        }
+        if let Some(allocation) = self.allocation {
+            model.allocation = allocation;
+        }
+        model
+    }
+}
+
 /// What a configuration document means for an open. See the module documentation.
 pub struct OpenPlan {
     /// The role the node dials as. The roles are a set at run time (a peer that lists endpoints
@@ -746,7 +793,9 @@ pub struct OpenPlan {
     /// is zenoh's default.
     pub keep_alive: KeepAliveConf,
     /// The width of the sequence numbers the session advertises, unicast and in a group's Join:
-    /// the build's `sn-resolution` policy, 32 bits unless it states another.
+    /// `transport/link/tx/sequence_number_resolution` when the document states a width other than
+    /// upstream's 32 bits, and the build's `sn-resolution` policy, 32 bits unless it states
+    /// another, when it does not.
     pub sn_resolution: SnResolution,
     /// How long an inbound link gets to complete its handshake and how many get it at once:
     /// `transport/unicast/accept_timeout` and `accept_pending`. A config that states none is
@@ -755,6 +804,9 @@ pub struct OpenPlan {
     /// What the session's links rejoin from fragments: `transport/link/rx/max_message_size`. A
     /// config that states none is zenoh's default.
     pub link_rx: LinkRxConf,
+    /// The transmit-queue keys the document states away from upstream's defaults, laid over the
+    /// ABI's transmit model when the plan becomes the open's arguments.
+    pub tx_queue: StatedTxQueue,
     /// What the links offer at the handshake, without shared memory.
     pub offer: SessionOffer,
     /// The `transport/shared_memory` keys. Facts about the document; whether they reach the
@@ -946,6 +998,16 @@ impl OpenPlan {
             .as_ref()
             .map_or_else(Vec::new, |ingest| ingest.ignored.clone());
         let node = ingest.map(|ingest| ingest.config);
+        // The width of the sequence numbers the sessions offer, unicast and in a group's Join:
+        // `transport/link/tx/sequence_number_resolution` when the document states a width other
+        // than upstream's, the build's `sn-resolution` policy otherwise. A document rendered from
+        // a whole configuration states every key at its default, so upstream's own width there is
+        // no instruction, and the build's policy stands.
+        let upstream_width = ZenohNodeConfig::default().sn_resolution;
+        let sn_resolution = match node.as_ref().map(|node| node.sn_resolution) {
+            Some(stated) if stated != upstream_width => stated,
+            _ => SessionPolicy::from_build().sn_resolution,
+        };
         let namespace_text = node.as_ref().and_then(|node| node.namespace.clone());
         // How the node keeps its south apart (`gateway/south`): the preset unless the document
         // states subregions.
@@ -962,6 +1024,9 @@ impl OpenPlan {
         let link_rx = node
             .as_ref()
             .map_or_else(LinkRxConf::default, |node| node.link_rx);
+        let tx_queue = node
+            .as_ref()
+            .map_or_else(StatedTxQueue::default, StatedTxQueue::of);
         let accept = node
             .as_ref()
             .map_or_else(AcceptBounds::default, |node| AcceptBounds {
@@ -1164,9 +1229,6 @@ impl OpenPlan {
                 pool_size: node.shm_pool_size,
             },
         );
-        // The width of the sequence numbers the build advertises (`sn-resolution`); the document
-        // has no key for it, since neither zenoh nor zenoh-pico does.
-        let sn_resolution = SessionPolicy::from_build().sn_resolution;
         let groups = node.as_ref().map_or_else(Vec::new, |node| {
             let profile = zenoh_group_profile(node, batch_size, sn_resolution);
             // zenoh announces each subscriber on the groups it holds, on every target but
@@ -1207,6 +1269,7 @@ impl OpenPlan {
             sn_resolution,
             accept,
             link_rx,
+            tx_queue,
             offer,
             shm,
             zid,
@@ -1316,7 +1379,7 @@ impl OpenPlan {
             role: self.role,
             dial: self.dial,
             stance: OpenStance {
-                tx_queue: abi.tx_queue,
+                tx_queue: self.tx_queue.over(abi.tx_queue),
                 batch_size: self.batch_size,
                 lease_ms: self.lease_ms,
                 keep_alive: self.keep_alive,
@@ -1916,6 +1979,52 @@ mod tests {
         assert_eq!(silent.accept, AcceptBounds::default());
     }
 
+    /// The transmit-queue keys a document states away from upstream's defaults are laid over the
+    /// ABI's transmit model, and a document that states them at upstream's defaults, or not at
+    /// all, leaves the model as the ABI chose it.
+    #[test]
+    fn the_queue_keys_a_document_states_are_laid_over_the_abis_model() {
+        let stance = |document: &str, model: TxQueueConf| {
+            plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
+                .expect("a client with an endpoint opens")
+                .into_arguments(AbiChoices {
+                    tx_queue: model,
+                    start_read_task: true,
+                    local_delivery: LocalDeliveryDrain::Caller,
+                    liveliness_to_self: true,
+                    initial_interest: true,
+                    face_drive: FaceDrive::PerFace,
+                    shm_clients: crate::faces::no_shm_clients(),
+                    offer_shm: false,
+                    groups_report_shm: false,
+                })
+                .stance
+                .tx_queue
+        };
+        let off = r#"{ transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#;
+        assert!(!stance(off, TxQueueConf::default()).batching);
+        assert!(!stance(off, TxQueueConf::pico()).batching);
+        let bound =
+            r#"{ transport: { link: { tx: { queue: { batching: { time_limit: 4 } } } } } }"#;
+        assert_eq!(
+            stance(bound, TxQueueConf::default()).batching_time_limit_us,
+            4_000
+        );
+        let init =
+            r#"{ transport: { link: { tx: { queue: { allocation: { mode: "init" } } } } } }"#;
+        assert_eq!(
+            stance(init, TxQueueConf::default()).allocation,
+            wz_session_core::link::QueueAllocation::Init
+        );
+        // Upstream's own value is no instruction, and silence is none either: the model keeps
+        // its writer's bound rather than taking upstream's millisecond.
+        let on = r#"{ transport: { link: { tx: { queue: { batching: { enabled: true,
+                                                                      time_limit: 1 },
+                                                          allocation: { mode: "lazy" } } } } } }"#;
+        assert_eq!(stance(on, TxQueueConf::pico()), TxQueueConf::pico());
+        assert_eq!(stance("{}", TxQueueConf::default()), TxQueueConf::default());
+    }
+
     /// The width of the sequence numbers a group's Join states is the `sn-resolution` policy's,
     /// each value its own code, and the request-id resolution is not moved by it: a member of a
     /// group built with another width refuses a Join that states a different one, so the
@@ -1933,6 +2042,39 @@ mod tests {
             assert_eq!(profile.seq_num_res, code, "{}", width.id());
             assert_eq!(profile.req_id_res, 0x02, "the request id is untouched");
         }
+    }
+
+    /// The width a document states is the one its sessions offer and its groups' Joins state,
+    /// and a document that states none, or states upstream's own, offers the build's
+    /// `sn-resolution` policy.
+    #[test]
+    fn the_width_a_document_states_is_the_one_its_sessions_offer() {
+        let plan = |document: &str| {
+            plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
+                .expect("a client with an endpoint opens")
+        };
+        let stated =
+            plan(r#"{ transport: { link: { tx: { sequence_number_resolution: "16bit" } } } }"#);
+        assert_eq!(stated.sn_resolution, SnResolution::Bits16);
+        // Control: silence is the build's policy, so the width above is the document's; and so
+        // is upstream's own width, which a rendered configuration states for every open.
+        let build = SessionPolicy::from_build().sn_resolution;
+        assert_eq!(plan("{}").sn_resolution, build);
+        assert_eq!(
+            plan(r#"{ transport: { link: { tx: { sequence_number_resolution: "32bit" } } } }"#)
+                .sn_resolution,
+            build
+        );
+        // A width zenoh has no name for is a document the reader refuses.
+        assert_eq!(
+            refusal_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:7447"],
+                &[],
+                r#"{ transport: { link: { tx: { sequence_number_resolution: "12bit" } } } }"#,
+            ),
+            OpenRefusal::DocumentUnreadable
+        );
     }
 
     /// The role is read from the `mode` key, and the default is the build's.
@@ -2267,7 +2409,8 @@ mod tests {
                 "{head}\n\
                  dial: DialPhase {{ policy: PhasePolicy {{ budget: PhaseBudget({budget}), \
                  exit_on_failure: {exit} }}, schedule: {SCHEDULE}, redial: Some({SCHEDULE}), \
-                 start_window: Some(500ms), router_hold: 500ms, wait_declares: true }}\n\
+                 start_window: Some(500ms), router_hold: 500ms, wait_declares: true, \
+                 open_timeout: 10s }}\n\
                  listen_phase: ListenPhase {{ policy: PhasePolicy {{ budget: PhaseBudget(0), \
                  exit_on_failure: true }}, schedule: {SCHEDULE} }}\n\
                  batch_size: 65535\n\
@@ -2343,13 +2486,14 @@ mod tests {
             state("transport/auth/pubkey/key_size"),
             Some(KeyState::Inert)
         );
-        assert_eq!(
-            state("transport/unicast/open_timeout"),
-            Some(KeyState::Unmapped)
-        );
+        assert_eq!(state("transport/link/tx/threads"), Some(KeyState::Unmapped));
         // A key the C interface acts on is mapped, whichever list it left.
         assert_eq!(
             state("transport/unicast/accept_timeout"),
+            Some(KeyState::Mapped)
+        );
+        assert_eq!(
+            state("transport/unicast/open_timeout"),
             Some(KeyState::Mapped)
         );
         assert_eq!(
@@ -2359,7 +2503,7 @@ mod tests {
         assert_eq!(state("a/key/nobody/lists"), None);
         assert!(is_section_of_keys_with_a_state("gateway"));
         assert!(!is_section_of_keys_with_a_state(
-            "transport/unicast/open_timeout"
+            "transport/link/tx/threads"
         ));
     }
 
@@ -2530,10 +2674,16 @@ mod tests {
             &[],
             r#"{ connect: { timeout_ms: 500 },
                  scouting: { multicast: { enabled: false } },
-                 transport: { unicast: { open_timeout: 1234 } } }"#,
+                 transport: { unicast: { open_timeout: 1234 },
+                              link: { tx: { threads: 3 } } } }"#,
         )
         .expect("opens");
-        assert_eq!(plan.ignored, ["transport/unicast/open_timeout"]);
+        assert_eq!(plan.ignored, ["transport/link/tx/threads"]);
+        // The open bound is a key the engine acts on: it reaches the dial phase.
+        assert_eq!(
+            plan.dial.open_timeout,
+            std::time::Duration::from_millis(1234)
+        );
     }
 
     /// `transport/link/protocols` is a whitelist of the unicast links the node makes: an endpoint

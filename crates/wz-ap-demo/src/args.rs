@@ -1244,6 +1244,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // The bound on each open of an endpoint the node dials, its dial and its handshake: every
+    // run-mode that dials holds its opens to it, so it is honoured at any value.
+    if named("transport/unicast/open_timeout") {
+        exp.pair(
+            "transport/unicast/open_timeout",
+            "--open-timeout-ms",
+            cfg.open_timeout_ms.to_string(),
+            None,
+        );
+    }
     if named("transport/unicast/qos/enabled") {
         exp.presence("transport/unicast/qos/enabled", "--qos", cfg.qos, None);
     }
@@ -1284,6 +1294,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // The third InitSyn field the file moves: the width of the sequence numbers this node
+    // offers. Honoured at any of its four values, for the reason the two above are.
+    if named("transport/link/tx/sequence_number_resolution") {
+        exp.pair(
+            "transport/link/tx/sequence_number_resolution",
+            "--sn-resolution",
+            String::from(cfg.sn_resolution.zenoh_name()),
+            None,
+        );
+    }
     // R2925 — the queue sizes and the two congestion waits: local policy, not
     // wire values, but honoured at any value for the reason `batch_size` is —
     // there is no "off" for a size or a deadline. One flag per key, because an
@@ -1321,6 +1341,39 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             "transport/link/tx/queue/congestion_control/block/wait_before_close",
             "--wait-before-close-us",
             cfg.tx_queue.wait_before_close_us.to_string(),
+            None,
+        );
+    }
+    // Whether the sessions coalesce a burst into few frames, honoured at either value: the
+    // flag says which, so a named `true` is the behaviour already and a `false` turns it off.
+    if named("transport/link/tx/queue/batching/enabled") {
+        exp.pair(
+            "transport/link/tx/queue/batching/enabled",
+            "--tx-batching",
+            cfg.tx_queue.batching.to_string(),
+            None,
+        );
+    }
+    // The bound the writer holds a stream back for, in the file's milliseconds. The struct holds
+    // it in microseconds; one the reader built from a file is a whole number of milliseconds.
+    if named("transport/link/tx/queue/batching/time_limit") {
+        exp.pair(
+            "transport/link/tx/queue/batching/time_limit",
+            "--tx-batching-time-limit-ms",
+            cfg.tx_queue
+                .batching_time_limit_us
+                .div_ceil(1_000)
+                .to_string(),
+            None,
+        );
+    }
+    // When a link's queue takes its batches, honoured at either value for the reason the
+    // batching switch is.
+    if named("transport/link/tx/queue/allocation/mode") {
+        exp.pair(
+            "transport/link/tx/queue/allocation/mode",
+            "--tx-queue-allocation",
+            String::from(cfg.tx_queue.allocation.zenoh_name()),
             None,
         );
     }
@@ -3379,6 +3432,16 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          off a frame today only by a unit test that calls the setter directly.",
     ),
     (
+        "transport/link/tx/sequence_number_resolution",
+        KIND_NOT_YET_READ,
+        "expands to `--sn-resolution`. The width rides the InitSyn's `sn_res` byte \
+         (`handshake_encode.rs` @ `sn_res: pack_sn_res(caps.seq_num_res, caps.req_id_res)`, \
+         upstream `init.rs` behind the `S` flag) and the Join of a group the router hat \
+         holds, so a fixture pair of 32 and 16 bits shows two codes. The demo's own test \
+         `the_width_a_config_names_reaches_the_init_the_node_sends` reads it off the \
+         encoded InitSyn; no leg of the wire sweep does yet.",
+    ),
+    (
         "gateway/south",
         KIND_NOT_YET_READ,
         "expands to `--gateway-south <partition>`. A custom partition makes a \
@@ -3505,6 +3568,30 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          deadline, visible only as the Close it ends in.",
     ),
     (
+        "transport/link/tx/queue/batching/enabled",
+        KIND_LEG_JUDGED,
+        "expands to `--tx-batching`. Its effect is how many messages a frame carries, and \
+         `a_session_without_batching_sends_each_message_as_a_frame_of_its_own` in the \
+         runtime's session_glue.rs reads it off the frames a link is handed: one frame of \
+         three with batching on, three frames of one with it off.",
+    ),
+    (
+        "transport/link/tx/queue/batching/time_limit",
+        KIND_LEG_JUDGED,
+        "expands to `--tx-batching-time-limit-ms`. A local bound on how long the writer \
+         holds a stream back, read off the runtime's timer by \
+         `the_writer_holds_a_stream_back_for_the_batching_bound_and_no_longer` in \
+         writer_queue.rs: the stated bound while a producer keeps staging, nothing at zero.",
+    ),
+    (
+        "transport/link/tx/queue/allocation/mode",
+        KIND_LEG_JUDGED,
+        "expands to `--tx-queue-allocation`. Local memory no frame carries: \
+         `an_init_queue_holds_its_batches_before_the_first_frame_and_a_lazy_one_none` in \
+         writer_queue.rs counts the batches a shaped queue holds before its first frame, \
+         every lane's under init and none under lazy.",
+    ),
+    (
         "transport/link/rx/max_message_size",
         KIND_OFF_WIRE,
         "expands to `--rx-max-message-size`. The largest message a session \
@@ -3534,6 +3621,16 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          face past it, witnessed by `max_sessions_refuses_the_peer_past_the_ \
          bound` in accept_loop.rs. A refused peer sees its link close, which \
          no frame field distinguishes from any other close.",
+    ),
+    (
+        "transport/unicast/open_timeout",
+        KIND_LEG_JUDGED,
+        "expands to `--open-timeout-ms`. A local deadline on one open, the dial and \
+         the handshake together, read off the clock by \
+         `an_open_that_does_not_complete_ends_at_the_open_bound` in the runtime's \
+         tests/connect_and_open_session.rs: \
+         an open against a peer that never answers ends at the bound, before the \
+         handshake's own window.",
     ),
     (
         "listen/retry",
@@ -5523,6 +5620,12 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { unicast: { max_sessions: 5 } } }"#,
             ),
+            (
+                "transport/unicast/open_timeout",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { unicast: { open_timeout: 2500 } } }"#,
+            ),
             // `qos` RESOLVES to true in stock zenoh, so a document that names
             // only `lowlatency` describes a node that cannot start. Both sides
             // of this pair name `qos: false` — which adds nothing, since the
@@ -5558,6 +5661,12 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { lease: 3000 } } } }"#,
+            ),
+            (
+                "transport/link/tx/sequence_number_resolution",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { sequence_number_resolution: "16bit" } } } }"#,
             ),
             // R2925 — the queue sizes and the two congestion waits.
             (
@@ -5628,6 +5737,24 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: {
                        congestion_control: { block: { wait_before_close: 7000000 } } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/batching/enabled",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/batching/time_limit",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { batching: { time_limit: 5 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/allocation/mode",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { allocation: { mode: "init" } } } } } }"#,
             ),
             (
                 "transport/link/rx/max_message_size",
@@ -8154,7 +8281,9 @@ mod stock_config_tests {
                    queue: { size: { real_time: 5, data: 7 },
                             congestion_control: { drop: { wait_before_drop: 2500,
                                                           max_wait_before_drop_fragments: 40000 },
-                                                  block: { wait_before_close: 7000000 } } } },
+                                                  block: { wait_before_close: 7000000 } },
+                            batching: { enabled: false, time_limit: 5 },
+                            allocation: { mode: "init" } } },
                                    rx: { max_message_size: 65536 } } } }"#,
         )
         .unwrap();
@@ -8180,6 +8309,9 @@ mod stock_config_tests {
                 wait_before_drop_us: 2_500,
                 max_wait_before_drop_fragments_us: 40_000,
                 wait_before_close_us: 7_000_000,
+                batching: false,
+                batching_time_limit_us: 5_000,
+                allocation: wz::runtime_tokio::session_glue::QueueAllocation::Init,
                 ..wz::runtime_tokio::session_glue::TxQueueConf::default()
             },
             "the file's queue section reaches the session the node opens"
@@ -8208,6 +8340,56 @@ mod stock_config_tests {
             bare.link_rx,
             wz::runtime_tokio::session_glue::LinkRxConf::default()
         );
+    }
+
+    /// The width of the sequence numbers a config names is the one the node offers: the file
+    /// reaches `--sn-resolution`, the flag reaches the session's parameters, and those are what
+    /// the InitSyn's `sn_res` byte carries (`an_initsyn_offers_each_width_its_params_carry` in
+    /// the runtime). Against a stock zenoh peer, which offers 32 bits, the smaller is the 16 the
+    /// file asked for.
+    #[test]
+    fn the_width_a_config_names_reaches_the_init_the_node_sends() {
+        use wz::runtime_tokio::policy::{SessionPolicy, SnResolution};
+        use wz::runtime_tokio::session_glue::PeerInitCaps;
+        let exp = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "client",
+                 connect: { endpoints: ["tcp/r:7447"] },
+                 transport: { link: { tx: { sequence_number_resolution: "16bit" } } } }"#,
+        )
+        .unwrap();
+        assert!(
+            exp.added.contains(&String::from("--sn-resolution")),
+            "added = {:?}",
+            exp.added
+        );
+        let tuned = TransportTuning::from_argv(&exp.argv).expect("the expansion is parseable");
+        assert_eq!(tuned.sn_resolution, SnResolution::Bits16);
+        let params = demo_session_init_params(NodeKind::Initiator, vec![0x0a], &tuned)
+            .expect("OS entropy for the cookie signing key");
+        assert_eq!(params.seq_num_res, SnResolution::Bits16.wire_code());
+        let stock_peer = PeerInitCaps {
+            seq_num_res: SnResolution::Bits32.wire_code(),
+            req_id_res: 2,
+            batch_size: 65535,
+        };
+        assert_eq!(
+            PeerInitCaps::negotiated_seq_num_res(params.seq_num_res, Some(stock_peer)),
+            SnResolution::Bits16.wire_code(),
+            "the session settles on the width the file offered"
+        );
+
+        // CONTROL: without the key the node offers the build's width, so the 16 above is the
+        // file's.
+        let bare = TransportTuning::from_argv(&argv(&["--connect", "tcp/r:7447"])).unwrap();
+        assert_eq!(
+            bare.sn_resolution,
+            SessionPolicy::from_build().sn_resolution
+        );
+
+        // A width zenoh has no name for is refused by the flag, not offered as some other one.
+        let refused = TransportTuning::from_argv(&argv(&["--sn-resolution", "12bit"])).unwrap_err();
+        assert!(refused.contains("--sn-resolution"), "{refused}");
     }
 
     /// `transport/link/rx/buffer_size` reaches the session the node opens through
@@ -8352,6 +8534,19 @@ mod stock_config_tests {
             (
                 vec!["--wait-before-close-us", "-1"],
                 "--wait-before-close-us expects",
+            ),
+            (vec!["--tx-batching", "off"], "--tx-batching expects"),
+            (
+                vec!["--tx-batching-time-limit-ms", "1.5"],
+                "--tx-batching-time-limit-ms expects",
+            ),
+            (
+                vec!["--tx-queue-allocation", "eager"],
+                "--tx-queue-allocation expects",
+            ),
+            (
+                vec!["--open-timeout-ms", "10s"],
+                "--open-timeout-ms expects",
             ),
         ] {
             let err = TransportTuning::from_argv(&argv(&cli))
@@ -9877,6 +10072,10 @@ pub(crate) struct TransportTuning {
     pub(crate) batch_size: u16,
     /// OpenSyn lease, in milliseconds.
     pub(crate) lease_ms: u64,
+    /// `--sn-resolution <8bit|16bit|32bit|64bit>`: the width of the frame sequence numbers the
+    /// InitSyn offers, which the session then negotiates down to the peer's. The build's
+    /// `sn-resolution` policy unless given, 32 bits when the build states none.
+    pub(crate) sn_resolution: wz::runtime_tokio::policy::SnResolution,
     /// R2592 — every `--link-config <kind>#<span>`, layered in argv order.
     pub(crate) link_defaults: wz::runtime_tokio::link_socket::LinkDefaults,
     /// R2925 — the per-priority queue sizes and the two congestion waits:
@@ -9886,6 +10085,9 @@ pub(crate) struct TransportTuning {
     /// `--rx-max-message-size <bytes>`: the largest message a session rejoins
     /// from fragments. Upstream's default unless given.
     pub(crate) link_rx: wz::runtime_tokio::session_glue::LinkRxConf,
+    /// `--open-timeout-ms <ms>`: how long one open of an endpoint this node dials, its dial and
+    /// its handshake, may take. Upstream's ten seconds unless given.
+    pub(crate) open_timeout: std::time::Duration,
 }
 
 /// R2925 — the demo's flag for each priority's queue size, indexed by the
@@ -9907,9 +10109,11 @@ impl Default for TransportTuning {
         Self {
             batch_size: 65535,
             lease_ms: 10_000,
+            sn_resolution: wz::runtime_tokio::policy::SessionPolicy::from_build().sn_resolution,
             link_defaults: Default::default(),
             tx_queue: Default::default(),
             link_rx: Default::default(),
+            open_timeout: wz::runtime_tokio::session_open::OPEN_TIMEOUT,
         }
     }
 }
@@ -9948,6 +10152,12 @@ impl TransportTuning {
                 ));
             }
         }
+        if let Some(v) = parse_pair(rest, "--sn-resolution") {
+            out.sn_resolution = wz::runtime_tokio::policy::SnResolution::from_zenoh_name(&v)
+                .ok_or_else(|| {
+                    format!("--sn-resolution expects 8bit, 16bit, 32bit or 64bit, got '{v}'")
+                })?;
+        }
         // R2925 — a size outside upstream's `1..=16` is refused, as upstream's
         // config refuses it; the waits take any microsecond count.
         for (byte, flag) in TX_QUEUE_SIZE_FLAGS.iter().enumerate() {
@@ -9972,6 +10182,34 @@ impl TransportTuning {
             out.tx_queue.wait_before_close_us = v
                 .parse::<u64>()
                 .map_err(|_| format!("--wait-before-close-us expects microseconds, got '{v}'"))?;
+        }
+        if let Some(v) = parse_pair(rest, "--tx-batching") {
+            out.tx_queue.batching = match v.as_str() {
+                "true" => true,
+                "false" => false,
+                _ => return Err(format!("--tx-batching expects true or false, got '{v}'")),
+            };
+        }
+        if let Some(v) = parse_pair(rest, "--tx-batching-time-limit-ms") {
+            out.tx_queue.batching_time_limit_us = v
+                .parse::<u64>()
+                .ok()
+                .and_then(|ms| ms.checked_mul(1_000))
+                .ok_or_else(|| {
+                    format!("--tx-batching-time-limit-ms expects milliseconds, got '{v}'")
+                })?;
+        }
+        if let Some(v) = parse_pair(rest, "--tx-queue-allocation") {
+            out.tx_queue.allocation =
+                wz::runtime_tokio::session_glue::QueueAllocation::from_zenoh_name(&v).ok_or_else(
+                    || format!("--tx-queue-allocation expects init or lazy, got '{v}'"),
+                )?;
+        }
+        if let Some(v) = parse_pair(rest, "--open-timeout-ms") {
+            out.open_timeout = std::time::Duration::from_millis(
+                v.parse::<u64>()
+                    .map_err(|_| format!("--open-timeout-ms expects milliseconds, got '{v}'"))?,
+            );
         }
         if let Some(v) = parse_pair(rest, "--rx-max-message-size") {
             out.link_rx.max_message_size = v
@@ -10196,7 +10434,10 @@ pub(crate) fn session_init_params_for(
     Ok(SessionInitParams {
         whatami,
         zid,
-        seq_num_res: 2,
+        // The width the operator offered, which the session negotiates down to the peer's.
+        seq_num_res: tuning.sn_resolution.wire_code(),
+        // Upstream exposes no key for the request-id width: its half of `Resolution` is always
+        // the width of a `u32` request id.
         req_id_res: 2,
         // R311y843 — the two handshake fields an operator's stock zenoh config
         // can move. They were literals here until the config reader had a way

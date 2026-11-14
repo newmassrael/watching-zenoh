@@ -179,6 +179,11 @@ pub(crate) fn print_usage() {
     eprintln!("                             default 65535). zenoh transport/link/tx/batch_size");
     eprintln!("    --lease-ms <ms>          OpenSyn session lease announced to the peer");
     eprintln!("                             (default 10000). zenoh transport/link/tx/lease");
+    eprintln!("    --sn-resolution <8bit|16bit|32bit|64bit>");
+    eprintln!("                             width of the frame sequence numbers the InitSyn");
+    eprintln!("                             offers; the session takes the smaller of it and the");
+    eprintln!("                             peer's (default the build's, 32bit).");
+    eprintln!("                             zenoh transport/link/tx/sequence_number_resolution");
     eprintln!("    --tx-queue-size-control <n>, --tx-queue-size-real-time <n>,");
     eprintln!("    --tx-queue-size-interactive-high <n>, --tx-queue-size-interactive-low <n>,");
     eprintln!("    --tx-queue-size-data-high <n>, --tx-queue-size-data <n>,");
@@ -199,6 +204,26 @@ pub(crate) fn print_usage() {
     eprintln!("                             how long a blocking message waits before the session");
     eprintln!("                             closes (default 5000000).");
     eprintln!("                             zenoh transport/link/tx/queue/congestion_control/block/wait_before_close");
+    eprintln!("    --tx-batching <true|false>");
+    eprintln!("                             whether a session coalesces a burst into few frames");
+    eprintln!("                             (default true); false sends each message as a frame");
+    eprintln!(
+        "                             of its own. zenoh transport/link/tx/queue/batching/enabled"
+    );
+    eprintln!("    --tx-batching-time-limit-ms <ms>");
+    eprintln!("                             the longest a link's writer holds a burst back for");
+    eprintln!("                             senders still adding to it (default the writer's");
+    eprintln!("                             200 us; 0 holds nothing back).");
+    eprintln!("                             zenoh transport/link/tx/queue/batching/time_limit");
+    eprintln!("    --open-timeout-ms <ms>");
+    eprintln!("                             how long one open of an endpoint, its dial and its");
+    eprintln!("                             handshake, may take (default 10000).");
+    eprintln!("                             zenoh transport/unicast/open_timeout");
+    eprintln!("    --tx-queue-allocation <init|lazy>");
+    eprintln!("                             whether a link's queue allocates every batch it may");
+    eprintln!("                             hold when its session is established, or each when");
+    eprintln!("                             first wanted (default lazy).");
+    eprintln!("                             zenoh transport/link/tx/queue/allocation/mode");
     eprintln!("    --rx-max-message-size <bytes>");
     eprintln!("                             the largest message a session rejoins from fragments");
     eprintln!("                             (default 1073741824, read as at most the build's");

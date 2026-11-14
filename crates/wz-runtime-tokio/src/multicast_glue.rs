@@ -1525,7 +1525,11 @@ pub struct GroupBeacon {
     pub lease_ms: u64,
     /// How often the router beacons, in milliseconds.
     pub join_interval_ms: u64,
-    /// The 2-bit wire code of the sequence number resolution.
+    /// The 2-bit wire code of the sequence number resolution: the node's
+    /// `transport/link/tx/sequence_number_resolution`, the one its unicast sessions offer, as
+    /// upstream's multicast transport states its manager's one resolution. A member whose JOIN
+    /// states another is ignored
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @ `if join.resolution != self.manager.config.resolution {`).
     pub seq_num_res: u8,
     /// The 2-bit wire code of the request id resolution.
     pub req_id_res: u8,

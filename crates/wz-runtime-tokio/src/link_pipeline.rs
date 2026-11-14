@@ -538,18 +538,13 @@ pub async fn resolve_locator_addrs(host: &str, port: u16) -> io::Result<Vec<Sock
 /// whole-walk clock cannot serve as a per-candidate bound: the first candidate
 /// that never answers would consume the entire budget and the reachable one
 /// behind it would never be tried, which is the outcome this bound exists to
-/// avoid. wz does not read that key (it sits in `UNHONOURED_BEYOND_WZ`), so
-/// there is no configured value to derive from, and a second knob for the same
-/// purpose is not added. What the constant IS tied to is the link-open window
-/// wz does carry, `SessionTimeouts::spec_defaults().link_open_ms`: a single
+/// avoid. wz honours that key as upstream does, around the whole open
+/// (`session_open::open_within`), and this bound runs INSIDE it: a non-final
+/// candidate gives way after this long, and the walk and the handshake together
+/// still end at the open's bound. What the constant IS tied to is the link-open
+/// window wz carries, `SessionTimeouts::spec_defaults().link_open_ms`: a single
 /// candidate may not be granted as long as the whole link is, and a unit test
 /// below pins that, so the two cannot drift into a bound that bounds nothing.
-///
-/// NOT-THIS-KEY: transport/unicast/open_timeout
-///
-/// The key is cited above to say why it is NOT the source of this value; this
-/// constant honours nothing of it, and the marker sits beside the mechanism so
-/// the citation cannot be read as "wz honours it".
 pub const CANDIDATE_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Try `dial` against each candidate address in turn and return the first
