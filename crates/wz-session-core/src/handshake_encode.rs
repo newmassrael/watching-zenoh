@@ -309,16 +309,44 @@ pub fn encode_open_into(
     cookie_override: Option<&[u8]>,
     extensions: &[ExtEntryOwned],
 ) -> Result<(), CodecError> {
-    let (header, body) = open_message(params, initial_sn, is_ack, cookie_override, extensions)?;
-    buf.append_byte(header)?;
-    body.encode(&mut TxSink::new(&mut *buf))?;
+    encode_open_head_into(
+        buf,
+        params,
+        initial_sn,
+        is_ack,
+        cookie_override,
+        !extensions.is_empty(),
+    )?;
     encode_ext_chain_into(buf, extensions)
 }
 
-/// The bytes [`encode_open_into`] writes for the same arguments, as
-/// [`init_frame_len`] is for Init: exact, since an Open body has no size constant
-/// (its cookie's length is a `u32`), and zero for a message `open_message`
-/// refuses.
+/// What [`encode_open_into`] writes before the extension chain: the header byte,
+/// whose Z flag says whether a chain follows (`has_ext`), and the body with the
+/// cookie. The chain is written after it by `ext_chain::encode_ext_chain_into`.
+///
+/// The two halves are separate for the lend-only send, which holds the cookie and
+/// the chain under two session mutexes and takes them one after the other: the
+/// chain is written where it is staged, and not copied out of its slot to be
+/// handed to an encoder that needs both at once.
+#[cfg(feature = "codec-open-body")]
+pub(crate) fn encode_open_head_into(
+    buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    params: &SessionInitParams,
+    initial_sn: u64,
+    is_ack: bool,
+    cookie_override: Option<&[u8]>,
+    has_ext: bool,
+) -> Result<(), CodecError> {
+    let (header, body) = open_message(params, initial_sn, is_ack, cookie_override, has_ext)?;
+    buf.append_byte(header)?;
+    body.encode(&mut TxSink::new(&mut *buf))
+}
+
+/// The bytes [`encode_open_head_into`] writes for the same arguments: exact, since
+/// an Open body has no size constant (its cookie's length is a `u32`), and zero for
+/// a message `open_message` refuses. With `ext_chain::ext_chain_len` of the chain
+/// it is what a lent slot for the Open must hold, as `init_frame_len` is for
+/// Init.
 // Its callers are the lend-only Open sends in `session_actions`, so the gate
 // carries that module's own (`storage-profile` and `session-unicast`).
 #[cfg(all(
@@ -328,32 +356,29 @@ pub fn encode_open_into(
     feature = "codec-open-body",
     any(feature = "session-unicast-open", feature = "session-unicast-accept")
 ))]
-pub(crate) fn open_frame_len(
+pub(crate) fn open_head_len(
     params: &SessionInitParams,
     initial_sn: u64,
     is_ack: bool,
     cookie_override: Option<&[u8]>,
-    extensions: &[ExtEntryOwned],
+    has_ext: bool,
 ) -> usize {
-    match open_message(params, initial_sn, is_ack, cookie_override, extensions) {
-        Ok((_header, body)) => {
-            1 + wz_codecs::open_body::OpenBodyWire::measure(&body).len()
-                + crate::ext_chain::ext_chain_len(extensions)
-        }
+    match open_message(params, initial_sn, is_ack, cookie_override, has_ext) {
+        Ok((_header, body)) => 1 + wz_codecs::open_body::OpenBodyWire::measure(&body).len(),
         Err(_) => 0,
     }
 }
 
-/// The header byte and the body of an Open message, as [`encode_open_into`]
-/// writes them and [`open_frame_len`] counts them. `LengthOutOfRange` for a
-/// cookie past the protocol's `u32` length.
+/// The header byte and the body of an Open message, as [`encode_open_head_into`]
+/// writes them and `open_head_len` counts them; `has_ext` sets the Z flag.
+/// `LengthOutOfRange` for a cookie past the protocol's `u32` length.
 #[cfg(feature = "codec-open-body")]
 fn open_message<'p>(
     params: &'p SessionInitParams,
     initial_sn: u64,
     is_ack: bool,
     cookie_override: Option<&'p [u8]>,
-    extensions: &[ExtEntryOwned],
+    has_ext: bool,
 ) -> Result<(u8, OpenBody<'p>), CodecError> {
     // R311ku — the T flag is DERIVED, not configured: a whole-second
     // lease compacts to the seconds form, pico `_z_t_msg_make_open_syn`
@@ -368,7 +393,7 @@ fn open_message<'p>(
     if is_ack {
         parent_flags |= wire_const::FLAG_T_OPEN_A;
     }
-    if !extensions.is_empty() {
+    if has_ext {
         parent_flags |= wire_const::FLAG_T_Z;
     }
 
@@ -674,6 +699,66 @@ mod tests {
     }
     #[cfg(feature = "codec-open-body")]
     use wz_codecs::wire_const;
+
+    /// The Open the lend-only send writes in two steps, the head and then the
+    /// chain where it is staged, is the Open written whole: the Z flag follows the
+    /// chain's presence, and the cookie and the chain land where the one encoder
+    /// puts them. Where the lend-only sizer is built, it counts exactly the head.
+    #[cfg(feature = "codec-open-body")]
+    #[test]
+    fn an_open_written_head_then_chain_is_the_open_written_whole() {
+        let params = open_params(10_000);
+        let entries = [
+            crate::extpatch::encode_patch_ext(),
+            crate::extpatch::encode_patch_ext_at(0),
+        ];
+        let echoed = [0x5Au8; 12];
+        for is_ack in [false, true] {
+            for chain in [&entries[..], &[][..]] {
+                for cookie in [None, Some(&echoed[..])] {
+                    let mut whole = alloc::vec::Vec::new();
+                    super::encode_open_into(&mut whole, &params, 1234, is_ack, cookie, chain)
+                        .expect("whole");
+                    let mut split = alloc::vec::Vec::new();
+                    super::encode_open_head_into(
+                        &mut split,
+                        &params,
+                        1234,
+                        is_ack,
+                        cookie,
+                        !chain.is_empty(),
+                    )
+                    .expect("head");
+                    let head = split.len();
+                    crate::ext_chain::encode_ext_chain_into(&mut split, chain).expect("chain");
+                    assert_eq!(split, whole, "ack {is_ack}, {} ext(s)", chain.len());
+                    assert_eq!(
+                        whole[0] & wire_const::FLAG_T_Z != 0,
+                        !chain.is_empty(),
+                        "the Z flag says whether a chain follows"
+                    );
+                    #[cfg(all(
+                        feature = "tx-lend-only",
+                        feature = "storage-profile",
+                        feature = "session-unicast",
+                        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+                    ))]
+                    assert_eq!(
+                        super::open_head_len(&params, 1234, is_ack, cookie, !chain.is_empty()),
+                        head,
+                        "the sizer counts the head it writes"
+                    );
+                    #[cfg(not(all(
+                        feature = "tx-lend-only",
+                        feature = "storage-profile",
+                        feature = "session-unicast",
+                        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+                    )))]
+                    let _ = head;
+                }
+            }
+        }
+    }
 
     /// init_cbyte must match zenoh-pico's transport.c:189-192
     /// packing exactly — Layer 3 byte-equiv depends on this.
