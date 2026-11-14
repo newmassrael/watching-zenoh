@@ -1308,6 +1308,11 @@ Each lands whole with its surface lines, tests and faults in one round.
     zenoh-c's `z_timestamp_new` gives the session's node clock and the system time where the node
     holds none, as upstream's `session.new_timestamp()` does (`wz_capi_c` revision 16), and
     zenoh-pico's gives the registered clock's time whatever its standing (`capi-pico` revision 2).
+    zenoh-pico's reads the wall clock where nothing is registered, and passes either reading
+    through the session's last time given, as pico keeps `_last_timestamp` in its session: one
+    session's stamps strictly increase whichever clock they come from, a clock registered or
+    removed while the session is open included, and run out only past the greatest time there is
+    (`Z_ERR_TIMESTAMP_GENERATION_FAILED`).
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.
