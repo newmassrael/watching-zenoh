@@ -108,7 +108,8 @@ and it is the one `Session::get_shm_provider` hands out.
 | the engine's POSIX provider and reader | `wz_runtime_tokio::shm_provider`, `shm_backend`, `shm_posix_backend`, `posix_shm`, `shm_clients` | what the C ABI allocates from and reads with |
 | the router's relay pass | `wz_runtime_tokio::shm_relay` | holds the chunks of a message while it is routed and re-expresses them per face |
 | `zenoh-shm` | `crates/wz-zenoh-shm` | upstream's crate, by its name and surface: the Rust API's provider, buffers and reader |
-| the top crate's adapter | `zenoh::api::shm::transport` (`crates/wz-zenoh/src/api/shm.rs`) | a `ZBytes` slice as the engine's send buffer, `ShmReader` as its resolver, and `Promoter`, the implicit optimisation of a put, a query value and a reply |
+| the top crate's adapter | `zenoh::api::shm::transport` (`crates/wz-zenoh/src/api/shm.rs`) | a `ZBytes` slice as the engine's send buffer, `ShmReader` as its resolver, and `Promoter`, the implicit optimisation of a put, a query value and a reply, copying into the family crate's provider |
+| what a session applies itself | `wz_capi_core::session_defaults` | `ShmInit` (the subsystem made at the end of every open, a node's as well, `init_shared_memory`), `ShmPromotion` (which payloads are copied, the one decision the top crate and the C ABI take), and `transport_copy`, the transport's copy into an engine provider, which the C ABI's session provider makes for a large put |
 
 What crosses a link without a copy, by path (registry = the registry of faces, node = a router node):
 
@@ -119,7 +120,8 @@ What crosses a link without a copy, by path (registry = the registry of faces, n
 | value of a get | registry and node | registry and node |
 | reply | registry and node | registry and node |
 | error reply | its bytes (section 4, rule 7) | its inline bytes |
-| implicit optimisation | put, value of a get, reply; registry and node | - |
+| implicit optimisation, top crate | put, value of a get, reply; registry and node | - |
+| implicit optimisation, zenoh-c ABI | `z_put` and `z_publisher_put`; registry and node | - |
 
 Upstream's own `shm` test file passes 10 of 10 against the patched graph (`docs/z8-expected.tsv`).
 
@@ -208,10 +210,24 @@ for that link.
 | `wz-session-core` | `transport-shm`, `session-extshm` | the descriptors and the receive state, and the establishment codec |
 
 A build without them offers nothing in the handshake, answers an offer plain, and refuses a message
-that carries the mandatory marker. A configuration that sets `message_size_threshold` or `messages`
-to other than the default is refused by name in a build that does not act on them (decision D6 of
-the seam note); the top crate with `shared-memory` and `unstable` acts on them
-(`acted_on_by_the_session`), for each of the three messages the list can name.
+that carries the mandatory marker.
+
+`mode`, `message_size_threshold` and `messages` are a session's keys (`SESSION_HONOURED_KEYS`): the
+reader reads them, the open plan compiles them into the session's `SessionDefaults`, and every
+session that publishes through the engine decides by that value. Whether a session acts on each is
+its own build's fact, asked with `key_state(path, SessionReach)`:
+
+| session | `mode` | `message_size_threshold` | `messages` |
+|---|---|---|---|
+| top crate, `shared-memory` and `unstable` | acted on | acted on, for a put, a query value and a reply | acted on |
+| top crate, `shared-memory` alone | acted on | unmapped: refused by name when not the default (D6) | unmapped, likewise |
+| zenoh-c ABI, shared-memory arm with the unstable API | acted on | acted on, for a put | unmapped: a query value and a reply leave as bytes |
+| a build without shared memory | inert, as upstream's built so | inert | inert |
+
+The C ABI's copy goes into the session's own provider (`z_obtain_shm_provider`'s), which the first
+large put asks for and so starts making; that put and every one while it is made go as bytes, as
+upstream's do. The top crate's copy goes into its family crate's provider (`Promoter`). The two
+providers are the two systems of section 6, and the decision they copy by is one.
 
 ## 6. One shared-memory system per process
 
@@ -263,3 +279,4 @@ memory are measured again in the step that moves them.
 | S7g | the same differential over a multicast group, for a put between two members that join it, two peers and a router with a peer each way (a wz router there is a node, a wz peer the registry): each pair of crates held equal to two upstream members with the sender's shared memory on and off, and the member without shared memory (section 1.2) held by name, upstream's handed no data and wz's handed nothing | landed |
 | S8 | a session in router mode with shared memory: it offers shared memory and reads a descriptor as its configuration says, as every other session of the top crate does (`Engine::open`), since upstream's transport manager makes its shared-memory context whatever the mode (`io/zenoh-transport/src/manager.rs` @ `let shm_context = ShmContext::new(self.shm, self.shm_reader)?;`) | landed |
 | S8g | a router node that joins a multicast group carries shared memory there as its configuration says, as an upstream router with a context maps both ways (section 1.2): the group is attached as a shared-memory one (`attach_mcast_group`, from `GroupJoin::is_shm`, which `Engine::open` now reports for a node too); a chunk the relay pass holds goes to such a group as a descriptor with one reference for the group and to any other as its bytes (`ShmRelay::for_group`, the relay of the unicast faces); and a descriptor a member sends is held and mapped where the group is a shared-memory one and refused where it is not (`open_shm_relay_message`) | landed |
+| S9 | the session's own keys on every session of the engine: `mode` makes the subsystem at the end of the open of the registry and of a node (`init_shared_memory`, `shm_provider::init`), and the zenoh-c ABI copies a large `z_put` and `z_publisher_put` into its session provider by the decision the top crate takes (`ShmPromotion::admits`, `SessionShm::promote`) | landed for the put; the query value and the reply of the zenoh-c ABI owed, which leave as bytes |
