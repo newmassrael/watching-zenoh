@@ -7234,6 +7234,159 @@ mod tests {
         assert_eq!(dialler.info().peers_zid().wait().count(), 0);
     }
 
+    /// What the `demux` spans the engine opened said: the `zid` of the node that opened each, and
+    /// whether a span named `opener` was among its ancestors.
+    type DemuxSpans = std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>;
+
+    /// The ids of the nodes the span test opens start with this; the recorder keeps the spans of
+    /// those nodes alone, so the other tests of the process, which open spans of their own once a
+    /// subscriber is installed, neither grow it nor read into it.
+    const SPAN_TEST_IDS: &str = "5ba7c";
+
+    /// Records every `demux` span of the span test's nodes as it is opened, with its node and
+    /// whether it was opened inside a span named `opener`.
+    struct DemuxRecorder(DemuxSpans);
+
+    impl<S> tracing_subscriber::layer::Layer<S> for DemuxRecorder
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::span::Id,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if attrs.metadata().name() != "demux" {
+                return;
+            }
+            let mut zid = ZidField::default();
+            attrs.record(&mut zid);
+            if !zid.0.starts_with(SPAN_TEST_IDS) {
+                return;
+            }
+            let inside = ctx
+                .span(id)
+                .is_some_and(|span| span.scope().skip(1).any(|outer| outer.name() == "opener"));
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((zid.0, inside));
+        }
+    }
+
+    /// The `zid` field of a span, as it prints.
+    #[derive(Default)]
+    struct ZidField(String);
+
+    impl tracing::field::Visit for ZidField {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "zid" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    /// The recorder, installed for the process the first time it is asked for: the spans are
+    /// opened on the engine's threads, which a subscriber set on the test's own thread would not
+    /// reach. A process whose global subscriber is someone else's cannot answer.
+    fn demux_spans() -> DemuxSpans {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        static RECORDED: std::sync::OnceLock<DemuxSpans> = std::sync::OnceLock::new();
+        RECORDED
+            .get_or_init(|| {
+                let recorded = DemuxSpans::default();
+                tracing::subscriber::set_global_default(
+                    tracing_subscriber::registry().with(DemuxRecorder(recorded.clone())),
+                )
+                .expect("no other global subscriber in this test binary");
+                recorded
+            })
+            .clone()
+    }
+
+    /// `tracing-instrument` carries the span an open is called in onto everything the session
+    /// then does on the network: the threads of its drive and its faces, and the tasks those
+    /// spawn. A peer opened inside `opener` dials a peer that holds a subscriber, and is told of
+    /// it on the face it dialled, where the engine opens upstream's `demux` span for the node.
+    /// With the feature on every such span of the dialler is a descendant of `opener`; without
+    /// it, which is the same test in a build without the feature, none is, because the face runs
+    /// on a thread the opener's span was never entered on. The listener is opened outside the
+    /// span, so the spans of its node say nothing either way, and the two are told apart by id.
+    #[test]
+    fn the_faces_of_a_session_opened_in_a_span_run_in_it_exactly_when_the_feature_is_on() {
+        let recorded = demux_spans();
+        let port = unautoselected_port();
+        let listener = open(
+            Config::from_json5(&format!(
+                r#"{{ id: "5ba7c1", mode: "peer", listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                      scouting: {{ multicast: {{ enabled: false }} }} }}"#
+            ))
+            .expect("a configuration zenoh reads"),
+        )
+        .wait()
+        .expect("opens");
+        let _subscriber = listener
+            .declare_subscriber("caller/span")
+            .callback(|_| {})
+            .wait()
+            .expect("declares");
+        let opener = tracing::info_span!("opener");
+        assert!(opener.id().is_some(), "the recorder gives spans ids");
+        let dialler = {
+            let _inside = opener.enter();
+            open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "5ba7c2", mode: "peer", listen: {{ endpoints: [] }},
+                          connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("opens")
+        };
+        let zid = dialler.zid().to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let of_dialler: Vec<bool> = loop {
+            let of: Vec<bool> = recorded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|(node, _)| *node == zid)
+                .map(|(_, inside)| *inside)
+                .collect();
+            if !of.is_empty() || std::time::Instant::now() > deadline {
+                break of;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let nodes: Vec<String> = recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(node, _)| node.clone())
+            .collect();
+        assert!(
+            !of_dialler.is_empty(),
+            "the dialler's node opened no `demux` span; nodes seen: {nodes:?}"
+        );
+        if cfg!(feature = "tracing-instrument") {
+            assert!(
+                of_dialler.iter().all(|inside| *inside),
+                "every span of the dialler descends from the span it was opened in: {of_dialler:?}"
+            );
+        } else {
+            assert!(
+                of_dialler.iter().all(|inside| !*inside),
+                "without the feature no span of the dialler descends from it: {of_dialler:?}"
+            );
+        }
+        dialler.close().wait().expect("closes");
+        listener.close().wait().expect("closes");
+    }
+
     /// The keys the engine of `session` holds a declaration of.
     fn declared(session: &Session) -> Vec<String> {
         session

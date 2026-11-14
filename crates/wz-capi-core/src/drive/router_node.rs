@@ -649,6 +649,8 @@ pub(crate) fn open_router_blocking(
     // for each).
     let dials = connect.len();
     let face_drive = RoutingFaceDrive::default();
+    // Taken on the opener's thread: the node's thread runs the whole node inside it.
+    let opener = CallerSpan::current();
     let handle = std::thread::Builder::new()
         .name("wz-capi-router".to_owned())
         .stack_size(DRIVE_THREAD_STACK_BYTES)
@@ -678,7 +680,7 @@ pub(crate) fn open_router_blocking(
                     return;
                 }
             };
-            rt.block_on(run_router(
+            rt.block_on(opener.carry(run_router(
                 role,
                 node_zid,
                 connect,
@@ -698,7 +700,7 @@ pub(crate) fn open_router_blocking(
                 node_shutdown,
                 node_stop,
                 tx,
-            ));
+            )));
         })
         .map_err(|_| OpenError::DriveFailed)?;
     // A router's open is held for `scouting/delay` in full, as the other roles' is (R3125): the

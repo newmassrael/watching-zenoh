@@ -406,8 +406,15 @@ declarations-synced-event = ["wz-session-core/declarations-synced-event", "wz-ru
 remote-declaration-watch = ["wz-runtime-tokio/remote-declaration-watch"]
 local-subscriber = []
 local-queryable = []
+# The tracing span current where a session is opened rides onto every task and thread the drive
+# runs it on (`caller_span`), and the runtime's own spawns carry it on from there, as upstream's
+# `tracing-instrument` makes its runtime's spawns carry it. No door of an ABI: the facade crate
+# `zenoh` turns it on with its feature of that name.
+tracing-instrument = ["dep:tracing", "wz-runtime-tokio/tracing-instrument"]
 
 [dependencies]
+# The span `tracing-instrument` carries. Optional, pulled only by that feature.
+tracing = { version = "0.1.41", optional = true }
 # OS entropy for the per-session zid, as zenoh-pico does at `z_open`
 # (`~/zenoh-pico/src/api/api.c:846-855`). Moved here with `fresh_zid`.
 getrandom = "0.2"
@@ -547,6 +554,9 @@ wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", fea
 # `node_auth`'s tests write the dictionary files a config names. Already in `crates/Cargo.lock`
 # through the C ABI crate's tests.
 tempfile = "3"
+# The witness of `tracing-instrument` (`caller_span`'s test) needs a subscriber that gives spans
+# ids; the registry is the smallest, and the runtime crate's witness takes the same one.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 # Paused time (`test-util`) for the multicast face's tests, whose beacons and lease then run
 # on their own schedule at no cost; the demo's group tests take it the same way.
 tokio = { version = "1", features = ["test-util"] }

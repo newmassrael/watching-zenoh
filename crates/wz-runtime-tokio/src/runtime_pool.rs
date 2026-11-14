@@ -164,8 +164,8 @@ use crate::runtime_impl::TokioJoinHandle;
 /// and routing tasks are spawned through those two. Every production spawn of a future in this
 /// crate goes through this function: the subsystem runtimes and their pool, the ambient runtime of
 /// `TokioRuntime`, and the seams that take a runtime handle (the link writer, a multicast group
-/// face, the replication and resource services, the router's face drives, the consumer of an
-/// offloaded subscriber). The span carried is the one current at the spawn, so a task spawned by a
+/// face, the replication and resource services, the router's face drives and the accept intake
+/// with its handshakes, the consumer of an offloaded subscriber). The span carried is the one current at the spawn, so a task spawned by a
 /// task carries what its parent carried.
 #[cfg(feature = "tracing-instrument")]
 pub(crate) fn in_caller_span<F: Future>(future: F) -> impl Future<Output = F::Output> {

@@ -113,11 +113,13 @@ unstable = [
 # Upstream's `tracing-instrument` forwards to `zenoh-runtime` and to `zenoh-task`. It carries the
 # caller's tracing span onto the runtime a future is handed to: every spawn this facade makes
 # (`ZRuntime::spawn` and `block_in_place`), every task a `TaskController` spawns, and, through the
-# engine's own feature, the transport, routing and session tasks the engine spawns on
-# `wz-runtime-tokio`, which is where upstream's transport tasks run in this build.
+# engine's own features, everything a session does on the network: the drive opens it on threads
+# of its own and carries the opener's span there (`wz-capi-core`), and the transport, routing and
+# session tasks it spawns on `wz-runtime-tokio` carry it on, as upstream's transport tasks do.
 tracing-instrument = [
     "zenoh-runtime/tracing-instrument",
     "zenoh-task/tracing-instrument",
+    "wz-capi-core?/tracing-instrument",
     "wz-runtime-tokio?/tracing-instrument",
 ]
 
@@ -191,6 +193,9 @@ tokio ={ version = "1.47.1", default-features = false, features = ["macros", "rt
 # The numbers the scouting tests give to sockets of their own (a group's port, a TCP listener's):
 # a number the kernel never autoselects, taken without a socket bound for the moment of the pick.
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+# The witness of `tracing-instrument` over an open: a subscriber that knows the parents of the
+# spans the engine opens. The registry is the smallest; the family's other crates take the same.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 
 [lints]
 workspace = true
