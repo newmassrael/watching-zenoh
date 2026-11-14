@@ -4205,6 +4205,13 @@ fn host_session_lifecycle<D, I, M, P, E>(
 
 #[cfg(feature = "routing-peer")]
 pub(crate) struct PeerOpts {
+    /// Whether the node announces itself a client (`--client-node`) rather than a peer
+    /// (`--peer`): a client that listens as well as it dials, as upstream's client binds its
+    /// listen endpoints before it connects to its router
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `async fn start_client(&self) -> ZResult<()> {`).
+    /// The mesh is the peer's, told to treat what it dials north as a router that holds it for a
+    /// client, as the node engine runs a client node.
+    pub as_client: bool,
     pub publish_key: Option<String>,
     pub subscribe_key: Option<String>,
     pub unsubscribe_after_data: bool,
@@ -4546,7 +4553,11 @@ async fn run_peer_until(
     let listeners = bind_all_endpoints(
         listen,
         &accept_cfg,
-        "peer",
+        if opts.as_client {
+            "client-node"
+        } else {
+            "peer"
+        },
         opts.listen_phase,
         opts.listen_retry,
     )
@@ -4587,7 +4598,13 @@ async fn run_peer_until(
     // R311rc (c3d-4) — a DISTINCT zid per peer (the mesh routing graph keys on it,
     // so two peers MUST NOT share one). `node_zid` above is the configured
     // `--zid` or a random one (R2883), as a zenoh node's is.
-    let params = demo_session_init_params(NodeKind::Peer, node_zid, &tuning)?;
+    // The role the node announces, and the session kind that announces it.
+    let (role, kind) = if opts.as_client {
+        (WhatAmI::Client, NodeKind::ClientNode)
+    } else {
+        (WhatAmI::Peer, NodeKind::Peer)
+    };
+    let params = demo_session_init_params(kind, node_zid, &tuning)?;
 
     // R311rb/rf — the peer maintains a linkstate-peer routing graph: each held
     // face feeds the topology graph (the `RouterForwarder`'s north net), which floods its
@@ -4612,13 +4629,21 @@ async fn run_peer_until(
     // the peer hat in `North` and a broker hat for the clients south of it.
     let forwarder = RouterForwarder::peer_with_timestamping(
         Zid::from_slice(&params.zid),
-        opts.timestamping.map_for(WhatAmI::Peer),
-    )
-    .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
-    // Item 751, step 7d — the south partition, before ANYTHING else is set on the hats: it
-    // rebuilds them, so a mode chosen first would be lost, and the hats a face joins are the
-    // ones it keeps. The face loop reads it back off the forwarder for every session it opens.
-    .with_south_partition(opts.south_partition.clone());
+        opts.timestamping.map_for(role),
+    );
+    // A client node routes on the peer's tables and holds what it dials north as the router
+    // that holds it for a client, as the node engine opens one.
+    let forwarder = if opts.as_client {
+        forwarder.as_client_of_north()
+    } else {
+        forwarder
+    };
+    let forwarder = forwarder
+        .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
+        // Item 751, step 7d — the south partition, before ANYTHING else is set on the hats: it
+        // rebuilds them, so a mode chosen first would be lost, and the hats a face joins are the
+        // ones it keeps. The face loop reads it back off the forwarder for every session it opens.
+        .with_south_partition(opts.south_partition.clone());
     // `--peer-mode` (zenoh `routing.peer.mode`). Set BEFORE any face registers,
     // because the mode governs how the very first inbound flood is ingested; a
     // node that learned one flood in the wrong mode has already mis-shaped its
@@ -4708,13 +4733,7 @@ async fn run_peer_until(
     // a locator list it did not have yet.
     #[cfg(feature = "scouting-responder")]
     if let Some(scout_socket) = opts.scout_listen.as_ref() {
-        spawn_scouting_responder(
-            scout_socket,
-            WhatAmI::Peer,
-            &params.zid,
-            self_locators.clone(),
-        )
-        .await?;
+        spawn_scouting_responder(scout_socket, role, &params.zid, self_locators.clone()).await?;
     }
 
     // §5.16 interceptor pipeline — assemble ONE InterceptorConfig from the
@@ -5102,9 +5121,10 @@ async fn run_peer_until(
             //
             // The empty `successors` is not a placeholder: it is what this node
             // HAS. `route/successor` is read off the router hats alone, and a peer
-            // holds none.
+            // holds none. A client node announces the client role, whose hat holds
+            // no graph, so it answers no `linkstate` leg.
             #[cfg(feature = "adminspace-router-linkstate")]
-            {
+            if whatami_str != "client" {
                 let linkstate = linkstate_view.regions_text();
                 let rctx = AdminRouterCtx {
                     zid_hex: &zid_hex,
@@ -5385,7 +5405,7 @@ async fn run_peer_until(
         );
         let policy = AutoConnect::new(
             Zid::from_slice(&params.zid),
-            default_autoconnect_matcher(WhatAmI::Peer),
+            default_autoconnect_matcher(role),
             strategy,
         );
         forwarder.enable_autoconnect_into(
@@ -10208,6 +10228,7 @@ mod peer_quic_cert_tests {
         std::fs::write(&key_path, key_pem.as_bytes()).expect("write key pem");
 
         let opts = PeerOpts {
+            as_client: false,
             publish_key: None,
             subscribe_key: None,
             unsubscribe_after_data: false,
@@ -10346,6 +10367,7 @@ mod peer_failfast_tests {
         // fires at zid derivation, BEFORE any opts field is consumed. The cfg-gated
         // fields are set only under their feature (mirrors main.rs's construction).
         let opts = PeerOpts {
+            as_client: false,
             publish_key: None,
             subscribe_key: None,
             unsubscribe_after_data: false,

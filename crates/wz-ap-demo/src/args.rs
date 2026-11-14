@@ -950,14 +950,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // - `{ mode: "router", connect: [..] }` with no listen. zenohd binds port
     //   7447 on every interface (its own mode-dependent default) and is a
     //   ROUTER; wz selected `--connect` and came up as a CLIENT.
-    // - `{ mode: "client", listen: [..] }`. zenohd starts and binds NOTHING,
-    //   naming no locator; wz bound the endpoint. This one runs the other way --
-    //   wz doing something upstream does not -- and it was found by asking the
-    //   oracle rather than by reading wz.
+    // - `{ mode: "client", listen: [..], connect: [..] }`. Upstream's client
+    //   binds its listen endpoints and then dials its router
+    //   (`zenoh/src/net/runtime/orchestrator.rs` @
+    //   `async fn start_client(&self) -> ZResult<()> {`); wz selected
+    //   `--connect` and lost the listener, or `--listen` and lost the dial. It
+    //   selects `--client-node` now, which keeps both.
     //
     // So: `mode` picks the run-mode, [`default_listen_endpoint`] supplies the
-    // address when the document names none, and a client's `listen` is dropped
-    // the way upstream drops it. A document that NAMES the key -- an explicitly
+    // address when the document names none, and a client's `listen` is bound by
+    // the client node as upstream binds it. A document that NAMES the key -- an explicitly
     // empty list included -- suppresses the default, which is also upstream's
     // behaviour (measured: an empty list starts a node that binds nothing).
     //
@@ -1063,10 +1065,24 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             // the verdict below says so rather than inventing an address the
             // file refused.
             (WhatAmI::Router | WhatAmI::Peer, _) => None,
-            // A zenoh client never listens, so its `listen` list is not an
-            // address here -- it is a key that reaches nothing, reported as
-            // such below.
-            //
+            // A client that names listen endpoints binds them before it dials its
+            // router (`zenoh/src/net/runtime/orchestrator.rs` @
+            // `async fn start_client(&self) -> ZResult<()> {`, whose first act is
+            // `bind_listeners`): the client node, which binds the whole list and
+            // dials the whole connect list as the peer arm above does.
+            (WhatAmI::Client, eps) if !eps.is_empty() && !connect.is_empty() => {
+                let listen_carried = eps.len();
+                exp.added.push("--client-node".into());
+                exp.added.push(eps.join(","));
+                exp.added.push("--connect".into());
+                exp.added.push(connect.join(","));
+                Some(Selected {
+                    flag: "--client-node",
+                    role: WhatAmI::Client,
+                    listen_carried,
+                    connect_carried: connect.len(),
+                })
+            }
             // R2099 — the WHOLE connect list, which is item 512's same-seam
             // residue: this arm used to emit `connect[0]` and drop the rest,
             // while `connect/endpoints` was reported Expanded. Upstream's client
@@ -1080,11 +1096,8 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                 Some(Selected {
                     flag: "--connect",
                     role: WhatAmI::Client,
-                    // A client binds nothing, so no listen member reaches it --
-                    // the `listen/endpoints` verdict below never consults this
-                    // count on the client path (it is `WithheldFromThisRun`
-                    // before it gets here), and zero is the honest value if it
-                    // ever did.
+                    // This arm is reached with no listen endpoint (the client node
+                    // above takes the ones that name some), so it carries none.
                     listen_carried: 0,
                     connect_carried: connect.len(),
                 })
@@ -1131,13 +1144,22 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             "listen/endpoints",
             match (role_on_cli, cfg.mode, cfg.listen.is_empty()) {
                 (true, _, _) => KeyEffect::OverriddenOnTheCommandLine,
-                // R2091b (open-debt item 511) — a zenoh client never listens, so
-                // the endpoint it names reaches nothing HERE for the same reason
-                // it reaches nothing in a real zenohd. Measured: handed
-                // `{ mode: "client", listen: [..] }` a zenohd starts and names no
-                // locator at all.
-                (false, WhatAmI::Client, false) => {
-                    KeyEffect::WithheldFromThisRun("a zenoh client never listens")
+                // A client that listens binds its endpoints, and the client node
+                // carries them (the general arm below counts them). One that names
+                // nothing to dial runs no node here: upstream's would scout for a
+                // router, and this expansion emits no scouting run.
+                //
+                // R2091b read the opposite off a live zenohd, which named no
+                // locator for `{ mode: "client", listen: [..] }`. A zenohd prints
+                // only the locators that are not loopback
+                // (`zenoh/src/net/runtime/orchestrator.rs` @
+                // `for locator in &locators_noloopback {`), and the endpoint read
+                // was a loopback one, so the reading did not show whether it bound;
+                // the source binds it before it dials.
+                (false, WhatAmI::Client, false) if selected.is_none() => {
+                    KeyEffect::WithheldFromThisRun(
+                        "a client with nothing to dial runs no node here",
+                    )
                 }
                 // An empty list is what binding nothing already means.
                 (false, _, true) => KeyEffect::AlreadyTheBehaviour,
@@ -1162,7 +1184,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         let dialled = matches!(
             selected,
             Some(Selected {
-                flag: "--peer" | "--connect" | "--router-hat",
+                flag: "--peer" | "--client-node" | "--connect" | "--router-hat",
                 ..
             })
         ) && !cfg.connect.is_empty();
@@ -1514,11 +1536,10 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // client starts the responder once its session is open. A `--peer` or
     // `--router-hat` that also dials carries `--connect` and was in the set
     // already, so the only run this adds is the client.
-    let role_answers_scouts = exp
-        .rest
-        .iter()
-        .chain(exp.added.iter())
-        .any(|a| a == "--peer" || a == "--router-hat" || a == "--connect");
+    let role_answers_scouts =
+        exp.rest.iter().chain(exp.added.iter()).any(|a| {
+            a == "--peer" || a == "--client-node" || a == "--router-hat" || a == "--connect"
+        });
     // The switch withholds a direction that ASKS for something. `listen: false`
     // asks for nothing -- it is what the absent flag already means -- and
     // reporting it as withheld would answer a question the operator did not
@@ -1705,7 +1726,9 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // flag with no zenoh config key behind it, so this expansion has no site
     // that emits it and never will. `flag_precondition_gate.py` derives exactly
     // that and reports it as `no site`.
-    let re_dials = |a: &String| a == "--peer" || a == "--router-hat" || a == "--connect";
+    let re_dials = |a: &String| {
+        a == "--peer" || a == "--client-node" || a == "--router-hat" || a == "--connect"
+    };
     let dials = exp.rest.iter().chain(exp.added.iter()).any(re_dials);
     if named("connect/retry") {
         let blocked = no_sink("connect/retry").or_else(|| {
@@ -1754,7 +1777,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // R2948 — a `--connect --reconnect` client too: its supervisor governs the
     // re-dials after an established link is lost, and its FIRST open runs the
     // same startup phase a one-shot client does.
-    let has_phases = |a: &String| a == "--peer" || a == "--router-hat";
+    let has_phases = |a: &String| a == "--peer" || a == "--client-node" || a == "--router-hat";
     let mesh = exp.rest.iter().chain(exp.added.iter()).any(has_phases);
     let not_a_mesh_run = (!mesh).then_some(KeyEffect::WithheldFromThisRun(
         "this run's mode has no startup phase to bound",
@@ -2278,8 +2301,11 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         // in, the `cfg!` arm is the constant `true`, and clippy then reads the
         // three arms as a `matches!` (R2859 paid that red in the all-features
         // lane).
-        let hosts_an_adminspace = matches!(run_flag, Some("--peer") | Some("--storage-host"))
-            || (run_flag == Some("--router-hat") && cfg!(feature = "adminspace-router-linkstate"))
+        let hosts_an_adminspace = matches!(
+            run_flag,
+            Some("--peer") | Some("--client-node") | Some("--storage-host")
+        ) || (run_flag == Some("--router-hat")
+            && cfg!(feature = "adminspace-router-linkstate"))
             || single_session_host;
         let blocked = no_sink("metadata").or_else(|| {
             (!hosts_an_adminspace).then_some(KeyEffect::WithheldFromThisRun(
@@ -4438,13 +4464,24 @@ mod stock_config_tests {
             // nothing, so it selects none rather than inventing an address the
             // document refused.
             (r#"{ mode: "peer", listen: { endpoints: [] } }"#, vec![]),
-            // R2091b — a zenoh client NEVER listens, so the endpoint reaches
-            // nothing. Measured on a real zenohd: handed this document it starts
-            // and names no locator at all, while the same file as a peer answers
-            // on that address.
+            // A client that names a listen endpoint and nothing to dial runs no
+            // node here: upstream's would scout for its router first, and this
+            // expansion emits no scouting run.
             (
                 r#"{ mode: "client", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
                 vec![],
+            ),
+            // With a router to dial it is the client node, binding and dialling
+            // as upstream's client does (`fn start_client`).
+            (
+                r#"{ mode: "client", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     connect: { endpoints: ["tcp/router:7447"] } }"#,
+                vec![
+                    "--client-node",
+                    "tcp/0.0.0.0:7447",
+                    "--connect",
+                    "tcp/router:7447",
+                ],
             ),
             (
                 r#"{ mode: "client", connect: { endpoints: ["tcp/router:7447"] } }"#,
@@ -7126,7 +7163,7 @@ mod stock_config_tests {
     /// |---|---|---|
     /// | `peer` + listen | binds it and is findable | `--listen`, the one-shot acceptor |
     /// | `router` + connect, no listen | binds port 7447 as a ROUTER | `--connect`, a CLIENT |
-    /// | `client` + listen | starts and binds NOTHING | bound the endpoint |
+    /// | `client` + listen | binds it before it dials (`fn start_client`); the live reading named no locator, as zenohd names no loopback one | bound the endpoint and dialled nothing |
     ///
     /// The rows are each other's controls, which is why they are one test. Each
     /// differs from a neighbour in ONE word, so an expansion that answered a
@@ -7168,7 +7205,19 @@ mod stock_config_tests {
                 String::from(r#"{ mode: "peer", listen: { endpoints: [] } }"#),
                 vec![],
             ),
-            // ITEM 511 (c). A zenoh client never listens.
+            // ITEM 511 (c), as the source has it: a client binds its listen
+            // endpoints and dials its router (`fn start_client`), so the pair
+            // selects the client node, which keeps both.
+            (
+                "client + listen + connect",
+                format!(
+                    r#"{{ mode: "client", listen: {{ endpoints: ["{L}"] }},
+                          connect: {{ endpoints: ["{C}"] }} }}"#
+                ),
+                vec!["--client-node", L, "--connect", C],
+            ),
+            // A client that names nothing to dial runs no node here: upstream's
+            // would scout for its router, and this expansion emits no scouting run.
             (
                 "client + listen",
                 format!(r#"{{ mode: "client", listen: {{ endpoints: ["{L}"] }} }}"#),
@@ -7188,6 +7237,24 @@ mod stock_config_tests {
             assert_eq!(out.added, argv(&want), "{what}: {file}");
         }
 
+        // A client that listens and dials keeps both: its mode, its listen list and
+        // its connect list are each applied, by the client node.
+        let client_node = expand(
+            &["--config", "z.json5"],
+            &format!(
+                r#"{{ mode: "client", listen: {{ endpoints: ["{L}"] }},
+                      connect: {{ endpoints: ["{C}"] }} }}"#
+            ),
+        )
+        .unwrap();
+        for key in ["mode", "listen/endpoints", "connect/endpoints"] {
+            assert!(
+                client_node.applied().contains(&key),
+                "{key}: {:?}",
+                client_node.applied()
+            );
+        }
+
         // AND THE REPORT AGREES WITH THE ARGV, on the row where the two used to
         // disagree most: a client's listen endpoint reaches nothing, and saying
         // so is the difference between an operator who knows their file did not
@@ -7203,10 +7270,8 @@ mod stock_config_tests {
             client.applied()
         );
         assert!(
-            client
-                .read_but_not_applied_with_reasons()
-                .iter()
-                .any(|l| l.contains("listen/endpoints (a zenoh client never listens)")),
+            client.read_but_not_applied_with_reasons().iter().any(|l| l
+                .contains("listen/endpoints (a client with nothing to dial runs no node here)")),
             "{:?}",
             client.read_but_not_applied_with_reasons()
         );
@@ -8233,7 +8298,7 @@ mod stock_config_tests {
             r#"{ id: "c2", mode: "client", connect: { endpoints: ["tcp/10.0.0.9:7447"] } }"#;
 
         let err = check(&[("c1.json5", CLIENT_TO_9), ("c2.json5", C2)])
-            .expect_err("a zenoh client never listens");
+            .expect_err("no node of the set listens");
         assert!(err.contains("every node is a client"), "{err}");
 
         let ok = check(&[
@@ -8913,6 +8978,11 @@ pub(crate) enum NodeKind {
     /// for now (a distinct WhatAmI refinement is a later atom).
     #[cfg(feature = "routing-peer")]
     Peer,
+    /// The mesh node of `--client-node <listen>`: a client that listens as well as
+    /// it dials, upstream's client with listen endpoints. It runs the peer's mesh
+    /// and announces the Client `whatami`.
+    #[cfg(feature = "routing-peer")]
+    ClientNode,
     /// P4 §5.21 ACTIVATION — the router-hat node (`--router-hat`, and since
     /// R2886 also `--router`): the ONE demo kind that announces a TRUE wire
     /// [`WhatAmI::Router`], driving the dual-mesh `RouterForwarder`. It needs
@@ -8995,6 +9065,7 @@ pub(crate) const RUN_MODE_ROLES: &[(&str, WhatAmI)] = &[
     // ([`canonical_run_flags`]) before anything reads the argv, so a table
     // entry for it could never match.
     ("--peer", WhatAmI::Peer),
+    ("--client-node", WhatAmI::Client),
     ("--router-hat", WhatAmI::Router),
     ("--storage-host", WhatAmI::Peer),
     // The single-session roles, which `main` reaches last.
@@ -9357,6 +9428,8 @@ pub(crate) fn demo_session_init_params(
         // A hold-only mesh peer announces Peer too (whatami refinement later).
         #[cfg(feature = "routing-peer")]
         NodeKind::Peer => WhatAmI::Peer,
+        #[cfg(feature = "routing-peer")]
+        NodeKind::ClientNode => WhatAmI::Client,
         // P4 §5.21 ACTIVATION — the router-hat node announces the TRUE Router
         // wire value (0b00), so a connecting peer's linkstate graph tags it as a
         // router and this node's RouterForwarder partitions faces by role. This

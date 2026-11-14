@@ -7127,6 +7127,12 @@ layer_c1ay_cargo_test_router_hat() {
     wz_test_args wz-ap-demo peer_gateway_south_binary
     _runci_guarded_test "C1AY peer_gateway_south_binary 2" 2 \
         cargo test -p wz-ap-demo --features routing-peer,zenoh-config "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    # `--client-node`, the client that listens and dials (upstream's `start_client` binds its
+    # listen endpoints before it connects): refused without a router to dial and beside `--peer`,
+    # and bound when it has one. 3, read off the file's tests.
+    wz_test_args wz-ap-demo client_node_binary
+    _runci_guarded_test "C1AY client_node_binary 3" 3 \
+        cargo test -p wz-ap-demo --features routing-peer "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R311y842 — the stock-zenoh config -> argv expansion, for the same reason
     # the parser above states: it returns Result rather than exiting, precisely
     # so the accept/reject SET can be tested, and an exiting expander could not
