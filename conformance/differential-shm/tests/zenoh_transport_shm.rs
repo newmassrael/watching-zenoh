@@ -25,7 +25,8 @@
 //! and a peer (a wz router there is a node, a wz peer the registry): a group negotiates nothing,
 //! so each member's own configuration decides. The one difference held by name is a member whose
 //! shared memory is disabled, which upstream hands the descriptor in the place of the data and
-//! wz refuses; neither hands it the data.
+//! wz refuses; neither hands it the data. A member whose batch size is not the receiver's is not
+//! heard at all, by either crate.
 //!
 //! The crates share the machine's segments, so the tests of this binary take one lock.
 
@@ -96,24 +97,29 @@ macro_rules! peer {
             }
 
             /// A session of `mode` with id `id` that listens on the endpoint `listen` (a TCP
-            /// endpoint or a multicast group) and dials `connect`, scouts for nobody, and has
-            /// shared memory as `shm` says.
+            /// endpoint or a multicast group) and dials `connect`, scouts for nobody, has shared
+            /// memory as `shm` says, and the batch size `batch_size` states (the default when it
+            /// states none).
             pub fn open(
                 id: &str,
                 mode: &str,
                 listen: Option<&str>,
                 connect: Option<&str>,
                 shm: bool,
+                batch_size: Option<u16>,
             ) -> Node {
                 let endpoints = |endpoint: Option<&str>| match endpoint {
                     Some(endpoint) => format!(r#"["{endpoint}"]"#),
                     None => "[]".to_owned(),
                 };
+                let link = batch_size.map_or_else(String::new, |batch_size| {
+                    format!(", link: {{ tx: {{ batch_size: {batch_size} }} }}")
+                });
                 let config = Config::from_json5(&format!(
                     r#"{{ id: "{id}", mode: "{mode}",
                           listen: {{ endpoints: {} }}, connect: {{ endpoints: {} }},
                           scouting: {{ multicast: {{ enabled: false }} }},
-                          transport: {{ shared_memory: {{ enabled: {shm} }} }} }}"#,
+                          transport: {{ shared_memory: {{ enabled: {shm} }}{link} }} }}"#,
                     endpoints(listen),
                     endpoints(connect)
                 ))
@@ -269,11 +275,16 @@ fn open(
     listen: Option<&str>,
     connect: Option<&str>,
     shm: bool,
+    batch_size: Option<u16>,
 ) -> Box<dyn Peer> {
     let id = next_id();
     match of {
-        Crate::Up => Box::new(up::open(&id, mode, listen, connect, shm)) as Box<dyn Peer>,
-        Crate::Wz => Box::new(wz::open(&id, mode, listen, connect, shm)) as Box<dyn Peer>,
+        Crate::Up => {
+            Box::new(up::open(&id, mode, listen, connect, shm, batch_size)) as Box<dyn Peer>
+        }
+        Crate::Wz => {
+            Box::new(wz::open(&id, mode, listen, connect, shm, batch_size)) as Box<dyn Peer>
+        }
     }
 }
 
@@ -332,8 +343,8 @@ fn transcript(
 ) -> Vec<String> {
     let body: Vec<u8> = (0..64u8).collect();
     let endpoint = format!("tcp/127.0.0.1:{}", free_port());
-    let mut listening = open(listener, mode, Some(&endpoint), None, true);
-    let mut dialling = open(dialler, "peer", None, Some(&endpoint), dialler_shm);
+    let mut listening = open(listener, mode, Some(&endpoint), None, true, None);
+    let mut dialling = open(dialler, "peer", None, Some(&endpoint), dialler_shm, None);
     let deadline = Instant::now() + Duration::from_secs(5);
     while listening.linked() < 1 || dialling.linked() < 1 {
         assert!(
@@ -425,12 +436,14 @@ fn with_shared_memory_off_on_one_side_every_payload_crosses_as_its_bytes() {
     }
 }
 
-/// One member of a group: its crate, its mode and whether its shared memory is enabled.
+/// One member of a group: its crate, its mode, whether its shared memory is enabled and the batch
+/// size its configuration states, if any.
 #[derive(Clone, Copy, Debug)]
 struct Member {
     of: Crate,
     mode: &'static str,
     shm: bool,
+    batch_size: Option<u16>,
 }
 
 /// The modes of the two members of a group, the sender's first. A wz member in router mode is a
@@ -443,8 +456,22 @@ const GROUP_MODES: [(&str, &str); 3] = [("peer", "peer"), ("router", "peer"), ("
 /// descriptor it receives.
 fn group_line(sender: Member, receiver: Member) -> String {
     let group = format!("udp/224.0.0.1:{}", free_group_port());
-    let mut receiving = open(receiver.of, receiver.mode, Some(&group), None, receiver.shm);
-    let sending = open(sender.of, sender.mode, Some(&group), None, sender.shm);
+    let mut receiving = open(
+        receiver.of,
+        receiver.mode,
+        Some(&group),
+        None,
+        receiver.shm,
+        receiver.batch_size,
+    );
+    let sending = open(
+        sender.of,
+        sender.mode,
+        Some(&group),
+        None,
+        sender.shm,
+        sender.batch_size,
+    );
     let key = format!("diff/shm/group/{}", next_id());
     let told = receiving.subscribe(&key);
     let body: Vec<u8> = (0..64u8).collect();
@@ -463,11 +490,13 @@ fn shared_memory_crosses_a_multicast_group_to_and_from_upstream_as_between_two_u
                         of: sender,
                         mode: sender_mode,
                         shm: sender_shm,
+                        batch_size: None,
                     },
                     Member {
                         of: receiver,
                         mode: receiver_mode,
                         shm: true,
+                        batch_size: None,
                     },
                 )
             };
@@ -505,11 +534,13 @@ fn a_put_crosses_a_multicast_group_between_the_crates_as_between_two_upstream_me
                     of: sender,
                     mode: sender_mode,
                     shm: false,
+                    batch_size: None,
                 },
                 Member {
                     of: receiver,
                     mode: receiver_mode,
                     shm: false,
+                    batch_size: None,
                 },
             )
         };
@@ -545,11 +576,13 @@ fn a_member_without_shared_memory_is_never_handed_a_descriptor_as_the_data() {
                 of,
                 mode: sender_mode,
                 shm: true,
+                batch_size: None,
             };
             let without = |of: Crate| Member {
                 of,
                 mode: receiver_mode,
                 shm: false,
+                batch_size: None,
             };
             let upstream = group_line(sender, without(Crate::Up));
             assert!(
@@ -560,6 +593,49 @@ fn a_member_without_shared_memory_is_never_handed_a_descriptor_as_the_data() {
                 group_line(sender, without(Crate::Wz)),
                 "a put to the group: never handed over",
                 "{sender:?} sending, wz's {receiver_mode} without shared memory"
+            );
+        }
+    }
+}
+
+/// A member whose batch size is not the receiver's is never admitted, and nothing it sends is
+/// handed over: the sender states zenoh-pico's multicast batch (2,048 bytes), the receiver keeps
+/// zenoh's (8,192). What two upstream members do is the reference, and every pair of crates and
+/// modes must do the same. The cell above with no batch stated is the control that the group
+/// carries a put at all.
+#[test]
+fn a_member_of_another_batch_size_is_heard_by_no_member_as_by_no_upstream_member() {
+    let _g = serial();
+    for (sender_mode, receiver_mode) in GROUP_MODES {
+        let members = |sender: Crate, receiver: Crate| {
+            (
+                Member {
+                    of: sender,
+                    mode: sender_mode,
+                    shm: false,
+                    batch_size: Some(2_048),
+                },
+                Member {
+                    of: receiver,
+                    mode: receiver_mode,
+                    shm: false,
+                    batch_size: None,
+                },
+            )
+        };
+        let (sender, receiver) = members(Crate::Up, Crate::Up);
+        let reference = group_line(sender, receiver);
+        assert_eq!(
+            reference, "a put to the group: never handed over",
+            "two upstream members of different batch sizes, a {sender_mode} sending and a \
+             {receiver_mode} receiving"
+        );
+        for (sender, receiver) in &PAIRS[1..] {
+            let (sending, receiving) = members(*sender, *receiver);
+            assert_eq!(
+                group_line(sending, receiving),
+                reference,
+                "{sending:?} sending, {receiving:?} receiving"
             );
         }
     }
