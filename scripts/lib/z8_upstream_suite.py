@@ -411,20 +411,173 @@ def raise_open_files_limit() -> None:
         resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
 
 
-def run(cmd: list[str], cwd: pathlib.Path, log: pathlib.Path, bound: int) -> int | None:
-    with log.open("w", encoding="utf-8") as fh:
+#: A run that neither writes to its log nor spends `STALL_CPU_TICKS` clock ticks of CPU (its whole
+#: process tree, cargo and the test binary) for this many seconds has its threads written into its
+#: log, once per stall, and goes on to its bound as before (`Z8_STALL_S`; 0 turns it off). The
+#: routing file's process-wide stop (2026-10-31: every thread asleep, two router loop threads in
+#: a futex, 0 CPU) came once in about twelve runs and did not come back under a debugger: the
+#: state of the stopped process is what is missing, and it is gone once the bound kills it.
+STALL_S = int(os.environ.get("Z8_STALL_S", "120"))
+STALL_POLL_S = 5
+#: Less CPU than this in one poll is no progress: an idle runtime's timer wheel spends a tick now
+#: and then, a stopped process none.
+STALL_CPU_TICKS = 2
+#: Frames per thread of the stack `gdb` is asked for.
+STALL_FRAMES = 40
+
+
+def stat_fields(text: str) -> tuple[str, int, int] | None:
+    """The state letter, the parent pid and the CPU (user + system, in clock ticks) of a
+    `/proc/<pid>/stat` or `/proc/<pid>/task/<tid>/stat` text. The name is in parentheses and may
+    hold anything, so the fields are those after the LAST closing one."""
+    close = text.rfind(")")
+    if close < 0:
+        return None
+    f = text[close + 2 :].split()
+    try:
+        return f[0], int(f[1]), int(f[11]) + int(f[12])
+    except (IndexError, ValueError):
+        return None
+
+
+def read_text(path: pathlib.Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def process_tree(root: int) -> list[int]:
+    """`root` and every process below it, parents first; empty where there is no `/proc`."""
+    proc = pathlib.Path("/proc")
+    children: dict[int, list[int]] = {}
+    for entry in proc.glob("[0-9]*"):
+        fields = stat_fields(read_text(entry / "stat"))
+        if fields:
+            children.setdefault(fields[1], []).append(int(entry.name))
+    if not (proc / str(root)).is_dir():
+        return []
+    tree, todo = [], [root]
+    while todo:
+        pid = todo.pop(0)
+        tree.append(pid)
+        todo.extend(sorted(children.get(pid, [])))
+    return tree
+
+
+def tree_cpu_ticks(pids: list[int]) -> int:
+    return sum((stat_fields(read_text(pathlib.Path(f"/proc/{pid}/stat"))) or ("", 0, 0))[2] for pid in pids)
+
+
+def stall_report(root: int, why: str) -> str:
+    """Every process and thread of the tree under `root`: state, CPU, kernel wait channel and
+    name, read from `/proc` without any privilege; then each process but cargo's own as `gdb`
+    sees its threads. `gdb` attaches only where the host lets a non-ancestor trace
+    (`kernel.yama.ptrace_scope` 0): a refusal is written as it comes, and bx's own record of a run
+    that stays idle (`BX_RUN_STALL_BEGIN`, ten minutes) holds the stacks then, since bx's first
+    process of a run is an ancestor of the test."""
+    scope = read_text(pathlib.Path("/proc/sys/kernel/yama/ptrace_scope")).strip() or "?"
+    lines = [f"z8-stall: {why}; root pid={root} ptrace_scope={scope}"]
+    pids = process_tree(root)
+    if not pids:
+        lines.append("z8-stall: no /proc entry for the run: nothing to read on this host")
+    gdb = shutil.which("gdb")
+    for pid in pids:
+        base = pathlib.Path(f"/proc/{pid}")
+        state, ppid, ticks = stat_fields(read_text(base / "stat")) or ("?", 0, 0)
+        cmd = read_text(base / "cmdline").replace("\0", " ").strip()[:300]
+        lines.append(f"z8-stall: process pid={pid} ppid={ppid} state={state} cpu_ticks={ticks} cmd={cmd}")
+        for task in sorted(base.glob("task/[0-9]*"), key=lambda p: int(p.name)):
+            t_state, _, t_ticks = stat_fields(read_text(task / "stat")) or ("?", 0, 0)
+            lines.append(
+                f"z8-stall: thread pid={pid} tid={task.name} state={t_state} cpu_ticks={t_ticks}"
+                f" wchan={read_text(task / 'wchan').strip() or '?'} name={read_text(task / 'comm').strip()}"
+            )
+        if read_text(base / "comm").strip() == "cargo":
+            continue
+        if not gdb:
+            lines.append(f"z8-stall: gdb pid={pid}: no gdb on this host")
+            continue
         try:
-            return subprocess.run(
-                cmd,
-                cwd=cwd,
-                stdout=fh,
-                stderr=subprocess.STDOUT,
-                timeout=bound,
-                # `preexec_fn` exists only where processes fork; elsewhere there is no limit to raise.
-                preexec_fn=raise_open_files_limit if os.name == "posix" else None,
-            ).returncode
-        except subprocess.TimeoutExpired:
-            return None
+            seen = subprocess.run(
+                [gdb, "-batch", "-nx", "-p", str(pid), "-ex", "set pagination off",
+                 "-ex", f"thread apply all bt {STALL_FRAMES}"],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=120,
+            )
+            told = (seen.stdout + seen.stderr).splitlines()
+        except (OSError, subprocess.TimeoutExpired) as e:
+            told = [f"gdb did not answer: {e}"]
+        lines.extend(f"z8-stall: gdb pid={pid}: {line}" for line in told)
+    return "\n".join(lines) + "\n"
+
+
+def write_beside(fh, text: str) -> None:
+    """Append `text` to a log a child is writing: the child shares the file's offset, and a
+    stalled child writes nothing meanwhile."""
+    fh.flush()
+    os.write(fh.fileno(), text.encode("utf-8", errors="replace"))
+
+
+def end_tree(proc: subprocess.Popen) -> None:
+    """Kill the run and every process below it: killing cargo alone left its test binary running
+    with no one to read it."""
+    for pid in reversed(process_tree(proc.pid)[1:]):
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+    proc.kill()
+    proc.wait()
+
+
+def run(cmd: list[str], cwd: pathlib.Path, log: pathlib.Path, bound: int) -> int | None:
+    """Run `cmd` into `log` for at most `bound` seconds: its exit status, or `None` when the bound
+    ended it. A stall (`STALL_S`) and the end at the bound write the run's threads into the log
+    first ([`stall_report`])."""
+    with log.open("w", encoding="utf-8") as fh:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=fh,
+            stderr=subprocess.STDOUT,
+            # `preexec_fn` exists only where processes fork; elsewhere there is no limit to raise.
+            preexec_fn=raise_open_files_limit if os.name == "posix" else None,
+        )
+        deadline = time.monotonic() + bound
+        size, ticks, still_since, told = -1, -1, time.monotonic(), False
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                write_beside(fh, stall_report(proc.pid, f"the bound of {bound} s ended the run"))
+                end_tree(proc)
+                return None
+            try:
+                return proc.wait(timeout=min(STALL_POLL_S, left))
+            except subprocess.TimeoutExpired:
+                pass
+            # A host with no `/proc` (Windows) has no CPU to read and no threads to name.
+            if STALL_S <= 0 or not os.path.isdir("/proc"):
+                continue
+            now = time.monotonic()
+            now_size, now_ticks = log.stat().st_size, tree_cpu_ticks(process_tree(proc.pid))
+            progressed = now_size != size or now_ticks - ticks >= STALL_CPU_TICKS
+            size, ticks = now_size, now_ticks
+            if progressed:
+                still_since, told = now, False
+            elif not told and now - still_since >= STALL_S:
+                write_beside(
+                    fh,
+                    stall_report(
+                        proc.pid,
+                        f"no output and under {STALL_CPU_TICKS} CPU ticks per {STALL_POLL_S} s"
+                        f" for {int(now - still_since)} s",
+                    ),
+                )
+                # The report is not progress: the next poll measures from what it left.
+                size, told = log.stat().st_size, True
 
 
 def first_errors(log: pathlib.Path, limit: int = 3) -> list[str]:
@@ -572,6 +725,11 @@ def measure(names: list[str], out: pathlib.Path) -> int:
 
 
 def selftest() -> int:
+    # A name with spaces and parentheses: the fields are read after the last `)`.
+    stat = "4242 (wz-capi (r) x) S 17 4242 4242 0 -1 4194560 10 0 0 0 7 5 0 0 20 0 3 0 99 0 0"
+    assert stat_fields(stat) == ("S", 17, 12), stat_fields(stat)
+    assert stat_fields("no name here") is None and stat_fields("1 (a) S") is None
+    assert process_tree(-1) == []
     deps = workspace_dependencies(
         '[workspace]\nmembers = []\n\n[workspace.dependencies]\nregex = "1.11"\n'
         'tokio = { version = "1.45", default-features = false }\n\n[profile.dev]\nx = 1\n'
