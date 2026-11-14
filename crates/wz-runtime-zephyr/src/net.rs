@@ -864,9 +864,9 @@ impl DatagramSocket for ZephyrUdpSocket {
 /// `wz_runtime_coop::udp_link::UdpDriver`; its constructors and its behaviour are documented there.
 pub type UdpDriver<B, T> = wz_runtime_coop::udp_link::UdpDriver<ZephyrUdpSocket, B, T>;
 
-/// The heap profile's driver: its receive buffer is a `Vec<u8>` of the capacity the link was
-/// given, and its frames are encoded into a [`HeapTx`] of the capacity it was given, if any.
 wz_runtime_coop::with_heap_link_seams! {
+    /// The heap profile's driver: its receive buffer is a `Vec<u8>` of the capacity the link was
+    /// given, and its frames are encoded into a [`HeapTx`] of the capacity it was given, if any.
     #[cfg(feature = "alloc")]
     pub type ZephyrUdpDriver = UdpDriver<Vec<u8>, HeapTx>;
 }
