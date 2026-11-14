@@ -344,6 +344,46 @@ pub struct PayloadClass {
     /// The PAYLOAD bytes — upstream's `pl_bytes`, the message's own payload and
     /// not the encoded envelope (which `bytes` already counts at the wire seam).
     pub pl_bytes: usize,
+    /// The `stats/filters` keys its key expression meets, by their place in the
+    /// session's filter list: what the per-key payload family counts it under.
+    /// Empty until the session that sends or receives it matches it
+    /// ([`NetworkStatsClass::with_keys`]).
+    pub keys: StatsKeyMatch,
+}
+
+/// A set of `stats/filters` keys, by their index in a session's filter list (upstream's key
+/// index, `commons/zenoh-stats/src/keys.rs` @ `.map(|key| (self.generation, key))`).
+///
+/// One word, so a class stays `Copy` and is matched once where the key expression is known. A
+/// filter list holds at most [`Self::CAPACITY`] keys for that reason.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatsKeyMatch(u64);
+
+impl StatsKeyMatch {
+    /// The most keys a filter list holds.
+    pub const CAPACITY: usize = 64;
+    /// No key.
+    pub const NONE: StatsKeyMatch = StatsKeyMatch(0);
+
+    /// This set and the key at `index`; an index past [`Self::CAPACITY`] adds nothing.
+    #[must_use]
+    pub fn with(self, index: usize) -> StatsKeyMatch {
+        if index < Self::CAPACITY {
+            StatsKeyMatch(self.0 | (1u64 << index))
+        } else {
+            self
+        }
+    }
+
+    /// Whether the key at `index` is in the set.
+    pub fn contains(self, index: usize) -> bool {
+        index < Self::CAPACITY && self.0 & (1u64 << index) != 0
+    }
+
+    /// Whether the set holds no key.
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
 }
 
 /// The network message kind a registry sample counts
@@ -473,6 +513,7 @@ impl NetworkStatsClass {
                 message,
                 space,
                 pl_bytes,
+                keys: StatsKeyMatch::NONE,
             }),
         }
     }
@@ -493,6 +534,7 @@ impl NetworkStatsClass {
                 message,
                 space,
                 pl_bytes,
+                keys: StatsKeyMatch::NONE,
             }),
         }
     }
@@ -503,6 +545,16 @@ impl NetworkStatsClass {
     #[must_use]
     pub const fn on_shm(mut self) -> NetworkStatsClass {
         self.medium = StatMedium::Shm;
+        self
+    }
+
+    /// The same class counted under the `stats/filters` keys `keys`; a class with no payload
+    /// counts under none and is returned as it is.
+    #[must_use]
+    pub fn with_keys(mut self, keys: StatsKeyMatch) -> NetworkStatsClass {
+        if let Some(payload) = self.payload.as_mut() {
+            payload.keys = keys;
+        }
         self
     }
 }
@@ -981,6 +1033,29 @@ mod tests {
         assert_eq!(
             TransportStats::default().report(),
             TransportStatsReport::default()
+        );
+    }
+
+    /// A key set holds the indices put in it and nothing past its capacity, and
+    /// a class takes one only where it has a payload to count under it.
+    #[test]
+    fn a_key_set_is_carried_by_a_payload_class_alone() {
+        let set = StatsKeyMatch::NONE
+            .with(0)
+            .with(63)
+            .with(StatsKeyMatch::CAPACITY);
+        assert!(set.contains(0) && set.contains(63));
+        assert!(!set.contains(1) && !set.contains(StatsKeyMatch::CAPACITY));
+        assert!(StatsKeyMatch::NONE.is_empty() && !set.is_empty());
+
+        let put = NetworkStatsClass::net(MessageLabel::Put, StatMessage::Put, StatSpace::User, 4);
+        assert_eq!(put.payload.map(|p| p.keys), Some(StatsKeyMatch::NONE));
+        assert_eq!(put.with_keys(set).payload.map(|p| p.keys), Some(set));
+        let declare = NetworkStatsClass::control(MessageLabel::Declare);
+        assert_eq!(
+            declare.with_keys(set),
+            declare,
+            "a control message counts under no key"
         );
     }
 }

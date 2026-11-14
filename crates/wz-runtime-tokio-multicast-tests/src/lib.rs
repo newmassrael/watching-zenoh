@@ -46,6 +46,7 @@ mod tests {
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+            max_sessions: None,
         };
         let (producer, tap) = MulticastTxTap::attach(&params);
         let session = TokioMulticastSession::new_multicast(

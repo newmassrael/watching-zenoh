@@ -180,6 +180,11 @@ fn count_rx_network_messages<R: SessionRuntime, T: TimeSource>(
     #[cfg(feature = "transport-stats")]
     for msg in &messages {
         let class = crate::network_message::stats_class(msg, |_id| None);
+        // Matched against the session's `stats/filters` with the same empty resolver, so an
+        // aliased key counts under no filter as it counts in the user space.
+        let class = _actions.stats_keys_of(class, || {
+            crate::network_message::stats_keyexpr(msg, |_id| None)
+        });
         _actions.stats.inc_rx_network(&class);
         // R2825 — the registry: the payload observed, and the message counted
         // on the link that received it, under the message's own band.
@@ -213,6 +218,9 @@ fn count_rx_plain_puts<R: SessionRuntime, T: TimeSource>(
         let pl_bytes = put.payload.1.saturating_sub(put.payload.0) as usize;
         let class =
             crate::network_message::plain_put_stats_class(put.id, suffix, pl_bytes, |_id| None);
+        let class = actions.stats_keys_of(class, || {
+            crate::network_message::stats_keyexpr_of_key(put.id, suffix, &|_id| None)
+        });
         actions.stats.inc_rx_network(&class);
         let priority = crate::declare_ext_qos::qos_of_raw(put.qos.map(u64::from)).priority();
         actions.observe_payload(rx, priority, &class);

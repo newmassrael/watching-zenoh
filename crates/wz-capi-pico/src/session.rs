@@ -185,6 +185,8 @@ const fn pico_group(
     wz_capi_core::drive::GroupProfile {
         lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
         join_interval_ms: 2_500,
+        // pico has no cap on a group's members: its list grows while its allocator gives.
+        max_sessions: None,
         seq_num_res: sn_resolution.wire_code(),
         req_id_res: 0x02,
         batch_size: pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES),
@@ -2179,6 +2181,19 @@ mod build_numbers {
             assert_eq!(profile.req_id_res, default.req_id_res);
             assert_eq!(profile.batch_size, default.batch_size);
             assert_eq!(profile.lease_ms, default.lease_ms);
+        }
+    }
+
+    /// Pico states no cap on a group's members, and neither does its preset, whatever the width:
+    /// the face it joins then holds the rows of its table and no more, which is where the preset
+    /// departs from pico by decision (`docs/upstream-parity.md` section 7).
+    #[cfg(feature = "multicast-transport")]
+    #[test]
+    fn the_pico_group_states_no_member_cap() {
+        use wz_session_core::policy::SnResolution;
+        assert_eq!(PICO_GROUP.max_sessions, None);
+        for width in [SnResolution::Bits8, SnResolution::Bits64] {
+            assert_eq!(pico_group(width).max_sessions, None, "{}", width.id());
         }
     }
 }

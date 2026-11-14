@@ -539,6 +539,57 @@ pub(crate) fn parse_max_sessions(args: &[String]) -> usize {
         .unwrap_or(default)
 }
 
+/// `--multicast-max-sessions <N>`: how many members the router's group face holds at once, the
+/// flag a document's `transport/multicast/max_sessions` expands to. `None` when the flag is
+/// absent, which states no cap: the face's table rows are then the bound.
+///
+/// A value that is not a count is an error rather than a warning and a default, unlike
+/// `--max-sessions`: the face would otherwise hold a cap nobody stated. Zero is a count, as
+/// upstream's `usize` takes it, and a face under it admits no member.
+#[cfg(feature = "router-hat-router")]
+pub(crate) fn parse_multicast_max_sessions(args: &[String]) -> Result<Option<usize>, String> {
+    parse_pair(args, "--multicast-max-sessions")
+        .map(|s| {
+            s.trim().parse::<usize>().map_err(|_| {
+                format!("--multicast-max-sessions expects a count of members, got '{s}'")
+            })
+        })
+        .transpose()
+}
+
+#[cfg(all(test, feature = "router-hat-router"))]
+mod multicast_max_sessions_flag_tests {
+    use super::parse_multicast_max_sessions;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    /// Absent is no cap; any count is read, zero included; anything else is refused by the
+    /// flag's name rather than replaced by a default.
+    #[test]
+    fn the_flag_reads_a_count_zero_included_and_refuses_anything_else() {
+        assert_eq!(parse_multicast_max_sessions(&argv(&[])), Ok(None));
+        let flag = "--multicast-max-sessions";
+        assert_eq!(
+            parse_multicast_max_sessions(&argv(&[flag, "1000"])),
+            Ok(Some(1000))
+        );
+        assert_eq!(
+            parse_multicast_max_sessions(&argv(&[flag, "0"])),
+            Ok(Some(0))
+        );
+        for bad in ["-1", "ten", "1.5", ""] {
+            let err = parse_multicast_max_sessions(&argv(&[flag, bad]))
+                .expect_err("a value that is not a count is refused");
+            assert!(
+                err.contains("--multicast-max-sessions expects"),
+                "{bad}: {err}"
+            );
+        }
+    }
+}
+
 /// `--accept-pending <N>` and `--accept-timeout-ms <MS>`: how many inbound links may be
 /// mid-handshake at once and how long each gets, the two keys upstream keeps under
 /// `transport/unicast` (`accept_pending`, `accept_timeout`). Absent, upstream's own, a hundred and
@@ -662,6 +713,55 @@ pub(crate) fn metadata_flag(
         .to_upstream_value_json_text()
         .map_err(|e| format!("--metadata: {e}; stock zenoh refuses it too"))?;
     Ok(Some(value))
+}
+
+/// `--aggregation-subscribers <list>` and `--aggregation-publishers <list>`: the
+/// node config's `aggregation/subscribers` and `aggregation/publishers`, each a
+/// JSON5 list of key expressions, which a `--config` file's keys expand to. The
+/// node's session, or a peer node's own declarations, declare under them. An
+/// absent flag is an empty list; a member that is not a key expression, and a
+/// list in a build without the inclusion test that applies it, are refused.
+pub(crate) fn declaration_aggregation_flags(
+    args: &[String],
+) -> Result<wz::runtime_tokio::declaration_aggregation::DeclarationAggregation, String> {
+    fn list(args: &[String], flag: &str) -> Result<Vec<String>, String> {
+        let Some(text) = parse_pair(args, flag) else {
+            return Ok(Vec::new());
+        };
+        match wz::runtime_tokio::json5::parse(&text) {
+            Ok(wz::runtime_tokio::json5::Json5Value::Array(items)) => items
+                .into_iter()
+                .map(|item| match item {
+                    wz::runtime_tokio::json5::Json5Value::String(key) => Ok(key),
+                    _ => Err(format!("{flag} {text:?} must be a list of key expressions")),
+                })
+                .collect(),
+            _ => Err(format!("{flag} {text:?} must be a list of key expressions")),
+        }
+    }
+    let subscribers = list(args, "--aggregation-subscribers")?;
+    let publishers = list(args, "--aggregation-publishers")?;
+    wz::runtime_tokio::declaration_aggregation::DeclarationAggregation::new(subscribers, publishers)
+        .map_err(|e| format!("--aggregation-subscribers / --aggregation-publishers: {e}"))
+}
+
+/// `--plugin-search-dirs <list>`: the node config's `plugins_loading/search_dirs`,
+/// a JSON5 list of paths and `{ kind, value }` specs, which a `--config` file's
+/// key expands to. Read by the storage host, the run-mode that loads plugins;
+/// `None` when not given, and the host then searches upstream's default list.
+/// A list upstream's parser refuses is refused here before the host starts.
+#[cfg(feature = "adminspace-config-hotreload")]
+pub(crate) fn plugin_search_dirs_flag(
+    args: &[String],
+) -> Result<Option<wz::runtime_tokio::plugin_search_dirs::LibSearchDirs>, String> {
+    let Some(text) = parse_pair(args, "--plugin-search-dirs") else {
+        return Ok(None);
+    };
+    let value = wz::runtime_tokio::json5::parse(&text)
+        .map_err(|e| format!("--plugin-search-dirs {text:?} is not a JSON5 value: {e}"))?;
+    wz::runtime_tokio::plugin_search_dirs::LibSearchDirs::from_json5(&value)
+        .map(Some)
+        .map_err(|shape| format!("--plugin-search-dirs {text:?} must be {shape}"))
 }
 
 /// §5.23 `adminspace-core` — the admin space a single-session run hosts on its
@@ -2164,6 +2264,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             no_sink("transport/multicast/qos/enabled"),
         );
     }
+    // The cap on a group's members, which the router-hat's group face holds. Expanded at any
+    // value, upstream's 1000 included: the face grows its table to whatever cap it is given.
+    if named("transport/multicast/max_sessions") {
+        exp.pair(
+            "transport/multicast/max_sessions",
+            "--multicast-max-sessions",
+            cfg.multicast_max_sessions.to_string(),
+            no_sink("transport/multicast/max_sessions"),
+        );
+    }
     if named("transport/shared_memory/enabled") {
         exp.presence(
             "transport/shared_memory/enabled",
@@ -2427,6 +2537,94 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             .map(|section| section.to_json5_text())
             .unwrap_or_default();
         exp.pair("plugins", "--plugins", section, blocked);
+    }
+    // `plugins_loading/search_dirs`, onto `--plugin-search-dirs <list>`, taken
+    // verbatim like `--plugins` and read by the same run-mode, the one that
+    // loads plugins.
+    if named("plugins_loading/search_dirs") {
+        let run_flag = typed_role
+            .map(|(flag, _)| flag)
+            .or(selected.map(|s| s.flag));
+        let blocked = no_sink("plugins_loading/search_dirs").or_else(|| {
+            (run_flag != Some("--storage-host")).then_some(KeyEffect::WithheldFromThisRun(
+                "a plugin search (only --storage-host loads plugins)",
+            ))
+        });
+        let dirs = cfg
+            .plugin_search_dirs
+            .as_ref()
+            .map(|dirs| dirs.to_json5_text())
+            .unwrap_or_default();
+        exp.pair(
+            "plugins_loading/search_dirs",
+            "--plugin-search-dirs",
+            dirs,
+            blocked,
+        );
+    }
+    // `aggregation/{subscribers,publishers}`, onto `--aggregation-subscribers
+    // <list>` and `--aggregation-publishers <list>`. Every run that declares a
+    // subscriber or a publisher of its own takes them: a single-session run's
+    // session, a peer node's own declarations and a storage host's storages. A
+    // router-hat declares none. An empty list is upstream's default.
+    {
+        let run_flag = typed_role
+            .map(|(flag, _)| flag)
+            .or(selected.map(|s| s.flag));
+        for (key, flag, list) in [
+            (
+                "aggregation/subscribers",
+                "--aggregation-subscribers",
+                &cfg.aggregation_subscribers,
+            ),
+            (
+                "aggregation/publishers",
+                "--aggregation-publishers",
+                &cfg.aggregation_publishers,
+            ),
+        ] {
+            if !named(key) {
+                continue;
+            }
+            if list.is_empty() {
+                exp.record(key, KeyEffect::AlreadyTheBehaviour);
+                continue;
+            }
+            let blocked = no_sink(key).or_else(|| {
+                (run_flag == Some("--router-hat")).then_some(KeyEffect::WithheldFromThisRun(
+                    "a declaration of its own (a --router-hat declares none)",
+                ))
+            });
+            let text = wz::runtime_tokio::json5::Json5Value::Array(
+                list.iter()
+                    .map(|member| wz::runtime_tokio::json5::Json5Value::String(member.clone()))
+                    .collect(),
+            )
+            .to_json5_text();
+            exp.pair(key, flag, text, blocked);
+        }
+    }
+    // `stats/filters`, onto `--stats-filters <list>` of the filters' keys. Every
+    // run counts its sessions' payloads, so every run takes it; an empty list is
+    // upstream's default.
+    if named("stats/filters") {
+        if cfg.stats_filters.is_empty() {
+            exp.record("stats/filters", KeyEffect::AlreadyTheBehaviour);
+        } else {
+            let text = wz::runtime_tokio::json5::Json5Value::Array(
+                cfg.stats_filters
+                    .iter()
+                    .map(|key| wz::runtime_tokio::json5::Json5Value::String(key.clone()))
+                    .collect(),
+            )
+            .to_json5_text();
+            exp.pair(
+                "stats/filters",
+                "--stats-filters",
+                text,
+                no_sink("stats/filters"),
+            );
+        }
     }
     // `plugins_loading/enabled`, onto the storage host's `--plugins-loading`, under the
     // `plugins` site's precondition: only that run-mode hosts plugins. A named `false` is the
@@ -3622,6 +3820,19 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          bound` in accept_loop.rs. A refused peer sees its link close, which \
          no frame field distinguishes from any other close.",
     ),
+    // OFF-WIRE for its unicast twin's reason, more so: a member turned away is sent nothing at
+    // all, since upstream ignores the Join (`io/zenoh-transport/src/multicast/rx.rs` @
+    // `Ignoring Join on {} from peer: {}. Max sessions reached: {}.`), and so does wz.
+    (
+        "transport/multicast/max_sessions",
+        KIND_OFF_WIRE,
+        "expands to `--multicast-max-sessions`, which the router-hat's group face \
+         takes as its dispatcher's cap (multicast_glue.rs, `serve_group_face`). A \
+         local admission bound: the table grows to it and ignores the Join of a \
+         member past it, witnessed by `a_growing_table_admits_past_its_rows_to_the_\
+         stated_cap` in wz-session-core's multicast_dispatch.rs. The member turned \
+         away is sent nothing, so no frame carries the bound.",
+    ),
     (
         "transport/unicast/open_timeout",
         KIND_LEG_JUDGED,
@@ -4083,7 +4294,7 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
         KIND_OFF_WIRE,
         "expands to `--plugins-loading` on a `--storage-host` run. Whether a plugin \
          the section names with no path is looked up, visible as that plugin left \
-         unloaded with a warning or refused by name, which \
+         unloaded with a warning or searched for in `plugins_loading/search_dirs`, which \
          by_name_loading_off_leaves_an_unnamed_plugin_unloaded_and_fails_nothing \
          reads; no zenoh frame carries it.",
     ),
@@ -4099,6 +4310,51 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          wz_storage_host_from_a_config_file_alone_hosts_its_storage_and_applies_its_listen_endpoint, in \
          wz_storage_host_from_config_alone.rs, starts it on the file with no run \
          flag at all.",
+    ),
+    // The aggregates are carried by the declarations themselves: the key a
+    // `DeclSubscriber` and a subscribers `Interest` name, and how many of them go.
+    (
+        "aggregation/subscribers",
+        KIND_NOT_YET_READ,
+        "expands to `--aggregation-subscribers <list>`. A frame DOES carry it: the \
+         DeclSubscriber a subscriber under an aggregate sends names the aggregate, \
+         and the subscribers under it send one between them \
+         (`zenoh/src/api/session.rs` @ `.aggregated_subscribers`). The session's \
+         own count is judged by subscribers_under_one_aggregate_put_one_declaration_on_the_wire; \
+         no leg reads a CONFIG-sourced aggregate off a node's frame yet.",
+    ),
+    (
+        "aggregation/publishers",
+        KIND_NOT_YET_READ,
+        "expands to `--aggregation-publishers <list>`. A frame DOES carry it: the \
+         subscribers Interest a publisher under an aggregate sends names the \
+         aggregate, one for all of them \
+         (`zenoh/src/api/session.rs` @ `.aggregated_publishers`). The session's own count is judged by \
+         publishers_under_one_aggregate_ask_with_one_interest; no leg reads a \
+         CONFIG-sourced aggregate off a node's frame yet.",
+    ),
+    // Which per-key series a node's metrics carry: a counter, which no frame
+    // carries.
+    (
+        "stats/filters",
+        KIND_OFF_WIRE,
+        "expands to `--stats-filters <list>`. Each payload a session sends or \
+         receives is counted again under every filter its key expression meets, \
+         visible only in the metrics document an adminspace serves, as the \
+         per-key payload family's `key` label; no frame field carries it. Judged \
+         by a_session_counts_its_payloads_under_the_stats_filters_they_meet in \
+         wz-runtime-tokio's session tests.",
+    ),
+    // Which library a plugin named without a `__path__` loads from: a search of
+    // the file system, which no frame carries.
+    (
+        "plugins_loading/search_dirs",
+        KIND_OFF_WIRE,
+        "expands to `--plugin-search-dirs <list>` on a `--storage-host` run. The \
+         list decides which directory a plugin named without a path is loaded \
+         from, visible only as the plugin that starts; no frame field carries it. \
+         Judged by a_plugin_named_without_a_path_is_found_in_the_search_dirs in \
+         wz-runtime-tokio's plugin plane.",
     ),
     // §5.23 `adminspace-core` — `metadata`. The value travels in the REPLY to an
     // admin GET of the node's root key, and that reply is what the leg reads.
@@ -4267,6 +4523,11 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     if !cfg!(feature = "transport-qos") {
         out.push("transport/multicast/qos/enabled");
     }
+    // `transport/multicast/max_sessions`'s sink is the router-hat's group face, which a build
+    // without `router-multicast-faces` does not spawn.
+    if !cfg!(feature = "router-multicast-faces") {
+        out.push("transport/multicast/max_sessions");
+    }
     // The certificate material, which upstream hands to the `tls/` and the `quic/` link alike:
     // its sinks are this binary's plumbing for either link (`apply_tls_ca`/`apply_tls_accept`
     // under `tls`, `apply_quic_ca`/`apply_quic_accept` under `quic`), and without either
@@ -4330,9 +4591,24 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         out.push("plugins");
     }
     // `plugins_loading/enabled`'s sink is the storage host's library plugin plane, which only a
-    // `plugin-dynamic-loading` build compiles: without it `--plugins-loading` is inert.
+    // `plugin-dynamic-loading` build compiles: without it `--plugins-loading` is inert. The plane
+    // is `plugins_loading/search_dirs`' sink too, the directories its lookup searches.
     if !cfg!(all(unix, feature = "plugin-dynamic-loading")) {
         out.push("plugins_loading/enabled");
+        out.push("plugins_loading/search_dirs");
+    }
+    // The aggregates' sink is every session's declare, which a build without the inclusion test
+    // they are applied by does not have, and the stats filters' is the transport counters, which
+    // a build without `transport-stats` does not have; this crate reads both off the runtime
+    // rather than naming the runtime's features, which it does not declare.
+    for key in [
+        "aggregation/subscribers",
+        "aggregation/publishers",
+        "stats/filters",
+    ] {
+        if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
+            out.push(key);
+        }
     }
     // §5.23 `adminspace-core` — `metadata`'s sink is an adminspace host's
     // `local_data`, and this binary has four: `--peer` (`routing-peer`),
@@ -5538,9 +5814,9 @@ mod stock_config_tests {
             // storage manager. A file cannot select it (`mode` never maps to
             // it), so the row types it, and the role-parity sweep below skips
             // this row by MEASURING that the file supplies a different role.
-            // `plugins_loading/enabled` shares the precondition: the storage host is the one
-            // run-mode with a plugin plane.
-            "plugins" | "plugins_loading/enabled" => {
+            // `plugins_loading/enabled` and `search_dirs` share the precondition: the storage
+            // host is the one run-mode with a plugin plane.
+            "plugins" | "plugins_loading/enabled" | "plugins_loading/search_dirs" => {
                 &["--config", "z.json5", "--storage-host", "tcp/127.0.0.1:0"]
             }
             _ => &["--config", "z.json5"],
@@ -5964,6 +6240,13 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { multicast: { qos: { enabled: true } } } }"#,
             ),
+            // 9, away from upstream's 1000, so the delta is a value the file asked for.
+            (
+                "transport/multicast/max_sessions",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { multicast: { max_sessions: 9 } } }"#,
+            ),
             // R2063 (open-debt item 214) — the non-default value, for the reason
             // the `scouting/multicast/listen` row above states: the delta this
             // gate looks for is a VALUE the file asked for. R2896 (item 751):
@@ -6259,6 +6542,33 @@ mod stock_config_tests {
                 "metadata",
                 r#"{ mode: "peer" }"#,
                 r#"{ mode: "peer", metadata: { name: "strawberry" } }"#,
+            ),
+            // One directory, on the storage host `cli_for` names.
+            (
+                "plugins_loading/search_dirs",
+                r#"{ mode: "peer" }"#,
+                r#"{ mode: "peer", plugins_loading: { search_dirs: ["/opt/wz/plugins"] } }"#,
+            ),
+            // One aggregate each, which an empty list (the default) is not. A client
+            // document makes the run the one-shot client, which every build compiles.
+            (
+                "aggregation/subscribers",
+                r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] } }"#,
+                r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] },
+                     aggregation: { subscribers: ["demo/**"] } }"#,
+            ),
+            (
+                "aggregation/publishers",
+                r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] } }"#,
+                r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] },
+                     aggregation: { publishers: ["demo/**"] } }"#,
+            ),
+            // One filter, which the empty default list is not; every run counts.
+            (
+                "stats/filters",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     stats: { filters: [{ key: "demo/**" }] } }"#,
             ),
         ]
     }
@@ -10088,6 +10398,9 @@ pub(crate) struct TransportTuning {
     /// `--open-timeout-ms <ms>`: how long one open of an endpoint this node dials, its dial and
     /// its handshake, may take. Upstream's ten seconds unless given.
     pub(crate) open_timeout: std::time::Duration,
+    /// `--stats-filters <list>`: the key expressions every session of the node
+    /// counts payloads under (`stats/filters`). None unless given.
+    pub(crate) stats_filters: wz::runtime_tokio::stats_registry::StatsKeyFilters,
 }
 
 /// R2925 — the demo's flag for each priority's queue size, indexed by the
@@ -10114,6 +10427,7 @@ impl Default for TransportTuning {
             tx_queue: Default::default(),
             link_rx: Default::default(),
             open_timeout: wz::runtime_tokio::session_open::OPEN_TIMEOUT,
+            stats_filters: Default::default(),
         }
     }
 }
@@ -10253,6 +10567,33 @@ impl TransportTuning {
             out.link_defaults
                 .set(kind, span)
                 .map_err(|e: LinkDefaultsError| format!("--link-config '{value}': {e}"))?;
+        }
+        // `stats/filters`: a JSON5 list of key expressions. A build that counts
+        // no stats refuses one rather than starting without it.
+        if let Some(text) = parse_pair(rest, "--stats-filters") {
+            let refused = || format!("--stats-filters {text:?} must be a list of key expressions");
+            let keys: Vec<String> = match wz::runtime_tokio::json5::parse(&text) {
+                Ok(wz::runtime_tokio::json5::Json5Value::Array(items)) => items
+                    .into_iter()
+                    .map(|item| match item {
+                        wz::runtime_tokio::json5::Json5Value::String(key)
+                            if wz::runtime_tokio::keyexpr_canon::validate_keyexpr(&key).is_ok() =>
+                        {
+                            Ok(key)
+                        }
+                        _ => Err(refused()),
+                    })
+                    .collect::<Result<_, _>>()?,
+                _ => return Err(refused()),
+            };
+            if !keys.is_empty() && !wz::runtime_tokio::node_stats::stats_compiled() {
+                return Err(format!(
+                    "--stats-filters {text:?}: {}",
+                    wz::runtime_tokio::stats_registry::StatsKeyFiltersError::NotInBuild
+                ));
+            }
+            out.stats_filters = wz::runtime_tokio::stats_registry::StatsKeyFilters::new(keys)
+                .map_err(|e| format!("--stats-filters {text:?}: {e}"))?;
         }
         Ok(out)
     }
@@ -10555,6 +10896,9 @@ pub(crate) struct PublisherSpec {
 /// `Session::declare_{subscriber, queryable}` path (R311ou / R311ow), handled
 /// in `install_session_handles` rather than the raw `send_declare_*` emit here.
 pub(crate) struct DeclareEmitSpec {
+    /// `--aggregation-subscribers` / `--aggregation-publishers`: the aggregates the session
+    /// declares its subscribers and publishers under ([`declaration_aggregation_flags`]).
+    pub(crate) aggregation: wz::runtime_tokio::declaration_aggregation::DeclarationAggregation,
     pub(crate) token_keyexpr: Option<String>,
     /// R280 — optional `--liveliness-subscribe <keyexpr>` payload.
     /// When `Some`, the demo calls
@@ -11234,6 +11578,140 @@ mod gateway_south_flag_tests {
         ] {
             let err = parse_gateway_south(&argv(Some(bad))).expect_err(bad);
             assert!(err.starts_with("--gateway-south "), "{bad} -> {err}");
+        }
+    }
+}
+
+/// `--aggregation-subscribers` / `--aggregation-publishers`: absent is no
+/// aggregate, a list is read in order where the build can apply it, and a list
+/// that is not one of key expressions is refused with the flag named.
+#[cfg(test)]
+mod aggregation_flag_tests {
+    use super::*;
+    use wz::runtime_tokio::declaration_aggregation::DeclarationAggregation;
+
+    fn argv(pairs: &[(&str, &str)]) -> Vec<String> {
+        let mut out = vec!["--connect".to_string(), "tcp/127.0.0.1:7447".to_string()];
+        for (flag, value) in pairs {
+            out.push(flag.to_string());
+            out.push(value.to_string());
+        }
+        out
+    }
+
+    #[test]
+    fn absent_flags_aggregate_nothing() {
+        assert_eq!(
+            declaration_aggregation_flags(&argv(&[])),
+            Ok(DeclarationAggregation::none())
+        );
+    }
+
+    #[test]
+    fn the_two_lists_reach_the_aggregation_the_build_can_hold() {
+        let read = declaration_aggregation_flags(&argv(&[
+            ("--aggregation-subscribers", r#"["demo/a/**", "demo/**"]"#),
+            ("--aggregation-publishers", r#"["s/*/t"]"#),
+        ]));
+        let held = DeclarationAggregation::new(
+            vec![String::from("demo/a/**"), String::from("demo/**")],
+            vec![String::from("s/*/t")],
+        );
+        match held {
+            Ok(held) => assert_eq!(read, Ok(held)),
+            // A build without the inclusion test refuses the lists by the flags.
+            Err(_) => assert!(read.unwrap_err().starts_with("--aggregation-subscribers")),
+        }
+    }
+
+    #[test]
+    fn a_list_that_is_not_one_of_key_expressions_is_refused_by_the_flag() {
+        for (flag, bad) in [
+            ("--aggregation-subscribers", r#""demo/**""#),
+            ("--aggregation-subscribers", "[3]"),
+            ("--aggregation-publishers", r#"["demo//x"]"#),
+            ("--aggregation-publishers", "[ \"a\""),
+        ] {
+            let err = declaration_aggregation_flags(&argv(&[(flag, bad)])).expect_err(bad);
+            assert!(err.starts_with("--aggregation-"), "{bad} -> {err}");
+        }
+    }
+}
+
+/// `--stats-filters <list>`: absent is no filter, a list of key expressions is
+/// the node's filters where the build counts stats and refused where it does
+/// not, and a list of anything else is refused with the flag named.
+#[cfg(test)]
+mod stats_filters_flag_tests {
+    use super::*;
+
+    fn tuning(value: Option<&str>) -> Result<TransportTuning, String> {
+        let mut argv = vec!["--listen".to_string(), "tcp/127.0.0.1:0".to_string()];
+        if let Some(v) = value {
+            argv.push("--stats-filters".to_string());
+            argv.push(v.to_string());
+        }
+        TransportTuning::from_argv(&argv)
+    }
+
+    #[test]
+    fn absent_names_no_key_and_a_list_is_read() {
+        assert!(tuning(None).unwrap().stats_filters.is_empty());
+        assert!(
+            tuning(Some("[]")).unwrap().stats_filters.is_empty(),
+            "an empty list asks for nothing, in every build"
+        );
+        let read = tuning(Some(r#"["home/**", "garden/*"]"#));
+        if wz::runtime_tokio::node_stats::stats_compiled() {
+            assert_eq!(read.unwrap().stats_filters.keys(), ["home/**", "garden/*"]);
+        } else {
+            assert!(read.unwrap_err().starts_with("--stats-filters"));
+        }
+    }
+
+    #[test]
+    fn a_list_that_is_not_one_of_key_expressions_is_refused() {
+        for bad in [r#""home/**""#, "[3]", r#"["home//x"]"#, "[ \"a\""] {
+            let err = tuning(Some(bad)).expect_err(bad);
+            assert!(err.starts_with("--stats-filters "), "{bad} -> {err}");
+        }
+    }
+}
+
+/// `--plugin-search-dirs <list>`: absent is upstream's default list, a list is
+/// read in both spellings, and what upstream's parser refuses is refused with
+/// the flag named.
+#[cfg(all(test, feature = "adminspace-config-hotreload"))]
+mod plugin_search_dirs_flag_tests {
+    use super::*;
+    use wz::runtime_tokio::plugin_search_dirs::{LibSearchDir, LibSearchDirs};
+
+    fn argv(value: Option<&str>) -> Vec<String> {
+        let mut out = vec!["--storage-host".to_string(), "tcp/127.0.0.1:0".to_string()];
+        if let Some(v) = value {
+            out.push("--plugin-search-dirs".to_string());
+            out.push(v.to_string());
+        }
+        out
+    }
+
+    #[test]
+    fn absent_names_no_list_and_a_list_is_read_in_order() {
+        assert_eq!(plugin_search_dirs_flag(&argv(None)), Ok(None));
+        assert_eq!(
+            plugin_search_dirs_flag(&argv(Some(r#"["/a", { kind: "current_exe_parent" }]"#))),
+            Ok(Some(LibSearchDirs::new(vec![
+                LibSearchDir::Path(String::from("/a")),
+                LibSearchDir::CurrentExeParent,
+            ])))
+        );
+    }
+
+    #[test]
+    fn a_list_upstream_refuses_is_refused_by_the_flag() {
+        for bad in ["[ \"/a\"", r#""/a""#, r#"[{ kind: "nowhere" }]"#] {
+            let err = plugin_search_dirs_flag(&argv(Some(bad))).expect_err(bad);
+            assert!(err.starts_with("--plugin-search-dirs "), "{bad} -> {err}");
         }
     }
 }

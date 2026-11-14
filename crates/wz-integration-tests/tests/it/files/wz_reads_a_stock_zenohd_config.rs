@@ -176,7 +176,8 @@ fn operator_config(port: u16) -> String {
       qos: {{ enabled: false }},
       compression: {{ enabled: true }},
     }},
-    multicast: {{ qos: {{ enabled: true }} }},
+    // 9, away from upstream's 1000, per this fixture's own rule.
+    multicast: {{ max_sessions: 9, qos: {{ enabled: true }} }},
     shared_memory: {{ enabled: false }},
     link: {{
       tls: {{
@@ -321,7 +322,9 @@ fn render_resolved(value: &Json5Value) -> String {
                 .iter()
                 .map(|i| match i {
                     Json5Value::String(s) => format!("\"{s}\""),
-                    other => format!("{other:?}"),
+                    // An object member (a `plugins_loading/search_dirs` spec) as its
+                    // JSON text, for the reason the object arm below gives.
+                    other => other.to_json5_text(),
                 })
                 .collect();
             format!("[{}]", joined.join(","))
@@ -446,6 +449,10 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
         (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
+        ),
+        (
+            "transport/multicast/max_sessions",
+            wz.multicast_max_sessions.to_string(),
         ),
         (
             "transport/shared_memory/enabled",
@@ -949,6 +956,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             wz.multicast_qos.to_string(),
         ),
         (
+            "transport/multicast/max_sessions",
+            wz.multicast_max_sessions.to_string(),
+        ),
+        (
             "transport/shared_memory/enabled",
             wz.shared_memory.to_string(),
         ),
@@ -960,6 +971,30 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // asserted below rather than rendered here, for the literal-in-a-row
         // reason the weights row gives.
         ("plugins", String::from("{}")),
+        // The two aggregate lists resolve to `[]` for a silent file (upstream's
+        // aggregation block derives its default), and wz's two lists are empty, which is
+        // asserted below rather than rendered here.
+        ("aggregation/subscribers", String::from("[]")),
+        ("aggregation/publishers", String::from("[]")),
+        // The same for the stats filter list (upstream's stats block derives its default), and
+        // wz's list is empty, asserted below.
+        ("stats/filters", String::from("[]")),
+        // A silent file resolves to upstream's default search list, a `current_exe_parent`
+        // spec and five paths, and wz holds `None` for it, which searches that same list. The
+        // list wz searches is rendered here through the tree's own renderer, so the two are one
+        // spelling of one value.
+        (
+            "plugins_loading/search_dirs",
+            render_resolved(
+                &json5::parse(
+                    &wz.plugin_search_dirs
+                        .clone()
+                        .unwrap_or_default()
+                        .to_json5_text(),
+                )
+                .unwrap(),
+            ),
+        ),
     ];
     assert!(wz.connect.is_empty(), "the fixture states no connect list");
     assert!(
@@ -977,6 +1012,14 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
     assert!(
         wz.qos_network.is_empty(),
         "the fixture states no QoS overwrite rule"
+    );
+    assert!(
+        wz.aggregation_subscribers.is_empty() && wz.aggregation_publishers.is_empty(),
+        "the fixture states no aggregate"
+    );
+    assert!(
+        wz.stats_filters.is_empty(),
+        "the fixture states no stats filter"
     );
     // The key the tree cannot answer (`THE_TREE_ANSWERS_NULL`): a silent file leaves wz on the
     // `auto` preset, the one the pinned `DEFAULT_CONFIG.json5` documents.
@@ -3648,7 +3691,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
       qos: {{ enabled: true }},
       compression: {{ enabled: true }},
     }},
-    multicast: {{ qos: {{ enabled: true }} }},
+    // 9, away from upstream's 1000, per this fixture's own rule.
+    multicast: {{ max_sessions: 9, qos: {{ enabled: true }} }},
     shared_memory: {{ enabled: false }},
     // R2627 — the pubkey identity, NAMED rather than excepted, and the contrast
     // with `usrpwd/dictionary_file` (excepted below) is the whole decision. That
@@ -3872,6 +3916,11 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     ] }} }},
   }},
   adminspace: {{ enabled: true, permissions: {{ read: true, write: false }} }},
+  // The aggregates this client's session declares its subscribers and publishers
+  // under: one declaration each for everything below `dropin`.
+  aggregation: {{ subscribers: ["dropin/**"], publishers: ["dropin/**"] }},
+  // The key this client's session counts its payloads under.
+  stats: {{ filters: [{{ key: "dropin/**" }}] }},
 }}
 "#
     );
@@ -3925,6 +3974,9 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     // `--storage-host` runs a plugin plane, so a connecting client looks no plugin up and its
     // run is told the key was withheld. This process's reader is also built with no plugin host,
     // so the one value the file could state and still be read here is the library's `false`.
+    // `plugins_loading/search_dirs` is the SIXTH, with them: the list is where that plane's
+    // lookup searches, so a connecting client's run is told it was withheld rather than handed
+    // `--plugin-search-dirs`.
     let mut every_honoured: Vec<&str> = HONOURED_CONFIG_KEYS
         .iter()
         .chain(WZ_EXTENSION_HONOURED_KEYS)
@@ -3934,6 +3986,7 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         .filter(|k| *k != "plugins")
         .filter(|k| *k != "gateway/south")
         .filter(|k| *k != "plugins_loading/enabled")
+        .filter(|k| *k != "plugins_loading/search_dirs")
         .collect();
     fixture_names.sort_unstable();
     every_honoured.sort_unstable();

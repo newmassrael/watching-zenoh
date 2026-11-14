@@ -430,6 +430,11 @@ pub(crate) fn refused_ask(stance: &OpenStance) -> Option<&'static str> {
     if stance.groups.len() > 1 {
         return Some("more than one multicast group");
     }
+    // The node's own subscribers and publishers are entries of its tables, each under its own
+    // key, and not declarations of a session that `aggregation/*` could name an aggregate for.
+    if !stance.session_defaults.aggregation.is_empty() {
+        return Some("`aggregation/subscribers` or `aggregation/publishers`");
+    }
     None
 }
 
@@ -498,6 +503,7 @@ async fn join_group(
             },
             // The rule of the preset that opened the node.
             join_rule: join.profile.join_rule,
+            max_sessions: join.profile.max_sessions,
         },
         opts,
         None,

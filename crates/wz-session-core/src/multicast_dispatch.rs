@@ -3,9 +3,10 @@
 
 //! Round A — the multicast Router (dispatcher) that drives the one
 //! session-level [`session_fsm_multicast`](crate::session_fsm_multicast)
-//! Engine plus a fixed bounded pool of per-peer
+//! Engine plus a bounded pool of per-peer
 //! [`multicast_peer`](crate::multicast_peer) Engines (the §3.2
-//! `multicast_peer_table`).
+//! `multicast_peer_table`): fixed rows, and on a heap host whose config lets
+//! the table grow, rows added past them up to `transport/multicast/max_sessions`.
 //!
 //! This is the handshake-free multicast sibling of
 //! [`reassembly_dispatch`](crate::reassembly_dispatch): the two engine-free
@@ -115,6 +116,9 @@ use crate::multicast_peer::{
 // no-alloc MCU profile (run-ci Layer G.12).
 use crate::duty_outbox::{Duties, DutyOutbox};
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason};
+use crate::multicast_peer_rows::PeerRows;
+#[cfg(feature = "alloc")]
+use crate::multicast_peer_rows::RowIndex;
 #[cfg(all(feature = "reassembly", feature = "storage-profile"))]
 use crate::reassembly_dispatch::Fragment as ReassemblyFragment;
 #[cfg(feature = "reassembly")]
@@ -206,13 +210,73 @@ pub struct MulticastConfig {
     /// an absurd lease. The §3.1 sweep CADENCE is `lease/3` — a
     /// host-loop concern (how often `sweep` is called), not a Router field.
     pub lease_ms: u64,
+    /// `transport/multicast/max_sessions`: how many members the group's table may hold at once,
+    /// or `None` when the host states no cap, as zenoh-pico states none. zenoh ignores the Join of
+    /// a new member while its table holds this many
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @
+    /// `if zread!(self.peers).len() >= self.manager.config.multicast.max_sessions {`).
+    /// See [`MulticastDispatcher::member_cap`] for what a table makes of it.
+    pub max_sessions: Option<usize>,
+    /// Whether the table may add rows past its fixed `MAX_PEERS` to hold a stated
+    /// [`Self::max_sessions`]: a host with an allocator, whose group may be as large as its
+    /// configuration says. Without it the fixed rows are the table, and a stated cap above them
+    /// is refused by [`MulticastDispatcher::stated_cap_fits`] rather than held to fewer.
+    #[cfg(feature = "alloc")]
+    pub growable: bool,
 }
 
 impl MulticastConfig {
     /// Construct an explicit config. See the field docs for the no-`Default`
-    /// rationale.
+    /// rationale. No cap is stated and the table does not grow, so it holds as many members as
+    /// it has fixed rows.
     pub const fn new(lease_ms: u64) -> Self {
-        Self { lease_ms }
+        Self {
+            lease_ms,
+            max_sessions: None,
+            #[cfg(feature = "alloc")]
+            growable: false,
+        }
+    }
+
+    /// This config with `max_sessions` as its cap on the group's members ([`Self::max_sessions`]).
+    pub const fn with_max_sessions(self, max_sessions: Option<usize>) -> Self {
+        Self {
+            max_sessions,
+            ..self
+        }
+    }
+
+    /// This config with a table that grows past its fixed rows to a stated cap
+    /// ([`Self::growable`]).
+    #[cfg(feature = "alloc")]
+    pub const fn growing(self) -> Self {
+        Self {
+            growable: true,
+            ..self
+        }
+    }
+}
+
+/// A cap on a group's members that a table which does not grow cannot hold: the configuration
+/// asks for more members than the build gave the table rows
+/// ([`MulticastDispatcher::stated_cap_fits`]). Holding fewer than the configuration states would
+/// be a cap nobody set, so the group is not opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaxSessionsBeyondTable {
+    /// The members the configuration's `transport/multicast/max_sessions` asks the table to hold.
+    pub stated: usize,
+    /// The rows the table has.
+    pub rows: usize,
+}
+
+impl core::fmt::Display for MaxSessionsBeyondTable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "transport/multicast/max_sessions: {} members asked of a group table of {} rows, \
+             which this build does not grow",
+            self.stated, self.rows
+        )
     }
 }
 
@@ -220,8 +284,9 @@ impl MulticastConfig {
 /// dropped; no per-peer FSM is allocated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinRefuse {
-    /// Every pool slot already holds a live peer (the §3.2
-    /// `multicast_peer_table` bounded cap; the `max_sessions` reject).
+    /// The table already holds as many members as it may
+    /// ([`MulticastDispatcher::member_cap`]): every row of a table that does not grow is live, or
+    /// a stated `transport/multicast/max_sessions` is reached.
     PeerTableFull,
 }
 
@@ -842,12 +907,19 @@ impl PeerSlot {
     }
 }
 
-/// The multicast Router: one session-level FSM plus a fixed pool of
-/// `MAX_PEERS` per-peer FSMs (the §3.2 `multicast_peer_table`). See the
-/// module docs for the division of labour with the engine-free FSMs.
+/// The multicast Router: one session-level FSM plus a pool of per-peer FSMs (the §3.2
+/// `multicast_peer_table`): `MAX_PEERS` fixed rows, and on a heap build whose config lets the
+/// table grow ([`MulticastConfig::max_sessions`]), rows added past them up to the stated cap. See
+/// the module docs for the division of labour with the engine-free FSMs.
 pub struct MulticastDispatcher<const MAX_PEERS: usize> {
     session: Engine<SessionFsmMulticastPolicy<SessionBinding>>,
-    peers: [PeerSlot; MAX_PEERS],
+    peers: PeerRows<PeerSlot, MAX_PEERS>,
+    /// The row of each member by the address its datagrams come from, kept by a table that grows
+    /// ([`MulticastConfig::growable`]) and absent from one that does not, which scans its few
+    /// rows. Every datagram is attributed through [`Self::find_by_src`], so a grown table answers
+    /// it without walking a thousand rows.
+    #[cfg(feature = "alloc")]
+    by_src: RowIndex<SocketAddr>,
     config: MulticastConfig,
     /// Set by the session machine's `enter_running` duty and cleared by its
     /// `release_multicast_link`: whether peers, frames and fragments are
@@ -924,10 +996,13 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                     SessionBinding::default(),
                 ),
             );
-            let peers = addr_of_mut!((*at).peers).cast::<MaybeUninit<PeerSlot>>();
-            for index in 0..MAX_PEERS {
-                PeerSlot::init_in(&mut *peers.add(index));
-            }
+            let peers = &mut *addr_of_mut!((*at).peers)
+                .cast::<MaybeUninit<PeerRows<PeerSlot, MAX_PEERS>>>();
+            PeerRows::init_in(peers, |cell| {
+                PeerSlot::init_in(cell);
+            });
+            #[cfg(feature = "alloc")]
+            addr_of_mut!((*at).by_src).write(RowIndex::for_table(config.growable));
             addr_of_mut!((*at).config).write(config);
             addr_of_mut!((*at).running).write(false);
             addr_of_mut!((*at).join_refusals).write(0);
@@ -954,6 +1029,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let Self {
             session: _,
             peers: _,
+            #[cfg(feature = "alloc")]
+                by_src: _,
             config: _,
             running: _,
             join_refusals: _,
@@ -1000,12 +1077,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
             return;
         };
-        if let Some(member) = self
-            .peers
-            .iter_mut()
-            .find(|p| p.matches_src(src))
-            .and_then(|slot| slot.member.as_mut())
-        {
+        let Some(idx) = self.find_by_src(src) else {
+            return;
+        };
+        if let Some(member) = self.peers[idx].member.as_mut() {
             member.scope(messages);
         }
     }
@@ -1112,8 +1187,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let Some(ns) = self.namespace.as_ref() else {
             return;
         };
-        if let Some(slot) = self.peers.iter_mut().find(|p| p.matches_src(src)) {
-            let ingress = slot
+        if let Some(idx) = self.find_by_src(src) {
+            let ingress = self.peers[idx]
                 .namespace_ingress
                 .get_or_insert_with(|| NamespaceIngress::new(ns.clone()));
             crate::namespace::strip_outcome(ingress, outcome);
@@ -1152,9 +1227,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
             return;
         };
-        let Some(slot) = self.peers.iter_mut().find(|p| p.matches_src(src)) else {
+        let Some(idx) = self.find_by_src(src) else {
             return;
         };
+        let slot = &mut self.peers[idx];
         for msg in messages.iter_mut() {
             match msg {
                 NetworkMessage::Declare(declare) => {
@@ -1311,9 +1387,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
             return;
         };
-        let Some(slot) = self.peers.iter_mut().find(|p| p.matches_src(src)) else {
+        let Some(idx) = self.find_by_src(src) else {
             return;
         };
+        let slot = &mut self.peers[idx];
         for msg in messages.iter() {
             let NetworkMessage::Declare(declare) = msg else {
                 continue;
@@ -1384,6 +1461,12 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// Number of pool slots currently holding a live peer (the
     /// `multicast_peer_table` occupancy gauge).
     pub fn active_peers(&self) -> usize {
+        // A table that grows counts its members in its index: every Join asks this against the
+        // cap, and a scan of a thousand rows per beacon is the cost the index is there to remove.
+        #[cfg(feature = "alloc")]
+        if let Some(members) = self.by_src.members() {
+            return members;
+        }
         self.peers.iter().filter(|p| !p.is_free()).count()
     }
 
@@ -1403,10 +1486,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// `None` if no slot holds it (the address-keyed observability mirror of
     /// [`peer_state`](MulticastDispatcher::peer_state)).
     pub fn peer_state_by_src(&self, src: SocketAddr) -> Option<MulticastPeerState> {
-        self.peers
-            .iter()
-            .find(|p| p.matches_src(src))
-            .map(|p| p.engine.get_current_state())
+        self.find_by_src(src)
+            .map(|idx| self.peers[idx].engine.get_current_state())
     }
 
     /// The zids of the live on-group peers that announced `whatami=Router` — the
@@ -1469,7 +1550,18 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// `open_multicast_link` the returned duties carry for the host to
     /// perform. A `create` outside Idle is a no-op and asks for nothing (the
     /// FSM has no `multicast.create` transition elsewhere).
+    ///
+    /// A dispatcher whose table cannot hold the cap its config states
+    /// ([`Self::stated_cap_fits`]) asks for nothing either and stays Idle, so
+    /// no drive loop runs a group under fewer members than its configuration
+    /// says; a host that reports the refusal asks `stated_cap_fits` for it.
     pub fn create(&mut self) -> MulticastLinkDuties {
+        if self.stated_cap_fits().is_err() {
+            return MulticastLinkDuties {
+                open: false,
+                release: false,
+            };
+        }
         self.session
             .process_event(SessionFsmMulticastEvent::MulticastCreate);
         self.session_duties()
@@ -1519,10 +1611,17 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             // Open-debt item 913 — the members go with the link, and what they declared with
             // them, as zenoh-pico drops a peer's targets when its connection drops.
             #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-            for idx in 0..MAX_PEERS {
+            for idx in 0..self.peers.len() {
                 self.retire_member(idx);
             }
-            for peer in &mut self.peers {
+            // No member is left to hold an index past the fixed rows, so the grown ones go
+            // before the rest are made free.
+            #[cfg(feature = "alloc")]
+            {
+                self.peers.shed_grown();
+                self.by_src.cleared();
+            }
+            for peer in self.peers.iter_mut() {
                 peer.reset_in_place();
             }
         }
@@ -1615,14 +1714,18 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             self.peers[idx].whatami = baseline.whatami;
             return JoinOutcome::Refreshed;
         }
-        let idx = match self.peers.iter().position(PeerSlot::is_free) {
-            Some(i) => i,
-            None => {
-                self.join_refusals = self.join_refusals.saturating_add(1);
-                return JoinOutcome::Refused(JoinRefuse::PeerTableFull);
-            }
+        let row = if self.active_peers() < self.member_cap() {
+            self.free_row()
+        } else {
+            None
+        };
+        let Some(idx) = row else {
+            self.join_refusals = self.join_refusals.saturating_add(1);
+            return JoinOutcome::Refused(JoinRefuse::PeerTableFull);
         };
         self.peers[idx].admit(src, zid, baseline, qos_next_sns, now_ms);
+        #[cfg(feature = "alloc")]
+        self.by_src.admitted(src, idx);
         #[cfg(all(feature = "alloc", feature = "codec-declare"))]
         if let Some(tags) = &mut self.member_tags {
             self.peers[idx].member = Some(tags.admit());
@@ -1630,11 +1733,88 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         JoinOutcome::Admitted
     }
 
-    /// How many JOINs this dispatcher turned away because every row of its peer table held a live
-    /// peer. A refresh of a member already in the table is not counted, nor is a JOIN refused for
-    /// what it advertises.
+    /// How many JOINs this dispatcher turned away because its table already held as many members
+    /// as it may ([`Self::member_cap`]). A refresh of a member already in the table is not counted,
+    /// nor is a JOIN refused for what it advertises.
     pub const fn join_refusals(&self) -> u32 {
         self.join_refusals
+    }
+
+    /// How many members the table may hold at once. A config that states no cap
+    /// ([`MulticastConfig::max_sessions`] `None`) leaves the fixed rows the bound, so a table grows
+    /// only to a cap a configuration asked for. A stated cap is held as it is by a table that grows
+    /// (`MulticastConfig::growable`) and is the lesser of it and the fixed rows otherwise, which
+    /// [`Self::stated_cap_fits`] refuses and [`Self::create`] does not bring up, rather than leave
+    /// the table holding fewer than the configuration says.
+    pub fn member_cap(&self) -> usize {
+        let Some(stated) = self.config.max_sessions else {
+            return MAX_PEERS;
+        };
+        #[cfg(feature = "alloc")]
+        if self.config.growable {
+            return stated;
+        }
+        stated.min(MAX_PEERS)
+    }
+
+    /// Whether this table can hold the cap its config states: `Err` when the config asks for more
+    /// members than the table has fixed rows and the table does not grow, which no host can honour
+    /// by any means but a larger build. A config that states no cap, or a table that grows, fits.
+    pub fn stated_cap_fits(&self) -> Result<(), MaxSessionsBeyondTable> {
+        let Some(stated) = self.config.max_sessions else {
+            return Ok(());
+        };
+        #[cfg(feature = "alloc")]
+        if self.config.growable {
+            return Ok(());
+        }
+        if stated <= MAX_PEERS {
+            Ok(())
+        } else {
+            Err(MaxSessionsBeyondTable {
+                stated,
+                rows: MAX_PEERS,
+            })
+        }
+    }
+
+    /// zenoh's order of a Join's judgements: whether the Join from `src` is turned away before its
+    /// terms are read, because no member holds `src` and the table already holds as many members as
+    /// it may ([`Self::member_cap`]). zenoh asks this first and drops the Join whatever it
+    /// advertises (`io/zenoh-transport/src/multicast/rx.rs` @
+    /// `if zread!(self.peers).len() >= self.manager.config.multicast.max_sessions {`, ahead of
+    /// `if join.version != self.manager.config.version {`). A turned-away Join is counted in
+    /// [`Self::join_refusals`], as [`Self::ingest_join_qos`] counts one; zenoh-pico reads the terms
+    /// first, so its rule leaves the cap to that call alone. A session that is not running, or a
+    /// Join from a member, is not turned away here.
+    pub fn turn_away_at_capacity(&mut self, src: SocketAddr) -> bool {
+        if !self.running
+            || self.find_by_src(src).is_some()
+            || self.active_peers() < self.member_cap()
+        {
+            return false;
+        }
+        self.join_refusals = self.join_refusals.saturating_add(1);
+        true
+    }
+
+    /// A free row for a new member: the first free one, or, when there is none and the table
+    /// grows, a row added past the last. `None` when every row of a table that does not grow is
+    /// live.
+    fn free_row(&mut self) -> Option<usize> {
+        if let Some(idx) = self.peers.iter().position(PeerSlot::is_free) {
+            return Some(idx);
+        }
+        #[cfg(feature = "alloc")]
+        if self.config.growable {
+            // SAFETY: `PeerSlot::init_in` writes a whole slot into the cell it is given.
+            return Some(unsafe {
+                self.peers.grow_with(|cell| {
+                    PeerSlot::init_in(cell);
+                })
+            });
+        }
+        None
     }
 
     /// How many JOINs the node's rule refused for what they advertise: another protocol version,
@@ -1923,6 +2103,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
                 self.retire_member(idx);
                 self.peers[idx].evict(reason, on_lost);
+                #[cfg(feature = "alloc")]
+                self.by_src.left(&src);
                 true
             }
             None => false,
@@ -1983,13 +2165,35 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             if let Some(member) = slot.member.take() {
                 self.member_retractions.extend(member.retractions());
             }
+            // The address is read before the eviction clears it.
+            #[cfg(feature = "alloc")]
+            if let Some(src) = slot.src {
+                self.by_src.left(&src);
+            }
             slot.evict(MulticastPeerLostReason::LeaseExpired, &mut on_lost);
             expired += 1;
         }
         expired
     }
 
+    /// The row of the member at `src`: by the index of a table that grows, and by a scan of the
+    /// rows of one that does not.
     fn find_by_src(&self, src: SocketAddr) -> Option<usize> {
+        #[cfg(feature = "alloc")]
+        if let Some(found) = self.by_src.lookup(&src) {
+            if let Some(idx) = found {
+                debug_assert!(
+                    self.peers[idx].matches_src(src),
+                    "the index names row {idx} for a member that row does not hold"
+                );
+            }
+            return found;
+        }
+        self.scan_by_src(src)
+    }
+
+    /// The row of the member at `src`, found by walking the rows.
+    fn scan_by_src(&self, src: SocketAddr) -> Option<usize> {
         self.peers.iter().position(|p| p.matches_src(src))
     }
 }
@@ -2490,7 +2694,11 @@ mod tests {
     };
 
     fn running_dispatcher<const N: usize>(lease_ms: u64) -> MulticastDispatcher<N> {
-        let mut d = MulticastDispatcher::<N>::new(MulticastConfig::new(lease_ms));
+        running_with::<N>(MulticastConfig::new(lease_ms))
+    }
+
+    fn running_with<const N: usize>(config: MulticastConfig) -> MulticastDispatcher<N> {
+        let mut d = MulticastDispatcher::<N>::new(config);
         assert_eq!(d.create(), OPEN_LINK);
         assert_eq!(d.notify_link_ready(), NO_LINK_DUTY);
         assert_eq!(d.session_state(), SessionFsmMulticastState::Running);
@@ -3162,6 +3370,280 @@ mod tests {
             JoinOutcome::Refreshed
         );
         assert_eq!(d.join_refusals(), 2);
+    }
+
+    /// A source address of its own per member, for the tables that hold more than three.
+    #[cfg(feature = "alloc")]
+    fn member_src(n: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 100 + n)
+    }
+
+    /// A stated cap below the table's rows is the bound: the member past it is refused and
+    /// counted, a member's own beacon is still a refresh, and a departure makes room again.
+    #[test]
+    fn a_stated_cap_below_the_rows_refuses_the_member_past_it() {
+        let mut d = running_with::<4>(MulticastConfig::new(5_000).with_max_sessions(Some(2)));
+        assert_eq!(d.member_cap(), 2);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_B, SRC_B, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(
+            d.ingest_join(ZID_C, SRC_C, sn0(), 0),
+            JoinOutcome::Refused(JoinRefuse::PeerTableFull),
+            "two free rows are left, and the cap is reached"
+        );
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, sn0(), 1),
+            JoinOutcome::Refreshed
+        );
+        assert_eq!((d.active_peers(), d.join_refusals()), (2, 1));
+        assert!(d.close_by_src(SRC_A));
+        assert_eq!(d.ingest_join(ZID_C, SRC_C, sn0(), 2), JoinOutcome::Admitted);
+    }
+
+    /// A cap of none is a cap upstream takes: no member is admitted, and each Join is counted.
+    #[test]
+    fn a_stated_cap_of_none_admits_no_member() {
+        let mut d = running_with::<4>(MulticastConfig::new(5_000).with_max_sessions(Some(0)));
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, sn0(), 0),
+            JoinOutcome::Refused(JoinRefuse::PeerTableFull)
+        );
+        assert_eq!((d.active_peers(), d.join_refusals()), (0, 1));
+    }
+
+    /// A table that does not grow cannot hold a cap above its rows, and says so by the key's
+    /// name; a cap it holds, or none stated, fits.
+    #[test]
+    fn a_table_that_does_not_grow_refuses_a_stated_cap_above_its_rows() {
+        let mut over =
+            MulticastDispatcher::<4>::new(MulticastConfig::new(5_000).with_max_sessions(Some(5)));
+        let refusal = over
+            .stated_cap_fits()
+            .expect_err("five members of four rows");
+        assert_eq!(refusal, MaxSessionsBeyondTable { stated: 5, rows: 4 });
+        let text = std::format!("{refusal}");
+        assert!(text.contains("transport/multicast/max_sessions"), "{text}");
+        assert_eq!(
+            over.create(),
+            NO_LINK_DUTY,
+            "the session is not brought up, so no link is asked for"
+        );
+        assert_eq!(over.session_state(), SessionFsmMulticastState::Idle);
+
+        let mut at =
+            MulticastDispatcher::<4>::new(MulticastConfig::new(5_000).with_max_sessions(Some(4)));
+        assert_eq!(at.stated_cap_fits(), Ok(()));
+        assert_eq!(at.create(), OPEN_LINK, "a cap the rows hold opens");
+        let none = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        assert_eq!(none.stated_cap_fits(), Ok(()));
+        assert_eq!(none.member_cap(), 4);
+    }
+
+    /// zenoh's order: a Join from an address no member holds meets the cap before its terms are
+    /// read, and is counted as a refusal; a member's Join, or any Join while the session is not
+    /// running, is not turned away there.
+    #[test]
+    fn a_new_member_is_turned_away_at_the_cap_before_its_terms() {
+        let mut d =
+            MulticastDispatcher::<4>::new(MulticastConfig::new(5_000).with_max_sessions(Some(1)));
+        assert!(
+            !d.turn_away_at_capacity(SRC_A),
+            "an Idle session admits nothing to refuse"
+        );
+        assert_eq!(d.create(), OPEN_LINK);
+        assert_eq!(d.notify_link_ready(), NO_LINK_DUTY);
+        assert!(!d.turn_away_at_capacity(SRC_A), "an empty table has room");
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        assert!(
+            !d.turn_away_at_capacity(SRC_A),
+            "a member's beacon is a refresh"
+        );
+        assert!(
+            d.turn_away_at_capacity(SRC_B),
+            "the table holds its one member"
+        );
+        assert_eq!(d.join_refusals(), 1);
+        assert_eq!(d.active_peers(), 1);
+    }
+
+    /// A table that grows takes members past its fixed rows up to the stated cap, refuses the one
+    /// past it, reuses a freed grown row under its index, and lets the grown rows go with the
+    /// link.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_growing_table_admits_past_its_rows_to_the_stated_cap() {
+        let mut d = running_with::<1>(
+            MulticastConfig::new(5_000)
+                .with_max_sessions(Some(3))
+                .growing(),
+        );
+        assert_eq!(d.member_cap(), 3);
+        assert_eq!(d.stated_cap_fits(), Ok(()));
+        for n in 0..3u8 {
+            assert_eq!(
+                d.ingest_join(&[0x10 + n], member_src(u16::from(n)), sn0(), 0),
+                JoinOutcome::Admitted,
+                "member {n} of a cap of three on one row"
+            );
+        }
+        assert_eq!(d.active_peers(), 3);
+        assert_eq!(
+            d.peer_index_by_src(member_src(2)),
+            Some(2),
+            "the second grown row"
+        );
+        assert_eq!(
+            d.ingest_join(&[0x13], member_src(3), sn0(), 0),
+            JoinOutcome::Refused(JoinRefuse::PeerTableFull)
+        );
+        assert_eq!(d.join_refusals(), 1);
+
+        assert!(d.close_by_src(member_src(1)));
+        assert_eq!(
+            d.ingest_join(&[0x13], member_src(3), sn0(), 1),
+            JoinOutcome::Admitted
+        );
+        assert_eq!(
+            d.peer_index_by_src(member_src(3)),
+            Some(1),
+            "the freed grown row is reused, not a new one added"
+        );
+        assert_eq!(d.peer_state(&[0x13]), Some(MulticastPeerState::Active));
+
+        assert_eq!(d.stop(), RELEASE_LINK);
+        assert_eq!(d.active_peers(), 0);
+        assert_eq!(d.peers.len(), 1, "the grown rows went with the link");
+    }
+
+    /// A table that may grow holds no more than its rows while no cap is stated: it grows only
+    /// to a cap a configuration asked for.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_growing_table_with_no_stated_cap_holds_its_rows() {
+        let mut d = running_with::<2>(MulticastConfig::new(5_000).growing());
+        assert_eq!(d.member_cap(), 2);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_B, SRC_B, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(
+            d.ingest_join(ZID_C, SRC_C, sn0(), 0),
+            JoinOutcome::Refused(JoinRefuse::PeerTableFull)
+        );
+        assert_eq!(d.peers.len(), 2, "no row was added");
+    }
+
+    /// Each place a row changes hands moves the index of a grown table with it, named one by one:
+    /// an admission enters the member, a Close and a lease expiry take it out, a freed row taken by
+    /// another member answers for that member only, and the reset with the link empties it.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_src_index_follows_each_place_a_row_changes_hands() {
+        let mut d = running_with::<1>(
+            MulticastConfig::new(5_000)
+                .with_max_sessions(Some(4))
+                .growing(),
+        );
+        let (a, b, c) = (member_src(0), member_src(1), member_src(2));
+        assert_eq!(d.ingest_join(&[1], a, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(&[2], b, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.by_src.lookup(&a), Some(Some(0)), "admission, fixed row");
+        assert_eq!(d.by_src.lookup(&b), Some(Some(1)), "admission, grown row");
+
+        assert!(d.close_by_src(a));
+        assert_eq!(d.by_src.lookup(&a), Some(None), "a Close");
+        assert_eq!(d.ingest_join(&[3], c, sn0(), 1_000), JoinOutcome::Admitted);
+        assert_eq!(
+            d.by_src.lookup(&c),
+            Some(Some(0)),
+            "the freed row, under its new member"
+        );
+
+        // `b` was last heard at 0 and `c` at 1_000; the sweep is past `b`'s lease only.
+        assert_eq!(d.sweep(5_500), 1);
+        assert_eq!(d.by_src.lookup(&b), Some(None), "a lease expiry");
+        assert_eq!(d.by_src.members(), Some(1));
+        assert_eq!(d.active_peers(), 1);
+
+        assert_eq!(d.stop(), RELEASE_LINK);
+        assert_eq!(d.by_src.lookup(&c), Some(None), "the reset with the link");
+        assert_eq!(d.by_src.members(), Some(0));
+    }
+
+    /// A table that does not grow keeps no index, on a build with an allocator too: it finds its
+    /// members by a scan of its rows and allocates nothing for them.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_table_that_does_not_grow_keeps_no_index() {
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(
+            d.by_src.lookup(&SRC_A),
+            None,
+            "no index: the rows are scanned"
+        );
+        assert_eq!(d.by_src.members(), None);
+        assert_eq!(d.peer_index_by_src(SRC_A), Some(0));
+        assert_eq!(d.active_peers(), 1);
+    }
+
+    /// The index of a grown table answers, after every step, what a scan of its rows answers, and
+    /// counts as many members as the rows hold: through admissions into fixed and grown rows,
+    /// refreshes, Closes, lease expiries, refusals at the cap and the reset with the link. The
+    /// steps come from a generator of fixed seed, so a failure replays.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_grown_tables_index_answers_as_a_scan_through_any_sequence() {
+        let pool: [SocketAddr; 10] = core::array::from_fn(|n| member_src(n as u16));
+        let mut seed: u64 = 0x5eed_0fab_cd01;
+        let mut draw = |bound: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % bound
+        };
+        for round in 0..8 {
+            let mut d = running_with::<2>(
+                MulticastConfig::new(5_000)
+                    .with_max_sessions(Some(6))
+                    .growing(),
+            );
+            let mut now = 0u64;
+            for step in 0..200 {
+                let k = draw(pool.len() as u64) as usize;
+                match draw(4) {
+                    0 | 1 => {
+                        let _ = d.ingest_join(&[k as u8 + 1], pool[k], sn0(), now);
+                    }
+                    2 => {
+                        let _ = d.close_by_src(pool[k]);
+                    }
+                    _ => {
+                        now += draw(4_000);
+                        let _ = d.sweep(now);
+                    }
+                }
+                for src in pool {
+                    assert_eq!(
+                        d.find_by_src(src),
+                        d.scan_by_src(src),
+                        "round {round} step {step}: {src}"
+                    );
+                }
+                assert_eq!(
+                    d.active_peers(),
+                    d.peers.iter().filter(|p| !p.is_free()).count(),
+                    "round {round} step {step}: the count"
+                );
+            }
+            assert_eq!(d.stop(), RELEASE_LINK);
+            for src in pool {
+                assert_eq!(
+                    d.find_by_src(src),
+                    None,
+                    "round {round}: {src} after the reset"
+                );
+            }
+            assert_eq!(d.active_peers(), 0);
+        }
     }
 
     /// An explicit Close from a peer's address evicts it and frees the slot

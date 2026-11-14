@@ -3959,8 +3959,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (`zenoh/src/net/routing/dispatcher/stats.rs` @ `pub(super) fn observe_payload(`).
     /// A control message has no payload class and a class with no kind (an
     /// undecoded body, [`crate::stats::NetworkStatsClass::undecoded`]) no
-    /// label, so neither is observed. No per-key filter is configured here, so
-    /// the per-key family gets its series and no keys.
+    /// label, so neither is observed. The per-key family counts it under the
+    /// `stats/filters` keys its class matched ([`Self::stats_keys_of`]).
     #[cfg(feature = "transport-stats")]
     pub(crate) fn observe_payload(
         &self,
@@ -3973,16 +3973,56 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         };
         let shm = class.medium == crate::stats::StatMedium::Shm;
         R::with_mutex_mut(&self.metrics, |metrics| {
-            metrics.observe_network_message_payload(
-                direction,
-                payload.space,
-                priority,
-                kind,
-                shm,
-                payload.pl_bytes as u64,
-                [],
-            )
+            metrics.observe_payload_class(direction, priority, kind, shm, &payload)
         });
+    }
+
+    /// `stats/filters`: count this session's payloads under `filters` from here on, as upstream
+    /// counts every face's under the filters of its node
+    /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `config.stats.filters().iter().map(|f| &*f.key),`).
+    /// A host sets it before the session carries data. A build without `transport-stats` counts
+    /// nothing, so it refuses a list that names a key rather than dropping it.
+    #[cfg(feature = "alloc")]
+    pub fn set_stats_key_filters(
+        &self,
+        filters: crate::stats_registry::StatsKeyFilters,
+    ) -> Result<(), crate::stats_registry::StatsKeyFiltersError> {
+        #[cfg(feature = "transport-stats")]
+        {
+            R::with_mutex_mut(&self.metrics, |metrics| metrics.set_key_filters(filters));
+            Ok(())
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            if filters.is_empty() {
+                Ok(())
+            } else {
+                Err(crate::stats_registry::StatsKeyFiltersError::NotInBuild)
+            }
+        }
+    }
+
+    /// `class` matched against this session's `stats/filters`: `keyexpr` is the key expression
+    /// the message addresses, asked only for a payload class of a session that holds a filter,
+    /// and never while the metrics are held, since resolving an alias takes the mapping table.
+    #[cfg(feature = "transport-stats")]
+    pub(crate) fn stats_keys_of(
+        &self,
+        class: crate::stats::NetworkStatsClass,
+        keyexpr: impl FnOnce() -> Option<alloc::string::String>,
+    ) -> crate::stats::NetworkStatsClass {
+        if class.payload.is_none()
+            || R::with_mutex_mut(&self.metrics, |metrics| metrics.key_filters().is_empty())
+        {
+            return class;
+        }
+        let Some(keyexpr) = keyexpr() else {
+            return class;
+        };
+        let keys = R::with_mutex_mut(&self.metrics, |metrics| {
+            metrics.key_filters().matching(&keyexpr)
+        });
+        class.with_keys(keys)
     }
 
     /// R2825 — count one network message on the link that carries it
@@ -11110,7 +11150,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> crate::stats::NetworkStatsClass {
         #[cfg(feature = "transport-stats")]
         {
-            crate::network_message::push_stats_class(_push, |id| self.resolve_outbound_mapping(id))
+            let resolve = |id| self.resolve_outbound_mapping(id);
+            let class = crate::network_message::push_stats_class(_push, resolve);
+            self.stats_keys_of(class, || {
+                crate::network_message::stats_keyexpr_of_wireexpr(&_push.keyexpr, &resolve)
+            })
         }
         #[cfg(not(feature = "transport-stats"))]
         {
@@ -11127,8 +11171,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> crate::stats::NetworkStatsClass {
         #[cfg(feature = "transport-stats")]
         {
-            crate::network_message::request_stats_class(_request, |id| {
-                self.resolve_outbound_mapping(id)
+            let resolve = |id| self.resolve_outbound_mapping(id);
+            let class = crate::network_message::request_stats_class(_request, resolve);
+            self.stats_keys_of(class, || {
+                crate::network_message::stats_keyexpr_of_wireexpr(&_request.keyexpr, &resolve)
             })
         }
         #[cfg(not(feature = "transport-stats"))]
@@ -11146,8 +11192,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> crate::stats::NetworkStatsClass {
         #[cfg(feature = "transport-stats")]
         {
-            crate::network_message::response_stats_class(_response, |id| {
-                self.resolve_outbound_mapping(id)
+            let resolve = |id| self.resolve_outbound_mapping(id);
+            let class = crate::network_message::response_stats_class(_response, resolve);
+            self.stats_keys_of(class, || {
+                crate::network_message::stats_keyexpr_of_wireexpr(&_response.keyexpr, &resolve)
             })
         }
         #[cfg(not(feature = "transport-stats"))]
@@ -12364,10 +12412,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             crate::sample::QosLevel::DEFAULT
         };
         #[cfg(feature = "transport-stats")]
-        let class =
-            crate::network_message::plain_put_stats_class(mapping_id, suffix, value.len(), |id| {
-                self.resolve_outbound_mapping(id)
-            });
+        let class = {
+            let resolve = |id| self.resolve_outbound_mapping(id);
+            let class = crate::network_message::plain_put_stats_class(
+                mapping_id,
+                suffix,
+                value.len(),
+                resolve,
+            );
+            self.stats_keys_of(class, || {
+                crate::network_message::stats_keyexpr_of_key(mapping_id, suffix, &resolve)
+            })
+        };
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
         // The Put's own size, from the same writer run into a sink that keeps nothing: a Push
@@ -12434,11 +12490,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "codec-push", feature = "tx-lend-only"))]
         {
             #[cfg(feature = "transport-stats")]
-            let class = crate::network_message::plain_put_stats_class(
-                0,
-                Some(keyexpr_suffix),
-                value.len(),
-                |_| None,
+            let class = self.stats_keys_of(
+                crate::network_message::plain_put_stats_class(
+                    0,
+                    Some(keyexpr_suffix),
+                    value.len(),
+                    |_| None,
+                ),
+                || Some(alloc::string::String::from(keyexpr_suffix)),
             );
             #[cfg(not(feature = "transport-stats"))]
             let class = crate::stats::NetworkStatsClass::unread();

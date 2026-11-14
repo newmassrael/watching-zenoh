@@ -355,6 +355,15 @@ where
                 // of our own beacon is a message this link received.
                 stats.transport_message_received();
                 if join.zid != params.zid.as_slice() {
+                    // zenoh asks whether its table has room for a new member before it reads
+                    // the Join's terms, so a Join it turns away there is a refusal and not an
+                    // incompatible Join, whatever it advertises. zenoh-pico reads the terms first,
+                    // and its rule meets the cap where the member is admitted.
+                    if params.join_rule == GroupJoinRule::Zenoh
+                        && dispatcher.turn_away_at_capacity(src)
+                    {
+                        return MulticastRxNext::Done;
+                    }
                     // R311y227 — the JOIN `ext_qos` (`None` = a non-qos peer), whose
                     // per-priority next-SNs seed each of the peer's conduits. A build
                     // without `transport-qos` reads no offer.
@@ -1060,6 +1069,7 @@ mod batch_walk_tests {
             tx_queue: crate::session_init_params::TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 

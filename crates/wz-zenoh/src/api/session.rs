@@ -4217,8 +4217,9 @@ pub(crate) struct SessionInner {
     /// How long a query waits for its replies when it does not say, from the configuration.
     queries_default_timeout: Duration,
     /// The configuration the session was opened with, as the application reads it
-    /// ([`Session::config`]).
-    #[cfg(feature = "unstable")]
+    /// ([`Session::config`]), and as the runtime admin space reads and writes it, which every
+    /// build on the engine hosts ([`WeakSession::config_notifier`]).
+    #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
     config: crate::api::config::Notifier<zenoh_config::ExpandedConfig>,
     /// What a node records on a message it intercepts: its role, the callback of the user if the
     /// session was opened with one, and the clock of a node that holds none.
@@ -5235,7 +5236,7 @@ impl Session {
             zid: core.zid,
             callbacks_drop_sync_group: SyncGroup::default(),
             queries_default_timeout: core.queries_default_timeout,
-            #[cfg(feature = "unstable")]
+            #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
             config: core.config,
             #[cfg(feature = "unstable")]
             timestamps: core.timestamps,
@@ -5274,7 +5275,7 @@ pub(crate) struct RuntimeCore {
     engine: Arc<Engine>,
     zid: ZenohId,
     queries_default_timeout: Duration,
-    #[cfg(feature = "unstable")]
+    #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
     config: crate::api::config::Notifier<zenoh_config::ExpandedConfig>,
     #[cfg(feature = "unstable")]
     timestamps: Arc<TimestampSource>,
@@ -5377,7 +5378,7 @@ impl RuntimeCore {
             engine: Arc::new(engine),
             zid,
             queries_default_timeout,
-            #[cfg(feature = "unstable")]
+            #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
             config: crate::api::config::Notifier::new(config.0.clone().expanded()),
             #[cfg(feature = "unstable")]
             timestamps,
@@ -8571,6 +8572,46 @@ mod tests {
         assert!(
             text.contains("`mode` = \"router\"") && text.contains("more than one multicast group"),
             "{text}"
+        );
+    }
+
+    /// `aggregation/*` opens on the registry of faces, which declares under the aggregates, and a
+    /// session that runs as a node, which does not carry them, is refused by the keys' names: a
+    /// router always, a peer that fits the node when the node is wanted. The CONTROL is the same
+    /// peer stating no aggregate, which opens as the node.
+    #[test]
+    fn an_aggregate_opens_on_the_registry_and_is_refused_by_a_node() {
+        let aggregated = || peer_with("aggregation/subscribers", r#"["demo/**"]"#);
+        let session = open(aggregated())
+            .wait()
+            .expect("the registry of faces declares under an aggregate");
+        drop(session);
+        let refused = |text: String| {
+            assert!(
+                text.contains("`aggregation/subscribers` or `aggregation/publishers`"),
+                "{text}"
+            );
+        };
+        refused(
+            with_the_node(|| open(aggregated()).wait())
+                .expect_err("a peer node given an aggregate")
+                .to_string(),
+        );
+        let control = with_the_node(|| open(peer("a1b2cb")).wait());
+        assert!(control.is_ok(), "CONTROL: the node opens with no aggregate");
+        let mut router = Config::from_json5(
+            r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                 scouting: { multicast: { enabled: false } } }"#,
+        )
+        .expect("a configuration zenoh reads");
+        router
+            .insert_json5("aggregation/publishers", r#"["demo/**"]"#)
+            .expect("a key zenoh reads");
+        refused(
+            open(router)
+                .wait()
+                .expect_err("a router given an aggregate")
+                .to_string(),
         );
     }
 

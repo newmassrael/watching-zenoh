@@ -336,6 +336,18 @@ fn demo_main() -> ExitCode {
         }
     };
 
+    // `--aggregation-subscribers` / `--aggregation-publishers`, read ONCE for
+    // the same reason: the session of a single-session run and the local
+    // declarations of a peer node declare under the same aggregates, and a list
+    // this build cannot apply stops the node rather than starting it without.
+    let aggregation = match crate::args::declaration_aggregation_flags(rest) {
+        Ok(aggregation) => aggregation,
+        Err(message) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+    };
+
     // R2112 (open-debt items 102 + 210) — `--timestamping <true|false>`, read
     // ONCE beside the tuning above and for the same reason: it is a NODE-scoped
     // policy, so every run mode must resolve one answer, and a malformed value
@@ -958,6 +970,7 @@ fn demo_main() -> ExitCode {
                     as_client,
                     publish_key,
                     subscribe_key,
+                    aggregation: aggregation.clone(),
                     unsubscribe_after_data,
                     autoconnect,
                     full_linkstate,
@@ -1115,6 +1128,15 @@ fn demo_main() -> ExitCode {
                 }
                 false
             };
+            // `--multicast-max-sessions <N>`: the cap on the members of the router's group face
+            // (`args::parse_multicast_max_sessions`). A value that is not a count fails the run.
+            let multicast_max_sessions = match crate::args::parse_multicast_max_sessions(rest) {
+                Ok(cap) => cap,
+                Err(e) => {
+                    eprintln!("wz-ap-demo: {e}");
+                    return ExitCode::from(2);
+                }
+            };
             // `--zid <hex>` (optional): PIN this router's zid so the mesh master
             // election (HRW over shared_nodes) is deterministic — a federation e2e
             // needs a reproducible non-master. Without it the zid derives from the
@@ -1263,6 +1285,7 @@ fn demo_main() -> ExitCode {
                         quic_ca: parse_pair(rest, "--quic-ca"),
                     },
                     multicast_qos,
+                    multicast_max_sessions,
                     // `--govern-multicast`, refused above on every case that cannot act on it.
                     #[cfg(feature = "access-acl-multicast")]
                     govern_multicast: rest.iter().any(|a| a == "--govern-multicast"),
@@ -1400,6 +1423,13 @@ fn demo_main() -> ExitCode {
                 period_ms: gc_ms("--storage-gc-period-ms"),
                 lifespan_ms: gc_ms("--storage-gc-lifespan-ms"),
             };
+            let plugin_search_dirs = match crate::args::plugin_search_dirs_flag(rest) {
+                Ok(dirs) => dirs,
+                Err(message) => {
+                    eprintln!("wz-ap-demo: {message}");
+                    return ExitCode::from(2);
+                }
+            };
             run_storage_host_mode(
                 storage_host_listen,
                 crate::runner::StorageHostOpts {
@@ -1421,6 +1451,8 @@ fn demo_main() -> ExitCode {
                     plugins: parse_pair(rest, "--plugins"),
                     // `plugins_loading/enabled`, a bare presence flag like the two above.
                     plugins_loading: rest.iter().any(|a| a == "--plugins-loading"),
+                    plugin_search_dirs,
+                    aggregation: aggregation.clone(),
                     // §5.23 `adminspace-core` — the one value read above.
                     metadata: metadata.clone(),
                     tuning,
@@ -2768,6 +2800,7 @@ fn demo_main() -> ExitCode {
     }
 
     let declare_spec = DeclareEmitSpec {
+        aggregation,
         token_keyexpr: declare_token_opt,
         liveliness_subscriber_keyexpr: liveliness_subscribe_opt,
         liveliness_subscriber_history: liveliness_subscribe_history,
