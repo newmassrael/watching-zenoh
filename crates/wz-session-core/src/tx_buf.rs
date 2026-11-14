@@ -278,13 +278,55 @@ pub type EncodeBuf<'a> = alloc::vec::Vec<u8>;
 pub const TX_LEND_ONLY: bool = cfg!(feature = "tx-lend-only");
 
 /// Whether this build compiled the per-session slot profile (`session-slot`,
-/// fixed-memory step S5): `false` on every build the AP links. A crate that
-/// shares this one with an MCU build and cannot work on that profile asserts it
-/// `false` at compile time, so a build graph that unifies the selector into it
-/// fails to build instead of misbehaving: `wz-runtime-tokio` does, as it does
-/// for [`TX_LEND_ONLY`]. (Here, beside that constant, because this module is
-/// compiled in every build and the session bundle's is not.)
+/// fixed-memory step S5): `false` on every build the AP links. (Here, beside
+/// [`TX_LEND_ONLY`], because this module is compiled in every build and the
+/// session bundle's is not.)
+///
+/// A crate that shares this one with an MCU build and cannot work on that
+/// profile does not assert this constant: it wraps its items in
+/// [`heap_session_profile!`](crate::heap_session_profile). The selector does not
+/// add to the heap forms, it replaces them (the session handle, the link sink,
+/// the received extension chains), so a heap crate that a build graph unified it
+/// into fails to type-check, and an assertion on a constant is evaluated after
+/// the type check: its message is the one such a build does not print.
 pub const SESSION_SLOT: bool = cfg!(feature = "session-slot");
+
+/// The items given, on a build of the heap session profile; on a build that
+/// compiled the per-session slot profile (`session-slot`), one `compile_error!`
+/// that names the crate refused and the cause, and no item.
+///
+/// For a crate written for the heap profile only, around every item of its
+/// root (`"crate-name"; items`). Features unify across the build graph, and a
+/// workspace-wide `--all-features` turns this selector on from every crate that
+/// has it; without the wrapper such a build reports each heap item of the crate
+/// that the slot profile lacks, and no line of it names the selector. The
+/// refusal is raised while the crate's macros expand, before its items are
+/// resolved or type-checked, and the items it drops add no error of their own.
+/// A crate whose root is more than a list of modules may give no items: its
+/// refusal is then the first error of the build and not the only one.
+#[cfg(not(feature = "session-slot"))]
+#[macro_export]
+macro_rules! heap_session_profile {
+    ($krate:literal; $($items:tt)*) => { $($items)* };
+}
+
+/// See the heap-profile form of this macro: the refusal, on a build that
+/// compiled the slot profile.
+#[cfg(feature = "session-slot")]
+#[macro_export]
+macro_rules! heap_session_profile {
+    ($krate:literal; $($items:tt)*) => {
+        ::core::compile_error!(::core::concat!(
+            $krate,
+            " is written for the heap session profile, and this build turned on \
+             `wz-session-core/session-slot`, the per-session slot profile of an MCU image. \
+             The two are exclusive: the slot profile replaces the heap forms of the session \
+             and does not add to them. The selector reached this crate by feature \
+             unification (a workspace-wide `--all-features`, or a crate of this build that \
+             names it on a dependency line); build this crate and the slot image apart."
+        ));
+    };
+}
 
 impl<'a> TxSink<'a, EncodeBuf<'a>> {
     /// Wrap `buf`; the position starts at the buffer's current length.
@@ -387,6 +429,22 @@ mod tests {
         let mut sink = TxSink::new(&mut buf);
         sink.write_u8(1).unwrap();
         assert_eq!(sink.write_bytes(&[2, 3]), Err(CodecError::BufferOverflow));
+    }
+
+    #[cfg(not(feature = "session-slot"))]
+    crate::heap_session_profile! {
+        "wz-session-core";
+        fn given_to_the_heap_profile() -> u8 {
+            7
+        }
+    }
+
+    // The slot arm is a `compile_error!` and has no test that can compile; the
+    // build it refuses is the check (`wz-capi-coop` with the selector unified).
+    #[cfg(not(feature = "session-slot"))]
+    #[test]
+    fn the_heap_profile_compiles_the_items_it_is_given() {
+        assert_eq!(given_to_the_heap_profile(), 7);
     }
 
     #[cfg(feature = "alloc")]
