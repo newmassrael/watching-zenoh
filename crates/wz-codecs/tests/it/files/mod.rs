@@ -11,4 +11,5 @@ mod query_marker_identity;
 mod serial_framing;
 mod smoke;
 mod transport_headers;
+mod transport_join;
 mod transport_messages;

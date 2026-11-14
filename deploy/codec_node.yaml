@@ -146,3 +146,6 @@ codecs:
   transport_fragment_header:
     capacity:
       extensions: 8
+  transport_join:
+    capacity:
+      extensions: 8
