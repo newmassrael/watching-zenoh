@@ -13692,6 +13692,26 @@
       "carry_forward_bullets": [
         "Open: read the hosted run of this head at the start of the next round, and the run of 847c5d2485, which another session pushed and which carries rounds 4485 to 4487 before this repair."
       ]
+    },
+    "Round 4490": {
+      "decision_summary": "Round 4488 (the offline build entry) left Layer C0 red on its own head and on the head of round 4489, which carries it, and the red is paid before anything else is pushed. The artifact-root lint refuses any product path named past the artifact root, and the offline build selftest that proves a staging root inside the checkout is refused named a path under the product build directory to do it. The test needs a path inside the checkout, not a product path, so it now names a directory of its own under the checkout root; what it proves is unchanged. C0 stops at its first failing gate, so the gates after it had graded nothing on hosted. Run to the end on a build host they found one more red of the same round: the workflow cache budget gate found the offline build job restoring the apt archives cache class, which did not declare that job among its owners. The class now declares it, since the job does restore those archives and the budget is meant to count every owner.",
+      "changes_bullets": [
+        "The offline build selftest's staging-root refusal case names a directory inside the checkout that is no product path.",
+        "The apt archives cache class declares the offline build job among its owners.",
+        "One ack row naming both red runs of the last two heads, paid by this push."
+      ],
+      "verification_bullets": [
+        "Both reds were read from their own Layer C0 job logs; each printed the same artifact-root lint sentence at the same line.",
+        "The offline build selftest passes 35 of 35 and the artifact-root lint passes; the workflow cache budget gate passes with the owner declared and failed without it.",
+        "Full Layer C0 passed on a build host (490 s), every gate run to the end.",
+        "Not run: the hosted Layer C0 on this head; the other jobs of the last head's run were still running when this was written."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the hosted run of this head and the rest of the last head's run at the start of the next round."
+      ]
     }
   },
   "inventory_entries": {
