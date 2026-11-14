@@ -577,3 +577,139 @@ fn a_multicast_congestion_drop_is_observed_and_not_counted_sent() {
         "a dropped message is not counted sent: {sent:?}"
     );
 }
+
+/// `stats/filters`: a filter list holds each key once and at most
+/// `StatsKeyMatch::CAPACITY` keys, and matches a key expression against every
+/// filter it intersects.
+#[test]
+fn a_filter_list_matches_every_key_its_message_meets() {
+    let keys = |items: &[&str]| -> Vec<String> { items.iter().map(|s| s.to_string()).collect() };
+    let filters = StatsKeyFilters::new(keys(&["a/**", "a/b", "z/*", "a/b"])).unwrap();
+    assert_eq!(
+        filters.keys(),
+        ["a/**", "a/b", "z/*"],
+        "a repeated key is one"
+    );
+    let names = |keyexpr: &str| -> Vec<String> {
+        filters
+            .names(filters.matching(keyexpr))
+            .map(String::from)
+            .collect()
+    };
+    assert_eq!(names("a/b"), ["a/**", "a/b"]);
+    assert_eq!(names("a"), ["a/**"], "`**` meets the empty remainder");
+    assert_eq!(
+        names("a/*"),
+        ["a/**", "a/b"],
+        "a wildcard key meets every filter it intersects"
+    );
+    assert!(names("z/q/r").is_empty(), "`z/*` is one chunk");
+    assert!(names("other").is_empty());
+    assert!(StatsKeyFilters::default().matching("a/b").is_empty());
+
+    let at_capacity: Vec<String> = (0..StatsKeyMatch::CAPACITY)
+        .map(|i| alloc::format!("k/{i}"))
+        .collect();
+    assert!(StatsKeyFilters::new(at_capacity.clone()).is_ok());
+    let mut over = at_capacity;
+    over.push("k/over".to_string());
+    assert_eq!(
+        StatsKeyFilters::new(over),
+        Err(StatsKeyFiltersError::TooMany {
+            count: StatsKeyMatch::CAPACITY + 1
+        })
+    );
+}
+
+/// A classified payload counts under the keys its class matched, into the very
+/// series S5 of the golden pins against the pin's encoder; a class matched
+/// against no filter counts under none.
+#[test]
+fn a_classified_payload_counts_under_the_keys_its_class_matched() {
+    let filters =
+        StatsKeyFilters::new(["a/**", "a/b", "z/*"].map(|s| s.to_string()).to_vec()).unwrap();
+    let put = crate::stats::NetworkStatsClass::net(
+        MessageLabel::Put,
+        crate::stats::StatMessage::Put,
+        StatSpace::User,
+        64,
+    );
+
+    let mut keyed = TransportMetrics::default();
+    keyed.set_key_filters(filters.clone());
+    let matched = put.with_keys(filters.matching("a/b"));
+    keyed.observe_payload_class(
+        StatsDirection::Rx,
+        Priority::Data,
+        MessageLabel::Put,
+        false,
+        &matched.payload.unwrap(),
+    );
+    let mut pinned = TransportMetrics::default();
+    pinned.set_key_filters(filters.clone());
+    pinned.observe_network_message_payload(
+        StatsDirection::Rx,
+        StatSpace::User,
+        Priority::Data,
+        MessageLabel::Put,
+        false,
+        64,
+        ["a/**", "a/b"],
+    );
+    assert_eq!(keyed, pinned);
+
+    let mut unmatched = TransportMetrics::default();
+    unmatched.set_key_filters(filters);
+    unmatched.observe_payload_class(
+        StatsDirection::Rx,
+        Priority::Data,
+        MessageLabel::Put,
+        false,
+        &put.payload.unwrap(),
+    );
+    assert_ne!(
+        unmatched, keyed,
+        "CONTROL: the same payload unmatched counts under no key"
+    );
+}
+
+/// Replacing the filter list drops the per-key series counted under the old
+/// one and keeps the rest; setting the same list again drops nothing.
+#[test]
+fn a_new_filter_list_drops_the_per_key_series_of_the_old() {
+    let filters = StatsKeyFilters::new(alloc::vec!["a/**".to_string()]).unwrap();
+    let observe = |metrics: &mut TransportMetrics| {
+        metrics.observe_network_message_payload(
+            StatsDirection::Tx,
+            StatSpace::User,
+            Priority::Data,
+            MessageLabel::Put,
+            false,
+            8,
+            ["a/**"],
+        );
+    };
+    let mut metrics = TransportMetrics::default();
+    metrics.set_key_filters(filters.clone());
+    observe(&mut metrics);
+    let counted = metrics.clone();
+    metrics.set_key_filters(filters);
+    assert_eq!(metrics, counted, "the same list again keeps every series");
+
+    metrics.set_key_filters(StatsKeyFilters::new(alloc::vec!["b/**".to_string()]).unwrap());
+    let mut expected = TransportMetrics::default();
+    expected.set_key_filters(StatsKeyFilters::new(alloc::vec!["b/**".to_string()]).unwrap());
+    expected.observe_network_message_payload(
+        StatsDirection::Tx,
+        StatSpace::User,
+        Priority::Data,
+        MessageLabel::Put,
+        false,
+        8,
+        [],
+    );
+    assert_eq!(
+        metrics, expected,
+        "the payload series stays, its per-key series under the old key goes"
+    );
+}

@@ -131,14 +131,17 @@ pub fn key_state(path: &str) -> Option<KeyState> {
 
 /// Keys the runtime's reader honours for a wz NODE whose effect lives in a part of that node this
 /// engine does not have: the plugin plane of the storage host searches
-/// `plugins_loading/search_dirs`, and the runtime's session and the peer node's local declarations
+/// `plugins_loading/search_dirs`, the runtime's session and the peer node's local declarations
 /// declare under `aggregation/*`, where this engine's registry of faces declares each entity as
-/// its own key. Stating one here asks for something that will not happen, so it is
-/// [`KeyState::Unmapped`] and reported among [`OpenPlan::ignored`] although the reader read it.
+/// its own key, and the node's stats registry hands `stats/filters` to the sessions it counts,
+/// which this engine does not install. Stating one here asks for something that will not happen,
+/// so it is [`KeyState::Unmapped`] and reported among [`OpenPlan::ignored`] although the reader
+/// read it.
 pub const NODE_KEYS_THE_ENGINE_DOES_NOT_ACT_ON: &[&str] = &[
     "plugins_loading/search_dirs",
     "aggregation/subscribers",
     "aggregation/publishers",
+    "stats/filters",
 ];
 
 /// The five keys that give a certificate or a key of the `tls/` and `quic/` links inline, base64
@@ -2282,7 +2285,8 @@ mod tests {
             &[],
             r#"{ scouting: { multicast: { enabled: false } },
                  plugins_loading: { search_dirs: ["/opt/wz/plugins"] },
-                 aggregation: { subscribers: [], publishers: [] } }"#,
+                 aggregation: { subscribers: [], publishers: [] },
+                 stats: { filters: [] } }"#,
         )
         .expect("opens");
         assert_eq!(
@@ -2290,7 +2294,8 @@ mod tests {
             [
                 "aggregation/publishers",
                 "aggregation/subscribers",
-                "plugins_loading/search_dirs"
+                "plugins_loading/search_dirs",
+                "stats/filters"
             ]
         );
     }

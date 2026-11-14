@@ -506,6 +506,12 @@ pub use wz_session_core::reply_acceptance;
 /// and a second copy in `wz-capi-c` is exactly what the re-export prevents.
 pub use wz_session_core::json5;
 
+/// The stats registry and its `stats/filters` key list, on the same precedent: a
+/// node host hands the key list to its sessions
+/// (`SessionLinkActions::set_stats_key_filters`, `node_stats::NodeStats`) and
+/// reaches them without depending on `wz-session-core`.
+pub use wz_session_core::stats_registry;
+
 /// Open-debt item 751 — the south partition type, on the same precedent: a
 /// router host hands one to
 /// `router_forward::RouterForwarder::with_south_partition`, and wz-ap-demo

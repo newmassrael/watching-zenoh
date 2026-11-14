@@ -919,6 +919,9 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // asserted below rather than rendered here.
         ("aggregation/subscribers", String::from("[]")),
         ("aggregation/publishers", String::from("[]")),
+        // The same for the stats filter list (upstream's stats block derives its default), and
+        // wz's list is empty, asserted below.
+        ("stats/filters", String::from("[]")),
         // A silent file resolves to upstream's default search list, a `current_exe_parent`
         // spec and five paths, and wz holds `None` for it, which searches that same list. The
         // list wz searches is rendered here through the tree's own renderer, so the two are one
@@ -956,6 +959,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
     assert!(
         wz.aggregation_subscribers.is_empty() && wz.aggregation_publishers.is_empty(),
         "the fixture states no aggregate"
+    );
+    assert!(
+        wz.stats_filters.is_empty(),
+        "the fixture states no stats filter"
     );
     // The key the tree cannot answer (`THE_TREE_ANSWERS_NULL`): a silent file leaves wz on the
     // `auto` preset, the one the pinned `DEFAULT_CONFIG.json5` documents.
@@ -3828,6 +3835,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   // The aggregates this client's session declares its subscribers and publishers
   // under: one declaration each for everything below `dropin`.
   aggregation: {{ subscribers: ["dropin/**"], publishers: ["dropin/**"] }},
+  // The key this client's session counts its payloads under.
+  stats: {{ filters: [{{ key: "dropin/**" }}] }},
 }}
 "#
     );

@@ -1508,6 +1508,9 @@ pub struct ZenohNodeConfig {
     pub aggregation_subscribers: Vec<String>,
     /// `aggregation/publishers`: the same for the subscribers interest of a publisher.
     pub aggregation_publishers: Vec<String>,
+    /// `stats/filters`: the key expressions the node's transports count payloads under, each
+    /// filter's `key` in the document's order. Empty, upstream's default, counts under no key.
+    pub stats_filters: Vec<String>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1657,6 +1660,7 @@ impl Default for ZenohNodeConfig {
             plugin_search_dirs: None,
             aggregation_subscribers: Vec::new(),
             aggregation_publishers: Vec::new(),
+            stats_filters: Vec::new(),
         }
     }
 }
@@ -2183,6 +2187,18 @@ impl ZenohNodeConfig {
             push_endpoints(&self.aggregation_publishers, &mut out);
             out.push_str(" }");
         }
+        if !self.stats_filters.is_empty() {
+            out.push_str(",\n  \"stats\": { \"filters\": [");
+            for (i, key) in self.stats_filters.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str("{ \"key\": ");
+                escape_into(key, &mut out);
+                out.push_str(" }");
+            }
+            out.push_str("] }");
+        }
         out.push_str("\n}\n");
         out
     }
@@ -2485,6 +2501,11 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // declaration-aggregation group, so the surface total is unchanged.
     "aggregation/subscribers",
     "aggregation/publishers",
+    // The keys a node's transports count payloads under: each session's payload class carries
+    // the filters its key expression meets (`wz_session_core::stats_registry::StatsKeyFilters`).
+    // Moved from the unhonoured half and its per-keyexpr statistics group, so the surface total
+    // is unchanged.
+    "stats/filters",
 ];
 
 /// The keys of [`HONOURED_CONFIG_KEYS`] whose reader is a CAPABILITY of the build: the key, the
@@ -2608,6 +2629,13 @@ pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
         "aggregation/publishers",
         crate::declaration_aggregation::AGGREGATION_CAPABILITY,
         cfg!(feature = "keyexpr-includes"),
+    ),
+    // The filters are counted under by the transport counters, which a build without them
+    // does not have.
+    (
+        "stats/filters",
+        "transport-stats",
+        cfg!(feature = "transport-stats"),
     ),
 ];
 
@@ -2898,13 +2926,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // command line (`--autoconnect`), not from the file, and moving those keys
     // is a different seam with a different witness.
     //
-    // R2230 (open-debt item 579) — `stats/filters` ARRIVED in 1.10.0. ⚠ Do NOT
-    // read wz's `transport-stats` feature as answering it: that feature answers
-    // upstream's `stats` FEATURE (four per-session counters), and this key is
-    // upstream's per-KEYEXPR statistics selector. wz counts at two wire seams
-    // neither of which sees a key expression, so there is no dimension here to
-    // filter on.
-    "stats/filters",
+    // `stats/filters` LEFT this list for `HONOURED_CONFIG_KEYS`: a session's
+    // payload class now carries the filters its key expression meets, and the
+    // per-key family counts under them.
     // R2626 — `timestamping/drop_future_timestamp` LEFT this list for
     // [`HONOURED_CONFIG_KEYS`]: wz now implements zenoh's drop arm and exposes
     // the knob, so the key is acted on rather than merely accepted.
@@ -3010,9 +3034,6 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   no "gateway region-partitioning plane" (`GatewayConf`), and the region-hat
 ///   forwarder applies one. Its other half, `region_name`, left earlier for
 ///   [`UNHONOURED_READER_GAP`].)
-/// * `stats/filters` — per-keyexpr statistics (`StatsFilterConfig`). ⚠ Not
-///   answered by wz's `transport-stats`, which answers upstream's `stats`
-///   FEATURE; see the row's own comment.
 /// * `transport/shared_memory/transport_optimization/*` — an implicit
 ///   large-message SHM promotion path (`LargeMessageTransportOpt`). wz HAS
 ///   shared memory and still lacks this one, which is why it is worth a group.
@@ -3109,16 +3130,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // false in the direction this list cannot express.
     // R2950 — `scouting/delay` left for the honoured list.
     // R3075 -- `scouting/gossip/enabled` left for the C ABI session's honoured list.
-    // R2230 (open-debt item 579) — ARRIVED in 1.10.0, and it is the row most at
-    // risk of being read as a reader gap, because wz DOES have a `transport-stats`
-    // feature. That feature answers upstream's `stats` FEATURE. This key is
-    // upstream's `StatsFilterConfig { key: OwnedKeyExpr }` — statistics selected
-    // PER KEY EXPRESSION. wz's `TransportStats` is four `AtomicUsize`
-    // (`tx_bytes`/`tx_msgs`/`rx_bytes`/`rx_msgs`) counted at two wire seams,
-    // neither of which sees a key expression, reported as one flat OpenMetrics
-    // block with no selector. There is no dimension here to filter on; wz's own
-    // doc already records that even a per-priority split is a later extension.
-    "stats/filters",
+    // `stats/filters` LEFT this list: wz's per-key payload family counts under
+    // the filters a message's key expression meets.
     // R2626 — `timestamping/drop_future_timestamp` left this half of the
     // partition too, and for the sharper reason: this list is "beyond wz", and
     // wz now HAS the surface.
@@ -3434,11 +3447,7 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
     // _gate` checks that claim against wz's own code: it found `RegionName` at
     // three files and refused the push. wz HAS a node region identity now; the
     // key is a reader gap, which is a different list.
-    (
-        "per-keyexpr statistics",
-        "StatsFilterConfig",
-        &["stats/filters"],
-    ),
+    // The per-keyexpr statistics group is GONE, not emptied: its one key is honoured.
     (
         "an implicit large-message SHM promotion path",
         "LargeMessageTransportOpt",
@@ -3770,11 +3779,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "qos/publication",
         "build",
         "applied by the Rust API preset session; no per-key defaults in node or C ABI",
-    ),
-    (
-        "stats/filters",
-        "build",
-        "statistics per key expression; wz counts per session and sees no key expression",
     ),
     (
         "transport/link/rx/buffer_size",
@@ -4785,7 +4789,8 @@ fn honoured<'a>(doc: &'a Json5Value, path: &str) -> Option<&'a Json5Value> {
     feature = "access-qos-overwrite",
     feature = "transport-link-tls",
     feature = "routing-router-hat",
-    feature = "keyexpr-includes"
+    feature = "keyexpr-includes",
+    feature = "transport-stats"
 )))]
 fn refuse_unbuilt_instruction(
     doc: &Json5Value,
@@ -4807,7 +4812,8 @@ fn refuse_unbuilt_instruction(
     feature = "access-downsampling",
     feature = "access-quota",
     feature = "access-qos-overwrite",
-    feature = "keyexpr-includes"
+    feature = "keyexpr-includes",
+    feature = "transport-stats"
 )))]
 fn is_empty_list(value: &Json5Value) -> bool {
     matches!(value, Json5Value::Array(items) if items.is_empty())
@@ -6647,6 +6653,40 @@ fn keyexpr_list_of(
     Ok(keys)
 }
 
+/// `stats/filters`: a list of `{ key: "<keyexpr>" }`, as upstream's filter type reads it
+/// (`commons/zenoh-config/src/lib.rs` @ `pub struct StatsFilterConfig {`): `key` is required and
+/// a key expression, and a field it does not know is not refused, the struct naming no
+/// `deny_unknown_fields`. More filters than a transport counts under is refused by the key.
+#[cfg(feature = "transport-stats")]
+fn stats_filters_of(value: &Json5Value) -> Result<Vec<String>, ConfigIngestError> {
+    const PATH: &str = "stats/filters";
+    let refused = || ConfigIngestError::WrongType {
+        path: PATH,
+        expected: "a list of { key: \"<keyexpr>\" }",
+    };
+    let Json5Value::Array(items) = value else {
+        return Err(refused());
+    };
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        // A member that is not an object has no `key` to get.
+        let Some(Json5Value::String(key)) = item.get("key") else {
+            return Err(refused());
+        };
+        if wz_session_core::keyexpr_canon::validate_keyexpr(key).is_err() {
+            return Err(refused());
+        }
+        keys.push(key.clone());
+    }
+    if keys.len() > wz_session_core::stats::StatsKeyMatch::CAPACITY {
+        return Err(ConfigIngestError::OutOfRange {
+            path: PATH,
+            value: format!("{} filters", keys.len()),
+        });
+    }
+    Ok(keys)
+}
+
 /// The same, refusing any member outside `allowed`.
 ///
 /// This is where wz stays exactly as strict as upstream rather than more
@@ -8122,6 +8162,15 @@ impl ZenohNodeConfig {
         for path in ["aggregation/subscribers", "aggregation/publishers"] {
             refuse_unbuilt_instruction(&doc, path, is_empty_list)?;
         }
+        // The keys a node's transports count payloads under, read where the build counts them
+        // (`CAPABILITY_HONOURED_KEYS`).
+        #[cfg(feature = "transport-stats")]
+        if let Some(value) = honoured(&doc, "stats/filters") {
+            out.stats_filters = stats_filters_of(value)?;
+            named.push("stats/filters");
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        refuse_unbuilt_instruction(&doc, "stats/filters", is_empty_list)?;
         // `adminspace` is a block rather than a field: an absent block is not
         // `enabled: false`, which is why the struct models it as an Option and
         // why `enabled: false` here has to erase the block rather than record
@@ -9718,6 +9767,10 @@ mod tests {
                 "aggregation/publishers",
                 r#"{ "aggregation": { "publishers": ["demo/**"] } }"#,
             ),
+            (
+                "stats/filters",
+                r#"{ "stats": { "filters": [{ "key": "demo/**" }] } }"#,
+            ),
             // R2230 (items 579 / 582) — this row MOVED to the tail of the table
             // when the key left `HONOURED_CONFIG_KEYS` for
             // `WZ_EXTENSION_HONOURED_KEYS`. It is still driven, and driven the
@@ -9821,6 +9874,54 @@ mod tests {
                 "{doc}"
             );
         }
+    }
+
+    /// `stats/filters` is read as upstream's filter list, its keys in order; a
+    /// member with no key expression for `key` is refused, a field upstream does
+    /// not know is not, and more filters than a transport counts under is refused
+    /// by the key. The emitter writes what the reader takes back.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn the_stats_filters_are_read_as_upstreams_list() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ stats: { filters: [{ key: "home/**" }, { key: "garden/*", note: 1 }] } }"#,
+        )
+        .expect("a list of filters");
+        assert_eq!(ingest.config.stats_filters, ["home/**", "garden/*"]);
+        assert!(ingest.named.contains(&"stats/filters"));
+        let back = ZenohNodeConfig::from_json5(&ingest.config.to_json5()).unwrap();
+        assert_eq!(back.config, ingest.config);
+
+        for bad in [
+            r#"{ stats: { filters: "home/**" } }"#,
+            r#"{ stats: { filters: ["home/**"] } }"#,
+            r#"{ stats: { filters: [{ keys: "home/**" }] } }"#,
+            r#"{ stats: { filters: [{ key: "home//x" }] } }"#,
+        ] {
+            assert!(
+                matches!(
+                    ZenohNodeConfig::from_json5(bad),
+                    Err(ConfigIngestError::WrongType {
+                        path: "stats/filters",
+                        ..
+                    })
+                ),
+                "{bad}"
+            );
+        }
+        let many: Vec<String> = (0..=wz_session_core::stats::StatsKeyMatch::CAPACITY)
+            .map(|i| format!("{{ key: \"k/{i}\" }}"))
+            .collect();
+        assert!(matches!(
+            ZenohNodeConfig::from_json5(&format!(
+                "{{ stats: {{ filters: [{}] }} }}",
+                many.join(", ")
+            )),
+            Err(ConfigIngestError::OutOfRange {
+                path: "stats/filters",
+                ..
+            })
+        ));
     }
 
     /// `plugins_loading/search_dirs` is read in both of upstream's spellings, in
@@ -12988,6 +13089,11 @@ mod tests {
                 "keyexpr-includes",
                 cfg!(feature = "keyexpr-includes"),
             ),
+            (
+                "stats/filters",
+                "transport-stats",
+                cfg!(feature = "transport-stats"),
+            ),
         ] {
             assert_eq!(config_key_capability(key), Some((feature, built)), "{key}");
             assert_eq!(config_key_in_build(key), built, "{key}");
@@ -13023,13 +13129,15 @@ mod tests {
                                    rules: [], subjects: [], policies: [] },
                  transport: { link: { tls: { enable_mtls: false, verify_name_on_connect: true } } },
                  gateway: { south: "auto" },
-                 aggregation: { subscribers: [], publishers: [] } }"#,
+                 aggregation: { subscribers: [], publishers: [] },
+                 stats: { filters: [] } }"#,
         )
         .expect("upstream's defaults state no instruction");
         // Every capability key whose default is a value; the others default to their absence.
         let stated = [
             "aggregation/subscribers",
             "aggregation/publishers",
+            "stats/filters",
             "low_pass_filter",
             "downsampling",
             "qos/network",
@@ -13106,6 +13214,10 @@ mod tests {
             (
                 "aggregation/publishers",
                 r#"{ aggregation: { publishers: ["a/**"] } }"#,
+            ),
+            (
+                "stats/filters",
+                r#"{ stats: { filters: [{ key: "a/**" }] } }"#,
             ),
         ] {
             let read = ZenohNodeConfig::from_json5(doc);

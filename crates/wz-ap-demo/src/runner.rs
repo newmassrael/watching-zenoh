@@ -3428,6 +3428,11 @@ pub(crate) async fn run_demo(
     // `aggregation/{subscribers,publishers}`: set before the first declaration
     // below, since a declaration keeps the key it was made under.
     session.set_declaration_aggregation(declare_spec.aggregation.clone());
+    // `stats/filters`: before the session carries data, so every payload is
+    // counted under the keys it meets.
+    actions
+        .set_stats_key_filters(tuning.stats_filters.clone())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
     // Read the matching knob BEFORE `publisher_spec` moves into spawn_tasks.
     //
@@ -5017,6 +5022,11 @@ async fn run_peer_until(
         params.whatami,
         env!("CARGO_PKG_VERSION"),
     );
+    // `stats/filters`: every face this node opens counts its payloads under
+    // them. A build without the registry has refused a non-empty list already.
+    if let Some(stats) = &node_stats {
+        stats.set_key_filters(tuning.stats_filters.clone());
+    }
     if config_queryable {
         use wz::runtime_tokio::adminspace::{
             admin_config_key, admin_queryable_key, answer_admin_query, AdminAnswerCtx,
@@ -6765,6 +6775,10 @@ async fn run_router_hat_until(
         params.whatami,
         env!("CARGO_PKG_VERSION"),
     );
+    // `stats/filters`, for every face this router opens, as on the peer host.
+    if let Some(stats) = &node_stats {
+        stats.set_key_filters(opts.tuning.stats_filters.clone());
+    }
     // R2333 (open-debt item 15, `transport-multicast`) — the group faces' stop
     // handles, held here for the whole run and driven at teardown. The library
     // has had a graceful multicast stop since R311y772 and its wire half (the
@@ -8933,6 +8947,10 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // counts outlive it in the registry's totals. Numbered in accept order.
     let node_stats =
         wz::runtime_tokio::node_stats::NodeStats::for_node(&zid_hex, params.whatami, &version);
+    // `stats/filters`, for every client session this host serves.
+    if let Some(stats) = &node_stats {
+        stats.set_key_filters(tuning.stats_filters.clone());
+    }
     let mut next_transport: u64 = 0;
     loop {
         let dialed = match race_against_shutdown(

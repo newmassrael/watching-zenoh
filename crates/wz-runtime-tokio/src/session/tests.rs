@@ -15577,6 +15577,82 @@ fn a_driver_refusal_charges_n_dropped_and_no_sent_counter() {
     }
 }
 
+/// `stats/filters`: a session counts each payload it sends under every filter
+/// its key expression meets, in the per-key family of the metrics document, and
+/// under no other. CONTROL: the same sends with no filter carry no keyed series.
+#[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+#[test]
+fn a_session_counts_its_payloads_under_the_stats_filters_they_meet() {
+    use wz_session_core::stats_registry::{MetricsQuery, StatsKeyFilters, StatsRegistry};
+    let metrics_after = |filters: &[&str]| -> String {
+        let (session, _driver) = build_session();
+        session
+            .actions()
+            .set_stats_key_filters(
+                StatsKeyFilters::new(filters.iter().map(|s| s.to_string()).collect()).unwrap(),
+            )
+            .expect("a build with transport-stats takes the list");
+        for (key, value) in [("home/temp", &b"21.5"[..]), ("garden/soil", &b"dry"[..])] {
+            session
+                .publish(
+                    key,
+                    value,
+                    PublishOptions::put().with_locality(Locality::Remote),
+                )
+                .expect("published");
+        }
+        let mut registry = StatsRegistry::new("a1b2", wz_session_core::WhatAmI::Client, "test");
+        let transport =
+            registry.open_unicast_transport("c3d4", wz_session_core::WhatAmI::Router, None);
+        registry.set_transport_metrics(transport, session.actions().stats_metrics());
+        let mut doc = String::new();
+        registry.encode_metrics(&mut doc, MetricsQuery::default());
+        doc
+    };
+
+    let keyed = metrics_after(&["home/**", "nowhere/*"]);
+    let line = keyed
+        .lines()
+        .find(|l| {
+            l.starts_with("zenoh_tx_network_message_payload_per_key_bytes_count{")
+                && l.contains("key=\"home/**\"")
+        })
+        .unwrap_or_else(|| panic!("no per-key series for home/**:\n{keyed}"));
+    assert!(line.ends_with(" 1"), "one payload met home/**: {line}");
+    assert!(
+        !keyed.contains("key=\"nowhere/*\""),
+        "a filter no payload met has no series:\n{keyed}"
+    );
+
+    let bare = metrics_after(&[]);
+    assert!(
+        !bare.contains("key=\""),
+        "CONTROL: a session with no filter counts under no key:\n{bare}"
+    );
+}
+
+/// A build without `transport-stats` counts nothing, so a session of it refuses
+/// a stats filter that names a key rather than dropping it, and takes the empty
+/// list, which asks for nothing.
+#[cfg(not(feature = "transport-stats"))]
+#[test]
+fn a_build_without_transport_stats_refuses_a_stats_filter() {
+    use wz_session_core::stats_registry::{StatsKeyFilters, StatsKeyFiltersError};
+    let (session, _driver) = build_session();
+    assert_eq!(
+        session
+            .actions()
+            .set_stats_key_filters(StatsKeyFilters::new(vec![String::from("a/**")]).unwrap()),
+        Err(StatsKeyFiltersError::NotInBuild)
+    );
+    assert_eq!(
+        session
+            .actions()
+            .set_stats_key_filters(StatsKeyFilters::default()),
+        Ok(())
+    );
+}
+
 /// R2423 (open-debt item 688) — the F2 send gate learns from a `WriterGone`
 /// refusal, so the NEXT send rejects typed instead of vanishing.
 ///

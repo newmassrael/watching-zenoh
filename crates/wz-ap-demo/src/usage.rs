@@ -231,6 +231,11 @@ pub(crate) fn print_usage() {
     eprintln!("    --aggregation-publishers <json5>");
     eprintln!("                             the same for the subscribers interest a publisher");
     eprintln!("                             asks with. zenoh aggregation/publishers");
+    eprintln!("    --stats-filters <json5>  a list of key expressions: every payload a session");
+    eprintln!("                             of this node sends or receives is counted again");
+    eprintln!("                             under each one its key meets, in the per-key");
+    eprintln!("                             payload family of the metrics. Needs the");
+    eprintln!("                             transport-stats build. zenoh stats/filters");
     eprintln!("    --plugin-search-dirs <json5>");
     eprintln!("                             the directories a --storage-host searches, in order,");
     eprintln!("                             for a plugin its plugins section names without a");

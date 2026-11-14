@@ -8675,10 +8675,13 @@ layer_c1ak_cargo_test_transport_stats() {
     # registry has its own guard below, where its number can move alone.
     # R2843 — 10 -> 7. The report's OpenMetrics renderer is gone (the metrics
     # leg serves the registry), and with it its three `alloc` tests.
-    _runci_guarded_test C1ak 7 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
+    # 7 -> 8: `a_key_set_is_carried_by_a_payload_class_alone` (`stats/filters`).
+    _runci_guarded_test C1ak 8 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
         || return 1
     # R2930 — 8 -> 9: `a_multicast_congestion_drop_is_observed_and_not_counted_sent`.
-    _runci_guarded_test C1ak 9 cargo test -p wz-session-core --lib stats_registry:: --quiet \
+    # 9 -> 12: the three `stats/filters` tests (the filter list, a classified payload
+    # counted under its keys, a new list dropping the old per-key series).
+    _runci_guarded_test C1ak 12 cargo test -p wz-session-core --lib stats_registry:: --quiet \
         || return 1
     # R2825 (open-debt item 820) — payload SIZE is upstream's `payload_size()`.
     # The classifier arms compile only with their codecs, so the features are
@@ -8695,7 +8698,8 @@ layer_c1ak_cargo_test_transport_stats() {
     # R2844 — the NODE registry: its lifecycle (open, closed, retired after the
     # collection delay) and the face loop recording into it. Needs the loop,
     # so `routing-peer`, which no other leg here composes with the counters.
-    _runci_guarded_test C1ak 3 cargo test -p wz-runtime-tokio --features transport-stats,routing-peer --lib --quiet \
+    # 3 -> 4: `the_nodes_stats_filters_reach_every_transport` (`stats/filters`).
+    _runci_guarded_test C1ak 4 cargo test -p wz-runtime-tokio --features transport-stats,routing-peer --lib --quiet \
         -- node_stats:: the_face_loop_records_each_face_into_the_node_registry \
         || return 1
     # R2848/R2849 — the MULTICAST transport's counts: the drive loop recording
@@ -8718,7 +8722,8 @@ layer_c1ak_cargo_test_transport_stats() {
     # field in every feature combination.
     # R2372 — 3 -> 6, the same R2371 arithmetic on the alloc-only arm.
     # R2843 — 6 -> 3: the three renderer tests were all this arm's `alloc` ones.
-    _runci_guarded_test C1ak 3 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
+    # 3 -> 4: `a_key_set_is_carried_by_a_payload_class_alone`, ungated like the class it holds.
+    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
         || return 1
     # R311y811 — the BARE arm: no `alloc`, no `transport-stats`. R311y810 un-gated
     # this module precisely so its report type could be named in EVERY feature
@@ -8737,7 +8742,8 @@ layer_c1ak_cargo_test_transport_stats() {
     # whole job is the no-allocation build was allocating. The 12 was the
     # allocating arm's count, written to match the red tree. The feature
     # implies nothing now, and this arm reads its three again.
-    _runci_guarded_test C1ak 3 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
+    # 3 -> 4: `a_key_set_is_carried_by_a_payload_class_alone`, which needs no allocator.
+    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
         || return 1
     # R311y810 — adminspace-metrics AND transport-stats together: the combination
     # a deployment actually runs, which no lane composed before. The metrics leg's

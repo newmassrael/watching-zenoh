@@ -2384,6 +2384,28 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             exp.pair(key, flag, text, blocked);
         }
     }
+    // `stats/filters`, onto `--stats-filters <list>` of the filters' keys. Every
+    // run counts its sessions' payloads, so every run takes it; an empty list is
+    // upstream's default.
+    if named("stats/filters") {
+        if cfg.stats_filters.is_empty() {
+            exp.record("stats/filters", KeyEffect::AlreadyTheBehaviour);
+        } else {
+            let text = wz::runtime_tokio::json5::Json5Value::Array(
+                cfg.stats_filters
+                    .iter()
+                    .map(|key| wz::runtime_tokio::json5::Json5Value::String(key.clone()))
+                    .collect(),
+            )
+            .to_json5_text();
+            exp.pair(
+                "stats/filters",
+                "--stats-filters",
+                text,
+                no_sink("stats/filters"),
+            );
+        }
+    }
     // The run-mode the expanded argv runs, typed or selected by the file, and,
     // when it is a single-session run that cannot host the admin space a
     // document enables, the verdict its admin keys get instead of a flag it
@@ -3939,6 +3961,18 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          publishers_under_one_aggregate_ask_with_one_interest; no leg reads a \
          CONFIG-sourced aggregate off a node's frame yet.",
     ),
+    // Which per-key series a node's metrics carry: a counter, which no frame
+    // carries.
+    (
+        "stats/filters",
+        KIND_OFF_WIRE,
+        "expands to `--stats-filters <list>`. Each payload a session sends or \
+         receives is counted again under every filter its key expression meets, \
+         visible only in the metrics document an adminspace serves, as the \
+         per-key payload family's `key` label; no frame field carries it. Judged \
+         by a_session_counts_its_payloads_under_the_stats_filters_they_meet in \
+         wz-runtime-tokio's session tests.",
+    ),
     // Which library a plugin named without a `__path__` loads from: a search of
     // the file system, which no frame carries.
     (
@@ -4160,9 +4194,14 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         out.push("plugins_loading/search_dirs");
     }
     // The aggregates' sink is every session's declare, which a build without the inclusion test
-    // they are applied by does not have; this crate reads that off the runtime rather than
-    // naming the runtime's feature, which it does not declare.
-    for key in ["aggregation/subscribers", "aggregation/publishers"] {
+    // they are applied by does not have, and the stats filters' is the transport counters, which
+    // a build without `transport-stats` does not have; this crate reads both off the runtime
+    // rather than naming the runtime's features, which it does not declare.
+    for key in [
+        "aggregation/subscribers",
+        "aggregation/publishers",
+        "stats/filters",
+    ] {
         if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
             out.push(key);
         }
@@ -5950,6 +5989,13 @@ mod stock_config_tests {
                 r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] } }"#,
                 r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] },
                      aggregation: { publishers: ["demo/**"] } }"#,
+            ),
+            // One filter, which the empty default list is not; every run counts.
+            (
+                "stats/filters",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     stats: { filters: [{ key: "demo/**" }] } }"#,
             ),
         ]
     }
@@ -9369,6 +9415,9 @@ pub(crate) struct TransportTuning {
     /// `--rx-max-message-size <bytes>`: the largest message a session rejoins
     /// from fragments. Upstream's default unless given.
     pub(crate) link_rx: wz::runtime_tokio::session_glue::LinkRxConf,
+    /// `--stats-filters <list>`: the key expressions every session of the node
+    /// counts payloads under (`stats/filters`). None unless given.
+    pub(crate) stats_filters: wz::runtime_tokio::stats_registry::StatsKeyFilters,
 }
 
 /// R2925 — the demo's flag for each priority's queue size, indexed by the
@@ -9393,6 +9442,7 @@ impl Default for TransportTuning {
             link_defaults: Default::default(),
             tx_queue: Default::default(),
             link_rx: Default::default(),
+            stats_filters: Default::default(),
         }
     }
 }
@@ -9485,6 +9535,33 @@ impl TransportTuning {
             out.link_defaults
                 .set(proto, span)
                 .map_err(|e: LinkDefaultsError| format!("--link-config '{value}': {e}"))?;
+        }
+        // `stats/filters`: a JSON5 list of key expressions. A build that counts
+        // no stats refuses one rather than starting without it.
+        if let Some(text) = parse_pair(rest, "--stats-filters") {
+            let refused = || format!("--stats-filters {text:?} must be a list of key expressions");
+            let keys: Vec<String> = match wz::runtime_tokio::json5::parse(&text) {
+                Ok(wz::runtime_tokio::json5::Json5Value::Array(items)) => items
+                    .into_iter()
+                    .map(|item| match item {
+                        wz::runtime_tokio::json5::Json5Value::String(key)
+                            if wz::runtime_tokio::keyexpr_canon::validate_keyexpr(&key).is_ok() =>
+                        {
+                            Ok(key)
+                        }
+                        _ => Err(refused()),
+                    })
+                    .collect::<Result<_, _>>()?,
+                _ => return Err(refused()),
+            };
+            if !keys.is_empty() && !wz::runtime_tokio::node_stats::stats_compiled() {
+                return Err(format!(
+                    "--stats-filters {text:?}: {}",
+                    wz::runtime_tokio::stats_registry::StatsKeyFiltersError::NotInBuild
+                ));
+            }
+            out.stats_filters = wz::runtime_tokio::stats_registry::StatsKeyFilters::new(keys)
+                .map_err(|e| format!("--stats-filters {text:?}: {e}"))?;
         }
         Ok(out)
     }
@@ -10478,6 +10555,46 @@ mod aggregation_flag_tests {
         ] {
             let err = declaration_aggregation_flags(&argv(&[(flag, bad)])).expect_err(bad);
             assert!(err.starts_with("--aggregation-"), "{bad} -> {err}");
+        }
+    }
+}
+
+/// `--stats-filters <list>`: absent is no filter, a list of key expressions is
+/// the node's filters where the build counts stats and refused where it does
+/// not, and a list of anything else is refused with the flag named.
+#[cfg(test)]
+mod stats_filters_flag_tests {
+    use super::*;
+
+    fn tuning(value: Option<&str>) -> Result<TransportTuning, String> {
+        let mut argv = vec!["--listen".to_string(), "tcp/127.0.0.1:0".to_string()];
+        if let Some(v) = value {
+            argv.push("--stats-filters".to_string());
+            argv.push(v.to_string());
+        }
+        TransportTuning::from_argv(&argv)
+    }
+
+    #[test]
+    fn absent_names_no_key_and_a_list_is_read() {
+        assert!(tuning(None).unwrap().stats_filters.is_empty());
+        assert!(
+            tuning(Some("[]")).unwrap().stats_filters.is_empty(),
+            "an empty list asks for nothing, in every build"
+        );
+        let read = tuning(Some(r#"["home/**", "garden/*"]"#));
+        if wz::runtime_tokio::node_stats::stats_compiled() {
+            assert_eq!(read.unwrap().stats_filters.keys(), ["home/**", "garden/*"]);
+        } else {
+            assert!(read.unwrap_err().starts_with("--stats-filters"));
+        }
+    }
+
+    #[test]
+    fn a_list_that_is_not_one_of_key_expressions_is_refused() {
+        for bad in [r#""home/**""#, "[3]", r#"["home//x"]"#, "[ \"a\""] {
+            let err = tuning(Some(bad)).expect_err(bad);
+            assert!(err.starts_with("--stats-filters "), "{bad} -> {err}");
         }
     }
 }
