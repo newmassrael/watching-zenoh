@@ -453,7 +453,7 @@ impl RouterKeys {
 
 /// The handler the admin space of a session runs for each query it is asked. Shared, because a
 /// registry of faces answers on each face it holds and every face is handed the same one.
-#[cfg(feature = "unstable")]
+#[cfg(feature = "engine-tokio")]
 pub(crate) type AdminQueryHandler = Arc<
     dyn Fn(
             &dyn wz_session_core::query_sink::QueryView,
@@ -464,14 +464,12 @@ pub(crate) type AdminQueryHandler = Arc<
 
 /// What the admin space of a session answers from, by the engine it runs on: a node holds the
 /// router's tables, and a registry of faces holds a session for each node it is linked to.
-#[cfg(feature = "unstable")]
-#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+#[cfg(feature = "engine-tokio")]
 pub(crate) enum AdminViews {
     /// A node, router, peer or client: the views of its tables.
     Node(RouterAdminViews),
     /// A registry of faces: a client, or a peer that fits no node. Its transports are its faces,
     /// and it holds no router graph.
-    #[cfg(feature = "engine-tokio")]
     Faces {
         /// The faces and the groups the registry publishes, read when a query asks, so a face
         /// that came up a moment ago is listed. The cell and not the registry: a GET of the
@@ -484,7 +482,7 @@ pub(crate) enum AdminViews {
     },
 }
 
-#[cfg(all(feature = "unstable", feature = "engine-tokio"))]
+#[cfg(feature = "engine-tokio")]
 impl AdminViews {
     /// Where the session's listeners can be reached.
     pub(crate) fn locators(&self) -> &[String] {
@@ -550,17 +548,13 @@ impl AdminViews {
 
 /// What the admin space of a router node answers from: views of the router's tables, which show
 /// them as they are when a query asks, and the locators its listeners got.
-#[cfg(feature = "unstable")]
-#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+#[cfg(feature = "engine-tokio")]
 pub(crate) struct RouterAdminViews {
     /// The sessions the router holds, one for each face.
-    #[cfg(feature = "engine-tokio")]
     pub(crate) sessions: wz_runtime_tokio::router_forward::RouterSessionsView,
     /// What the faces declared, by kind, folded by tier as the pin folds them.
-    #[cfg(feature = "engine-tokio")]
     pub(crate) declarations: wz_runtime_tokio::router_forward::RouterDeclarationsView,
     /// The graph of the north region: the routers.
-    #[cfg(feature = "engine-tokio")]
     pub(crate) routers: wz_runtime_tokio::linkstate_forward::LinkstateNetView,
     /// Where the router's listeners can be reached.
     pub(crate) locators: Vec<String>,
@@ -931,7 +925,6 @@ impl Engine {
     /// The graph of each region the session's admin space answers a `linkstate` query for, as
     /// text, by the region's name: a router node holds the graph of its routers, the north
     /// region, and the one of its peers, the south region they are in.
-    #[cfg(feature = "unstable")]
     fn linkstate_regions(&self) -> Vec<(String, String)> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().linkstate_regions(),
@@ -940,7 +933,6 @@ impl Engine {
     }
 
     /// The views the admin space of the session answers from, whatever its mode.
-    #[cfg(feature = "unstable")]
     fn admin_views(&self) -> AdminViews {
         match self {
             Engine::Router(router) => {
@@ -967,7 +959,6 @@ impl Engine {
     /// came in on; both declare it as upstream does, not complete
     /// (`ADMIN_QUERYABLE_COMPLETE`, after `zenoh/src/net/runtime/adminspace.rs` @
     /// `ext_info: QueryableInfoType::DEFAULT,`).
-    #[cfg(feature = "unstable")]
     fn host_admin_queryable(&self, key: &str, handler: AdminQueryHandler) {
         use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
         use wz_runtime_tokio::adminspace::ADMIN_QUERYABLE_COMPLETE;
@@ -1739,21 +1730,6 @@ impl Engine {
 
     #[cfg(any(feature = "unstable", feature = "internal"))]
     fn listen_locators(&self) -> Vec<String> {
-        match *self {}
-    }
-
-    #[cfg(feature = "unstable")]
-    fn linkstate_regions(&self) -> Vec<(String, String)> {
-        match *self {}
-    }
-
-    #[cfg(feature = "unstable")]
-    fn admin_views(&self) -> AdminViews {
-        match *self {}
-    }
-
-    #[cfg(feature = "unstable")]
-    fn host_admin_queryable(&self, _key: &str, _handler: AdminQueryHandler) {
         match *self {}
     }
 
@@ -4959,6 +4935,11 @@ impl Session {
             shm_clients,
         )?;
         let session = Session::on(core, true);
+        // The runtime's admin space first, as upstream's runtime starts it before the session's
+        // own is declared (`zenoh/src/net/runtime/mod.rs` @
+        // `let start_admin_space = *config.adminspace.enabled();`).
+        #[cfg(feature = "engine-tokio")]
+        crate::api::runtime_admin::start(&session.downgrade());
         #[cfg(feature = "unstable")]
         crate::api::admin::init(session.downgrade());
         Ok(session)
@@ -5172,7 +5153,7 @@ impl WeakSession {
 
     /// The configuration the session was opened with, as the session itself reads and writes it,
     /// which the admin space reads the permissions from and applies the writes to.
-    #[cfg(feature = "unstable")]
+    #[cfg(feature = "engine-tokio")]
     pub(crate) fn config_notifier(
         &self,
     ) -> crate::api::config::Notifier<zenoh_config::ExpandedConfig> {
@@ -5315,19 +5296,19 @@ impl WeakSession {
 
     /// The graph of each region the admin space answers a `linkstate` query for, as text, by the
     /// region's name.
-    #[cfg(feature = "unstable")]
+    #[cfg(feature = "engine-tokio")]
     pub(crate) fn linkstate_regions(&self) -> Vec<(String, String)> {
         self.0.engine.linkstate_regions()
     }
 
     /// The views the admin space of the session answers from, whatever its mode.
-    #[cfg(feature = "unstable")]
+    #[cfg(feature = "engine-tokio")]
     pub(crate) fn admin_views(&self) -> AdminViews {
         self.0.engine.admin_views()
     }
 
     /// Host `handler` as the routed queryable of the session's admin space on `key`.
-    #[cfg(feature = "unstable")]
+    #[cfg(feature = "engine-tokio")]
     pub(crate) fn host_admin_queryable(&self, key: &str, handler: AdminQueryHandler) {
         self.0.engine.host_admin_queryable(key, handler)
     }
@@ -5347,7 +5328,7 @@ impl WeakSession {
 
     /// Take the samples for `key_expr` into `callback` as [`Session::declare_subscriber_inner`]
     /// does, for an entity of the session that holds it by this reference.
-    #[cfg(feature = "unstable")]
+    #[cfg(feature = "engine-tokio")]
     pub(crate) fn declare_subscriber_inner(
         &self,
         key_expr: &KeyExpr,
@@ -5385,7 +5366,7 @@ impl WeakSession {
 
     /// Answer the queries for `key_expr` into `callback` as [`Session::declare_queryable_inner`]
     /// does, for an entity of the session that holds it by this reference.
-    #[cfg(feature = "unstable")]
+    #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
     pub(crate) fn declare_queryable_inner(
         &self,
         key_expr: &KeyExpr,
@@ -14887,7 +14868,6 @@ mod tests {
 
         /// The replies a GET of `selector` from `session` gets within a couple of seconds, as
         /// `(key, payload)`.
-        #[cfg(feature = "unstable")]
         fn answers(session: &Session, selector: &str) -> Vec<(String, String)> {
             let replies = session.get(selector).wait().expect("asks");
             let mut found = Vec::new();
@@ -14913,7 +14893,6 @@ mod tests {
         /// client that leaves the admin space off answers nothing, as upstream's default
         /// (`adminspace.enabled: false`) does. A client of this crate is the registry of faces, so
         /// this is the host of that engine.
-        #[cfg(feature = "unstable")]
         #[test]
         fn a_client_answers_its_admin_space_through_its_router() {
             use std::time::{Duration, Instant};
@@ -14999,7 +14978,6 @@ mod tests {
         /// registry lock before it reaches that plane, so an answer that took the registry lock
         /// would take the two in the reverse order: the published transports
         /// (`TransportsCell`) are what it reads instead.
-        #[cfg(feature = "unstable")]
         #[test]
         fn a_clients_own_admin_get_ends_while_entities_are_declared_beside_it() {
             use std::sync::atomic::{AtomicBool, Ordering};
@@ -15064,7 +15042,6 @@ mod tests {
         /// A peer that runs as a node roots its admin space at `peer`, its own mode, and answers
         /// none of the router-tier legs, as upstream's peer reads no router hat. Until the role
         /// was read off the mode, every node answered under `router` whatever it was opened as.
-        #[cfg(feature = "unstable")]
         #[test]
         fn a_peer_node_answers_its_admin_space_under_its_own_role() {
             let port = unautoselected_port();
