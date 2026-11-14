@@ -24,8 +24,30 @@
 //! `--always --dirty=-modified --abbrev=40 --exclude=*`, and `release` where there is none), and
 //! so does this: the commit of 40 digits, followed by `-modified` when the tree has changes, or
 //! `release` for a build with no history to ask, a crate unpacked from a registry.
+//!
+//! A build that has the source and not its history hands the commit in instead: `WZ_SOURCE_COMMIT`,
+//! when it is set, is the answer `git` would have given, and `git` is then neither asked nor watched.
+//! A hermetic build runs on a copy of the tree with no `.git` (`deploy/offline-build.json`), and
+//! without this it would name itself `release` where a build of the same commit in a checkout names
+//! the commit; with it, the two compose the same version. The value is held to what `git` can
+//! answer, the commit of 40 lowercase digits with `-modified` or without, or `release`, so a value
+//! that is not one fails the build rather than becoming the version a daemon reports.
 
 use std::{env, path::Path, process::Command};
+
+/// The variable a build with no history hands the commit in by.
+const SOURCE_COMMIT: &str = "WZ_SOURCE_COMMIT";
+
+/// Whether `text` is an answer `describe` can give: a commit of 40 lowercase digits, with
+/// `-modified` or without, or `release`.
+fn is_answer(text: &str) -> bool {
+    let commit = text.strip_suffix("-modified").unwrap_or(text);
+    text == "release"
+        || (commit.len() == 40
+            && commit
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
 
 /// What `git describe` says of the tree around `dir`, or `None` where it cannot say.
 fn describe(dir: &Path) -> Option<String> {
@@ -51,14 +73,29 @@ fn describe(dir: &Path) -> Option<String> {
 fn main() {
     let manifest = env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
     let manifest = Path::new(&manifest);
-    let commit = describe(manifest).unwrap_or_else(|| "release".to_owned());
     let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed={SOURCE_COMMIT}");
+
+    if let Some(given) = env::var_os(SOURCE_COMMIT) {
+        let given = given.into_string().unwrap_or_else(|raw| {
+            panic!("{SOURCE_COMMIT} is not UTF-8 ({raw:?}); unset it to ask git")
+        });
+        assert!(
+            is_answer(&given),
+            "{SOURCE_COMMIT}={given:?} is not an answer of `git describe`: a commit of 40 lowercase \
+             hex digits, with `-modified` or without, or `release`; unset it to ask git"
+        );
+        println!("cargo:rustc-env=WZ_ZENOH_GIT_VERSION=v{version}-{given}");
+        return;
+    }
+
+    let commit = describe(manifest).unwrap_or_else(|| "release".to_owned());
     println!("cargo:rustc-env=WZ_ZENOH_GIT_VERSION=v{version}-{commit}");
 
     // A build is of the commit that is checked out: it is made again when HEAD moves, which is
     // as precise as upstream's macro, that runs when the crate is compiled and not when a file
     // of the tree changes.
-    println!("cargo:rerun-if-changed=build.rs");
     if let Ok(output) = Command::new("git")
         .args(["rev-parse", "--git-path", "HEAD"])
         .current_dir(manifest)
