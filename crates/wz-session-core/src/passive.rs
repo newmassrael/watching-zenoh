@@ -2840,11 +2840,13 @@ impl PassiveSession {
     /// by default in zenoh's transmission pipeline, so this is the ordinary
     /// case and not a corner of the protocol.
     ///
-    /// A `Frame` or `Fragment` consumes the remainder by construction
-    /// (`zenoh-codec-1.5.0/src/transport/frame.rs:173`), which is why a real
-    /// batch looks like `[KeepAlive][Frame]` and never `[Frame][KeepAlive]` —
-    /// and why the message that used to be dropped here is so often the DATA
-    /// one.
+    /// A `Fragment` consumes the remainder of its unit. A `Frame` ends where its
+    /// records do: upstream's reader stops at the first message that does not
+    /// decode as a network one and the batch's loop reads it as the next
+    /// transport message (`commons/zenoh-codec/src/transport/frame.rs` @
+    /// `reader.rewind(mark);`), so a batch may hold `[Frame][KeepAlive]` and
+    /// `[Frame][Frame]` as well as `[KeepAlive][Frame]`; the walk cuts a
+    /// `Frame` at the message behind it ([`BatchParse::next_message_at`]).
     ///
     /// # What is per-unit and what is per-message
     ///
@@ -8455,35 +8457,59 @@ mod tests {
         assert_eq!(s.unaccounted_batch_bytes(Direction::A), 0);
     }
 
-    /// R311y631 (§1.2b) — and the COUNTER-CASE that says why a batch ends with
-    /// a data frame: a `Frame` eats the remainder, sentinel and all.
+    /// The counter-case of the sentinel behind an OAM above, as the wire has it: a
+    /// KeepAlive behind a `Frame`'s last record is a message of its own, as upstream's
+    /// pipeline writes one into the open batch and its reader reads it. Upstream's
+    /// `Frame` reader stops at the first message that does not decode as a network
+    /// one and rewinds, and the batch's loop reads that message next
+    /// (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`,
+    /// `io/zenoh-transport/src/unicast/universal/rx.rs` @ `while !batch.is_empty() {`).
     ///
-    /// Not a defect and not a shortfall — it is what the wire says. zenoh's own
-    /// decoder reads a Frame's payload as `reader.remaining()`
-    /// (`zenoh-codec-1.5.0/src/transport/frame.rs:173`), so a sender that put
-    /// anything behind a Frame in one unit would have written a message no
-    /// conforming peer can retrieve. Asserted here so that the walk's stopping
-    /// point is a MEASURED property of the codec rather than a coincidence
-    /// nobody would notice changing.
+    /// The decode of the unit still hands the `Frame` the tail of the unit, since
+    /// only the walk of its records says where they end; the walk cuts it there.
     #[test]
-    fn a_frame_eats_the_rest_of_its_unit_which_is_why_it_ends_a_batch() {
-        let sentinel = crate::wire_const::T_MID_KEEP_ALIVE;
-        let mut unit = frame_wire(3, &oam_record(1));
+    fn a_keepalive_behind_a_frame_is_a_message_of_its_own() {
+        let records = oam_record(1);
+        let mut unit = frame_wire(3, &records);
         let frame_len = unit.len();
-        unit.push(sentinel);
+        unit.push(crate::wire_const::T_MID_KEEP_ALIVE);
 
         let (_, consumed) =
             crate::inbound::parse_inbound_consuming(&unit).expect("the frame decodes");
         assert_eq!(
             consumed,
             frame_len + 1,
-            "a Frame consumes to the end of its unit, so the sentinel is part \
-             of its payload rather than a message behind it"
+            "the decode of the unit hands the Frame the tail of the unit"
         );
 
         let mut s = PassiveSession::new();
         let frames = s.next_datagram(Direction::A, &unit, 0);
-        assert_eq!(frames.len(), 1, "one Frame, and nothing after it");
+        assert_eq!(
+            frames.len(),
+            2,
+            "the Frame and the KeepAlive behind it, got {:?}",
+            frames.iter().map(|f| &f.frame).collect::<Vec<_>>()
+        );
+        match &frames[0].frame {
+            Ok(InboundFrame::Frame { payload, .. }) => {
+                assert_eq!(
+                    payload.as_slice(),
+                    records.as_slice(),
+                    "the Frame's records"
+                )
+            }
+            other => panic!("expected the Frame, got {other:?}"),
+        }
+        let Carried::Batch(batch) = &frames[0].carried else {
+            panic!("the Frame carried no batch")
+        };
+        assert!(batch.is_complete());
+        assert_eq!(batch.next_message_at, Some(records.len()));
+        assert!(matches!(
+            frames[1].frame,
+            Ok(InboundFrame::KeepAlive { .. })
+        ));
+        assert_eq!(frames[1].unit_offset, frame_len);
         assert_eq!(s.unaccounted_batch_bytes(Direction::A), 0);
     }
 
