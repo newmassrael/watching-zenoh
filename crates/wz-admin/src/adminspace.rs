@@ -6991,6 +6991,92 @@ mod tests {
         );
     }
 
+    /// One answerer for every role: the node's role is the second chunk of
+    /// every key it answers, the root document is the same object whatever the
+    /// role, and a GET addressed to the same zid under another role meets
+    /// nothing. Upstream roots the whole space at the runtime's role in every
+    /// mode (`zenoh/src/net/runtime/adminspace.rs` @
+    /// `let root_key: OwnedKeyExpr = format!("@/{zid_str}/{whatami_str}")`), and
+    /// its `local_data` names no role at the top level, so a client and a router
+    /// with the same facts answer the same bytes under different keys.
+    #[test]
+    fn every_role_answers_its_own_root_with_one_document() {
+        #[cfg(not(feature = "adminspace-plugins-handlers"))]
+        let plugins_tok = "null";
+        #[cfg(feature = "adminspace-plugins-handlers")]
+        let plugins_tok = "{}";
+        let document = format!(
+            r#"{{"locators":[],"metadata":null,"plugins":{plugins_tok},"sessions":[],"version":"0.1.0","zid":"a1b2"}}"#
+        );
+        let roles = ["client", "peer", "router"];
+        for whatami in roles {
+            let ctx = AdminAnswerCtx {
+                whatami,
+                ..admin_ctx(true)
+            };
+            let root = format!("@/a1b2/{whatami}");
+            let subtree = format!("{root}/**");
+            let view = admin_view(&subtree);
+            let mut out = RecordingReply::default();
+            let _ = answer_admin_query(&view, &mut out, &ctx, &[], &[], &[], "{}");
+            let body = out
+                .replies
+                .iter()
+                .find(|(k, _)| *k == root)
+                .map(|(_, p)| String::from_utf8_lossy(p).into_owned())
+                .unwrap_or_else(|| panic!("{whatami}: no reply at {root}: {:?}", out.replies));
+            assert_eq!(body, document, "{whatami}: the root document");
+            let own_prefix = format!("{root}/");
+            for (key, _) in &out.replies {
+                assert!(
+                    *key == root || key.starts_with(&own_prefix),
+                    "{whatami}: {key} is outside its own root"
+                );
+            }
+            for other in roles.iter().filter(|r| **r != whatami) {
+                let foreign = format!("@/a1b2/{other}/**");
+                let view = admin_view(&foreign);
+                let mut out = RecordingReply::default();
+                let _ = answer_admin_query(&view, &mut out, &ctx, &[], &[], &[], "{}");
+                assert!(
+                    out.replies.is_empty(),
+                    "{whatami}: a GET for the {other} role answered {:?}",
+                    out.replies
+                );
+            }
+        }
+    }
+
+    /// The manifest of a client and of a router list their own keys, and only
+    /// the router lists the router-tier legs: upstream's client hat holds no
+    /// link-state graph and no successor table, so its `linkstate` and
+    /// `route/successor` handlers find no hat to answer from
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `hat.mode().is_router()`).
+    #[test]
+    fn a_client_manifest_lists_its_own_keys_and_no_router_leg() {
+        let client = admin_legs("a1b2", "client");
+        assert!(!client.is_empty(), "a client answers at least its root");
+        for leg in &client {
+            assert!(
+                leg.key == "@/a1b2/client" || leg.key.starts_with("@/a1b2/client/"),
+                "{} is outside the client's root",
+                leg.key
+            );
+            assert!(
+                !leg.key.contains("/linkstate/") && !leg.key.contains("/route/"),
+                "a client lists a router-tier leg: {}",
+                leg.key
+            );
+        }
+        #[cfg(feature = "adminspace-router-linkstate")]
+        assert!(
+            admin_legs("a1b2", "router")
+                .iter()
+                .any(|leg| leg.key == "@/a1b2/router/linkstate/routers"),
+            "the control: the router does list its link-state leg"
+        );
+    }
+
     #[cfg(feature = "adminspace-introspection-handlers")]
     fn sub_decl(keyexpr: &str, peers: &[&str]) -> AdminDeclaration {
         AdminDeclaration {
