@@ -1860,15 +1860,18 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             ),
         }
     }
-    // Item 751 (step 7d-2) — the south PARTITION. Its sinks are the two nodes
-    // that hold a region-hat forwarder, `--peer` and `--router-hat`, which is the
-    // mesh precondition the lifecycle keys use: any other run mode has no hat to
-    // place a remote by and `--gateway-south` is refused there by name. The
-    // preset is upstream's shipped value and what the flag's absence means, so a
-    // document stating it asks for the behaviour the node already has.
+    // Item 751 (step 7d-2) — the south PARTITION. Its sinks are the nodes that
+    // hold a region-hat forwarder, `--peer` (and `--client-node`, the same run in
+    // the client role) and `--router-hat`, which is the mesh precondition the
+    // lifecycle keys use: any other run mode has no hat to place a remote by and
+    // `--gateway-south` is refused there by name. Upstream builds the partition's
+    // hats whatever the node's mode (`zenoh/src/net/routing/gateway.rs` @
+    // `GatewaySouthConf::Custom(subregions) => {`), so a peer document carries it.
+    // The preset is upstream's shipped value and what the flag's absence means, so
+    // a document stating it asks for the behaviour the node already has.
     if named("gateway/south") {
         let not_a_region_hat_run = (!mesh).then_some(KeyEffect::WithheldFromThisRun(
-            "only a --peer or --router-hat node places its remotes by a partition",
+            "only a --peer, --client-node or --router-hat node places its remotes by a partition",
         ));
         let blocked = no_sink("gateway/south").or(not_a_region_hat_run);
         if cfg.gateway_south == wz::runtime_tokio::region_partition::SouthPartition::Auto {
@@ -6125,18 +6128,9 @@ mod stock_config_tests {
             out
         }
 
-        fn first_flag(text: &str) -> Option<String> {
-            let at = text.find("--")?;
-            let token: String = text[at..]
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-                .collect();
-            (token.len() > 2).then_some(token)
-        }
-
         // `(flag, alternatives)`: a refusal reading `X requires --a or --b` is
         // satisfied by EITHER, so a rule carries every flag the sentence offers
-        // (item 751's `--gateway-south` is the first with two).
+        // (`refusal_alternatives`; item 751's `--gateway-south` offers three).
         let mut pairs: Vec<(String, Vec<String>)> = Vec::new();
         let mut feature_gated: Vec<String> = Vec::new();
         for lit in REFUSAL_SOURCES.iter().flat_map(|s| string_literals(s)) {
@@ -6158,20 +6152,9 @@ mod stock_config_tests {
                 feature_gated.push(flag);
                 continue;
             }
-            // The leading flag, then each ` or --flag` that follows it; a segment
-            // that does not open with `--` ends the list, so a parenthesis that
-            // happens to say "or" adds nothing.
-            let mut segments = after.split(" or ");
-            let Some(needs) = segments.next().and_then(first_flag) else {
+            let Some(needs) = refusal_alternatives(after) else {
                 continue;
             };
-            let needs: Vec<String> = core::iter::once(needs)
-                .chain(
-                    segments
-                        .take_while(|segment| segment.trim_start().starts_with("--"))
-                        .filter_map(first_flag),
-                )
-                .collect();
             if !pairs.iter().any(|(f, n)| *f == flag && *n == needs) {
                 pairs.push((flag, needs));
             }
@@ -6487,6 +6470,89 @@ mod stock_config_tests {
             i = end + 1;
         }
         out
+    }
+
+    /// The first `--flag` token in `text`.
+    fn first_flag(text: &str) -> Option<String> {
+        let at = text.find("--")?;
+        let token: String = text[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        (token.len() > 2).then_some(token)
+    }
+
+    /// The flags a refusal offers after its ` requires `, any one of which
+    /// satisfies it, or `None` when it offers none.
+    ///
+    /// The sentence lists them as English does: `--a`, `--a or --b`, or
+    /// `--a, --b or --c`. Cut at ` or ` and `, `, the first item holds the
+    /// leading flag and each later item names one more while it opens with
+    /// `--`; the first that does not ends the list, so a parenthesis that
+    /// happens to say "or" adds nothing.
+    fn refusal_alternatives(after: &str) -> Option<Vec<String>> {
+        let mut items = after.split(" or ").flat_map(|segment| segment.split(", "));
+        let leading = items.next().and_then(first_flag)?;
+        Some(
+            core::iter::once(leading)
+                .chain(
+                    items
+                        .take_while(|item| item.trim_start().starts_with("--"))
+                        .filter_map(first_flag),
+                )
+                .collect(),
+        )
+    }
+
+    /// A refusal that offers its alternatives as a list is satisfied by each
+    /// member of it: `main` refuses `--gateway-south` without `--router-hat`,
+    /// `--peer` or `--client-node`, and a reader that kept only the flags
+    /// around ` or ` would hold a peer document to a rule `main` does not make.
+    #[test]
+    fn a_refusal_offers_every_flag_its_sentence_lists() {
+        assert_eq!(
+            refusal_alternatives(
+                "--router-hat, --peer or --client-node \
+                 (only the region-hat forwarder serves a partitioned south)"
+            ),
+            Some(vec![
+                String::from("--router-hat"),
+                String::from("--peer"),
+                String::from("--client-node"),
+            ])
+        );
+        assert_eq!(
+            refusal_alternatives("--reply <text> or --reply-err <text>"),
+            Some(vec![String::from("--reply"), String::from("--reply-err")])
+        );
+        assert_eq!(
+            refusal_alternatives("--query (the timeout binds to the pending entry)"),
+            Some(vec![String::from("--query")])
+        );
+        // The list ends at its first item that is not a flag, so the flags a
+        // parenthesis names after it are not alternatives.
+        assert_eq!(
+            refusal_alternatives("--connect (an acceptor, or a scout, has none; --listen, --peer)"),
+            Some(vec![String::from("--connect")])
+        );
+        assert_eq!(refusal_alternatives("the `routing-peer` feature"), None);
+
+        // The rule as `main` states it, read out of its source the way the sweep
+        // reads it.
+        let derived: Vec<Vec<String>> = string_literals(include_str!("main.rs"))
+            .into_iter()
+            .filter_map(|lit| lit.split_once("--gateway-south requires "))
+            .filter_map(|(_, after)| refusal_alternatives(after))
+            .collect();
+        assert_eq!(
+            derived,
+            [vec![
+                String::from("--router-hat"),
+                String::from("--peer"),
+                String::from("--client-node"),
+            ]],
+            "main's one `--gateway-south` refusal and the three run modes it admits"
+        );
     }
 
     /// The `--help` entry for one flag: its own line plus every continuation
