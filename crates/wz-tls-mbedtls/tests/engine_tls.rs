@@ -37,7 +37,7 @@ use wz_session_core::WhatAmI;
 use wz_tls_mbedtls::channel::{Identity, Trust};
 use wz_tls_mbedtls::stream::{AcceptBudget, ChainTrust, TlsDial};
 
-const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+const LOOPBACK: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 
 type Links = IpLinks<PosixUdpSocket, PosixTcpDial, TlsDial<PosixTcpDial>>;
 type Engine = CoopEngine<Links, PosixClock>;

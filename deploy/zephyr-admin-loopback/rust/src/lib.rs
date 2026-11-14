@@ -257,11 +257,11 @@ struct SteppingSocket {
 impl StreamSocket for SteppingSocket {
     type Error = ZephyrNetError;
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> core::net::SocketAddr {
         self.inner.local()
     }
 
-    fn peer(&self) -> ([u8; 4], u16) {
+    fn peer(&self) -> core::net::SocketAddr {
         self.inner.peer()
     }
 
@@ -290,10 +290,8 @@ struct SteppingDial;
 impl StreamDial for SteppingDial {
     type Stream = SteppingSocket;
 
-    fn dial(&self, addr: [u8; 4], port: u16) -> Result<SteppingSocket, LinkOpenError> {
-        ZephyrTcpDial
-            .dial(addr, port)
-            .map(|inner| SteppingSocket { inner })
+    fn dial(&self, to: core::net::SocketAddr) -> Result<SteppingSocket, LinkOpenError> {
+        ZephyrTcpDial.dial(to).map(|inner| SteppingSocket { inner })
     }
 }
 
@@ -743,13 +741,14 @@ fn start_server(
         return Err(c"wz: FAIL - the admin node's runtime was started twice");
     };
     let local = CoopLocalSet::new(&runtime);
+    let address = core::net::IpAddr::from(address);
     let stack: Stack = IpStack::new(address, &SERVER.rx, &SERVER.tx, ZephyrTcpDial).with_tls(
         TlsDial::new(ZephyrTcpDial, identity).with_accept(AcceptBudget {
             clock: clock_ms,
             timeout_ms: ACCEPT_TIMEOUT_MS,
         }),
     );
-    let Ok(port) = ZephyrTcpListener::listen(address, PORT, 2) else {
+    let Ok(port) = ZephyrTcpListener::listen(core::net::SocketAddr::new(address, PORT), 2) else {
         return Err(c"wz: FAIL - the admin node could not listen");
     };
     let tls = TlsDial::new(ZephyrTcpDial, identity).with_accept(AcceptBudget {
@@ -866,13 +865,18 @@ pub extern "C" fn wz_app_main() -> i32 {
 
     // The dialling node: the fixed-memory client over the same sockets, whose `tls/` dial steps the
     // admin node while it waits.
-    let stack: ClientStack = IpStack::new(LOOPBACK, &CLIENT.rx, &CLIENT.tx, ZephyrTcpDial)
-        .with_tls(
-            TlsDial::new(SteppingDial, client_id).with_budget(HandshakeBudget {
-                wait_ms: 5,
-                waits: 12_000,
-            }),
-        );
+    let stack: ClientStack = IpStack::new(
+        core::net::IpAddr::from(LOOPBACK),
+        &CLIENT.rx,
+        &CLIENT.tx,
+        ZephyrTcpDial,
+    )
+    .with_tls(
+        TlsDial::new(SteppingDial, client_id).with_budget(HandshakeBudget {
+            wait_ms: 5,
+            waits: 12_000,
+        }),
+    );
     let Some(identity) = NodeIdentity::new(&client_id.zid(), client_key) else {
         log(c"wz: FAIL - the client's identity does not fit");
         return 1;

@@ -34,6 +34,7 @@ use alloc::format;
 use alloc::string::String;
 use core::cell::{Cell, RefCell};
 use core::ffi::c_int;
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz::runtime_zephyr::glue::{log, log_line, yield_us};
 use wz::runtime_zephyr::net::ZephyrNetError;
@@ -50,11 +51,16 @@ wz::runtime_zephyr::zephyr_image!();
 /// The board's `CONFIG_SYS_CLOCK_TICKS_PER_SEC`, as this build was configured.
 const TICK_HZ: u32 = wz::runtime_zephyr::tick_hz_from_build!();
 /// The loopback address both ends use.
-const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 /// The port the listener takes secure channels on.
 const PORT: u16 = 7470;
 /// The port the restart check listens on twice.
 const RESTART_PORT: u16 = 7471;
+
+/// `port` on the loopback.
+const fn at(port: u16) -> SocketAddr {
+    SocketAddr::new(LOOPBACK, port)
+}
 /// The longest the listener lets one inbound handshake take.
 const ACCEPT_TIMEOUT_MS: u64 = 20_000;
 /// Passes of the listener the witness gives a connection to be taken or dropped, 5 ms apart.
@@ -111,11 +117,11 @@ struct SteppingSocket {
 impl StreamSocket for SteppingSocket {
     type Error = ZephyrNetError;
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         self.inner.local()
     }
 
-    fn peer(&self) -> ([u8; 4], u16) {
+    fn peer(&self) -> SocketAddr {
         self.inner.peer()
     }
 
@@ -146,8 +152,8 @@ struct SteppingDial {
 impl StreamDial for SteppingDial {
     type Stream = SteppingSocket;
 
-    fn dial(&self, addr: [u8; 4], port: u16) -> Result<SteppingSocket, LinkOpenError> {
-        match ZephyrTcpSocket::connect(addr, port) {
+    fn dial(&self, to: SocketAddr) -> Result<SteppingSocket, LinkOpenError> {
+        match ZephyrTcpSocket::connect(to) {
             Ok(inner) => Ok(SteppingSocket {
                 inner,
                 server: self.server,
@@ -204,7 +210,7 @@ pub extern "C" fn wz_app_main() -> i32 {
         return 1;
     }
 
-    let Ok(port) = ZephyrTcpListener::listen(LOOPBACK, PORT, 2) else {
+    let Ok(port) = ZephyrTcpListener::listen(at(PORT), 2) else {
         log(c"wz: FAIL - listen on 127.0.0.1:7470");
         return 1;
     };
@@ -224,7 +230,7 @@ pub extern "C" fn wz_app_main() -> i32 {
     }));
 
     // 1. A peer that is no secure channel is not served.
-    let Ok(junk) = ZephyrTcpSocket::connect(LOOPBACK, PORT) else {
+    let Ok(junk) = ZephyrTcpSocket::connect(at(PORT)) else {
         log(c"wz: FAIL - a plain connection to the listener was not taken");
         return 1;
     };
@@ -259,7 +265,7 @@ pub extern "C" fn wz_app_main() -> i32 {
         wait_ms: 5,
         waits: PASSES,
     });
-    let client = match dialling.dial(LOOPBACK, PORT) {
+    let client = match dialling.dial(at(PORT)) {
         Ok(stream) => stream,
         Err(e) => {
             log_line(format!(
@@ -292,7 +298,7 @@ pub extern "C" fn wz_app_main() -> i32 {
         return 1;
     }
     log(c"wz: each end names the zid of the other end's key");
-    if served.peer().0 != LOOPBACK {
+    if served.peer().ip() != LOOPBACK {
         log(c"wz: FAIL - the accepted stream does not know its peer's address");
         return 1;
     }
@@ -331,14 +337,14 @@ pub extern "C" fn wz_app_main() -> i32 {
 /// A listener serves one connection, closes it first and goes; a listener on the same port
 /// binds at once.
 fn restart_takes_the_port() -> bool {
-    let first = match ZephyrTcpListener::listen(LOOPBACK, RESTART_PORT, 1) {
+    let first = match ZephyrTcpListener::listen(at(RESTART_PORT), 1) {
         Ok(first) => first,
         Err(e) => {
             log_line(format!("wz: FAIL - listen on the restart port: {e:?}"));
             return false;
         }
     };
-    let peer = match ZephyrTcpSocket::connect(LOOPBACK, RESTART_PORT) {
+    let peer = match ZephyrTcpSocket::connect(at(RESTART_PORT)) {
         Ok(peer) => peer,
         Err(e) => {
             log_line(format!(
@@ -364,7 +370,7 @@ fn restart_takes_the_port() -> bool {
     drop(first);
     drop(peer);
     yield_us(50_000);
-    match ZephyrTcpListener::listen(LOOPBACK, RESTART_PORT, 1) {
+    match ZephyrTcpListener::listen(at(RESTART_PORT), 1) {
         Ok(_) => {
             log(c"wz: a listener restarted on its port took it again");
             true

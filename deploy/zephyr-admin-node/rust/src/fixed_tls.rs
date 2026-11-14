@@ -84,7 +84,8 @@ pub fn stack(
     tx: &'static dyn ByteSource,
     identity: &'static Identity,
 ) -> Stack {
-    IpStack::new(address, rx, tx, ZephyrTcpDial).with_tls(TlsDial::new(ZephyrTcpDial, identity))
+    IpStack::new(core::net::IpAddr::from(address), rx, tx, ZephyrTcpDial)
+        .with_tls(TlsDial::new(ZephyrTcpDial, identity))
 }
 
 /// The stack of a node at `address` that also LISTENS for `tls/`: the same stack, whose secure dial
@@ -98,6 +99,6 @@ pub fn accepting_stack(
     identity: &'static Identity,
     accept: AcceptBudget,
 ) -> Stack {
-    IpStack::new(address, rx, tx, ZephyrTcpDial)
+    IpStack::new(core::net::IpAddr::from(address), rx, tx, ZephyrTcpDial)
         .with_tls(TlsDial::new(ZephyrTcpDial, identity).with_accept(accept))
 }

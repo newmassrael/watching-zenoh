@@ -18,7 +18,7 @@
 mod common;
 
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,7 +36,12 @@ use wz_session_core::credential_identity::zid_from_spki_der;
 use wz_tls_mbedtls::channel::{Identity, Trust};
 use wz_tls_mbedtls::stream::{AcceptBudget, ChainTrust, HandshakeBudget, TlsDial};
 
-const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
+
+/// `port` on the IPv4 loopback.
+fn at(port: u16) -> SocketAddr {
+    SocketAddr::from((LOOPBACK, port))
+}
 
 fn clock_ms() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
@@ -160,7 +165,7 @@ fn a_chain_dial_verifies_the_server_and_offers_no_credential_zid() {
     let (port, served) = serve(server_config(&server, None));
 
     let stream = chain_dial(&authority, true, None)
-        .dial(LOOPBACK, port)
+        .dial(at(port))
         .expect("the chain verifies, and the address is in the certificate");
     assert_eq!(stream.peer_zid(), Some(server.zid()));
     assert_eq!(
@@ -189,7 +194,7 @@ fn a_chain_dial_checks_the_name_only_when_asked() {
     );
 
     let (port, served) = serve(server_config(&named_otherwise, None));
-    let refused = chain_dial(&authority, true, None).dial(LOOPBACK, port);
+    let refused = chain_dial(&authority, true, None).dial(at(port));
     assert!(
         matches!(refused, Err(LinkOpenError::Refused)),
         "a certificate that does not cover the address"
@@ -198,7 +203,7 @@ fn a_chain_dial_checks_the_name_only_when_asked() {
 
     let (port, served) = serve(server_config(&named_otherwise, None));
     let stream = chain_dial(&authority, false, None)
-        .dial(LOOPBACK, port)
+        .dial(at(port))
         .expect("no name check, as pico's default");
     echo_through(&stream);
     stream.shutdown();
@@ -213,7 +218,7 @@ fn a_chain_dial_to_a_server_the_roots_do_not_vouch_for_is_refused() {
     let server = stranger.issue(ExtendedKeyUsagePurpose::ServerAuth);
     let (port, served) = serve(server_config(&server, None));
 
-    let refused = chain_dial(&authority, false, None).dial(LOOPBACK, port);
+    let refused = chain_dial(&authority, false, None).dial(at(port));
     assert!(matches!(refused, Err(LinkOpenError::Refused)));
     let _ = served.join();
 }
@@ -227,7 +232,7 @@ fn a_mutual_dial_presents_its_chain_and_a_policy_missing_a_half_is_unsupported()
 
     let (port, served) = serve(server_config(&server, Some(&authority)));
     let stream = chain_dial(&authority, true, Some(&client))
-        .dial(LOOPBACK, port)
+        .dial(at(port))
         .expect("a router that requires a client chain takes one");
     echo_through(&stream);
     stream.shutdown();
@@ -247,10 +252,7 @@ fn a_mutual_dial_presents_its_chain_and_a_policy_missing_a_half_is_unsupported()
             verify_name: false,
         },
     );
-    assert!(matches!(
-        half.dial(LOOPBACK, 1),
-        Err(LinkOpenError::Unsupported)
-    ));
+    assert!(matches!(half.dial(at(1)), Err(LinkOpenError::Unsupported)));
 }
 
 #[test]
@@ -259,9 +261,9 @@ fn a_chain_listener_presents_its_chain_and_a_rustls_client_verifies_it() {
     let authority = Authority::new();
     let server = authority.issue(ExtendedKeyUsagePurpose::ServerAuth);
     let listener = chain_listener(&server, None)
-        .listen(LOOPBACK, 0)
+        .listen(at(0))
         .expect("the port opens");
-    let (_, port) = listener.local();
+    let port = listener.local().port();
     let client = rustls_client(port, &authority, None);
 
     let stream = accept_within(&listener, Duration::from_secs(10)).expect("a verified client");
@@ -284,9 +286,9 @@ fn a_mutual_listener_requires_the_clients_chain_and_is_not_wedged_by_a_refused_o
     let client = authority.issue(ExtendedKeyUsagePurpose::ClientAuth);
     let strange = stranger.issue(ExtendedKeyUsagePurpose::ClientAuth);
     let listener = chain_listener(&server, Some(&authority))
-        .listen(LOOPBACK, 0)
+        .listen(at(0))
         .expect("the port opens");
-    let (_, port) = listener.local();
+    let port = listener.local().port();
 
     // A client with no certificate and one the roots do not vouch for come first, and are not
     // handed on.
@@ -316,18 +318,18 @@ fn a_peer_that_stalls_or_speaks_junk_is_dropped_and_the_next_is_served() {
         timeout_ms: 300,
     };
     // The typed listener, not the boxed one a dial's `listen` returns, so its counters are read.
-    let inner = PosixTcpDial.listen(LOOPBACK, 0).expect("the port opens");
+    let inner = PosixTcpDial.listen(at(0)).expect("the port opens");
     let listener = chain_listener(&server, None)
         .with_accept(quick)
         .listener(inner)
         .expect("a listener");
-    let (_, port) = listener.local();
+    let port = listener.local().port();
     assert_eq!(listener.dropped(), 0);
     assert_eq!(listener.last_drop(), None);
 
     // A connection that sends nothing: dropped when its handshake outlasts the budget, which the
     // peer sees as the end of the stream. The drop is counted and has no channel error.
-    let mut stalled = TcpStream::connect((Ipv4Addr::from(LOOPBACK), port)).expect("connects");
+    let mut stalled = TcpStream::connect((LOOPBACK, port)).expect("connects");
     stalled
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("a timeout");
@@ -341,7 +343,7 @@ fn a_peer_that_stalls_or_speaks_junk_is_dropped_and_the_next_is_served() {
     assert_eq!(listener.last_drop(), None, "a stall has no channel error");
 
     // A client that is not speaking TLS: dropped as soon as the handshake fails, with its error.
-    let mut junk = TcpStream::connect((Ipv4Addr::from(LOOPBACK), port)).expect("connects");
+    let mut junk = TcpStream::connect((LOOPBACK, port)).expect("connects");
     junk.write_all(&[b'G'; 200]).expect("junk leaves");
     assert!(accept_within(&listener, Duration::from_millis(1_000)).is_none());
     assert_eq!(listener.dropped(), 2, "the junk connection is counted");
@@ -418,9 +420,9 @@ fn a_pinned_listener_names_the_client_by_the_zid_of_its_key() {
     ));
     let listener = TlsDial::new(PosixTcpDial, device)
         .with_accept(ACCEPT)
-        .listen(LOOPBACK, 0)
+        .listen(at(0))
         .expect("the port opens");
-    let (_, port) = listener.local();
+    let port = listener.local().port();
 
     // The client: a self-signed key of its own, and no verdict on the listener's certificate.
     let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("a key");
@@ -437,7 +439,7 @@ fn a_pinned_listener_names_the_client_by_the_zid_of_its_key() {
         )
         .expect("the client's configuration");
     let client = thread::spawn(move || -> Result<(), std::io::Error> {
-        let tcp = TcpStream::connect((Ipv4Addr::from(LOOPBACK), port))?;
+        let tcp = TcpStream::connect((LOOPBACK, port))?;
         let name = ServerName::try_from("wz.invalid").expect("a name");
         let conn = ClientConnection::new(Arc::new(config), name).expect("a client session");
         let mut tls = StreamOwned::new(conn, tcp);
@@ -470,7 +472,7 @@ fn a_dial_that_cannot_accept_does_not_take_the_port() {
     ));
     let dial_only = TlsDial::new(PosixTcpDial, device);
     assert!(matches!(
-        dial_only.listen(LOOPBACK, 0),
+        dial_only.listen(at(0)),
         Err(LinkOpenError::Unsupported)
     ));
 }

@@ -189,3 +189,12 @@ config WZ_MEMORY_REPORT_STACK_SIZE
 	default 1024
 
 endmenu
+
+# IPv6 links. A wz image opens a socket of the family its locator's address is, as zenoh-pico's
+# Zephyr links do, so `udp/[x:y::z]:port` and `tcp/[x:y::z]:port` work wherever Zephyr's stack has
+# IPv6. The images are IPv4 alone by default; Zephyr's own default of NET_IPV6 is y, so the default
+# is stated here, as a default and not as an assignment in each prj.conf, and an image takes IPv6
+# with CONFIG_NET_IPV6=y in a board conf, an extra conf file or a -D on the west command line.
+# An IPv6 image also states its address (CONFIG_NET_CONFIG_MY_IPV6_ADDR, or autoconfiguration).
+config NET_IPV6
+	default n

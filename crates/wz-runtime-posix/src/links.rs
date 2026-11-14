@@ -23,12 +23,13 @@ pub type PosixHeapDriver = wz_runtime_coop::ip_stack::HeapIpDriver<PosixUdpSocke
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::net::{TcpListener, UdpSocket};
 
-    use wz_runtime_coop::session_drive::{IpEndpoint, Locator, SessionLinks};
+    use wz_runtime_coop::session_drive::{Locator, SessionLinks};
     use wz_session_core::link::BoxedLinkDriver;
 
-    const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+    const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
     #[test]
     fn a_dial_names_the_link_it_opens_over_the_hosts_sockets() {
@@ -36,10 +37,7 @@ mod tests {
         let port = listener.local_addr().expect("its port").port();
         let links = PosixLinks::new(LOOPBACK, PosixTcpDial);
         let tcp = links
-            .open_initiator(Locator::tcp(IpEndpoint {
-                addr: LOOPBACK,
-                port,
-            }))
+            .open_initiator(Locator::tcp(SocketAddr::new(LOOPBACK, port)))
             .expect("a connection")
             .pump;
         assert!(tcp.batch_length_prefixed());
@@ -47,12 +45,41 @@ mod tests {
         assert_eq!(ends.dst.as_str(), std::format!("tcp/127.0.0.1:{port}"));
 
         let udp = links
-            .open_initiator(Locator::udp(IpEndpoint {
-                addr: LOOPBACK,
-                port,
-            }))
+            .open_initiator(Locator::udp(SocketAddr::new(LOOPBACK, port)))
             .expect("a datagram socket")
             .pump;
         assert!(!udp.batch_length_prefixed());
+    }
+
+    /// Links bound on the IPv4 address dial an IPv6 locator over sockets of its family, as the
+    /// stacks of the C ABIs bind every interface of one family and reach the other: the stream's
+    /// ends and the datagram link's peer are named in brackets. Needs the host's IPv6 loopback.
+    #[test]
+    fn links_bound_on_ipv4_dial_an_ipv6_locator_over_its_family() {
+        let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).expect("an IPv6 listener");
+        let port = listener.local_addr().expect("its port").port();
+        let links = PosixLinks::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), PosixTcpDial);
+        let tcp = links
+            .open_initiator(Locator::tcp(SocketAddr::from((Ipv6Addr::LOCALHOST, port))))
+            .expect("a connection")
+            .pump;
+        let ends = tcp.link_endpoints().expect("a connection knows both ends");
+        assert_eq!(ends.dst.as_str(), std::format!("tcp/[::1]:{port}"));
+        assert!(ends.src.as_str().starts_with("tcp/[::1]:"), "{}", ends.src);
+
+        let peer = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).expect("an IPv6 datagram socket");
+        let udp_port = peer.local_addr().expect("its port").port();
+        let udp = links
+            .open_initiator(Locator::udp(SocketAddr::from((
+                Ipv6Addr::LOCALHOST,
+                udp_port,
+            ))))
+            .expect("a datagram socket of the peer's family")
+            .pump;
+        let ends = udp
+            .link_endpoints()
+            .expect("a dialled link knows both ends");
+        assert_eq!(ends.dst.as_str(), std::format!("udp/[::1]:{udp_port}"));
+        assert!(ends.src.as_str().starts_with("udp/[::]:"), "{}", ends.src);
     }
 }

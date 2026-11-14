@@ -28,14 +28,14 @@
 
 use core::cell::{Cell, RefCell};
 use core::ffi::c_int;
-use core::fmt::{Debug, Write};
+use core::fmt::Debug;
+use core::net::SocketAddr;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::vec;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::vec::Vec;
 
-use wz_session_core::caps::MAX_LOCATOR_LEN;
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
@@ -51,14 +51,14 @@ use crate::link_storage::HeapTx;
 use crate::link_storage::{TxLender, TxStore};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::LinkReadiness;
-use crate::session_drive::{IpEndpoint, LinkOpenError, LinkProto, Locator, SessionDatagramLink};
-use crate::udp_link::SERVICE_WAIT_MS;
+use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
+use crate::udp_link::{link_endpoints, SERVICE_WAIT_MS};
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
 /// the batch behind it.
 pub const STREAM_RX_CAPACITY: usize = u16::MAX as usize + STREAM_BATCH_LENGTH_BYTES;
 
-/// One connected IPv4 byte stream: a platform's TCP socket, or a channel over one. Only the one
+/// One connected byte stream, IPv4 or IPv6: a platform's TCP socket, or a channel over one. Only the one
 /// thread that drives the link touches it. How the stream came to be connected is a
 /// [`StreamDial`]'s to say, so a stream that needs more than an address to open (a secure channel
 /// needs its identity and its peer's) is a stream like any other here.
@@ -71,11 +71,11 @@ pub trait StreamSocket: Sized {
     /// is `tcp/`, a secure channel over one `tls/`.
     const PROTO: LinkProto = LinkProto::Tcp;
 
-    /// The `(address, port)` this end of the connection is bound to.
-    fn local(&self) -> ([u8; 4], u16);
+    /// The address and port this end of the connection is bound to.
+    fn local(&self) -> SocketAddr;
 
-    /// The `(address, port)` of the other end.
-    fn peer(&self) -> ([u8; 4], u16);
+    /// The address and port of the other end.
+    fn peer(&self) -> SocketAddr;
 
     /// Write every byte of `parts`, in order, as one write where the stack allows (a length and
     /// the batch behind it leave together), blocking until the stack has taken them all.
@@ -116,28 +116,28 @@ pub trait StreamDial {
     /// The stream a dial yields.
     type Stream: StreamSocket;
 
-    /// Connect to `addr:port`, blocking until the stream can carry a session or the dial has
-    /// failed: [`LinkOpenError::Refused`] when the other end did not take it,
-    /// [`LinkOpenError::Exhausted`] when the platform had no socket to give.
-    fn dial(&self, addr: [u8; 4], port: u16) -> Result<Self::Stream, LinkOpenError>;
+    /// Connect to `to`, over a socket of its family, blocking until the stream can carry a
+    /// session or the dial has failed: [`LinkOpenError::Refused`] when the other end did not take
+    /// it, [`LinkOpenError::Exhausted`] when the platform had no socket to give,
+    /// [`LinkOpenError::Unsupported`] when it has no socket of that family at all.
+    fn dial(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError>;
 
     /// Whether the dial opens streams at all. A stack asks before it claims any buffer, so a
     /// protocol it does not carry is [`LinkOpenError::Unsupported`] (permanent) and never
     /// [`LinkOpenError::Exhausted`] (retried) when its tables happen to be full.
     const CARRIED: bool = true;
 
-    /// Listen on `addr:port` (port 0: the platform picks one, read back with
-    /// [`StreamListen::local`]) for the connections of the protocol this dial opens. A stack that
-    /// listens overrides it; the answer of one that does not is [`LinkOpenError::Unsupported`],
-    /// as a dial it does not carry is. Boxed, so a stack names the listener it opens here and
-    /// nowhere above, and one that never listens links none.
+    /// Listen on `at` (port 0: the platform picks one, read back with [`StreamListen::local`])
+    /// for the connections of the protocol this dial opens. A stack that listens overrides it;
+    /// the answer of one that does not is [`LinkOpenError::Unsupported`], as a dial it does not
+    /// carry is. Boxed, so a stack names the listener it opens here and nowhere above, and one
+    /// that never listens links none.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn listen(
         &self,
-        addr: [u8; 4],
-        port: u16,
+        at: SocketAddr,
     ) -> Result<alloc::boxed::Box<dyn StreamListen<Stream = Self::Stream>>, LinkOpenError> {
-        let _ = (addr, port);
+        let _ = at;
         Err(LinkOpenError::Unsupported)
     }
 }
@@ -151,8 +151,8 @@ pub trait StreamListen {
     /// The stream an accept yields.
     type Stream: StreamSocket;
 
-    /// The `(address, port)` the listener is bound to.
-    fn local(&self) -> ([u8; 4], u16);
+    /// The address and port the listener is bound to.
+    fn local(&self) -> SocketAddr;
 
     /// The connection waiting on the listener, taken without blocking: `Ok(None)` when none waits
     /// (or when the one that did gave up before it was taken, which leaves nothing to take).
@@ -178,7 +178,7 @@ pub trait StreamListen {
 impl<L: StreamListen + ?Sized> StreamListen for alloc::boxed::Box<L> {
     type Stream = L::Stream;
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         (**self).local()
     }
 
@@ -203,11 +203,11 @@ pub enum NoStream {}
 impl StreamSocket for NoStream {
     type Error = core::convert::Infallible;
 
-    fn local(&self) -> ([u8; 4], u16) {
+    fn local(&self) -> SocketAddr {
         match *self {}
     }
 
-    fn peer(&self) -> ([u8; 4], u16) {
+    fn peer(&self) -> SocketAddr {
         match *self {}
     }
 
@@ -233,23 +233,9 @@ impl StreamDial for NoDial {
 
     const CARRIED: bool = false;
 
-    fn dial(&self, _addr: [u8; 4], _port: u16) -> Result<NoStream, LinkOpenError> {
+    fn dial(&self, _to: SocketAddr) -> Result<NoStream, LinkOpenError> {
         Err(LinkOpenError::Unsupported)
     }
-}
-
-/// `<scheme>/a.b.c.d:port`, zenoh's rendering of a stream's locator, written into fixed text:
-/// the longest one, `tcp/255.255.255.255:65535`, is 25 bytes of the [`MAX_LOCATOR_LEN`] the text
-/// has, and every scheme is three letters.
-fn locator_text(
-    proto: LinkProto,
-    (addr, port): ([u8; 4], u16),
-) -> heapless::String<MAX_LOCATOR_LEN> {
-    let mut text = heapless::String::new();
-    let at = IpEndpoint { addr, port };
-    // Cannot fail: the longest rendering is shorter than the text's capacity.
-    let _ = write!(text, "{}", Locator { proto, at });
-    text
 }
 
 /// What the front of a receive buffer holds, as the framing reads it.
@@ -324,12 +310,8 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
     /// `tx`.
     pub fn over(socket: S, mut rx_buf: B, tx: T) -> Self {
         let rx_len = rx_buf.as_mut().len();
-        let (local, peer) = (socket.local(), socket.peer());
         Self {
-            endpoints: LinkEndpoints::new(
-                locator_text(S::PROTO, local).as_str(),
-                locator_text(S::PROTO, peer).as_str(),
-            ),
+            endpoints: link_endpoints(S::PROTO, socket.local(), socket.peer()),
             socket,
             rx_buf: RefCell::new(rx_buf),
             rx_len,
@@ -583,6 +565,8 @@ mod tests {
         reads: Cell<u32>,
         waits: Cell<u32>,
         shut: Cell<bool>,
+        /// The connection's two ends, local then peer; `None` is an IPv4 pair.
+        ends_at: Option<(SocketAddr, SocketAddr)>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -591,12 +575,16 @@ mod tests {
     impl StreamSocket for Pipe {
         type Error = Broken;
 
-        fn local(&self) -> ([u8; 4], u16) {
-            ([10, 0, 0, 2], 40_000)
+        fn local(&self) -> SocketAddr {
+            self.ends_at
+                .map_or(SocketAddr::from(([10, 0, 0, 2], 40_000)), |(local, _)| {
+                    local
+                })
         }
 
-        fn peer(&self) -> ([u8; 4], u16) {
-            ([10, 0, 0, 1], 7447)
+        fn peer(&self) -> SocketAddr {
+            self.ends_at
+                .map_or(SocketAddr::from(([10, 0, 0, 1], 7447)), |(_, peer)| peer)
         }
 
         fn send_parts(&self, parts: &[&[u8]]) -> Result<(), Broken> {
@@ -897,6 +885,29 @@ mod tests {
             32,
             "a whole slot: the length is counted in the batch"
         );
+    }
+
+    /// A connection between IPv6 ends names them in zenoh's bracketed text, with the scope of a
+    /// link-local end.
+    #[test]
+    fn an_ipv6_connection_names_its_ends_in_brackets() {
+        use core::net::{Ipv6Addr, SocketAddrV6};
+        let pipe = Pipe {
+            ends_at: Some((
+                SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2),
+                    40_000,
+                    0,
+                    2,
+                )),
+                SocketAddr::from((Ipv6Addr::LOCALHOST, 7447)),
+            )),
+            ..Pipe::default()
+        };
+        let link = StreamDriver::over(pipe, [0u8; 34], Slots(UnsafeCell::new([0; 64])));
+        let ends = link.link_endpoints().expect("known from the connection");
+        assert_eq!(ends.src.as_str(), "tcp/[fe80::2%2]:40000");
+        assert_eq!(ends.dst.as_str(), "tcp/[::1]:7447");
     }
 
     #[test]

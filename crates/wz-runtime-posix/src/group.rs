@@ -33,9 +33,16 @@ pub struct PosixGroupTransport<const RX: usize> {
     ingress: Option<PosixUdpSocket>,
     /// The sender, on a port of its own.
     egress: Option<PosixUdpSocket>,
-    group: ([u8; 4], u16),
+    /// The group and its port, where every datagram is sent.
+    group: SocketAddr,
     rx: [u8; RX],
     rx_error: Option<PosixNetError>,
+}
+
+/// The wildcard IPv4 address on `port`: what a group's receiver and sender bind, as the group is
+/// joined over IPv4 (`IP_ADD_MEMBERSHIP`).
+fn any_v4(port: u16) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)
 }
 
 impl<const RX: usize> PosixGroupTransport<RX> {
@@ -49,9 +56,9 @@ impl<const RX: usize> PosixGroupTransport<RX> {
         interface: [u8; 4],
         ttl: u8,
     ) -> Result<Self, PosixNetError> {
-        let ingress = PosixUdpSocket::bind_shared([0; 4], port)?;
+        let ingress = PosixUdpSocket::bind_shared(any_v4(port))?;
         ingress.join_group(group, interface)?;
-        let egress = PosixUdpSocket::bind([0; 4], 0)?;
+        let egress = PosixUdpSocket::bind(any_v4(0))?;
         if interface != [0; 4] {
             egress.set_multicast_interface(interface)?;
         }
@@ -59,7 +66,7 @@ impl<const RX: usize> PosixGroupTransport<RX> {
         Ok(Self {
             ingress: Some(ingress),
             egress: Some(egress),
-            group: (group, port),
+            group: SocketAddr::from((group, port)),
             rx: [0; RX],
             rx_error: None,
         })
@@ -86,14 +93,14 @@ impl<const RX: usize> PosixGroupTransport<RX> {
         }
     }
 
-    /// The `(group, port)` this transport sends to and receives on.
-    pub fn group(&self) -> ([u8; 4], u16) {
+    /// The group and port this transport sends to and receives on.
+    pub fn group(&self) -> SocketAddr {
         self.group
     }
 
     /// The port of the sender: the source every peer sees this member's datagrams from.
     pub fn sender_port(&self) -> Option<u16> {
-        self.egress.as_ref().map(|socket| socket.local().1)
+        self.egress.as_ref().map(|socket| socket.local().port())
     }
 
     /// The most recent receive failure, if the receiver has failed: the seam the loop reads
@@ -133,7 +140,7 @@ impl<const RX: usize> GroupTransport for PosixGroupTransport<RX> {
         // Best-effort, as the trait says: multicast UDP has no acknowledgement and the next
         // cadence retries.
         if let Some(socket) = &self.egress {
-            let _ = socket.send_to(self.group.0, self.group.1, datagram);
+            let _ = socket.send_to(self.group, datagram);
         }
     }
 
@@ -142,11 +149,8 @@ impl<const RX: usize> GroupTransport for PosixGroupTransport<RX> {
             return false;
         };
         match socket.try_recv(&mut self.rx) {
-            Ok(Some((len, addr, port))) => {
-                f(
-                    &self.rx[..len],
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::from(addr)), port),
-                );
+            Ok(Some((len, from))) => {
+                f(&self.rx[..len], from);
                 true
             }
             Ok(None) => false,
@@ -185,10 +189,10 @@ mod tests {
     fn two_receivers_may_share_the_groups_port() {
         // The members of one host all bind the group's port; without the two reuse options the
         // second bind is refused.
-        let first = PosixUdpSocket::bind_shared([0; 4], 0).expect("a first receiver");
-        let port = first.local().1;
-        PosixUdpSocket::bind_shared([0; 4], port).expect("a second receiver on the same port");
-        match PosixUdpSocket::bind([0; 4], port) {
+        let first = PosixUdpSocket::bind_shared(any_v4(0)).expect("a first receiver");
+        let port = first.local().port();
+        PosixUdpSocket::bind_shared(any_v4(port)).expect("a second receiver on the same port");
+        match PosixUdpSocket::bind(any_v4(port)) {
             Err(PosixNetError::Bind(e)) => assert_eq!(e, libc::EADDRINUSE),
             Err(other) => panic!("a different error: {other:?}"),
             Ok(_) => panic!("a plain bind took a port a shared one holds"),
@@ -210,11 +214,11 @@ mod tests {
     /// needs a multicast route on the host: what the rest of the transport does is the same
     /// whether or not the group was joined.
     fn unjoined(ttl: u8) -> PosixGroupTransport<64> {
-        let ingress = PosixUdpSocket::bind_shared([0; 4], 0).expect("a receiver");
-        let egress = PosixUdpSocket::bind([0; 4], 0).expect("a sender");
+        let ingress = PosixUdpSocket::bind_shared(any_v4(0)).expect("a receiver");
+        let egress = PosixUdpSocket::bind(any_v4(0)).expect("a sender");
         egress.set_multicast_ttl(ttl).expect("a hop limit");
         PosixGroupTransport {
-            group: (GROUP, ingress.local().1),
+            group: SocketAddr::from((GROUP, ingress.local().port())),
             ingress: Some(ingress),
             egress: Some(egress),
             rx: [0; 64],
@@ -233,7 +237,7 @@ mod tests {
         );
         assert_ne!(
             a.sender_port(),
-            Some(a.group().1),
+            Some(a.group().port()),
             "a member does not send from the group's port"
         );
         let egress = a.egress.as_ref().expect("a sender");
@@ -267,8 +271,8 @@ mod tests {
     fn a_datagram_one_member_sends_reaches_another_with_the_senders_own_port() {
         // Both members bind the same port (the second only because both are shared) and the group
         // has a loopback: a member hears its own and every other's.
-        let probe = PosixUdpSocket::bind_shared([0; 4], 0).expect("a port");
-        let port = probe.local().1;
+        let probe = PosixUdpSocket::bind_shared(any_v4(0)).expect("a port");
+        let port = probe.local().port();
         let mut a = PosixGroupTransport::<256>::join(GROUP, port, [0; 4], 1).expect("member a");
         let mut b = PosixGroupTransport::<256>::join(GROUP, port, [0; 4], 1).expect("member b");
         let a_port = a.sender_port().expect("a sender");

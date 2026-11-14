@@ -32,6 +32,11 @@ use wz_runtime_posix::stream::PosixTcpDial;
 use wz_tls_mbedtls::channel::arena_peak;
 
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+
+/// `port` on the IPv4 loopback.
+fn at(port: u16) -> std::net::SocketAddr {
+    std::net::SocketAddr::from((LOOPBACK, port))
+}
 const ACCEPT_MS: u64 = 5_000;
 
 /// More connections than the default store of 32 keys could hold (each is two sessions of four
@@ -70,9 +75,9 @@ fn a_host_holds_more_sessions_than_the_librarys_default_key_store_could() {
     let server = authority.issue(ExtendedKeyUsagePurpose::ServerAuth);
     let listening = provider(&listen_config(&server));
     let listener = listening
-        .listen(LOOPBACK, 0)
+        .listen(at(0))
         .unwrap_or_else(|e| panic!("the listener binds: {e:?}"));
-    let port = listener.local().1;
+    let port = listener.local().port();
 
     // Every client keeps its session until the server has answered all of them, so the sessions
     // are live together: the barrier is passed once, by every client and by this thread.
@@ -82,7 +87,7 @@ fn a_host_holds_more_sessions_than_the_librarys_default_key_store_could() {
         .map(|_| {
             let (all_live, config) = (all_live.clone(), config.clone());
             thread::spawn(move || {
-                let stream = provider(&config).dial(LOOPBACK, port)?;
+                let stream = provider(&config).dial(at(port))?;
                 stream
                     .send_parts(&[b"ping".as_slice()])
                     .expect("the stream takes bytes");

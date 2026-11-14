@@ -29,6 +29,7 @@
 //! and a refusal surfaces there as `fmt::Error` too.
 
 use core::fmt;
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// A sink for hand-written text. See the module documentation.
 ///
@@ -88,6 +89,88 @@ pub trait TextOut: fmt::Write {
         if let Ok(text) = core::str::from_utf8(&nibbles[at..]) {
             self.push_str(text);
         }
+    }
+
+    /// Append `ip` as `{ip}` prints it, without going through `core::fmt`: dotted decimal for
+    /// IPv4, and for IPv6 the RFC 5952 text `Ipv6Addr`'s `Display` writes (lowercase hexadecimal
+    /// groups, the first longest run of two or more zero groups as `::`, an IPv4-mapped address
+    /// as `::ffff:a.b.c.d`). A link names its ends in this text, and zenoh names them with that
+    /// `Display`, so the two read the same.
+    fn push_ip(&mut self, ip: IpAddr) {
+        match ip {
+            IpAddr::V4(v4) => push_ipv4(self, v4),
+            IpAddr::V6(v6) => {
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    self.push_str("::ffff:");
+                    push_ipv4(self, v4);
+                    return;
+                }
+                let groups = v6.segments();
+                // The first longest run of zero groups: a later run of the same length keeps the
+                // first, as `Display` keeps it.
+                let (mut best_at, mut best_len, mut run_at, mut run_len) = (0, 0, 0, 0);
+                for (at, &group) in groups.iter().enumerate() {
+                    if group == 0 {
+                        if run_len == 0 {
+                            run_at = at;
+                        }
+                        run_len += 1;
+                        if run_len > best_len {
+                            (best_at, best_len) = (run_at, run_len);
+                        }
+                    } else {
+                        run_len = 0;
+                    }
+                }
+                if best_len > 1 {
+                    push_groups(self, &groups[..best_at]);
+                    self.push_str("::");
+                    push_groups(self, &groups[best_at + best_len..]);
+                } else {
+                    push_groups(self, &groups);
+                }
+            }
+        }
+    }
+
+    /// Append `at` as `{at}` prints it, without going through `core::fmt`: `a.b.c.d:port` for
+    /// IPv4, `[ip]:port` for IPv6 and `[ip%scope]:port` when it names a scope.
+    fn push_socket_addr(&mut self, at: SocketAddr) {
+        match at {
+            SocketAddr::V4(v4) => push_ipv4(self, *v4.ip()),
+            SocketAddr::V6(v6) => {
+                self.push('[');
+                self.push_ip(IpAddr::V6(*v6.ip()));
+                if v6.scope_id() != 0 {
+                    self.push('%');
+                    self.push_u64(u64::from(v6.scope_id()));
+                }
+                self.push(']');
+            }
+        }
+        self.push(':');
+        self.push_u64(u64::from(at.port()));
+    }
+}
+
+/// `a.b.c.d`, as [`TextOut::push_ip`] writes an IPv4 address.
+fn push_ipv4<W: TextOut + ?Sized>(out: &mut W, ip: Ipv4Addr) {
+    for (at, octet) in ip.octets().into_iter().enumerate() {
+        if at > 0 {
+            out.push('.');
+        }
+        out.push_u64(u64::from(octet));
+    }
+}
+
+/// IPv6 groups in hexadecimal, colon separated, as [`TextOut::push_ip`] writes either side of a
+/// `::`.
+fn push_groups<W: TextOut + ?Sized>(out: &mut W, groups: &[u16]) {
+    for (at, &group) in groups.iter().enumerate() {
+        if at > 0 {
+            out.push(':');
+        }
+        out.push_hex_u128(u128::from(group));
     }
 }
 
@@ -300,6 +383,59 @@ mod tests {
             let mut t: FixedText<40> = FixedText::new();
             t.push_hex_u128(n);
             assert_eq!(t.finish(), Ok(std::format!("{n:x}").as_str()), "hex {n}");
+        }
+    }
+
+    /// Every shape `Display` gives an address: each zero-run case of RFC 5952 (none, one group
+    /// alone, a run at either end, two runs of which the first or the longer wins), the
+    /// unspecified, loopback and IPv4-mapped forms, and a scope.
+    #[test]
+    fn an_address_is_written_as_the_formatter_writes_it() {
+        use core::net::{Ipv6Addr, SocketAddrV6};
+        let v6 = [
+            Ipv6Addr::UNSPECIFIED,
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1),
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0x0211, 0x22ff, 0xfe33, 0x4455),
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, 1),
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 1, 0, 0, 1),
+            Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 1, 1, 1, 1),
+            Ipv6Addr::new(1, 0, 0, 0, 0, 0, 0, 0),
+            Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0xc000, 0x0280),
+            Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xc000, 0x0280),
+            Ipv6Addr::new(
+                0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+            ),
+        ];
+        for ip in v6 {
+            let mut t: FixedText<64> = FixedText::new();
+            t.push_ip(IpAddr::V6(ip));
+            assert_eq!(t.finish(), Ok(std::format!("{ip}").as_str()), "{ip:?}");
+        }
+        let at = [
+            SocketAddr::from(([0, 0, 0, 0], 0)),
+            SocketAddr::from(([192, 168, 1, 50], 7447)),
+            SocketAddr::from(([255, 255, 255, 255], 65535)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 7447)),
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+                7446,
+                0,
+                3,
+            )),
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::new(
+                    0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+                ),
+                65535,
+                0,
+                u32::MAX,
+            )),
+        ];
+        for at in at {
+            let mut t: FixedText<64> = FixedText::new();
+            t.push_socket_addr(at);
+            assert_eq!(t.finish(), Ok(std::format!("{at}").as_str()), "{at:?}");
         }
     }
 
