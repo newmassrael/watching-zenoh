@@ -1279,6 +1279,59 @@ sees the three samples of `slot-reporter`'s replay in order, mutated, the first 
 Not yet: mutation at the wire rather than the payload, which is a codec's fault injection and not a
 workload.
 
+## 5d. The offline build entry: what a hermetic build of the consumer bundles reads
+
+A consumer that builds everything in one build graph with a shared action cache does not redefine
+wz's build in its own rules. It wraps wz as one hermetic action that runs cargo on the pinned
+source: no `.git`, no network, the lockfile's crates vendored and a pinned toolchain as inputs. That
+action needs a list of its inputs, and the list is wz's knowledge, for the reason section 1 gives
+for the manifest: the consumer must not hold a second copy of it.
+
+**The entry is a file**, `deploy/offline-build.json`, which the consumer reads and does not copy.
+It states, for the four bundles (the three C ABI libraries the analyzer links and `wz-ap-demo` with
+`preset-ap-full`):
+
+- the source: the files the repository tracks at the commit, and the submodules the bundles reach
+  (`vendor/sce` only), each at the commit the tree's gitlink records;
+- the commit input: `WZ_SOURCE_COMMIT`, which `crates/wz-zenoh/build.rs` reads instead of asking
+  `git`. Without it a build with no `.git` names itself `v<version>-release`, where a checkout
+  build of the same commit names the commit; with it, both compose the same `zenoh::GIT_VERSION`;
+- the toolchain channel, the manifest, the lockfile and the cargo flags;
+- the system tools (`cc`, which is also the linker, `c++`, `ar`, `libclang`) with the commands each
+  puts on PATH (`cc` brings `as` and `ld`, which gcc runs by name), every crate of the bundles'
+  closures that has a build script with the tools that script calls, and each bundle's tools as
+  the union of its closure's;
+- the variables a build script reads that change what it produces (librocksdb-sys's library and
+  compiler variables), which a build identical to a checkout build leaves unset;
+- what is not an input: the zenoh-c oracle archive is read by no build script of any bundle; it is
+  what the zenoh-c oracle lanes compare the drop-in against, listed by `install-zenoh-c.sh
+  --inputs` and handed in by `WZ_ZENOH_C_ARCHIVE` and `WZ_ZENOH_C_SOURCE`.
+
+**Held in two ways, by `scripts/lib/offline_build.py`.** `--check` (Layer C0 and the pre-push
+hook) derives the closures with `cargo tree` and compares: a crate that enters a closure with a
+build script, a bundle's tools, a submodule reached, the channel, a git source in the lockfile, an
+output variable no script reads. What a build script runs cannot be read off the graph, so a person
+reads it once, when the crate enters, and `--check` makes sure that happens. `--build` (Layer C1ob)
+is the measurement: each bundle is built in a bwrap sandbox with its own network namespace, an
+empty home, the checkout covered, PATH holding the toolchain, the declared tools and failing stubs
+of `git`, `curl` and `wget`, and the crates vendored outside the sandbox. A bundle passes when cargo
+exits 0, no stub was called, its products exist, and, in a bundle holding wz-zenoh, that crate's
+build script handed rustc (`WZ_ZENOH_GIT_VERSION`, read from cargo's `build-script-executed`
+message) the version a checkout build of the same tree composes. The product is not searched for
+the string: ap-demo never reads `zenoh::GIT_VERSION`, and the linker drops it.
+
+Measured when the entry was written: 52 crates of the four closures have a build script (a reading
+of `cargo metadata` without `--all-features` misses `memoffset`, which a bundle's features reach),
+two of them call a system tool (`ring`, `librocksdb-sys`), and every other one asks only `rustc`.
+`perl` is not a tool: the vendored ring has no `.git` of its own, so its build script takes the
+pregenerated assembly. The first sandboxed build failed all four bundles on `cc: fatal error:
+cannot execute 'as'`: the entry had declared `cc` and not the assembler and linker gcc runs from
+PATH, which a reading of the build scripts could not show and the sandbox did.
+
+Not covered: byte identity with a checkout build. The version is one input of it; the absolute
+build path in `.rodata` is another (`run-ci.sh`'s `footprint_remap_rustflags`), and the consumer's
+action chooses its own `--remap-path-prefix`.
+
 ## 6. Open
 
 - Whether wz-ap-demo's session-node role and a consumer-built driver linking the
