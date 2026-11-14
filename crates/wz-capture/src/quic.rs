@@ -502,20 +502,21 @@ pub struct QuicStreamFeed {
     /// bytes as a message's fields. A live tap feeds incrementally, so that
     /// refusal cost it every field walk after the first.
     ///
-    /// An appending offer is now REBASED into its own coordinate space and
-    /// walked, so this counts only the offer that genuinely cannot be addressed
-    /// — one whose every new message began in bytes an earlier offer carried,
-    /// which are gone. See [`Self::messages_straddling_offers`] for the partial
-    /// case and [`crate::Dissection::feed_quic_stream_with_sink`] for the rule.
+    /// An appending offer is REBASED into its own coordinate space and walked,
+    /// and a message that began in an earlier offer is read from the plaintext
+    /// the stream keeps, so this counts only an offer whose every new message
+    /// began in bytes the stream no longer keeps. The stream releases its
+    /// plaintext only in front of the oldest message it holds, so no path in
+    /// this crate produces one; the count is kept so a future release that did
+    /// would be said rather than mis-sliced. See
+    /// [`crate::Dissection::feed_quic_stream_with_sink`] for the rule.
     pub appends_not_walked: usize,
     /// R311y749 (N6) — messages a walked offer could NOT address, because they
-    /// began before its first byte.
+    /// began before its first byte and the stream no longer keeps their head.
     ///
-    /// A message that spans an offer boundary has its head in bytes this
-    /// dissection no longer holds — a recovered QUIC stream is framed, not
-    /// buffered — so no coordinate can point a sink at its fields. At most one
-    /// per offer, and it is the first: every later message starts where the
-    /// previous one ended.
+    /// At most one per offer, and it is the first: every later message starts
+    /// where the previous one ended. Zero on every path today, for the reason
+    /// [`Self::appends_not_walked`] gives.
     ///
     /// Its own counter rather than a share of [`Self::appends_not_walked`]
     /// because the two are different findings. That one says a whole offer went

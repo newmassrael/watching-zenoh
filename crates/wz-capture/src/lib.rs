@@ -7953,18 +7953,23 @@ impl Dissection {
     /// the flow decodes messages, and the walk that turns a message into named
     /// fields never sees them.
     ///
-    /// # The one offer it will not hand on
+    /// # An offer that appends
     ///
     /// A frame's `stream_offset` is absolute within its direction's recovered
-    /// stream, while `bytes` is what THIS offer added. The two agree only while
-    /// the offer starts at zero, which is every offer the analyzer's own pass
-    /// makes (one per direction per stream) and not a guarantee of the
-    /// contract. So an offer that APPENDS is framed as usual and not walked,
-    /// counted in [`quic::QuicStreamFeed::appends_not_walked`]. Handing it on
-    /// anyway would slice the tail at an offset into the whole, which does not
-    /// fail loudly -- it names the wrong bytes as a message's fields, and a
-    /// field layer that can be quietly wrong is worse than one that is quietly
-    /// absent.
+    /// stream, while `bytes` is what THIS offer added, so the sink is told where
+    /// in the stream the bytes it is handed begin ([`DecryptedStream::base`])
+    /// and slices at the difference. A message whose head an earlier offer
+    /// carried is read from the plaintext the stream keeps: the offered bytes
+    /// begin at that head rather than at this offer's first byte, so a feed in
+    /// any number of parts walks every message it frames.
+    ///
+    /// [`quic::QuicStreamFeed::messages_straddling_offers`] and
+    /// [`quic::QuicStreamFeed::appends_not_walked`] count a message whose head
+    /// the stream no longer keeps. No path produces one: the stream lets go of
+    /// its plaintext only in front of the oldest message it still holds. The
+    /// counters stay, because a slice taken at a coordinate nothing holds would
+    /// name the wrong bytes as a message's fields, and that is said rather than
+    /// done.
     pub fn feed_quic_stream_with_sink(
         &mut self,
         flow: FlowKey,
@@ -8117,31 +8122,45 @@ impl Dissection {
         // from `before`, because the cap loop above discards from the FRONT:
         // after a trim, `before` names a frame that is no longer there.
         let window_start = stream.frames.len().saturating_sub(added);
-        // A message that began in bytes an earlier offer carried has its head in
-        // bytes nothing holds any more, so no coordinate can address it. At most
-        // one, and it is the first: every later message starts where the
-        // previous ended. The other-direction guard is defensive — this offer
-        // pushed on one direction — and costs one comparison.
+        // The bytes offered begin at the head of the first message this offer
+        // framed. At most that one message began in bytes an earlier offer
+        // carried (every later one starts where the previous ended), and its
+        // head is in the plaintext the stream keeps, which is released only in
+        // front of the oldest message still held. A message whose head is not
+        // kept, or one framed on the other direction (defensive: this offer
+        // pushed on one), cannot be addressed and is counted instead.
+        let end = base as usize + bytes.len();
+        let kept = &stream.plaintext[dir_index(direction)];
         let mut walk_from = window_start;
-        while walk_from < stream.frames.len()
-            && (stream.frames().row(walk_from).direction != direction
-                || (stream.frames().row(walk_from).stream_offset as u64) < base)
-        {
+        let mut offered: Option<(&[u8], usize)> = None;
+        while walk_from < stream.frames.len() {
+            let head_direction = stream.frames().row(walk_from).direction;
+            let head = stream.frames().row(walk_from).stream_offset;
+            if head_direction == direction {
+                if head as u64 >= base {
+                    offered = Some((bytes, base as usize));
+                    break;
+                }
+                if let Some(widened) = kept.get(head, end) {
+                    offered = Some((widened, head));
+                    break;
+                }
+            }
             walk_from += 1;
             feed.messages_straddling_offers += 1;
         }
-        if walk_from < stream.frames.len() {
-            sink.on_plaintext(DecryptedStream {
+        match offered {
+            Some((plaintext, at)) => sink.on_plaintext(DecryptedStream {
                 flow,
                 direction,
-                plaintext: bytes,
+                plaintext,
                 frames: stream.frames().rows_from(walk_from),
                 record_origins: &[],
-                base: base as usize,
-            });
-        } else if added > 0 {
-            // Framed, and addressable by nothing: the whole window straddled.
-            feed.appends_not_walked += 1;
+                base: at,
+            }),
+            // Framed, and addressable by nothing.
+            None if added > 0 => feed.appends_not_walked += 1,
+            None => {}
         }
         // R311y709 — the flow's recovered/fed ledger. A QUIC flow's `fed` was
         // zero for the life of every capture until this method existed, which
@@ -16416,21 +16435,22 @@ mod datagram_tests {
         );
     }
 
-    /// R311y749 (debt-carry-N6) — AND THE MESSAGE THAT SPANS THE BOUNDARY IS
-    /// COUNTED RATHER THAN MIS-ADDRESSED.
+    /// AND THE MESSAGE THAT SPANS THE BOUNDARY IS WALKED TOO, from the plaintext
+    /// the stream keeps.
     ///
-    /// The other half of the fix above, and the half that keeps it honest. A
-    /// message whose head arrived in an earlier offer has those bytes nowhere:
-    /// a recovered QUIC stream is framed, not buffered. No coordinate can point
-    /// a sink at its fields, so it is excluded from the walk and named in
-    /// [`quic::QuicStreamFeed::messages_straddling_offers`] — the rule R311y718
-    /// applied to a whole offer, kept for the one message it is still true of.
+    /// A message whose head arrived in an earlier offer is completed by this
+    /// one, and its head is still held: a recovered stream keeps its plaintext
+    /// from the oldest message it holds (open-debt item 924, D8). So the bytes
+    /// offered begin at that head, `base` says where, and the message is sliced
+    /// whole; nothing is counted as unaddressable. A live tap feeds a stream in
+    /// the pieces its packets carry, and a message across two packets is the
+    /// ordinary case there, not an edge.
     ///
     /// Both legs in one fixture because they differ by one byte of input: a
-    /// second offer that carries ONLY the tail of a straddling message walks
-    /// nothing at all, and the same offer plus a whole message walks that one.
+    /// second offer that carries ONLY the tail of a straddling message, and the
+    /// same offer followed by a whole message.
     #[test]
-    fn a_message_that_spans_two_quic_offers_is_named_not_walked() {
+    fn a_message_that_spans_two_quic_offers_is_walked_from_the_kept_plaintext() {
         #[derive(Default)]
         struct Recorder {
             calls: alloc::vec::Vec<(alloc::vec::Vec<u8>, alloc::vec::Vec<usize>)>,
@@ -16455,8 +16475,7 @@ mod datagram_tests {
             d.datagram_flows()[0].flow
         };
 
-        // LEG ONE — the offer carries only the straddler's tail, so the walk has
-        // nothing it can address and the whole offer is unwalked.
+        // LEG ONE — the offer carries only the straddler's tail.
         let mut d = Dissection::with_limits(DissectionLimits::for_live_tap());
         let flow = open(&mut d);
         let mut sink = Recorder::default();
@@ -16471,15 +16490,25 @@ mod datagram_tests {
         assert_eq!(tail.messages, 1, "the tail completes the message");
         assert_eq!(
             (tail.messages_straddling_offers, tail.appends_not_walked),
-            (1, 1),
-            "its head is in bytes nothing holds, so it is named and the offer \
-             is unwalked"
+            (0, 0),
+            "its head is kept, so nothing is unaddressable"
         );
-        assert_eq!(sink.calls.len(), 0, "nothing addressable reached the sink");
+        assert_eq!(
+            sink.calls.len(),
+            1,
+            "the completed message reached the sink"
+        );
+        let (plaintext, offsets) = &sink.calls[0];
+        assert_eq!(
+            plaintext.as_slice(),
+            unit.as_slice(),
+            "the bytes offered begin at the message's head, an offer earlier"
+        );
+        assert_eq!(offsets.as_slice(), &[0], "and it is sliced from there");
 
-        // LEG TWO — the same tail followed by a WHOLE message in one offer. The
-        // straddler is still named; the message inside the offer is walked, at
-        // the offset that slices it out of these bytes.
+        // LEG TWO — the same tail followed by a WHOLE message in one offer. Both
+        // are walked, each at the offset that slices it out of the bytes
+        // offered.
         let mut e = Dissection::with_limits(DissectionLimits::for_live_tap());
         let flow = open(&mut e);
         let mut sink = Recorder::default();
@@ -16490,18 +16519,26 @@ mod datagram_tests {
         assert_eq!(both.messages, 2, "the completed one and the whole one");
         assert_eq!(
             (both.messages_straddling_offers, both.appends_not_walked),
-            (1, 0),
-            "one message is unaddressable and the offer is still walked"
+            (0, 0),
+            "both messages are addressable"
         );
-        assert_eq!(sink.calls.len(), 1, "the walkable half reached the sink");
+        assert_eq!(sink.calls.len(), 1, "one offer, one call");
         let (plaintext, offsets) = &sink.calls[0];
-        assert_eq!(plaintext.as_slice(), rest.as_slice());
-        assert_eq!(offsets.len(), 1, "only the addressable message is offered");
+        let mut stream = unit.clone();
+        stream.extend_from_slice(&unit);
         assert_eq!(
-            &plaintext[offsets[0]..],
-            unit.as_slice(),
-            "and its offset slices the message out of THESE bytes"
+            plaintext.as_slice(),
+            stream.as_slice(),
+            "the kept head, then this offer's bytes"
         );
+        assert_eq!(offsets.as_slice(), &[0, unit.len()]);
+        for at in offsets {
+            assert_eq!(
+                &plaintext[*at..*at + unit.len()],
+                unit.as_slice(),
+                "each offset slices its message out of THESE bytes"
+            );
+        }
     }
 
     /// R311y651 (§4.4) — and R311y610's rule on the plane it was not written
