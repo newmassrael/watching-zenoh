@@ -1574,6 +1574,9 @@ layer_b_verify_codegen() {
     #             SCE's resource ends the chain at the end of the frame, which
     #             two queries in one frame do not survive), its
     #             `entry-flag-bind` child and the import that names the entry —
+    #             and, since the consolidation width round, the `consolidation`
+    #             field's `sce:type`/`sce:bit-size` (a VLE u64 here, upstream's
+    #             z64; `uint8` there) —
     #             and every backend reports `golden mismatch`. Layer 3 and the shared-
     #             memory witnesses (a router linked against upstream's own
     #             `zenoh`, `wz_shm_query_reply_zenohd_interop`) are the wire
@@ -13809,9 +13812,12 @@ layer_c1br_uring_fixed_buffers() {
     # nothing else of this UID registers. Serialized and filtered, this lane is
     # that condition; a whole-`--lib` parallel lane (C1bn) is not, and redded it
     # on the FIRST registration in hosted run 36064882812.
+    # The datagram link chooses its read body in `udp_pipeline`, so its
+    # witnesses are a fourth module path, `udp_pipeline::ring_selection::`,
+    # named here for the reason the third one is.
     out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-tokio-uring \
         --lib --quiet -- --include-ignored --test-threads=1 uring:: uring_reactor:: \
-        stream_link::ring_selection:: 2>&1)" \
+        stream_link::ring_selection:: udp_pipeline::ring_selection:: 2>&1)" \
         || { echo "$out"; return 1; }
     local tests
     tests="$(_runci_passed_count <<<"$out")"
@@ -26119,6 +26125,9 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh-collections)" 8 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_collections || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-task)" 3 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_task || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-macros)" 4 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_macros || return 1

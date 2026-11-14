@@ -135,7 +135,7 @@ impl<'a> RequestWriter<'a> {
         let parameters: Option<Bytes<'_, { usize::MAX }>> = None;
         let query = QueryParts {
             header: QUERY_HEADER,
-            consolidation: parts.consolidation.map(|mode| mode.wire_byte()),
+            consolidation: parts.consolidation.map(|mode| u64::from(mode.wire_byte())),
             parameters,
             extensions: None,
         };

@@ -405,14 +405,16 @@ pub mod timestamp_stack {
 }
 
 /// What zenoh's own crates and the language bindings reach into: the traits of the builders, which
-/// the builders of a sample implement, the node sessions share, and the helpers of the family's own
-/// crates, which the ecosystem crate `zenoh-ext` names through this module. The rest of upstream's
-/// module (the task controller and the condition of crates the family does not have, the plugins,
-/// the buffers and the timers) arrives with the slices that give them a body.
+/// the builders of a sample implement, the node sessions share, the task controller of
+/// `zenoh-task`, which the ecosystem's crates spawn and stop their tasks through, and the helpers of
+/// the family's own crates, which the ecosystem crate `zenoh-ext` names through this module. The
+/// rest of upstream's module (the plugins, the buffers and the timers) arrives with the slices that
+/// give them a body.
 #[zenoh_macros::internal]
 pub mod internal {
     pub use zenoh_core::{zasynclock, zerror, zlock, zread, ztimeout, zwrite, ResolveFuture};
     pub use zenoh_result::{bail, ErrNo};
+    pub use zenoh_task::{TaskController, TerminatableTask};
 
     /// The node several sessions share, and the session that is made on it
     /// ([`session::init`](crate::session::init)), and the roles of the family's runtime pool.

@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# This package reproduces the public API and the documentation of the crate of the same name of
+# eclipse-zenoh/zenoh, which is EPL-2.0 OR Apache-2.0, so the whole package is under that expression.
+# The notices of the upstream files it derives from are kept in its sources (see LICENSES/ and
+# THIRD_PARTY.md at the root of this repository).
+#
+# zenoh-task -- the task controller of the zenoh family, over watching-zenoh (inventory atom
+# `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13).
+#
+# Named `zenoh-task` and versioned as the pinned zenoh, like every crate of the family (see
+# `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). `zenoh` re-exports its two
+# types under `zenoh::internal`, and the ecosystem spawns and stops its tasks through them
+# (`zenoh-ext`'s group, publication cache and advanced publisher do), so a graph the family is
+# patched into must meet this crate and not upstream's. It is one of the lower crates of C13a: a
+# contract over the family's runtimes, equal to upstream's, with no session behaviour of its own.
+
+[package]
+name = "zenoh-task"
+version = "1.10.2"
+edition.workspace = true
+rust-version.workspace = true
+license = "EPL-2.0 OR Apache-2.0"
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The task controller of the zenoh family (1.10.2), as a drop-in over watching-zenoh."
+
+[lib]
+name = "zenoh_task"
+path = "src/lib.rs"
+
+# Upstream's one feature, by its name and with its forwarding: every spawn of the controller carries
+# the caller's tracing span, and so does every spawn of `zenoh-runtime` it hands a future to.
+[features]
+tracing-instrument = ["zenoh-runtime/tracing-instrument"]
+
+# The requirements are upstream's where they are types of this crate's public API: the controller
+# hands out tokio-util's `CancellationToken` and tokio's `JoinHandle`, so a caller that names them
+# meets the same crates upstream's would, at the lower bounds upstream's workspace states. Upstream's
+# `futures` is not taken: it served one `FutureExt::map`, which an `async` block states.
+[dependencies]
+tokio = { version = "1.47.1", default-features = false, features = ["macros", "rt", "sync", "time"] }
+tokio-util = { version = "0.7.16", default-features = false, features = ["rt"] }
+tracing = "0.1.41"
+zenoh-core = { path = "../wz-zenoh-core" }
+zenoh-runtime = { path = "../wz-zenoh-runtime" }
+
+# The test of `tracing-instrument` needs a subscriber that gives spans ids.
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+
+[lints]
+workspace = true

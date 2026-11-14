@@ -3565,7 +3565,9 @@ impl WriterHandle {
             sealed: false,
         };
         WriterHandle {
-            join: TokioJoinHandle::from_tokio(handle.spawn(task(queue))),
+            join: TokioJoinHandle::from_tokio(
+                handle.spawn(crate::runtime_pool::in_caller_span(task(queue))),
+            ),
             seal,
         }
     }

@@ -161,13 +161,18 @@ impl Closee for RuntimeCloser {
     async fn close_inner(&self, _: ()) {
         let inner = self.0.clone();
         // A close joins the threads of the node, so it is run where blocking is allowed.
-        let _ = ZRuntime::Net
-            .spawn_blocking(move || {
-                if let Some(core) = inner.core.get() {
-                    core.close();
-                }
-            })
-            .await;
+        let close = move || {
+            if let Some(core) = inner.core.get() {
+                core.close();
+            }
+        };
+        // In the span of the caller of the close, as the session's close runs (`WeakSession`'s).
+        #[cfg(feature = "engine-tokio")]
+        let close = {
+            let caller = wz_capi_core::caller_span::CallerSpan::current();
+            move || caller.in_scope(close)
+        };
+        let _ = ZRuntime::Net.spawn_blocking(close).await;
     }
 }
 

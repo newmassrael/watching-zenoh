@@ -2309,10 +2309,10 @@ pub fn walk_query(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         flag("z", carrier, (header & 0x80) != 0),
     ];
     if (header & 0x20) != 0 {
-        let (byte, f) = c.u8("consolidation")?;
+        let (mode, f) = c.vle_u64("consolidation")?;
         let span = f.span;
         out.push(f);
-        out.extend(consolidation_name(span, byte));
+        out.extend(consolidation_name(span, mode));
     }
     if (header & 0x40) != 0 {
         let (n, len) = c.vle_u64("parameters_len")?;
@@ -2325,7 +2325,7 @@ pub fn walk_query(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     Ok(out)
 }
 
-/// `Reply` (zenoh MID 0x04) — a consolidation byte plus an inner put / del.
+/// `Reply` (zenoh MID 0x04) — a consolidation z64 plus an inner put / del.
 pub fn walk_reply(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let (header, header_field) = c.u8("header")?;
     let carrier = header_field.span;
@@ -2336,10 +2336,10 @@ pub fn walk_reply(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         flag("z", carrier, (header & 0x80) != 0),
     ];
     if (header & 0x20) != 0 {
-        let (byte, f) = c.u8("consolidation")?;
+        let (mode, f) = c.vle_u64("consolidation")?;
         let span = f.span;
         out.push(f);
-        out.extend(consolidation_name(span, byte));
+        out.extend(consolidation_name(span, mode));
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
@@ -2350,21 +2350,27 @@ pub fn walk_reply(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     Ok(out)
 }
 
-/// The mode a `Query`'s or a `Reply`'s consolidation byte names, as a label
-/// beside the byte: [`crate::query_mode::ConsolidationMode::wire_word`], which
-/// reads the byte on zenoh's numbering.
+/// The mode a `Query`'s or a `Reply`'s consolidation field names, as a label
+/// beside the field: [`crate::query_mode::ConsolidationMode::wire_word`], which
+/// reads the value on zenoh's numbering.
 ///
-/// ABSENT for a byte zenoh's decoder does not number, as `whatami_name` is for
+/// The field is a z64, as upstream reads it
+/// (`commons/zenoh-codec/src/zenoh/query.rs` @
+/// `let v: u64 = self.read(&mut *reader)?;`, which the Reply's decoder calls
+/// too), so a value of 0x80 or more spans its continuation bytes and the field
+/// after it starts where upstream's does.
+///
+/// ABSENT for a value zenoh's decoder does not number, as `whatami_name` is for
 /// a role code, and the raw `consolidation` beside it still says what the
-/// sender wrote. The label aliases the byte and owns none of it, so the tiling
+/// sender wrote. The label aliases the field and owns none of it, so the tiling
 /// is unchanged.
 ///
-/// The byte is read on one numbering, not per sender: nothing in the message
+/// The value is read on one numbering, not per sender: nothing in the message
 /// says which implementation wrote it. A stock zenoh-pico sender writes its API
 /// enum one slot low (`query_mode`'s `wire_byte` states the measurement), and
-/// its byte reads here as the mode a zenoh receiver applies to it.
-fn consolidation_name(span: Span, byte: u8) -> Option<Field> {
-    let consolidation_word = crate::query_mode::ConsolidationMode::wire_word(u64::from(byte))?;
+/// its value reads here as the mode a zenoh receiver applies to it.
+fn consolidation_name(span: Span, mode: u64) -> Option<Field> {
+    let consolidation_word = crate::query_mode::ConsolidationMode::wire_word(mode)?;
     Some(label("consolidation_name", span, consolidation_word))
 }
 
@@ -6628,23 +6634,30 @@ mod tests {
         assert_eq!(raw(&f, "payload"), b"v".to_vec());
     }
 
-    /// Every consolidation byte a `Query` or a `Reply` can carry reads as the
-    /// word of the mode zenoh numbers it, and a byte zenoh does not number
+    /// Every consolidation value a `Query` or a `Reply` can carry reads as the
+    /// word of the mode zenoh numbers it, and a value zenoh does not number
     /// keeps its raw value and gets no word. Each leg names the word it
     /// expects, so a table shifted by one slot (pico's numbering) reds here.
+    /// The values at and past 0x80 are z64s of two bytes or more, and the
+    /// tiling assertion holds the field to all of them.
     #[test]
     fn a_consolidation_byte_is_named_as_zenoh_numbers_it() {
         for (byte, word) in [
-            (0u8, Some("Auto")),
+            (0u64, Some("Auto")),
             (1, Some("None")),
             (2, Some("Monotonic")),
             (3, Some("Latest")),
             (4, None),
+            (0x7F, None),
+            (0x80, None),
             (0xFF, None),
+            (0x4000, None),
+            (u64::MAX, None),
         ] {
-            let query = alloc::vec![0x03u8 | 0x20, byte];
+            let query = concat(&[alloc::vec![0x03u8 | 0x20], vle(byte)]);
             let reply = concat(&[
-                alloc::vec![0x04u8 | 0x20, byte],
+                alloc::vec![0x04u8 | 0x20],
+                vle(byte),
                 msg_put(None, None, &[], b"v"),
             ]);
             type Walk = fn(&mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError>;
@@ -6656,11 +6669,7 @@ mod tests {
                 let fields = walk(&mut c).expect("the walker rejected the fixture");
                 let f = group(name, 0, c.offset(), fields);
                 assert_tiles(&f, 0, bytes.len());
-                assert_eq!(
-                    uint(&f, "consolidation"),
-                    u64::from(byte),
-                    "{name} {byte:#04x}"
-                );
+                assert_eq!(uint(&f, "consolidation"), byte, "{name} {byte:#04x}");
                 match word {
                     Some(w) => {
                         assert_eq!(label_of(&f, "consolidation_name"), w, "{name} {byte:#04x}")
@@ -6672,6 +6681,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A consolidation value of 0x80 or more is read as the z64 upstream reads
+    /// (`commons/zenoh-codec/src/zenoh/query.rs` @
+    /// `let v: u64 = self.read(&mut *reader)?;`, called for the Reply too):
+    /// the field spans its continuation byte, the Query's parameters and the
+    /// Reply's put start after it, and the generated codec ends where the
+    /// walker does. A one-byte reader takes `0x01` for the parameters' length
+    /// and the put's header, so the parameters and the payload would differ.
+    #[test]
+    fn a_consolidation_value_past_one_byte_is_read_as_upstream_reads_it() {
+        const MODE: u64 = 0x80;
+        let params = b"k=v".to_vec();
+        let query = concat(&[
+            alloc::vec![0x03u8 | 0x20 | 0x40],
+            vle(MODE),
+            vle(params.len() as u64),
+            params.clone(),
+        ]);
+        let f = agree(
+            "Query",
+            &query,
+            |b| {
+                let mut c = SceCursor::new(b);
+                let q = wz_codecs::lent::Query::decode(&mut c).expect("codec rejected");
+                assert_eq!(q.consolidation, Some(MODE), "the codec's Query value");
+                assert_eq!(q.parameters_len, Some(params.len() as u64));
+                b.len() - c.remaining()
+            },
+            walk_query,
+        );
+        assert_eq!(uint(&f, "consolidation"), MODE);
+        let mode = f.find("consolidation").expect("the field is walked");
+        assert_eq!(mode.span.end - mode.span.start, 2, "the z64 of 0x80");
+        assert!(f.find("consolidation_name").is_none());
+        assert_eq!(uint(&f, "parameters_len"), params.len() as u64);
+        assert_eq!(raw(&f, "parameters"), params);
+
+        let reply = concat(&[
+            alloc::vec![0x04u8 | 0x20],
+            vle(MODE),
+            msg_put(None, None, &[], b"v"),
+        ]);
+        let f = agree(
+            "Reply",
+            &reply,
+            |b| {
+                let mut c = SceCursor::new(b);
+                let r = wz_codecs::lent::Reply::decode(&mut c).expect("codec rejected");
+                assert_eq!(r.consolidation, Some(MODE), "the codec's Reply value");
+                b.len() - c.remaining()
+            },
+            walk_reply,
+        );
+        assert_eq!(uint(&f, "consolidation"), MODE);
+        assert!(f.find("consolidation_name").is_none());
+        assert_eq!(raw(&f, "payload"), b"v".to_vec());
+        assert!(
+            crate::query_mode::ConsolidationMode::from_wire_byte(MODE).is_none(),
+            "upstream applies Auto to a value it does not number, which wz \
+             spells as no named mode"
+        );
     }
 
     #[test]

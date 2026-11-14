@@ -3673,6 +3673,8 @@ dependencies = [
  "zenoh-runtime 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-shm 1.10.2",
  "zenoh-shm 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zenoh-task 1.10.2",
+ "zenoh-task 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-util 1.10.2",
  "zenoh-util 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -3841,6 +3843,7 @@ dependencies = [
  "zenoh-protocol 1.10.2",
  "zenoh-result 1.10.2",
  "zenoh-runtime 1.10.2",
+ "zenoh-task 1.10.2",
  "zenoh-util 1.10.2",
 ]
 
@@ -3890,7 +3893,7 @@ dependencies = [
  "zenoh-result 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-runtime 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-sync",
- "zenoh-task",
+ "zenoh-task 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-transport",
  "zenoh-util 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -4367,6 +4370,17 @@ dependencies = [
 [[package]]
 name = "zenoh-task"
 version = "1.10.2"
+dependencies = [
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "zenoh-core 1.10.2",
+ "zenoh-runtime 1.10.2",
+]
+
+[[package]]
+name = "zenoh-task"
+version = "1.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "327425c8309bc0fa3eb4316b4628eb1635a3ea1f06a92d7293e77eddc3ac2593"
 dependencies = [
@@ -4408,7 +4422,7 @@ dependencies = [
  "zenoh-result 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-runtime 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-sync",
- "zenoh-task",
+ "zenoh-task 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-util 1.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 

@@ -153,6 +153,31 @@ use wz_runtime_core::Runtime;
 
 use crate::runtime_impl::TokioJoinHandle;
 
+/// `future`, to be polled inside the tracing span that is current HERE, where it is spawned, when
+/// `tracing-instrument` is on.
+///
+/// A spawned future is polled by a worker of whichever runtime takes it, a thread that is inside no
+/// span of the caller's, so without this a task's events lose the context of the code that started
+/// it. Upstream wraps each spawn of its runtime pool and of its task controller the same way
+/// (`commons/zenoh-runtime/src/lib.rs` @ `let future = tracing::Instrument::instrument(future, tracing::Span::current());`,
+/// and `commons/zenoh-task/src/lib.rs` @ `pub fn spawn_abortable_with_rt<F, T>`), and its transport
+/// and routing tasks are spawned through those two. Every production spawn of a future in this
+/// crate goes through this function: the subsystem runtimes and their pool, the ambient runtime of
+/// `TokioRuntime`, and the seams that take a runtime handle (the link writer, a multicast group
+/// face, the replication and resource services, the router's face drives and the accept intake
+/// with its handshakes, the consumer of an offloaded subscriber). The span carried is the one current at the spawn, so a task spawned by a
+/// task carries what its parent carried.
+#[cfg(feature = "tracing-instrument")]
+pub(crate) fn in_caller_span<F: Future>(future: F) -> impl Future<Output = F::Output> {
+    tracing::Instrument::instrument(future, tracing::Span::current())
+}
+
+/// Without `tracing-instrument` a future is spawned as it was given.
+#[cfg(not(feature = "tracing-instrument"))]
+pub(crate) fn in_caller_span<F: Future>(future: F) -> impl Future<Output = F::Output> {
+    future
+}
+
 /// Environment variable that overrides the per-subsystem defaults. Named for
 /// wz rather than borrowed from upstream: the two pools are configured
 /// independently and a process may host both.
@@ -278,7 +303,7 @@ impl WzRuntime {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.handle().spawn(fut)
+        self.handle().spawn(in_caller_span(fut))
     }
 
     /// Run a BLOCKING closure on this subsystem's blocking-thread pool.
@@ -353,6 +378,10 @@ impl WzRuntime {
             }
         }
 
+        // Polled on this thread, where the caller's span is current already; carried anyway, as
+        // upstream's `ZRuntime::block_in_place` carries it, so the future that runs is the same
+        // future whichever bridge it took.
+        let fut = in_caller_span(fut);
         tokio::task::block_in_place(move || self.handle().block_on(fut))
     }
 }
@@ -707,7 +736,7 @@ impl RuntimePool {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.handle(rt).spawn(fut)
+        self.handle(rt).spawn(in_caller_span(fut))
     }
 
     /// Run a blocking closure on the blocking pool of the runtime serving `rt` —
@@ -863,5 +892,41 @@ impl Runtime for PartitionedRuntime {
         T: Send + Sync + 'static,
     {
         crate::sync::RwLock::new(value)
+    }
+}
+
+/// The span a spawned task runs in. Built where `tracing` is, which is either span feature; the
+/// build with `tracing-spans` alone is the control.
+#[cfg(all(test, any(feature = "tracing-spans", feature = "tracing-instrument")))]
+mod span_tests {
+    use super::*;
+
+    /// `tracing-instrument` decides whether a future spawned inside a span runs in it: the span is
+    /// entered while the future is made and spawned, and left before either is polled, so a future
+    /// that sees it saw it through the feature. Asked of the function every spawn goes through and
+    /// of a spawn through `TokioRuntime`, whose task is polled by this test's one thread, where the
+    /// subscriber is; nothing is installed for the process. CONTROL: without the feature both must
+    /// see no span, which is the same test in a build with `tracing-spans` alone.
+    #[tokio::test]
+    async fn a_spawned_task_runs_in_its_callers_span_exactly_when_the_feature_is_on() {
+        let _subscriber = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let caller = tracing::info_span!("caller");
+        assert!(caller.id().is_some(), "the subscriber gives spans ids");
+        let (wrapped, spawned) = {
+            let _inside = caller.enter();
+            (
+                in_caller_span(async { tracing::Span::current().id() }),
+                crate::runtime_impl::TokioRuntime.spawn(async { tracing::Span::current().id() }),
+            )
+        };
+        let wrapped = wrapped.await;
+        let spawned = spawned.await.expect("the task ends");
+        let want = if cfg!(feature = "tracing-instrument") {
+            caller.id()
+        } else {
+            None
+        };
+        assert_eq!(wrapped, want, "the function every spawn goes through");
+        assert_eq!(spawned, want, "a spawn on the ambient runtime");
     }
 }
