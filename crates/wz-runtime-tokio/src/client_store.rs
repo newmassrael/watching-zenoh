@@ -425,28 +425,37 @@ impl<V: Held> ClientStore<V> {
         self.log.push(self.version, keyexpr);
     }
 
+    /// Enter `id` of `face` under `keyexpr` in the index by key: one lookup of the key, by its
+    /// text, and the key indexed when it is new.
     fn index_add(&mut self, face: FaceId, id: u64, keyexpr: &Arc<str>, value: V) {
-        if !self.by_key.contains_key(&**keyexpr) {
-            self.keys.insert(keyexpr, Arc::clone(keyexpr));
-        }
+        let mut new_key = false;
         self.by_key
-            .get_mut_or_default(Arc::clone(keyexpr))
+            .get_mut_or_insert_by(
+                &**keyexpr,
+                || Arc::clone(keyexpr),
+                || {
+                    new_key = true;
+                    Holders::default()
+                },
+            )
             .get_mut_or_default(face)
             .insert(id, value);
+        if new_key {
+            self.keys.insert(keyexpr, Arc::clone(keyexpr));
+        }
     }
 
+    /// Take `id` of `face` out from under `keyexpr` in the index by key: one lookup of the key for
+    /// the write and, when it leaves the key with no holder, its removal.
     fn index_remove(&mut self, face: FaceId, id: u64, keyexpr: &Arc<str>) {
-        let Some(holders) = self.by_key.get_mut(&**keyexpr) else {
-            return;
-        };
-        if let Some(ids) = holders.get_mut(&face) {
-            ids.remove(&id);
-            if ids.is_empty() {
-                holders.remove(&face);
-            }
-        }
-        if holders.is_empty() {
-            self.by_key.remove(&**keyexpr);
+        let kept = self.by_key.edit_or_remove(&**keyexpr, |holders| {
+            holders.edit_or_remove(&face, |ids| {
+                ids.remove(&id);
+                !ids.is_empty()
+            });
+            !holders.is_empty()
+        });
+        if kept == Some(false) {
             self.keys.remove(keyexpr, keyexpr);
         }
     }
@@ -657,8 +666,17 @@ mod tests {
             Some(info(true, 0)),
             "the newer value replaced the older"
         );
+        assert_eq!(
+            store.keys_intersecting("demo/**").len(),
+            1,
+            "the key is indexed once, after the id left it and came back"
+        );
         assert_eq!(store.remove_id(face(1), 1).as_deref(), Some("demo/q"));
         assert!(!store.names_key("demo/q"), "one withdrawal leaves nothing");
+        assert!(
+            store.keys_intersecting("demo/**").is_empty(),
+            "and the index let go of the key"
+        );
     }
 
     #[test]

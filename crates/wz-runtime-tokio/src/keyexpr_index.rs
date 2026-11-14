@@ -189,9 +189,12 @@ impl<M: Hash + Eq + Clone> KeyexprIndex<M> {
         }
         let mut node = &mut self.root;
         for chunk in keyexpr.split('/') {
-            node = node
-                .children_mut(chunk)
-                .get_mut_or_default(Box::from(chunk));
+            // Found by the chunk's text: a chunk some key already holds allocates nothing.
+            node = node.children_mut(chunk).get_mut_or_insert_by(
+                chunk,
+                || Box::from(chunk),
+                IndexNode::default,
+            );
         }
         let added = node.members.insert(member);
         debug_assert!(added, "the read did not find the member");

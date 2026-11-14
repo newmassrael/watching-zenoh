@@ -413,6 +413,36 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> PersistentMap<K, V, S> {
         self.walk_mut(hash, key)
     }
 
+    /// Write the value of `key` through `edit`, and take the key out of the map when `edit` answers
+    /// that the value is not to be kept (a set it emptied): one hash of `key` for the write and the
+    /// removal. `None` for a key the map does not hold, which copies nothing; else whether the key
+    /// was kept.
+    ///
+    /// Read by the tests and by the forwarder's client stores (`routing-router-hat`).
+    #[cfg(any(test, feature = "routing-router-hat"))]
+    pub(crate) fn edit_or_remove<Q>(
+        &mut self,
+        key: &Q,
+        edit: impl FnOnce(&mut V) -> bool,
+    ) -> Option<bool>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let hash = self.hash_of(key);
+        self.find_hashed(hash, key)?;
+        let keep = edit(
+            self.walk_mut(hash, key)
+                .expect("the key was found just before"),
+        );
+        if !keep {
+            let removed = remove_from(Arc::make_mut(&mut self.root), hash, key, 0);
+            debug_assert!(removed.is_some(), "the key was found before the removal");
+            self.len -= 1;
+        }
+        Some(keep)
+    }
+
     /// The value of `key`, whose hash is `hash`, for writing: the path to it copied where another
     /// version shares it. Called once the key is known to be held, so a miss copies nothing.
     fn walk_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<&mut V>
@@ -871,7 +901,7 @@ mod tests {
         for step in 0..steps {
             let key = draw.next() % keys;
             let value = draw.next();
-            match draw.next() % 8 {
+            match draw.next() % 9 {
                 0 | 1 => assert_eq!(map.insert(key, value), model.insert(key, value)),
                 2 => assert_eq!(map.remove(&key), model.remove(&key)),
                 3 => {
@@ -897,6 +927,19 @@ mod tests {
                 6 => {
                     *map.get_mut_or_insert_by(&key, || key, || value) ^= 2;
                     *model.entry(key).or_insert(value) ^= 2;
+                }
+                7 => {
+                    // Kept unless the edit leaves a multiple of three.
+                    let edit = |v: &mut u64| {
+                        *v ^= 4;
+                        *v % 3 != 0
+                    };
+                    let kept = map.edit_or_remove(&key, edit);
+                    let expected = model.get_mut(&key).map(edit);
+                    if expected == Some(false) {
+                        model.remove(&key);
+                    }
+                    assert_eq!(kept, expected, "kept or removed, {key} at step {step}");
                 }
                 _ => {
                     // A copy kept aside must answer, later, what the map answered now.
