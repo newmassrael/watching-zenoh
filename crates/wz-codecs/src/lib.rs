@@ -453,6 +453,17 @@ pub mod transport_join {
     ));
 }
 
+// The batch of a compressing session: the batch header byte and the payload
+// after it. Ungated: compression is a session feature, not a codec one, and the
+// passive reader takes a batch apart on every build that decompresses.
+pub mod compressed_batch {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/compressed_batch.rs"
+    ));
+}
+
 // The transport OAM, whole: header, id, chain, then the body the header's
 // encoding names. Ungated as the network `oam` is: the session reads it on
 // every build with an allocator, under no `codec-*` feature.

@@ -75,6 +75,7 @@ const CODECS: &[&str] = &[
     "cobs_encode",
     "cobs_decode",
     "stream_envelope",
+    "compressed_batch",
     "close",
     "frame",
     "fragment",
