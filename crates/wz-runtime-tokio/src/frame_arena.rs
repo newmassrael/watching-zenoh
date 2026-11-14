@@ -230,10 +230,10 @@ impl RecyclingArena {
     /// storage a frame needs is the prefix plus the payload the prefix names.
     ///
     /// ⚠ `rx_buffer_size` is an ARGUMENT, not a read of upstream's RX
-    /// buffer-size key: that key is still on [`crate::zenoh_config`]'s
-    /// upstream-inert list, and the production callers below pass the pinned
-    /// default. Plumbing the parsed value here is what would make the key
-    /// honoured, and this signature is the place it arrives.
+    /// buffer-size key: `transport/link/rx/buffer_size` is a reader gap
+    /// (`zenoh_config::UNHONOURED_READER_GAP`), and the production callers
+    /// below pass the pinned default. Plumbing the parsed value here is what
+    /// would make the key honoured, and this signature is the place it arrives.
     pub fn for_link(rx_buffer_size: usize, mtu: usize) -> Self {
         let count = (rx_buffer_size / mtu.max(1)).max(1);
         Self::new(count, MAX_FRAME)
