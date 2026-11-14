@@ -421,6 +421,27 @@ pub mod transport_keep_alive {
     ));
 }
 
+// The headers of the two transport messages whose payload is not a document
+// of its own: a Frame's network messages end where the batch says (L5), and a
+// Fragment's payload is a piece of a message reassembly puts together.
+#[cfg(feature = "codec-frame")]
+pub mod transport_frame_header {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_frame_header.rs"
+    ));
+}
+
+#[cfg(feature = "codec-fragment")]
+pub mod transport_fragment_header {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/transport_fragment_header.rs"
+    ));
+}
+
 // The element of a sliced payload: what `msg_put` repeats when its extension
 // chain carries the shared-memory marker. A leaf, so it is declared before the
 // module that imports it.
