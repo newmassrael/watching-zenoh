@@ -873,8 +873,8 @@ fn any_qabl_matches_in(hats: &RegionMap<Hat>, ke: &str, aggregate: bool) -> bool
 /// each keyexpr once, however many ids name it. Every reader goes through this
 /// rather than the id map, so a face with two subscribers on one key is never
 /// delivered to, advertised or counted twice.
-fn face_keyexprs(by_id: &PersistentMap<u64, String>) -> HashSet<&str> {
-    by_id.values().map(String::as_str).collect()
+fn face_keyexprs(by_id: &PersistentMap<u64, Arc<str>>) -> HashSet<&str> {
+    by_id.values().map(|key| &**key).collect()
 }
 
 /// A client face's liveliness tokens, decl id -> keyexpr (an `UndeclareToken`
@@ -6781,7 +6781,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Declared::Face(keyexpr) => {
                 let store = self.tables.owner_broker_mut(region).subs_mut();
                 let already = store.face_names(inbound, keyexpr);
-                store.insert(inbound, decl_id, keyexpr.clone(), ());
+                store.insert(inbound, decl_id, keyexpr, ());
                 !already
             }
         };
@@ -6818,7 +6818,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 hat.subs
                     .get(&inbound)
                     .and_then(|by_id| by_id.get(&decl_id))
-                    .cloned()
+                    .map(|key| key.to_string())
             },
         ) else {
             return;
@@ -6942,7 +6942,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Declared::Face(keyexpr) => {
                 let store = self.tables.owner_broker_mut(region).qabls_mut();
                 let before = store.face_value(inbound, keyexpr);
-                store.insert(inbound, decl_id, keyexpr.clone(), info);
+                store.insert(inbound, decl_id, keyexpr, info);
                 store.face_value(inbound, keyexpr) != before
             }
         };
@@ -6981,7 +6981,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 hat.qabls
                     .get(&inbound)
                     .and_then(|by_id| by_id.get(&decl_id))
-                    .cloned()
+                    .map(|key| key.to_string())
             },
         ) else {
             return;
@@ -7067,8 +7067,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .tokens
                 .get(&inbound)
                 .and_then(|ids| ids.get(&decl_id))
-                .filter(|old| *old != keyexpr)
-                .cloned(),
+                .filter(|old| ***old != **keyexpr)
+                .map(|old| old.to_string()),
             Declared::Sourced(_) => None,
         };
         let snapshot = self.snapshot::<TokenPlane>(declared.keyexpr());
@@ -7127,14 +7127,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .tokens
                     .get(&inbound)
                     .and_then(|ids| ids.get(&decl_id))
-                    .is_some_and(|held| held == keyexpr);
+                    .is_some_and(|held| **held == **keyexpr);
                 if held {
                     return false;
                 }
                 self.tables.owner_broker_mut(region).tokens_mut().insert(
                     inbound,
                     decl_id,
-                    keyexpr.clone(),
+                    keyexpr,
                     (),
                 );
                 true
@@ -7182,7 +7182,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 hat.tokens
                     .get(&inbound)
                     .and_then(|ids| ids.get(&decl_id))
-                    .cloned()
+                    .map(|key| key.to_string())
             },
         ) else {
             return;
@@ -10004,12 +10004,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables
             .owner_broker_mut(Region::Local)
             .qabls_mut()
-            .insert(
-                LOCAL_FACE,
-                id,
-                keyexpr.to_string(),
-                QueryableInfo::local(complete),
-            );
+            .insert(LOCAL_FACE, id, keyexpr, QueryableInfo::local(complete));
         self.tables.local_queryables_mut().push(HostedQueryable {
             id,
             keyexpr: keyexpr.to_string(),
@@ -10176,7 +10171,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables
             .owner_broker_mut(Region::Local)
             .subs_mut()
-            .insert(LOCAL_FACE, id, keyexpr.to_string(), ());
+            .insert(LOCAL_FACE, id, keyexpr, ());
         self.tables.local_subscribers_mut().push(HostedSubscriber {
             id,
             keyexpr: keyexpr.to_string(),
@@ -10376,7 +10371,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables
             .owner_broker_mut(Region::Local)
             .tokens_mut()
-            .insert(LOCAL_FACE, id, keyexpr.to_owned(), ());
+            .insert(LOCAL_FACE, id, keyexpr, ());
         self.repropagate(snapshot);
         self.push_future_token(keyexpr, LOCAL_FACE);
         id
@@ -12999,7 +12994,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                         .owner_broker(region)
                         .tokens
                         .get(&id)
-                        .map(|ids| ids.values().cloned().collect())
+                        .map(|ids| ids.values().map(|key| key.to_string()).collect())
                 })
                 .unwrap_or_default();
             let snapshots: Vec<Snapshot<TokenPlane>> = keyexprs

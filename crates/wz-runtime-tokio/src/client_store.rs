@@ -36,17 +36,88 @@
 
 use std::collections::HashSet;
 use std::ops::Deref;
+use std::sync::Arc;
 
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::queryable_info::QueryableInfo;
 
 use crate::accept_loop::FaceId;
 use crate::keyexpr_index::KeyexprIndex;
-use crate::persistent_map::{AssignedHere, AssignedKeyMap, PersistentMap};
+use crate::persistent_map::{AssignedKeyMap, PersistentMap};
 
 /// How many changed keys the log keeps. A cache consulted by every message is never this far behind;
 /// one that is drops its routes instead.
 const LOG_CAPACITY: usize = 4096;
+
+/// The entries of one chunk of the log ([`ChangeLog`]).
+const LOG_CHUNK: usize = 64;
+
+// An entry's slot is its number modulo the capacity, which stays right across the wrap of the
+// numbers only for a power of two; and the chunks tile the ring.
+const _: () = assert!(LOG_CAPACITY.is_power_of_two() && LOG_CAPACITY % LOG_CHUNK == 0);
+
+/// One logged change: the version it produced and the key it moved.
+type LogEntry = (u64, Arc<str>);
+
+/// The keys changed, each under the version its change produced, by the order they were logged in:
+/// the entries numbered from `first` up to before `next`, at most [`LOG_CAPACITY`] of them. A
+/// change that drops a face logs several keys under one version, so the log is numbered by entry
+/// and not by version.
+///
+/// A ring: entry `n` sits in slot `n % LOG_CAPACITY`, read and written by its number with nothing
+/// hashed. The slots are in chunks of [`LOG_CHUNK`], each behind an `Arc`, and the chunks behind
+/// one more, so that a version of the tables copies the log with one count and a write to a
+/// shared log copies the chunk table and the one chunk it writes (`docs/router-table-snapshots.md`,
+/// phase 6). A log no other version shares is written in place.
+#[derive(Debug, Clone, Default)]
+struct ChangeLog {
+    /// The chunks, filled in order the first time round and overwritten after.
+    chunks: Arc<Vec<Arc<Vec<LogEntry>>>>,
+    /// The number of the oldest entry held.
+    first: u64,
+    /// The number the next entry is logged under.
+    next: u64,
+    /// The version of the newest change whose entry the log has dropped, or 0 while none has been.
+    /// A reader that was fresh at this version or later is answered from the log; an earlier one is
+    /// not.
+    floor: u64,
+}
+
+impl ChangeLog {
+    /// The chunk and the slot in it of entry `n`.
+    fn slot_of(n: u64) -> (usize, usize) {
+        let slot = (n % LOG_CAPACITY as u64) as usize;
+        (slot / LOG_CHUNK, slot % LOG_CHUNK)
+    }
+
+    /// Entry `n`, which the log holds.
+    fn entry(&self, n: u64) -> &LogEntry {
+        let (chunk, slot) = Self::slot_of(n);
+        &self.chunks[chunk][slot]
+    }
+
+    /// Log `keyexpr` under `version`, in the slot of the oldest entry once the log is full.
+    fn push(&mut self, version: u64, keyexpr: Arc<str>) {
+        if self.next.wrapping_sub(self.first) == LOG_CAPACITY as u64 {
+            self.floor = self.entry(self.first).0;
+            self.first = self.first.wrapping_add(1);
+        }
+        let (chunk, slot) = Self::slot_of(self.next);
+        let chunks = Arc::make_mut(&mut self.chunks);
+        debug_assert!(chunk <= chunks.len(), "the chunks are filled in order");
+        if chunk == chunks.len() {
+            chunks.push(Arc::new(Vec::with_capacity(LOG_CHUNK)));
+        }
+        let slots = Arc::make_mut(&mut chunks[chunk]);
+        debug_assert!(slot <= slots.len(), "a chunk is filled in order");
+        if slot == slots.len() {
+            slots.push((version, keyexpr));
+        } else {
+            slots[slot] = (version, keyexpr);
+        }
+        self.next = self.next.wrapping_add(1);
+    }
+}
 
 /// What a client declaration carries beside its key, and how the declarations of one face on one key
 /// read as one: the face is one holder of the key, whatever number of ids it declared it under.
@@ -76,36 +147,23 @@ impl Held for QueryableInfo {
 /// faces are the node's own numbers and the ids the remote's, so only the inner map is keyed.
 pub(crate) type Holders<V> = AssignedKeyMap<FaceId, PersistentMap<u64, V>>;
 
-/// The number of an entry of the change log, counted by the store itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct LogEntryNo(u64);
-
-/// The store numbers its log entries; no remote names one.
-impl AssignedHere for LogEntryNo {}
-
 /// The client faces' declarations on one plane: per face, by declaration id; and by key.
+///
+/// A key is held once, as one `Arc<str>` that the face's ids, the index by key and the log all
+/// point at: a declaration of a key some client already declares allocates no text.
 #[derive(Debug, Clone)]
 pub(crate) struct ClientStore<V> {
     /// Per face, the declaration ids and the key each names.
-    by_face: AssignedKeyMap<FaceId, PersistentMap<u64, String>>,
+    by_face: AssignedKeyMap<FaceId, PersistentMap<u64, Arc<str>>>,
     /// Per key some client declares, the faces declaring it, each with its ids on it and their values.
-    by_key: PersistentMap<String, Holders<V>>,
+    by_key: PersistentMap<Arc<str>, Holders<V>>,
     /// The keys in `by_key`, each held under itself: the keys an asked keyexpr may intersect, found
     /// without trying every key.
-    keys: KeyexprIndex<String>,
+    keys: KeyexprIndex<Arc<str>>,
     /// How many changes the store has seen; wraps.
     version: u64,
-    /// The keys changed, each under the version its change produced, by the order they were logged
-    /// in: the entries numbered from `log_first` up to before `log_next`. A change that drops a face
-    /// logs several keys under one version, so the log is numbered by entry and not by version.
-    log: AssignedKeyMap<LogEntryNo, (u64, String)>,
-    /// The number of the oldest entry the log holds.
-    log_first: u64,
-    /// The number the next entry is logged under.
-    log_next: u64,
-    /// The version of the newest change whose entries the log has dropped, or 0 while none has been.
-    /// A reader that was fresh at this version or later is answered from the log; an earlier one is not.
-    log_floor: u64,
+    /// The keys the changes moved ([`ChangeLog`]).
+    log: ChangeLog,
 }
 
 /// The client faces' subscribers.
@@ -126,16 +184,13 @@ impl<V> Default for ClientStore<V> {
             by_key: PersistentMap::default(),
             keys: KeyexprIndex::default(),
             version: 0,
-            log: AssignedKeyMap::default(),
-            log_first: 0,
-            log_next: 0,
-            log_floor: 0,
+            log: ChangeLog::default(),
         }
     }
 }
 
 impl<V> Deref for ClientStore<V> {
-    type Target = AssignedKeyMap<FaceId, PersistentMap<u64, String>>;
+    type Target = AssignedKeyMap<FaceId, PersistentMap<u64, Arc<str>>>;
 
     fn deref(&self) -> &Self::Target {
         &self.by_face
@@ -202,28 +257,37 @@ impl<V: Held> ClientStore<V> {
         &mut self,
         face: FaceId,
         id: u64,
-        keyexpr: String,
+        keyexpr: &str,
         value: V,
-    ) -> Option<String> {
+    ) -> Option<Arc<str>> {
+        let keyexpr = self.key_of(keyexpr);
         let displaced = self
             .by_face
             .get_mut_or_default(face)
-            .insert(id, keyexpr.clone());
+            .insert(id, Arc::clone(&keyexpr));
         // The id leaves the key it named before it is entered under the one it names now, so an id
         // declared again on its own key is held once.
         if let Some(old) = &displaced {
             self.index_remove(face, id, old);
-            if *old != keyexpr {
-                self.record(old);
+            if **old != *keyexpr {
+                self.record(Arc::clone(old));
             }
         }
-        self.record(&keyexpr);
+        self.record(Arc::clone(&keyexpr));
         self.index_add(face, id, &keyexpr, value);
         displaced
     }
 
+    /// `keyexpr` as the store holds it: the one copy the store shares when some client declares
+    /// it already, else a new one.
+    fn key_of(&self, keyexpr: &str) -> Arc<str> {
+        self.by_key
+            .get_key_value(keyexpr)
+            .map_or_else(|| Arc::from(keyexpr), |(held, _)| Arc::clone(held))
+    }
+
     /// Withdraw `id` of `face`, returning the key it named. A face left with nothing is dropped.
-    pub(crate) fn remove_id(&mut self, face: FaceId, id: u64) -> Option<String> {
+    pub(crate) fn remove_id(&mut self, face: FaceId, id: u64) -> Option<Arc<str>> {
         // Looked up before it is written, so that an id the face does not hold copies nothing.
         let by_id = self
             .by_face
@@ -232,7 +296,7 @@ impl<V: Held> ClientStore<V> {
         if by_id.is_empty() {
             self.by_face.remove(&face);
         }
-        self.record(&removed);
+        self.record(Arc::clone(&removed));
         self.index_remove(face, id, &removed);
         Some(removed)
     }
@@ -250,7 +314,7 @@ impl<V: Held> ClientStore<V> {
     }
 
     /// Withdraw every declaration of `face`, returning what it held by id.
-    pub(crate) fn remove_face(&mut self, face: FaceId) -> Option<PersistentMap<u64, String>> {
+    pub(crate) fn remove_face(&mut self, face: FaceId) -> Option<PersistentMap<u64, Arc<str>>> {
         let removed = self.by_face.remove(&face)?;
         // One change for the whole face: the version moves once, and each distinct key it held is
         // logged under it.
@@ -258,7 +322,7 @@ impl<V: Held> ClientStore<V> {
         let mut seen: HashSet<&str> = HashSet::new();
         for (id, keyexpr) in &removed {
             if seen.insert(keyexpr) {
-                self.log_key(keyexpr);
+                self.log.push(self.version, Arc::clone(keyexpr));
             }
             self.index_remove(face, *id, keyexpr);
         }
@@ -288,11 +352,8 @@ impl<V: Held> ClientStore<V> {
             .into_iter()
             .filter(|key| keyexpr_intersects_target(key, &target))
             .map(|key| {
-                let holders = self
-                    .by_key
-                    .get(key.as_str())
-                    .expect("an indexed key has holders");
-                (key.as_str(), holders)
+                let holders = self.by_key.get(&**key).expect("an indexed key has holders");
+                (&**key, holders)
             })
             .collect()
     }
@@ -324,7 +385,7 @@ impl<V: Held> ClientStore<V> {
         }
         self.by_key
             .get_key_value(keyexpr)
-            .map(|(key, holders)| (key.as_str(), holders))
+            .map(|(key, holders)| (&**key, holders))
             .into_iter()
             .collect()
     }
@@ -333,7 +394,7 @@ impl<V: Held> ClientStore<V> {
     pub(crate) fn every_key(&self) -> Vec<(&str, &Holders<V>)> {
         self.by_key
             .iter()
-            .map(|(key, holders)| (key.as_str(), holders))
+            .map(|(key, holders)| (&**key, holders))
             .collect()
     }
 
@@ -341,59 +402,41 @@ impl<V: Held> ClientStore<V> {
     /// means the log no longer reaches back that far, and the caller must treat every key as changed.
     pub(crate) fn changed_since(&self, version: u64, mut visit: impl FnMut(&str)) -> bool {
         let behind = self.version.wrapping_sub(version);
-        let reach = self.version.wrapping_sub(self.log_floor);
+        let reach = self.version.wrapping_sub(self.log.floor);
         if behind > reach {
             return false;
         }
         // Newest first, as far back as the reader is behind.
-        let mut entry = self.log_next;
-        while entry != self.log_first {
+        let mut entry = self.log.next;
+        while entry != self.log.first {
             entry = entry.wrapping_sub(1);
-            let (at, keyexpr) = self
-                .log
-                .get(&LogEntryNo(entry))
-                .expect("the log holds every entry from the first to before the next");
+            let (at, keyexpr) = self.log.entry(entry);
             if self.version.wrapping_sub(*at) >= behind {
                 break;
             }
-            visit(keyexpr);
+            visit(&**keyexpr);
         }
         true
     }
 
     /// One change that moved `keyexpr`.
-    fn record(&mut self, keyexpr: &str) {
+    fn record(&mut self, keyexpr: Arc<str>) {
         self.version = self.version.wrapping_add(1);
-        self.log_key(keyexpr);
+        self.log.push(self.version, keyexpr);
     }
 
-    /// Log `keyexpr` under the current version, dropping the oldest entry past the capacity.
-    fn log_key(&mut self, keyexpr: &str) {
-        self.log.insert(
-            LogEntryNo(self.log_next),
-            (self.version, keyexpr.to_owned()),
-        );
-        self.log_next = self.log_next.wrapping_add(1);
-        while self.log.len() > LOG_CAPACITY {
-            if let Some((at, _)) = self.log.remove(&LogEntryNo(self.log_first)) {
-                self.log_floor = at;
-            }
-            self.log_first = self.log_first.wrapping_add(1);
-        }
-    }
-
-    fn index_add(&mut self, face: FaceId, id: u64, keyexpr: &str, value: V) {
-        if !self.by_key.contains_key(keyexpr) {
-            self.keys.insert(keyexpr, keyexpr.to_owned());
+    fn index_add(&mut self, face: FaceId, id: u64, keyexpr: &Arc<str>, value: V) {
+        if !self.by_key.contains_key(&**keyexpr) {
+            self.keys.insert(keyexpr, Arc::clone(keyexpr));
         }
         self.by_key
-            .get_mut_or_default(keyexpr.to_owned())
+            .get_mut_or_default(Arc::clone(keyexpr))
             .get_mut_or_default(face)
             .insert(id, value);
     }
 
-    fn index_remove(&mut self, face: FaceId, id: u64, keyexpr: &str) {
-        let Some(holders) = self.by_key.get_mut(keyexpr) else {
+    fn index_remove(&mut self, face: FaceId, id: u64, keyexpr: &Arc<str>) {
+        let Some(holders) = self.by_key.get_mut(&**keyexpr) else {
             return;
         };
         if let Some(ids) = holders.get_mut(&face) {
@@ -403,8 +446,8 @@ impl<V: Held> ClientStore<V> {
             }
         }
         if holders.is_empty() {
-            self.by_key.remove(keyexpr);
-            self.keys.remove(keyexpr, &keyexpr.to_owned());
+            self.by_key.remove(&**keyexpr);
+            self.keys.remove(keyexpr, keyexpr);
         }
     }
 }
@@ -457,7 +500,7 @@ mod tests {
             .values()
             .flat_map(|ids| ids.values())
             .filter(|sub| keyexpr_intersects_target(sub, &target))
-            .cloned()
+            .map(|sub| sub.to_string())
             .collect();
         keys.sort_unstable();
         keys.dedup();
@@ -479,7 +522,7 @@ mod tests {
     fn assert_exact_answers<V: Held>(store: &ClientStore<V>, keyexpr: &str) {
         let naming: Vec<FaceId> = store
             .iter()
-            .filter(|(_, ids)| ids.values().any(|sub| sub == keyexpr))
+            .filter(|(_, ids)| ids.values().any(|sub| **sub == *keyexpr))
             .map(|(f, _)| *f)
             .collect();
         assert_eq!(
@@ -694,7 +737,7 @@ mod tests {
         let mut store = ClientSubStore::new();
         let start = store.version();
         for i in 0..(LOG_CAPACITY as u64 + 10) {
-            store.insert(face(1), i, format!("demo/{i}"), ());
+            store.insert(face(1), i, &format!("demo/{i}"), ());
         }
         assert!(
             !store.changed_since(start, |_| {}),
@@ -704,5 +747,60 @@ mod tests {
         let mut n = 0;
         assert!(store.changed_since(recent, |_| n += 1));
         assert_eq!(n, 5, "a reader within reach is answered");
+    }
+
+    /// The ring keeps the last [`LOG_CAPACITY`] changes across several rounds of its slots, in
+    /// order, and a copy of the store taken between rounds keeps the log it had.
+    #[test]
+    fn the_log_keeps_the_last_changes_across_its_rounds_and_a_copy_keeps_its_own() {
+        let mut store = ClientSubStore::new();
+        let mut copy = None;
+        let total = 3 * LOG_CAPACITY as u64 + 17;
+        for i in 0..total {
+            store.insert(face(1), 1, &format!("demo/{i}"), ());
+            if i == LOG_CAPACITY as u64 + 5 {
+                copy = Some((store.clone(), store.version()));
+            }
+        }
+        // A move of an id logs the key it left and the key it took, so each insertion after the
+        // first is two changes; the reader asks for the last ten.
+        let mut moved = Vec::new();
+        assert!(store.changed_since(store.version() - 10, |k| moved.push(k.to_owned())));
+        let expected: Vec<String> = (total - 5..total)
+            .rev()
+            .flat_map(|i| [format!("demo/{i}"), format!("demo/{}", i - 1)])
+            .collect();
+        assert_eq!(moved, expected, "newest first, both keys of each move");
+        let reach = store.version() - LOG_CAPACITY as u64;
+        assert!(
+            store.changed_since(reach, |_| {}),
+            "the capacity is reached"
+        );
+        assert!(
+            !store.changed_since(reach - 1, |_| {}),
+            "one change past the capacity is not"
+        );
+        let (copy, at) = copy.expect("a copy was taken");
+        let mut kept = Vec::new();
+        assert!(copy.changed_since(at - 2, |k| kept.push(k.to_owned())));
+        let i = LOG_CAPACITY as u64 + 5;
+        assert_eq!(
+            kept,
+            [format!("demo/{i}"), format!("demo/{}", i - 1)],
+            "the copy's log is as it was when it was taken"
+        );
+    }
+
+    /// A key is held once: every face declaring it and the log point at the one copy.
+    #[test]
+    fn a_key_declared_by_two_faces_is_held_once() {
+        let mut store = ClientSubStore::new();
+        store.insert(face(1), 1, "demo/a", ());
+        store.insert(face(2), 7, "demo/a", ());
+        let first = store.get(&face(1)).and_then(|ids| ids.get(&1)).expect("1");
+        let second = store.get(&face(2)).and_then(|ids| ids.get(&7)).expect("7");
+        assert!(Arc::ptr_eq(first, second), "the second face shares the key");
+        let logged = &store.log.entry(store.log.next - 1).1;
+        assert!(Arc::ptr_eq(first, logged), "and so does the log");
     }
 }
