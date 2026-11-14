@@ -83,11 +83,16 @@ fn client(peer: Zid) -> (Arc<SessionLinkActions>, Arc<CountingLinkDriver>) {
 
 /// `message` brought by `face`, as the face's drive hands a frame to the router.
 fn bring(fwd: &RouterForwarder, face: FaceId, message: NetworkMessage) {
+    bring_frame(fwd, face, vec![message]);
+}
+
+/// `messages` brought by `face` in one frame, in their order.
+fn bring_frame(fwd: &RouterForwarder, face: FaceId, messages: Vec<NetworkMessage>) {
     let outcome = DriverLoopOutcome::FramePayload {
         priority: Priority::DEFAULT,
         reliable: true,
         sn: 0,
-        messages: vec![message],
+        messages,
         has_ext: false,
         extensions: Vec::new(),
     };
@@ -651,11 +656,16 @@ fn the_readers_under_a_busy_writer_measured_by_what_the_writes_change() {
 /// The totals the declaration throughput instrument runs, one after the other on one router.
 const CHURN_TOTALS: [u64; 3] = [1_000, 10_000, 100_000];
 
+/// How many declarations each frame of the throughput instrument carries, one router each: one, as
+/// a client that sends each control message in a frame of its own brings them, and many, as one
+/// whose control messages share the frame open while they are staged does.
+const CHURN_PER_FRAME: [usize; 2] = [1, 64];
+
 /// One client face declares a queryable and withdraws it, again and again, each time with an id
-/// it has not used, as a session does that declares and undeclares beside its own traffic; each
-/// declaration reaches the router as a frame of its own, as a client's control message leaves.
-/// Prints what one declaration costs the face's thread for each total, run one after the other on
-/// the same router, so a later total is measured behind every declaration that came before it.
+/// it has not used, as a session does that declares and undeclares beside its own traffic, in
+/// frames of each size of [`CHURN_PER_FRAME`]. Prints what one declaration costs the face's thread
+/// for each total, run one after the other on the same router, so a later total is measured
+/// behind every declaration that came before it.
 ///
 /// A MEASUREMENT, with one bound: the last total's cost a declaration stays within four times the
 /// first's, which a cost that grows with the declarations already taken (a log, a memo or a map
@@ -665,47 +675,56 @@ const CHURN_TOTALS: [u64; 3] = [1_000, 10_000, 100_000];
 #[ignore = "a measurement of the declarations one face can bring the router a second; run with \
             --release --ignored --nocapture on a build host"]
 fn the_declarations_of_one_face_measured_against_their_count() {
-    let fwd = RouterForwarder::new(zid(0x01));
-    let face = FaceId(1);
-    let (actions, _sink) = client(zid(0xC1));
-    fwd.register(face, &actions);
-    let mut last_id = 0u64;
-    let mut costs = Vec::new();
-    for total in CHURN_TOTALS {
-        let began = Instant::now();
-        for _ in 0..total / 2 {
-            last_id += 1;
-            let declare = build_declare_queryable_with_id_info(
-                last_id,
-                "demo/beside/admin",
-                QueryableInfo::local(false),
-            )
-            .expect("build queryable");
-            bring(&fwd, face, NetworkMessage::Declare(Box::new(declare)));
-            let undeclare = build_undeclare_queryable(last_id);
-            bring(&fwd, face, NetworkMessage::Declare(Box::new(undeclare)));
+    for per_frame in CHURN_PER_FRAME {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let face = FaceId(1);
+        let (actions, _sink) = client(zid(0xC1));
+        fwd.register(face, &actions);
+        let mut last_id = 0u64;
+        let mut costs = Vec::new();
+        for total in CHURN_TOTALS {
+            let began = Instant::now();
+            let mut frame = Vec::with_capacity(per_frame);
+            for _ in 0..total / 2 {
+                last_id += 1;
+                let declare = build_declare_queryable_with_id_info(
+                    last_id,
+                    "demo/beside/admin",
+                    QueryableInfo::local(false),
+                )
+                .expect("build queryable");
+                for message in [declare, build_undeclare_queryable(last_id)] {
+                    frame.push(NetworkMessage::Declare(Box::new(message)));
+                    if frame.len() == per_frame {
+                        bring_frame(&fwd, face, std::mem::take(&mut frame));
+                    }
+                }
+            }
+            if !frame.is_empty() {
+                bring_frame(&fwd, face, frame);
+            }
+            let cost = began.elapsed() / u32::try_from(total).expect("a total fits");
+            println!(
+                "declaration-churn: structure={} per_frame={per_frame} declarations={total} \
+                 per_declaration={}ns per_second={:.0}",
+                fwd.table_sharing().id(),
+                cost.as_nanos(),
+                1e9 / cost.as_nanos().max(1) as f64,
+            );
+            assert_eq!(
+                fwd.client_queryables_seen(),
+                0,
+                "every queryable declared was withdrawn"
+            );
+            costs.push(cost);
         }
-        let cost = began.elapsed() / u32::try_from(total).expect("a total fits");
-        println!(
-            "declaration-churn: structure={} declarations={total} per_declaration={}ns \
-             per_second={:.0}",
-            fwd.table_sharing().id(),
-            cost.as_nanos(),
-            1e9 / cost.as_nanos().max(1) as f64,
+        let (first, last) = (costs[0], costs[costs.len() - 1]);
+        assert!(
+            last <= first * 4,
+            "a declaration in frames of {per_frame} costs {last:?} after {} of them and \
+             {first:?} after {}: the cost grows with the declarations already taken",
+            CHURN_TOTALS.iter().sum::<u64>(),
+            CHURN_TOTALS[0],
         );
-        assert_eq!(
-            fwd.client_queryables_seen(),
-            0,
-            "every queryable declared was withdrawn"
-        );
-        costs.push(cost);
     }
-    let (first, last) = (costs[0], costs[costs.len() - 1]);
-    assert!(
-        last <= first * 4,
-        "a declaration costs {last:?} after {} of them and {first:?} after {}: the cost grows \
-         with the declarations already taken",
-        CHURN_TOTALS.iter().sum::<u64>(),
-        CHURN_TOTALS[0],
-    );
 }

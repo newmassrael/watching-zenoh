@@ -15040,6 +15040,75 @@ mod tests {
             declarer.join().expect("the declarer ends");
         }
 
+        /// A client declares a queryable and withdraws it, again and again, as a session that
+        /// declares beside its own traffic does, and then declares one more, which another client
+        /// of the same router asks for until it answers: the link carries the declarations in
+        /// order, so the answer comes once the router has taken every one before it. Prints the
+        /// declarations the router took a second, end to end, and how long the client spent
+        /// issuing them.
+        ///
+        /// A MEASUREMENT: it asserts only that the last queryable was reached.
+        #[test]
+        #[ignore = "a measurement of the declarations a client brings its router a second; run \
+                    with --release --ignored --nocapture on a build host"]
+        fn the_declarations_a_client_brings_its_router_measured_end_to_end() {
+            use std::time::{Duration, Instant};
+
+            const PAIRS: usize = 20_000;
+            let port = unautoselected_port();
+            let _router = router("a1b2ec", port);
+            let client = |id: &str| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "client",
+                              connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("a client dials its router")
+            };
+            let declarer = client("c1a4");
+            let asker = client("c1b4");
+            let began = Instant::now();
+            for _ in 0..PAIRS {
+                let queryable = declarer
+                    .declare_queryable("demo/churn/beside")
+                    .callback(|_| {})
+                    .wait()
+                    .expect("declares");
+                queryable.undeclare().wait().expect("undeclares");
+            }
+            let issued = began.elapsed();
+            let _last = declarer
+                .declare_queryable("demo/churn/last")
+                .callback(|query| {
+                    let _ = query.reply("demo/churn/last", "taken").wait();
+                })
+                .wait()
+                .expect("declares");
+            let deadline = began + Duration::from_secs(300);
+            let mut reached = answers(&asker, "demo/churn/last");
+            while reached.is_empty() && Instant::now() < deadline {
+                reached = answers(&asker, "demo/churn/last");
+            }
+            let taken = began.elapsed();
+            assert_eq!(
+                reached,
+                [("demo/churn/last".to_string(), "taken".to_string())],
+                "the queryable declared after the others was not reached within 300 s"
+            );
+            let declarations = 2 * PAIRS + 1;
+            println!(
+                "declaration-churn-e2e: declarations={declarations} issued_in_ms={} \
+                 taken_in_ms={} per_second={:.0}",
+                issued.as_millis(),
+                taken.as_millis(),
+                declarations as f64 / taken.as_secs_f64(),
+            );
+        }
+
         /// A peer that runs as a node roots its admin space at `peer`, its own mode, and answers
         /// none of the router-tier legs, as upstream's peer reads no router hat. Until the role
         /// was read off the mode, every node answered under `router` whatever it was opened as.
