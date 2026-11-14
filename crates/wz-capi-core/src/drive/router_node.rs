@@ -423,6 +423,9 @@ struct JoinedGroup {
     /// group is on, which an endpoint that named port 0 did not state.
     locator: String,
     face: wz_runtime_tokio::multicast_glue::RouterMcastGroup,
+    /// Whether the group is a shared-memory one for the node (`GroupJoin::is_shm`): the node
+    /// sends a buffer to it as a descriptor and maps the descriptors its members send.
+    reads_shm: bool,
 }
 
 /// Join the group `join` names, as a router joins its group locator: either family, with the
@@ -471,7 +474,11 @@ async fn join_group(
         opts,
         None,
     );
-    Ok(JoinedGroup { locator, face })
+    Ok(JoinedGroup {
+        locator,
+        face,
+        reads_shm: join.is_shm,
+    })
 }
 
 /// Open a router node on `listen`: bind the endpoints, answer the scouts that name it and serve
@@ -924,8 +931,10 @@ async fn run_router(
     // What the group's members send the router rides the face loop; what the router forwards
     // into the group goes out through the forwarder, which holds the group's producer.
     let (mcast_ingress, mcast_members, mcast_group_subs, group_stop) = match group {
-        Some(JoinedGroup { face, .. }) => {
-            forwarder.attach_mcast_group(face.outbound);
+        Some(JoinedGroup {
+            face, reads_shm, ..
+        }) => {
+            forwarder.attach_mcast_group(face.outbound, reads_shm);
             (
                 Some(face.ingress),
                 Some(face.members),

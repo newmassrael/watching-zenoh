@@ -21,6 +21,12 @@
 //! disabled on the dialler (the control) the link negotiates none and every payload crosses as its
 //! bytes, which is also what shows that the comparison reads the difference.
 //!
+//! The same is held of a put to a multicast group that two members join, two peers or a router
+//! and a peer (a wz router there is a node, a wz peer the registry): a group negotiates nothing,
+//! so each member's own configuration decides. The one difference held by name is a member whose
+//! shared memory is disabled, which upstream hands the descriptor in the place of the data and
+//! wz refuses; neither hands it the data.
+//!
 //! The crates share the machine's segments, so the tests of this binary take one lock.
 
 #![cfg(target_os = "linux")]
@@ -419,14 +425,26 @@ fn with_shared_memory_off_on_one_side_every_payload_crosses_as_its_bytes() {
     }
 }
 
-/// A peer of `receiver` and then a peer of `sender` that join one multicast group, each with
-/// shared memory as said, and what the receiver is handed of a put of a buffer of shared memory
-/// the sender makes. A group negotiates nothing: a member with shared memory sends a buffer as its
-/// descriptor to every member, and maps a descriptor it receives.
-fn group_line(sender: Crate, sender_shm: bool, receiver: Crate, receiver_shm: bool) -> String {
+/// One member of a group: its crate, its mode and whether its shared memory is enabled.
+#[derive(Clone, Copy, Debug)]
+struct Member {
+    of: Crate,
+    mode: &'static str,
+    shm: bool,
+}
+
+/// The modes of the two members of a group, the sender's first. A wz member in router mode is a
+/// router node on the group, one in peer mode the registry of faces.
+const GROUP_MODES: [(&str, &str); 3] = [("peer", "peer"), ("router", "peer"), ("peer", "router")];
+
+/// A `receiver` and then a `sender` that join one multicast group, and what the receiver is
+/// handed of a put of a buffer of shared memory the sender makes. A group negotiates nothing: a
+/// member with shared memory sends a buffer as its descriptor to every member, and maps a
+/// descriptor it receives.
+fn group_line(sender: Member, receiver: Member) -> String {
     let group = format!("udp/224.0.0.1:{}", free_group_port());
-    let mut receiving = open(receiver, "peer", Some(&group), None, receiver_shm);
-    let sending = open(sender, "peer", Some(&group), None, sender_shm);
+    let mut receiving = open(receiver.of, receiver.mode, Some(&group), None, receiver.shm);
+    let sending = open(sender.of, sender.mode, Some(&group), None, sender.shm);
     let key = format!("diff/shm/group/{}", next_id());
     let told = receiving.subscribe(&key);
     let body: Vec<u8> = (0..64u8).collect();
@@ -437,19 +455,37 @@ fn group_line(sender: Crate, sender_shm: bool, receiver: Crate, receiver_shm: bo
 #[test]
 fn shared_memory_crosses_a_multicast_group_to_and_from_upstream_as_between_two_upstream_members() {
     let _g = serial();
-    for (sender_shm, expected) in [(true, "as shared memory"), (false, "as plain bytes")] {
-        let reference = group_line(Crate::Up, sender_shm, Crate::Up, true);
-        assert!(
-            reference.ends_with(expected),
-            "two upstream members, the sender's shared memory {sender_shm}: {reference}"
-        );
-        for (sender, receiver) in &PAIRS[1..] {
-            assert_eq!(
-                group_line(*sender, sender_shm, *receiver, true),
-                reference,
-                "{sender:?} sending, {receiver:?} receiving, the sender's shared memory \
-                 {sender_shm}"
+    for (sender_mode, receiver_mode) in GROUP_MODES {
+        for (sender_shm, expected) in [(true, "as shared memory"), (false, "as plain bytes")] {
+            let members = |sender: Crate, receiver: Crate| {
+                (
+                    Member {
+                        of: sender,
+                        mode: sender_mode,
+                        shm: sender_shm,
+                    },
+                    Member {
+                        of: receiver,
+                        mode: receiver_mode,
+                        shm: true,
+                    },
+                )
+            };
+            let (sender, receiver) = members(Crate::Up, Crate::Up);
+            let reference = group_line(sender, receiver);
+            assert!(
+                reference.ends_with(expected),
+                "two upstream members, a {sender_mode} sending and a {receiver_mode} receiving, \
+                 the sender's shared memory {sender_shm}: {reference}"
             );
+            for (sender, receiver) in &PAIRS[1..] {
+                let (sending, receiving) = members(*sender, *receiver);
+                assert_eq!(
+                    group_line(sending, receiving),
+                    reference,
+                    "{sending:?} sending, {receiving:?} receiving"
+                );
+            }
         }
     }
 }
@@ -462,16 +498,28 @@ fn shared_memory_crosses_a_multicast_group_to_and_from_upstream_as_between_two_u
 #[test]
 fn a_member_without_shared_memory_is_never_handed_a_descriptor_as_the_data() {
     let _g = serial();
-    for sender in [Crate::Up, Crate::Wz] {
-        let upstream = group_line(sender, true, Crate::Up, false);
-        assert!(
-            !upstream.contains("the bytes"),
-            "{sender:?} sending, upstream's member without shared memory: {upstream}"
-        );
-        assert_eq!(
-            group_line(sender, true, Crate::Wz, false),
-            "a put to the group: never handed over",
-            "{sender:?} sending, wz's member without shared memory"
-        );
+    for (sender_mode, receiver_mode) in GROUP_MODES {
+        for of in [Crate::Up, Crate::Wz] {
+            let sender = Member {
+                of,
+                mode: sender_mode,
+                shm: true,
+            };
+            let without = |of: Crate| Member {
+                of,
+                mode: receiver_mode,
+                shm: false,
+            };
+            let upstream = group_line(sender, without(Crate::Up));
+            assert!(
+                !upstream.contains("the bytes"),
+                "{sender:?} sending, upstream's {receiver_mode} without shared memory: {upstream}"
+            );
+            assert_eq!(
+                group_line(sender, without(Crate::Wz)),
+                "a put to the group: never handed over",
+                "{sender:?} sending, wz's {receiver_mode} without shared memory"
+            );
+        }
     }
 }

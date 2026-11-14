@@ -1814,6 +1814,12 @@ struct RouterFaceState {
 #[cfg(feature = "router-multicast-faces")]
 struct McastGroup {
     tx: crate::multicast_pipeline::MulticastTxProducer,
+    /// Whether the node's session holds shared memory for this group: a group negotiates
+    /// nothing, so this is the node's configuration alone, as upstream's member with a
+    /// shared-memory context maps both ways (`io/zenoh-transport/src/multicast/tx.rs` @
+    /// `&TxHandoffStorage::new_disabled(),`).
+    #[cfg(feature = "transport-shm")]
+    reads_shm: bool,
 }
 
 /// Where a Put that is about to be put on the multicast group came from: what
@@ -4119,7 +4125,11 @@ router_entry_points! { on_tables:
     #[cfg(feature = "routing-interceptor-hotreload")]
     fn interceptor_cache_entries_for(&self, id: FaceId) -> (usize, usize);
     #[cfg(feature = "router-multicast-faces")]
-    fn attach_mcast_group(&self, tx: crate::multicast_pipeline::MulticastTxProducer);
+    fn attach_mcast_group(
+        &self,
+        tx: crate::multicast_pipeline::MulticastTxProducer,
+        reads_shm: bool,
+    );
     #[cfg(feature = "adminspace-introspection-handlers")]
     fn declarations_view(&self) -> RouterDeclarationsView;
     #[cfg(feature = "adminspace-introspection-handlers")]
@@ -5291,8 +5301,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// transport-shm -- open the pass that holds the chunks of a Push this router is about to
     /// route (see [`crate::shm_relay`]), acknowledging each of its shared-memory slices to the
     /// face that sent them. `None` is a Push that arrived on a face that never negotiated shared
-    /// memory, which is counted and not routed; the multicast ingress is such a face, since it
-    /// negotiates nothing.
+    /// memory, which is counted and not routed. The multicast ingress negotiates nothing: it is
+    /// such a face exactly when the node's group is not a shared-memory one.
     #[cfg(feature = "transport-shm")]
     fn open_shm_relay_pass(
         &self,
@@ -5311,6 +5321,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         inbound: FaceId,
         message: crate::shm_relay::Routed<'_>,
     ) -> Option<crate::shm_relay::RelayPass<'_>> {
+        // A group negotiates nothing and keeps no handoff: a node whose group is a shared-memory
+        // one maps a descriptor a member sends there, as upstream's member with a shared-memory
+        // context does (`io/zenoh-transport/src/multicast/rx.rs` @
+        // `if let Some(shm_context) = &self.shm_context {`), and one whose group is not refuses
+        // it, with nothing to acknowledge either way.
+        #[cfg(feature = "router-multicast-faces")]
+        if inbound == MCAST_INGRESS_FACE {
+            let reads_shm = self.mcast_groups.read().iter().any(|group| group.reads_shm);
+            let pass = self.shm_relay.open_message(message, || reads_shm);
+            if pass.is_none() {
+                self.shm_unnegotiated_dropped.bump();
+            }
+            return pass;
+        }
         // The session of the link the message arrived on: a joined link's own, else the face's.
         // A slice is acknowledged through the handoff of THAT link, because its peer is the one
         // that named the counters.
@@ -8336,9 +8360,23 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// thereafter broadcast to this group. The producer is `Send` + `Clone`, so
     /// the drive loop stays a SEPARATE task from this `!Send` forwarder — the
     /// EGRESS half needs no single-task fold (that is the INGRESS milestone).
+    /// `reads_shm` says whether the group is a shared-memory one for this node: its session
+    /// holds shared memory, which a group, negotiating nothing, takes as it is. Such a group is
+    /// sent a buffer as its descriptor and has the descriptors its members send mapped; any
+    /// other is sent the bytes and has them refused.
     #[cfg(feature = "router-multicast-faces")]
-    pub fn attach_mcast_group(&self, tx: crate::multicast_pipeline::MulticastTxProducer) {
-        self.mcast_groups.write().push(McastGroup { tx });
+    pub fn attach_mcast_group(
+        &self,
+        tx: crate::multicast_pipeline::MulticastTxProducer,
+        reads_shm: bool,
+    ) {
+        #[cfg(not(feature = "transport-shm"))]
+        let _ = reads_shm;
+        self.mcast_groups.write().push(McastGroup {
+            tx,
+            #[cfg(feature = "transport-shm")]
+            reads_shm,
+        });
         self.note_ungoverned_group();
     }
 
@@ -8423,19 +8461,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Ok(carrier) = reliteralize_push(push, keyexpr) else {
             return;
         };
-        // transport-shm -- a multicast group negotiates nothing, so no member of it can read a
-        // chunk: a Push that names one goes out as the chunk's bytes, from the pass `route_push`
-        // holds. The descriptor it arrived with would be a few bytes of struct as every member's
-        // payload.
-        #[cfg(feature = "transport-shm")]
-        let carrier = {
-            let mut carrier = carrier;
-            if self.shm_relay.into_plain_bytes(&mut carrier).is_err() {
-                self.shm_relay_dropped.bump();
-                return;
-            }
-            carrier
-        };
         // The §5.16 egress chain, when the host chose to govern the group: judged on the
         // literal the group would receive, by the group's link, not by any peer.
         #[cfg(feature = "access-acl-multicast")]
@@ -8453,6 +8478,23 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // same contract the drive loop's own reply backing carries.
             // The group is one more face the Push is handed to: the routing is recorded for it as
             // for any other (the multicast egress does not pass `egress_to_face`).
+            //
+            // transport-shm -- a chunk the pass `route_push` holds goes to a shared-memory group
+            // as a descriptor with one reference taken for the group, which its members share as
+            // upstream's do, and to any other group as the chunk's bytes. The descriptor the Push
+            // arrived with is never sent on as it came.
+            #[cfg(feature = "transport-shm")]
+            let (push, reservations) = {
+                let mut push = carrier.clone();
+                match self.shm_relay.for_group(&mut push, group.reads_shm) {
+                    Ok(reservations) => (Box::new(push), reservations),
+                    Err(_) => {
+                        self.shm_relay_dropped.bump();
+                        continue;
+                    }
+                }
+            };
+            #[cfg(not(feature = "transport-shm"))]
             let push = Box::new(carrier.clone());
             #[cfg(feature = "pubsub-ts-stack")]
             let push = {
@@ -8464,7 +8506,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 );
                 push
             };
-            let _ = group.tx.push(MulticastTxItem::Push {
+            let pushed = group.tx.push(MulticastTxItem::Push {
                 push,
                 reliable,
                 // R311y227 — the received routing band (the inbound frame's decoded
@@ -8475,6 +8517,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 // at its band, not DEFAULT.
                 priority,
             });
+            // The group's reference is kept once the frame is handed to the group; a push that
+            // was refused gives it back with `reservations`.
+            #[cfg(feature = "transport-shm")]
+            if matches!(
+                pushed,
+                Ok(wz_session_core::tx_deadline::PushOutcome::Pushed)
+            ) {
+                for reservation in reservations {
+                    reservation.commit();
+                }
+            }
+            #[cfg(not(feature = "transport-shm"))]
+            let _ = pushed;
         }
     }
 
@@ -28950,7 +29005,7 @@ mod tests {
     fn mcast_group_receives_routed_push_and_echo_guards() {
         let fwd = RouterForwarder::new(zid(0x01));
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
         let push =
             wz_session_core::push_build::build_push_literal("demo/data", b"payload").expect("push");
 
@@ -28988,6 +29043,56 @@ mod tests {
         );
     }
 
+    /// A chunk the node publishes reaches a group that reads shared memory as a descriptor of
+    /// the chunk, and a group that does not as the chunk's bytes: a group negotiates nothing, so
+    /// the node's own configuration decides, as an upstream member's shared-memory context does.
+    #[cfg(all(
+        feature = "router-multicast-faces",
+        feature = "transport-shm",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn a_chunk_the_node_publishes_reaches_a_shared_memory_group_as_its_descriptor() {
+        for reads_shm in [true, false] {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (tx, mut rx) = group_tap();
+            fwd.attach_mcast_group(tx, reads_shm);
+            let mut chunk =
+                crate::shm_provider::ShmBackedPayload::alloc(5).expect("a POSIX segment");
+            chunk.write(b"group");
+            let chunk = Arc::new(chunk);
+            fwd.publish_shm_with(
+                "demo/group",
+                chunk.send_handle(),
+                &PublishOptions::default(),
+            )
+            .expect("the node publishes a chunk");
+            let (push, _) = group_push(&mut rx).expect("the group was handed the Put");
+            let PushOwnedVariant::CodecZenohMsgPut(put) = &push.body else {
+                panic!("a Put");
+            };
+            let slices = wz_session_core::put_payload::shm_descriptors(put);
+            if reads_shm {
+                assert_eq!(
+                    slices.len(),
+                    1,
+                    "the group reads shared memory: a descriptor"
+                );
+                assert!(
+                    wz_session_core::extshm::decode_shm_descriptor(slices[0]).is_some(),
+                    "of a chunk"
+                );
+            } else {
+                assert!(slices.is_empty(), "a plain group names no chunk");
+                assert_eq!(
+                    wz_session_core::put_payload::inline_bytes(put),
+                    Some(&b"group"[..]),
+                    "it is sent the chunk's bytes"
+                );
+            }
+        }
+    }
+
     /// R311y188 — router-multicast-faces slice 3: a REAL routed Push (driven
     /// through `forward` -> `route_push`, not a direct `broadcast_to_mcast_groups`
     /// call as slice 1's unit did) reaches an attached multicast group at the
@@ -29007,7 +29112,7 @@ mod tests {
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
@@ -29048,7 +29153,7 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), kexpr);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         // A pure-aliased push (id 7, no suffix): route_push resolves it via the face
         // table, and the egress must re-literalize before enqueuing to the group.
@@ -29080,7 +29185,7 @@ mod tests {
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
         // An explicit empty relay is equivalent to never relaying: no other
         // on-group router ⇒ self is the only candidate.
         fwd.set_mcast_group_members(&[]);
@@ -29109,7 +29214,7 @@ mod tests {
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         fwd.set_mcast_group_members(&[zid(0x02).as_slice().to_vec()]);
 
@@ -29134,7 +29239,7 @@ mod tests {
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         fwd.set_mcast_group_members(&[zid(0x02).as_slice().to_vec()]);
 
@@ -29164,7 +29269,7 @@ mod tests {
         advertise_link_back(&fwd, FaceId(0), 0x05, 0x03, 5);
         fwd.tick();
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
         fwd.set_mcast_group_members(&[zid(0x03).as_slice().to_vec()]);
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
@@ -29191,7 +29296,7 @@ mod tests {
         let (cli, _sink) = face(zid(0xCC), WIRE_CLIENT);
         fwd.register(FaceId(0), &cli);
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         // A larger router on the group ⇒ self is NOT primary.
         fwd.set_mcast_group_members(&[zid(0x02).as_slice().to_vec()]);
@@ -29431,7 +29536,7 @@ mod tests {
     fn mcast_ingress_push_is_echo_guarded_off_the_groups() {
         let fwd = RouterForwarder::new(zid(0x01));
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
@@ -29537,7 +29642,7 @@ mod tests {
                 .with_govern_multicast(true),
         );
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         assert!(!group_got(&fwd, &mut rx, "admin/secret"));
         assert_eq!(fwd.interceptor_dropped(), 1);
@@ -29555,7 +29660,7 @@ mod tests {
             Vec::new(),
         ));
         let (tx, mut rx) = group_tap();
-        fwd.attach_mcast_group(tx);
+        fwd.attach_mcast_group(tx, false);
 
         assert!(group_got(&fwd, &mut rx, "admin/secret"));
         assert_eq!(fwd.interceptor_dropped(), 0);
@@ -29638,7 +29743,7 @@ mod tests {
                     .with_govern_multicast(true),
             );
             let (tx, mut rx) = group_tap();
-            fwd.attach_mcast_group(tx);
+            fwd.attach_mcast_group(tx, false);
             assert_eq!(
                 group_got(&fwd, &mut rx, "admin/secret"),
                 expected_sent,
@@ -31083,7 +31188,7 @@ mod tests {
         fn a_push_broadcast_to_a_multicast_group_records_this_router() {
             let fwd = RouterForwarder::new(zid(0x01));
             let (tx, mut rx) = group_tap();
-            fwd.attach_mcast_group(tx);
+            fwd.attach_mcast_group(tx, false);
             let NetworkMessage::Push(push) = stacked_push(ALL) else {
                 unreachable!()
             };
