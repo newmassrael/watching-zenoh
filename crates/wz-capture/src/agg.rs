@@ -4371,10 +4371,14 @@ pub(crate) mod tests {
     /// discard what WAS read — and the shortfall must be visible.
     #[test]
     fn a_halted_batch_is_reported_rather_than_quietly_short() {
-        // `0x01` is outside the network MID space (0x19..=0x1F), so
-        // `decode_one_record` cannot name it and the walk halts on it.
+        // `0x18` is outside the network MID space (0x19..=0x1F), so
+        // `decode_one_record` cannot name it and the walk halts on it. It is
+        // outside the transport ids (0x00..=0x07) too: one of those ends the
+        // Frame's records and is read as the batch's next transport message,
+        // as upstream's Frame reader rewinds to it
+        // (`commons/zenoh-codec/src/transport/frame.rs` @ `reader.rewind(mark);`).
         let mut record = push(sender_space(0, Some("seen/before/the/halt")), &[0u8; 9]);
-        let tail = [0x01u8, 0xAA, 0xBB, 0xCC];
+        let tail = [0x18u8, 0xAA, 0xBB, 0xCC];
         record.extend_from_slice(&tail);
         let table = aggregate_datagrams(&[(true, record)]);
 
