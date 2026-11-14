@@ -1,0 +1,152 @@
+{
+  "schema": 1,
+  "about": "What a build of the consumer bundles reads when it runs with no network and no .git, and how to give it what it reads. Held by scripts/lib/offline_build.py (--check derives it from the crates graph, --build builds every bundle in a sandbox that has nothing else); the design is docs/target-build-contract.md section 5d.",
+  "source": {
+    "tree": "the files the repository tracks at the commit, without .git",
+    "submodules": [
+      {
+        "path": "vendor/sce",
+        "url": "https://github.com/newmassrael/scxml-core-engine.git",
+        "commit": "the gitlink the tree records at this path"
+      }
+    ]
+  },
+  "commit_input": {
+    "variable": "WZ_SOURCE_COMMIT",
+    "value": "what `git describe --always --dirty=-modified --abbrev=40 --exclude=*` answers in a checkout of the commit: the commit of 40 lowercase hex digits for a clean tree",
+    "read_by": "crates/wz-zenoh/build.rs",
+    "without_it": "the build names itself `release` where a checkout build names the commit"
+  },
+  "toolchain": {
+    "file": "rust-toolchain.toml",
+    "channel": "1.97.0"
+  },
+  "cargo": {
+    "manifest": "crates/Cargo.toml",
+    "lockfile": "crates/Cargo.lock",
+    "crates": "every package of the lockfile, from crates.io, vendored (`cargo vendor --locked`); the lockfile has no git source",
+    "flags": ["--locked", "--offline", "--release"]
+  },
+  "system_tools": {
+    "cc": {
+      "what": "a C compiler driver; rustc also calls it as the linker",
+      "variable": "CC"
+    },
+    "c++": {
+      "what": "a C++17 compiler",
+      "variable": "CXX"
+    },
+    "ar": {
+      "what": "an archiver for the static libraries build scripts make",
+      "variable": "AR"
+    },
+    "libclang": {
+      "what": "the libclang shared library and its resource headers, which bindgen loads while librocksdb-sys's build script runs",
+      "variable": "LIBCLANG_PATH"
+    }
+  },
+  "linker": "cc",
+  "build_scripts": {
+    "ahash": [],
+    "anyhow": [],
+    "bindgen": [],
+    "clang-sys": [],
+    "crossbeam-utils": [],
+    "generic-array": [],
+    "getrandom": [],
+    "heapless": [],
+    "httparse": [],
+    "libc": [],
+    "libm": [],
+    "librocksdb-sys": ["ar", "c++", "libclang"],
+    "memoffset": [],
+    "mime_guess": [],
+    "nix": [],
+    "num-bigint-dig": [],
+    "num-traits": [],
+    "oid-registry": [],
+    "parking_lot_core": [],
+    "paste": [],
+    "portable-atomic": [],
+    "proc-macro2": [],
+    "quinn": [],
+    "quinn-udp": [],
+    "quote": [],
+    "ref-cast": [],
+    "ring": ["ar", "cc"],
+    "rlimit": [],
+    "rustls": [],
+    "rustversion": [],
+    "serde": [],
+    "serde_core": [],
+    "serde_json": [],
+    "stabby": [],
+    "stabby-abi": [],
+    "stabby-macros": [],
+    "static_init": [],
+    "static_init_macro": [],
+    "syn": [],
+    "thiserror": [],
+    "typeid": [],
+    "wz": [],
+    "wz-ap-demo": [],
+    "wz-capi-c": [],
+    "wz-capi-dissect": [],
+    "wz-capi-pico": [],
+    "wz-capi-replay": [],
+    "zenoh": [],
+    "zenoh-macros": [],
+    "zenoh-shm": [],
+    "zerocopy": [],
+    "zmij": []
+  },
+  "output_variables": {
+    "note": "variables a build script reads that change what it produces; a build identical to a checkout build leaves them unset",
+    "names": [
+      "ROCKSDB_COMPILE", "ROCKSDB_CXX_STD", "ROCKSDB_INCLUDE_DIR", "ROCKSDB_LIB_DIR", "ROCKSDB_STATIC",
+      "SNAPPY_COMPILE", "SNAPPY_LIB_DIR", "SNAPPY_STATIC"
+    ]
+  },
+  "bundles": [
+    {
+      "id": "capi-dissect",
+      "package": "wz-capi-dissect",
+      "features": [],
+      "default_features": true,
+      "products": ["libwz_capi_dissect.so"],
+      "system_tools": ["ar", "cc"]
+    },
+    {
+      "id": "capi-c",
+      "package": "wz-capi-c",
+      "features": ["identity-make", "lifecycle-doors"],
+      "default_features": true,
+      "products": ["libwz_capi_c.a", "libwz_capi_c.so"],
+      "system_tools": ["ar", "cc"]
+    },
+    {
+      "id": "capi-replay",
+      "package": "wz-capi-replay",
+      "features": [],
+      "default_features": true,
+      "products": ["libwz_capi_replay.so"],
+      "system_tools": ["ar", "cc"]
+    },
+    {
+      "id": "ap-demo",
+      "package": "wz-ap-demo",
+      "features": ["preset-ap-full"],
+      "default_features": true,
+      "products": ["wz-ap-demo"],
+      "system_tools": ["ar", "c++", "cc", "libclang"]
+    }
+  ],
+  "not_inputs": [
+    {
+      "id": "zenoh-c-oracle",
+      "why": "no build script of any bundle reads it: it is what wz's zenoh-c oracle lanes compare the drop-in against",
+      "list": "bash scripts/install-zenoh-c.sh --inputs",
+      "hand_in": ["WZ_ZENOH_C_ARCHIVE", "WZ_ZENOH_C_SOURCE"]
+    }
+  ]
+}
