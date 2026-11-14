@@ -5584,6 +5584,16 @@ mod stock_config_tests {
 
         let mut reached_nothing: Vec<&str> = Vec::new();
         for (key, control, variant) in &fixtures {
+            // A key whose reader is a capability this build was made without: the variant states
+            // an instruction the build cannot carry out, so the reader refuses it by the key's
+            // name, and the key reaches nothing here.
+            if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
+                let refused = expand_as_a_build_with_every_link(cli_for(key), variant)
+                    .expect_err("an instruction to a capability the build lacks is refused");
+                assert!(refused.contains(*key), "{key}: {refused}");
+                reached_nothing.push(key);
+                continue;
+            }
             let cli = cli_for(key);
             let base = expand_as_a_build_with_every_link(cli, control)
                 .unwrap_or_else(|e| panic!("{key}: the control config is not readable: {e}"));
@@ -5710,6 +5720,15 @@ mod stock_config_tests {
         let mut skipped: Vec<(&str, &str)> = Vec::new();
 
         for (key, control, variant) in honoured_key_fixtures() {
+            // The variant is refused in a build without the key's capability (the test above holds
+            // that), so there is no behaviour for the two invocations to differ in.
+            if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
+                skipped.push((
+                    key,
+                    "the key's reader is a capability this build was made without",
+                ));
+                continue;
+            }
             let typed = cli_for(key);
             let typed_roles: Vec<&str> = typed
                 .iter()
@@ -7142,6 +7161,11 @@ mod stock_config_tests {
     fn every_key_this_build_drops_is_told_so_by_the_site_that_decides_it() {
         let dropped = config_keys_the_demo_drops();
         for (key, _control, variant) in honoured_key_fixtures() {
+            // Refused by the reader in a build without the key's capability, before any site
+            // decides it; the coverage test above holds that refusal.
+            if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
+                continue;
+            }
             let exp = expand_as_a_build_with_every_link(cli_for(key), variant)
                 .unwrap_or_else(|e| panic!("{key}: the variant config is not readable: {e}"));
             let effect = exp

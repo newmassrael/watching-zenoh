@@ -39,9 +39,9 @@ use wz_runtime_tokio::session_glue::{KeepAliveConf, LinkRxConf, TxQueueConf, Wha
 use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
 use wz_runtime_tokio::zenoh_config::{
-    default_listen_endpoint, honours_config_key, ZenohConfigIngest, ZenohNodeConfig,
-    UNHONOURED_READER_GAP, UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS,
-    WZ_EXTENSION_CONFIG_KEYS,
+    config_key_in_build, default_listen_endpoint, honours_config_key, ConfigIngestError,
+    ZenohConfigIngest, ZenohNodeConfig, UNHONOURED_READER_GAP, UNHONOURED_UPSTREAM_CONFIG_KEYS,
+    UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
 };
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
@@ -107,7 +107,13 @@ pub enum KeyState {
 /// given one, and which a test over the default configuration fails on until then.
 pub fn key_state(path: &str) -> Option<KeyState> {
     if honours_config_key(path) {
-        Some(KeyState::Mapped)
+        // A key whose reader is a capability this build was made without is acted on by a build
+        // with it, and not by this one.
+        Some(if config_key_in_build(path) {
+            KeyState::Mapped
+        } else {
+            KeyState::Unmapped
+        })
     } else if UPSTREAM_INERT_CONFIG_KEYS.contains(&path) || WZ_EXTENSION_CONFIG_KEYS.contains(&path)
     {
         Some(KeyState::Inert)
@@ -182,7 +188,8 @@ pub enum OpenRefusal {
     /// mechanism. A node told to demand credentials that starts and admits everyone is worse than
     /// one that does not start.
     Security,
-    /// A certificate or key file `transport/link/tls` names cannot be read.
+    /// A certificate or key file `transport/link/tls` names cannot be read, or the document
+    /// states `transport/link/tls` in a build with neither a `tls/` nor a `quic/` link.
     TlsMaterial,
     /// `id` is not text zenoh accepts as an identity. A config that named an identity and got
     /// another would be a silent fallback.
@@ -489,6 +496,23 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePol
     Ok((auth, policy))
 }
 
+/// The refusal of a document that states an instruction to `path`, a key whose reader the runtime
+/// was built without ([`ConfigIngestError::NotInBuild`]): the refusal a build that read the key and
+/// could not hold its mechanism gives, so the open answers the same code whichever half is missing.
+/// The traffic policy's keys are [`OpenRefusal::Security`], as [`node_security_of`] refuses them;
+/// the certificate material of a build with no `tls/` or `quic/` link is
+/// [`OpenRefusal::TlsMaterial`]; a south kept apart in a build with no region hat is
+/// [`OpenRefusal::GatewayNotCarried`], as [`OpenPlan::refuse_uncarried_south`] refuses it.
+fn refusal_of_unbuilt_key(path: &str) -> OpenRefusal {
+    match path {
+        "low_pass_filter" | "downsampling" | "qos/network" => OpenRefusal::Security,
+        _ if path.starts_with("access_control/") => OpenRefusal::Security,
+        _ if path.starts_with("transport/link/tls/") => OpenRefusal::TlsMaterial,
+        "gateway/south" => OpenRefusal::GatewayNotCarried,
+        _ => OpenRefusal::DocumentUnreadable,
+    }
+}
+
 /// The certificate material a config's `transport/link/tls` keys name, read for the `tls/` and
 /// `quic/` links of the session.
 ///
@@ -779,7 +803,15 @@ impl OpenPlan {
         stated: StatedEndpoints,
         document: Option<&str>,
     ) -> Result<Self, OpenRefusal> {
-        let ingest = document.and_then(|document| ZenohNodeConfig::from_json5(document).ok());
+        let ingest = match document.map(ZenohNodeConfig::from_json5) {
+            Some(Ok(ingest)) => Some(ingest),
+            // An instruction to a key whose reader this build was made without: refused for what
+            // it asks, where a build with the reader and not the mechanism refuses it.
+            Some(Err(ConfigIngestError::NotInBuild { path, .. })) => {
+                return Err(refusal_of_unbuilt_key(path))
+            }
+            Some(Err(_)) | None => None,
+        };
         let StatedEndpoints { connect, listen } = stated;
         let listen = listen_endpoints(listen, ingest.as_ref(), role);
         let timestamping = ingest.as_ref().map_or_else(
@@ -1298,13 +1330,41 @@ mod without_interceptors {
             .config
     }
 
+    const POLICIES: [&str; 2] = [
+        r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["a/**"], size_limit: 4 } ] }"#,
+        r#"{ access_control: { enabled: true, default_permission: "deny" } }"#,
+    ];
+
     #[test]
     fn a_config_that_states_a_traffic_policy_fails_the_open() {
-        for document in [
-            r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["a/**"], size_limit: 4 } ] }"#,
-            r#"{ access_control: { enabled: true, default_permission: "deny" } }"#,
-        ] {
-            assert!(node_security_of(&node(document)).is_err(), "{document}");
+        for document in POLICIES {
+            match ZenohNodeConfig::from_json5(document) {
+                // The runtime has the key's reader (another crate of the build asked for it), and
+                // this build holds no policy.
+                Ok(ingest) => assert!(node_security_of(&ingest.config).is_err(), "{document}"),
+                // The runtime was built without it, and the reader refuses the key by its name.
+                Err(refused) => assert!(
+                    matches!(refused, ConfigIngestError::NotInBuild { .. }),
+                    "{document}: {refused}"
+                ),
+            }
+        }
+    }
+
+    /// Whichever half is missing, the reader or the mechanism, the open refuses a stated policy
+    /// with one code.
+    #[test]
+    fn a_stated_policy_is_refused_as_security_whichever_half_is_missing() {
+        for document in POLICIES {
+            let plan = OpenPlan::resolve(
+                WhatAmI::Client,
+                StatedEndpoints {
+                    connect: vec!["tcp/127.0.0.1:1".to_owned()],
+                    listen: Vec::new(),
+                },
+                Some(document),
+            );
+            assert_eq!(plan.err(), Some(OpenRefusal::Security), "{document}");
         }
     }
 
@@ -1322,6 +1382,37 @@ mod without_interceptors {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key whose reader the runtime was built without draws the refusal of its mechanism: the
+    /// traffic policy's keys are a security refusal, the certificate material a TLS one, a south
+    /// kept apart the gateway's, and any other key the unreadable document's.
+    #[test]
+    fn a_key_out_of_the_build_draws_the_refusal_of_its_mechanism() {
+        for (key, refusal) in [
+            ("low_pass_filter", OpenRefusal::Security),
+            ("downsampling", OpenRefusal::Security),
+            ("qos/network", OpenRefusal::Security),
+            ("access_control/enabled", OpenRefusal::Security),
+            ("access_control/rules", OpenRefusal::Security),
+            (
+                "transport/link/tls/root_ca_certificate",
+                OpenRefusal::TlsMaterial,
+            ),
+            ("transport/link/tls/so_rcvbuf", OpenRefusal::TlsMaterial),
+            ("gateway/south", OpenRefusal::GatewayNotCarried),
+            ("transport/link/protocols", OpenRefusal::DocumentUnreadable),
+        ] {
+            assert_eq!(refusal_of_unbuilt_key(key), refusal, "{key}");
+        }
+        // Every key a build can be made without is given one of the mechanism refusals.
+        for (key, _, _) in wz_runtime_tokio::zenoh_config::CAPABILITY_HONOURED_KEYS {
+            assert_ne!(
+                refusal_of_unbuilt_key(key),
+                OpenRefusal::DocumentUnreadable,
+                "{key} has no mechanism refusal"
+            );
+        }
+    }
 
     /// The node a config document reads as, through the one reader an open uses.
     fn node_of(document: &str) -> ZenohNodeConfig {

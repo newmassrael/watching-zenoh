@@ -360,7 +360,7 @@ config WZ_CAP_INTERCEPTORS
 	bool "interceptors"
 	default y
 	help
-	  The traffic policy a node's config states: access_control, low_pass_filter and downsampling, enforced on every face.
+	  The traffic policy a node's config states: access_control, low_pass_filter, downsampling and the qos/network overwrite, enforced on every face; a build without it refuses a config that states one, by its key.
 	  Exported by: c.
 
 endmenu

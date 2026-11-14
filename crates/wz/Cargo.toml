@@ -200,6 +200,11 @@ access-extauth-jwt = ["session-extauth"]
 access-extauth-pubkey = ["session-extauth", "wz-runtime-tokio?/access-extauth-pubkey"]
 access-extauth-usrpwd = ["session-extauth", "wz-runtime-tokio?/access-extauth-usrpwd"]
 access-quota = ["wz-runtime-tokio?/access-quota"]
+# The QoS overwrite (`qos/network`): the interceptor that rewrites the QoS of a message instead of
+# admitting or dropping it, and the config reader's reader of the key, which a build without it
+# refuses by name. Not in `domain-access`: the store has no atom of that name yet, and the census
+# refuses a bundle member the store does not carry.
+access-qos-overwrite = ["wz-runtime-tokio?/access-qos-overwrite"]
 
 # ----- domain: attachment (2 atomic) -----
 # attachment-bytes: the attachment-ext codec primitive (wz-session-core
@@ -2133,6 +2138,7 @@ preset-ap-full = [
     "access-acl-multicast",
     "access-downsampling",
     "access-quota",
+    "access-qos-overwrite",
     "access-extauth-jwt",
     "access-extauth-pubkey",
     "access-extauth-usrpwd",

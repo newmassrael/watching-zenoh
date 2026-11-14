@@ -1282,7 +1282,7 @@ os_needs = []
 upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
-help = "The traffic policy a node's config states: access_control, low_pass_filter and downsampling, enforced on every face."
+help = "The traffic policy a node's config states: access_control, low_pass_filter, downsampling and the qos/network overwrite, enforced on every face; a build without it refuses a config that states one, by its key."
 
 # ## The upstream switches (docs/build-configuration.md, C7)
 #

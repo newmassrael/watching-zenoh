@@ -642,6 +642,9 @@ routing-peer = [
     "wz/access-acl",
     "wz/access-downsampling",
     "wz/access-quota",
+    # The fourth interceptor's reader: the node reads `qos/network` from its file, and
+    # without it refuses the key by name.
+    "access-qos-overwrite",
     # R311y45 (§5.23 Phase 2b) — a routing peer can host its OWN adminspace
     # (the `--config-queryable` opt-in registers a forwarder-local admin
     # queryable reading the node's live shared WzConfig); pull the admin SSOT.
@@ -690,6 +693,11 @@ transport-multicast = ["wz/transport-multicast", "wz/transport-link-udp"]
 # thing governed. NOT in `default`; a build without it refuses an `access` block by its key
 # before starting any session.
 access-acl-multicast = ["transport-multicast", "wz/access-acl-multicast"]
+# The QoS overwrite (`qos/network`), forwarding the facade's `access-qos-overwrite`: what makes
+# the config reader read the key. The demo has no sink for it yet (`config_keys_the_demo_drops`),
+# so a node reads the rules and applies none, and says so; a build without it refuses a document
+# that states one by its key. `routing-peer` carries it, as it carries the other three knobs.
+access-qos-overwrite = ["wz/access-qos-overwrite"]
 # R311y433 (session-extcompression) — opt-in per-batch lz4 COMPRESSION, forwarding
 # the wz facade's `session-extcompression` (which itself pulls
 # `transport-compression`, so ONE demo feature carries both atoms: the
