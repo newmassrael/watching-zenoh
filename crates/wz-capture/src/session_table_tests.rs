@@ -1206,8 +1206,8 @@ fn a_tls_flow_is_encrypted_unreadable_and_states_its_bytes_and_nothing_inside() 
 }
 
 /// A TLS FLOW THAT WAS DECRYPTED BEFORE THE TABLE WAS ASKED FOR: the session
-/// inside is read, and the finding is `decrypted_tls`. The doors of this library
-/// do not decrypt, so this is a dissection a caller prepared.
+/// inside is read, and the finding is `decrypted_tls`. This crate holds no
+/// cipher, so this is a dissection a caller prepared.
 #[test]
 fn a_decrypted_tls_flow_states_the_session_inside_it() {
     let client = |wire: &[u8]| protected(&stream_unit(wire));

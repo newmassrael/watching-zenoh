@@ -3917,11 +3917,13 @@ dependencies = [
 name = "wz-capi-dissect"
 version = "0.1.0"
 dependencies = [
+ "rustls",
  "wz-capture",
  "wz-cdylib-build",
  "wz-codecs",
  "wz-packet-fixtures",
  "wz-session-core",
+ "wz-tls-record",
 ]
 
 [[package]]

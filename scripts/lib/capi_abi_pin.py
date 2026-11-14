@@ -53,7 +53,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 56
+EXPECTED_VERSION = 57
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -363,6 +363,15 @@ EXPECTED_SYMBOLS = {
     # `wz_dissect_string_free`, nothing is retained between calls, and no
     # callback runs.
     "wz_dissect_transport_layout_e2e",
+    # (ABI 57) -- the decryption pass behind the doors. Two document doors take
+    # an NSS key log's bytes beside what their older doors take, and an open
+    # handle takes one. Three symbols. The memory rule does not move: the
+    # documents are `char*` released by `wz_dissect_string_free`, the key bytes
+    # are read in the call and not retained, and the secrets a handle keeps are
+    # released with it by `wz_dissect_live_close`.
+    "wz_dissect_pcap_summary_keyed",
+    "wz_dissect_pcap_session_table_keyed",
+    "wz_dissect_live_add_keylog",
     # (ABI 35) -- the NODE NAMES of a selector resolved to the zids a caller's
     # table gives them. A `node` term names a node the way the application's own
     # list does, and a record carries only the zid its sender announced; this is

@@ -2075,7 +2075,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 56
+#define WZ_DISSECT_ABI_REVISION 57
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2248,7 +2248,16 @@ int wz_dissect_transport_message_in(const char *context_json,
  * `unsupported_link_type`, and summed over one link type they are that link
  * type's share. Two pcapng sections that both declare the same interface number
  * with the same link type are one entry. The live handle's health document
- * carries the same group from the same emitter. */
+ * carries the same group from the same emitter.
+ *
+ * (ABI 57) A pcapng's Decryption Secrets Blocks are READ: the TLS flows the
+ * keys they carry reach are decrypted before the summary is written, so their
+ * `frames` count the zenoh messages inside. See wz_dissect_pcap_session_table
+ * for the pass and what it does not reach.
+ *
+ * SUBSUMED BY wz_dissect_pcap_summary_keyed -- that door takes the limits
+ * preset and a key log as ARGUMENTS, and with WZ_DISSECT_LIMITS_NONE and no key
+ * log it writes this document byte for byte. Kept and still linkable. */
 int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
 
 /* R311y748 (ABI 2) — the same summary, read under BOUNDED memory.
@@ -2288,9 +2297,40 @@ int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
  * arrived at census revision 21, field-document revision 39, summary
  * revision 7, health revision 4, retention revision 4, selection revision 5,
  * selection_since revision 3 and session_table revision 2 -- every document
- * that embeds this group. */
+ * that embeds this group.
+ *
+ * SUBSUMED BY wz_dissect_pcap_summary_keyed -- the preset this door
+ * hard-codes is an argument there; with WZ_DISSECT_LIMITS_LIVE_TAP and no key
+ * log it writes this document byte for byte. Kept and still linkable. */
 int wz_dissect_pcap_summary_bounded(const unsigned char *bytes, size_t len,
                                     char **out);
+
+/* (ABI 57) -- THE SUMMARY, WITH A KEY LOG BESIDE THE CAPTURE.
+ *
+ * The document wz_dissect_pcap_summary writes, read under the preset `limits`
+ * names (WZ_DISSECT_LIMITS_NONE or WZ_DISSECT_LIMITS_LIVE_TAP; another value
+ * is WZ_DISSECT_ERR_INVALID_ARG), after the decryption pass has opened every
+ * TLS and QUIC flow the keys reach. `keylog` is the BYTES of an NSS key log,
+ * the text an SSLKEYLOGFILE holds, `keylog_len` long: read the file the user
+ * picked and hand its contents over. NULL with a `keylog_len` of 0 is no key
+ * log; NULL with any other length is WZ_DISSECT_ERR_INVALID_ARG. Keys the
+ * capture carries in its Decryption Secrets Blocks are used too, and the two
+ * are merged.
+ *
+ * What a key moves here is counts: a decrypted flow's `frames` are the zenoh
+ * messages read out of its plaintext, and `health` covers them. The shape does
+ * not move. The pass, what it reaches and what it does not, is described once,
+ * at wz_dissect_pcap_session_table.
+ *
+ * THE KEYS GO NOWHERE: they are parsed in this call and dropped with it, and
+ * no document, refusal or error code carries a byte of them. The string is
+ * released by wz_dissect_string_free.
+ *
+ * @bound limits work-ceiling -- it bounds the WALK, and what the walk dropped
+ * is reported in dropped_by_limits. */
+int wz_dissect_pcap_summary_keyed(const unsigned char *bytes, size_t len,
+                                  int limits, const unsigned char *keylog,
+                                  size_t keylog_len, char **out);
 
 /* R311y851 (ABI 3) — the ANALYSIS planes, which this ABI could not
  * reach at all: the keyexpr plane (which keys carry the traffic, with
@@ -3003,10 +3043,38 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * says the flow is encrypted: it may be zenoh this reader could not read, or
  * something else) or `mixed` (the row's flows differ). The detection is the
  * report's (`wz-analyze --summary`'s `encrypted` group), not a second one.
- * THESE DOORS DO NOT DECRYPT, so `decrypted_tls` and `decrypted_quic` are words a
- * consumer has to handle and that a capture handed to this door cannot produce
- * today; they arise only over a dissection a caller decrypted first. An
- * encrypted flow is a row because zenoh over TLS or QUIC cannot be told from
+ *
+ * (ABI 57) THE DECRYPTION PASS. Every door of this library that dissects a
+ * capture runs it before it walks what it read, with the keys the capture
+ * carries in its pcapng Decryption Secrets Blocks; wz_dissect_pcap_summary_keyed
+ * and wz_dissect_pcap_session_table_keyed add an NSS key log a caller hands in,
+ * and wz_dissect_live_add_keylog adds one to an open handle. It is the pass
+ * `wz-analyze --keylog` runs, from one implementation. With no key anywhere it
+ * does not run for TLS, and every TLS flow stays `encrypted_unreadable`.
+ *
+ *   TLS 1.3   A flow is matched to its keys by its ClientHello's random; every
+ *             record it kept is opened, the application data is read as the
+ *             zenoh stream it carries, and the row says `decrypted_tls` when
+ *             every record opened.
+ *   QUIC      A flow is opened from the capture's own packets, which a
+ *             document door has: the Initial space needs no key, the later
+ *             spaces need the connection's secrets, and the row says
+ *             `decrypted_quic` when a stream or a datagram was recovered. A
+ *             live handle keeps no QUIC packet, so a QUIC flow read through
+ *             one stays `encrypted_unreadable`.
+ *
+ * KEYS GIVEN AND NONE MATCHED reads `encrypted_unreadable`, with the row's cells
+ * unstated for the reason `encrypted`, exactly as a flow with no key at all:
+ * both words say what the row can state, and in both no key was applied. No
+ * word is added for it and the document's revision does not move. The same
+ * word stands for a flow the keys reach only partly: a capture with no
+ * ClientHello to match a key by, a direction no key covers, or a record that
+ * did not open. A consumer that wants to tell a user the key log matched
+ * nothing compares the rows before and after the keys, and reads the count of
+ * connections wz_dissect_live_add_keylog returns (zero says the bytes held no
+ * key log at all).
+ *
+ * An encrypted flow is a row because zenoh over TLS or QUIC cannot be told from
  * other TLS or QUIC without keys, so a capture of a whole network lists every
  * flow and one with bytes and nothing understood is `unknown`, not hidden:
  * filter the capture to the deployment's ports for a table of sessions. An
@@ -3067,10 +3135,39 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * @carries session_table why passenger
  * @carries session_table zenoh passenger
  *
+ * SUBSUMED BY wz_dissect_pcap_session_table_keyed -- that door takes a key log
+ * beside everything this one takes, and with none it writes this document
+ * byte for byte. Kept and still linkable.
+ *
  * @bound limits work-ceiling -- it bounds the WALK, and what the walk dropped is
  * reported in dropped_by_limits. */
 int wz_dissect_pcap_session_table(const unsigned char *bytes, size_t len,
                                   int limits, char **out);
+
+/* (ABI 57) -- THE SESSION TABLE, WITH A KEY LOG BESIDE THE CAPTURE.
+ *
+ * The document wz_dissect_pcap_session_table writes, after the decryption pass
+ * described there has opened every TLS and QUIC flow the keys reach: a flow
+ * the keys opened reads `decrypted_tls` or `decrypted_quic` and states the
+ * session inside it, and one they do not reach reads `encrypted_unreadable`.
+ *
+ * `keylog` is the BYTES of an NSS key log, the text an SSLKEYLOGFILE holds,
+ * `keylog_len` long: read the file the user picked and hand its contents over.
+ * NULL with a `keylog_len` of 0 is no key log, and the document is the older
+ * door's byte for byte; NULL with any other length is
+ * WZ_DISSECT_ERR_INVALID_ARG. Keys the capture carries in its Decryption
+ * Secrets Blocks are used too, and the two are merged. Everything else --
+ * `limits`, the refusals, the errors and the memory rule -- is the older
+ * door's.
+ *
+ * THE KEYS GO NOWHERE: they are parsed in this call and dropped with it, and
+ * no document, refusal or error code carries a byte of them.
+ *
+ * @bound limits work-ceiling -- it bounds the WALK, and what the walk dropped is
+ * reported in dropped_by_limits. */
+int wz_dissect_pcap_session_table_keyed(const unsigned char *bytes, size_t len,
+                                        int limits, const unsigned char *keylog,
+                                        size_t keylog_len, char **out);
 
 /* R311y854 (ABI 4) — compile a selector and say what is wrong with it,
  * without a capture.
@@ -6203,6 +6300,55 @@ int wz_dissect_live_push(wz_dissect_live *h, unsigned int link_type,
                          uint64_t ts_ns, const unsigned char *bytes,
                          size_t len);
 
+/* ── (ABI 57) — KEYS FOR A HANDLE THAT IS ALREADY OPEN ───────────────────
+ *
+ * Hand the handle an NSS key log, so the TLS flows it names are decrypted.
+ * `keylog` is the BYTES of the log, the text an SSLKEYLOGFILE holds, `len`
+ * long: read the file the user picked and hand its contents over. On
+ * WZ_DISSECT_OK `*connections` is how many TLS connections the bytes named;
+ * zero is an answer and not an error, and says the bytes held no line this
+ * reader can act on. Keys add to the ones the handle holds already -- an
+ * earlier call, and the Decryption Secrets Blocks of a capture it reads -- so a
+ * log from each peer may be handed in, one after the other.
+ *
+ * A capture FILE read through wz_dissect_pcap_replay or
+ * wz_dissect_pcap_replay_lent is a handle like any other: hand it the key log
+ * here, and its records, its field documents, its row facts and its session
+ * table read the TLS flows the keys open. That is the door for a file's rows;
+ * the keyed document doors are wz_dissect_pcap_summary_keyed and
+ * wz_dissect_pcap_session_table_keyed.
+ *
+ * WHAT IT DOES TO WHAT THE HANDLE ALREADY READ. The handle keeps each TLS
+ * flow's records (up to 4096 a direction, the most recent), and it keeps the
+ * stream bytes they are views of. So a flow it has opened nothing of -- no key
+ * was held for it, or the keys held were another connection's -- IS read again
+ * when keys for it arrive: it is opened from the oldest record it still keeps,
+ * and its messages become NEW records. The next wz_dissect_live_drain hands
+ * them out after every record already issued, while each one's `anchor` is
+ * the stream offset of the TLS record it came out of and its instant that
+ * record's packet's -- earlier than records drained before it. The documents
+ * of the handle read them as rows the same way. A flow already opened goes on from where it stopped, and every record
+ * pushed afterwards is opened as it arrives, in the call that pushed it.
+ *
+ * What it does not do, said plainly. Records the 4096 bound dropped before the
+ * keys arrived are gone, and a flow whose oldest kept record is not its first
+ * may not frame. A flow one direction of which was opened before a key for
+ * its other direction arrived keeps that other direction unread. A QUIC flow
+ * is not decrypted on a handle at all: the handle keeps no QUIC packet to open
+ * (the document doors read QUIC from the capture you hand them, see
+ * wz_dissect_pcap_session_table).
+ *
+ * THE KEYS GO NOWHERE. The bytes are parsed in this call and dropped; the
+ * handle keeps only the secrets they name, writes none of them into a document
+ * or a record, and returns none through any door. wz_dissect_live_memory does
+ * not count them. The words a row's `encrypted` cell says are listed at
+ * wz_dissect_pcap_session_table.
+ *
+ * A null `h` or `connections`, or a null `keylog` with a `len` other than 0, is
+ * WZ_DISSECT_ERR_INVALID_ARG and changes nothing. */
+int wz_dissect_live_add_keylog(wz_dissect_live *h, const unsigned char *keylog,
+                               size_t len, size_t *connections);
+
 /* ── R2373 (ABI 15) — A CONTAINER THAT IS STILL BEING WRITTEN ────────────
  *
  * Feed a GROWING capture container into an existing handle.
@@ -8032,8 +8178,11 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  *     it, which every list that has seen a fragment keeps, whether it holds its
  *     rows as entries or whole.
  *   - tls_records is the encrypted records an encrypted flow keeps for a
- *     decryptor. It is bounded per flow, not per row: at most 4096 a direction,
- *     so it is the one figure here that stops growing with the capture.
+ *     decryptor. Those are bounded per flow, not per row: at most 4096 a
+ *     direction. (ABI 57) A flow the decryption pass opened adds about 40 bytes per
+ *     opened record whose plaintext it still holds, the map from that
+ *     plaintext back to the records, which follows the plaintext as the lists'
+ *     own bytes do. The keys a handle holds are not counted here.
  *   - selection is what wz_dissect_live_selection_since keeps between calls: the
  *     word each selector said of each row, which is how a later call says which
  *     moved, a nibble a row, and the folds that decide the words (the verdict of

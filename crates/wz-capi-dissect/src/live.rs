@@ -453,6 +453,11 @@ pub struct LiveDissection {
     /// [`Self::from_capture`] leaves it at the end of the file it read, which
     /// is what lets a replayed handle be followed as the writer appends more.
     cursor: CaptureCursor,
+    /// The keys this handle decrypts TLS with (the capture's own Decryption
+    /// Secrets Blocks as the feed meets them, and every key log
+    /// [`Self::add_keylog`] was handed) and one opener per flow it began. Run
+    /// after every feed, so a record is opened in the call that kept it.
+    keys: wz_tls_record::pass::LiveDecryptor,
 }
 
 impl LiveDissection {
@@ -572,14 +577,33 @@ impl LiveDissection {
     /// not call `finish`, because a container still being written has no last
     /// packet.
     pub fn follow(&mut self, bytes: &[u8]) -> Result<usize, FollowError> {
-        self.dissection.follow_container(&mut self.cursor, bytes)
+        let read = self.dissection.follow_container(&mut self.cursor, bytes);
+        self.keys.run(&mut self.dissection);
+        read
     }
 
     /// [`Self::follow`] over a container this handle is LENT: see
     /// [`wz_capture::Dissection::follow_lent`] for what the handle then holds,
     /// and [`LentCapture`] for what the lender keeps.
     pub fn follow_lent(&mut self, capture: Arc<dyn LentCapture>) -> Result<usize, FollowError> {
-        self.dissection.follow_lent(&mut self.cursor, capture)
+        let read = self.dissection.follow_lent(&mut self.cursor, capture);
+        self.keys.run(&mut self.dissection);
+        read
+    }
+
+    /// Fold an NSS key log into the keys this handle decrypts with, open what
+    /// it now can, and return how many connections the text named.
+    ///
+    /// A TLS flow the handle has opened nothing of so far -- no key was held
+    /// for it, or the keys held were another connection's -- is opened from
+    /// the oldest record it still keeps, so its messages become rows now, at
+    /// the packets that carried their records. A flow already opened goes on
+    /// from where it stopped. The text is parsed and dropped; only the secrets
+    /// it names are kept, and never written anywhere.
+    pub fn add_keylog(&mut self, text: &[u8]) -> usize {
+        let named = self.keys.absorb(text);
+        self.keys.run(&mut self.dissection);
+        named
     }
 
     /// How many bytes of the container [`Self::follow`] has consumed.
@@ -612,6 +636,7 @@ impl LiveDissection {
             progress: None,
             lost: 0,
             cursor: CaptureCursor::new(),
+            keys: wz_tls_record::pass::LiveDecryptor::new(),
         }
     }
 
@@ -633,6 +658,7 @@ impl LiveDissection {
         let at = self.dissection.next_packet_index();
         self.dissection
             .push_packet_at_nanos(link_type, at, ts_nanos, bytes);
+        self.keys.run(&mut self.dissection);
     }
 
     /// The packet index the NEXT push will anchor its messages to, which on a
@@ -1685,6 +1711,8 @@ impl LiveDissection {
     /// Releasing the handle is still [`crate::wz_dissect_live_close`]'s job.
     pub fn end(&mut self) {
         self.dissection.finish();
+        // The end can hand the TLS walk the records a held gap kept back.
+        self.keys.run(&mut self.dissection);
     }
 
     /// The lists this handle is currently tracking a watermark for. Used by the

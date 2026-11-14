@@ -70,6 +70,14 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     # test's.
     "codec-declare",
 ] }
+# The decryption pass (`wz_tls_record::pass`), the one the command line runs.
+# This crate is a host-side composition root like `wz-analyze`, so it is a place
+# `wz-capture` and the cipher (`ring`, through this crate) may meet; the
+# dissector itself still carries no third-party dependency. Not behind a
+# feature: the doors that take a key log are symbols of every build, and a
+# build that answered them with "cannot decrypt" would be a second contract for
+# the same names.
+wz-tls-record = { path = "../wz-tls-record" }
 
 # R311y851 — the CENSUS fixture's records, built by the codecs that own their
 # wire form rather than hand-laid.
@@ -113,3 +121,11 @@ features = ["dissect", "compression", "fixtures"]
 
 [dev-dependencies.wz-packet-fixtures]
 path = "../wz-packet-fixtures"
+
+# THE ORACLE for the decryption doors' tests, and never a dependency, in the
+# role it plays for `wz-tls-record` and `wz-analyze`: a record these doors open
+# must have been sealed by an implementation that is not this workspace's.
+[dev-dependencies.rustls]
+version = "0.23"
+default-features = false
+features = ["ring", "std"]

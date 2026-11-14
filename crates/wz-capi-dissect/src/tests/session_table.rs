@@ -472,12 +472,21 @@ fn the_boundary_adds_nothing_to_the_library_call() {
     );
 }
 
-/// THE ABI'S TWO DOORS ARE LISTED where the library says which door is current.
+/// THE CONTAINER DOORS ARE LISTED where the library says which door is current:
+/// the keyed door is, and the door it joined names it.
 #[test]
-fn the_container_door_is_in_the_doors_walk_and_joins_nothing() {
+fn the_container_doors_are_in_the_doors_walk_and_the_keyed_one_is_current() {
     let catalogue = call_readable_surfaces();
     assert!(
-        catalogue.contains("{\"name\":\"wz_dissect_pcap_session_table\",\"subsumed_by\":null}"),
+        catalogue.contains(
+            "{\"name\":\"wz_dissect_pcap_session_table\",\
+             \"subsumed_by\":\"wz_dissect_pcap_session_table_keyed\"}"
+        ),
+        "{catalogue}"
+    );
+    assert!(
+        catalogue
+            .contains("{\"name\":\"wz_dissect_pcap_session_table_keyed\",\"subsumed_by\":null}"),
         "{catalogue}"
     );
 }

@@ -1154,6 +1154,7 @@ dependencies = [
  "wz-capture",
  "wz-cdylib-build",
  "wz-session-core",
+ "wz-tls-record",
 ]
 
 [[package]]

@@ -3020,6 +3020,62 @@ static int check_session_table_doors(void) {
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL, "null handle rc=%d", rc);
     rc = wz_dissect_live_session_table(h, NULL);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null live out rc=%d", rc);
+
+    /* (ABI 57) -- the keyed doors. With no key log they answer what the older
+     * doors answer; a length with no bytes is a caller's bug. */
+    {
+        static const unsigned char not_keys[] = "not a key log";
+        char *older = NULL;
+        char *keyed = NULL;
+        size_t named = 99;
+
+        rc = wz_dissect_pcap_session_table(file, file_len, WZ_DISSECT_LIMITS_NONE,
+                                           &older);
+        CHECK(rc == WZ_DISSECT_OK, "session table again rc=%d", rc);
+        rc = wz_dissect_pcap_session_table_keyed(file, file_len,
+                                                 WZ_DISSECT_LIMITS_NONE, NULL, 0,
+                                                 &keyed);
+        CHECK(rc == WZ_DISSECT_OK && keyed != NULL, "keyed session table rc=%d", rc);
+        CHECK(strcmp(older, keyed) == 0,
+              "no key log answers what the older door answers:\n%s\n%s", older,
+              keyed);
+        wz_dissect_string_free(keyed);
+        wz_dissect_string_free(older);
+        older = NULL;
+        keyed = NULL;
+
+        rc = wz_dissect_pcap_summary(file, file_len, &older);
+        CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
+        rc = wz_dissect_pcap_summary_keyed(file, file_len, WZ_DISSECT_LIMITS_NONE,
+                                           NULL, 0, &keyed);
+        CHECK(rc == WZ_DISSECT_OK && keyed != NULL, "keyed summary rc=%d", rc);
+        CHECK(strcmp(older, keyed) == 0,
+              "no key log answers what the older summary answers:\n%s\n%s",
+              older, keyed);
+        wz_dissect_string_free(keyed);
+        wz_dissect_string_free(older);
+        keyed = NULL;
+
+        rc = wz_dissect_pcap_session_table_keyed(file, file_len,
+                                                 WZ_DISSECT_LIMITS_NONE, NULL, 3,
+                                                 &keyed);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && keyed == NULL,
+              "a length with no key bytes rc=%d", rc);
+        rc = wz_dissect_pcap_summary_keyed(file, file_len, 9, NULL, 0, &keyed);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && keyed == NULL,
+              "unknown preset on the keyed summary rc=%d", rc);
+
+        rc = wz_dissect_live_add_keylog(h, not_keys, sizeof not_keys - 1, &named);
+        CHECK(rc == WZ_DISSECT_OK && named == 0,
+              "text naming no connection is an answer of zero: rc=%d named=%zu",
+              rc, named);
+        rc = wz_dissect_live_add_keylog(h, not_keys, sizeof not_keys - 1, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null connections rc=%d", rc);
+        rc = wz_dissect_live_add_keylog(NULL, not_keys, sizeof not_keys - 1, &named);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle add_keylog rc=%d", rc);
+        rc = wz_dissect_live_add_keylog(h, NULL, 4, &named);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null key bytes with a length rc=%d", rc);
+    }
     wz_dissect_live_close(h);
     return 0;
 }

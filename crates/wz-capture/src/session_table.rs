@@ -966,8 +966,9 @@ pub type Stated<T> = Result<T, Unstated>;
 /// * `clear` -- zenoh transport messages were decoded from the flow's own bytes;
 /// * `encrypted_unreadable` -- the flow is TLS or QUIC and nothing was decrypted;
 /// * `decrypted_tls`, `decrypted_quic` -- the flow was encrypted and a decryption
-///   pass recovered the session. The doors of this library do not decrypt, so a
-///   row says these only over a dissection a caller decrypted before asking;
+///   pass recovered the session. This crate holds no cipher, so a row says
+///   these only over a dissection a caller decrypted before asking (the C ABI's
+///   doors and the command line run `wz_tls_record::pass` first);
 /// * `unknown` -- nothing was decoded and nothing says the flow is encrypted, so
 ///   the flow may be zenoh this reader could not read or may be something else;
 /// * `mixed` -- the row groups flows that differ.

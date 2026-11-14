@@ -462,6 +462,11 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // profile. The `transport_layout` and `transport_build` documents moved to
     // revision 2 on the same step (two row keys; `checksum` and `big_endian` on
     // the layout document), which moves no symbol.
+    // 57, for `wz_dissect_pcap_summary_keyed`, `wz_dissect_pcap_session_table_keyed`
+    // and `wz_dissect_live_add_keylog`: the decryption pass reaches these doors,
+    // with a key log a caller hands in beside the keys a capture carries. Every
+    // door now opens the TLS and QUIC flows those carried keys reach, which
+    // moves values of the documents and no key of them.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -479,7 +484,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 56;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 57;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -702,6 +707,10 @@ pub unsafe extern "C" fn wz_dissect_readable_surfaces(out: *mut *mut c_char) -> 
 enum Door {
     Summary,
     SummaryBounded,
+    /// (ABI 57) — the summary with a preset and a key log. It answers what
+    /// both summary doors answer, given a null key log and their preset, and
+    /// one thing more, so both are its older shape.
+    SummaryKeyed,
     Census,
     CensusBounded,
     CensusWhere,
@@ -743,6 +752,10 @@ enum Door {
     /// session question, and it takes a preset beside its bytes as the census
     /// doors do, so neither is the older shape of the other.
     SessionTable,
+    /// (ABI 57) — the session table with a key log beside the capture. Given a
+    /// null key log it answers what `SessionTable` answers, so that door is
+    /// its older shape.
+    SessionTableKeyed,
     /// (ABI 46) — every packet of one link type, as records naming where each
     /// packet's bytes are in the caller's container.
     ///
@@ -777,6 +790,7 @@ impl Door {
         match self {
             Door::Summary => "wz_dissect_pcap_summary",
             Door::SummaryBounded => "wz_dissect_pcap_summary_bounded",
+            Door::SummaryKeyed => "wz_dissect_pcap_summary_keyed",
             Door::Census => "wz_dissect_pcap_census",
             Door::CensusBounded => "wz_dissect_pcap_census_bounded",
             Door::CensusWhere => "wz_dissect_pcap_census_where",
@@ -789,6 +803,7 @@ impl Door {
             Door::ReplayLent => "wz_dissect_pcap_replay_lent",
             Door::FrameBytes => "wz_dissect_pcap_frame_bytes",
             Door::SessionTable => "wz_dissect_pcap_session_table",
+            Door::SessionTableKeyed => "wz_dissect_pcap_session_table_keyed",
             Door::PacketsOfLinkType => "wz_dissect_pcap_packets_of_link_type",
             Door::CustomOptionsOfLinkType => "wz_dissect_pcap_custom_options_of_link_type",
             Door::LocalOptionsOfLinkType => "wz_dissect_pcap_local_options_of_link_type",
@@ -797,9 +812,10 @@ impl Door {
 
     /// The door that joined this one, or `None` when this IS the current shape.
     ///
-    /// `wz_dissect_pcap_summary_bounded` answers `None` beside its own plain
-    /// door on purpose: it takes a preset rather than subsuming, so neither is
-    /// the older shape of the other. Item 451 counted five subsumed and that
+    /// `wz_dissect_pcap_summary_bounded` does not join its own plain door: it
+    /// fixes a preset where the plain one fixes none, so neither is the older
+    /// shape of the other. Both join `wz_dissect_pcap_summary_keyed`, which
+    /// takes the preset as an argument. Item 451 counted five subsumed and that
     /// number is what this match makes checkable.
     fn subsumed_by(self) -> Option<Self> {
         match self {
@@ -816,6 +832,12 @@ impl Door {
             Door::Fields | Door::FieldsWithPayloads | Door::FieldsLimited => {
                 Some(Door::FieldsWhereLimited)
             }
+            // (ABI 57) — the keyed doors take a key log beside everything the
+            // older doors take, and answer them byte for byte when it is null.
+            // The two summaries join one door because it takes the preset the
+            // bounded one fixes: nine subsumed, where there were six.
+            Door::Summary | Door::SummaryBounded => Some(Door::SummaryKeyed),
+            Door::SessionTable => Some(Door::SessionTableKeyed),
             // `Replay` answers `None` and joins nothing: it emits no document
             // at all, so it is not the newer shape of a door that does. The
             // count assertion beside this match is what keeps that honest --
@@ -827,15 +849,14 @@ impl Door {
             // subsumed to six, and that is the argument the comment asks for:
             // a selector-taking field door answers what the limited one does
             // and says which rows matched as well.
-            Door::Summary
-            | Door::SummaryBounded
+            Door::SummaryKeyed
             | Door::CensusWhereLimited
             | Door::FieldsWhereLimited
             | Door::Replay
             | Door::ReplayLent
             // Like `Replay`, it emits no document and joins nothing.
             | Door::FrameBytes
-            | Door::SessionTable
+            | Door::SessionTableKeyed
             | Door::PacketsOfLinkType
             | Door::CustomOptionsOfLinkType
             | Door::LocalOptionsOfLinkType => None,
@@ -846,7 +867,8 @@ impl Door {
     fn next(self) -> Option<Self> {
         match self {
             Door::Summary => Some(Door::SummaryBounded),
-            Door::SummaryBounded => Some(Door::Census),
+            Door::SummaryBounded => Some(Door::SummaryKeyed),
+            Door::SummaryKeyed => Some(Door::Census),
             Door::Census => Some(Door::CensusBounded),
             Door::CensusBounded => Some(Door::CensusWhere),
             Door::CensusWhere => Some(Door::CensusWhereLimited),
@@ -858,7 +880,8 @@ impl Door {
             Door::Replay => Some(Door::ReplayLent),
             Door::ReplayLent => Some(Door::FrameBytes),
             Door::FrameBytes => Some(Door::SessionTable),
-            Door::SessionTable => Some(Door::PacketsOfLinkType),
+            Door::SessionTable => Some(Door::SessionTableKeyed),
+            Door::SessionTableKeyed => Some(Door::PacketsOfLinkType),
             Door::PacketsOfLinkType => Some(Door::CustomOptionsOfLinkType),
             Door::CustomOptionsOfLinkType => Some(Door::LocalOptionsOfLinkType),
             Door::LocalOptionsOfLinkType => None,
@@ -1079,7 +1102,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary(
     // SAFETY: caller contract above.
     let input = unsafe { core::slice::from_raw_parts(bytes, len) };
     let dissection = match Dissection::from_capture(input) {
-        Ok(d) => d,
+        Ok(d) => decrypted(d, input, None),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
     write_string(summary_json(&dissection), out)
@@ -1134,9 +1157,56 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary_bounded(
     let dissection =
         match Dissection::from_capture_bounded(input, wz_capture::DissectionLimits::for_live_tap())
         {
-            Ok(d) => d,
+            Ok(d) => decrypted(d, input, None),
             Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
         };
+    write_string(summary_json(&dissection), out)
+}
+
+/// The summary with a preset AND a key log beside the capture: the document
+/// [`wz_dissect_pcap_summary`] and [`wz_dissect_pcap_summary_bounded`] write,
+/// after the decryption pass has opened every TLS and QUIC flow the keys reach.
+///
+/// # One door for the two it joins
+///
+/// `limits` is the preset the bounded door fixes and the plain one leaves
+/// unbounded, and `keylog` is the BYTES of an NSS key log (the text an
+/// `SSLKEYLOGFILE` holds), `keylog_len` long; a null `keylog` is no key log.
+/// With a null `keylog` it answers what the older door of the same preset
+/// answers, byte for byte, because the keys a pcapng carries in its Decryption
+/// Secrets Blocks are read by every door with or without this one.
+///
+/// What a key moves here is the counts: a decrypted flow's `frames` are the
+/// zenoh messages read out of its plaintext, and the health counters cover
+/// them. The keys go nowhere; no document or error code carries a byte of them.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes, `keylog` must be null
+/// or point to at least `keylog_len` readable bytes, and `out` must be a
+/// writable pointer to a `*mut c_char`. `bytes` and `out` may not be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_summary_keyed(
+    bytes: *const u8,
+    len: usize,
+    limits: c_int,
+    keylog: *const u8,
+    keylog_len: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || out.is_null() || (keylog.is_null() && keylog_len != 0) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let Some(preset) = preset_limits(limits) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    // SAFETY: caller contract above.
+    let keys = unsafe { key_log(keylog, keylog_len) };
+    let dissection = match Dissection::from_capture_bounded(input, preset) {
+        Ok(d) => decrypted(d, input, keys),
+        Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+    };
     write_string(summary_json(&dissection), out)
 }
 
@@ -1199,7 +1269,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_census(
     // SAFETY: caller contract above.
     let input = unsafe { core::slice::from_raw_parts(bytes, len) };
     let dissection = match Dissection::from_capture(input) {
-        Ok(d) => d,
+        Ok(d) => decrypted(d, input, None),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
     write_string(wz_capture::census_json::census_json(&dissection), out)
@@ -1261,7 +1331,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_census_bounded(
     let dissection =
         match Dissection::from_capture_bounded(input, wz_capture::DissectionLimits::for_live_tap())
         {
-            Ok(d) => d,
+            Ok(d) => decrypted(d, input, None),
             Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
         };
     write_string(wz_capture::census_json::census_json(&dissection), out)
@@ -1325,7 +1395,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
     // SAFETY: caller contract above.
     let input = unsafe { core::slice::from_raw_parts(bytes, len) };
     let dissection = match Dissection::from_capture(input) {
-        Ok(d) => d,
+        Ok(d) => decrypted(d, input, None),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
     let cap = (max_messages_shown_per_flow > 0).then_some(max_messages_shown_per_flow);
@@ -1465,7 +1535,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_with_payloads(
     // SAFETY: caller contract above.
     let input = unsafe { core::slice::from_raw_parts(bytes, len) };
     let dissection = match Dissection::from_capture(input) {
-        Ok(d) => d,
+        Ok(d) => decrypted(d, input, None),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
     let cap = (max_messages_shown_per_flow > 0).then_some(max_messages_shown_per_flow);
@@ -1551,7 +1621,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_limited(
     // field `None`, so the unbounded arm is the bounded call with no ceilings
     // rather than a second code path that could drift from it.
     let dissection = match Dissection::from_capture_bounded(input, preset) {
-        Ok(d) => d,
+        Ok(d) => decrypted(d, input, None),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
     let cap = (max_messages_shown_per_flow > 0).then_some(max_messages_shown_per_flow);
@@ -1653,7 +1723,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_where_limited(
     // SAFETY: caller contract above.
     let input = unsafe { core::slice::from_raw_parts(bytes, len) };
     let dissection = match Dissection::from_capture_bounded(input, preset) {
-        Ok(d) => d,
+        Ok(d) => decrypted(d, input, None),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
     let cap = (max_messages_shown_per_flow > 0).then_some(max_messages_shown_per_flow);
@@ -3092,7 +3162,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_census_where(
     // SAFETY: caller contract above.
     let input = unsafe { core::slice::from_raw_parts(bytes, len) };
     let dissection = match Dissection::from_capture(input) {
-        Ok(d) => d,
+        Ok(d) => decrypted(d, input, None),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
     write_string(
@@ -3179,7 +3249,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_census_where_limited(
     // field `None`, so the unbounded arm is the bounded call with no ceilings
     // rather than a second code path that could drift from it.
     let dissection = match Dissection::from_capture_bounded(input, preset) {
-        Ok(d) => d,
+        Ok(d) => decrypted(d, input, None),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
     write_string(
@@ -3249,11 +3319,75 @@ pub unsafe extern "C" fn wz_dissect_pcap_session_table(
     };
     // SAFETY: caller contract above.
     let input = unsafe { core::slice::from_raw_parts(bytes, len) };
-    let document = match Dissection::from_capture_bounded(input, preset) {
-        Ok(dissection) => wz_capture::session_table_json::session_table_json(&dissection),
-        Err(error) => wz_capture::session_table_json::refusal_json(error),
+    write_string(session_table_of(input, preset, None), out)
+}
+
+/// [`wz_dissect_pcap_session_table`] with a key log beside the capture: the
+/// session table after the decryption pass has opened every TLS and QUIC flow
+/// the keys reach.
+///
+/// # One argument, and the existing door's signature untouched
+///
+/// `keylog` is the BYTES of an NSS key log (the text an `SSLKEYLOGFILE`
+/// holds), `keylog_len` long; a null `keylog` is no key log. The keys a pcapng
+/// carries in its Decryption Secrets Blocks are read by every door with or
+/// without this one, so a null `keylog` answers what
+/// [`wz_dissect_pcap_session_table`] answers, byte for byte, and that door is
+/// this one's older shape.
+///
+/// # What a key changes in the document
+///
+/// A TLS flow every kept record of which opened reads `decrypted_tls`, a QUIC
+/// flow from which a stream or a datagram was recovered reads `decrypted_quic`,
+/// and both state the session inside them. A flow the keys do not reach stays
+/// `encrypted_unreadable`, whatever the reason: no key named its connection,
+/// the capture holds no ClientHello to match one by, or a record did not open.
+/// The words and the document's shape do not move.
+///
+/// # The keys go nowhere
+///
+/// They are parsed in this call and dropped with it. No document, refusal or
+/// error code carries a byte of them.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes, `keylog` must be null
+/// or point to at least `keylog_len` readable bytes, and `out` must be a
+/// writable pointer to a `*mut c_char`. `bytes` and `out` may not be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_session_table_keyed(
+    bytes: *const u8,
+    len: usize,
+    limits: c_int,
+    keylog: *const u8,
+    keylog_len: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || out.is_null() || (keylog.is_null() && keylog_len != 0) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let Some(preset) = preset_limits(limits) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
     };
-    write_string(document, out)
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    // SAFETY: caller contract above.
+    let keys = unsafe { key_log(keylog, keylog_len) };
+    write_string(session_table_of(input, preset, keys), out)
+}
+
+/// The session table document of a capture, or the refusal of a container
+/// that does not read: what both session table doors write.
+fn session_table_of(
+    input: &[u8],
+    preset: wz_capture::DissectionLimits,
+    keylog: Option<&[u8]>,
+) -> String {
+    match Dissection::from_capture_bounded(input, preset) {
+        Ok(dissection) => wz_capture::session_table_json::session_table_json(&decrypted(
+            dissection, input, keylog,
+        )),
+        Err(error) => wz_capture::session_table_json::refusal_json(error),
+    }
 }
 
 /// R311y854 — compile a selector and say what is wrong with it, WITHOUT a
@@ -3587,6 +3721,56 @@ pub unsafe extern "C" fn wz_dissect_live_push(
     // SAFETY: caller contract above.
     let packet = unsafe { core::slice::from_raw_parts(bytes, len) };
     handle.push(link_type, ts_ns, packet);
+    WZ_DISSECT_OK
+}
+
+/// Hand a live handle an NSS key log, so the TLS flows it names are decrypted.
+///
+/// `keylog` is the BYTES of the log (the text an `SSLKEYLOGFILE` holds),
+/// `len` long, and `*connections` is set to how many TLS connections it named:
+/// zero is an answer and not an error, and says the bytes held no line this
+/// reader can act on. Keys add to the ones the handle holds (an earlier call,
+/// and the Decryption Secrets Blocks of a capture it reads), so a client-side
+/// and a server-side log may be handed in one after the other.
+///
+/// # What it does to what the handle already read
+///
+/// The handle keeps each encrypted flow's records, up to 4096 a direction, so
+/// a TLS flow it has opened nothing of is opened now, from the oldest record it
+/// still keeps: its messages become records that the next
+/// [`wz_dissect_live_drain`] hands out, and rows every document of the handle
+/// reads, anchored at the packets that carried them. A flow already opened goes
+/// on from where it stopped, and every record pushed afterwards is opened as it
+/// arrives. QUIC is not decrypted on a handle: its packets are not kept.
+///
+/// # The keys go nowhere
+///
+/// The text is parsed in this call and dropped; the handle keeps only the
+/// secrets it names, writes them into no document and returns them through no
+/// door.
+///
+/// # Safety
+/// `handle` must be a live handle that has not been closed, `keylog` must be
+/// null or point to at least `len` readable bytes, and `connections` must be a
+/// writable `size_t`. `handle` and `connections` may not be null, and `keylog`
+/// may be null only when `len` is 0.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_add_keylog(
+    handle: *mut live::LiveDissection,
+    keylog: *const u8,
+    len: usize,
+    connections: *mut usize,
+) -> c_int {
+    if handle.is_null() || connections.is_null() || (keylog.is_null() && len != 0) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let handle = unsafe { &mut *handle };
+    // SAFETY: caller contract above.
+    let text = unsafe { key_log(keylog, len) }.unwrap_or_default();
+    let named = handle.add_keylog(text);
+    // SAFETY: caller contract above.
+    unsafe { *connections = named };
     WZ_DISSECT_OK
 }
 
@@ -5942,6 +6126,33 @@ fn preset_limits(limits: c_int) -> Option<wz_capture::DissectionLimits> {
     }
 }
 
+/// A dissection of `capture` after the decryption pass: TLS with the keys the
+/// capture's Decryption Secrets Blocks carry and `keylog` (NSS key log text),
+/// then QUIC with the same keys. Every document door runs it before it walks
+/// the dissection, so a plane is folded over the plaintext and not over the
+/// ciphertext-only view; with no key anywhere the TLS half does not run and the
+/// dissection is what it was.
+///
+/// The pass is `wz_tls_record::pass`, the one the command line runs.
+fn decrypted(mut dissection: Dissection, capture: &[u8], keylog: Option<&[u8]>) -> Dissection {
+    wz_tls_record::pass::decrypt_capture(&mut dissection, capture, keylog, None, &mut ());
+    dissection
+}
+
+/// The key log a door was handed: `None` for a null pointer, which is how a
+/// caller says it has none.
+///
+/// # Safety
+/// `keylog` must be null or point to at least `len` readable bytes.
+unsafe fn key_log<'a>(keylog: *const u8, len: usize) -> Option<&'a [u8]> {
+    if keylog.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract above.
+        Some(unsafe { core::slice::from_raw_parts(keylog, len) })
+    }
+}
+
 /// R2171 (open-debt item 547) — READ A WHOLE CAPTURE INTO A LIVE HANDLE, which
 /// is the door this ABI's two halves had no way to reach each other through.
 ///
@@ -6185,6 +6396,12 @@ mod tests {
     /// the boundary: the mechanism and its oracle are held in `wz-capture`, and
     /// this file holds what the ABI adds to them.
     mod session_table;
+
+    /// The decryption pass through the doors: the keyed file doors, a capture's
+    /// own Decryption Secrets Blocks, a key log handed to an open handle, and no
+    /// key byte in anything a door writes. The pass itself is held in
+    /// `wz-tls-record` and `wz-capture`.
+    mod decryption;
 
     /// R311y873 — THE HEADER NAMES EVERY `payload_decode` STATE THE LIBRARY
     /// CAN EMIT.
@@ -7142,6 +7359,70 @@ mod tests {
             .to_string();
         unsafe { wz_dissect_string_free(out) };
         Ok(s)
+    }
+
+    /// A key log as the keyed doors take it: a null pointer and a zero length
+    /// for none.
+    fn key_log_arg(keylog: Option<&[u8]>) -> (*const u8, usize) {
+        keylog.map_or((core::ptr::null(), 0), |k| (k.as_ptr(), k.len()))
+    }
+
+    /// The string a door handed back, released; an error code and no string
+    /// otherwise.
+    fn taken(rc: c_int, out: *mut c_char) -> Result<String, c_int> {
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must not hand back a string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// Drive the keyed summary the way C does.
+    fn call_summary_keyed(
+        bytes: &[u8],
+        limits: c_int,
+        keylog: Option<&[u8]>,
+    ) -> Result<String, c_int> {
+        let (keys, keys_len) = key_log_arg(keylog);
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_pcap_summary_keyed(
+                bytes.as_ptr(),
+                bytes.len(),
+                limits,
+                keys,
+                keys_len,
+                &mut out,
+            )
+        };
+        taken(rc, out)
+    }
+
+    /// Drive the keyed session table the way C does.
+    fn call_session_table_keyed(
+        bytes: &[u8],
+        limits: c_int,
+        keylog: Option<&[u8]>,
+    ) -> Result<String, c_int> {
+        let (keys, keys_len) = key_log_arg(keylog);
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_pcap_session_table_keyed(
+                bytes.as_ptr(),
+                bytes.len(),
+                limits,
+                keys,
+                keys_len,
+                &mut out,
+            )
+        };
+        taken(rc, out)
     }
 
     /// R311y748 — AND THE BOUNDED DOOR MAKES THAT GROUP A MEASUREMENT.
@@ -9024,6 +9305,24 @@ mod tests {
                 call_fields_where_limited(&file, 0, "", "", WZ_DISSECT_LIMITS_LIVE_TAP)
                     .expect("reads"),
             ),
+            (
+                "wz_dissect_pcap_summary",
+                "wz_dissect_pcap_summary_keyed",
+                call_summary(&census).expect("reads"),
+                call_summary_keyed(&census, none, None).expect("reads"),
+            ),
+            (
+                "wz_dissect_pcap_summary_bounded",
+                "wz_dissect_pcap_summary_keyed",
+                call_summary_bounded(&census).expect("reads"),
+                call_summary_keyed(&census, WZ_DISSECT_LIMITS_LIVE_TAP, None).expect("reads"),
+            ),
+            (
+                "wz_dissect_pcap_session_table",
+                "wz_dissect_pcap_session_table_keyed",
+                session_table::call_pcap(&file, none).expect("reads"),
+                call_session_table_keyed(&file, none, None).expect("reads"),
+            ),
         ];
 
         let mut witnessed: Vec<(&str, &str)> = witnesses.iter().map(|w| (w.0, w.1)).collect();
@@ -9801,7 +10100,12 @@ mod tests {
         // 56, for `wz_dissect_transport_layout_e2e`: one symbol, the unit as
         // bytes and the profile as a C string in, a `char*` released by
         // `wz_dissect_string_free` out; no struct is new.
-        assert_eq!(wz_dissect_abi_version(), 56);
+        // 57, for `wz_dissect_pcap_summary_keyed`,
+        // `wz_dissect_pcap_session_table_keyed` and `wz_dissect_live_add_keylog`:
+        // three symbols, a key log's bytes in beside what the older doors take;
+        // the handle keeps the secrets it names and hands none back; no struct
+        // is new.
+        assert_eq!(wz_dissect_abi_version(), 57);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -10010,10 +10314,14 @@ mod tests {
         // 451 made of the census family, one family over. The count moved
         // because the ABI moved (16 -> 17), which is what this assertion asks
         // a reader to check rather than to update quietly.
+        // (ABI 57) — NINE. The two summary doors and the session table door
+        // joined the keyed doors, which take a key log beside everything they
+        // take and answer them byte for byte without one; each has its witness
+        // in `every_subsumed_door_has_a_witness_that_its_successor_answers_the_same_bytes`.
         assert_eq!(
-            subsumed, 6,
-            "item 451 counted five subsumed doors and R2766 made it six; a \
-             different number again means \
+            subsumed, 9,
+            "item 451 counted five subsumed doors, R2766 made it six and the \
+             keyed doors nine; a different number again means \
              the ABI moved and this comment is what should be re-read"
         );
     }
