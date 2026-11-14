@@ -11,6 +11,11 @@ pub struct Node;
 
 impl ::sce_forge_runtime::codec::Copying for Node {}
 
+// `compressed_batch`
+impl ::sce_forge_runtime::codec::HoldsBytes<super::compressed_batch::CompressedBatchPayloadField> for Node {
+    type Bytes = ::sce_forge_runtime::codec::InlineBytes<65535>;
+}
+
 // `decl_final`
 #[cfg(feature = "codec-declare")]
 impl ::sce_forge_runtime::codec::HoldsList<super::decl_final::DeclFinalExtensionsField> for Node {
@@ -227,6 +232,18 @@ impl ::sce_forge_runtime::codec::HoldsBytes<super::scout::ScoutZidField> for Nod
     type Bytes = ::sce_forge_runtime::codec::InlineBytes<16>;
 }
 
+// `scouting_hello`
+#[cfg(feature = "codec-hello")]
+impl ::sce_forge_runtime::codec::HoldsList<super::scouting_hello::ScoutingHelloExtensionsField> for Node {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
+// `scouting_scout`
+#[cfg(feature = "codec-scout")]
+impl ::sce_forge_runtime::codec::HoldsList<super::scouting_scout::ScoutingScoutExtensionsField> for Node {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
 // `serial_envelope`
 #[cfg(feature = "codec-serial")]
 impl ::sce_forge_runtime::codec::HoldsBytes<super::serial_envelope::SerialEnvelopePayloadField> for Node {
@@ -275,6 +292,11 @@ impl ::sce_forge_runtime::codec::HoldsList<super::transport_join::TransportJoinE
 // `transport_keep_alive`
 #[cfg(feature = "codec-keep-alive")]
 impl ::sce_forge_runtime::codec::HoldsList<super::transport_keep_alive::TransportKeepAliveExtensionsField> for Node {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
+// `transport_oam`
+impl ::sce_forge_runtime::codec::HoldsList<super::transport_oam::TransportOamExtensionsField> for Node {
     type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
 }
 
