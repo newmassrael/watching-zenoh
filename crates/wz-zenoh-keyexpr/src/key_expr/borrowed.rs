@@ -15,6 +15,8 @@
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-keyexpr 1.10.2, file
 // src/key_expr/borrowed.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
+#[cfg(feature = "internal")]
+use alloc::vec::Vec;
 use alloc::{
     borrow::{Borrow, ToOwned},
     format,
@@ -192,6 +194,248 @@ impl keyexpr {
             },
             None => Some(self), // no wildcard => return self
         }
+    }
+
+    /// Remove the specified `prefix` from `self`.
+    /// The result is a list of `keyexpr`, since there might be several ways for the prefix to match the beginning of the `self` key expression.
+    /// For instance, if `self` is `"a/**/c/*" and `prefix` is `a/b/c` then:
+    ///   - the `prefix` matches `"a/**/c"` leading to a result of `"*"` when stripped from `self`
+    ///   - the `prefix` matches `"a/**"` leading to a result of `"**/c/*"` when stripped from `self`
+    ///
+    /// So the result is `["*", "**/c/*"]`.
+    /// If `prefix` cannot match the beginning of `self`, an empty list is reuturned.
+    ///
+    /// See below more examples.
+    ///
+    /// NOTE: this operation can typically used in a backend implementation, within the `zenoh_backend_traits::Storage::on_query()` implementation,
+    /// to transform the received `Query::selector()`'s `key_expr` into a list of key selectors
+    /// that will match all the relevant stored keys (that correspond to keys stripped from the prefix).
+    ///
+    /// # Examples:
+    /// ```
+    /// # use zenoh_keyexpr::keyexpr;
+    /// assert_eq!(
+    ///     ["abc"],
+    ///     keyexpr::new("demo/example/test/abc").unwrap().strip_prefix(keyexpr::new("demo/example/test").unwrap()).as_slice()
+    /// );
+    /// assert_eq!(
+    ///     ["**"],
+    ///     keyexpr::new("demo/example/test/**").unwrap().strip_prefix(keyexpr::new("demo/example/test").unwrap()).as_slice()
+    /// );
+    /// assert_eq!(
+    ///     ["**"],
+    ///     keyexpr::new("demo/example/**").unwrap().strip_prefix(keyexpr::new("demo/example/test").unwrap()).as_slice()
+    /// );
+    /// assert_eq!(
+    ///     ["**"],
+    ///     keyexpr::new("**").unwrap().strip_prefix(keyexpr::new("demo/example/test").unwrap()).as_slice()
+    /// );
+    /// assert_eq!(
+    ///     ["**/xyz"],
+    ///     keyexpr::new("demo/**/xyz").unwrap().strip_prefix(keyexpr::new("demo/example/test").unwrap()).as_slice()
+    /// );
+    /// assert_eq!(
+    ///     ["**"],
+    ///     keyexpr::new("demo/**/test/**").unwrap().strip_prefix(keyexpr::new("demo/example/test").unwrap()).as_slice()
+    /// );
+    /// assert_eq!(
+    ///     ["xyz", "**/ex$*/*/xyz"],
+    ///     keyexpr::new("demo/**/ex$*/*/xyz").unwrap().strip_prefix(keyexpr::new("demo/example/test").unwrap()).as_slice()
+    /// );
+    /// assert_eq!(
+    ///     ["*", "**/test/*"],
+    ///     keyexpr::new("demo/**/test/*").unwrap().strip_prefix(keyexpr::new("demo/example/test").unwrap()).as_slice()
+    /// );
+    /// assert!(
+    ///     keyexpr::new("demo/example/test/**").unwrap().strip_prefix(keyexpr::new("not/a/prefix").unwrap()).is_empty()
+    /// );
+    /// ```
+    #[cfg(feature = "internal")]
+    #[doc(hidden)]
+    pub fn strip_prefix(&self, prefix: &Self) -> Vec<&keyexpr> {
+        // The cuts of `self` are tried from the longest to the shortest, and the list is kept free
+        // of a remainder another one includes. That order and `swap_remove` decide the order of the
+        // list, which a caller that matches on its slice sees, so both are upstream's.
+        let text = self.as_str();
+        let mut result: Vec<&keyexpr> = Vec::new();
+        'cuts: for i in (0..=text.len()).rev() {
+            let at_a_cut = if i == text.len() {
+                text.ends_with("**")
+            } else {
+                text.as_bytes()[i] == b'/'
+            };
+            if !at_a_cut {
+                continue;
+            }
+            // SAFETY: `i` is the end of `self` or the place of a `/`, never 0 (a key expression
+            // does not start with `/`), so the head is a non-empty run of whole chunks of a canon
+            // key expression; every rule of the language holds within a chunk or between two
+            // neighbouring chunks, so such a run is a canon key expression.
+            let head = unsafe { keyexpr::from_str_unchecked(&text[..i]) };
+            if !head.intersects(prefix) {
+                continue;
+            }
+            // A head that ends with `**` may have matched the prefix with fewer chunks than it has,
+            // so that `**` stays with the remainder.
+            let rest = if head.as_str().ends_with("**") {
+                &text[i - 2..]
+            } else {
+                &text[i + 1..]
+            };
+            // SAFETY: `rest` starts at a chunk (after a `/`, or at the `**` chunk that ends the
+            // head) and runs to the end, so it is a non-empty run of whole chunks, which is a canon
+            // key expression for the reason above.
+            let rest = unsafe { keyexpr::from_str_unchecked(rest) };
+            // `**` includes every remainder: it is the whole answer.
+            if rest.as_str() == "**" {
+                result.clear();
+                result.push(rest);
+                return result;
+            }
+            for j in (0..result.len()).rev() {
+                if result[j].includes(rest) {
+                    continue 'cuts;
+                }
+                if rest.includes(result[j]) {
+                    result.swap_remove(j);
+                }
+            }
+            result.push(rest);
+        }
+        result
+    }
+
+    /// Remove the specified namespace `prefix` from `self`.
+    ///
+    /// This method works essentially like [`keyexpr::strip_prefix()`], but returns only the longest possible suffix.
+    /// Prefix can not contain '*' character.
+    #[cfg(feature = "internal")]
+    #[doc(hidden)]
+    pub fn strip_nonwild_prefix(&self, prefix: &nonwild_keyexpr) -> Option<&keyexpr> {
+        /// Whether the chunk `target`, which may hold wildcards, matches the verbatim chunk
+        /// `prefix`.
+        fn is_chunk_matching(target: &[u8], prefix: &[u8]) -> bool {
+            let mut target_idx: usize = 0;
+            let mut prefix_idx: usize = 0;
+            let mut target_prev: u8 = b'/';
+            if prefix.first() == Some(&b'@') && target.first() != Some(&b'@') {
+                // verbatim chunk can only be matched by verbatim chunk
+                return false;
+            }
+
+            while target_idx < target.len() && prefix_idx < prefix.len() {
+                if target[target_idx] == b'*' {
+                    if target_prev == b'*' || target_idx + 1 == target.len() {
+                        // either a ** wild chunk or a single * chunk at the end of the string - this matches anything
+                        return true;
+                    } else if target_prev == b'$' {
+                        for i in prefix_idx..prefix.len() - 1 {
+                            if is_chunk_matching(&target[target_idx + 1..], &prefix[i..]) {
+                                return true;
+                            }
+                        }
+                    }
+                } else if target[target_idx] == prefix[prefix_idx] {
+                    prefix_idx += 1;
+                } else if target[target_idx] != b'$' {
+                    // non-special character, which do not match the one in prefix
+                    return false;
+                }
+                target_prev = target[target_idx];
+                target_idx += 1;
+            }
+            if prefix_idx != prefix.len() {
+                // prefix was not matched entirely
+                return false;
+            }
+            target_idx == target.len()
+                || (target_idx + 2 == target.len() && target[target_idx] == b'$')
+        }
+
+        /// The suffix of `target_bytes` left once `prefix_bytes` is matched from its start, chunk
+        /// by chunk, or `None` when it does not match.
+        fn strip_nonwild_prefix_inner<'a>(
+            target_bytes: &'a [u8],
+            prefix_bytes: &[u8],
+        ) -> Option<&'a keyexpr> {
+            let mut target_idx = 0;
+            let mut prefix_idx = 0;
+
+            while target_idx < target_bytes.len() && prefix_idx < prefix_bytes.len() {
+                let target_end = target_idx
+                    + target_bytes[target_idx..]
+                        .iter()
+                        .position(|&i| i == b'/')
+                        .unwrap_or(target_bytes.len() - target_idx);
+                let prefix_end = prefix_idx
+                    + prefix_bytes[prefix_idx..]
+                        .iter()
+                        .position(|&i| i == b'/')
+                        .unwrap_or(prefix_bytes.len() - prefix_idx);
+                let target_chunk = &target_bytes[target_idx..target_end];
+                if target_chunk.len() == 2 && target_chunk[0] == b'*' {
+                    let remaining_prefix = &prefix_bytes[prefix_idx..];
+                    return match remaining_prefix.iter().position(|&x| x == b'@') {
+                        Some(mut p) => {
+                            if target_end + 1 >= target_bytes.len() {
+                                // "**" is the last chunk, and it is not allowed to match @verbatim chunks, so we stop here
+                                None
+                            } else {
+                                loop {
+                                    // try to use "**" to match as many non-verbatim chunks as possible
+                                    if let Some(ke) = strip_nonwild_prefix_inner(
+                                        &target_bytes[(target_end + 1)..],
+                                        &remaining_prefix[p..],
+                                    ) {
+                                        return Some(ke);
+                                    } else if p == 0 {
+                                        // "**" is not allowed to match @verbatim chunks
+                                        return None;
+                                    } else {
+                                        // search for the beginning of the next chunk from the end
+                                        p -= 2;
+                                        while p > 0 && remaining_prefix[p - 1] != b'/' {
+                                            p -= 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // SAFETY: `target_idx` is the start of a chunk of a key expression, so
+                        // what follows it is a non-empty run of whole chunks, a key expression.
+                        None => unsafe {
+                            // "**" can match all remaining non-verbatim chunks
+                            Some(keyexpr::from_str_unchecked(core::str::from_utf8_unchecked(
+                                &target_bytes[target_idx..],
+                            )))
+                        },
+                    };
+                }
+                if target_end == target_bytes.len() {
+                    // target contains no more chunks than prefix and the last one is non double-wild - so it can not match
+                    return None;
+                }
+                let prefix_chunk = &prefix_bytes[prefix_idx..prefix_end];
+                if !is_chunk_matching(target_chunk, prefix_chunk) {
+                    return None;
+                }
+                if prefix_end == prefix_bytes.len() {
+                    // SAFETY: `target_end` is the place of a `/` (the end of the target was
+                    // refused above), so what follows it is a non-empty run of whole chunks of a
+                    // key expression, a key expression.
+                    return unsafe {
+                        Some(keyexpr::from_str_unchecked(core::str::from_utf8_unchecked(
+                            &target_bytes[(target_end + 1)..],
+                        )))
+                    };
+                }
+                target_idx = target_end + 1;
+                prefix_idx = prefix_end + 1;
+            }
+            None
+        }
+
+        strip_nonwild_prefix_inner(self.as_str().as_bytes(), prefix.as_str().as_bytes())
     }
 
     /// The chunks of the key expression.

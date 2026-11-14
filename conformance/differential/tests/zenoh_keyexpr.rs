@@ -111,6 +111,30 @@ macro_rules! cases {
                 let ke = keyexpr::new(s).unwrap();
                 (format!("{ke:?}"), format!("{ke}"))
             }
+
+            pub fn nonwild_prefix(s: &str) -> Option<String> {
+                keyexpr::new(s)
+                    .unwrap()
+                    .get_nonwild_prefix()
+                    .map(|k| k.to_string())
+            }
+
+            /// The list in the order the crate gives it: a caller matches on its slice.
+            pub fn strip_prefix(target: &str, prefix: &str) -> Vec<String> {
+                let (target, prefix) =
+                    (keyexpr::new(target).unwrap(), keyexpr::new(prefix).unwrap());
+                target
+                    .strip_prefix(prefix)
+                    .iter()
+                    .map(|k| k.to_string())
+                    .collect()
+            }
+
+            pub fn strip_nonwild_prefix(target: &str, prefix: &str) -> Option<String> {
+                let target = keyexpr::new(target).unwrap();
+                let prefix = nonwild_keyexpr::new(prefix).unwrap();
+                target.strip_nonwild_prefix(prefix).map(|k| k.to_string())
+            }
         }
     };
 }
@@ -363,4 +387,73 @@ fn the_generator_of_wz_makes_key_expressions_that_are_already_canon() {
             "upstream changes `{s}`"
         );
     }
+}
+
+/// The prefix-stripping items of the `internal` feature, which upstream's `zenoh` turns on for this
+/// crate in every build and its storage manager calls through `zenoh::key_expr::keyexpr`: every key
+/// expression of a small alphabet, and a generator's longer ones, against every short prefix. The
+/// list of `strip_prefix` is compared in its order, since a caller matches on its slice, and every
+/// remainder either crate gives is a key expression upstream's parser accepts.
+#[test]
+fn both_crates_strip_every_short_prefix_alike() {
+    let targets = valid(&['a', 'b', '/', '*', '$', '@'], 6);
+    let prefixes = valid(&['a', 'b', '/', '*', '@'], 3);
+    let nonwild: Vec<&String> = prefixes
+        .iter()
+        .filter(|p| c_wz::nonwild(p) == Some(true))
+        .collect();
+    let mut rng = StdRng::seed_from_u64(0x7374_7269_7020);
+    let generated: Vec<String> = wz_keyexpr::fuzzer::KeyExprFuzzer(&mut rng)
+        .take(400)
+        .map(|k| k.to_string())
+        .collect();
+    let (mut several, mut stripped, mut refused) = (0usize, 0usize, 0usize);
+    for target in targets.iter().chain(&generated) {
+        assert_eq!(
+            c_up::nonwild_prefix(target),
+            c_wz::nonwild_prefix(target),
+            "the non-wild prefix of `{target}`"
+        );
+        for prefix in &prefixes {
+            let wz = c_wz::strip_prefix(target, prefix);
+            assert_eq!(
+                c_up::strip_prefix(target, prefix),
+                wz,
+                "`{target}` without `{prefix}`"
+            );
+            several += usize::from(wz.len() > 1);
+            for rest in &wz {
+                assert_eq!(
+                    c_up::parse(rest),
+                    Ok(()),
+                    "`{rest}`, of `{target}` without `{prefix}`"
+                );
+            }
+        }
+        for prefix in &nonwild {
+            let wz = c_wz::strip_nonwild_prefix(target, prefix);
+            assert_eq!(
+                c_up::strip_nonwild_prefix(target, prefix),
+                wz,
+                "`{target}` without the namespace `{prefix}`"
+            );
+            match &wz {
+                Some(rest) => {
+                    stripped += 1;
+                    assert_eq!(
+                        c_up::parse(rest),
+                        Ok(()),
+                        "`{rest}`, of `{target}` without the namespace `{prefix}`"
+                    );
+                }
+                None => refused += 1,
+            }
+        }
+    }
+    // A comparison over nothing would pass: the inputs reach a list of several remainders, and a
+    // namespace both stripped and refused.
+    assert!(
+        several > 0 && stripped > 0 && refused > 0,
+        "several {several}, stripped {stripped}, refused {refused}"
+    );
 }
