@@ -259,7 +259,7 @@ impl SnapshotService {
         messages: impl Fn() -> NodeMessageReading + Send + 'static,
     ) -> tokio::task::JoinHandle<()> {
         let service = Arc::clone(self);
-        runtime.spawn(async move {
+        runtime.spawn(crate::runtime_pool::in_caller_span(async move {
             let mut source = HostResourceSource::new();
             loop {
                 service.poll(&mut source, &messages);
@@ -270,7 +270,7 @@ impl SnapshotService {
                 // millisecond, so a source that is slow cannot make this loop spin.
                 tokio::time::sleep(service.due_in().max(Duration::from_millis(1))).await;
             }
-        })
+        }))
     }
 }
 

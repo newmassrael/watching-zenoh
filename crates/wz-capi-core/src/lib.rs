@@ -56,6 +56,8 @@
 /// The one cancellation token both C ABIs hand out: the port's (`wz_capi_port::cancellation`),
 /// where every engine that issues a get registers with it. Re-exported under its old path.
 pub use wz_capi_port::cancellation;
+// The span of a session's opener, carried across the drive's threads and onto its tasks.
+mod caller_span;
 pub mod codec;
 pub mod drive;
 pub mod encoding_ids;

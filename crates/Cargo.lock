@@ -2967,6 +2967,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-util"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-vsock"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3777,6 +3791,7 @@ dependencies = [
  "zenoh-result",
  "zenoh-runtime",
  "zenoh-shm",
+ "zenoh-task",
  "zenoh-util",
 ]
 
@@ -3902,6 +3917,8 @@ dependencies = [
  "getrandom 0.2.17",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "wz-auth",
  "wz-capi-port",
  "wz-codecs",
@@ -4394,6 +4411,7 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-vsock",
  "tracing",
+ "tracing-subscriber",
  "walkdir",
  "webpki-roots",
  "windows-sys 0.61.2",
@@ -4677,6 +4695,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uhlc",
  "wz-capi-core",
  "wz-capi-port",
@@ -4694,6 +4713,7 @@ dependencies = [
  "zenoh-result",
  "zenoh-runtime",
  "zenoh-shm",
+ "zenoh-task",
  "zenoh-util",
 ]
 
@@ -4853,6 +4873,18 @@ dependencies = [
  "zenoh-core",
  "zenoh-macros",
  "zenoh-result",
+]
+
+[[package]]
+name = "zenoh-task"
+version = "1.10.2"
+dependencies = [
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "zenoh-core",
+ "zenoh-runtime",
 ]
 
 [[package]]

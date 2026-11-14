@@ -567,10 +567,13 @@ fn whatami_words() -> Vec<&'static str> {
 }
 
 /// The mode words a `consolidation_name` label can hold, walked from
-/// `ConsolidationMode::wire_word` over every value the byte can take rather
-/// than written down a second time.
+/// `ConsolidationMode::wire_word` rather than written down a second time.
+///
+/// The field is a z64 and its whole range cannot be walked, so the walk covers
+/// the values whose z64 is one byte: zenoh numbers its modes 0..=3, and
+/// `query_mode`'s own test holds `wire_word` to no word at 0x80 and above.
 fn consolidation_words() -> Vec<&'static str> {
-    (0..=u64::from(u8::MAX))
+    (0..0x80u64)
         .filter_map(crate::query_mode::ConsolidationMode::wire_word)
         .collect()
 }

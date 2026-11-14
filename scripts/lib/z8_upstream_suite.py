@@ -63,6 +63,7 @@ FAMILY = {
     "zenoh-result": "wz-zenoh-result",
     "zenoh-runtime": "wz-zenoh-runtime",
     "zenoh-shm": "wz-zenoh-shm",
+    "zenoh-task": "wz-zenoh-task",
     "zenoh-util": "wz-zenoh-util",
 }
 

@@ -3870,6 +3870,7 @@ where
                                 opened,
                                 Arc::clone(&spawn.forwarder),
                             )));
+                            let drive = crate::runtime_pool::in_caller_span(drive);
                             let task = match spawn.on {
                                 SpawnOn::Workers => spawned_drives.spawn(drive),
                                 SpawnOn::LocalSet => spawned_drives.spawn_local(drive),

@@ -33,6 +33,7 @@ use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptions;
 
 use super::RouterState;
+use crate::caller_span::CallerSpan;
 
 /// A job that runs `tick` every period on a thread of its own, until `tick` answers `false` or this
 /// is dropped. Dropping tells the thread, which ends at its next wake and is not waited for: the
@@ -47,6 +48,8 @@ impl PeriodicJob {
     pub fn start(period: Duration, tick: Arc<dyn Fn() -> bool + Send + Sync>) -> Option<Self> {
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let waiting = Arc::clone(&stop);
+        // Each tick runs in the span current where the job is started.
+        let starter = CallerSpan::current();
         std::thread::Builder::new()
             .name("wz-node-periodic".into())
             .spawn(move || {
@@ -60,7 +63,7 @@ impl PeriodicJob {
                         return;
                     }
                     drop(guard);
-                    if !tick() {
+                    if !starter.in_scope(&*tick) {
                         return;
                     }
                 }

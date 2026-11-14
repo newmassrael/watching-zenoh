@@ -923,7 +923,7 @@ impl RequestQueryBuilder {
         if let RequestOwnedVariant::CodecZenohQuery(ref mut query) = request.body {
             if let Some(mode) = self.consolidation {
                 query.header |= 0x20;
-                query.consolidation = Some(mode.wire_byte());
+                query.consolidation = Some(u64::from(mode.wire_byte()));
             }
             if let Some(params) = self.parameters {
                 query.header |= 0x40;

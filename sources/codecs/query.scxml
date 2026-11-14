@@ -26,11 +26,18 @@
      Wire shape (1+ bytes):
        byte 0   : header     (MID 0x03 in bits 0..4 + Q_C@5 + Q_P@6 +
                               Z@7) — header.Q_C gates the inline
-                              consolidation byte; header.Q_P gates the
+                              consolidation mode; header.Q_P gates the
                               parameters slice; header.Z signals the
                               ext chain follows.
        Q_C-gated:
-         byte 1 : consolidation (uint8 0..3)
+         bytes  : consolidation (VLE u64). Upstream writes and reads the
+                  mode as a z64 (`commons/zenoh-codec/src/zenoh/query.rs` @
+                  `let v: u64 = self.read(&mut *reader)?;`) and falls back
+                  to Auto for a value it does not number, so a value of 0x80
+                  or more is two bytes or longer, and a reader of one byte
+                  would take its continuation byte for the next field. The
+                  modes upstream sends (0..3) are one byte either way, which
+                  is also what zenoh-pico's `_z_uint8_encode` writes.
        Q_P-gated:
          bytes  : parameters_len (VLE u64) + parameters (UTF-8 bytes,
                                                           no bound)
@@ -125,7 +132,7 @@
       <sce:flag name="P"   bit="6"/>
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
-    <sce:field id="consolidation" sce:type="uint8" sce:byte="1" sce:bit-size="8"
+    <sce:field id="consolidation" sce:type="uint64" sce:byte="1" sce:bit-size="vle"
                sce:present-if="header.C"/>
     <sce:field id="parameters_len" sce:type="uint64" sce:byte="2" sce:bit-size="vle"
                sce:present-if="header.P"/>

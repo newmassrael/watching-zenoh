@@ -643,7 +643,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             .core
             .iteration_work
             .register(&RegisteredDrain::of(drain));
-        runtime.spawn(consume(lane.clone(), cell.clone()));
+        runtime.spawn(crate::runtime_pool::in_caller_span(consume(
+            lane.clone(),
+            cell.clone(),
+        )));
         Ok(OffloadedSubscriber {
             subscriber: Some(subscriber),
             lane,

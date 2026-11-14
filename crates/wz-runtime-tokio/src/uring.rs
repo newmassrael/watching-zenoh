@@ -51,8 +51,19 @@
 //! on Linux now selects this path (`StreamReadDriver::choose_ring`, over
 //! `crate::uring_reactor`), as upstream's `rx_task_uring` does for a link whose
 //! `get_fd` answers; the paragraph above is what this header said when only the
-//! adapter existed. The one link upstream puts on its ring that wz does not is
-//! UDP, which is open-debt item 583's.
+//! adapter existed. A dialed (connected) UDP link selects it too
+//! (`UdpReadDriver`'s own choice), so every link upstream puts on its ring is on
+//! this one:
+//!
+//! | link | `READ_FIXED` into a slot carries | cut by |
+//! |---|---|---|
+//! | TCP, unix-domain stream, unixpipe, vsock | any run of the byte stream | the length prefixes, across reads |
+//! | connected UDP | exactly one datagram | nothing: the read is the frame |
+//!
+//! The datagram row needs no other submission: a read of a datagram socket
+//! returns one datagram, and a slot is wider than any, so a read that fills it
+//! is the one sign of a truncation. `crate::uring_reactor` gives the framing
+//! and why upstream's multishot receive over provided buffers is not adopted.
 //!
 //! ⚠ R2747 — THIS PARAGRAPH USED TO PRESCRIBE THE REPAIR, AND THE
 //! PRESCRIPTION WAS WRONG. It said selecting the path "needs the length-prefix

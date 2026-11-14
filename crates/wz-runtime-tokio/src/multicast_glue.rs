@@ -1607,7 +1607,7 @@ where
     // R2333 — the stop channel. `false` is the resting value; the loop watches for
     // a CHANGE, so the initial value is never mistaken for a stop.
     let (signal, mut shutdown) = tokio::sync::watch::channel(false);
-    let task = pool.spawn(async move {
+    let task = pool.spawn(crate::runtime_pool::in_caller_span(async move {
         serve_group_face(
             GroupFaceSpec {
                 label,
@@ -1630,7 +1630,7 @@ where
             |_| {},
         )
         .await
-    });
+    }));
     McastFaceStop { signal, task }
 }
 

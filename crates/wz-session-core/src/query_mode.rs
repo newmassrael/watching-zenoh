@@ -47,6 +47,10 @@ impl ConsolidationMode {
     /// 0 is reachable only by ELIDING the field, which is what an unset Q_C
     /// flag means to both upstreams' decoders.
     ///
+    /// The field itself is a z64 (`commons/zenoh-codec/src/zenoh/query.rs` @
+    /// `let v: u64 = match x {`), and the codecs carry it as a `u64`; every
+    /// value this returns is below 0x80, so its z64 is this one byte.
+    ///
     /// R311y837 — THIS MOVED, AND IT MOVED ONTO MEASURED GROUND. R311y836 named
     /// the divergence and left the mapping on pico's numbering; the byte was
     /// then witnessed on both planes by execution, one real foreign encoder per
@@ -116,9 +120,14 @@ impl ConsolidationMode {
     /// This one answers what the byte SAYS, and `0` says `Auto`.
     ///
     /// Any other value has no word. Zenoh's decoder falls back to `Auto` for
-    /// it, but that is what the decoder does with a byte it cannot read, not
-    /// what the byte means, so naming it `Auto` would describe a mode the
+    /// it, but that is what the decoder does with a value it cannot read, not
+    /// what the value means, so naming it `Auto` would describe a mode the
     /// sender never wrote.
+    ///
+    /// The argument is the whole z64 the field carries, not its first byte:
+    /// upstream reads the field as a z64 (`commons/zenoh-codec/src/zenoh/query.rs`
+    /// @ `let v: u64 = self.read(&mut *reader)?;`), so `0x80` is a value of two
+    /// bytes with no word, not a byte `0x80` followed by another field.
     ///
     /// The numbering is zenoh's, for the reason [`wire_byte`](Self::wire_byte)
     /// gives. A stock zenoh-pico sender encodes its API enum raw, one slot

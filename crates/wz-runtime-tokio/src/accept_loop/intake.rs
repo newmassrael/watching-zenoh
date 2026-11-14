@@ -139,7 +139,7 @@ impl Handshakes {
         match self {
             Self::Polled(set) => set.push(ending),
             Self::Tasks(set) => {
-                set.spawn(ending);
+                set.spawn(crate::runtime_pool::in_caller_span(ending));
             }
         }
     }
@@ -261,7 +261,7 @@ impl Intake {
             IntakeOn::LoopTask => Running::Polled(Box::pin(intake)),
             IntakeOn::OwnTasks => {
                 let mut task = tokio::task::JoinSet::new();
-                task.spawn(intake);
+                task.spawn(crate::runtime_pool::in_caller_span(intake));
                 Running::Task(task)
             }
         };

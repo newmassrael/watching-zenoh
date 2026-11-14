@@ -37,6 +37,8 @@ use wz_session_core::reply::ReplyRegistry;
 use wz_session_core::reply_acceptance::{ReplyAcceptance, ReplyKeyExpr};
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink, ReplyView};
 
+use crate::caller_span::CallerSpan;
+
 /// What a liveliness subscriber of the face is called with, on the face's thread.
 pub type LivelinessHandler = Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static>;
 
@@ -486,45 +488,50 @@ impl LocalLiveliness {
     pub(super) fn start(router: Weak<RouterForwarder>) -> std::io::Result<(Self, LocalFaceSink)> {
         let (commands, received) = mpsc::channel::<Command>();
         let asked = router.clone();
+        // Taken on the opener's thread, as the node's own thread takes it.
+        let opener = CallerSpan::current();
         let thread = std::thread::Builder::new()
             .name("wz-router-local".to_owned())
             .spawn(move || {
-                // The thread of a face, as the thread of any other: it runs inside a
-                // single-threaded runtime, which is how a program that is handed an item here
-                // knows it must not wait on this thread for anything and queues the item for a
-                // worker of its own (see the callback context of the top crate).
-                let runtime = tokio::runtime::Builder::new_current_thread().build().ok();
-                let _inside = runtime.as_ref().map(tokio::runtime::Runtime::enter);
-                let mut state = State::new(router);
-                loop {
-                    // The next command, or the moment the first query that waits for an answer
-                    // runs out of time, whichever comes first.
-                    let command = match state.queries.next_deadline_ms() {
-                        Some(deadline) => {
-                            let wait = deadline.saturating_sub(state.now_ms());
-                            match received.recv_timeout(std::time::Duration::from_millis(wait)) {
+                opener.in_scope(|| {
+                    // The thread of a face, as the thread of any other: it runs inside a
+                    // single-threaded runtime, which is how a program that is handed an item here
+                    // knows it must not wait on this thread for anything and queues the item for a
+                    // worker of its own (see the callback context of the top crate).
+                    let runtime = tokio::runtime::Builder::new_current_thread().build().ok();
+                    let _inside = runtime.as_ref().map(tokio::runtime::Runtime::enter);
+                    let mut state = State::new(router);
+                    loop {
+                        // The next command, or the moment the first query that waits for an answer
+                        // runs out of time, whichever comes first.
+                        let command = match state.queries.next_deadline_ms() {
+                            Some(deadline) => {
+                                let wait = deadline.saturating_sub(state.now_ms());
+                                match received.recv_timeout(std::time::Duration::from_millis(wait))
+                                {
+                                    Ok(command) => Some(command),
+                                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                }
+                            }
+                            None => match received.recv() {
                                 Ok(command) => Some(command),
-                                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                Err(_) => break,
+                            },
+                        };
+                        match command {
+                            Some(command) => {
+                                if !state.handle(command) {
+                                    break;
+                                }
                             }
-                        }
-                        None => match received.recv() {
-                            Ok(command) => Some(command),
-                            Err(_) => break,
-                        },
-                    };
-                    match command {
-                        Some(command) => {
-                            if !state.handle(command) {
-                                break;
+                            None => {
+                                let now = state.now_ms();
+                                state.queries.sweep_timed_out(now);
                             }
-                        }
-                        None => {
-                            let now = state.now_ms();
-                            state.queries.sweep_timed_out(now);
                         }
                     }
-                }
+                })
             })?;
         let told = commands.clone();
         let ingresses = Ingresses::default();

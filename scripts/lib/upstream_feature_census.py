@@ -245,12 +245,19 @@ ANSWERS: tuple[tuple[str, str | None, str], ...] = (
     (
         "tracing-instrument",
         "tracing-instrument",
-        "the facade's forwarding feature, to `zenoh-runtime`'s: the caller's "
-        "tracing span rides onto the runtime a future is spawned on. An "
-        "instrumentation axis, not a protocol capability, and the one the "
-        "family crates carried before the facade did: `zenoh-runtime`'s own "
-        "test runs the spawn with the feature on and off, so a feature that "
-        "toggles nothing would red there",
+        "the facade's forwarding feature, to `zenoh-runtime`'s, `zenoh-task`'s "
+        "and the engine's (`wz-capi-core`, `wz-runtime-tokio`): the caller's "
+        "tracing span rides onto the runtime a future is spawned on, for every "
+        "spawn of the family's pool, of a `TaskController` or "
+        "`TerminatableTask`, and of the engine, whose drive takes the span "
+        "current at `open` (or at a scout) onto the threads and local tasks it "
+        "runs the session on (`caller_span::CallerSpan`) and whose runtime "
+        "spawns carry it on (`runtime_pool::in_caller_span`), as upstream's "
+        "`open` spawns its transport tasks from the caller's context. An "
+        "instrumentation axis, not a protocol capability: each of those crates' "
+        "tests runs a spawn with the feature on and off, and the facade's opens "
+        "a session inside a span and finds its faces' spans under it exactly "
+        "when the feature is on",
     ),
     (
         "unstable",
@@ -268,9 +275,14 @@ ANSWERS: tuple[tuple[str, str | None, str], ...] = (
         "the io_uring fixed-buffer read adapter (`uring.rs`) and the reactor "
         "that drives it (`uring_reactor.rs`); on Linux a TCP, unix-domain "
         "stream, unixpipe or vsock link picks the ring body when the feature "
-        "is on (`StreamReadDriver::choose_ring`), as upstream's "
+        "is on (`StreamReadDriver::choose_ring`), and so does a dialed, "
+        "connected UDP link (`UdpReadDriver`), as upstream's "
         "`rx_task_uring` dispatch picks it for a link whose `get_fd` answers "
-        "(`link_ring_fd.rs` holds the table row by row). ARRIVED in 1.10.0 and was judged "
+        "(`link_ring_fd.rs` holds the table row by row). The reactor cuts a "
+        "stream link's completions by its length prefixes and hands a "
+        "datagram link's up one datagram per frame, upstream's "
+        "`setup_fragmented_read` and `setup_read`; an unconnected UDP socket "
+        "stays off the ring on both sides. ARRIVED in 1.10.0 and was judged "
         "UNANSWERED at R2230 on the belief that wz had no io_uring path and "
         "that `uring.rs` shared only a name with it; both were wrong, and the "
         "module headers that said no link selects it were stale too. It adds "
@@ -290,24 +302,7 @@ ANSWERS: tuple[tuple[str, str | None, str], ...] = (
 # states the part that is not, citing the register item that owns it. This is not the depth axis
 # (open-debt item 200), which says of EVERY answered row that wz's counterpart may be shallower
 # than upstream's: a PARTIAL row is one whose missing part is KNOWN and named.
-PARTIAL: dict[str, str] = {
-    "tracing-instrument": (
-        "open-debt item 201 owns the half that is not here: upstream's feature "
-        "also forwards to `zenoh-task`, which the family has no crate for, and "
-        "its transport and routing tasks run on the engine, whose spawns on "
-        "`wz-runtime-tokio` carry no span. What is here is the spawns the "
-        "facade makes through `ZRuntime`"
-    ),
-    "uring": (
-        "open-debt item 583 owns the link that is not on the ring: upstream "
-        "hands it the fd of its TCP, unix-domain stream, unixpipe, vsock and "
-        "connected UDP links (the TLS, QUIC, serial and WebSocket links answer "
-        "`get_fd` with an error), and wz hands it all of those but UDP, "
-        "which is a datagram link with no length prefix for the stream body "
-        "to frame by and would need upstream's multishot, provided-buffer "
-        "shape, which `runtime-tokio-uring`'s design row does not choose"
-    ),
-}
+PARTIAL: dict[str, str] = {}
 
 # The shape a note must have to hand a row's residue to the register. Checked,
 # not trusted: an UNANSWERED row whose note cites nothing is a gap with no owner.

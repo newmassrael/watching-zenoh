@@ -62,6 +62,7 @@ use wz_runtime_tokio::startup_phase::{
     drive_connect_phase, endpoint_schedule, PhaseBudget, PhasePolicy,
 };
 
+use crate::caller_span::CallerSpan;
 #[cfg(feature = "peer")]
 use crate::faces::{CApiForwarder, GossipSetup};
 use crate::faces::{OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID};
@@ -846,7 +847,10 @@ where
     // Onto the session's OWN runtime, named as a handle and not through the ambient spelling:
     // this node builds one runtime per session ([`open_blocking`]) and has no part in the
     // `WZ_RUNTIME` subsystem partition, so there is no subsystem for the task to name.
-    tokio::runtime::Handle::current().spawn(Pausable::new(gate.clone(), future))
+    tokio::runtime::Handle::current().spawn(Pausable::new(
+        gate.clone(),
+        CallerSpan::current().carry(future),
+    ))
 }
 
 /// Spawn the leg of one endpoint (its dial, its re-dials and its face), where the session's
@@ -861,7 +865,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     match gate.face_drive() {
-        FaceDrive::Serial => tokio::task::spawn_local(future),
+        FaceDrive::Serial => tokio::task::spawn_local(CallerSpan::current().carry(future)),
         FaceDrive::PerFace => spawn_gated(gate, future),
     }
 }
@@ -922,6 +926,9 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    // The face's thread is polled in the span its leg runs in, as is the fallback that polls it
+    // here.
+    let future = CallerSpan::current().carry(future);
     // Handed to the thread through a slot, so that when no thread starts the future is still
     // here to be run another way.
     let slot = Arc::new(StdMutex::new(Some(future)));
@@ -2321,14 +2328,16 @@ async fn drive_peer(
                     if let Some((plan, link)) = scout {
                         let mut scout_closing = closing_rx.clone();
                         let scout_zid = zid.clone();
-                        faces.push(tokio::task::spawn_local(async move {
-                            tokio::select! {
-                                _ = link.autoconnect(&plan, &scout_zid, &intents_tx) => {}
-                                _ = scout_closing.wait_for(|c| *c) => {}
-                            }
-                        }));
+                        faces.push(tokio::task::spawn_local(CallerSpan::current().carry(
+                            async move {
+                                tokio::select! {
+                                    _ = link.autoconnect(&plan, &scout_zid, &intents_tx) => {}
+                                    _ = scout_closing.wait_for(|c| *c) => {}
+                                }
+                            },
+                        )));
                     }
-                    faces.push(tokio::task::spawn_local(scouted_connector(ScoutedPeers {
+                    let connector = scouted_connector(ScoutedPeers {
                         configured: endpoints.clone(),
                         intents,
                         own_zid: zid,
@@ -2339,7 +2348,10 @@ async fn drive_peer(
                         window: window.clone(),
                         releases_window: waits_for_scouted,
                         closing: closing_rx.clone(),
-                    })));
+                    });
+                    faces.push(tokio::task::spawn_local(
+                        CallerSpan::current().carry(connector),
+                    ));
                 }
             }
             if failed {
@@ -2993,12 +3005,12 @@ fn spawn_accept_leg(
     } = leg;
     let shared = shared.clone();
     let gate = gate.clone();
-    tokio::task::spawn_local(async move {
+    tokio::task::spawn_local(CallerSpan::current().carry(async move {
         accept_faces(listening, offer, clock, shared, index, &gate, async move {
             let _ = closing.wait_for(|c| *c).await;
         })
         .await;
-    })
+    }))
 }
 
 /// An endpoint of `listen` the bind phase left to the background: still to be bound, on its own
@@ -3113,7 +3125,7 @@ impl LateBinds {
                 let (shared, gate) = (shared.clone(), gate.clone());
                 let (locators, bound_before) = (locators.clone(), bound_before.clone());
                 let mut closing = closing.clone();
-                tokio::task::spawn_local(async move {
+                tokio::task::spawn_local(CallerSpan::current().carry(async move {
                     let bound = retry_until_bound(pending.schedule, |_| {
                         bind_one(&pending.endpoint, &tls, &zid, link_conf, whatami)
                     });
@@ -3140,7 +3152,7 @@ impl LateBinds {
                         },
                     )
                     .await;
-                })
+                }))
             })
             .collect()
     }
@@ -3169,7 +3181,7 @@ impl LateBinds {
                         let (tls, zid) = (tls.clone(), zid.clone());
                         let locators = locators.clone();
                         let (shared, bound_before) = (shared.clone(), bound_before.clone());
-                        tokio::task::spawn_local(async move {
+                        tokio::task::spawn_local(CallerSpan::current().carry(async move {
                             let listening = retry_until_bound(pending.schedule, |_| {
                                 bind_one(&pending.endpoint, &tls, &zid, link_conf, whatami)
                             })
@@ -3184,7 +3196,7 @@ impl LateBinds {
                                 &listening.listener,
                             );
                             std::future::pending::<()>().await;
-                        })
+                        }))
                     })
                     .collect();
                 for task in held {
@@ -3807,7 +3819,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                 .enumerate()
                 .map(|(index, group)| {
                     let (shared, stop, up) = (shared.clone(), stop_rx.clone(), up_tx.clone());
-                    tokio::task::spawn_local(async move {
+                    tokio::task::spawn_local(CallerSpan::current().carry(async move {
                         let ResolvedGroup {
                             endpoint,
                             is_shm,
@@ -3878,7 +3890,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                                 .await
                             }
                         }
-                    })
+                    }))
                 })
                 .collect();
             drop(up_tx);
@@ -4544,6 +4556,8 @@ pub fn open_blocking(
     wz_runtime_tokio::link_pipeline::set_rx_busy_poll(rx_busy_poll_budget(
         std::env::var("WZ_CAPI_RX_BUSY_POLL_US").ok().as_deref(),
     ));
+    // Taken on the opener's thread: the drive thread runs the whole session inside it.
+    let opener = CallerSpan::current();
     let handle = std::thread::Builder::new()
         .name("wz-capi-drive".to_owned())
         .stack_size(DRIVE_THREAD_STACK_BYTES)
@@ -4617,32 +4631,36 @@ pub fn open_blocking(
             // Polled only while the read task may run ([`Pausable`]): a stopped
             // task is a session nobody is driving, which is what pico's is.
             #[cfg(feature = "peer")]
-            rt.block_on(Pausable::new(drive_gate, async move {
-                let role = async move {
-                    if !connect.is_empty() || scouts || gossips_with_a_listener {
-                        drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
-                    } else if !listen.is_empty() {
-                        drive_listen(listen, tls, dial_whatami, ctx).await;
-                    } else {
-                        // R3067 -- no endpoint: a session alone, as zenoh starts one.
-                        // Whether a config MAY open without one is the calling ABI's
-                        // decision (a client may not, and a peer that scouts reaches
-                        // others through it), so it is asked there, not here.
-                        drive_idle(dial_whatami, ctx).await;
-                    }
-                };
-                #[cfg(feature = "multicast-transport")]
-                serve_beside_groups(group_setup, role).await;
-                #[cfg(not(feature = "multicast-transport"))]
-                role.await;
-            }));
+            opener.in_scope(|| {
+                rt.block_on(Pausable::new(drive_gate, async move {
+                    let role = async move {
+                        if !connect.is_empty() || scouts || gossips_with_a_listener {
+                            drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
+                        } else if !listen.is_empty() {
+                            drive_listen(listen, tls, dial_whatami, ctx).await;
+                        } else {
+                            // R3067 -- no endpoint: a session alone, as zenoh starts one.
+                            // Whether a config MAY open without one is the calling ABI's
+                            // decision (a client may not, and a peer that scouts reaches
+                            // others through it), so it is asked there, not here.
+                            drive_idle(dial_whatami, ctx).await;
+                        }
+                    };
+                    #[cfg(feature = "multicast-transport")]
+                    serve_beside_groups(group_setup, role).await;
+                    #[cfg(not(feature = "multicast-transport"))]
+                    role.await;
+                }))
+            });
             // The client's build has the one role, and `open_blocking` has refused any config
             // that has nothing to dial or find.
             #[cfg(not(feature = "peer"))]
-            rt.block_on(Pausable::new(
-                drive_gate,
-                drive_dial(connect, dial_whatami, tls, dial_phase, ctx),
-            ));
+            opener.in_scope(|| {
+                rt.block_on(Pausable::new(
+                    drive_gate,
+                    drive_dial(connect, dial_whatami, tls, dial_phase, ctx),
+                ))
+            });
             // `rt` is dropped here, after the drive loop has returned.
         })
         .map_err(|_| OpenError::DriveFailed)?;
