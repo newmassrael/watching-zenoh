@@ -3925,13 +3925,11 @@ pub const UNHONOURED_DISPOSITION_KINDS: &[&str] = &["build", "exclude"];
 /// and no line of the pinned checkout reads that field back: its TX tasks run on the shared
 /// runtime whatever the value. There is no behaviour to honour, and wz's own test asserts the
 /// key ignored (the `asserted-ignored` row above).
-pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
-    (
-        "transport/link/tx/threads",
-        "exclude",
-        "upstream stores it on its transport manager config and nothing reads it back",
-    ),
-];
+pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[(
+    "transport/link/tx/threads",
+    "exclude",
+    "upstream stores it on its transport manager config and nothing reads it back",
+)];
 
 /// Is `path` a key stock zenoh knows — itself, or under a subtree it knows?
 ///
