@@ -1049,7 +1049,7 @@ impl ResponseReplyBuilder {
             }
             if let Some(mode) = self.consolidation {
                 reply.header |= 0x20; // _Z_FLAG_Z_R_C
-                reply.consolidation = Some(mode.wire_byte());
+                reply.consolidation = Some(u64::from(mode.wire_byte()));
             }
             // Stamp the inner body's value timestamp + T-flag (0x20), on
             // whichever arm survived the del-swap above. Mirrors the Push

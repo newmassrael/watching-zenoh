@@ -1574,6 +1574,9 @@ layer_b_verify_codegen() {
     #             SCE's resource ends the chain at the end of the frame, which
     #             two queries in one frame do not survive), its
     #             `entry-flag-bind` child and the import that names the entry —
+    #             and, since the consolidation width round, the `consolidation`
+    #             field's `sce:type`/`sce:bit-size` (a VLE u64 here, upstream's
+    #             z64; `uint8` there) —
     #             and every backend reports `golden mismatch`. Layer 3 and the shared-
     #             memory witnesses (a router linked against upstream's own
     #             `zenoh`, `wz_shm_query_reply_zenohd_interop`) are the wire
