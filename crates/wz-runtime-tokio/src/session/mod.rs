@@ -7068,10 +7068,42 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         <R as SessionRuntime>::LinkSink: Send + Sync,
         T: 'static,
     {
-        let config = Arc::new(std::sync::Mutex::new(
+        self.declare_adminspace_with_config(
+            version,
+            locators,
             crate::config::WzConfig::from_init_params(&self.actions().params)
                 .with_admin_permissions(permissions),
-        ));
+        )
+    }
+
+    /// §5.23 `adminspace-core` — the pair upstream's `AdminSpace::start` declares,
+    /// answering from and writing into `config`, a config the HOST seeded.
+    ///
+    /// [`Self::declare_adminspace_with_permissions`] seeds the config from the
+    /// handshake params and a permit, and nothing else; a node started from an
+    /// operator's settings also carries what the operator set, `metadata` first,
+    /// which upstream serves in `local_data` from the same runtime config its gate
+    /// reads. Taking the config whole keeps one live instance behind the GET, the
+    /// PUT and the host, rather than a second copy of the operator's values beside
+    /// the one the admin space answers from.
+    ///
+    /// The role in every key is the session's own (`params.whatami`), whatever
+    /// `config` says: a client hosts `@/<zid>/client/**` and a router
+    /// `@/<zid>/router/**`, from this one method, as upstream's
+    /// `AdminSpace::start` roots its keys at `runtime.state.whatami` in every mode.
+    #[cfg(feature = "adminspace-core")]
+    pub fn declare_adminspace_with_config(
+        &self,
+        version: impl Into<String>,
+        locators: Vec<String>,
+        config: crate::config::WzConfig,
+    ) -> Result<AdminSpace<R, T>, AdminSpaceError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        T: 'static,
+    {
+        let config = Arc::new(std::sync::Mutex::new(config));
         let get_config = Arc::clone(&config);
         let queryable = self
             .declare_adminspace_viewing(version, locators, move || {
