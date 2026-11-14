@@ -643,8 +643,9 @@ pub unsafe extern "C" fn z_timestamp_id(ts: *const z_timestamp_t) -> crate::zid:
 }
 
 /// The wall clock as an NTP64 word, through the host's [`EpochSource`]: the tokio engine's
-/// runtime's where that engine is built in, the host's sockets' runtime otherwise. A clock set
-/// before 1970 reads as the epoch itself.
+/// runtime's where that engine is built in, the cooperative engine's host's otherwise (the
+/// process's on a host, the board's in a Zephyr image). A clock set before 1970, or a board that
+/// does not know the date yet, reads as the epoch itself.
 ///
 /// [`EpochSource`]: wz_session_core::epoch::EpochSource
 fn wall_clock_ntp64() -> u64 {
@@ -655,7 +656,7 @@ fn wall_clock_ntp64() -> u64 {
     #[cfg(not(feature = "engine-tokio"))]
     {
         use wz_session_core::epoch::EpochSource;
-        wz_runtime_posix::PosixEpoch
+        crate::coop_host::epoch()
             .try_now_ntp64()
             .map_or(0, |ntp| ntp.as_word())
     }

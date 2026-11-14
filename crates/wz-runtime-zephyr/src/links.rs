@@ -20,6 +20,20 @@ use alloc::rc::Rc;
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto, Locator, OpenedLink, SessionLinks};
 
 use crate::net::{HeapTx, ZephyrUdpDriver, ZephyrUdpSocket, UDP_RX_CAPACITY};
+use crate::stream::{ZephyrTcpDial, ZephyrTcpSocket};
+
+/// Zephyr's sockets as the session shell's links on the heap profile, `udp/` and `tcp/` alike:
+/// `wz_runtime_coop::ip_stack`'s `IpLinks` at [`ZephyrUdpSocket`] and [`ZephyrTcpDial`], made
+/// with `ZephyrIpLinks::new(local, ZephyrTcpDial)`. A dial opens the link of the protocol its
+/// locator names, a `tcp/` listener takes connections off its port, and each link allocates its
+/// buffers when it opens. The twin of `wz-runtime-posix`'s `PosixLinks`, and what a program with an
+/// allocator on Zephyr (the pico C ABI over the cooperative engine) gives the session shell;
+/// [`ZephyrLinks`] is the datagram-only form the heap images that predate it were written against.
+pub type ZephyrIpLinks = wz_runtime_coop::ip_stack::IpLinks<ZephyrUdpSocket, ZephyrTcpDial>;
+
+/// The driver [`ZephyrIpLinks`] opens: a datagram or a stream link, as the dial named.
+pub type ZephyrHeapDriver =
+    wz_runtime_coop::ip_stack::HeapIpDriver<ZephyrUdpSocket, ZephyrTcpSocket>;
 
 /// The links of a node whose network stack is Zephyr's own.
 pub struct ZephyrLinks {
@@ -87,8 +101,8 @@ impl SessionLinks for ZephyrLinks {
     }
 
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
-        // These links are Zephyr's datagram sockets; no stream socket of Zephyr's is written
-        // over `wz_runtime_coop::stream_link` yet, so a `tcp/` dial is not this stack's.
+        // These links are Zephyr's datagram sockets alone, so a `tcp/` dial is not this stack's;
+        // `ZephyrIpLinks` carries both.
         if to.proto != LinkProto::Udp {
             return Err(LinkOpenError::Unsupported);
         }
@@ -104,5 +118,26 @@ impl SessionLinks for ZephyrLinks {
             sink: driver.clone(),
             pump: driver,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use wz_runtime_coop::session_drive::SessionLinks;
+
+    /// What the session shell holds of a stack: its links, and the driver each link pumps.
+    fn shell_links<L: SessionLinks<Pump = Rc<ZephyrHeapDriver>>>(_: &L) {}
+
+    /// Zephyr's two sockets meet every bound the heap profile's stack asks of a platform's, so the
+    /// session shell takes them as it takes the host's: the stack is made without opening a
+    /// socket, and its driver is the datagram-or-stream one.
+    #[test]
+    fn zephyrs_sockets_are_the_shells_links_on_the_heap_profile() {
+        let links = ZephyrIpLinks::new([0; 4], ZephyrTcpDial)
+            .waited_by_owner()
+            .with_tx_buffers(2, 2048);
+        shell_links(&links);
     }
 }

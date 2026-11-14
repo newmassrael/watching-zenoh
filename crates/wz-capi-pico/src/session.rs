@@ -988,7 +988,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
 }
 
 /// Open `request` on the cooperative engine and install the session in `zs`: a session dialled
-/// over the host's sockets, and with `peer` one that listens on the `tcp/` endpoint of its
+/// over the sockets of the system the build runs on (`crate::coop_host`), and with `peer` one that listens on the `tcp/` endpoint of its
 /// `listen` key as well, opened on this thread before `z_open` returns, as the tokio engine's is.
 /// A listener is open once its port is bound, as pico's `z_open(listen)` returns, and takes each
 /// inbound link as a face of the session (`wz-capi-coop`'s `listen`). A group (a `udp/` endpoint
@@ -1029,8 +1029,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // `// First, try to open the optional listen locator.`).
     #[cfg(feature = "admin-space")]
     let transport_endpoint = listen.first().or_else(|| connect.first()).cloned();
-    let links =
-        wz_runtime_posix::links::PosixLinks::new([0; 4], wz_runtime_posix::stream::PosixTcpDial);
+    let links = crate::coop_host::links();
     // The `tls/` link: the secure channel over the host's streams, for the dial and the listen,
     // made from the material the config's keys named. A config whose material cannot make a
     // channel (half a listener, a key that is not its chain's) fails the open, as a malformed
@@ -1046,8 +1045,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     };
     let opened = wz_capi_coop::CoopEngine::open(
         links.waited_by_owner(),
-        wz_runtime_posix::PosixClock,
-        wz_runtime_posix::PosixEntropy,
+        crate::coop_host::clock(),
+        crate::coop_host::entropy(),
         wz_capi_coop::CoopConfig {
             endpoints: connect,
             whatami: dial_whatami,
