@@ -1117,7 +1117,9 @@ pub struct ZenohNodeConfig {
     /// `transport/link/rx/max_message_size`, the largest message a session
     /// rejoins from fragments (bytes). The session takes it through
     /// `SessionInitParams`, and its reassembly ends a chain that would pass it;
-    /// the build's reassembly slot bounds it from above.
+    /// the build's reassembly slot bounds it from above. Beside it
+    /// `transport/link/rx/buffer_size`, the read storage each stream link the
+    /// session wires pools (bytes), wz's `--rx-buffer-size`.
     pub link_rx: wz_session_core::session_init_params::LinkRxConf,
     /// `transport/unicast/max_links`.
     pub max_links: usize,
@@ -2076,6 +2078,15 @@ impl ZenohNodeConfig {
             self.tx_queue.wait_before_close_us
         );
         out.push_str("      }");
+        // `buffer_size` only where the build reads it: a build without a per-link pool reports
+        // the key ignored, and nothing wz emits may be a key it cannot read back.
+        #[cfg(not(feature = "runtime-zero-copy"))]
+        let _ = write!(
+            out,
+            ",\n      \"rx\": {{ \"buffer_size\": {}, \"max_message_size\": {} }}",
+            self.link_rx.buffer_size, self.link_rx.max_message_size
+        );
+        #[cfg(feature = "runtime-zero-copy")]
         let _ = write!(
             out,
             ",\n      \"rx\": {{ \"max_message_size\": {} }}",
@@ -2297,6 +2308,14 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // (`io/zenoh-transport/src/common/defragmentation.rs` @
     // `if new_len > self.capacity {`).
     "transport/link/rx/max_message_size",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and `UNHONOURED_READER_GAP`, so the surface
+    // total is unchanged: the read storage each stream link pools, which a session's `LinkRxConf`
+    // carries to the links it wires, `buffer_size / mtu` buffers and at least one, as upstream's
+    // RX task pools them. The udp, ws, quic-datagram and serial links read each message into
+    // storage of its own and keep no pool, so the key sizes nothing there; a `runtime-zero-copy`
+    // build reads every link into the node's shared table and refuses the key
+    // (`CAPABILITY_HONOURED_KEYS`).
+    "transport/link/rx/buffer_size",
     "adminspace/enabled",
     "adminspace/permissions/read",
     "adminspace/permissions/write",
@@ -2571,6 +2590,13 @@ pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
         "transport/link/unixpipe/file_access_mask",
         "transport-link-unixpipe",
         cfg!(all(feature = "transport-link-unixpipe", unix)),
+    ),
+    // The per-link RX pool the size counts out, which a `runtime-zero-copy` build replaces with
+    // the node's one table, sized by its deploy declaration (`frame_arena::link_arena`).
+    (
+        "transport/link/rx/buffer_size",
+        "a per-link RX pool (a build without runtime-zero-copy)",
+        cfg!(not(feature = "runtime-zero-copy")),
     ),
     // The partition a node places its remotes by, which only the region hats hold
     // (`RouterForwarder::with_south_partition`).
@@ -2920,7 +2946,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // [`HONOURED_CONFIG_KEYS`].
     // `transport/link/protocols` LEFT this list for `HONOURED_CONFIG_KEYS`: the open refuses an
     // endpoint whose protocol it leaves out.
-    "transport/link/rx/buffer_size",
+    // `transport/link/rx/buffer_size` LEFT this list for `HONOURED_CONFIG_KEYS`: a session's
+    // `LinkRxConf` sizes the RX pool of every stream link it wires.
     // `transport/link/rx/max_message_size` LEFT this list for
     // `HONOURED_CONFIG_KEYS`: a session's reassembly now ends a chain past it.
     // R2593 — `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` LEFT this list for
@@ -3215,10 +3242,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 ///   (R2788: `plugins` itself left this list — the reader carries the section.)
 /// * (`transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
 ///   verify_name_on_connect}` LEFT this list: the reader reads them, [`HONOURED_CONFIG_KEYS`].)
-/// * `transport/link/rx/buffer_size` — the size of a link's RX pool, which
-///   `crate::frame_arena::RecyclingArena::for_link` takes as a parameter and divides by the
-///   link's mtu as upstream's RX task does. Every caller passes upstream's default, so the
-///   reader change is "hand the parsed value to the arena", not "build a pool".
+/// * (`transport/link/rx/buffer_size` LEFT this list: a session's `LinkRxConf` carries it to the
+///   RX pool of every stream link the session wires, [`HONOURED_CONFIG_KEYS`].)
 /// * (`transport/link/tls/close_link_on_expiration` LEFT this list: the reader renders it onto
 ///   the tls, quic and quic-datagram layers of `crate::link_socket::LinkDefaults`,
 ///   [`HONOURED_CONFIG_KEYS`].)
@@ -3264,7 +3289,8 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // MOVED here from `UNHONOURED_BEYOND_WZ` and its `LinkTxConf` group, the R2363 class again:
     // the link-RX pool has taken its size as a parameter since R2742, and only the default
     // reaches it, so what is missing is the reader and not a configurable RX surface.
-    "transport/link/rx/buffer_size",
+    // It then LEFT for `HONOURED_CONFIG_KEYS` once a session's `LinkRxConf` carried the read
+    // value to the links it wires.
     // MOVED here from `UNHONOURED_BEYOND_WZ` and its `LinkTxConf` group: R2600 and R2608 built
     // the expiry teardown on the quic and tls links, armed from the locator's
     // `close_link_on_expiration`. Upstream renders this key into each tls endpoint's config as
@@ -3651,13 +3677,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // And for `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
     // verify_name_on_connect}`: their rows said the capability was in wz and the reader was
     // not, and the reader reads them now.
-    // The link-RX pool. Its doc in `frame_arena.rs` names the key beside the parameter that
-    // would carry it, and the anchor is the pool type that takes the size.
-    (
-        "transport/link/rx/buffer_size",
-        "wz-has-it",
-        "RecyclingArena",
-    ),
+    // The `transport/link/rx/buffer_size` row is GONE: the reader honours the key now, and this
+    // ledger carries evidence for unhonoured keys only.
     // The `transport/link/tls/close_link_on_expiration` row is GONE: the reader honours the key
     // now, and this ledger carries evidence for unhonoured keys only.
     // The `transport/link/unixpipe/file_access_mask` row is GONE: the reader honours the key
@@ -3783,11 +3804,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "stats/filters",
         "build",
         "statistics per key expression; wz counts per session and sees no key expression",
-    ),
-    (
-        "transport/link/rx/buffer_size",
-        "build",
-        "reader gap: RecyclingArena sizes each link RX pool by it; nothing reads the file",
     ),
     (
         "transport/link/tx/queue/allocation/mode",
@@ -7768,6 +7784,23 @@ impl ZenohNodeConfig {
                 })?;
             named.push("transport/link/rx/max_message_size");
         }
+        // The read storage a stream link pools, a `usize` upstream, read where the build pools
+        // per link (`CAPABILITY_HONOURED_KEYS`).
+        #[cfg(not(feature = "runtime-zero-copy"))]
+        if let Some(v) = want_u64(&doc, "transport/link/rx/buffer_size")? {
+            out.link_rx.buffer_size =
+                usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                    path: "transport/link/rx/buffer_size",
+                    value: v.to_string(),
+                })?;
+            named.push("transport/link/rx/buffer_size");
+        }
+        #[cfg(feature = "runtime-zero-copy")]
+        refuse_unbuilt_instruction(&doc, "transport/link/rx/buffer_size", |value| {
+            matches!(value, Json5Value::Number(text)
+                if number_as_u64(text)
+                    == Some(wz_session_core::session_init_params::RX_BUFFER_SIZE as u64))
+        })?;
         // R311y844 — the ten keys wz already acts on. Read in
         // HONOURED_CONFIG_KEYS order so `named` reports them the way the table
         // lists them.
@@ -9397,6 +9430,11 @@ mod tests {
             (
                 "transport/link/rx/max_message_size",
                 r#"{ "transport": { "link": { "rx": { "max_message_size": 65536 } } } }"#,
+            ),
+            // Four widest batches of read storage; upstream's default is one.
+            (
+                "transport/link/rx/buffer_size",
+                r#"{ "transport": { "link": { "rx": { "buffer_size": 262140 } } } }"#,
             ),
             (
                 "adminspace/enabled",
@@ -12972,6 +13010,10 @@ mod tests {
                 r#"{ transport: { link: { unixpipe: { file_access_mask: 432 } } } }"#,
             ),
             (
+                "transport/link/rx/buffer_size",
+                r#"{ transport: { link: { rx: { buffer_size: 262140 } } } }"#,
+            ),
+            (
                 "gateway/south",
                 r#"{ gateway: { south: [{ filters: [{ modes: ["peer"] }] }] } }"#,
             ),
@@ -12997,6 +13039,46 @@ mod tests {
                 None => panic!("{key} is a capability's key"),
             }
         }
+    }
+
+    /// `transport/link/rx/buffer_size` reads into the session's `LinkRxConf` in a build that
+    /// pools per link, upstream's default when the file is silent, and the emitter writes it
+    /// back where the reader finds it. A build whose links read into the node's table reads
+    /// upstream's default as stating nothing and refuses any other value by the key.
+    #[test]
+    fn the_rx_buffer_size_reaches_the_sessions_link_rx() {
+        use wz_session_core::session_init_params::RX_BUFFER_SIZE;
+        let read = |doc: &str| ZenohNodeConfig::from_json5(doc);
+        let stated = r#"{ transport: { link: { rx: { buffer_size: 262140 } } } }"#;
+        let silent = read("{}").expect("silence");
+        assert_eq!(silent.config.link_rx.buffer_size, RX_BUFFER_SIZE);
+        let default = read(r#"{ transport: { link: { rx: { buffer_size: 65535 } } } }"#)
+            .expect("upstream's default states nothing a build cannot carry");
+        if cfg!(feature = "runtime-zero-copy") {
+            assert!(matches!(
+                read(stated),
+                Err(ConfigIngestError::NotInBuild {
+                    path: "transport/link/rx/buffer_size",
+                    ..
+                })
+            ));
+            assert!(!default.named.contains(&"transport/link/rx/buffer_size"));
+            return;
+        }
+        assert!(default.named.contains(&"transport/link/rx/buffer_size"));
+        let ingest = read(stated).expect("a usize");
+        assert_eq!(ingest.config.link_rx.buffer_size, 262_140);
+        assert!(ingest.named.contains(&"transport/link/rx/buffer_size"));
+        let again = read(ingest.config.to_json5().as_str()).expect("it round-trips");
+        assert_eq!(again.config, ingest.config);
+        assert!(again.ignored.is_empty(), "{:?}", again.ignored);
+        assert!(matches!(
+            read(r#"{ transport: { link: { rx: { buffer_size: "big" } } } }"#),
+            Err(ConfigIngestError::WrongType {
+                path: "transport/link/rx/buffer_size",
+                ..
+            })
+        ));
     }
 
     /// The unixpipe FIFO mode is a `u32` upstream: read as the number it is, absent when the

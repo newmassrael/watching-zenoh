@@ -907,6 +907,12 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "transport/link/rx/max_message_size",
             wz.link_rx.max_message_size.to_string(),
         ),
+        // A plain `usize` upstream with its default applied at declaration (one widest batch),
+        // so the tree answers it and wz's struct answers the same.
+        (
+            "transport/link/rx/buffer_size",
+            wz.link_rx.buffer_size.to_string(),
+        ),
         (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
@@ -3675,8 +3681,9 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         }},
       }},
       // The largest message a session rejoins from fragments, off its 1 GiB
-      // default and still far above anything this leg sends.
-      rx: {{ max_message_size: 65536 }},
+      // default and still far above anything this leg sends; and the read storage
+      // each stream link pools, two widest batches where the default is one.
+      rx: {{ buffer_size: 131070, max_message_size: 65536 }},
     }},
   }},
   // R311y844 — this file now names EVERY honoured key, which turns this leg

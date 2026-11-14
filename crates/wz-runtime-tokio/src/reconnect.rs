@@ -69,7 +69,7 @@ use crate::session_glue::{
     SessionLinkActions,
 };
 use crate::session_open::{
-    dial_locator, initiator_open, plan_endpoint, wire_dialed_link, DialConfig, OpenError,
+    dial_locator, initiator_open, plan_endpoint, wire_dialed_link_with_rx, DialConfig, OpenError,
     OpenedSession,
 };
 use crate::writer_queue::WriterHandle;
@@ -261,6 +261,9 @@ pub struct ReconnectingSession {
     /// always carries it (only `DialConfig`'s tls field is cfg-gated), so the
     /// reconnect supervisor is signature-stable across the tls toggle.
     dial_config: DialConfig,
+    /// The session's `transport/link/rx` block, RETAINED for the reason the
+    /// dial config is: every link a reconnect wires reads as the first did.
+    link_rx: wz_session_core::session_init_params::LinkRxConf,
     policy: ReconnectPolicy,
     open_max_iters: Option<usize>,
     tick_interval_ms: u64,
@@ -493,7 +496,7 @@ impl ReconnectingSession {
                     continue;
                 }
             };
-            let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
+            let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(dialed, self.link_rx);
             let old = self.swappable.swap(outbound);
             drop(old);
             // R311ju — engine build + Initiator activation + open loop live
@@ -828,7 +831,8 @@ pub async fn open_session_with_reconnect(
     let dialed = dial_locator(locator.clone().into(), &dial_config)
         .await
         .map_err(OpenError::Dial)?;
-    let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
+    let link_rx = params.link_rx;
+    let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(dialed, link_rx);
     let swappable = Arc::new(SwappableLink::<TokioRuntime>::new(outbound));
     let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = swappable.clone();
     let actions = new_session_actions(sink, params, clock);
@@ -851,6 +855,7 @@ pub async fn open_session_with_reconnect(
         // `--scout` overrides it with `set_targets`.
         targets: Arc::new(ConfiguredEndpoint::new(locator)),
         dial_config,
+        link_rx,
         policy,
         open_max_iters: max_iters,
         tick_interval_ms,

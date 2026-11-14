@@ -866,9 +866,11 @@ pub async fn bind_unixpipe(path: &str, file_mask: Option<u32>) -> io::Result<Uni
 /// `Arc<`[`StreamWriteDriver`]`>`, and the [`writer_task`] join handle. The FIFO
 /// read + write halves are ALREADY separate, so this is the unixsock wiring minus
 /// the split. StreamEnvelope framing + the write driver are the SAME shared
-/// [`crate::stream_link`] code as TCP/unixsock.
+/// [`crate::stream_link`] code as TCP/unixsock. `rx_buffer_size` is the
+/// session's `transport/link/rx/buffer_size`: the read storage the link pools.
 pub fn wire_unixpipe_stream(
     link: UnixpipeLink,
+    rx_buffer_size: usize,
 ) -> (UnixpipeReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     let UnixpipeLink {
         read,
@@ -902,7 +904,11 @@ pub fn wire_unixpipe_stream(
     let endpoints = read
         .node_path()
         .map(|src| addressless_link_endpoints(LinkKind::Unixpipe, src, write_node.as_str()));
-    let inbound = StreamReadDriver::new(read, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let inbound = StreamReadDriver::new(
+        read,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        rx_buffer_size,
+    );
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(sender, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
@@ -1036,8 +1042,9 @@ mod tests {
             dialer.write_node,
             "the acceptor reads the node the dialer writes"
         );
-        let (_d_in, d_out, _d_writer) = wire_unixpipe_stream(dialer);
-        let (mut a_in, _a_out, _a_writer) = wire_unixpipe_stream(acceptor);
+        let rx = wz_session_core::session_init_params::RX_BUFFER_SIZE;
+        let (_d_in, d_out, _d_writer) = wire_unixpipe_stream(dialer, rx);
+        let (mut a_in, _a_out, _a_writer) = wire_unixpipe_stream(acceptor, rx);
         assert_eq!(
             d_out.send_blocking(payload, Reliability::Reliable),
             LinkSendOutcome::Sent

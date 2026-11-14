@@ -1325,6 +1325,15 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // The read storage each stream link pools, honoured at any value for the same reason.
+    if named("transport/link/rx/buffer_size") {
+        exp.pair(
+            "transport/link/rx/buffer_size",
+            "--rx-buffer-size",
+            cfg.link_rx.buffer_size.to_string(),
+            None,
+        );
+    }
     // R311y844 — the ten keys wz already acted on. Each row is a flag that has
     // been in this binary for rounds, so what changed is not the capability but
     // the ability to ask for it from the file an operator already has. The
@@ -3393,6 +3402,14 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          rejoins from fragments: a local bound no frame carries, visible only as \
          a fragmented message that is not delivered.",
     ),
+    (
+        "transport/link/rx/buffer_size",
+        KIND_OFF_WIRE,
+        "expands to `--rx-buffer-size`. The read storage each stream link pools: a \
+         local resource no frame carries, visible only as the pool a wired link \
+         holds, which a_sessions_rx_buffer_size_sizes_the_pool_of_the_link_it_wires \
+         reads.",
+    ),
     // R2758 — OFF-WIRE and not leg-judged, and the distinction is the point.
     // The bound IS judged by a leg, but that leg lives in the runtime crate
     // (`accept_loop.rs`, `max_sessions_refuses_the_peer_past_the_bound`), while
@@ -5435,6 +5452,12 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { rx: { max_message_size: 65536 } } } }"#,
+            ),
+            (
+                "transport/link/rx/buffer_size",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { rx: { buffer_size: 262140 } } } }"#,
             ),
             (
                 "adminspace/enabled",
@@ -7689,6 +7712,32 @@ mod stock_config_tests {
         );
     }
 
+    /// `transport/link/rx/buffer_size` reaches the session the node opens through
+    /// `--rx-buffer-size`, read back the way `main` reads it; a build with no
+    /// per-link pool refuses the file by the key instead.
+    #[test]
+    fn the_rx_buffer_size_a_config_names_reaches_the_params_the_node_opens_with() {
+        let key = "transport/link/rx/buffer_size";
+        let file = r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] },
+                        transport: { link: { rx: { buffer_size: 262140 } } } }"#;
+        if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
+            let refused = expand(&["--config", "z.json5"], file)
+                .expect_err("a build with no per-link pool refuses the key");
+            assert!(refused.contains(key), "{refused}");
+            return;
+        }
+        let exp = expand(&["--config", "z.json5"], file).expect("a valid file");
+        assert!(
+            exp.added.contains(&String::from("--rx-buffer-size")),
+            "added = {:?}",
+            exp.added
+        );
+        let tuned = TransportTuning::from_argv(&exp.argv).expect("the expansion is parseable");
+        let params = demo_session_init_params(NodeKind::Initiator, vec![0x0a], &tuned)
+            .expect("OS entropy for the cookie signing key");
+        assert_eq!(params.link_rx.buffer_size, 262_140);
+    }
+
     /// The exact argv the adminspace block and the compression flag produce.
     ///
     /// The census gate is a DIFFERENCE test and would accept any change at all;
@@ -9430,6 +9479,22 @@ impl TransportTuning {
             out.link_rx.max_message_size = v
                 .parse::<usize>()
                 .map_err(|_| format!("--rx-max-message-size expects bytes, got '{v}'"))?;
+        }
+        if let Some(v) = parse_pair(rest, "--rx-buffer-size") {
+            let bytes = v
+                .parse::<usize>()
+                .map_err(|_| format!("--rx-buffer-size expects bytes, got '{v}'"))?;
+            // A build whose links read into the node's one table has no per-link pool to size,
+            // so a size other than the default is an instruction it would only drop.
+            if !wz::runtime_tokio::frame_arena::LINK_RX_POOLED_PER_LINK
+                && bytes != out.link_rx.buffer_size
+            {
+                return Err(String::from(
+                    "--rx-buffer-size: this build reads every link into the node's shared RX \
+                     table (runtime-zero-copy) and has no per-link pool to size",
+                ));
+            }
+            out.link_rx.buffer_size = bytes;
         }
         // R2592 — `<kind>#<span>`, the shape upstream gives each link kind's
         // configuration: a parameter span keyed by the kind. A refusal names the

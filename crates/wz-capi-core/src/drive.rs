@@ -4718,6 +4718,7 @@ mod tests {
                 sn_resolution: SnResolution::Bits8,
             },
             rx: LinkRxConf {
+                buffer_size: 4 * 65_535,
                 max_message_size: 4096,
             },
             accept: AcceptBounds::default(),

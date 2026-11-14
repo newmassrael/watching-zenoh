@@ -204,6 +204,10 @@ pub(crate) fn print_usage() {
     eprintln!("                             (default 1073741824, read as at most the build's");
     eprintln!("                             reassembly slot).");
     eprintln!("                             zenoh transport/link/rx/max_message_size");
+    eprintln!("    --rx-buffer-size <bytes>");
+    eprintln!("                             the read storage each stream link pools, in");
+    eprintln!("                             buffers of the widest batch (default 65535, one).");
+    eprintln!("                             zenoh transport/link/rx/buffer_size");
     eprintln!("    --link-config <kind>#<k=v;...>");
     eprintln!("                             options every <kind> link takes unless its locator");
     eprintln!("                             names the same key (repeatable). tcp and tls");

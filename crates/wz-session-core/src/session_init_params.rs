@@ -199,15 +199,29 @@ pub const RX_MAX_MESSAGE_SIZE: usize = 1 << 30;
 /// The reassembly pool a host is built with is a second bound beside this one,
 /// and the smaller of the two is what holds: a value above the pool's slot can
 /// only be read as the slot.
+///
+/// `buffer_size` is the read storage each stream link pools, in bytes: the
+/// link keeps `buffer_size / mtu` buffers of one frame each, and at least one,
+/// as upstream's RX task does
+/// (`io/zenoh-transport/src/unicast/lowlatency/link.rs` @ `let mut n = rx_buffer_size / mtu;`).
+/// A frame read while every pooled buffer is still held gets storage of its
+/// own, so the value bounds what is reused and never what is received.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkRxConf {
+    /// `transport/link/rx/buffer_size`, in bytes.
+    pub buffer_size: usize,
     /// `transport/link/rx/max_message_size`, in bytes.
     pub max_message_size: usize,
 }
 
+/// Upstream's default `transport/link/rx/buffer_size`, one batch of the
+/// widest size (`commons/zenoh-config/src/defaults.rs` @ `buffer_size: BatchSize::MAX as usize,`).
+pub const RX_BUFFER_SIZE: usize = u16::MAX as usize;
+
 impl Default for LinkRxConf {
     fn default() -> Self {
         Self {
+            buffer_size: RX_BUFFER_SIZE,
             max_message_size: RX_MAX_MESSAGE_SIZE,
         }
     }

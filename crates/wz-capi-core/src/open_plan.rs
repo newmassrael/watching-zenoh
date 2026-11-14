@@ -237,10 +237,11 @@ pub enum OpenRefusal {
     /// its regions whatever links it holds; an open that accepted the key and ran as the registry
     /// of faces would hold a south it never partitions, and nothing would say so.
     GatewayNotCarried,
-    /// The document configures a kind of link this build cannot make (the FIFO mode of
-    /// `transport/link/unixpipe` in a build without a `unixpipe/` link). Told how to make a
-    /// link it has no means of making, the open refuses rather than accept an instruction it
-    /// could only drop.
+    /// The document configures a part of the links this build does not have: the FIFO mode of
+    /// `transport/link/unixpipe` in a build without a `unixpipe/` link, or the per-link RX pool
+    /// of `transport/link/rx/buffer_size` in a build whose links read into the node's shared
+    /// table. Told how to make a link in a way it has no means of, the open refuses rather than
+    /// accept an instruction it could only drop.
     LinkNotInBuild,
 }
 
@@ -265,7 +266,7 @@ impl OpenRefusal {
             Self::GroupInConnect | Self::NoDialableEndpoint => "connect/endpoints",
             Self::Namespace => "namespace",
             Self::GatewayNotCarried => "gateway/south",
-            Self::LinkNotInBuild => "transport/link/unixpipe",
+            Self::LinkNotInBuild => "transport/link/unixpipe, transport/link/rx/buffer_size",
         }
     }
 }
@@ -509,13 +510,15 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePol
 /// the certificate material of a build with no `tls/` or `quic/` link is
 /// [`OpenRefusal::TlsMaterial`]; a south kept apart in a build with no region hat is
 /// [`OpenRefusal::GatewayNotCarried`], as [`OpenPlan::refuse_uncarried_south`] refuses it; the
-/// configuration of a link kind the build has no link of is [`OpenRefusal::LinkNotInBuild`].
+/// configuration of a part of the links the build does not have is
+/// [`OpenRefusal::LinkNotInBuild`].
 fn refusal_of_unbuilt_key(path: &str) -> OpenRefusal {
     match path {
         "low_pass_filter" | "downsampling" | "qos/network" => OpenRefusal::Security,
         _ if path.starts_with("access_control/") => OpenRefusal::Security,
         _ if path.starts_with("transport/link/tls/") => OpenRefusal::TlsMaterial,
         _ if path.starts_with("transport/link/unixpipe/") => OpenRefusal::LinkNotInBuild,
+        "transport/link/rx/buffer_size" => OpenRefusal::LinkNotInBuild,
         "gateway/south" => OpenRefusal::GatewayNotCarried,
         _ => OpenRefusal::DocumentUnreadable,
     }
@@ -1411,6 +1414,7 @@ mod tests {
                 "transport/link/unixpipe/file_access_mask",
                 OpenRefusal::LinkNotInBuild,
             ),
+            ("transport/link/rx/buffer_size", OpenRefusal::LinkNotInBuild),
             ("gateway/south", OpenRefusal::GatewayNotCarried),
             ("transport/link/protocols", OpenRefusal::DocumentUnreadable),
         ] {

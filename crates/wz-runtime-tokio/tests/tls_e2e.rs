@@ -362,7 +362,11 @@ async fn a_tls_link_carries_its_peers_certificate_common_name_onto_its_subject()
     let DialedLink::Tls(tls, _) = dialed else {
         panic!("expected a TLS link from a tls/ locator");
     };
-    let (_inbound, outbound, _writer) = wire_tls_stream(*tls, false);
+    let (_inbound, outbound, _writer) = wire_tls_stream(
+        *tls,
+        false,
+        wz_session_core::session_init_params::RX_BUFFER_SIZE,
+    );
     let subject = outbound
         .link_subject()
         .expect("a tls link states a §5.16 subject");
@@ -620,7 +624,12 @@ async fn an_expiring_peer_chain_closes_only_the_tls_link_that_asked_for_it() {
     let armed = match dial_locator(dial_at(true), &DialConfig::default()).await {
         Ok(DialedLink::Tls(stream, closes)) => {
             assert!(closes, "the armed tail must reach DialedLink::Tls");
-            wire_tls_stream(*stream, closes).0
+            wire_tls_stream(
+                *stream,
+                closes,
+                wz_session_core::session_init_params::RX_BUFFER_SIZE,
+            )
+            .0
         }
         Ok(_) => panic!("expected a tls link"),
         Err(e) => panic!("the armed dial must handshake inside the window: {e}"),
@@ -628,7 +637,12 @@ async fn an_expiring_peer_chain_closes_only_the_tls_link_that_asked_for_it() {
     let unarmed = match dial_locator(dial_at(false), &DialConfig::default()).await {
         Ok(DialedLink::Tls(stream, closes)) => {
             assert!(!closes, "a tail without the key must not arm");
-            wire_tls_stream(*stream, closes).0
+            wire_tls_stream(
+                *stream,
+                closes,
+                wz_session_core::session_init_params::RX_BUFFER_SIZE,
+            )
+            .0
         }
         Ok(_) => panic!("expected a tls link"),
         Err(e) => panic!("the unarmed dial must handshake inside the window: {e}"),
@@ -751,7 +765,12 @@ async fn an_expiring_peer_chain_closes_a_tls_link_whose_kind_asked_for_it() {
                 closes,
                 "the tls kind's flag must reach a silent tail's link"
             );
-            wire_tls_stream(*stream, closes).0
+            wire_tls_stream(
+                *stream,
+                closes,
+                wz_session_core::session_init_params::RX_BUFFER_SIZE,
+            )
+            .0
         }
         Ok(_) => panic!("expected a tls link"),
         Err(e) => panic!("the kind-armed dial must handshake inside the window: {e}"),
@@ -762,7 +781,12 @@ async fn an_expiring_peer_chain_closes_a_tls_link_whose_kind_asked_for_it() {
                 !closes,
                 "the tail's own false must win over the kind's true"
             );
-            wire_tls_stream(*stream, closes).0
+            wire_tls_stream(
+                *stream,
+                closes,
+                wz_session_core::session_init_params::RX_BUFFER_SIZE,
+            )
+            .0
         }
         Ok(_) => panic!("expected a tls link"),
         Err(e) => panic!("the disarmed dial must handshake inside the window: {e}"),

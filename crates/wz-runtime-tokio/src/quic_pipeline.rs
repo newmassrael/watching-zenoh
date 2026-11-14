@@ -561,8 +561,13 @@ pub async fn accept_quic_on(endpoint: &Endpoint) -> io::Result<QuicLink> {
 /// `SendStream`/`RecvStream` are already a split pair (no `into_split` /
 /// `tokio::io::split`); the endpoint + connection ride into the read driver as
 /// the link keep-alive (module doc). StreamEnvelope framing + write driver are
-/// the SAME shared [`crate::stream_link`] code as TCP/TLS.
-pub fn wire_quic_stream(link: QuicLink) -> (QuicReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
+/// the SAME shared [`crate::stream_link`] code as TCP/TLS. `rx_buffer_size` is
+/// the session's `transport/link/rx/buffer_size`: the read storage the link
+/// pools.
+pub fn wire_quic_stream(
+    link: QuicLink,
+    rx_buffer_size: usize,
+) -> (QuicReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject: quinn reports the endpoint's bound address.
     // R2698 — with the peer's certificate common name, the ACL's fifth subject
     // axis. Unlike the TLS twin there is no split to race here: `connection`
@@ -578,7 +583,7 @@ pub fn wire_quic_stream(link: QuicLink) -> (QuicReadDriver, Arc<StreamWriteDrive
         link.endpoint.local_addr().ok(),
         Some(link.connection.remote_address()),
     );
-    wire_stream_over_quic(link, subject, endpoints)
+    wire_stream_over_quic(link, subject, endpoints, rx_buffer_size)
 }
 
 /// R2810 — the part of [`wire_quic_stream`] that does not depend on WHICH link
@@ -594,6 +599,7 @@ pub(crate) fn wire_stream_over_quic(
     link: QuicLink,
     subject: wz_session_core::link::LinkSubject,
     endpoints: Option<wz_session_core::link::LinkEndpoints>,
+    rx_buffer_size: usize,
 ) -> (QuicReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     let QuicLink {
         endpoint,
@@ -612,7 +618,11 @@ pub(crate) fn wire_stream_over_quic(
         endpoints,
     ));
     let inbound = QuicReadDriver {
-        inner: StreamReadDriver::new(recv, Arc::new(std::sync::atomic::AtomicBool::new(false))),
+        inner: StreamReadDriver::new(
+            recv,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rx_buffer_size,
+        ),
         _endpoint: endpoint,
         _connection: connection,
     };
