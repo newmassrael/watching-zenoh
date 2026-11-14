@@ -79,28 +79,11 @@ pub(crate) struct EncodingState {
 }
 
 impl EncodingState {
-    /// Build from an `id;schema` string exactly as pico's
-    /// `_z_encoding_convert_from_substr` does (`src/api/encoding.c:154`).
-    ///
-    /// The split is on the FIRST separator, and an unrecognised prefix is NOT an
-    /// error: the whole string becomes the schema under the default id. That
-    /// fallback is why `z_encoding_from_str` has no invalid input.
-    pub(crate) fn from_str(s: &str) -> Self {
-        Self {
-            hint: wz_session_core::encoding_hint::hint_from_str(s),
-        }
-    }
-
     /// Render as pico's `_z_encoding_convert_into_string` does: the id's table
-    /// entry, then `;schema` when a schema is present. An id past the table
-    /// renders as the empty prefix, which is pico's behaviour too (its bounds
-    /// check leaves `prefix` NULL and `prefix_len` 0).
-    pub(crate) fn to_string(hint: &EncodingHint) -> String {
-        wz_session_core::encoding_hint::hint_to_string(hint)
-    }
-
-    /// [`Self::to_string`] as the bytes pico hands out: a schema that is not
-    /// UTF-8 is copied as it is, as `_z_encoding_convert_into_string` copies it.
+    /// entry, then `;schema` when a schema is present, the schema copied as the
+    /// bytes it is (UTF-8 or not). An id past the table renders as the empty
+    /// prefix, which is pico's behaviour too (its bounds check leaves `prefix`
+    /// NULL and `prefix_len` 0).
     pub(crate) fn to_bytes(hint: &EncodingHint) -> Vec<u8> {
         wz_session_core::encoding_hint::hint_to_bytes(hint)
     }
@@ -550,6 +533,17 @@ pub unsafe extern "C" fn z_encoding_take_from_loaned(
 mod tests {
     use super::*;
 
+    /// What `z_encoding_from_str` stores for `s`: its bytes, split as pico's
+    /// `_z_encoding_convert_from_substr` splits them.
+    fn parsed(s: &str) -> EncodingHint {
+        wz_session_core::encoding_hint::hint_from_bytes(s.as_bytes())
+    }
+
+    /// What `z_encoding_to_string` hands back for `hint`, read as text.
+    fn rendered(hint: &EncodingHint) -> String {
+        String::from_utf8(EncodingState::to_bytes(hint)).expect("a UTF-8 encoding renders as text")
+    }
+
     /// Every constant renders through the SAME table the wire codec uses, so a
     /// constant and a `z_encoding_from_str` of its own string are one value.
     ///
@@ -572,13 +566,13 @@ mod tests {
             let hint = unsafe { encoding_hint(view) }.expect("a constant is never absent");
             assert_eq!(hint.packed_id >> 1, id, "wire id");
             assert_eq!(hint.packed_id & 1, 0, "a constant carries no schema");
-            let rendered = EncodingState::to_string(hint);
+            let text = rendered(hint);
             assert_eq!(
-                rendered, ENCODING_ID_TO_STR[id as usize],
+                text, ENCODING_ID_TO_STR[id as usize],
                 "a constant renders as its table entry"
             );
             assert_eq!(
-                EncodingState::from_str(&rendered).hint.packed_id,
+                parsed(&text).packed_id,
                 hint.packed_id,
                 "and parsing that string back lands on the same id"
             );
@@ -635,7 +629,7 @@ mod tests {
         let mut dst = z_owned_encoding_t::null_value();
         // SAFETY: live locals.
         unsafe {
-            store_encoding(&mut src, EncodingState::from_str("text/plain;utf8").hint);
+            store_encoding(&mut src, parsed("text/plain;utf8"));
             // Dirty every pad slot so an under-wide clear is visible.
             src._pad = [1usize as *mut c_void; 4];
             let loaned = z_encoding_loan_mut(&mut src);
@@ -664,15 +658,15 @@ mod tests {
     /// rather than stored beside it — so the two cannot disagree.
     #[test]
     fn the_schema_flag_is_derived_not_stored() {
-        let bare = EncodingState::from_str("text/plain");
-        assert_eq!(bare.hint.packed_id & 1, 0, "no schema, flag clear");
-        assert_eq!(bare.hint.packed_id >> 1, 4, "text/plain is id 4");
-        assert!(bare.hint.schema.is_none());
+        let bare = parsed("text/plain");
+        assert_eq!(bare.packed_id & 1, 0, "no schema, flag clear");
+        assert_eq!(bare.packed_id >> 1, 4, "text/plain is id 4");
+        assert!(bare.schema.is_none());
 
-        let with = EncodingState::from_str("text/plain;utf8");
-        assert_eq!(with.hint.packed_id & 1, 1, "schema present, flag set");
-        assert_eq!(with.hint.packed_id >> 1, 4);
-        assert_eq!(with.hint.schema.as_deref(), Some(&b"utf8"[..]));
+        let with = parsed("text/plain;utf8");
+        assert_eq!(with.packed_id & 1, 1, "schema present, flag set");
+        assert_eq!(with.packed_id >> 1, 4);
+        assert_eq!(with.schema.as_deref(), Some(&b"utf8"[..]));
     }
 
     /// An UNRECOGNISED prefix is not an error — the whole string becomes the
@@ -680,10 +674,10 @@ mod tests {
     /// `z_encoding_from_str` cannot fail on content.
     #[test]
     fn an_unknown_prefix_becomes_a_schema_on_the_default_id() {
-        let e = EncodingState::from_str("application/x-made-up-thing-entirely");
-        assert_eq!(e.hint.packed_id >> 1, u32::from(ENCODING_ID_DEFAULT));
+        let e = parsed("application/x-made-up-thing-entirely");
+        assert_eq!(e.packed_id >> 1, u32::from(ENCODING_ID_DEFAULT));
         assert_eq!(
-            e.hint.schema.as_deref(),
+            e.schema.as_deref(),
             Some(&b"application/x-made-up-thing-entirely"[..])
         );
     }
@@ -698,7 +692,7 @@ mod tests {
         let mut owned = z_owned_encoding_t::null_value();
         // SAFETY: live locals.
         unsafe {
-            store_encoding(&mut owned, EncodingState::from_str("text/plain").hint);
+            store_encoding(&mut owned, parsed("text/plain"));
             assert_eq!(
                 z_encoding_set_schema_from_substr(
                     z_encoding_loan_mut(&mut owned),
@@ -722,10 +716,8 @@ mod tests {
     #[test]
     fn to_string_round_trips_the_common_shapes() {
         for s in ["zenoh/bytes", "text/plain", "application/json"] {
-            let e = EncodingState::from_str(s);
-            assert_eq!(EncodingState::to_string(&e.hint), s);
+            assert_eq!(rendered(&parsed(s)), s);
         }
-        let e = EncodingState::from_str("text/plain;utf8");
-        assert_eq!(EncodingState::to_string(&e.hint), "text/plain;utf8");
+        assert_eq!(rendered(&parsed("text/plain;utf8")), "text/plain;utf8");
     }
 }
