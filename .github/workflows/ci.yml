@@ -644,8 +644,62 @@ jobs:
         # move to `validate-codegen`, which compiles nothing: about 1360s cold
         # (75%) and 1155s warm (64%) here, the margin y865 aimed for. Layer C1
         # is then most of what is left, and it moves only with the save.
+        #
+        # Open-debt item 940 — it crept back on a PARTIAL cache match: run
+        # 43346654760 took 96% with every lane green, Layer C1 1066s against
+        # 792s and 795s either side, its entry restored `full match: false`.
+        # Part of C1 moves, and not the save: Layer C1cap (the `capture-shard`
+        # job below) runs wz-capture's tests, the one binary that took 330s
+        # to 470s of C1 (1812 tests), and checks on every run that leaving it
+        # out of C1's selection changes no package's features, so the
+        # dependency set C1 compiles and this job saves is the one it was.
+        # Expected here: about 1260s (70%) on a partial match and 920s (51%)
+        # on a full one; the next run that ends is the measurement.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 30 '${{ job.status }}'
+
+  # ─────────────────────────────────────────────────────────────────
+  # Open-debt item 940 — Layer C1cap, the wz-capture shard of Layer C1, in a job of
+  # its own so that `ci` keeps room under its 90% alarm on a partial cache match.
+  # Why that crate and how the shard stays equal to what C1 ran is the lane's header
+  # in `scripts/run-ci.sh`. A READER of the `ci` job's entry (class `rust-ci`): the
+  # lane builds wz-capture and its dependencies only, all of them already in that
+  # entry, and nothing it needs is a system package, so it installs none and saves
+  # nothing. No disk prune either: one crate's tests are a fraction of the
+  # workspace build `ci` prunes for.
+  #
+  # NO BUDGET GATE YET, on the precedent of `pico-client-only`: a margin gate's floor
+  # and alarm are derived from measured runs and this job has none. Expected from
+  # the measured steps of `ci` (checkout 93 s to 125 s, toolchain and cache under
+  # 45 s, the binary 330 s to 470 s, its compile on top): well under half of the 30
+  # minutes. The first hosted run is the measurement.
+  capture-shard:
+    name: workspace tests, the wz-capture shard (Layer C1cap)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`). The path list is the
+        # saver's, in its order: a reader whose list differs never restores.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Layer C1cap — wz-capture's tests at Layer C1's features
+        run: bash scripts/run-ci.sh --layer C1cap
 
   # ─────────────────────────────────────────────────────────────────
   # R311y385 — the VALIDATE + CODEGEN job. Layers A/A2/A3/A4 (Mnemosyne

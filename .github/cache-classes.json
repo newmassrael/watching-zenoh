@@ -129,6 +129,7 @@
       "prefixes": ["v0-rust-ci-"],
       "owners": ["ci.yml:ci"],
       "readers": [
+        "ci.yml:capture-shard",
         "ci.yml:session-planes",
         "ci.yml:nondefault",
         "ci.yml:nondefault-builds",

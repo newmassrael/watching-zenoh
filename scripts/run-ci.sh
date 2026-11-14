@@ -5802,11 +5802,121 @@ layer_c1_cargo_test() {
     # no_std `wz-session-core` without adding it, so C1 did not compile at all
     # (hosted run 36338677128). The multicast-tests exclude stays by name: its
     # reason is transport-unicast unification, not no_std.
+    #
+    # Open-debt item 940 — and SHARDS, which are a different kind of exclusion:
+    # a member that builds in this graph and whose tests run in a lane of their
+    # own, at the features this selection gives it (Layer C1cap). They sit
+    # outside the invocation's own parentheses on purpose: pre-push gate 8
+    # (`workspace-check-gate.sh`) reads the excludes inside them as members
+    # that CANNOT join the workspace build, and a shard must still be checked
+    # there.
     local nostd excludes=()
+    local -a shards=(--exclude wz-capture)
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do excludes+=(--exclude "$member"); done
-    (cd crates && cargo test --workspace "${excludes[@]}" \
+    (cd crates && cargo test --workspace "${excludes[@]}" "${shards[@]}" \
         --exclude wz-runtime-tokio-multicast-tests --quiet)
+}
+
+# ─── Layer C1cap — the wz-capture shard of Layer C1 ─────────────────
+#
+# Open-debt item 940. Hosted `validate + verify + test` used 96% of its 1800 s
+# in run 43346654760 with every lane green, and Layer C1 was the step that grew:
+# 1066 s against 792 s and 795 s in the runs either side (43178526154,
+# 43360452070), the difference being a rust-cache entry restored with `full
+# match: false`. The job's own log splits the lane. The workspace compile is
+# 173 s (full match) to 273 s (partial); ONE test binary, wz-capture's lib tests
+# (1812 tests), runs 330 s to 470 s; every other binary and the doc tests
+# together run about 300 s. The job had to lose about 160 s to sit under the
+# 90% alarm on a partial match, and the next largest step in it (C1ch) is
+# 111 s to 164 s, so the crate whose tests are a third of the lane moves: C1
+# excludes it as a shard and this lane runs it in the `capture-shard` job.
+#
+# The shard must test what C1 tested, and the lane checks the two facts that
+# make it so on every run rather than trusting this paragraph:
+#   * FEATURES. C1's `cargo test --workspace` unifies features over every member
+#     it selects, which gives wz-capture `dissect`, `fixtures` and others from
+#     its dependents; `-p wz-capture` alone would give it its defaults. The set
+#     is cargo's own resolution of C1's selection (`cargo tree -i`), passed
+#     with `--features`, so the crate's own cfg is the one C1 compiled.
+#   * THE PARTITION. Leaving wz-capture out of C1's selection must change no
+#     member's features: its dev-dependencies could have been the only source
+#     of one. The lane resolves the selection with and without it and fails on
+#     any package whose features differ.
+# What does not carry over: wz-capture's dependencies are built at the features
+# its own graph asks for rather than at the workspace union, because cargo
+# cannot run one package's tests under another selection's resolution. Their
+# own tests stay in C1, at the union.
+layer_c1cap_capture_shard() {
+    local nostd feats="" member
+    local -a selection=()
+    nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
+    for member in $nostd; do selection+=(--exclude "$member"); done
+    # Layer C1's own selection: the same derived no_std set and the same named
+    # exclusion. Its shard exclusion is what this lane is about, so it is not
+    # in the selection.
+    selection+=(--exclude wz-runtime-tokio-multicast-tests)
+
+    # One line per resolved package, `name version (source)|features`, as a
+    # sorted set. ` (*)` marks a node cargo printed in full elsewhere; it depends
+    # on traversal order, which a removed root changes, so it is not a fact.
+    _c1cap_resolution() {
+        (cd crates && cargo tree --workspace "${selection[@]}" "$@" \
+            --edges normal,build,dev --format '{p}|{f}' --prefix none) \
+            | sed -e 's/ (\*)$//' | grep -F '|' | LC_ALL=C sort -u
+    }
+    _c1cap_features() {
+        local out
+        out="$(cd crates && cargo tree --workspace "${selection[@]}" -i wz-capture \
+            --edges normal,build,dev --depth 0 --format '{f}' --prefix none)" || {
+            echo "  C1cap FAIL: cargo could not resolve Layer C1's selection for wz-capture"
+            return 1
+        }
+        feats="${out%%$'\n'*}"
+        if [[ -z "$feats" || ! "$feats" =~ ^[a-z0-9_,-]+$ ]]; then
+            echo "  C1cap FAIL: cargo named no feature list for wz-capture under Layer C1's" \
+                "selection (read '${feats}'); a shard with no feature set would test the" \
+                "crate's defaults and call it C1's"
+            return 1
+        fi
+        echo "  C1cap: wz-capture under Layer C1's selection: --features $feats"
+    }
+    _c1cap_partition() {
+        local with without diff_out
+        with="$(_c1cap_resolution)" || {
+            echo "  C1cap FAIL: cargo could not resolve Layer C1's selection"; return 1; }
+        without="$(_c1cap_resolution --exclude wz-capture)" || {
+            echo "  C1cap FAIL: cargo could not resolve Layer C1's selection without the shard"
+            return 1
+        }
+        if [[ "$with" != "$without" ]]; then
+            diff_out="$(diff <(printf '%s\n' "$with") <(printf '%s\n' "$without"))"
+            echo "  C1cap FAIL: leaving wz-capture out of Layer C1's selection changes" \
+                "the features cargo resolves (< with it, > without it):"
+            echo "$diff_out"
+            return 1
+        fi
+        echo "  C1cap: Layer C1's selection resolves $(wc -l <<<"$with") package(s) to the" \
+            "same features with and without wz-capture"
+    }
+    _c1cap_tests() {
+        local out n
+        out="$( (cd crates && cargo test -p wz-capture --features "$feats" --quiet) 2>&1 \
+            | tee /dev/stderr )" || {
+            echo "  C1cap FAIL: \`cargo test -p wz-capture --features $feats\` exited non-zero"
+            return 1
+        }
+        n="$(_runci_passed_count <<<"$out")"
+        (( n > 0 )) || {
+            echo "  C1cap FAIL: wz-capture ran no test at --features $feats"; return 1; }
+        echo "  C1cap: $n wz-capture test(s) passed at Layer C1's features"
+    }
+
+    _runci_legs_open C1cap || return 1
+    _runci_leg features -- _c1cap_features
+    _runci_leg partition -- _c1cap_partition
+    _runci_leg tests --after features -- _c1cap_tests
+    _runci_legs_close
 }
 
 # ─── Layer C1b — cargo test -p wz-runtime-core --features alloc ────
@@ -27239,6 +27349,7 @@ run_layer C0f layer_c0f_lane_demo_feature_restore || overall=1
 run_layer C0g layer_c0g_apt_ceiling || overall=1
 run_layer C0s layer_c0s_test_lane_discipline || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
+run_layer C1cap layer_c1cap_capture_shard || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
 run_layer C1t layer_c1t_cargo_test_serial || overall=1
