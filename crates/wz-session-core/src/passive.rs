@@ -4090,6 +4090,11 @@ fn walk_unit(
         #[cfg(feature = "codec-frame")]
         let sn_verdict = judge.track_sn(direction, batch_index, &frame);
         let carried = carried_of(judge, direction, batch_index, &frame);
+        // A Frame read as the tail of its unit ends where the batch's next transport message
+        // begins: a second Frame header, behind which the sender put a message of the other
+        // reliability. The Frame keeps the payload before it, and the walk reads the rest as
+        // that message.
+        let (frame, consumed) = end_frame_at_next_message(frame, consumed, &carried);
         // R311y630 — the per-frame verdict and the counter bump that goes with
         // it, in ONE place because both ingestion paths need both and a fact
         // recorded at one site and counted at another is how the two drift.
@@ -4255,7 +4260,7 @@ fn carried_of(
             },
         ) {
             FragmentFate::Joined(bytes) => {
-                let b = parse_frame_payload_best_effort(&bytes);
+                let b = crate::network_message::parse_reassembled_payload_best_effort(&bytes);
                 judge.batch_read(direction, &b);
                 // R2706 — the buffer travels WITH the parse, as the referent of
                 // `b.spans`.
@@ -4269,6 +4274,38 @@ fn carried_of(
         },
         _ => Carried::Nothing,
     }
+}
+
+/// Cut a `Frame` at the transport message its records ended at
+/// ([`BatchParse::next_message_at`]): the `Frame` keeps the payload before it,
+/// and consumes that much less of its unit, so the walk's next step reads the
+/// message. Any other message, and a `Frame` whose records reach the end of the
+/// unit, is returned as it was.
+///
+/// Upstream reads a batch the same way: a `Frame`'s reader rewinds the message
+/// it cannot read as a network one, and the batch's loop reads that message as
+/// a transport message (`commons/zenoh-codec/src/transport/frame.rs` @
+/// `reader.rewind(mark);`, `io/zenoh-transport/src/unicast/universal/rx.rs` @
+/// `while !batch.is_empty() {`).
+fn end_frame_at_next_message(
+    mut frame: Result<InboundFrame, InboundParseError>,
+    mut consumed: usize,
+    carried: &Carried,
+) -> (Result<InboundFrame, InboundParseError>, usize) {
+    let Carried::Batch(BatchParse {
+        next_message_at: Some(end),
+        ..
+    }) = carried
+    else {
+        return (frame, consumed);
+    };
+    if let Ok(InboundFrame::Frame { payload, .. }) = &mut frame {
+        if let Some(kept) = payload.subslice(0..*end) {
+            consumed -= payload.len() - *end;
+            *payload = kept;
+        }
+    }
+    (frame, consumed)
 }
 
 /// R311y645 (§1.1n / §4.37) — where a `Frame`'s payload begins within the
@@ -5654,6 +5691,76 @@ mod tests {
         };
         assert!(batch.is_complete());
         assert_eq!(batch.messages.len(), 1);
+    }
+
+    /// One unit holding two Frames: the sender put a message of the other
+    /// reliability into the open batch behind a second Frame header. Each Frame
+    /// is a message of its own, with its own records and its own sn, and the
+    /// unit reads whole; the second Frame is not absorbed into the first one's
+    /// payload as an unknown record.
+    #[test]
+    fn a_second_frame_in_one_unit_is_a_message_with_its_own_records() {
+        let mut s = established(vec![]);
+        let reliable_records = [oam_record(7), oam_record(8)].concat();
+        let reliable = frame_wire(4, &reliable_records);
+        let mut best_effort = vec![wz_codecs::wire_const::T_MID_FRAME];
+        crate::vle::encode_vle_u64_into(&mut best_effort, 9);
+        best_effort.extend_from_slice(&oam_record(9));
+        let unit = [reliable.clone(), best_effort].concat();
+        s.push(Direction::A, &framed(&unit, 2));
+
+        let first = s.next_frame(Direction::A).expect("the first Frame");
+        match &first.frame {
+            Ok(InboundFrame::Frame {
+                reliable: true,
+                sn: 4,
+                payload,
+                ..
+            }) => assert_eq!(payload.as_slice(), reliable_records.as_slice()),
+            other => panic!("expected the reliable Frame, got {other:?}"),
+        }
+        let Carried::Batch(batch) = &first.carried else {
+            panic!("missing batch")
+        };
+        let ids = |batch: &BatchParse| -> Vec<u64> {
+            batch
+                .messages
+                .iter()
+                .filter_map(|m| match m {
+                    crate::network_message::NetworkMessage::Oam(o) => Some(o.id),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(ids(batch), vec![7, 8]);
+        assert!(batch.is_complete());
+        assert_eq!(batch.next_message_at, Some(reliable_records.len()));
+        assert_eq!(first.unit_offset, 0);
+        assert_eq!(
+            first.batch_offset,
+            Some(2),
+            "the payload begins behind its header"
+        );
+        assert!(first.unit_read_whole);
+
+        let second = s.next_frame(Direction::A).expect("the second Frame");
+        match &second.frame {
+            Ok(InboundFrame::Frame {
+                reliable: false,
+                sn: 9,
+                ..
+            }) => {}
+            other => panic!("expected the best-effort Frame, got {other:?}"),
+        }
+        let Carried::Batch(batch) = &second.carried else {
+            panic!("missing batch")
+        };
+        assert_eq!(ids(batch), vec![9]);
+        assert!(batch.is_complete());
+        assert_eq!(batch.next_message_at, None);
+        assert_eq!(second.unit_offset, reliable.len());
+        assert_eq!(second.batch_offset, Some(2));
+        assert!(second.unit_read_whole);
     }
 
     #[test]
