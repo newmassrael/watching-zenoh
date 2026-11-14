@@ -531,6 +531,12 @@ pub enum NotDecrypted {
     /// does not reach this state: it is the reading of a violated invariant, said
     /// aloud and not as a refusal of keys. It is a variant of its own, and not
     /// [`Self::RecordRefusedKeys`], because the remedy is not about keys.
+    ///
+    /// A pass that continues a direction across calls
+    /// ([`crate::Dissection::decrypt_continuing`]) reaches it in one more way:
+    /// the record it must open next was dropped by the bound
+    /// ([`MAX_KEPT_RECORDS_PER_DIRECTION`]) before the call, so its plaintext
+    /// would have a hole in the middle. `index` is then the record it needed.
     RecordNotHeld {
         /// The direction the record travelled.
         direction: Direction,
@@ -1028,16 +1034,96 @@ pub struct TlsFlowState {
     /// segment nobody saw — and the census then measures its overhead against
     /// the widest tag, which is what it always did.
     pub(crate) suite: Option<u16>,
+    /// The opener accepted this flow ([`RecordOpener::begin_flow`] answered
+    /// `Ok`), so a later pass may continue it with the same opener. `false` for
+    /// a flow no pass has reached and for one the opener declined.
+    pub(crate) accepted: bool,
+    /// Per direction, `[A, B]`, how far the passes have opened this flow.
+    pub(crate) opened_records: [OpenedRecords; 2],
+}
+
+/// How far the decryption passes have opened one direction of a flow, kept so
+/// that a later pass continues the same plaintext rather than starting it again.
+///
+/// The three lists run in step, one entry per opened `application_data` record,
+/// and start with the oldest record whose plaintext the flow still holds: a
+/// message decoded later can begin in it, and nothing earlier can be read again.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct OpenedRecords {
+    /// The index ([`EncryptedRecord::index`]) of the next record to open.
+    pub(crate) next: u64,
+    /// `(plaintext offset, stream offset)` of each record: where its plaintext
+    /// begins in the direction's whole plaintext, and where the record begins in
+    /// the direction's reassembled stream.
+    pub(crate) spans: Vec<(usize, usize)>,
+    /// Where each record ends in the stream, header and tag included.
+    pub(crate) ends: Vec<usize>,
+    /// The capture instant of the packet that held each record's first byte.
+    pub(crate) instants: Vec<Option<u64>>,
+}
+
+impl OpenedRecords {
+    /// Let go of the records whose plaintext lies wholly before plaintext offset
+    /// `from`, keeping the one `from` falls in.
+    pub(crate) fn release_before(&mut self, from: usize) {
+        let after = self
+            .spans
+            .partition_point(|(plain_at, _)| *plain_at <= from);
+        let cut = after.saturating_sub(1);
+        if cut == 0 {
+            return;
+        }
+        self.spans.drain(..cut);
+        self.ends.drain(..cut.min(self.ends.len()));
+        self.instants.drain(..cut.min(self.instants.len()));
+    }
+
+    /// Bytes these lists hold on the heap.
+    fn memory(&self) -> usize {
+        wz_session_core::heap_account::vec_bytes(&self.spans)
+            + wz_session_core::heap_account::vec_bytes(&self.ends)
+            + wz_session_core::heap_account::vec_bytes(&self.instants)
+    }
+}
+
+/// Supplies the opener of each flow to a pass that continues across calls
+/// ([`crate::Dissection::decrypt_continuing`]).
+///
+/// One opener cannot serve such a pass: [`RecordOpener::begin_flow`] replaces
+/// the state of the flow announced before it, and a flow continued on a later
+/// call needs the epoch and the sequence its earlier records left. So the
+/// caller keeps one opener per flow and hands it back here.
+pub trait FlowOpeners {
+    /// The opener for `flow`.
+    ///
+    /// `fresh` is `true` when the pass is about to announce the flow, so the
+    /// opener handed back must not have begun another; `false` when the pass
+    /// continues a flow it announced on an earlier call, so it must be the
+    /// opener handed back for that flow then.
+    fn opener(&mut self, flow: crate::link::FlowKey, fresh: bool) -> &mut dyn RecordOpener;
 }
 
 impl TlsFlowState {
+    /// Whether a direction that has not stopped keeps a record no pass opened.
+    pub(crate) fn has_unopened_records(&self) -> bool {
+        (0..2usize).any(|index| {
+            self.outcome_per_direction[index].is_none()
+                && self.kept[index]
+                    .last()
+                    .is_some_and(|record| record.index >= self.opened_records[index].next)
+        })
+    }
+
     /// Bytes this flow holds on the heap that follow its record count: the
     /// encrypted records kept for a decryptor (each a view of the stream, so its
-    /// own size and no ciphertext) and the bytes of a record still arriving.
+    /// own size and no ciphertext), the bytes of a record still arriving, and,
+    /// once a pass opened the flow, the map from its plaintext back to the
+    /// records it came out of.
     ///
-    /// Bounded: [`MAX_KEPT_RECORDS_PER_DIRECTION`] a direction, so a flow holds at
-    /// most that many records however long it runs. The ciphertext they point at
-    /// is the stream's, and the stream reports it.
+    /// The kept records are bounded: [`MAX_KEPT_RECORDS_PER_DIRECTION`] a
+    /// direction, so a flow holds at most that many however long it runs. The
+    /// ciphertext they point at is the stream's, and the stream reports it. The
+    /// map follows the plaintext the flow still holds, and is let go of with it.
     pub(crate) fn memory(&self) -> usize {
         self.kept
             .iter()
@@ -1047,6 +1133,11 @@ impl TlsFlowState {
                 .pending
                 .iter()
                 .map(wz_session_core::heap_account::vec_bytes)
+                .sum::<usize>()
+            + self
+                .opened_records
+                .iter()
+                .map(OpenedRecords::memory)
                 .sum::<usize>()
     }
 

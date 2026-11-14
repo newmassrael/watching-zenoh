@@ -4362,9 +4362,15 @@ impl FlowDissection {
     /// the plaintext the flow keeps; the restatement after this call moves
     /// where they stand into the ciphertext's space and leaves where they are
     /// read from alone.
+    ///
+    /// `appended` is how many bytes at the END of the direction's plaintext no
+    /// call has fed: the session is handed those and nothing before them, so a
+    /// pass that continues the flow appends to what it framed rather than
+    /// framing it again.
     fn feed_decrypted_stream(
         &mut self,
         direction: Direction,
+        appended: usize,
         instant_of: &dyn Fn(Direction, usize) -> Option<u64>,
     ) {
         let Self {
@@ -4387,6 +4393,7 @@ impl FlowDissection {
             container: None,
             plaintext: Some(plaintext),
         };
+        let held = &plaintext[dir_index(direction)].bytes;
         stream_into_session(
             session,
             frames,
@@ -4394,7 +4401,7 @@ impl FlowDissection {
             ingest,
             Fed {
                 direction,
-                bytes: &plaintext[dir_index(direction)].bytes,
+                bytes: &held[held.len().saturating_sub(appended)..],
                 instant_of,
                 entries_from: match keep {
                     Keep::Entries => Some(&source as &dyn messages::UnitBytes),
@@ -4404,6 +4411,239 @@ impl FlowDissection {
                 vouching: None,
             },
         );
+    }
+
+    /// One flow of a decryption pass ([`Dissection::decrypt_with_sink`],
+    /// [`Dissection::decrypt_continuing`]): announce it to `opener` if no pass
+    /// has, open each direction's kept records from the one the last pass
+    /// stopped after, and frame the plaintext they add.
+    ///
+    /// Returns whether the flow changed: a record opened or a finding was
+    /// written. A flow that is not encrypted, or that the opener declined on an
+    /// earlier pass, is left as it is.
+    ///
+    /// Rules (1) and (2) of [`Dissection::decrypt_with`] hold per call: only
+    /// `application_data` plaintext is fed, and a direction stops at the first
+    /// record that does not open. Rule (3) is the watermark each direction keeps
+    /// (`OpenedRecords::next`): a record is opened by one call only.
+    fn open_kept_records<O, S>(
+        &mut self,
+        opener: &mut O,
+        sink: &mut S,
+        summary: &mut DecryptionSummary,
+    ) -> bool
+    where
+        O: tls::RecordOpener + ?Sized,
+        S: PlaintextSink + ?Sized,
+    {
+        let Framing::Encrypted(state) = &mut self.framing else {
+            return false;
+        };
+        let first = state.outcome.is_none();
+        if first {
+            summary.flows += 1;
+            let client_direction = state.client_direction.map(idx_direction);
+            if let Err(reason) = opener.begin_flow(state.client_random.as_ref(), client_direction) {
+                state.outcome = Some(Some(reason));
+                summary.refused += 1;
+                return true;
+            }
+            state.outcome = Some(None);
+            state.accepted = true;
+        } else if !state.accepted {
+            return false;
+        }
+        // Taken out of the state for the length of the call and put back at its
+        // end: the framing below borrows the whole flow, and the remap reads
+        // these lists while it does.
+        let mut carry = core::mem::take(&mut state.opened_records);
+        // Where each direction's plaintext ends now: the offset the first
+        // record this call opens begins at.
+        let produced: [usize; 2] = core::array::from_fn(|index| {
+            self.plaintext
+                .as_deref()
+                .map_or(0, |held| held[index].from + held[index].bytes.len())
+        });
+        for (index, opened) in carry.iter_mut().enumerate() {
+            let from = self.plaintext.as_deref().map_or(0, |held| held[index].from);
+            opened.release_before(from);
+        }
+        // R311y669 — the reason PER DIRECTION, beside the flow's first one: a
+        // flow whose halves fail differently names both remedies.
+        let mut per_direction = state.outcome_per_direction;
+        let mut refusal: Option<tls::NotDecrypted> = None;
+        let mut changed = first;
+        // Per direction, the plaintext this call opened.
+        let mut fresh: [Vec<u8>; 2] = [Vec::new(), Vec::new()];
+        for index in 0..2usize {
+            let direction = idx_direction(index);
+            if per_direction[index].is_some() {
+                continue;
+            }
+            let next = carry[index].next;
+            let has_unopened = state.kept[index]
+                .last()
+                .is_some_and(|record| record.index >= next);
+            if !has_unopened {
+                continue;
+            }
+            // R311y668 — a direction the opener holds no key for is reported as
+            // such rather than attempted. Attempting it produced
+            // `RecordRefusedKeys { index: 0 }`, whose documented cause is the
+            // EPOCH, for the commonest arrangement there is: an `SSLKEYLOGFILE`
+            // from one of the two peers, carrying one side's traffic secret.
+            //
+            // Asked only of a direction with a record to open, because a
+            // direction with nothing in it is not missing anything: a capture of
+            // a one-way flow would otherwise report a reason about a half that
+            // carried no ciphertext.
+            if !opener.has_keys(direction) {
+                let reason = tls::NotDecrypted::NoKeyForDirection { direction };
+                refusal.get_or_insert(reason);
+                per_direction[index] = Some(reason);
+                changed = true;
+                continue;
+            }
+            // A kept record is a view of the stream: its bytes are read where
+            // the stream keeps them, which is the assembler's own kept bytes or
+            // the container the flow was lent.
+            let assembler = match direction {
+                Direction::A => &self.low_to_high,
+                Direction::B => &self.high_to_low,
+            };
+            let container = self.lent.as_deref().map(LentCapture::bytes);
+            for record in state.kept[index].iter().filter(|r| r.index >= next) {
+                // A direction this call continues must go on from the record
+                // after the last one opened; one the bound dropped in between
+                // leaves a hole no plaintext stream can be framed across.
+                if carry[index].next > 0 && record.index != carry[index].next {
+                    let reason = tls::NotDecrypted::RecordNotHeld {
+                        direction,
+                        index: carry[index].next,
+                    };
+                    refusal.get_or_insert(reason);
+                    per_direction[index] = Some(reason);
+                    changed = true;
+                    break;
+                }
+                let at = record.stream_offset;
+                let Some(bytes) = assembler.bytes(at, at + record.len, container) else {
+                    let reason = tls::NotDecrypted::RecordNotHeld {
+                        direction,
+                        index: record.index,
+                    };
+                    refusal.get_or_insert(reason);
+                    per_direction[index] = Some(reason);
+                    changed = true;
+                    break;
+                };
+                match opener.open(direction, record, &bytes) {
+                    Some(opened) => {
+                        state.opened[index] += 1;
+                        summary.records += 1;
+                        changed = true;
+                        carry[index].next = record.index + 1;
+                        // (1) of `decrypt_with`.
+                        if opened.content_type == tls::CT_APPLICATION_DATA {
+                            carry[index]
+                                .spans
+                                .push((produced[index] + fresh[index].len(), at));
+                            carry[index].ends.push(at + record.len);
+                            fresh[index].extend_from_slice(&opened.plaintext);
+                        }
+                    }
+                    None => {
+                        // (2) of `decrypt_with`: this direction stops here.
+                        let reason = tls::NotDecrypted::RecordRefusedKeys {
+                            direction,
+                            index: record.index,
+                        };
+                        refusal.get_or_insert(reason);
+                        per_direction[index] = Some(reason);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        state.outcome_per_direction = per_direction;
+        // The flow's one word is the FIRST refusal any call met, so a later call
+        // does not overwrite the reason an earlier one gave.
+        if let (Some(reason), Some(None)) = (refusal, state.outcome) {
+            state.outcome = Some(Some(reason));
+        }
+        if first && matches!(state.outcome, Some(None)) {
+            summary.decrypted += 1;
+        }
+        // The instant each new record's packet was captured at, resolved while
+        // the assembler is still in hand and BEFORE any frame exists: the
+        // plaintext is a different byte space from the TCP stream's, so the
+        // assembler's run map cannot be asked about a plaintext offset, only
+        // about the stream offset of the record it came out of. Both directions,
+        // because feeding one can release frames of the other (its context may
+        // only now be complete), and those are timed in the OTHER direction's
+        // plaintext.
+        for (index, opened) in carry.iter_mut().enumerate() {
+            let assembler = self.assembler(idx_direction(index));
+            let known = opened.instants.len();
+            let instants: Vec<Option<u64>> = opened.spans[known..]
+                .iter()
+                .map(|(_, stream_offset)| assembler.instant_of_offset(*stream_offset))
+                .collect();
+            opened.instants.extend(instants);
+        }
+        // Open-debt item 924, step 4c — the flow keeps the plaintext, which its
+        // messages are read again from: appended before any message is read
+        // from it, and moved rather than copied where the flow holds none yet.
+        let appended: [usize; 2] = [fresh[0].len(), fresh[1].len()];
+        let held = self.plaintext.get_or_insert_with(Default::default);
+        for (index, bytes) in fresh.iter_mut().enumerate() {
+            if held[index].bytes.is_empty() {
+                held[index].bytes = core::mem::take(bytes);
+            } else {
+                held[index].bytes.append(bytes);
+            }
+        }
+        for (index, appended) in appended.into_iter().enumerate() {
+            if appended == 0 {
+                continue;
+            }
+            let before = self.frames.len();
+            self.feed_decrypted_stream(idx_direction(index), appended, &|dir, plain_offset| {
+                let seat = dir_index(dir);
+                instant_of_plaintext(&carry[seat].spans, &carry[seat].instants, plain_offset)
+            });
+            let Some(plaintext) = self.plaintext.as_deref() else {
+                break;
+            };
+            // R311y678 — OFFERED here: after the session has framed the
+            // plaintext and BEFORE the remap below rewrites those frames'
+            // coordinates into ciphertext space. This window is the only one
+            // where the plaintext, the frames and the frames' plaintext
+            // coordinates all exist at once; a consumer walking the framing
+            // itself would hold a second opinion about where the messages are.
+            sink.on_plaintext(DecryptedStream {
+                flow: self.flow,
+                direction: idx_direction(index),
+                plaintext: &plaintext[index].bytes,
+                frames: self.frames().rows_from(before),
+                record_origins: &carry[index].spans,
+                base: plaintext[index].from,
+            });
+            // Each by the records of ITS direction: feeding one direction can
+            // release messages of the other that waited on a context.
+            self.frames
+                .restate_from(before, &mut |direction, offset, end| {
+                    let seat = dir_index(direction);
+                    record_coordinates(&carry[seat].spans, &carry[seat].ends, offset, end)
+                });
+            summary.frames += self.frames.len() - before;
+            changed = true;
+        }
+        if let Framing::Encrypted(state) = &mut self.framing {
+            state.opened_records = carry;
+        }
+        changed
     }
 }
 
@@ -7550,7 +7790,7 @@ impl Dissection {
     ) -> DecryptionSummary {
         let mut summary = DecryptionSummary::default();
         for flow in &mut self.flows {
-            let Framing::Encrypted(state) = &mut flow.framing else {
+            let Framing::Encrypted(state) = &flow.framing else {
                 continue;
             };
             // (3) above. A pass that already ran owns this flow's frames.
@@ -7561,169 +7801,78 @@ impl Dissection {
                 summary.already_opened += 1;
                 continue;
             }
-            summary.flows += 1;
-            let client_direction = state.client_direction.map(idx_direction);
-            if let Err(reason) = opener.begin_flow(state.client_random.as_ref(), client_direction) {
-                state.outcome = Some(Some(reason));
-                summary.refused += 1;
-                continue;
-            }
-            let mut refusal = None;
-            // R311y669 — and the reason PER DIRECTION beside it. `refusal` keeps
-            // the first, which is the flow's one-word summary; this keeps both, so
-            // a flow whose halves fail differently no longer names one of the two
-            // remedies a reader needs.
-            let mut per_direction: [Option<tls::NotDecrypted>; 2] = [None, None];
-            // Per direction: the opened plaintext, and the map from a byte
-            // offset within it back to the record that produced it.
-            let mut plaintext: [Vec<u8>; 2] = [Vec::new(), Vec::new()];
-            let mut spans: [Vec<(usize, usize)>; 2] = [Vec::new(), Vec::new()];
-            // Beside `spans`, one per entry: where that record ENDS in the TCP
-            // stream, header and tag included, which is where a message whose
-            // last byte it carried ends on the wire.
-            let mut record_ends: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
-            for index in 0..2usize {
-                let direction = idx_direction(index);
-                // R311y668 — a direction the opener holds no key for is reported
-                // as such rather than attempted. Attempting it produced
-                // `RecordRefusedKeys { index: 0 }`, whose documented cause is the
-                // EPOCH, for the commonest arrangement there is: an
-                // `SSLKEYLOGFILE` from one of the two peers, carrying one side's
-                // traffic secret. The reader was sent to look at key rotation for
-                // a key that was never in the log.
-                //
-                // Guarded on the direction having records, because a direction
-                // with nothing in it is not missing anything: a capture of a
-                // one-way flow would otherwise report a reason about a half that
-                // carried no ciphertext.
-                if !state.kept[index].is_empty() && !opener.has_keys(direction) {
-                    let reason = tls::NotDecrypted::NoKeyForDirection { direction };
-                    refusal.get_or_insert(reason);
-                    per_direction[index] = Some(reason);
-                    continue;
-                }
-                // A kept record is a view of the stream: its bytes are read where
-                // the stream keeps them, which is the assembler's own kept bytes
-                // or the container the flow was lent.
-                let assembler = match direction {
-                    Direction::A => &flow.low_to_high,
-                    Direction::B => &flow.high_to_low,
-                };
-                let container = flow.lent.as_deref().map(LentCapture::bytes);
-                for record in &state.kept[index] {
-                    let from = record.stream_offset;
-                    let Some(bytes) = assembler.bytes(from, from + record.len, container) else {
-                        let reason = tls::NotDecrypted::RecordNotHeld {
-                            direction,
-                            index: record.index,
-                        };
-                        refusal.get_or_insert(reason);
-                        per_direction[index] = Some(reason);
-                        break;
-                    };
-                    match opener.open(direction, record, &bytes) {
-                        Some(opened) => {
-                            state.opened[index] += 1;
-                            summary.records += 1;
-                            // (1) above.
-                            if opened.content_type == tls::CT_APPLICATION_DATA {
-                                spans[index].push((plaintext[index].len(), record.stream_offset));
-                                record_ends[index].push(record.stream_offset + record.len);
-                                plaintext[index].extend_from_slice(&opened.plaintext);
-                            }
-                        }
-                        None => {
-                            // (2) above — this direction stops here.
-                            let reason = tls::NotDecrypted::RecordRefusedKeys {
-                                direction,
-                                index: record.index,
-                            };
-                            refusal.get_or_insert(reason);
-                            per_direction[index] = Some(reason);
-                            break;
-                        }
-                    }
-                }
-            }
-            state.outcome = Some(refusal);
-            state.outcome_per_direction = per_direction;
-            if refusal.is_none() {
-                summary.decrypted += 1;
-            }
-            // The instant each opened record's packet was captured at, resolved
-            // while the assembler is still in hand and BEFORE any frame exists:
-            // the plaintext is a different byte space from the TCP stream's, so
-            // the assembler's run map cannot be asked about a plaintext offset,
-            // only about the stream offset of the record it came out of. Both
-            // directions, because feeding one can release frames of the other
-            // (its context may only now be complete), and those are timed in
-            // the OTHER direction's plaintext.
-            let record_instants: [Vec<Option<u64>>; 2] = core::array::from_fn(|index| {
-                spans[index]
-                    .iter()
-                    .map(|(_, stream_offset)| {
-                        flow.assembler(idx_direction(index))
-                            .instant_of_offset(*stream_offset)
-                    })
-                    .collect()
-            });
-            // Open-debt item 924, step 4c — the flow keeps the plaintext, which
-            // its messages are read again from: moved, not copied, before any
-            // message is read from it.
-            flow.plaintext = Some(alloc::boxed::Box::new(
-                plaintext.map(|bytes| Plaintext { bytes, from: 0 }),
-            ));
-            for index in 0..2usize {
-                let Some(plaintext) = flow.plaintext.as_deref() else {
-                    break;
-                };
-                if plaintext[index].bytes.is_empty() {
-                    continue;
-                }
-                let before = flow.frames.len();
-                flow.feed_decrypted_stream(idx_direction(index), &|dir, plain_offset| {
-                    let seat = dir_index(dir);
-                    instant_of_plaintext(&spans[seat], &record_instants[seat], plain_offset)
-                });
-                let Some(plaintext) = flow.plaintext.as_deref() else {
-                    break;
-                };
-                // R311y678 — OFFERED here: after the session has framed the
-                // plaintext and BEFORE the remap below rewrites those frames'
-                // coordinates into ciphertext space.
-                //
-                // R311y677 offered it one line earlier, before the frames
-                // existed, which left a consumer no way to know where the
-                // messages were and forced it to walk the framing itself. That
-                // is a SECOND OPINION about where the messages are, beside the
-                // session's, and nothing compared them: a capture the two
-                // disagreed about would report one count in `messages decoded`
-                // and a different set of rows underneath it.
-                //
-                // This window is the only one where the plaintext, the frames,
-                // and the frames' plaintext coordinates all exist at once.
-                sink.on_plaintext(DecryptedStream {
-                    flow: flow.flow,
-                    direction: idx_direction(index),
-                    plaintext: &plaintext[index].bytes,
-                    frames: flow.frames().rows_from(before),
-                    record_origins: &spans[index],
-                    base: 0,
-                });
-                // Each by the records of ITS direction: feeding one direction
-                // can release messages of the other that waited on a context.
-                flow.frames
-                    .restate_from(before, &mut |direction, offset, end| {
-                        let seat = dir_index(direction);
-                        record_coordinates(&spans[seat], &record_ends[seat], offset, end)
-                    });
-                summary.frames += flow.frames.len() - before;
-            }
+            flow.open_kept_records(&mut *opener, &mut *sink, &mut summary);
         }
         // What the plaintext was evidence of is observed at each flow's last
         // packet, and settled as a packet's is.
         self.settle_every_flow();
         summary
+    }
+
+    /// [`Self::decrypt_with`] for a dissection that is still being fed: opens
+    /// what was kept since the last call, and every flow no call has reached.
+    ///
+    /// A pass that runs once is the shape of a FILE, whose records are all in
+    /// before it starts. A live feed keeps adding records to a flow a pass has
+    /// already opened, and its keys may arrive after the flow began, so the pass
+    /// has to be resumable: each call opens, per direction, the records kept
+    /// since the record the last call stopped after, appends their plaintext to
+    /// what the flow holds, and frames only the new bytes. Nothing is fed twice,
+    /// which is the rule (3) of [`Self::decrypt_with`] protects, kept here by
+    /// the watermark rather than by refusing the flow.
+    ///
+    /// A flow continues with the opener that began it, which is why the opener
+    /// comes per flow ([`tls::FlowOpeners`]). A flow the opener declined is not
+    /// asked again; [`Self::reopen_unopened`] is what lets a caller holding new
+    /// keys put it back in front of a pass.
+    ///
+    /// The flows a call changed are settled as a packet's are. `already_opened`
+    /// stays zero: continuing a flow is what this pass is for.
+    pub fn decrypt_continuing(&mut self, openers: &mut dyn tls::FlowOpeners) -> DecryptionSummary {
+        let mut summary = DecryptionSummary::default();
+        let mut changed: Vec<FlowKey> = Vec::new();
+        for flow in &mut self.flows {
+            let Framing::Encrypted(state) = &flow.framing else {
+                continue;
+            };
+            let fresh = state.outcome.is_none();
+            if fresh || (state.accepted && state.has_unopened_records()) {
+                let opener = openers.opener(flow.flow, fresh);
+                if flow.open_kept_records(opener, &mut (), &mut summary) {
+                    changed.push(flow.flow);
+                }
+            }
+        }
+        for key in changed {
+            self.touch(Touched::Stream(key));
+        }
+        self.settle_touched();
+        summary
+    }
+
+    /// Put every encrypted flow a pass reached and opened NOTHING of back in
+    /// front of the next pass, and return how many.
+    ///
+    /// For a caller whose keys grew: a flow refused for want of a key, or whose
+    /// first record did not open under the keys held then, fed nothing to its
+    /// session, so passing it again cannot feed anything twice. A flow that
+    /// opened a record keeps its finding, because its plaintext has been framed
+    /// and a second start would frame it again.
+    pub fn reopen_unopened(&mut self) -> usize {
+        let mut reopened = 0usize;
+        for flow in &mut self.flows {
+            let Framing::Encrypted(state) = &mut flow.framing else {
+                continue;
+            };
+            if matches!(state.outcome, Some(Some(_))) && state.opened == [0, 0] {
+                state.outcome = None;
+                state.outcome_per_direction = [None, None];
+                state.accepted = false;
+                state.opened_records = Default::default();
+                reopened += 1;
+            }
+        }
+        reopened
     }
 
     /// R311y718 (§1.2a) — frame one recovered QUIC stream's bytes as zenoh.
@@ -21279,5 +21428,227 @@ mod tls_flow_tests {
             "and at least one of them must be a BYTE-OFFSET list, or the \
              discriminating half of this test never ran"
         );
+    }
+
+    /// One [`FakeOpener`] per flow, kept across calls as a caller of
+    /// `decrypt_continuing` keeps its openers.
+    #[derive(Default)]
+    struct FakeOpeners {
+        per_flow: alloc::collections::BTreeMap<crate::link::FlowKey, FakeOpener>,
+        /// How many times a pass asked for a fresh opener.
+        fresh: usize,
+        /// What every fresh opener declines a flow with.
+        decline: Option<crate::tls::NotDecrypted>,
+    }
+
+    impl crate::tls::FlowOpeners for FakeOpeners {
+        fn opener(
+            &mut self,
+            flow: crate::link::FlowKey,
+            fresh: bool,
+        ) -> &mut dyn crate::tls::RecordOpener {
+            if fresh {
+                self.fresh += 1;
+                let mut opener = FakeOpener::new();
+                opener.decline = self.decline;
+                self.per_flow.insert(flow, opener);
+            }
+            self.per_flow.entry(flow).or_insert_with(FakeOpener::new)
+        }
+    }
+
+    /// A client-side TLS flow fed packet by packet, with no `finish`: the
+    /// shape of a live feed.
+    struct LiveTlsFeed {
+        d: Dissection,
+        seq: u32,
+        at: usize,
+    }
+
+    impl LiveTlsFeed {
+        fn new(random: &[u8; 32]) -> Self {
+            let mut feed = Self {
+                d: Dissection::new(),
+                seq: 1000,
+                at: 0,
+            };
+            feed.push(&hello_with_random(random));
+            feed
+        }
+
+        fn push(&mut self, bytes: &[u8]) {
+            self.d.push_packet(
+                LINKTYPE_ETHERNET,
+                self.at,
+                &tcp_packet(1111, 7447, self.seq, bytes),
+            );
+            self.seq += bytes.len() as u32;
+            self.at += 1;
+        }
+
+        fn push_units(&mut self, ids: core::ops::Range<u8>) {
+            for id in ids {
+                self.push(&protected(
+                    crate::tls::CT_APPLICATION_DATA,
+                    &framed_unit(id),
+                ));
+            }
+        }
+    }
+
+    /// A pass that continues opens the records kept since the last call, and
+    /// frames each record's plaintext once: the second call adds two messages
+    /// to the two the first decoded, and asks the opener for no record twice.
+    #[test]
+    fn a_continuing_pass_opens_what_arrived_since_and_frames_each_record_once() {
+        let mut feed = LiveTlsFeed::new(&[7u8; 32]);
+        feed.push_units(0..2);
+        let mut openers = FakeOpeners::default();
+
+        let first = feed.d.decrypt_continuing(&mut openers);
+        assert_eq!(
+            (first.flows, first.decrypted, first.records, first.frames),
+            (1, 1, 2, 2),
+            "first={first:?}"
+        );
+
+        feed.push_units(2..4);
+        let second = feed.d.decrypt_continuing(&mut openers);
+        assert_eq!(
+            (second.flows, second.records, second.frames),
+            (0, 2, 2),
+            "the second call continues the flow it began: second={second:?}"
+        );
+        assert_eq!(openers.fresh, 1, "the flow is announced once");
+        let opener = openers.per_flow.values().next().expect("one flow");
+        assert_eq!(opener.seen.len(), 1);
+        assert_eq!(
+            opener.asked,
+            alloc::vec![
+                (Direction::A, 0),
+                (Direction::A, 1),
+                (Direction::A, 2),
+                (Direction::A, 3)
+            ],
+            "no record is opened by two calls"
+        );
+        let offsets: Vec<usize> = feed.d.flows()[0]
+            .frames()
+            .iter()
+            .map(|f| f.stream_offset)
+            .collect();
+        assert_eq!(
+            offsets,
+            alloc::vec![57, 67, 77, 87],
+            "four messages, each once, at the TCP offsets of their records"
+        );
+        assert_eq!(feed.d.encrypted_flows()[0].not_decrypted, None);
+
+        let third = feed.d.decrypt_continuing(&mut openers);
+        assert_eq!(
+            third,
+            DecryptionSummary::default(),
+            "with nothing kept since, a call does nothing"
+        );
+        assert_eq!(feed.d.flows()[0].frames.len(), 4);
+    }
+
+    /// A flow the opener declined is not asked again until the caller says its
+    /// keys grew, and then it opens from its first kept record. A flow that
+    /// opened a record is never put back: its plaintext was framed.
+    #[test]
+    fn keys_that_arrive_later_open_a_flow_the_first_pass_had_no_key_for() {
+        let mut feed = LiveTlsFeed::new(&[7u8; 32]);
+        feed.push_units(0..3);
+        let mut openers = FakeOpeners {
+            decline: Some(crate::tls::NotDecrypted::NoKeyForSession),
+            ..FakeOpeners::default()
+        };
+
+        let refused = feed.d.decrypt_continuing(&mut openers);
+        assert_eq!((refused.flows, refused.refused), (1, 1));
+        assert_eq!(
+            feed.d.encrypted_flows()[0].not_decrypted,
+            Some(crate::tls::NotDecrypted::NoKeyForSession)
+        );
+        let again = feed.d.decrypt_continuing(&mut openers);
+        assert_eq!(
+            again,
+            DecryptionSummary::default(),
+            "a declined flow is not asked again on its own"
+        );
+
+        openers.decline = None;
+        assert_eq!(
+            feed.d.reopen_unopened(),
+            1,
+            "the declined flow opened nothing"
+        );
+        let opened = feed.d.decrypt_continuing(&mut openers);
+        assert_eq!(
+            (
+                opened.flows,
+                opened.decrypted,
+                opened.records,
+                opened.frames
+            ),
+            (1, 1, 3, 3),
+            "opened={opened:?}"
+        );
+        assert_eq!(
+            openers.fresh, 2,
+            "the flow is announced again, to a fresh opener"
+        );
+        assert_eq!(feed.d.encrypted_flows()[0].not_decrypted, None);
+
+        assert_eq!(
+            feed.d.reopen_unopened(),
+            0,
+            "a flow that opened a record keeps its finding"
+        );
+        assert_eq!(
+            feed.d.decrypt_continuing(&mut openers),
+            DecryptionSummary::default()
+        );
+        assert_eq!(feed.d.flows()[0].frames.len(), 3, "nothing framed twice");
+    }
+
+    /// A direction continued across calls stops where the bound dropped the
+    /// record it needed next, and names that record: plaintext with a hole in
+    /// the middle cannot be framed.
+    #[test]
+    fn a_continued_direction_stops_where_the_bound_dropped_its_next_record() {
+        let mut feed = LiveTlsFeed::new(&[7u8; 32]);
+        feed.push_units(0..2);
+        let mut openers = FakeOpeners::default();
+        assert_eq!(feed.d.decrypt_continuing(&mut openers).frames, 2);
+
+        // Enough records that the oldest unopened one (index 2) leaves the
+        // bound before the next call.
+        for _ in 0..crate::tls::MAX_KEPT_RECORDS_PER_DIRECTION + 1 {
+            feed.push(&protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(9)));
+        }
+        let stopped = feed.d.decrypt_continuing(&mut openers);
+        assert_eq!(
+            (stopped.records, stopped.frames),
+            (0, 0),
+            "stopped={stopped:?}"
+        );
+        let flow = &feed.d.encrypted_flows()[0];
+        assert_eq!(
+            flow.not_decrypted_per_direction[0],
+            Some(crate::tls::NotDecrypted::RecordNotHeld {
+                direction: Direction::A,
+                index: 2
+            })
+        );
+        assert_eq!(
+            flow.not_decrypted,
+            Some(crate::tls::NotDecrypted::RecordNotHeld {
+                direction: Direction::A,
+                index: 2
+            })
+        );
+        assert_eq!(feed.d.flows()[0].frames.len(), 2);
     }
 }
