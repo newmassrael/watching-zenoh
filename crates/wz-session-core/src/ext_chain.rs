@@ -332,12 +332,15 @@ pub(crate) fn collect_handshake_ext_chain<'a>(
     Ok(())
 }
 
-/// The chain of a received Frame or Fragment as its header's document read it, owned: the heap
+/// The chain of a received Frame, Fragment or Join as its document read it, owned: the heap
 /// profile's form of the chain those messages report. The document's view reads a chain of any
 /// length, so the bound a node reads of a transport chain
 /// ([`MAX_EXT_CHAIN_DEPTH`](crate::parse_error::MAX_EXT_CHAIN_DEPTH)) is kept here, as
 /// `collect_handshake_ext_chain` keeps it.
-#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "codec-frame", feature = "codec-join")
+))]
 pub(crate) fn collect_ext_chain<'a>(
     walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
 ) -> Result<Vec<ExtEntryOwned>, crate::parse_error::InboundParseError> {
@@ -360,7 +363,10 @@ pub(crate) fn collect_ext_chain<'a>(
     feature = "codec-open-body",
     feature = "codec-close",
     feature = "codec-keep-alive",
-    all(feature = "alloc", feature = "codec-frame")
+    all(
+        feature = "alloc",
+        any(feature = "codec-frame", feature = "codec-join")
+    )
 ))]
 fn received_entry(
     entry: &wz_codecs::ext_entry::ExtEntryView<'_>,

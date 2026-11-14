@@ -1202,27 +1202,26 @@ fn parse_unit_into(
         // fields and the T bit's lease UNIT projected in exactly one place.
         #[cfg(all(feature = "alloc", feature = "codec-join"))]
         wire_const::T_MID_JOIN => {
-            let (join, consumed) = crate::join_decode::decode_join_body(header, &bytes[1..])?;
-            let body = join.try_into_owned()?;
-            let join_has_ext = (header & wire_const::FLAG_T_Z) != 0;
-            // R311y631 — hoisted out of the `if` so the consumed length can be
-            // read off it in BOTH arms. With no chain it has advanced nothing,
-            // which makes the subtraction below say `1 + consumed` — the base
-            // body and nothing else — without a second expression to keep in
-            // step with this one.
-            let mut ext_cursor = SceCursor::new(&bytes[1 + consumed..]);
-            let extensions = if join_has_ext {
-                decode_ext_chain(&mut ext_cursor)?
-            } else {
-                Vec::new()
-            };
-            let used = bytes.len() - ext_cursor.remaining();
+            // The whole message is read by its document
+            // (`sources/codecs/transport_join.scxml`); the lease is projected to
+            // milliseconds as every Join reader here projects it.
+            let mut cursor = SceCursor::new(bytes);
+            let view = wz_codecs::transport_join::TransportJoinView::decode(&mut cursor)?;
+            let join_has_ext = (view.header & wire_const::FLAG_T_Z) != 0;
+            let mut body = view.body.try_into_owned()?;
+            body.lease = crate::lease::lease_from_wire(
+                (view.header & wire_const::FLAG_T_JOIN_T) != 0,
+                body.lease,
+            );
+            let extensions = crate::ext_chain::collect_ext_chain(crate::ext_view::walked(
+                view.extensions.as_ref(),
+            ))?;
             *out = InboundFrame::Join {
                 has_ext: join_has_ext,
                 body,
                 extensions,
             };
-            Ok(used)
+            Ok(bytes.len() - cursor.remaining())
         }
         // Transport OAM, DELEGATED like the JOIN arm above rather than spelled
         // out here — see [`decode_oam`] for the second, measured reason. A heap
