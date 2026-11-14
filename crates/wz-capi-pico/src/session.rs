@@ -944,6 +944,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             gateway_south: wz_session_core::region_partition::SouthPartition::Auto,
             // The group its listen endpoint names, when it names one.
             groups,
+            // pico's config has no `qos/publication` and no `transport/shared_memory` keys, so
+            // its session applies nothing above its links.
+            session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
         },
     ) {
         Ok(state) => {

@@ -40,8 +40,8 @@ use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
 use wz_runtime_tokio::zenoh_config::{
     config_key_in_build, default_listen_endpoint, honours_config_key, ConfigIngestError,
-    ZenohConfigIngest, ZenohNodeConfig, UNHONOURED_READER_GAP, UNHONOURED_UPSTREAM_CONFIG_KEYS,
-    UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
+    ShmInitMode, ZenohConfigIngest, ZenohNodeConfig, UNHONOURED_READER_GAP,
+    UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
 };
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
@@ -58,6 +58,9 @@ use crate::node_auth::NodeAuth;
 use crate::node_policy::NodePolicy;
 #[cfg(feature = "scout")]
 use crate::scouting_node::ScoutingPlan;
+use crate::session_defaults::{
+    PromotedMessages, PublicationDefaults, PublicationQos, SessionDefaults, ShmInit, ShmPromotion,
+};
 
 /// The mode a node dials as, from the `mode` key it states.
 ///
@@ -102,10 +105,31 @@ pub enum KeyState {
     Unmapped,
 }
 
-/// The state of the key `path` (`transport/link/tx/threads`), or `None` for a key no list of the
-/// runtime's reader knows: one a bump of the pinned upstream added, which has no state until it is
-/// given one, and which a test over the default configuration fails on until then.
-pub fn key_state(path: &str) -> Option<KeyState> {
+/// What a session applies itself of the keys only a session applies
+/// ([`SESSION_HONOURED_KEYS`](wz_runtime_tokio::zenoh_config::SESSION_HONOURED_KEYS)), which the
+/// reader of the engine cannot know: it is the build of the
+/// session's own crate that says whether it has shared memory and a provider to copy into. Each
+/// client of the engine states its own, so that [`key_state`] answers for the session asking and
+/// not for the best build of wz.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionReach {
+    /// The session gives its publications the QoS `qos/publication` names for their keys.
+    pub publication_qos: bool,
+    /// The session's build has shared memory. Upstream's built without it reads the three
+    /// shared-memory keys and does nothing with them, so they are inert in such a build.
+    pub shared_memory: bool,
+    /// The messages whose large payload the session copies into its provider.
+    pub promotion: PromotedMessages,
+}
+
+/// The state of the key `path` (`transport/link/tx/threads`) for a session that reaches `reach`,
+/// or `None` for a key no list of the runtime's reader knows: one a bump of the pinned upstream
+/// added, which has no state until it is given one, and which a test over the default
+/// configuration fails on until then.
+pub fn key_state(path: &str, reach: SessionReach) -> Option<KeyState> {
+    if let Some(state) = session_key_state(path, reach) {
+        return Some(state);
+    }
     if honours_config_key(path) {
         // A key whose reader is a capability this build was made without is acted on by a build
         // with it, and not by this one.
@@ -124,6 +148,83 @@ pub fn key_state(path: &str) -> Option<KeyState> {
         Some(KeyState::Unmapped)
     } else {
         None
+    }
+}
+
+/// The state of `path` for a session that reaches `reach` when it is a key only a session applies
+/// ([`SESSION_HONOURED_KEYS`](wz_runtime_tokio::zenoh_config::SESSION_HONOURED_KEYS)), and `None`
+/// for any other key.
+///
+/// A shared-memory key the session does not act on is [`KeyState::Inert`] in a build without
+/// shared memory, as upstream's built so ignores it, and [`KeyState::Unmapped`] in one with it,
+/// where upstream acts on it. `messages` is acted on only by a session that copies every kind of
+/// message it can name: one that copies some kinds and not others would leave a kind the
+/// document names uncopied.
+pub fn session_key_state(path: &str, reach: SessionReach) -> Option<KeyState> {
+    let acted_on = match path {
+        "qos/publication" => {
+            return Some(if reach.publication_qos {
+                KeyState::Mapped
+            } else {
+                KeyState::Unmapped
+            })
+        }
+        // The subsystem is made by this engine's open, which has it in a build with the
+        // shared-memory transport.
+        "transport/shared_memory/mode" => cfg!(feature = "transport-shm") && reach.shared_memory,
+        "transport/shared_memory/transport_optimization/message_size_threshold" => {
+            reach.promotion.any()
+        }
+        "transport/shared_memory/transport_optimization/messages" => reach.promotion.all(),
+        _ => return None,
+    };
+    Some(if acted_on {
+        KeyState::Mapped
+    } else if reach.shared_memory {
+        KeyState::Unmapped
+    } else {
+        KeyState::Inert
+    })
+}
+
+/// What a session applies itself above its links (`SESSION_HONOURED_KEYS`), compiled from the
+/// reading of its document: the one place the C ABI and the Rust API take it from, carried into
+/// the session by [`OpenPlan::into_arguments`].
+pub fn session_defaults_of(node: &ZenohNodeConfig) -> SessionDefaults {
+    let publication_qos = PublicationQos::new(node.publication_qos.iter().map(|item| {
+        let conf = item.config;
+        (
+            item.key_exprs.clone(),
+            PublicationDefaults {
+                congestion_control: conf.congestion_control,
+                priority: conf.priority,
+                express: conf.express,
+                reliability: conf
+                    .reliable
+                    .map(wz_runtime_tokio::Reliability::from_reliable_bool),
+                allowed_destination: conf.allowed_destination,
+            },
+        )
+    }));
+    let listed = |message: &str| {
+        node.shm_optimised_messages
+            .iter()
+            .any(|named| named == message)
+    };
+    SessionDefaults {
+        publication_qos,
+        shm_init: match node.shm_init_mode {
+            ShmInitMode::Lazy => ShmInit::Lazy,
+            ShmInitMode::Init => ShmInit::Init,
+        },
+        shm_promotion: ShmPromotion {
+            threshold: usize::try_from(node.shm_message_size_threshold).unwrap_or(usize::MAX),
+            messages: PromotedMessages {
+                put: listed("put"),
+                query: listed("query"),
+                reply: listed("reply"),
+            },
+        },
     }
 }
 
@@ -676,6 +777,9 @@ pub struct OpenPlan {
     /// reader reports ignored, whether or not the value is the default. What an open does about
     /// them is its client's (see [`KeyState`]).
     pub ignored: Vec<String>,
+    /// What the session applies itself above its links ([`session_defaults_of`]), which the open
+    /// carries into the session for every ABI that publishes through it to read.
+    pub session: SessionDefaults,
 }
 
 impl OpenPlan {
@@ -1066,6 +1170,9 @@ impl OpenPlan {
                 })
                 .collect()
         });
+        let session = node
+            .as_ref()
+            .map_or_else(SessionDefaults::default, session_defaults_of);
 
         Ok(Self {
             role,
@@ -1094,6 +1201,7 @@ impl OpenPlan {
             tls,
             read_files,
             ignored,
+            session,
         })
     }
 
@@ -1213,6 +1321,7 @@ impl OpenPlan {
                 namespace: self.namespace,
                 gateway_south: self.gateway_south,
                 groups,
+                session_defaults: self.session,
             },
         }
     }
@@ -2201,29 +2310,187 @@ mod tests {
     /// Each key is mapped, inert or unmapped, and a key no list knows has no state.
     #[test]
     fn a_key_is_mapped_inert_or_unmapped_and_a_key_nobody_lists_has_none() {
-        assert_eq!(key_state("connect/timeout_ms"), Some(KeyState::Mapped));
+        let state = |path| key_state(path, SessionReach::default());
+        assert_eq!(state("connect/timeout_ms"), Some(KeyState::Mapped));
         assert_eq!(
-            key_state("transport/auth/pubkey/key_size"),
+            state("transport/auth/pubkey/key_size"),
             Some(KeyState::Inert)
         );
         assert_eq!(
-            key_state("transport/unicast/open_timeout"),
+            state("transport/unicast/open_timeout"),
             Some(KeyState::Unmapped)
         );
         // A key the C interface acts on is mapped, whichever list it left.
         assert_eq!(
-            key_state("transport/unicast/accept_timeout"),
+            state("transport/unicast/accept_timeout"),
             Some(KeyState::Mapped)
         );
         assert_eq!(
-            key_state("transport/link/tls/root_ca_certificate_base64"),
+            state("transport/link/tls/root_ca_certificate_base64"),
             Some(KeyState::Unmapped)
         );
-        assert_eq!(key_state("a/key/nobody/lists"), None);
+        assert_eq!(state("a/key/nobody/lists"), None);
         assert!(is_section_of_keys_with_a_state("gateway"));
         assert!(!is_section_of_keys_with_a_state(
             "transport/unicast/open_timeout"
         ));
+    }
+
+    /// A key only a session applies is mapped for the session that applies it and for no other:
+    /// a session without shared memory leaves the shared-memory keys inert, as upstream's built
+    /// without it does, and one with shared memory that does not copy a kind of message leaves
+    /// the promotion's keys unmapped, where upstream acts on them.
+    #[test]
+    fn a_session_key_is_mapped_only_for_the_session_that_applies_it() {
+        use wz_runtime_tokio::zenoh_config::SESSION_HONOURED_KEYS;
+        const THRESHOLD: &str =
+            "transport/shared_memory/transport_optimization/message_size_threshold";
+        const MESSAGES: &str = "transport/shared_memory/transport_optimization/messages";
+        const MODE: &str = "transport/shared_memory/mode";
+
+        let everything = SessionReach {
+            publication_qos: true,
+            shared_memory: true,
+            promotion: PromotedMessages::ALL,
+        };
+        for key in SESSION_HONOURED_KEYS {
+            assert!(
+                session_key_state(key, SessionReach::default()).is_some(),
+                "{key} is a session's and has no session state"
+            );
+            assert_eq!(
+                key_state(key, everything),
+                if *key == MODE && !cfg!(feature = "transport-shm") {
+                    Some(KeyState::Unmapped)
+                } else {
+                    Some(KeyState::Mapped)
+                },
+                "{key}"
+            );
+        }
+        assert_eq!(session_key_state("connect/timeout_ms", everything), None);
+
+        let nothing = SessionReach::default();
+        assert_eq!(
+            key_state("qos/publication", nothing),
+            Some(KeyState::Unmapped)
+        );
+        for key in [MODE, THRESHOLD, MESSAGES] {
+            assert_eq!(key_state(key, nothing), Some(KeyState::Inert), "{key}");
+        }
+
+        // Shared memory and a provider that copies puts alone: the threshold is acted on, the
+        // list is not, since a kind it names is left uncopied.
+        let puts_only = SessionReach {
+            publication_qos: true,
+            shared_memory: true,
+            promotion: PromotedMessages {
+                put: true,
+                query: false,
+                reply: false,
+            },
+        };
+        assert_eq!(key_state(THRESHOLD, puts_only), Some(KeyState::Mapped));
+        assert_eq!(key_state(MESSAGES, puts_only), Some(KeyState::Unmapped));
+        // Shared memory and no provider to copy into.
+        let no_provider = SessionReach {
+            promotion: PromotedMessages::NONE,
+            ..puts_only
+        };
+        assert_eq!(key_state(THRESHOLD, no_provider), Some(KeyState::Unmapped));
+        assert_eq!(key_state(MESSAGES, no_provider), Some(KeyState::Unmapped));
+    }
+
+    /// The plan compiles what the session applies itself from the document, and carries it into
+    /// the open's arguments, from where the session holds it.
+    #[test]
+    fn the_plan_compiles_the_session_defaults_and_hands_them_to_the_open() {
+        use crate::session_defaults::PromotedMessage;
+
+        let plan = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ scouting: { multicast: { enabled: false } },
+                 qos: { publication: [ { key_exprs: ["demo/**"],
+                                         config: { priority: "background", express: true } } ] },
+                 transport: { shared_memory: { mode: "init", transport_optimization: {
+                     message_size_threshold: 128, messages: ["query", "delete"] } } } }"#,
+        )
+        .expect("opens");
+        assert!(plan.ignored.is_empty(), "{:?}", plan.ignored);
+        assert_eq!(plan.session.shm_init, ShmInit::Init);
+        assert_eq!(plan.session.shm_promotion.threshold, 128);
+        assert_eq!(
+            plan.session.shm_promotion.messages,
+            PromotedMessages {
+                put: false,
+                query: true,
+                reply: false,
+            },
+            "a delete names no kind a payload is copied for"
+        );
+        assert!(plan
+            .session
+            .shm_promotion
+            .admits(PromotedMessage::Query, 128));
+        assert!(!plan
+            .session
+            .shm_promotion
+            .admits(PromotedMessage::Put, 1 << 20));
+        let given = plan.session.publication_qos.defaults_for("demo/a");
+        assert_eq!(
+            given.priority,
+            Some(wz_runtime_tokio::qos::Priority::Background)
+        );
+        assert_eq!(given.express, Some(true));
+        assert_eq!(given.congestion_control, None);
+
+        let expected = plan.session.clone();
+        let arguments = plan.into_arguments(AbiChoices {
+            tx_queue: TxQueueConf::default(),
+            start_read_task: true,
+            local_delivery: LocalDeliveryDrain::Caller,
+            liveliness_to_self: true,
+            initial_interest: true,
+            face_drive: FaceDrive::PerFace,
+            shm_clients: crate::faces::no_shm_clients(),
+            offer_shm: false,
+            groups_report_shm: false,
+        });
+        assert_eq!(arguments.stance.session_defaults, expected);
+
+        // A document that states none of the keys gives upstream's defaults, which apply nothing
+        // to a publication.
+        let silent = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ scouting: { multicast: { enabled: false } } }"#,
+        )
+        .expect("opens");
+        assert_eq!(silent.session, SessionDefaults::default());
+    }
+
+    /// Every case the surfaces of `qos/publication` are held to is what the plan compiles: the
+    /// one reading the C ABI and the Rust API preset both take their defaults from.
+    #[test]
+    fn the_plan_gives_each_shared_publication_case_its_settings() {
+        for case in crate::session_defaults::PUBLICATION_QOS_CASES {
+            let document = format!(
+                "{{ scouting: {{ multicast: {{ enabled: false }} }}, qos: {{ publication: {} }} }}",
+                case.rules
+            );
+            let plan = plan_of(WhatAmI::Client, &["tcp/127.0.0.1:1"], &[], &document)
+                .unwrap_or_else(|refusal| panic!("{}: {refusal:?}", case.rules));
+            assert_eq!(
+                plan.session.publication_qos.defaults_for(case.key),
+                case.expected,
+                "{} on {}",
+                case.rules,
+                case.key
+            );
+        }
     }
 
     /// The plan reports every key the document states that the engine does not act on, and the
