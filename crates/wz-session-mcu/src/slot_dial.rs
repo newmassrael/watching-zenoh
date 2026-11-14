@@ -22,15 +22,17 @@ use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionRole, SlotStack}
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle};
 use wz_session_core::close_reason::CloseReason;
+use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::driver_loop::{DriverOutcome, EventSink, InPlaceRecord, IterationEvent};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::locator_directory::DirectoryZid;
 use wz_session_core::replay_cursor::ReplayCursor;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 use crate::app_layer::SessionEvents;
-use crate::connect_manager::{DialFailed, Dialer, Ended};
+use crate::connect_manager::{ConnectManager, DialFailed, Dialer, Ended};
 use crate::dial::{dial_failed, parse_locator};
 use crate::slot_host::{DialRefused, OpenedSession, SessionHost};
 
@@ -181,6 +183,28 @@ impl<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static> SlotSessio
     /// End the session's task now, without a Close on the wire.
     pub fn abort(&self) {
         self.opened.task.abort();
+    }
+
+    /// End the session: an established peer is told with a Close, a half-open one has nothing
+    /// to close, and the session's task ends now.
+    pub fn hang_up(&self) {
+        if self.opened.actions.is_established() {
+            self.opened
+                .actions
+                .send_close_with_reason(CloseReason::Generic);
+        }
+        self.abort();
+    }
+
+    /// The zid the key of the session's link proved, while the session runs: `None` for a peer
+    /// that only claims one, and for a session that has ended (decisions D1 and D10). What a node
+    /// that accepts sessions tells its connect manager its sessions are of.
+    pub fn proven_peer(&self) -> Option<DirectoryZid> {
+        let actions = &self.opened.actions;
+        if self.is_finished() || !actions.peer_identity_verified() {
+            return None;
+        }
+        actions.peer_zid_array()
     }
 
     /// The task that runs the session, for a caller that waits on it.
@@ -336,13 +360,52 @@ where
     }
 
     fn hang_up(&mut self, session: Self::Session) {
-        // An established peer is told; a half-open one has nothing to close.
-        if session.opened.actions.is_established() {
-            session
-                .opened
-                .actions
-                .send_close_with_reason(CloseReason::Generic);
-        }
-        session.abort();
+        session.hang_up();
     }
+}
+
+/// Tell `manager` which nodes have a running session to this node, among the sessions peers
+/// opened to it (`accepted`), whose link's key proved their zid (decision D10), so a node it waits
+/// for under a passive intent holds its own session, and one whose session ended is told so. At
+/// most `N`, the sessions the node holds; a session whose peer only claims a zid is no node's.
+pub fn report_inbound<'s, M, C, D, I, const N: usize>(
+    manager: &mut ConnectManager<M>,
+    accepted: I,
+    now_ms: u64,
+) where
+    M: Dialer,
+    C: ClockSource + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
+    I: Iterator<Item = &'s SlotSession<C, D>>,
+{
+    let mut proven: [DirectoryZid; N] = [[0; CREDENTIAL_ZID_BYTES]; N];
+    let mut count = 0;
+    for zid in accepted.filter_map(|session| session.proven_peer()) {
+        if count < N {
+            proven[count] = zid;
+            count += 1;
+        }
+    }
+    manager.inbound_sessions(&proven[..count], now_ms);
+}
+
+/// End the sessions peers opened to this node (`accepted`) that `manager`'s machines let go of
+/// since it was last asked: a `close` or a `reset` of a node held by the session it opened
+/// (decision D10). The sessions are the node's, which accepted them, so it is the node that ends
+/// them, every running one whose link's key proved the zid of a node let go of. Called after the
+/// manager's tick, so a session on its way out is not reported to it as running again.
+pub fn end_released_inbound<'s, M, C, D, I>(manager: &mut ConnectManager<M>, accepted: I)
+where
+    M: Dialer,
+    C: ClockSource + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
+    I: Iterator<Item = &'s SlotSession<C, D>> + Clone,
+{
+    manager.take_inbound_hang_ups(|zid| {
+        for session in accepted.clone() {
+            if session.proven_peer().as_ref() == Some(zid) {
+                session.hang_up();
+            }
+        }
+    });
 }

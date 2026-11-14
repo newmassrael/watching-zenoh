@@ -12470,16 +12470,21 @@ layer_c1m_session_lwip() {
     # (decision D15), and a close removes it: the one test of the refusal it replaces became two.
     # 49 -> 52: the mode test above, and two of the passive form (decision D10): a node waited
     # for and not dialled, and an opener whose dialling open changes a passive node.
-    _runci_guarded_test "C1m mcu adminspace-write" 53 \
+    # +2 here and in the next leg (53 -> 55, 25 -> 27), counted from the source and not yet
+    # printed by a run: the session a passive node opened is ended through the shell by a close,
+    # and its end is a lost session to a machine a dialling open moved on (decision D10).
+    _runci_guarded_test "C1m mcu adminspace-write" 55 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
-    _runci_guarded_test "C1m mcu peer nodes" 25 \
+    _runci_guarded_test "C1m mcu peer nodes" 27 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
     # 29 -> 31: the commanders of a verb are a list per verb, default deny, and the same request
     # is answered for the one a list names and refused by name for the others (decision D12).
     # 31 -> 32: the text a build states a list in reads as the bytes a link's key proves.
-    _runci_guarded_test "C1m mcu lifecycle verbs" 32 \
+    # 32 -> 35, counted from the source: the two passive tests of the legs above, and the verbs
+    # reaching the session a passive node opened (its link, a reset and a close through the shell).
+    _runci_guarded_test "C1m mcu lifecycle verbs" 35 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu \
         --features adminspace-write,lifecycle-close,lifecycle-reset,lifecycle-status --lib \
@@ -12490,7 +12495,8 @@ layer_c1m_session_lwip() {
     # the build host.
     # 58 -> 59: the same test D15 added (a close removes the row of a node with no locator).
     # 59 -> 62: the same three as the adminspace-write leg (decision D10).
-    _runci_guarded_test "C1m mcu adminspace read+write" 63 \
+    # 63 -> 65, counted from the source: the same two as the adminspace-write leg.
+    _runci_guarded_test "C1m mcu adminspace read+write" 65 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
