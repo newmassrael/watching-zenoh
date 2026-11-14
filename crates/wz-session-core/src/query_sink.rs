@@ -142,7 +142,7 @@ pub trait QueryView {
     }
     /// Request id from the outer `Request.rid` envelope (correlation key
     /// for the matching reply chain).
-    fn rid(&self) -> u64;
+    fn rid(&self) -> crate::wire_id::RequestId;
     /// R311li — `true` when the query originated in-process (the
     /// requester is this same session's `query` loopback branch), so a
     /// reply must route back into the local reply registry rather than
@@ -245,7 +245,7 @@ impl QueryView for ProvenQuery<'_> {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.inner.encoding()
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.inner.rid()
     }
     fn is_local(&self) -> bool {
@@ -558,7 +558,7 @@ pub trait ReplyOut {
     ) -> Result<(), ReplyError> {
         let hint = crate::sample::EncodingHint {
             packed_id,
-            schema: schema.map(alloc::string::String::from),
+            schema: schema.map(|s| s.as_bytes().to_vec()),
         };
         self.reply_keyed_encoded(keyexpr, payload, Some(&hint))
     }
@@ -853,7 +853,7 @@ pub struct BorrowedQuery<'a> {
     #[cfg(feature = "alloc")]
     pub encoding: Option<&'a crate::sample::EncodingHint>,
     /// Request id (correlation key).
-    pub rid: u64,
+    pub rid: crate::wire_id::RequestId,
     /// R311li — in-process loopback origin marker (see
     /// [`QueryView::is_local`]). `false` for wire dispatch.
     pub is_local: bool,
@@ -885,7 +885,7 @@ impl QueryView for BorrowedQuery<'_> {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.encoding
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
     fn is_local(&self) -> bool {
@@ -946,7 +946,7 @@ impl QueryView for SharedQuery<'_> {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.base.encoding()
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.base.rid()
     }
     fn is_local(&self) -> bool {
@@ -1075,7 +1075,7 @@ mod tests {
     struct EchoQuerySink {
         calls: u32,
         last_key_len: usize,
-        last_rid: u64,
+        last_rid: crate::wire_id::RequestId,
         last_param_len: Option<usize>,
     }
 

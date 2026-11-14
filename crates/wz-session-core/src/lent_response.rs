@@ -107,7 +107,7 @@ impl Window<'_> {
     }
 }
 
-/// The bytes an encoding takes after its header: the packed id, and the schema's length and text
+/// The bytes an encoding takes after its header: the packed id, and the schema's length and bytes
 /// when it carries one.
 fn encoding_len(encoding: Option<crate::reply_stage::EncodingParts<'_>>) -> usize {
     let Some(encoding) = encoding else {
@@ -128,7 +128,7 @@ fn write_encoding(out: &mut Window<'_>, encoding: Option<crate::reply_stage::Enc
     out.vle(u64::from(encoding.packed_id), VLE_U32);
     if let Some(schema) = encoding.schema {
         out.vle(schema.len() as u64, VLE_U64);
-        out.bytes(schema.as_bytes());
+        out.bytes(schema);
     }
 }
 
@@ -273,7 +273,7 @@ fn link_chain(chain: &mut [ExtEntryParts<'_>]) {
 /// length: `LengthOutOfRange` past it, so a reply with such a schema is refused and not sent
 /// with another encoding.
 #[cfg(any(feature = "pubsub-encoding", feature = "query-reply-err"))]
-fn schema_text<const MAX: usize>(schema: &str) -> Result<Bounded<&str, MAX>, CodecError> {
+fn schema_bytes<const MAX: usize>(schema: &[u8]) -> Result<Bounded<&[u8], MAX>, CodecError> {
     crate::codec_owned::sent(schema)
 }
 
@@ -702,7 +702,7 @@ impl<'a> ResponseWriter<'a> {
             .map(|e| {
                 Ok::<_, CodecError>(wz_codecs::encoding::EncodingParts {
                     packed_id: e.packed_id,
-                    schema: e.schema.map(schema_text).transpose()?,
+                    schema: e.schema.map(schema_bytes).transpose()?,
                 })
             })
             .transpose()?;
@@ -808,7 +808,7 @@ impl<'a> ResponseWriter<'a> {
             .map(|(id, schema)| {
                 Ok::<_, CodecError>(wz_codecs::encoding::EncodingParts {
                     packed_id: (id << 1) | u32::from(schema.is_some()),
-                    schema: schema.map(schema_text).transpose()?,
+                    schema: schema.map(schema_bytes).transpose()?,
                 })
             })
             .transpose()?;
@@ -869,7 +869,7 @@ mod tests {
             }),
             Some(EncodingParts {
                 packed_id: (5 << 1) | 1,
-                schema: Some("v=1"),
+                schema: Some(&b"v=1"[..]),
             }),
         ];
         let stamps: [Option<TimestampParts<'_>>; 2] = [
@@ -947,7 +947,7 @@ mod tests {
                         ] {
                             let encoding = with_encoding.then_some(EncodingParts {
                                 packed_id: (5 << 1) | 1,
-                                schema: Some("v=1"),
+                                schema: Some(&b"v=1"[..]),
                             });
                             let parts = ReplyParts {
                                 rid,
@@ -1082,10 +1082,10 @@ mod tests {
         assert_eq!(refused(&past_key, None), Some(CodecError::LengthOutOfRange));
         #[cfg(feature = "pubsub-encoding")]
         {
-            let past_schema = "s".repeat(usize::from(u8::MAX) + 1);
+            let past_schema = alloc::vec![b's'; usize::from(u8::MAX) + 1];
             let encoding = EncodingParts {
                 packed_id: (5 << 1) | 1,
-                schema: Some(&past_schema),
+                schema: Some(past_schema.as_slice()),
             };
             assert_eq!(
                 refused("demo/a", Some(encoding)),
@@ -1186,7 +1186,7 @@ mod tests {
                     for (del, with_encoding) in [(false, false), (false, true), (true, false)] {
                         let encoding = with_encoding.then_some(EncodingParts {
                             packed_id: (5 << 1) | 1,
-                            schema: Some("v=1"),
+                            schema: Some(&b"v=1"[..]),
                         });
                         direct_matches_generic(ReplyParts {
                             rid: 7,

@@ -203,7 +203,7 @@ pub fn encoding_from_mime(s: &str) -> EncodingHint {
     let (packed_id, schema) = encoding_parts_from_mime(s);
     EncodingHint {
         packed_id,
-        schema: schema.map(String::from),
+        schema: schema.map(|s| s.as_bytes().to_vec()),
     }
 }
 
@@ -233,7 +233,13 @@ pub fn encoding_parts_from_mime(s: &str) -> (u32, Option<&str>) {
 #[cfg(feature = "alloc")]
 pub fn encoding_to_mime(e: &EncodingHint) -> String {
     let mut out = String::new();
-    write_encoding_mime_parts(e.packed_id, e.schema.as_deref(), &mut out);
+    // A schema that is not UTF-8 renders as zenoh's `Encoding::to_string`
+    // renders it (`crate::encoding_hint::NON_UTF8_SCHEMA`).
+    let schema = e
+        .schema
+        .as_deref()
+        .map(|s| core::str::from_utf8(s).unwrap_or(crate::encoding_hint::NON_UTF8_SCHEMA));
+    write_encoding_mime_parts(e.packed_id, schema, &mut out);
     out
 }
 

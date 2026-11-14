@@ -111,7 +111,7 @@ impl SampleView for LentSample<'_, '_> {
     fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
         self.timestamp.map(|ts| (ts.time, ts.zid.into_inner()))
     }
-    fn encoding_parts(&self) -> Option<(u32, Option<&str>)> {
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
         self.encoding.map(|encoding| {
             (
                 encoding.packed_id,

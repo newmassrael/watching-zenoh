@@ -105,7 +105,7 @@ fn a_lent_subscriber_declaration_reaches_the_remote_subscribers_as_the_owned_one
             seen.lock().expect("not poisoned").push(format!("-{id}"));
         });
     }
-    let table: HashMap<u64, String> = HashMap::new();
+    let table: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
     for declare in [
         build_declare_subscriber(1, 0, Some("a/b")).expect("build"),
         build_declare_subscriber(2, 0, Some("c/d")).expect("build"),
@@ -154,7 +154,7 @@ fn a_lent_queryable_declaration_carries_its_completeness_as_the_owned_one_does()
             seen.lock().expect("not poisoned").push(format!("-{id}"));
         });
     }
-    let table: HashMap<u64, String> = HashMap::new();
+    let table: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
     let info = |complete| QueryableInfo {
         complete,
         distance: 0,
@@ -217,7 +217,7 @@ fn a_lent_token_declaration_is_announced_as_the_owned_one_is() {
             seen.lock().expect("not poisoned").push(format!("-{id}"));
         });
     }
-    let table: HashMap<u64, String> = HashMap::new();
+    let table: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
     for declare in [
         build_declare_token(3, 0, Some("live/a")).expect("build"),
         build_undeclare_token(3),
@@ -261,7 +261,7 @@ fn a_lent_token_reaches_a_liveliness_subscriber_and_a_current_replays_final_comp
             )
             .expect("register the subscriber");
     }
-    let table: HashMap<u64, String> = HashMap::new();
+    let table: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
     for declare in [
         build_declare_token(3, 0, Some("live/a")).expect("build"),
         // A token this subscriber's pattern does not cover.
@@ -317,7 +317,7 @@ fn a_lent_reply_to_a_liveliness_get_is_delivered_and_its_final_ends_the_get_as_t
             )
             .expect("register the get");
     }
-    let table: HashMap<u64, String> = HashMap::new();
+    let table: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
     for declare in [
         // An unsolicited token is not a get reply, on either form.
         build_declare_token(1, 0, Some("not/a/reply")).expect("build"),
@@ -349,7 +349,7 @@ fn a_lent_interest_is_answered_by_the_local_tokens_as_the_owned_one_is() {
     let mut registry = LocalTokenRegistry::new();
     registry.register(1, "live/a").expect("register");
     registry.register(2, "other/b").expect("register");
-    let table: HashMap<u64, String> = HashMap::new();
+    let table: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
     let tokens_and_finals =
         |pending: &BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>| {
             pending
@@ -453,7 +453,7 @@ fn a_lent_response_final_ends_the_pending_get_as_the_owned_one_does() {
             },
         );
     }
-    let table: HashMap<u64, String> = HashMap::new();
+    let table: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
     // A final for a request nobody here asked is dropped, on both forms.
     for done in [
         build_response_final(99, QosLevel::default()),

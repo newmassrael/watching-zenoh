@@ -136,7 +136,7 @@ fn request(rid: u64) -> NetworkMessage {
     ))
 }
 
-fn no_aliases() -> hashbrown::HashMap<u64, String> {
+fn no_aliases() -> hashbrown::HashMap<wz_session_core::wire_id::ExprId, String> {
     hashbrown::HashMap::new()
 }
 

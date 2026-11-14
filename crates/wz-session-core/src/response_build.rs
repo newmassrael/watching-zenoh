@@ -126,7 +126,7 @@ pub fn set_response_keyexpr_literal(
 #[cfg(feature = "codec-response")]
 pub fn relay_response(
     response: &ResponseOwned,
-    src_rid: u64,
+    src_rid: crate::wire_id::RequestId,
     src_qos: crate::sample::QosLevel,
     keyexpr: Option<&str>,
 ) -> Result<ResponseOwned, CodecError> {
@@ -234,7 +234,7 @@ pub fn build_response_reply_literal(
 #[cfg(feature = "codec-response")]
 pub fn build_response_reply_aliased(
     request_id: u64,
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     payload: &[u8],
 ) -> Result<ResponseOwned, CodecError> {
@@ -330,7 +330,7 @@ pub fn build_response_err_literal(
 #[cfg(feature = "codec-response")]
 pub fn build_response_err_aliased(
     request_id: u64,
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     payload: &[u8],
 ) -> Result<ResponseOwned, CodecError> {
@@ -675,7 +675,7 @@ fn err_body(payload: &[u8]) -> Result<ResponseOwnedVariant, CodecError> {
 #[cfg(feature = "codec-response")]
 pub struct ResponseReplyBuilder {
     request_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<String>,
     payload: Vec<u8>,
     // Reply-body-arm selector. Default false = MsgPut (the put-data
@@ -799,7 +799,7 @@ impl ResponseReplyBuilder {
     /// (literal id=0 + Some, alias id=N + None, compound id=N + Some).
     pub fn new(
         request_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         payload: &[u8],
     ) -> Self {
@@ -816,7 +816,7 @@ impl ResponseReplyBuilder {
     /// copying them again was two allocations per reply for bytes that were about to be dropped.
     pub fn from_owned(
         request_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<String>,
         payload: Vec<u8>,
     ) -> Self {
@@ -1193,12 +1193,12 @@ impl ResponseReplyBuilder {
 #[cfg(feature = "codec-response")]
 pub struct ResponseErrBuilder {
     request_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<String>,
     payload: Vec<u8>,
     // Err-layer settings. Tuple = (id, optional schema). packed_id =
     // (id << 1) | has_schema computed at build() time.
-    encoding: Option<(u32, Option<String>)>,
+    encoding: Option<(u32, Option<Vec<u8>>)>,
     // R121j-4b: Err-body source_info ext (ext_id 0x01 ZBUF). Tuple =
     // (zid bytes 1..=16, eid, sn). zid owned to outlive the builder;
     // wire body packed at build() time via
@@ -1227,7 +1227,7 @@ impl ResponseErrBuilder {
     /// (literal id=0 + Some, alias id=N + None, compound id=N + Some).
     pub fn new(
         request_id: u64,
-        keyexpr_mapping_id: u64,
+        keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         payload: &[u8],
     ) -> Self {
@@ -1271,8 +1271,8 @@ impl ResponseErrBuilder {
     /// `vendor/zenoh-pico/src/protocol/codec/core.c` — the LSB carries
     /// the schema-present discriminator so the decoder can parse the
     /// optional suffix conditionally.
-    pub fn encoding(mut self, id: u32, schema: Option<&str>) -> Self {
-        self.encoding = Some((id, schema.map(str::to_string)));
+    pub fn encoding(mut self, id: u32, schema: Option<&[u8]>) -> Self {
+        self.encoding = Some((id, schema.map(<[u8]>::to_vec)));
         self
     }
 
@@ -1353,7 +1353,7 @@ impl ResponseErrBuilder {
                 err.encoding = Some(EncodingOwned {
                     packed_id: packed,
                     schema_len: schema.as_ref().map(|s| s.len() as u64),
-                    schema: schema.as_deref().map(owned_string).transpose()?,
+                    schema: schema.as_deref().map(owned_bytes).transpose()?,
                 });
             }
             if let Some((zid, eid, sn)) = self.source_info {
@@ -1890,7 +1890,7 @@ mod tests {
     #[test]
     fn response_err_builder_encoding_with_schema_sets_lsb_and_emits_suffix() {
         let with_enc = ResponseErrBuilder::new(42, 7, None, b"oops")
-            .encoding(4, Some("schema_v1"))
+            .encoding(4, Some(&b"schema_v1"[..]))
             .build()
             .unwrap()
             .wire();

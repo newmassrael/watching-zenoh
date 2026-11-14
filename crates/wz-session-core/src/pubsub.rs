@@ -4965,7 +4965,10 @@ mod tests {
     }
 
     /// R311y739 — OUR id space as a bare table, installed on the registry.
-    fn own_space(id: u64, literal: &str) -> alloc::sync::Arc<HashMap<u64, String>> {
+    fn own_space(
+        id: crate::wire_id::ExprId,
+        literal: &str,
+    ) -> alloc::sync::Arc<HashMap<crate::wire_id::ExprId, String>> {
         let mut t = HashMap::new();
         t.insert(id, literal.to_string());
         alloc::sync::Arc::new(t)

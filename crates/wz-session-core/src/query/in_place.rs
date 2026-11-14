@@ -307,7 +307,7 @@ mod tests {
         payload: Option<Vec<u8>>,
         encoding: Option<EncodingHint>,
         source_info: Option<SourceInfo>,
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         is_local: bool,
         qos: QosLevel,
         #[cfg(feature = "pubsub-ts-stack")]
@@ -345,7 +345,7 @@ mod tests {
 
     /// The peer's id space: one alias, and one whose expansion together with a
     /// suffix is past the bounded keyexpr buffer.
-    fn peer() -> HashMap<u64, String> {
+    fn peer() -> HashMap<crate::wire_id::ExprId, String> {
         let mut peer = HashMap::new();
         peer.insert(5, String::from("demo/mapped"));
         peer.insert(

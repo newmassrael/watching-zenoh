@@ -74,7 +74,7 @@ pub enum ReplyKind {
 pub trait ReplyView {
     /// Echo of the inbound `Response.request_id` — the rid the z_get
     /// caller used when registering.
-    fn rid(&self) -> u64;
+    fn rid(&self) -> crate::wire_id::RequestId;
     /// Resolved keyexpr literal the reply is bound to.
     fn keyexpr(&self) -> &str;
     /// Put / Del / Err discriminant.
@@ -193,7 +193,7 @@ pub trait ReplyView {
 /// `&dyn ReplyView`).
 pub struct BorrowedReply<'a> {
     /// Echo of the inbound request id.
-    pub rid: u64,
+    pub rid: crate::wire_id::RequestId,
     /// Resolved keyexpr literal.
     pub keyexpr: &'a str,
     /// Put / Del / Err discriminant.
@@ -234,7 +234,7 @@ pub struct BorrowedReply<'a> {
 }
 
 impl ReplyView for BorrowedReply<'_> {
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
     fn keyexpr(&self) -> &str {
@@ -343,7 +343,7 @@ struct ArrivedReply<'a> {
 
 #[cfg(feature = "pubsub-ts-stack")]
 impl ReplyView for ArrivedReply<'_> {
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.inner.rid()
     }
     fn keyexpr(&self) -> &str {
@@ -413,7 +413,7 @@ pub trait ReplySink {
     fn on_reply(&mut self, reply: &dyn ReplyView);
     /// Signal the terminal `ResponseFinal` for `rid`. Fires once; the
     /// pending entry is removed by the registry afterwards.
-    fn on_final(&mut self, rid: u64);
+    fn on_final(&mut self, rid: crate::wire_id::RequestId);
     /// R311y323 — the pending for `rid` EXPIRED: its deadline passed before a
     /// terminal `ResponseFinal` arrived. Fires instead of a bare
     /// [`on_final`](Self::on_final), exactly once, and the registry removes the
@@ -438,7 +438,7 @@ pub trait ReplySink {
     /// reason the stream stopped). The default's `on_reply` -> `on_final`
     /// sequence would emit the error FIRST and the cached data after it, and a
     /// caller that treats an error as terminal would lose the data.
-    fn on_timeout(&mut self, rid: u64) {
+    fn on_timeout(&mut self, rid: crate::wire_id::RequestId) {
         self.on_reply(&timeout_reply(rid));
         self.on_final(rid);
     }
@@ -463,7 +463,7 @@ pub trait ReplySink {
 ///
 /// Ungated and no-alloc-safe (a `BorrowedReply` over `'static` literals), so the
 /// MCU profile gets the same timeout signal as AP.
-pub fn timeout_reply(rid: u64) -> BorrowedReply<'static> {
+pub fn timeout_reply(rid: crate::wire_id::RequestId) -> BorrowedReply<'static> {
     BorrowedReply {
         rid,
         keyexpr: "",
@@ -518,7 +518,7 @@ impl ReplySink for BoxedReplySink {
     fn on_reply(&mut self, reply: &dyn ReplyView) {
         (self.reply_fn)(reply)
     }
-    fn on_final(&mut self, rid: u64) {
+    fn on_final(&mut self, rid: crate::wire_id::RequestId) {
         (self.final_fn)(rid)
     }
 }
@@ -707,13 +707,13 @@ impl<S: ReplySink> ReplySink for ConsolidatingSink<S> {
     ///
     /// The `Latest` check is not duplicated here; `flush_latest` owns it, so the
     /// normal-final path and this one cannot disagree about when a flush is due.
-    fn on_timeout(&mut self, rid: u64) {
+    fn on_timeout(&mut self, rid: crate::wire_id::RequestId) {
         self.flush_latest();
         self.inner.on_reply(&timeout_reply(rid));
         self.inner.on_final(rid);
     }
 
-    fn on_final(&mut self, rid: u64) {
+    fn on_final(&mut self, rid: crate::wire_id::RequestId) {
         // Drain BEFORE the inner final so the consumer sees every reply ahead of
         // the terminal signal — the ordering zenoh produces (it flushes, then
         // closes the query) and the one the Reply-before-Final contract already
@@ -804,10 +804,10 @@ mod tests {
     struct CountingReplySink {
         replies: u32,
         finals: u32,
-        last_rid: u64,
+        last_rid: crate::wire_id::RequestId,
         last_kind: ReplyKind,
         last_len: usize,
-        last_final_rid: u64,
+        last_final_rid: crate::wire_id::RequestId,
     }
 
     impl ReplySink for CountingReplySink {
@@ -817,7 +817,7 @@ mod tests {
             self.last_kind = reply.kind();
             self.last_len = reply.payload().len();
         }
-        fn on_final(&mut self, rid: u64) {
+        fn on_final(&mut self, rid: crate::wire_id::RequestId) {
             self.finals += 1;
             self.last_final_rid = rid;
         }
@@ -907,7 +907,7 @@ mod tests {
             move |reply: &dyn ReplyView| {
                 seen_cb.lock().unwrap().push(reply.keyexpr().to_string());
             },
-            move |rid: u64| {
+            move |rid: crate::wire_id::RequestId| {
                 finals_cb.lock().unwrap().push(rid);
             },
         );
@@ -969,7 +969,7 @@ mod consolidating_sink_tests {
             self.delivered
                 .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
         }
-        fn on_final(&mut self, rid: u64) {
+        fn on_final(&mut self, rid: crate::wire_id::RequestId) {
             self.finals.push(rid);
         }
     }
@@ -1386,7 +1386,7 @@ mod consolidating_sink_tests {
                     self.arrivals.load(Ordering::SeqCst),
                 ));
             }
-            fn on_final(&mut self, _rid: u64) {}
+            fn on_final(&mut self, _rid: crate::wire_id::RequestId) {}
         }
 
         /// A node that records its routing (when the reply was routed to it) and its receive,

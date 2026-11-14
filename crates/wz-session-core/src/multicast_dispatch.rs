@@ -4221,7 +4221,7 @@ mod tests {
         let NetworkMessage::Push(push) = &messages[1] else {
             panic!("expected the Push at index 1");
         };
-        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        let empty: hashbrown::HashMap<crate::wire_id::ExprId, String> = hashbrown::HashMap::new();
         assert_eq!(
             resolve_wireexpr(&push.keyexpr.body, &empty),
             Some("demo/keyexpr".to_string()),
@@ -4274,7 +4274,7 @@ mod tests {
         let NetworkMessage::Push(push) = &messages[0] else {
             panic!("expected a Push");
         };
-        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        let empty: hashbrown::HashMap<crate::wire_id::ExprId, String> = hashbrown::HashMap::new();
         assert_eq!(
             resolve_wireexpr(&push.keyexpr.body, &empty),
             None,
@@ -4303,7 +4303,7 @@ mod tests {
         let mut d = running_dispatcher::<4>(5_000);
         assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
         assert_eq!(d.ingest_join(ZID_B, SRC_B, sn0(), 0), JoinOutcome::Admitted);
-        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        let empty: hashbrown::HashMap<crate::wire_id::ExprId, String> = hashbrown::HashMap::new();
         let mut named = |src, key: &str| -> Vec<Option<String>> {
             let mut outcome = DriverLoopOutcome::FramePayload {
                 priority: crate::qos::Priority::DEFAULT,
@@ -4417,7 +4417,7 @@ mod tests {
         let NetworkMessage::Push(push) = &messages[0] else {
             panic!("expected a Push");
         };
-        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        let empty: hashbrown::HashMap<crate::wire_id::ExprId, String> = hashbrown::HashMap::new();
         assert_eq!(
             resolve_wireexpr(&push.keyexpr.body, &empty),
             None,
@@ -4483,7 +4483,7 @@ mod tests {
         let DriverLoopOutcome::FramePayload { messages, .. } = &b1 else {
             unreachable!()
         };
-        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        let empty: hashbrown::HashMap<crate::wire_id::ExprId, String> = hashbrown::HashMap::new();
         let NetworkMessage::Push(p_over) = &messages[1] else {
             panic!("expected the over-cap Push at index 1");
         };

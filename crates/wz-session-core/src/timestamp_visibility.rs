@@ -151,7 +151,7 @@ impl SampleView for HiddenTimestamp<'_> {
 pub struct HiddenReplyTimestamp<'a>(pub &'a dyn crate::reply_sink::ReplyView);
 
 impl crate::reply_sink::ReplyView for HiddenReplyTimestamp<'_> {
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.0.rid()
     }
     fn keyexpr(&self) -> &str {

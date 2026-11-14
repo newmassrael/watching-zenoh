@@ -84,9 +84,9 @@ pub enum Resolved {
 #[derive(Debug, Default)]
 pub struct KeyexprTables {
     /// Ids declared BY [`Direction::A`], in A's own number space.
-    a: HashMap<u64, String>,
+    a: HashMap<crate::wire_id::ExprId, String>,
     /// Ids declared BY [`Direction::B`].
-    b: HashMap<u64, String>,
+    b: HashMap<crate::wire_id::ExprId, String>,
 }
 
 impl KeyexprTables {
@@ -96,14 +96,14 @@ impl KeyexprTables {
     }
 
     /// The table owning the ids `direction` declares.
-    fn table(&self, direction: Direction) -> &HashMap<u64, String> {
+    fn table(&self, direction: Direction) -> &HashMap<crate::wire_id::ExprId, String> {
         match direction {
             Direction::A => &self.a,
             Direction::B => &self.b,
         }
     }
 
-    fn table_mut(&mut self, direction: Direction) -> &mut HashMap<u64, String> {
+    fn table_mut(&mut self, direction: Direction) -> &mut HashMap<crate::wire_id::ExprId, String> {
         match direction {
             Direction::A => &mut self.a,
             Direction::B => &mut self.b,
@@ -177,7 +177,7 @@ impl KeyexprTables {
         &mut self,
         direction: Direction,
         declare: &DeclareOwned,
-    ) -> Option<(u64, Resolved)> {
+    ) -> Option<(crate::wire_id::ExprId, Resolved)> {
         match &declare.body {
             DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
                 // The BOUND expression is itself a wire expression and takes
@@ -189,12 +189,14 @@ impl KeyexprTables {
                 if let Resolved::Literal(ref path) = bound {
                     // The declarer owns the id, so it lands in the DECLARER's
                     // table regardless of how the bound expression was rooted.
-                    self.table_mut(direction).insert(d.id, path.clone());
+                    self.table_mut(direction)
+                        .insert(crate::wire_id::declared_expr_id(d.id), path.clone());
                 }
-                Some((d.id, bound))
+                Some((crate::wire_id::declared_expr_id(d.id), bound))
             }
             DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
-                self.table_mut(direction).remove(&u.id);
+                self.table_mut(direction)
+                    .remove(&crate::wire_id::declared_expr_id(u.id));
                 None
             }
             _ => None,

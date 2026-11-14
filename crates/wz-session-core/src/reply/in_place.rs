@@ -69,7 +69,7 @@ use crate::wireexpr_resolve::{
 /// `'r` is the delivery's borrow of the decoded record; `'f` is the frame's, in
 /// which the codec's lent timestamp is invariant.
 struct LentReply<'r, 'f> {
-    rid: u64,
+    rid: crate::wire_id::RequestId,
     keyexpr: &'r str,
     kind: ReplyKind,
     payload: &'r [u8],
@@ -89,7 +89,7 @@ struct LentReply<'r, 'f> {
 }
 
 impl ReplyView for LentReply<'_, '_> {
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
     fn keyexpr(&self) -> &str {
@@ -252,9 +252,9 @@ fn lent_timestamp<'r, 'f>(ts: Option<&'r Timestamp<'f>>) -> Option<&'r Timestamp
     }
 }
 
-/// An encoding read where its frame lies, as the id word and the schema text a lent reply
+/// An encoding read where its frame lies, as the id word and the schema bytes a lent reply
 /// carries.
-fn encoding_parts<'r>(encoding: &wz_codecs::encoding::Encoding<'r>) -> (u32, Option<&'r str>) {
+fn encoding_parts<'r>(encoding: &wz_codecs::encoding::Encoding<'r>) -> (u32, Option<&'r [u8]>) {
     (
         encoding.packed_id,
         encoding.schema.map(|schema| schema.into_inner()),
@@ -458,7 +458,7 @@ mod tests {
     /// Everything a sink can read through the view, as owned values.
     #[derive(Debug, Clone, PartialEq)]
     struct Seen {
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         keyexpr: String,
         kind: ReplyKind,
         payload: Vec<u8>,
@@ -516,7 +516,7 @@ mod tests {
 
     /// The peer's id space: one alias, and one whose expansion together with a
     /// suffix is past the bounded keyexpr buffer.
-    fn peer() -> HashMap<u64, String> {
+    fn peer() -> HashMap<crate::wire_id::ExprId, String> {
         let mut peer = HashMap::new();
         peer.insert(5, String::from("demo/mapped"));
         peer.insert(6, "x".repeat(crate::caps::MAX_KEYEXPR_BYTES));

@@ -88,7 +88,11 @@ pub trait ResponseSink {
     /// default for the reason the builder takes one: a terminator that read as
     /// DEFAULT would be droppable while the replies it closes are not.
     #[cfg(feature = "codec-response-final")]
-    fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel);
+    fn send_response_final(
+        &self,
+        request_id: crate::wire_id::RequestId,
+        qos: crate::sample::QosLevel,
+    );
 
     /// Open a window in which the messages the next calls send leave together as one frame, and
     /// say whether this call opened it (to be handed back to [`Self::end_burst`]). The replies a
@@ -271,7 +275,11 @@ impl<S: ResponseSink + ?Sized> ResponseSink for &S {
         (**self).send_reply_parts(parts)
     }
     #[cfg(feature = "codec-response-final")]
-    fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
+    fn send_response_final(
+        &self,
+        request_id: crate::wire_id::RequestId,
+        qos: crate::sample::QosLevel,
+    ) {
         (**self).send_response_final(request_id, qos)
     }
     fn begin_burst(&self) -> bool {
@@ -339,7 +347,11 @@ impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
         (**self).send_reply_parts(parts)
     }
     #[cfg(feature = "codec-response-final")]
-    fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
+    fn send_response_final(
+        &self,
+        request_id: crate::wire_id::RequestId,
+        qos: crate::sample::QosLevel,
+    ) {
         (**self).send_response_final(request_id, qos)
     }
     fn begin_burst(&self) -> bool {

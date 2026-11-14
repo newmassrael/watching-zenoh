@@ -61,8 +61,9 @@ use crate::sample::{QosLevel, SourceInfo};
 pub struct EncodingParts<'a> {
     /// The wire-packed id (`id << 1 | schema_present`).
     pub packed_id: u32,
-    /// The schema text, if the encoding carries one.
-    pub schema: Option<&'a str>,
+    /// The schema's bytes, if the encoding carries one (any bytes: upstream
+    /// holds a schema as bytes).
+    pub schema: Option<&'a [u8]>,
 }
 
 #[cfg(feature = "alloc")]
@@ -171,7 +172,7 @@ pub enum PartsKind<'a> {
     #[cfg(feature = "query-reply-err")]
     Err {
         /// The error body's encoding id and schema, if any.
-        encoding: Option<(u32, Option<&'a str>)>,
+        encoding: Option<(u32, Option<&'a [u8]>)>,
         /// The error payload.
         payload: &'a [u8],
     },
@@ -183,7 +184,7 @@ pub enum PartsKind<'a> {
 #[derive(Clone, Copy)]
 pub struct ReplyParts<'a> {
     /// The request id the reply answers.
-    pub rid: u64,
+    pub rid: crate::wire_id::RequestId,
     /// The keyexpr the reply is stamped with.
     pub keyexpr: &'a str,
     /// The responder identity (`zid` bytes, entity id) stamped on the response, if
@@ -242,7 +243,7 @@ pub trait FinalStaging {
     fn has_room(&self) -> bool;
 
     /// Owe a `Final` for `rid`, carrying the query's `qos`.
-    fn owe(&mut self, rid: u64, qos: QosLevel);
+    fn owe(&mut self, rid: crate::wire_id::RequestId, qos: QosLevel);
 
     /// A request refused because no `Final` could be owed for it. Counted.
     fn refuse_request(&mut self);
@@ -317,7 +318,7 @@ enum RowKind<P: Storage> {
 
 /// One staged reply: fixed fields, and spans into the stage's arena for its bytes.
 struct Row<P: Storage> {
-    rid: u64,
+    rid: crate::wire_id::RequestId,
     qos: QosLevel,
     keyexpr: Span<P>,
     responder: Option<(BoundedVec<u8, ZID_BYTES, P>, u32)>,
@@ -446,15 +447,15 @@ impl<P: Storage> ReplyStage<P> {
         }
     }
 
-    fn put_encoding(&mut self, encoding: Option<(u32, Option<&str>)>) -> RowEncoding<P> {
-        encoding.map(|(id, schema)| (id, schema.map(|schema| self.put(schema.as_bytes()))))
+    fn put_encoding(&mut self, encoding: Option<(u32, Option<&[u8]>)>) -> RowEncoding<P> {
+        encoding.map(|(id, schema)| (id, schema.map(|schema| self.put(schema))))
     }
 
-    /// A row's encoding as the id and the schema text read out of the arena.
-    fn encoding_of(&self, encoding: &RowEncoding<P>) -> Option<(u32, Option<&str>)> {
+    /// A row's encoding as the id and the schema's bytes read out of the arena.
+    fn encoding_of(&self, encoding: &RowEncoding<P>) -> Option<(u32, Option<&[u8]>)> {
         encoding
             .as_ref()
-            .map(|(packed_id, schema)| (*packed_id, schema.map(|schema| self.text(schema))))
+            .map(|(packed_id, schema)| (*packed_id, schema.map(|schema| self.bytes(schema))))
     }
 
     /// A row as the borrowed description it was staged from. Nothing is copied:
@@ -601,13 +602,15 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
                     PartsBody::Shared(_) => 0,
                 },
                 attachment.map_or(0, <[u8]>::len),
-                encoding.and_then(|e| e.schema).map_or(0, str::len),
+                encoding.and_then(|e| e.schema).map_or(0, <[u8]>::len),
             ),
             #[cfg(feature = "query-reply-err")]
             PartsKind::Err { encoding, payload } => (
                 payload.len(),
                 0,
-                encoding.and_then(|(_, schema)| schema).map_or(0, str::len),
+                encoding
+                    .and_then(|(_, schema)| schema)
+                    .map_or(0, <[u8]>::len),
             ),
         };
         // A policy that enforces its capacity addresses its arena with 16 bits, which
@@ -815,7 +818,7 @@ impl<P: Storage> FinalStaging for FinalStage<P> {
         self.rows.free_slots() > 0
     }
 
-    fn owe(&mut self, rid: u64, qos: QosLevel) {
+    fn owe(&mut self, rid: crate::wire_id::RequestId, qos: QosLevel) {
         // Room was asked for before the request ran; a table that has none by
         // now is the caller's contract broken, and counted rather than dropped
         // in silence.
@@ -967,7 +970,11 @@ mod tests {
     // ---- The reply stage, the same bodies on every policy ----------------------
 
     /// A plain data reply, described the way a queryable's `send_*` describes it.
-    fn put_reply<'a>(rid: u64, keyexpr: &'a str, payload: &'a [u8]) -> ReplyParts<'a> {
+    fn put_reply<'a>(
+        rid: crate::wire_id::RequestId,
+        keyexpr: &'a str,
+        payload: &'a [u8],
+    ) -> ReplyParts<'a> {
         ReplyParts {
             rid,
             keyexpr,
@@ -986,7 +993,11 @@ mod tests {
     }
 
     /// A reply whose bytes come from four places: key, payload, attachment, schema.
-    fn fat_reply<'a>(rid: u64, payload: &'a [u8], attachment: &'a [u8]) -> ReplyParts<'a> {
+    fn fat_reply<'a>(
+        rid: crate::wire_id::RequestId,
+        payload: &'a [u8],
+        attachment: &'a [u8],
+    ) -> ReplyParts<'a> {
         let key = "k";
         ReplyParts {
             rid,
@@ -1094,7 +1105,7 @@ mod tests {
                     body: PartsBody::Put(&payload),
                     encoding: Some(EncodingParts {
                         packed_id: 7,
-                        schema: Some("s"),
+                        schema: Some(&b"s"[..]),
                     }),
                     timestamp: Some(TimestampParts {
                         time: 42,
@@ -1123,7 +1134,7 @@ mod tests {
                 panic!("the staged reply is a Put with every optional field");
             };
             assert_eq!(payload, &[seen as u8 + 1; 3]);
-            assert_eq!((encoding.packed_id, encoding.schema), (7, Some("s")));
+            assert_eq!((encoding.packed_id, encoding.schema), (7, Some(&b"s"[..])));
             assert_eq!((timestamp.time, timestamp.zid), (42, &zid[..]));
             assert_eq!(attachment, b"att");
             seen += 1;

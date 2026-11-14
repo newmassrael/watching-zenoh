@@ -743,7 +743,7 @@ impl crate::sink::SampleView for Sample {
             .as_ref()
             .map(|timestamp| (timestamp.time, timestamp.zid.as_slice()))
     }
-    fn encoding_parts(&self) -> Option<(u32, Option<&str>)> {
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
         self.encoding
             .as_ref()
             .map(|encoding| (encoding.packed_id, encoding.schema.as_deref()))

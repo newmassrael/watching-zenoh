@@ -19,6 +19,19 @@
 /// (`commons/zenoh-protocol/src/core/wire_expr.rs` @ `pub type ExprId = u16;`).
 pub type ExprId = u16;
 
+/// The `ExprId` a `DeclareKeyExpr` or `UndeclareKeyExpr` names, from the field
+/// the codec reads it into.
+///
+/// Upstream reads that id UNBOUNDED and narrows it, so a wider value is
+/// truncated and not refused (`commons/zenoh-codec/src/network/declare.rs` @
+/// `let id: ExprId = self.codec.read(&mut *reader)?;`, a `Zenoh080` read that
+/// ends in `x as $uint`), unlike the scope of a key expression, which it bounds.
+/// The codec keeps the field at 64 bits for that reason, and this is the one
+/// place a session narrows it.
+pub const fn declared_expr_id(wire: u64) -> ExprId {
+    wire as ExprId
+}
+
 /// A request's id, which its responses name
 /// (`commons/zenoh-protocol/src/network/request.rs` @ `pub type RequestId = u32;`).
 pub type RequestId = u32;

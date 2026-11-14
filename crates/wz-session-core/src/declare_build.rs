@@ -69,7 +69,10 @@ use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
 /// Panics if `mapping_id == 0` — id zero is reserved as the
 /// literal-keyexpr sentinel and a DECLARE with id=0 has no
 /// table-population semantics in zenoh-pico.
-pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Result<DeclareOwned, CodecError> {
+pub fn build_declare_kexpr(
+    mapping_id: crate::wire_id::ExprId,
+    suffix: &str,
+) -> Result<DeclareOwned, CodecError> {
     assert!(
         mapping_id != 0,
         "build_declare_kexpr requires a non-zero mapping id; id=0 is the literal-keyexpr sentinel",
@@ -109,7 +112,9 @@ pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Result<DeclareOwned
             // 0x40 OR under the leaf-owned `tag="parent.M"` regime)
             // has retired with this pin bump.
             header: wire_const::D_MID_KEXPR | wire_const::FLAG_D_N, // DeclKexpr MID(0x00) + N
-            id: mapping_id,
+            // The declared id field is read unbounded upstream, so the codec
+            // keeps it at 64 bits; the id itself is an `ExprId`.
+            id: u64::from(mapping_id),
             keyexpr: WireexprOwned {
                 body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                     id: 0,
@@ -170,7 +175,7 @@ pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Result<DeclareOwned
 ///     subscribed keyexpr is mapping `N`'s prefix + `s`.
 pub fn build_declare_subscriber(
     subscriber_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<DeclareOwned, CodecError> {
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
@@ -253,7 +258,7 @@ pub fn build_declare_subscriber(
 ///   - `(N, Some(s))`: compound — alias `N`'s prefix + `s`.
 pub fn build_declare_queryable(
     queryable_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<DeclareOwned, CodecError> {
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
@@ -354,7 +359,7 @@ pub fn set_declare_queryable_info(
 /// other DECLARE builders (literal / alias / compound).
 pub fn build_declare_token(
     token_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<DeclareOwned, CodecError> {
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
@@ -463,7 +468,7 @@ pub fn build_declare_token(
 /// ```
 pub fn build_declare_subscriber_nonlocal(
     subscriber_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<DeclareOwned, CodecError> {
     assert!(
@@ -511,7 +516,7 @@ pub fn build_declare_subscriber_nonlocal(
 /// `build_declare_queryable_nonlocal_with_info` helper.
 pub fn build_declare_queryable_nonlocal(
     queryable_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<DeclareOwned, CodecError> {
     assert!(
@@ -555,7 +560,7 @@ pub fn build_declare_queryable_nonlocal(
 /// surface at all, so the no-ext byte-stability contract is preserved.
 pub fn build_declare_token_nonlocal(
     token_id: u64,
-    keyexpr_mapping_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<&str>,
 ) -> Result<DeclareOwned, CodecError> {
     assert!(
@@ -617,14 +622,14 @@ pub fn build_declare_token_nonlocal(
 /// pico `_z_msg_ext_skip_non_mandatories(zbf, 0x10)`
 /// (declarations.c:192-200) — and wz now carries it too. What stays true
 /// is the emit contract above: wz writes Z=0 here.
-pub fn build_undeclare_kexpr(mapping_id: u64) -> DeclareOwned {
+pub fn build_undeclare_kexpr(mapping_id: crate::wire_id::ExprId) -> DeclareOwned {
     DeclareOwned {
         header: DECLARE_ENVELOPE_HEADER,
         interest_id: None,
         extensions: Some(declare_envelope_extensions()),
         body: DeclareOwnedVariant::CodecZenohUndeclKexpr(UndeclKexprOwned {
             header: wire_const::D_MID_UNDECL_KEXPR,
-            id: mapping_id,
+            id: u64::from(mapping_id),
             // R311y804: Z=0. This body has no ext of its own in either upstream
             // (unlike the sourced UndeclareSubscriber / -Queryable / -Token,
             // which carry `ext_keyexpr`); the chain exists so an INBOUND one is
@@ -763,7 +768,7 @@ pub fn build_undeclare_queryable_with_keyexpr(keyexpr: &str) -> Result<DeclareOw
 /// subscriber was announced on.
 pub fn build_undeclare_subscriber_on_wire(
     subscriber_id: u64,
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: &str,
 ) -> Result<DeclareOwned, CodecError> {
     let ext = crate::declare_ext_keyexpr::build_ext_wireexpr(mapping_id, suffix)?;
@@ -788,7 +793,7 @@ pub fn build_undeclare_subscriber_on_wire(
 /// `_z_wireexpr_t expr = _z_declared_keyexpr_alias_to_wire(&_Z_RC_IN_VAL(&q)->_key, zn);`).
 pub fn build_undeclare_queryable_on_wire(
     queryable_id: u64,
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: &str,
 ) -> Result<DeclareOwned, CodecError> {
     let ext = crate::declare_ext_keyexpr::build_ext_wireexpr(mapping_id, suffix)?;
@@ -874,7 +879,7 @@ pub fn build_undeclare_token_with_keyexpr(keyexpr: &str) -> Result<DeclareOwned,
 /// caller's ABI, not this builder's.
 pub fn build_undeclare_token_on_wire(
     token_id: u64,
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: &str,
 ) -> Result<DeclareOwned, CodecError> {
     let ext = crate::declare_ext_keyexpr::build_ext_wireexpr(mapping_id, suffix)?;
@@ -999,7 +1004,7 @@ pub fn build_declare_subscriber_reply_with_id(
 /// Panics on `mapping_id == 0`, as [`build_declare_kexpr`] does.
 pub fn build_declare_kexpr_reply(
     interest_id: u64,
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     keyexpr: &str,
 ) -> Result<DeclareOwned, CodecError> {
     let mut declare = build_declare_kexpr(mapping_id, keyexpr)?;

@@ -151,7 +151,7 @@ pub fn literal_put_with_qos<'a>(
 /// `mapping_id` is not zero: that id is the literal key's.
 #[cfg(feature = "storage-profile")]
 pub fn aliased_put_with_qos<'a>(
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&'a str>,
     value: &'a [u8],
     qos: crate::sample::QosLevel,
@@ -165,7 +165,7 @@ pub fn aliased_put_with_qos<'a>(
 /// [`literal_put`] is.
 #[cfg(feature = "storage-profile")]
 pub fn put_with_qos<'a>(
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&'a str>,
     value: &'a [u8],
     qos: crate::sample::QosLevel,
@@ -216,7 +216,7 @@ pub fn put_with_qos<'a>(
 #[cfg(feature = "storage-profile")]
 pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
     sink: &mut S,
-    mapping_id: u64,
+    mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     value: &[u8],
     qos: crate::sample::QosLevel,

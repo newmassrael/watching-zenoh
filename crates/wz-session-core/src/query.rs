@@ -301,7 +301,7 @@ pub fn request_query_parameters(request: &RequestOwned) -> Option<&[u8]> {
 #[derive(Debug, Clone)]
 pub struct RequestQueryView {
     keyexpr: String,
-    rid: u64,
+    rid: crate::wire_id::RequestId,
     qos: crate::sample::QosLevel,
     parameters: Option<Vec<u8>>,
     attachment: Option<Vec<u8>>,
@@ -710,7 +710,7 @@ pub enum QueryReply {
     Reply {
         /// Echo of the inbound Request.rid so the requester
         /// correlates this reply with their pending `z_get`.
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         /// Resolved keyexpr literal the inbound Request matched
         /// against. Echoed back as the Reply's keyexpr in literal
         /// form (`mapping_id = 0`, `suffix = Some(literal)`).
@@ -794,9 +794,9 @@ pub enum QueryReply {
     /// [`crate::reply::InboundReplyBody::Err`] must always decode it.
     #[cfg(feature = "query-reply-err")]
     Err {
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         keyexpr_literal: String,
-        encoding: Option<(u32, Option<String>)>,
+        encoding: Option<(u32, Option<Vec<u8>>)>,
         payload: Vec<u8>,
         /// Optional `(zid bytes, eid)` carried as the envelope-level
         /// responder ext on the emitted Response. Mirror of
@@ -855,7 +855,7 @@ impl QueryReply {
                 },
                 encoding: encoding.map(|e| EncodingHint {
                     packed_id: e.packed_id,
-                    schema: e.schema.map(String::from),
+                    schema: e.schema.map(<[u8]>::to_vec),
                 }),
                 timestamp: timestamp.map(|ts| TimestampHint {
                     time: ts.time,
@@ -872,7 +872,7 @@ impl QueryReply {
             PartsKind::Err { encoding, payload } => QueryReply::Err {
                 rid: parts.rid,
                 keyexpr_literal,
-                encoding: encoding.map(|(id, schema)| (id, schema.map(String::from))),
+                encoding: encoding.map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
                 payload: payload.to_vec(),
                 responder,
                 qos: parts.qos,
@@ -1103,7 +1103,7 @@ impl QueryReply {
 /// constructs a `QueryResponder`, so it shares the registry's gate.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 pub struct QueryResponder<'a> {
-    rid: u64,
+    rid: crate::wire_id::RequestId,
     /// The query's keyexpr. Borrowed when the responder is built over the
     /// keyexpr the dispatch already holds (`QueryableRegistry::fire_projection`),
     /// so a matched queryable that stages nothing costs the heap nothing for it;
@@ -1217,7 +1217,7 @@ impl<'a> QueryResponder<'a> {
     /// `Block`.
     #[cfg(feature = "alloc")]
     pub fn new(
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         keyexpr_literal: String,
         accept: ReplyKeyExpr,
         qos: QosLevel,
@@ -1240,7 +1240,7 @@ impl<'a> QueryResponder<'a> {
     /// [`Self::new`] over a keyexpr borrowed for as long as the responder is:
     /// what the registry's own fan-out builds, once per matched queryable.
     fn over(
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         keyexpr: &'a str,
         keyexpr_facts: crate::keyexpr_match::KeyFacts,
         accept: ReplyKeyExpr,
@@ -1797,7 +1797,7 @@ impl<'a> QueryResponder<'a> {
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Err {
-                encoding: encoding_id.map(|id| (id, schema)),
+                encoding: encoding_id.map(|id| (id, schema.map(str::as_bytes))),
                 payload,
             },
         })
@@ -2003,7 +2003,14 @@ impl ReplyOut for QueryResponder<'_> {
         packed_id: u32,
         schema: Option<&str>,
     ) -> Result<(), ReplyError> {
-        self.send_reply_keyed_encoded_parts(keyexpr, payload, EncodingParts { packed_id, schema })
+        self.send_reply_keyed_encoded_parts(
+            keyexpr,
+            payload,
+            EncodingParts {
+                packed_id,
+                schema: schema.map(str::as_bytes),
+            },
+        )
     }
     #[cfg(feature = "alloc")]
     fn reply_keyed_attached(
@@ -2593,7 +2600,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
 #[derive(Debug, Clone, Copy)]
 pub struct QueryEnvelope {
     /// The request id (correlation key).
-    pub rid: u64,
+    pub rid: crate::wire_id::RequestId,
     /// The requester's completeness target.
     pub target: Option<QueryTarget>,
     /// The requester's QoS, which every reply inherits.
@@ -2940,7 +2947,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     #[cfg(feature = "alloc")]
     pub fn local_query(
         &mut self,
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         keyexpr: &str,
         query: &QueryOwned,
         target: Option<QueryTarget>,
@@ -3509,7 +3516,7 @@ impl QueryableRegistry<BoxedQuerySink> {
 /// will land via a separate setter (none exist on the wire today —
 /// zenoh-pico's `_z_response_final_encode` emits only header + rid).
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
-pub fn response_final_for(rid: u64) -> ResponseFinalOwned {
+pub fn response_final_for(rid: crate::wire_id::RequestId) -> ResponseFinalOwned {
     ResponseFinal {
         request_id: rid,
         // header = 0x1a (_Z_MID_N_RESPONSE_FINAL) and extensions =
@@ -3578,7 +3585,11 @@ mod tests {
     #[cfg(feature = "request-put-del")]
     use wz_codecs::lent::{MsgPut, WireexprNonlocal};
 
-    fn request_query(rid: u64, mapping_id: u64, suffix: Option<&str>) -> RequestOwned {
+    fn request_query(
+        rid: crate::wire_id::RequestId,
+        mapping_id: u64,
+        suffix: Option<&str>,
+    ) -> RequestOwned {
         // Construct a minimal Request whose body is a default Query.
         // The Local arm (zero-init mapping = LOCAL on the zenoh-pico
         // side, mirrored by push_with_keyexpr at pubsub.rs:398-415) is
@@ -3618,7 +3629,7 @@ mod tests {
     /// dispatch path only reads `query.extensions` directly so the
     /// flag is purely for authoring fidelity.
     fn request_query_with_attachment(
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         suffix: Option<&str>,
         attachment: &[u8],
     ) -> RequestOwned {
@@ -3667,7 +3678,7 @@ mod tests {
     }
 
     #[cfg(feature = "request-put-del")]
-    fn request_put(rid: u64, suffix: &str) -> RequestOwned {
+    fn request_put(rid: crate::wire_id::RequestId, suffix: &str) -> RequestOwned {
         let keyexpr = Wireexpr {
             body: wz_codecs::lent::WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
@@ -3688,7 +3699,11 @@ mod tests {
 
     /// R311y740 (N37) — the `M=0` (`Mapping::Receiver`) twin of
     /// [`request_query`]: the mapping id names OUR space, not the peer's.
-    fn request_query_nonlocal(rid: u64, mapping_id: u64, suffix: Option<&str>) -> RequestOwned {
+    fn request_query_nonlocal(
+        rid: crate::wire_id::RequestId,
+        mapping_id: u64,
+        suffix: Option<&str>,
+    ) -> RequestOwned {
         let suffix_len = suffix.map(|s| s.len() as u64);
         let keyexpr = Wireexpr {
             body: wz_codecs::lent::WireexprVariant::WireexprNonlocal(
@@ -4015,7 +4030,11 @@ mod tests {
     /// flag 0x40 + parameters_len + parameters). The POS contrast for the
     /// `query-selector-parameters`-OFF NEG in
     /// `request_decode_isolation_tests`.
-    fn request_query_with_parameters(rid: u64, suffix: &str, params: &[u8]) -> RequestOwned {
+    fn request_query_with_parameters(
+        rid: crate::wire_id::RequestId,
+        suffix: &str,
+        params: &[u8],
+    ) -> RequestOwned {
         let keyexpr = Wireexpr {
             body: wz_codecs::lent::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
@@ -4135,7 +4154,11 @@ mod tests {
     /// so the fixture composes regardless of `query-source-info` — that
     /// feature gates only the queryable-side projection.
     #[cfg(feature = "query-source-info")]
-    fn request_query_with_source_info(rid: u64, suffix: &str, zid: &[u8]) -> RequestOwned {
+    fn request_query_with_source_info(
+        rid: crate::wire_id::RequestId,
+        suffix: &str,
+        zid: &[u8],
+    ) -> RequestOwned {
         let payload = crate::source_info_ext::encode_source_info_ext_body(zid, 7, 42);
         let mut ext = ExtEntry::default();
         ext.set_ext_id(0x01); // SOURCE_INFO_EXT_ID
@@ -4643,7 +4666,7 @@ mod tests {
             } => {
                 assert_eq!(*rid, 5);
                 assert_eq!(keyexpr_literal, "error/path");
-                assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
+                assert_eq!(*encoding, Some((4, Some(b"schema_v1".to_vec()))));
                 assert_eq!(payload, b"oops");
             }
             other => panic!("expected Err, got {other:?}"),
@@ -4788,7 +4811,7 @@ mod tests {
                 responder,
                 ..
             } => {
-                assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
+                assert_eq!(*encoding, Some((4, Some(b"schema_v1".to_vec()))));
                 assert_eq!(payload, b"oops");
                 assert_eq!(*responder, Some((vec![0xCC; 2], 5_u32)));
             }
@@ -5530,7 +5553,7 @@ mod tests {
         let reply = QueryReply::Err {
             rid: 42,
             keyexpr_literal: "error/path".to_string(),
-            encoding: Some((4, Some("schema_v1".to_string()))),
+            encoding: Some((4, Some(b"schema_v1".to_vec()))),
             payload: b"oops".to_vec(),
             responder: None,
             qos: QosLevel::DEFAULT,
@@ -5540,7 +5563,7 @@ mod tests {
         let response = reply.into_response().unwrap();
         let via_builder =
             crate::response_build::ResponseErrBuilder::new(42, 0, Some("error/path"), b"oops")
-                .encoding(4, Some("schema_v1"))
+                .encoding(4, Some(&b"schema_v1"[..]))
                 .build()
                 .unwrap()
                 .wire();
@@ -6278,7 +6301,7 @@ mod tests {
             seen_cb.lock().unwrap().push(q.requester());
             responder.reply(b"put");
         });
-        let ask = |reg: &mut QueryableRegistry<_>, rid: u64| {
+        let ask = |reg: &mut QueryableRegistry<_>, rid: crate::wire_id::RequestId| {
             let mut replies = ReplyStage::new();
             reg.dispatch_request(
                 &request_query(rid, 0, Some("metrics/cpu")),
@@ -6489,7 +6512,7 @@ mod tests {
     /// malformed ext would satisfy the feature-off assertion just as well as a
     /// real one — and would keep satisfying it if the gate were later deleted.
     fn request_query_with_value(
-        rid: u64,
+        rid: crate::wire_id::RequestId,
         suffix: Option<&str>,
         payload: &[u8],
         encoding: &crate::sample::EncodingHint,
@@ -6759,7 +6782,11 @@ mod request_decode_isolation_tests {
     /// ENC_ZBUF). The codec `Query.extensions` field is ungated, so this
     /// is constructible with `query-attachment` off — that feature gates
     /// only `extract_query_attachment`'s projection.
-    fn request_query_with_attachment(rid: u64, suffix: &str, attachment: &[u8]) -> RequestOwned {
+    fn request_query_with_attachment(
+        rid: crate::wire_id::RequestId,
+        suffix: &str,
+        attachment: &[u8],
+    ) -> RequestOwned {
         let mut ext = ExtEntry::default();
         ext.set_ext_id(0x05); // ATTACHMENT_EXT_ID_QUERY
         ext.set_enc(2); // ENC_ZBUF
@@ -6796,7 +6823,11 @@ mod request_decode_isolation_tests {
     /// (header flag 0x40 + parameters_len + parameters). Ungated codec
     /// field; `query-selector-parameters` gates only the `parameters_view`
     /// projection in `fire_matching_queryables`.
-    fn request_query_with_parameters(rid: u64, suffix: &str, params: &[u8]) -> RequestOwned {
+    fn request_query_with_parameters(
+        rid: crate::wire_id::RequestId,
+        suffix: &str,
+        params: &[u8],
+    ) -> RequestOwned {
         let query = Query {
             header: 0x40,
             parameters_len: Some(params.len() as u64),
@@ -6878,7 +6909,11 @@ mod request_decode_isolation_tests {
     /// Constructible with `query-source-info` off — the feature gates
     /// only `extract_query_source_info`'s projection.
     #[cfg(not(feature = "query-source-info"))]
-    fn request_query_with_source_info(rid: u64, suffix: &str, zid: &[u8]) -> RequestOwned {
+    fn request_query_with_source_info(
+        rid: crate::wire_id::RequestId,
+        suffix: &str,
+        zid: &[u8],
+    ) -> RequestOwned {
         let payload = crate::source_info_ext::encode_source_info_ext_body(zid, 7, 42);
         let mut ext = ExtEntry::default();
         ext.set_ext_id(0x01); // SOURCE_INFO_EXT_ID

@@ -69,7 +69,7 @@ const FLAG_EXT_M: u8 = 0x10;
 #[derive(Debug, Clone, Copy)]
 pub struct GetParts<'a> {
     /// The request id the peer echoes in its replies and its final.
-    pub rid: u64,
+    pub rid: crate::wire_id::RequestId,
     /// The queried keyexpr, written as a literal.
     pub keyexpr: &'a str,
     /// The selector parameters; empty states none.
