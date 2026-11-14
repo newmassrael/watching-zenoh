@@ -18,6 +18,17 @@ which is what a stock config's `adminspace` block expands to; a build without
 the demo's `adminspace-core` feature refuses the flag by name and the config
 expansion withholds the block's keys rather than handing the flag over.
 
+The `zenoh` API preset (`wz-zenoh`) reads the same key the same way: a session
+opened with `adminspace.enabled` hosts the runtime admin space in every mode,
+and one opened without it hosts none. Its defaults are upstream's, field for
+field, because its config crate is the family copy of upstream's:
+
+| Key | Upstream default | `wz-zenoh-config` default | Anchor |
+|---|---|---|---|
+| `adminspace/enabled` | `false` | `false` | `commons/zenoh-config/src/lib.rs` @ `AdminSpaceConf {` and `DEFAULT_CONFIG.json5` @ `/// Enables the admin space` |
+| `adminspace/permissions/read` | `true` | `true` | `commons/zenoh-config/src/lib.rs` @ `impl Default for PermissionsConf {` |
+| `adminspace/permissions/write` | `false` | `false` | (the same impl) |
+
 ## 2. What is declared
 
 `AdminSpace::start` makes the same two declarations in every mode, rooted at
@@ -88,6 +99,15 @@ fixes it.
 | `wz-ap-demo --storage-host` | `peer` | the session's params |
 | `Session::declare_adminspace*` (library) | the session's | its params |
 | MCU slot and fixed admin spaces | the node's | its identity |
+| `wz-zenoh` session, any mode, `adminspace.enabled` | `client`, `peer` or `router` | the config's `mode`, read once at the open by `admin::init`; one host function (`host_admin_space`) for both engines |
+
+The `zenoh` API preset runs a session on one of two engines, and the one host
+function answers on both through one seam, `Engine::host_admin_queryable`:
+
+| Engine | Which sessions | Declared as | Answers from |
+|---|---|---|---|
+| the node (`Engine::Router`) | a router; a peer that listens and does not scout; a client that keeps a `gateway/south` | a queryable the router hosts, complete | the router's tables: its faces as `sessions`, their declarations by kind, and, for a router alone, the successor routes |
+| the registry of faces (`Engine::Tokio`) | every other client, and a peer that fits no node | a routed queryable on every face, not complete, as upstream's | one `sessions[]` row per face, each read by `SessionAdminRow::admin_session_of_peer`, the reading the library's Session host uses; its listeners as `locators` |
 
 The single-session client declares the pair upstream declares, routed, with the
 queryable's default info (`complete = false`): the queryable and, under
@@ -102,11 +122,13 @@ both sit under the same root.
 
 ### Residuals
 
-| Residual | Why it stays |
-|---|---|
-| The one-shot acceptor (`--listen`) hosts no admin space and refuses `--config-queryable` | its bound listener is held inside the open helper, so its `local_data` could not list the locator it accepts on; `--peer` hosts a peer's |
-| The `zenoh` API preset (`wz-zenoh`) hosts the runtime admin space only for a router node, under a fixed `router` role, and declares its `linkstate` queryable session-local | its client and peer engines expose no admin views or hosted queryable seam yet; a client session of that preset answers `@/<zid>/session/**` alone |
-| `admin_legs` lists `linkstate/peers` for a router only, while the `--peer` host serves it | the manifest predicates the router-tier legs on the role string |
+| Residual | Upstream | Why it stays |
+|---|---|---|
+| The one-shot acceptor (`--listen`) hosts no admin space and refuses `--config-queryable` | has no one-shot acceptor; every node that listens hosts its admin space with its listeners in `locators`, a client that listens included (`zenoh/src/net/runtime/orchestrator.rs` @ `async fn start_client(&self) -> ZResult<()> {` binds them) | the gap is the demo's run modes, not the admin space: a stock client document that names listen endpoints expands to `--listen` and loses its dial, so no demo run mode is upstream's listening client. `--peer` and `--router-hat` host a listening node's admin space, and so does the `zenoh` preset in every mode. Closing it is a demo run mode that listens and dials as one client |
+| The admin space of the `zenoh` preset exists only in a build with `unstable` | the runtime starts it whatever the features (`zenoh/src/net/runtime/mod.rs` @ `let start_admin_space = *config.adminspace.enabled();`) | the preset's admin module is built on its unstable surface (the transport and link views, the config notifier); lifting it is a restructuring of that module |
+| The node engine declares its admin queryable complete | not complete in every mode (`zenoh/src/net/runtime/adminspace.rs` @ `ext_info: QueryableInfoType::DEFAULT,`) | every router host of this tree registers its hosted queryables complete (`register_local_queryable(.., true, ..)`), the demo's too; the registry of faces declares it as upstream does |
+| A peer on the registry of faces that joined a multicast group lists no group member in `sessions` | lists each member after the unicast transports | the registry's group members are not read into `multicast_peers` yet |
+| The `linkstate` legs are named `linkstate/routers` and `linkstate/peers` by the demo's hosts and the manifest, and the manifest lists them for a router only, while the `--peer` host serves `linkstate/peers` | names one leg per region of a peer or router hat, `linkstate/<region>` (`north`, `south:<id>:<mode>`), for a peer and a router alike (`zenoh/src/net/runtime/adminspace.rs` @ `fn linkstate_data(prefix: &keyexpr, context: &AdminContext, query: Query) {`, and `commons/zenoh-protocol/src/core/region.rs` @ `Region::North => f.write_str("north"),`) | a real difference, and wider than the manifest's predicate: the leg names predate the regions. Listing `linkstate/peers` for a peer would make the manifest agree with the demo's host and still disagree with upstream. The `zenoh` preset already answers by region. The rename moves the demo's hosts, `answer_router_admin_query`, the manifest and the interop tests that pin the old names together |
 
 ## 5. Witnesses
 
@@ -117,4 +139,9 @@ both sit under the same root.
 | `wz-runtime-tokio` `declare_adminspace_with_config_answers_a_client_under_its_own_role` | a client session answers at `@/<zid>/client` with the host's metadata, and not at `@/<zid>/peer` |
 | `wz-runtime-tokio` `declare_adminspace_with_config_announces_a_clients_queryable_on_the_wire` | the queryable goes out as a declaration naming `@/<zid>/client/**` |
 | `wz-ap-demo` `session_admin_tests`, `a_client_document_enables_its_admin_space_where_the_build_hosts_one`, `an_acceptor_run_has_the_admin_keys_withheld` | the flag, the refusals by run-mode and build, and the config expansion that hands the flag over |
+| `wz-runtime-tokio` `admin_session_of_peer_files_the_row_under_the_named_peer` | the one `sessions[]` row reading both the Session host and the preset's registry use: none before a peer is named, then the peer's zid, its role once announced, no weight |
+| `wz-zenoh` `a_client_answers_its_admin_space_through_its_router` | a preset client on the registry of faces, asked `@/<zid>/client` by another client through a router node: one answer with its zid, metadata, `[]` locators and the router as its one session; nothing under `router`; a client that leaves the switch off answers nothing |
+| `wz-zenoh` `a_peer_node_answers_its_admin_space_under_its_own_role` | a peer on the node engine answers under `peer`, nothing under `router`, and no successor route |
+| `wz-zenoh` `the_admin_space_is_off_and_read_only_by_default` | the preset's defaults are upstream's three values, built in code and read from a document |
+| `conformance/differential` `zenoh_api_client_admin_space` (Layer E18) | upstream's crate and wz's as the client, with an upstream router and an upstream asker: the same lines (answered, the root's field names, zid, metadata, locators, the session's field names, peer and role, nothing under `router`), and the control that a client answering nothing is a difference |
 | `wz-integration-tests` `wz_client_adminspace_zenohd_interop` (Layer Z) | a zenohd client behind a zenohd router (the control), a wz client behind it, and a wz client behind a wz router, each asked `@/<zid>/client` by another client and judged by one predicate |
