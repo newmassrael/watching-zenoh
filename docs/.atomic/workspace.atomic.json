@@ -13546,6 +13546,24 @@
       "carry_forward_bullets": [
         "Open: read the hosted Layer C0 of this head at the start of the next round."
       ]
+    },
+    "Round 4483": {
+      "decision_summary": "A consumer that fetches every release input once into its own content-addressed cache and builds with no network hands the zenoh-c oracle installer its archive and source. To know what to fetch it had to keep its own copy of three of the installer's decisions: the machine-to-target mapping, the URL filling from the pin, and the already-installed tests, guarded by a contrast test. The installer now answers that itself with a list-only mode that fetches, writes and creates nothing: one line per input, the digest the installer will hold it to (or a dash when a version override names none), the URL and the variable to hand it back in, or an installed line naming where it already is. Every decision is one function the install path and the listing both call, so the listing cannot drift from what an install does; a condition the install refuses makes the listing refuse with the same message.",
+      "changes_bullets": [
+        "install-zenoh-c.sh gains --inputs; target mapping, URL filling, digest choice, installed tests and version refusals are factored into functions both paths call; unknown arguments are refused.",
+        "A selftest of 19 cases runs the listing in a sandbox with fetch tools stubbed to fail and compares the whole root before and after; Layer C0 and the pre-push hook run it."
+      ],
+      "verification_bullets": [
+        "The selftest passes (fetch, installed, override and refused listings); shellcheck is clean on the installer; on this machine the listing prints the two installed lines, and against an empty prefix it prints the pinned digests and URLs for the host target and writes nothing.",
+        "round_fed_gate_reach, gate_provenance_lint, hook_gate_boundary_gate --check and prose_named_identifier_gate --check pass.",
+        "Not run: the hosted Layer C0 on this head; the first hosted run misses the zenoh-c cache once, because its key hashes the installer."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the hosted Layer C0 of this head at the start of the next round."
+      ]
     }
   },
   "inventory_entries": {
