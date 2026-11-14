@@ -1104,7 +1104,8 @@ tx-lend-only = ["transport-tx-lend"]
 # dependency line: workspace feature unification would hand the AP sessions
 # that take a slot where they should take the heap. A crate written for the heap
 # profile refuses it by name (`heap_session_profile!`, src/tx_buf.rs):
-# `wz-runtime-tokio` and `wz-capi-coop` do.
+# `wz-runtime-tokio` and `wz-capi-coop` do, and the analyzer's two crates
+# (`wz-analyze`, `wz-capi-dissect`), whose readings it would cut short.
 #
 # `transport-multilink` shares ONE kernel between several links by reference
 # count, which a slot, holding exactly one of each, has no form of: with both on
