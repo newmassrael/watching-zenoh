@@ -249,6 +249,17 @@ impl ::sce_forge_runtime::codec::HoldsList<super::transport_close::TransportClos
     type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
 }
 
+// `transport_fragment_header`
+#[cfg(feature = "codec-fragment")]
+impl ::sce_forge_runtime::codec::HoldsList<super::transport_fragment_header::TransportFragmentHeaderExtensionsField> for Node {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
+// `transport_frame_header`
+impl ::sce_forge_runtime::codec::HoldsList<super::transport_frame_header::TransportFrameHeaderExtensionsField> for Node {
+    type List<T> = ::sce_forge_runtime::heapless::Vec<T, 8> where T: Default + ::core::fmt::Debug + Clone + PartialEq;
+}
+
 // `transport_init`
 #[cfg(feature = "codec-init-body")]
 impl ::sce_forge_runtime::codec::HoldsList<super::transport_init::TransportInitExtensionsField> for Node {

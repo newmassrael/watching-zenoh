@@ -2538,7 +2538,6 @@ mod qos_wire_tests {
     use super::*;
     use crate::inbound::{parse_inbound, InboundFrame};
     use crate::qos::Priority;
-    use sce_forge_runtime::codec::SceSink;
 
     /// R311y227 — an oversize QoS MULTICAST frame re-frames as a fragment chain
     /// that carries the `ext_qos` on EVERY fragment AND mints its follow-on SNs on
