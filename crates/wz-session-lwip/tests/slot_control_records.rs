@@ -38,8 +38,11 @@
 // (`PumpSlots::claim`), and this file builds its pumps with `new`. The slot profile
 // without `reassembly` is this file's and is built and run by the C1m leg that
 // names it; clippy builds the other, which is why the gate is here and not at the
-// use.
+// use. With `alloc`: the application layer here is the heap profile's
+// (`app_layer::dispatch_to`), and the slot profile built with no allocator is
+// `slot_frames_without_alloc`'s.
 #![cfg(all(
+    feature = "alloc",
     feature = "session-slot",
     not(feature = "reassembly"),
     feature = "session-unicast-open",
@@ -780,10 +783,9 @@ fn a_frame_chain_is_owned_by_no_record_of_the_slot_profile() {
 /// refuses is dropped with its records, and the Frame behind it is still read, as upstream drains
 /// a refused Frame's reader and reads the batch on.
 ///
-/// Where the next unit is read depends on the build. Without an allocator the datagram is read
-/// on where it lies, in the same iteration and at no cost to the heap. A build that has one
-/// (this file's lane names the crate's default `alloc`) parks what follows the Frame, one copy,
-/// and the next iteration reads it before it reaches for the link.
+/// This build has an allocator, so what follows the Frame is parked, one copy, and the next
+/// iteration reads it before it reaches for the link. A build with none reads the datagram on
+/// where it lies, in the same iteration, which `slot_frames_without_alloc` holds.
 #[test]
 fn a_datagram_of_two_frames_is_read_frame_by_frame() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
@@ -811,22 +813,20 @@ fn a_datagram_of_two_frames_is_read_frame_by_frame() {
         best_effort,
         &record::subscriber(62, "two/b"),
     ));
-    let both = read(
+    // What the copying path that reads a parked unit costs is not this test's claim.
+    let _ = read(
         &measure,
         &mut acceptor,
         &initiator,
         "a reliable and a best-effort Frame in one datagram",
         &wire,
     );
-    #[cfg(feature = "alloc")]
-    {
-        assert_eq!(
-            declared(),
-            (1, 61),
-            "(declarations told, the id of the last): the reliable Frame's record, the rest parked"
-        );
-        acceptor.step();
-    }
+    assert_eq!(
+        declared(),
+        (1, 61),
+        "(declarations told, the id of the last): the reliable Frame's record, the rest parked"
+    );
+    acceptor.step();
     assert_eq!(
         declared(),
         (2, 62),
@@ -839,37 +839,24 @@ fn a_datagram_of_two_frames_is_read_frame_by_frame() {
         next_best_effort_sn(&initiator),
         &record::subscriber(64, "two/d"),
     ));
-    let behind_refused = read(
+    let _ = read(
         &measure,
         &mut acceptor,
         &initiator,
         "a best-effort Frame behind a refused one",
         &wire,
     );
-    #[cfg(feature = "alloc")]
-    {
-        assert_eq!(
-            declared(),
-            (2, 62),
-            "(declarations told, the id of the last): nothing of the refused Frame, the rest parked"
-        );
-        acceptor.step();
-    }
+    assert_eq!(
+        declared(),
+        (2, 62),
+        "(declarations told, the id of the last): nothing of the refused Frame, the rest parked"
+    );
+    acceptor.step();
     assert_eq!(
         declared(),
         (3, 64),
         "(declarations told, the id of the last): the refused Frame's record is not told, the \
          record of the Frame behind it is"
-    );
-    // A build with an allocator copies the rest of each datagram once to park it, and reads the
-    // parked unit by the copying path: what that costs is not this test's claim.
-    #[cfg(feature = "alloc")]
-    let _ = (both, behind_refused);
-    #[cfg(not(feature = "alloc"))]
-    assert_eq!(
-        (both, behind_refused),
-        (0, 0),
-        "(allocations of the two datagrams)"
     );
 }
 

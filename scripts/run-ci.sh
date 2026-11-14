@@ -12961,6 +12961,16 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,codec-response-final,session-slot \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    # The same two datagrams on the slot profile built with NO allocator (`--no-default-features`,
+    # so no crate of the session tier links `alloc`): the walk that reads a datagram on where it
+    # lies, which no build with `alloc` compiles, both Frames' records told in the one iteration
+    # through the slot observer of closed sinks, at zero allocations. Every other leg of this
+    # crate keeps the default `alloc`. 1 test.
+    wz_test_args wz-session-lwip slot_frames_without_alloc
+    _runci_guarded_test "C1m slot frames without alloc" 1 \
+        cargo test -p wz-session-lwip --no-default-features \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,codec-response-final,session-slot \
+        "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # Fixed-memory step S6 -- the PUMP and the RUNTIME under it, counted
     # (`tests/session_pump_allocations.rs`): the same real pair, each end run as a
     # task of one local set, from the runtime's making to the last task's end. Under
