@@ -133,28 +133,31 @@ enum Door {
 ///
 /// | case        | after replay | after reads |
 /// |-------------|--------------|-------------|
-/// | udp owned   | 46.6         | 72.8        |
-/// | udp lent    | 15.7         | 41.9        |
-/// | tcp owned   | 61.3         | 95.3        |
-/// | tcp lent    | 27.2         | 61.2        |
+/// | udp owned   | 46.6         | 59.8        |
+/// | udp lent    | 15.7         | 28.9        |
+/// | tcp owned   | 61.3         | 82.2        |
+/// | tcp lent    | 27.2         | 48.1        |
 ///
-/// (Before the selection door kept the planes that decide its words between
-/// calls, the reads were 59.8, 28.9, 82.2 and 48.1: the 13 bytes between are
-/// those planes, for the one selector the reads ask under. See below.)
+/// (While the selection door's planes kept the verdict of every row they took,
+/// the reads were 72.8, 41.9, 95.3 and 61.2: 13 bytes a row for those planes,
+/// for the one selector the reads ask under. The planes now give up a row's
+/// verdict once its word is final and said, and a later call reads it from the
+/// word the door remembers, so the reads are the figures measured before the
+/// planes were kept, and so are the ceilings.)
 ///
 /// (Before the entries and the run map were kept as packed columns, D10, these
 /// were 82.0 and 95.9, 49.2 and 63.1, 130.4 and 152.2, 90.2 and 112.1: a row's
 /// entry was 48 bytes of words and a run 40, most of them zeros.)
 ///
 /// The reads are every field window to the end of the capture, the selection door
-/// from the start and again from where it ended, then the census. They add 26 to
-/// 34 bytes a row: 12 for what the census's selector said of the row (its
-/// coordinate and the number of its answer, `verdict_column`), 13 for the planes
-/// the selection door keeps for its selector so that a later call folds only what
-/// arrived (the payload plane's verdict of each row, in the same column, and the
-/// row plane's), half a byte for the word the selection door said
-/// (`word_column`) and, for a stream capture, 8 for the digest of the row's text
-/// (`digest_column`). Before the first and the last two were
+/// from the start and again from where it ended, then the census. They add 13 to
+/// 21 bytes a row: 12 for what the census's selector said of the row (its
+/// coordinate and the number of its answer, `verdict_column`), half a byte for
+/// the word the selection door said (`word_column`), which is also what a later
+/// call reads of a row whose word is final, so the planes the door keeps for its
+/// selector hold no verdict of such a row, and, for a stream capture, 8 for the
+/// digest of the row's text (`digest_column`). Before the first and the last two
+/// were
 /// columns the same reads cost 100 bytes a row (the verdict was a map entry
 /// holding its own vector), about 40 more for the selection door's word, and on a
 /// stream capture 49 for the digest, each a map entry. This gate first measured
@@ -479,7 +482,7 @@ fn a_datagram_capture_s_handle_holds_a_constant_per_row() {
         transport: RunTransport::Datagram,
         door: Door::Owned,
         after_replay_ceiling: 52.0,
-        after_reads_ceiling: 82.0,
+        after_reads_ceiling: 66.0,
     });
 }
 
@@ -490,7 +493,7 @@ fn a_lent_datagram_capture_s_handle_holds_a_constant_per_row() {
         transport: RunTransport::Datagram,
         door: Door::Lent,
         after_replay_ceiling: 18.0,
-        after_reads_ceiling: 48.0,
+        after_reads_ceiling: 32.0,
     });
 }
 
@@ -501,7 +504,7 @@ fn a_stream_capture_s_handle_holds_a_constant_per_row() {
         transport: RunTransport::Stream,
         door: Door::Owned,
         after_replay_ceiling: 68.0,
-        after_reads_ceiling: 106.0,
+        after_reads_ceiling: 92.0,
     });
 }
 
@@ -512,6 +515,6 @@ fn a_lent_stream_capture_s_handle_holds_a_constant_per_row() {
         transport: RunTransport::Stream,
         door: Door::Lent,
         after_replay_ceiling: 30.0,
-        after_reads_ceiling: 68.0,
+        after_reads_ceiling: 54.0,
     });
 }

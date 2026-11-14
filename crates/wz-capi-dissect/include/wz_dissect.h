@@ -7872,8 +7872,10 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  *   - what the folds keep that is not a row's (the exchanges still open) is
  *     more than four entries per message the handle holds, and a thousand
  *     more. What they keep of the rows a ceiling took is given up before that,
- *     in one pass, each time it has doubled, so a ceiling alone never begins
- *     them again.
+ *     and so is what they keep of a row whose word was final and was said: at
+ *     the end of every call, so a ceiling alone never begins them again, and a
+ *     call that reads every row reads such a row's word from the handle's
+ *     memory of what it said.
  * Every row is read, and the folds go on, when the cursor is below the
  * `through_seq` the last document gave or the last document wrote a row with no
  * `seq`. A ceiling that trims a list's front is NOT among these: the folds go on
