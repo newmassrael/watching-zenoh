@@ -455,6 +455,8 @@ use wz_session_core::wire::{PushOwned, RequestOwned, ResponseOwned};
 
 #[cfg(feature = "routing-interest-pending-gc")]
 mod brokered_interest;
+#[cfg(test)]
+mod client_hat_tests;
 mod declaration_ids;
 mod egress;
 #[cfg(test)]
@@ -552,15 +554,31 @@ fn mcast_ingress_region() -> Region {
         .unwrap_or_else(|| unreachable!("the pin places a peer on a router's group"))
 }
 
-/// Whether a face in `region` is a leaf, meaning its hat keeps no link-state
-/// net. That is the pin's client and broker hats. Read off the ported hat
-/// table ([`hat_kind`]) so the leaf set and the hats the pin builds cannot
-/// disagree.
+/// Whether a face in `region` is a leaf: a client the node holds south of it,
+/// which routes no topology and is kept with its declarations by id. That is
+/// the pin's broker hat. Read off the ported hat table ([`hat_kind`]) so the
+/// leaf set and the hats the pin builds cannot disagree.
+///
+/// The pin's CLIENT hat is not a leaf hat, though it keeps no net either: it is
+/// the north hat of a client node, and its one face is the node the client is
+/// attached to, which the client sends everything its south holds
+/// ([`is_client_hat`]).
 fn is_leaf(region: Region, node_mode: WhatAmI) -> bool {
-    matches!(
-        hat_kind(&region, node_mode),
-        HatKind::Broker | HatKind::Client
-    )
+    matches!(hat_kind(&region, node_mode), HatKind::Broker)
+}
+
+/// Whether `region` is served by the pin's CLIENT hat: the north region of a
+/// node whose mode is Client (`zenoh/src/net/routing/hat/client/mod.rs` @
+/// `debug_assert!(region.bound().is_north());`).
+///
+/// It is held in a [`MeshHat`], as the router and peer hats are, and differs
+/// from them by the rules that ask this: its graph holds its one north link and
+/// is never exchanged ([`Tables::exchanges_topology`]), a second north remote is
+/// refused, and it routes as the north peer hat does, by its faces
+/// ([`Tables::face_based`]), sending north what its south holds and what its
+/// south asks (`docs/peer-region-hats.md`, section 15).
+fn is_client_hat(region: Region, node_mode: WhatAmI) -> bool {
+    matches!(hat_kind(&region, node_mode), HatKind::Client)
 }
 
 /// R2888 (open-debt item 751, step 8a) — whether `region` is served by the
@@ -693,12 +711,19 @@ impl MeshHat {
         // carries every node, self included with its locators, where a `Network` of this mode
         // sends the direct neighbours by zid alone and so never tells the router the peer's
         // locators (`zenoh/src/net/protocol/gossip.rs` @ `// Send all nodes linkstate on new link`).
-        let mut net = if is_peer_hat(region, node_mode) && region.bound().is_north() {
+        //
+        // The CLIENT hat keeps no net in the pin (`zenoh/src/net/routing/hat/client/mod.rs` @
+        // `"graph {}".to_string()`). Its graph here is the one the north peer hat keeps, of the
+        // node's own links alone: what the gateway rule reads the face's bound from, and what a
+        // declaration of the remote is routed back along. It is never sent nor fed
+        // ([`Tables::exchanges_topology`]), so its shape decides no message.
+        let face_hat = is_peer_hat(region, node_mode) || is_client_hat(region, node_mode);
+        let mut net = if face_hat && region.bound().is_north() {
             LinkstateNetwork::new(self_zid, node_mode)
         } else {
             LinkstateNetwork::new_in_region(self_zid, node_mode, region.bound().is_south())
         };
-        net.set_full_linkstate(!is_peer_hat(region, node_mode));
+        net.set_full_linkstate(!face_hat);
         Self {
             net: Arc::new(net),
             trees_dirty: false,
@@ -2361,18 +2386,15 @@ pub(crate) struct Tables {
     /// The mode this node runs as, which decides what each region's hat is
     /// ([`hat_kind`]) and so which regions are leaves, which are peers' and
     /// which are routers'. It is fixed at construction: the hats are built from
-    /// it. Every constructor passes [`WhatAmI::Router`] until a peer node is
-    /// built on this forwarder (`docs/peer-region-hats.md`, step 2).
+    /// it. A router, a peer and a client node each pass their own mode, and the
+    /// north hat follows it: the router hat, the peer hat or the client hat
+    /// (`docs/peer-region-hats.md`, sections 3 and 15).
     node_mode: WhatAmI,
     /// How this router's south is partitioned into subregions, and so which
     /// regions [`hats`](Self#structfield.hats) holds and which one each face lands in
     /// ([`RouterForwarder::with_south_partition`]). `Auto` is the pin's preset
     /// and every router's default.
     partition: SouthPartition,
-    /// Whether this node is a CLIENT of its north ([`RouterForwarder::as_client_of_north`]): the
-    /// router it is attached to sends it a declaration only in answer to an interest of its own,
-    /// so the interest of a face south of it is brokered north as a client's is.
-    north_is_client: bool,
     /// Held faces keyed by id, each carrying its send seam, its tier, and (once
     /// its zid is known) its graph link. One id-keyed map across BOTH tiers
     /// (the `RouterFaceState.tier` says which net), so the flood can scope to a
@@ -3361,22 +3383,45 @@ impl Tables {
     /// custom partition each subregion's router region. Each fills the one `routers` bucket of
     /// an admin leg, as each of the pin's router hats fills its own and the dispatcher merges
     /// them per resource.
+    ///
+    /// A client node's north hat fills it too when the node it is attached to is a router
+    /// ([`client_hat_fills`](Self::client_hat_fills)).
     #[cfg(feature = "adminspace-introspection-handlers")]
     fn router_mesh_hats(&self) -> impl Iterator<Item = (Region, &MeshHat)> {
         self.hats
             .iter()
-            .filter(|(region, _)| is_router_hat(*region, self.node_mode))
+            .filter(|(region, _)| {
+                is_router_hat(*region, self.node_mode)
+                    || self.client_hat_fills(*region, WhatAmI::Router)
+            })
             .filter_map(|(region, hat)| hat.mesh().map(|hat| (region, hat)))
     }
 
     /// The hats of the regions the pin's PEER hat serves, in region order: one on the `auto`
-    /// preset, one per subregion on a custom partition.
+    /// preset, one per subregion on a custom partition. A client node's north hat fills the
+    /// `peers` bucket when the node it is attached to is a peer.
     #[cfg(feature = "adminspace-introspection-handlers")]
     fn peer_mesh_hats(&self) -> impl Iterator<Item = (Region, &MeshHat)> {
         self.hats
             .iter()
-            .filter(|(region, _)| is_peer_hat(*region, self.node_mode))
+            .filter(|(region, _)| {
+                is_peer_hat(*region, self.node_mode)
+                    || self.client_hat_fills(*region, WhatAmI::Peer)
+            })
             .filter_map(|(region, hat)| hat.mesh().map(|hat| (region, hat)))
+    }
+
+    /// Whether `region` is the CLIENT hat and fills the admin bucket of `mode`: the pin's client
+    /// hat names each source by the mode of the face it came from
+    /// (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `WhatAmI::Router => srcs.routers.push(face.zid),`),
+    /// and its one face is the node the client is attached to.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn client_hat_fills(&self, region: Region, mode: WhatAmI) -> bool {
+        is_client_hat(region, self.node_mode)
+            && self
+                .faces
+                .of_tier(region)
+                .any(|(_, face)| peer_whatami_routing(&face.runtime.actions) == mode)
     }
 
     /// The hat of `region` when it is a leaf region's BROKER hat, `None`
@@ -3458,8 +3503,43 @@ impl Tables {
     /// A ROUTER node's south peer region stays face-based with the extension
     /// on: R2896 turns the flag on there so the router follows its peers'
     /// topology exchange, not to relay between them.
+    ///
+    /// The pin's CLIENT hat is face-based as well: it offers its one face what
+    /// came from another region and nothing of its own
+    /// (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `if ctx.subs.is_some() && *src_region != self.region() {`),
+    /// and it propagates a declaration to that face, not along a tree.
     fn face_based(&self, region: Region) -> bool {
-        is_peer_hat(region, self.node_mode) && !self.runs_linkstate_peers(region)
+        is_client_hat(region, self.node_mode)
+            || (is_peer_hat(region, self.node_mode) && !self.runs_linkstate_peers(region))
+    }
+
+    /// Whether this node is a CLIENT of the node north of it: its north region is the pin's
+    /// client hat ([`is_client_hat`]). The node it is attached to tells it a declaration only in
+    /// answer to an interest, so the interest of a face south of it is sent north, as a
+    /// client's is (`zenoh/src/net/routing/hat/client/interests.rs` @ `fn route_interest`).
+    fn north_is_client(&self) -> bool {
+        is_client_hat(NORTH_REGION, self.node_mode)
+    }
+
+    /// Whether this node sends north the interests it is asked and the ones of its own session:
+    /// its north hat is the pin's peer hat, which sends a client's interest to the faces whose
+    /// remote is south-bound (`zenoh/src/net/routing/hat/peer/interests.rs` @
+    /// `.filter(|f| f.remote_bound.is_south())`), or its client hat, which sends every interest
+    /// of its south to its one face. A router hat answers from its own tables and asks no one.
+    fn routes_interest_north(&self) -> bool {
+        matches!(
+            hat_kind(&NORTH_REGION, self.node_mode),
+            HatKind::Peer | HatKind::Client
+        )
+    }
+
+    /// Whether `region`'s hat exchanges its graph with its faces: every mesh hat but the CLIENT
+    /// hat, which builds no net, so it sends no link state and reads none
+    /// (`zenoh/src/net/routing/hat/client/mod.rs` @ `fn handle_oam(`, which answers `Ok(())`).
+    /// The node it is attached to holds it as a client, a leaf of its own, which keeps no graph
+    /// of it either.
+    fn exchanges_topology(&self, region: Region) -> bool {
+        !is_client_hat(region, self.node_mode)
     }
 
     /// Whether `region` is a region of the pin's PEER hat that lies SOUTH of this node: the group
@@ -3474,13 +3554,14 @@ impl Tables {
 
     /// Whether every declaration this node sends to a face of `region` leaves with an id of its
     /// own ([`declaration_ids`]). Two north faces keep declarations by the id they carry: the
-    /// router that holds this node as a client, and a peer of the pin's peer hat, which the
-    /// region of a peer node is made of. The peer registers a queryable under the id it was
-    /// sent with and, for an id it already holds, takes the new info and keeps the first
-    /// resource (`zenoh/src/net/routing/hat/peer/queries.rs` @ `.and_modify(|(_, old_info)| *old_info = *info)`),
+    /// node that holds this node as a client (the north face of the client hat), and a peer of
+    /// the pin's peer hat, which the region of a peer node is made of. The peer registers a
+    /// queryable under the id it was sent with and, for an id it already holds, takes the new
+    /// info and keeps the first resource
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `.and_modify(|(_, old_info)| *old_info = *info)`),
     /// so a node that sends every declaration as id 0 is known to it by the first key alone.
     fn numbers_every_declaration_to(&self, region: Region) -> bool {
-        region == NORTH_REGION && (self.north_is_client || is_peer_hat(region, self.node_mode))
+        region == NORTH_REGION && self.routes_interest_north()
     }
 
     /// Whether `region`'s hat is a peer hat running wz's link-state peer
@@ -4347,21 +4428,6 @@ impl RouterForwarder {
         self.tables.sharing()
     }
 
-    /// Make this node a CLIENT of its north: a node that keeps a south apart
-    /// ([`with_south_partition`](Self::with_south_partition)) and announces itself as a client to
-    /// the router it dials. Upstream builds its north as the client hat
-    /// (`zenoh/src/net/routing/hat/client/interests.rs` @ `fn route_interest`), which sends the
-    /// interest of a face south of it on to its one north face; the router in turn tells a client
-    /// only what the client asked for. The interest of a south face is therefore brokered north
-    /// (`broker_current_interest`, built with `routing-interest-pending-gc`) as a client's is.
-    ///
-    /// The routing tables stay a peer node's: the north region has no client hat of its own here,
-    /// and the answers a router gives a client are the ones it gives a peer that asks.
-    pub fn as_client_of_north(self) -> Self {
-        self.on_tables_mut().tables.north_is_client = true;
-        self
-    }
-
     /// Record the routing of this node on a timestamp stack with `source`, the clock or the
     /// callback its session was opened with, as upstream's runtime records an interception with
     /// the one the application gave it. Set once, before the program does anything: a second call
@@ -4458,9 +4524,40 @@ impl RouterForwarder {
         )
     }
 
+    /// A forwarder for a CLIENT node that keeps a south apart
+    /// ([`with_south_partition`](Self::with_south_partition)): the pin's client hat in `North`,
+    /// whose one face is the node the client is attached to, and the hats of its subregions south
+    /// of it (`zenoh/src/net/routing/gateway.rs` @ `match (region.bound(), region.mode().unwrap_or(mode)) {`),
+    /// with its faces placed by [`region_of`] at node mode Client.
+    ///
+    /// The node it is attached to tells a client only what the client asked for, so the client
+    /// hat sends north every interest its south makes and every declaration its south holds,
+    /// and every message whose source is south unless the north face finalized its interest in
+    /// the resource (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn compute_data_route`).
+    /// `timestamping` is resolved against Client, as
+    /// [`peer_with_timestamping`](Self::peer_with_timestamping) resolves it against Peer.
+    pub fn client_with_timestamping(
+        self_zid: Zid,
+        timestamping: crate::node_clock::TimestampingEnabled,
+    ) -> Self {
+        Self::build(
+            WhatAmI::Client,
+            self_zid,
+            Box::new(Instant::now),
+            timestamping,
+        )
+    }
+
     #[cfg(test)]
     fn peer(self_zid: Zid) -> Self {
         Self::peer_with_clock(self_zid, Box::new(Instant::now))
+    }
+
+    /// [`client_with_timestamping`](Self::client_with_timestamping) with the shipped
+    /// `timestamping.enabled` map.
+    #[cfg(test)]
+    fn client(self_zid: Zid) -> Self {
+        Self::client_with_timestamping(self_zid, crate::node_clock::TimestampingEnabled::default())
     }
 
     /// [`peer`](Self::peer) with an injected monotonic clock, for a test that
@@ -4495,7 +4592,6 @@ impl RouterForwarder {
                         .collect(),
                     node_mode,
                     partition: SouthPartition::Auto,
-                    north_is_client: false,
                     faces: FaceTable::new(),
                     #[cfg(feature = "resource-snapshot")]
                     receive_ledger: Default::default(),
@@ -5724,6 +5820,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables.plane(tier)
     }
 
+    /// The graph of `tier` when its hat exchanges it with its faces
+    /// ([`Tables::exchanges_topology`]): what a link-state flood is built from and what an inbound
+    /// one is fed to. `None` for a leaf region and for the client hat, whose graph is its own.
+    fn topology_plane(&self, tier: Region) -> Option<&LinkstateNetwork> {
+        self.plane(tier)
+            .filter(|_| self.tables.exchanges_topology(tier))
+    }
+
     /// The hat of `region` when it is a MESH hat (see [`Tables::mesh_hat`]).
     fn mesh_hat(&self, region: Region) -> Option<&MeshHat> {
         self.tables.mesh_hat(region)
@@ -6083,7 +6187,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         neighbour: &Zid,
         neighbour_was_new: bool,
     ) -> Result<usize, CodecError> {
-        let Some(net) = self.plane(tier) else {
+        let Some(net) = self.topology_plane(tier) else {
             return Ok(0);
         };
         // R2893 (751 rule 8d) — both shapes are the graph's decision, by the
@@ -6116,7 +6220,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// topology at once (each receiver's own detached-node prune handles the
     /// rest). Reliable.
     fn flood_self_links_changed_tier(&self, tier: Region) -> Result<usize, CodecError> {
-        let Some(net) = self.plane(tier) else {
+        let Some(net) = self.topology_plane(tier) else {
             return Ok(0);
         };
         // R2893 — nothing to tell in a single-hop gossip `Network`.
@@ -6181,7 +6285,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if changes.new.is_empty() && changes.updated.is_empty() {
             return Ok(0);
         }
-        let Some(net) = self.plane(tier) else {
+        let Some(net) = self.topology_plane(tier) else {
             return Ok(0);
         };
         // R2893 — the shape and the per-face exclusions are the graph's
@@ -6412,8 +6516,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
+        // The client hat's one face numbers its declarations too: the node a client is attached
+        // to declares to it by an id of its own and withdraws by that id with no key
+        // (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `.remote_subs.remove(&id)`).
         if let Declared::Sourced(sourced) = declared {
-            if is_peer_hat(region, self.tables.node_mode) {
+            if is_peer_hat(region, self.tables.node_mode)
+                || is_client_hat(region, self.tables.node_mode)
+            {
                 self.tables
                     .mesh_ids_mut()
                     .remember(kind, inbound, decl_id, &sourced.keyexpr);
@@ -7436,17 +7545,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// a publisher to the faces whose remote is south-bound
     /// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`),
     /// and a router has no router to ask.
+    ///
+    /// A CLIENT node asks the one face of its client hat, whatever that remote is: the pin's
+    /// client hat sends every interest to the face it owns
+    /// (`zenoh/src/net/routing/hat/client/interests.rs` @ `if let Some(mut dst_face) = self.owned_faces(ctx.tables).next().cloned() {`).
     fn router_faces(&self) -> Vec<FaceId> {
-        if self.tables.node_mode != WhatAmI::Peer {
+        let mut faces: Vec<FaceId> = if self.tables.north_is_client() {
+            self.tables
+                .faces
+                .of_tier(NORTH_REGION)
+                .map(|(id, _)| id)
+                .collect()
+        } else if self.tables.node_mode == WhatAmI::Peer {
+            self.tables
+                .faces
+                .iter()
+                .filter(|(_, state)| {
+                    peer_whatami_routing(&state.runtime.actions) == WhatAmI::Router
+                })
+                .map(|(id, _)| *id)
+                .collect()
+        } else {
             return Vec::new();
-        }
-        let mut faces: Vec<FaceId> = self
-            .tables
-            .faces
-            .iter()
-            .filter(|(_, state)| peer_whatami_routing(&state.runtime.actions) == WhatAmI::Router)
-            .map(|(id, _)| *id)
-            .collect();
+        };
         faces.sort_unstable();
         faces
     }
@@ -9137,8 +9258,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// `dst.has_unfinalized_subscriber_interest = true`), and the gateway, which knows its own
     /// subscribers, routes it on or drops it. Data whose source is not south, a transit message
     /// from another peer, takes no part of it (`src_region.bound().is_south()`).
+    ///
+    /// The pin's CLIENT hat takes the same rule toward its one north face
+    /// (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `dst.has_unfinalized_subscriber_interest = true`
+    /// and `zenoh/src/net/routing/hat/client/queries.rs` @ `dst.has_unfinalized_queryable_interest = true`),
+    /// which is south-bound as a gateway is: the node a client is attached to.
     fn gateways_owed(&self, tier: Region, keyexpr: &str, queryables: bool) -> Vec<FaceId> {
-        if self.tables.node_mode != WhatAmI::Peer || !is_peer_hat(tier, self.tables.node_mode) {
+        let owed = match hat_kind(&tier, self.tables.node_mode) {
+            HatKind::Client => true,
+            HatKind::Peer => self.tables.node_mode == WhatAmI::Peer,
+            HatKind::Router | HatKind::Broker => false,
+        };
+        if !owed {
             return Vec::new();
         }
         let mut gateways = self.gateway_faces();
@@ -10846,6 +10977,25 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     pub fn linkstate_regions_text(&self) -> Vec<(String, String)> {
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
         let label = |zid: &Zid| zid_to_zenoh_hex(zid.as_slice());
+        // The pin answers the regions whose hat is a peer's or a router's and no other
+        // (`zenoh/src/net/runtime/adminspace.rs` @ `.filter(|(_, hat)| hat.mode().is_peer() || hat.mode().is_router())`):
+        // a client node's north hat is its client hat and is not answered, the peer regions it
+        // keeps south of it are, each with its own graph.
+        if self.tables.north_is_client() {
+            return self
+                .tables
+                .hats
+                .iter()
+                .filter(|(region, _)| {
+                    is_peer_hat(*region, self.tables.node_mode)
+                        || is_router_hat(*region, self.tables.node_mode)
+                })
+                .filter_map(|(region, hat)| {
+                    hat.mesh()
+                        .map(|hat| (region.to_string(), hat.net.dot_with(label)))
+                })
+                .collect();
+        }
         let north = NORTH_REGION.to_string();
         let net = self.tables.north_net();
         if self.tables.node_mode != WhatAmI::Peer {
@@ -11713,9 +11863,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             forwarded += self.forward_request_to_tier(
                 block, reliable, inbound, &hops, request, keyexpr, fan, deadline,
             );
-            // The gateways belong to the peer hat's region, whose gateway has no queryable info
-            // and is therefore asked only when that region has no complete queryable.
-            if !picked_complete && is_peer_hat(block.tier, self.tables.node_mode) {
+            // The gateways belong to the north region, the peer hat's or the client hat's, whose
+            // gateway has no queryable info and is therefore asked only when that region has no
+            // complete queryable. A south peer region's block does not ask them: each hat routes
+            // to its own faces, and a gateway asked from two blocks would be sent the query
+            // twice.
+            if !picked_complete && block.tier == NORTH_REGION {
                 forwarded += self.forward_request_to_gateways(
                     gateways, &hops, reliable, request, keyexpr, fan, deadline,
                 );
@@ -11827,7 +11980,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             forwarded += self.forward_request_to_tier(
                 block, reliable, inbound, &hops, request, keyexpr, fan, deadline,
             );
-            if is_peer_hat(block.tier, self.tables.node_mode) {
+            // In the north block alone, as for BestMatching above.
+            if block.tier == NORTH_REGION {
                 forwarded += self.forward_request_to_gateways(
                     gateways, &hops, reliable, request, keyexpr, fan, deadline,
                 );
@@ -12597,12 +12751,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 
     /// A topology link-state from face `id` in `tier`: ingest it into the tier's net, re-flood
     /// the changed nodes onward to the SAME tier, purge the interest of any detached node, and
-    /// coalesce that net's recompute. A face with no net (a client) carries no topology.
+    /// coalesce that net's recompute. A face with no net (a client) carries no topology, and
+    /// neither does the face of a client hat: what the node it is attached to sends it is not
+    /// read ([`Tables::exchanges_topology`]).
     fn ingest_topology(&mut self, id: FaceId, tier: Region, oam: &OamOwned)
     where
         T: std::ops::DerefMut,
     {
-        if self.plane(tier).is_none() {
+        if self.topology_plane(tier).is_none() {
             return;
         }
         match try_parse_linkstate_oam(oam) {
@@ -12778,7 +12934,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         // A gateway that comes up is sent what the faces south of the node already asked for.
         #[cfg(feature = "routing-interest-pending-gc")]
-        if self.tables.node_mode == WhatAmI::Peer && self.gateway_faces().contains(&id) {
+        if self.tables.routes_interest_north() && self.gateway_faces().contains(&id) {
             self.repropagate_brokered_interests(id);
         }
         // A node being dialled is connected: it is a face now, and the face is what is waited on.
@@ -13109,8 +13265,27 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// (`zenoh/src/net/runtime/region.rs` @ `pub(crate) fn compute_region_of(`
     /// answers an error), and so does this router. Every region the rules can
     /// place a remote in has its hat here, a subregion's router region included.
+    ///
+    /// A client node refuses a remote it would place in the north region while another remote
+    /// holds it (`zenoh/src/net/runtime/mod.rs` @ `bail!("Client runtimes only accept one north-bound transport");`):
+    /// its client hat sends everything its south holds and asks to its one face, and a second
+    /// one would be told half of it. A second link of the remote the face already is, is no
+    /// second transport, and the admission joins or drops it.
     fn refuses_face(&self, actions: &Arc<SessionLinkActions>) -> Option<String> {
-        self.place_face(actions).err().map(|why| why.to_string())
+        let (region, _) = match self.place_face(actions) {
+            Ok(placed) => placed,
+            Err(why) => return Some(why.to_string()),
+        };
+        if !is_client_hat(region, self.tables.node_mode) {
+            return None;
+        }
+        let zid = peer_zid_routing(actions);
+        let another = self
+            .tables
+            .faces
+            .of_tier(region)
+            .any(|(_, held)| zid.is_none() || held.peer_zid != zid);
+        another.then(|| "a client node accepts one north-bound transport".to_owned())
     }
 
     /// The partition this router's hats were built from, which every session it

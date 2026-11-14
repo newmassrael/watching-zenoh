@@ -248,7 +248,7 @@ fn routing_table_sharing_snapshot_frees_a_retired_version_on_the_writer_not_the_
     );
 
     let held = fwd.on_tables();
-    fwd.on_tables_mut().tables.north_is_client = true;
+    fwd.on_tables_mut().tables.next_hosted_id += 1;
     assert_eq!(
         fwd.tables.retired(),
         (1, 0),
@@ -260,7 +260,7 @@ fn routing_table_sharing_snapshot_frees_a_retired_version_on_the_writer_not_the_
         (1, 1),
         "the reader let the version go and did not free it"
     );
-    fwd.on_tables_mut().tables.north_is_client = false;
+    fwd.on_tables_mut().tables.next_hosted_id += 1;
     assert_eq!(
         fwd.tables.retired(),
         (0, 0),
@@ -268,7 +268,7 @@ fn routing_table_sharing_snapshot_frees_a_retired_version_on_the_writer_not_the_
     );
 
     let held = fwd.on_tables();
-    fwd.on_tables_mut().tables.north_is_client = true;
+    fwd.on_tables_mut().tables.next_hosted_id += 1;
     drop(held);
     assert_eq!(fwd.tables.retired(), (1, 1));
     fwd.tables.synchronize();
@@ -344,20 +344,21 @@ fn routing_table_sharing_snapshot_serves_a_reader_of_an_older_version_its_versio
 #[test]
 fn routing_table_sharing_snapshot_does_not_publish_a_write_that_panicked() {
     let fwd = router_with_a_client(RoutingTableSharing::Snapshot);
-    assert!(!fwd.on_tables().tables.north_is_client);
+    let before = fwd.on_tables().tables.next_hosted_id;
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut on = fwd.on_tables_mut();
-        on.tables.north_is_client = true;
+        on.tables.next_hosted_id = before + 1;
         panic!("a writer of the tables fails in the middle of its write");
     }));
     assert!(unwound.is_err(), "the write panicked");
-    assert!(
-        !fwd.on_tables().tables.north_is_client,
+    assert_eq!(
+        fwd.on_tables().tables.next_hosted_id,
+        before,
         "the draft of the write that panicked was never published"
     );
     // The writers' lock was let go with the abandoned draft: the next write gets in.
-    fwd.on_tables_mut().tables.north_is_client = true;
-    assert!(fwd.on_tables().tables.north_is_client);
+    fwd.on_tables_mut().tables.next_hosted_id = before + 1;
+    assert_eq!(fwd.on_tables().tables.next_hosted_id, before + 1);
 }
 
 /// The value is chosen before any face registers: the faces a router holds are not carried into

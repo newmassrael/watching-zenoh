@@ -78,7 +78,7 @@ the sorting:
 the hats' graphs and interest tables (`MeshHat::{net, subs, qabls, tokens}`, `BrokerHat::{subs, qabls,
 tokens}`), the face set and each face's routing facts (tier, zid, link, alias table `keyexpr_table`,
 `initial_final`), `joined_links`, the future-interest stores, `mesh_ids`, `own_interests`, the hosted
-entity lists and `next_hosted_id`, `partition`, `north_is_client`, `node_mode`, `local_face_sink`,
+entity lists and `next_hosted_id`, `partition`, `node_mode`, `local_face_sink`,
 `advertised_tokens` and `receive_ledger`. This is what becomes the snapshot. Two of its members carry a
 lock only so that a writer could reach them through `&self` (`advertised_tokens: PlainMutex`,
 `MeshHat::trees_dirty: PlainCell`); in a snapshot they are plain values written through `&mut`.

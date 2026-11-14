@@ -550,17 +550,12 @@ pub(crate) fn open_router_blocking(
     let own_zid = Zid::from_slice(&wire_zid);
     let forwarder = match role {
         NodeRole::Router => RouterForwarder::with_timestamping(own_zid, timestamping),
-        // A client node routes on the peer node's tables: its south is kept apart by the same
-        // partition, and what it owes the router it dialled is what a peer owes its gateway, which
-        // declares nothing of what its other remotes hold, so every message whose source is south
-        // goes up to it (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn maybe_propagate_subscriber`,
-        // and the client hat sends all it has north). What differs is how the node announces
-        // itself: as a client, which the router tells only what the node asked for, so the
-        // interest of its south goes north.
         NodeRole::Peer => RouterForwarder::peer_with_timestamping(own_zid, timestamping),
-        NodeRole::Client => {
-            RouterForwarder::peer_with_timestamping(own_zid, timestamping).as_client_of_north()
-        }
+        // A client node's north is the pin's client hat: its one face is the router it dialled,
+        // which tells a client only what the client asked for, so the hat sends that face every
+        // interest and every declaration of its south and every message whose source is south
+        // (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn compute_data_route`).
+        NodeRole::Client => RouterForwarder::client_with_timestamping(own_zid, timestamping),
     };
     #[cfg(feature = "routing-namespace")]
     let forwarder = match namespace {
@@ -735,8 +730,8 @@ pub(crate) fn open_router_blocking(
                 // waited for until their face is up and has ended its declarations.
                 //
                 // A client node is told no gossip by the router it dialled, which holds it for a
-                // client, so its start condition is the connection and the end of the router's
-                // initial declarations.
+                // client, and no face of its client hat ends initial declarations, so its start
+                // condition is the connection.
                 NodeRole::Peer | NodeRole::Client if dials > 0 => {
                     let deadline = std::time::Instant::now() + window;
                     while (forwarder.face_snapshots().len() < dials

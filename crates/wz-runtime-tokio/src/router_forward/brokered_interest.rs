@@ -36,8 +36,11 @@
 //!   its key and declared nothing matching it (the pin's `subscriber_interest_finalized` and
 //!   `queryable_interest_finalized`, `zenoh/src/net/routing/hat/peer/pubsub.rs`).
 //!
-//! It acts for a node of mode Peer and for a client face only: the pin's other hats propagate by
-//! their own rules, which wz's router hats carry separately.
+//! It acts for a node whose north hat is the peer hat or the client hat, for a client face and,
+//! on a client node, for a face of a south peer region: the client hat sends every interest of
+//! its south to its one north face (`zenoh/src/net/routing/hat/client/interests.rs` @
+//! `fn route_interest`), and the face it is attached to is that node's one gateway. The pin's
+//! router hat propagates by its own rules, which wz's router hats carry separately.
 
 use super::*;
 use crate::interest_broker::{CurrentInterest, PendingCurrentInterests};
@@ -288,13 +291,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         future: bool,
         target: Option<&str>,
     ) -> usize {
-        if self.tables.node_mode != WhatAmI::Peer {
+        if !self.tables.routes_interest_north() {
             return 0;
         }
         // A client's interest is brokered. So is the interest of a face south of a node that is a
-        // client of its north: the router tells that node only what it asked for, and a south
-        // peer that asks the node has no other way to reach it.
-        let south_asking = self.tables.north_is_client && self.asks_for_declarations(inbound);
+        // client of its north: the node it is attached to tells it only what it asked for, and a
+        // south peer that asks the node has no other way to reach it.
+        let south_asking = self.tables.north_is_client() && self.asks_for_declarations(inbound);
         if !self.is_client_face(inbound) && !south_asking {
             return 0;
         }
