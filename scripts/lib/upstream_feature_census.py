@@ -250,13 +250,14 @@ ANSWERS: tuple[tuple[str, str | None, str], ...] = (
         "tracing span rides onto the runtime a future is spawned on, for every "
         "spawn of the family's pool, of a `TaskController` or "
         "`TerminatableTask`, and of the engine, whose drive takes the span "
-        "current at `open` (or at a scout) onto the threads and local tasks it "
-        "runs the session on (`caller_span::CallerSpan`) and whose runtime "
-        "spawns carry it on (`runtime_pool::in_caller_span`), as upstream's "
-        "`open` spawns its transport tasks from the caller's context. An "
-        "instrumentation axis, not a protocol capability: each of those crates' "
-        "tests runs a spawn with the feature on and off, and the facade's opens "
-        "a session inside a span and finds its faces' spans under it exactly "
+        "current at `open` (or at a scout, or at a close) onto the threads and "
+        "local tasks it does that work on (`caller_span::CallerSpan`) and whose "
+        "runtime spawns carry it on (`runtime_pool::in_caller_span`), as "
+        "upstream's `open` spawns its transport tasks and runs its close in the "
+        "caller's context. An instrumentation axis, not a protocol capability: "
+        "each of those crates' tests runs a spawn with the feature on and off, "
+        "and the facade's opens a session inside a span and closes it inside "
+        "another, and finds its faces' spans and its close under them exactly "
         "when the feature is on",
     ),
     (
