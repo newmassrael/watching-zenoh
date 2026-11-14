@@ -8102,7 +8102,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         if !first {
             return Ok(Some(leave));
         }
-        let announced = self.announce_subscriber(id, 0, Some(&aggregate), options);
+        let announced = self.announce_subscriber(id, 0, Some(aggregate.as_str()), options);
         let mut held = self
             .aggregated_subscribers
             .lock()
