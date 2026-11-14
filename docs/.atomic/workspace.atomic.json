@@ -13671,6 +13671,27 @@
         "Open: read the hosted offline-build job (Layer C1ob) and Layer C0 of this head at the start of the next round, and set the job's budget floor from its first timed run.",
         "Open: byte identity with a checkout build also needs the build path remapped; the entry states this and leaves --remap-path-prefix to the consumer's action."
       ]
+    },
+    "Round 4489": {
+      "decision_summary": "Two things are paid in this round. The first is the rest of the hosted red of d77c093ea2, which came from my own rounds 4485 to 4487. Its Layer C0 stopped at the first failure: the reply fixture wrote two extension headers as literal flag compositions, where the gate wants the named identities. C0 graded nothing after that, so the layer was run to the end on a build host, and it found two more failures from the same rounds. The new removal sites (the flow table's key index, what a query's final closed, and the record coordinates of plaintext already framed) had no stated reason. The keyed dissect doors build bounded reads that the ceiling-parity gate did not name. The removal sites are registered with their reasons, and each keyed door is pinned to a test that asserts its document says what the ceiling cost.\n\nThe second is the cost of the zenoh evidence model, which was about two thirds of a push in the profile of the last round. A row of the zenoh test is a host pair, and every flow between those two hosts is one of its SN links. On every observation the row summed its checks over every link, and found the observed link by scanning the list. On a handle holding 2048 flows of one host pair, that was thousands of steps an observation, so the cost of a push followed the flow count, which the last round had wrongly put down to the capture's mix. Links are now found by their number, and the SN sums move by what each step changed. These are integer sums whose values cannot reach saturation, so every verdict is the same to the bit; the model's corpus and digest tests pass unchanged. Measured on pc2 with the same capture, a push with 512 or 2048 flows held now costs what a push with one flow costs.",
+      "changes_bullets": [
+        "The reply fixture names network_eid::QOS and network_eid::RESPONDER. discard_site_lint registers six removal sites and moves the flow table entry. bounded_output_parity names both keyed doors, and two tests assert their ceilings.",
+        "ZenohEvidence keeps its SN links in SnLinks: links are found by number through an index, and the follows, breaks, yes and no sums are updated by each step's change.",
+        "Two ack rows for the run of d77c093ea2, covering C0 and C1bnl."
+      ],
+      "verification_bullets": [
+        "Layer C0 passed on a build host, run to the end (3051 s), with literal_wire_flag_lint, discard_site_lint and bounded_output_parity each passing on their own; the two keyed ceiling tests pass.",
+        "wz-capture with dissect and fixtures, 1823 tests passed, including the zenoh evidence corpus, calibration and digest tests; with default features, 1358 passed. wz-capi-dissect: 244 passed, plus the handle memory gate (4). clippy of wz-capture, with and without dissect, is clean.",
+        "live_keys_cost on pc2, baseline and change run alternately. Quiet baseline, ns a push with no keys: 3683 at 1 flow, 5936 at 512, 11346 at 2048. The change, over two runs: 3566 to 3603, 3217 to 3264, and 3171 to 3654. One baseline run was discarded because it overlapped other load.",
+        "Not run: the hosted lanes on this head."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ],
+      "carry_forward_bullets": [
+        "Open: read the hosted run of this head at the start of the next round, and the run of 847c5d2485, which another session pushed and which carries rounds 4485 to 4487 before this repair."
+      ]
     }
   },
   "inventory_entries": {
