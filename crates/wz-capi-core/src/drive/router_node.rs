@@ -503,6 +503,7 @@ async fn join_group(
             },
             // The rule of the preset that opened the node.
             join_rule: join.profile.join_rule,
+            max_sessions: join.profile.max_sessions,
         },
         opts,
         None,

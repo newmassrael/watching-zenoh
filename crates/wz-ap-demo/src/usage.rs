@@ -450,6 +450,13 @@ pub(crate) fn print_usage() {
     eprintln!("                             the log says so. Requires --router-hat and the");
     eprintln!("                             `router-multicast-faces` and `access-acl-multicast`");
     eprintln!("                             build features; refused otherwise.");
+    eprintln!("    --multicast-max-sessions <N>");
+    eprintln!("                             how many members this ROUTER's multicast group holds");
+    eprintln!("                             at once; the Join of a new member past it is ignored.");
+    eprintln!("                             0 admits none. Default: no cap, the group's table of");
+    eprintln!("                             32 rows. Requires --router-hat and the");
+    eprintln!("                             `router-multicast-faces` build feature.");
+    eprintln!("                             zenoh transport/multicast/max_sessions");
     eprintln!("    --zid <hex>              PIN this node's routing zid (else it is derived from");
     eprintln!("                             the listen port). REQUIRED for a non-IP listen, which");
     eprintln!("                             has no port to derive a distinct mesh id from.");

@@ -3753,6 +3753,7 @@ impl ResolvedGroup {
         let GroupProfile {
             lease_ms,
             join_interval_ms,
+            max_sessions,
             seq_num_res,
             req_id_res,
             batch_size,
@@ -3778,6 +3779,7 @@ impl ResolvedGroup {
                 tx_queue,
                 link_rx,
                 join_rule,
+                max_sessions,
             },
         })
     }
@@ -4310,6 +4312,10 @@ pub struct GroupProfile {
     pub lease_ms: u64,
     /// How often the session beacons, in milliseconds.
     pub join_interval_ms: u64,
+    /// How many members the session holds on the group at once,
+    /// `transport/multicast/max_sessions`, or `None` for no cap of its own (zenoh-pico has none).
+    /// Not beaconed: it bounds what this session admits.
+    pub max_sessions: Option<usize>,
     /// The 2-bit wire code of the sequence number resolution.
     pub seq_num_res: u8,
     /// The 2-bit wire code of the request id resolution.
@@ -6079,6 +6085,7 @@ mod multicast_face_tests {
             tx_queue: Default::default(),
             link_rx: Default::default(),
             join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Zenoh,
+            max_sessions: None,
         }
     }
 

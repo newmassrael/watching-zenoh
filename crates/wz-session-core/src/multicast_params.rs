@@ -200,6 +200,15 @@ pub struct MulticastParams {
     /// Whose rule this node judges a member's Join by: the preset's upstream's
     /// ([`GroupJoinRule`]).
     pub join_rule: GroupJoinRule,
+    /// `transport/multicast/max_sessions`: how many members this node holds on the group at
+    /// once, or `None` for no cap of the deploy's own. zenoh reads the key into its multicast
+    /// manager (`io/zenoh-transport/src/multicast/manager.rs` @
+    /// `self = self.max_sessions(config.transport().multicast().max_sessions().unwrap());`) and
+    /// holds every group to it, 1000 unless the configuration states another; zenoh-pico has no
+    /// such key, and its member list is bounded by its allocator, so a pico preset and an MCU
+    /// session state `None` and their table's rows are the bound. A host builds its dispatcher's
+    /// cap from this (`MulticastConfig::with_max_sessions`).
+    pub max_sessions: Option<usize>,
 }
 
 /// Whose rule a node judges the Join of a group member by. Both upstreams admit an unknown

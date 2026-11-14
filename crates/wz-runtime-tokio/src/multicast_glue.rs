@@ -618,7 +618,11 @@ where
 ///
 /// The bind's or the open's error, after the machine has heard `link.lost`
 /// (the session is then Stopped and admits nothing); `NotConnected` when the
-/// session asked for no link and `link` holds none.
+/// session asked for no link and `link` holds none; `InvalidInput`, naming
+/// `transport/multicast/max_sessions`, when the dispatcher's config states a cap
+/// on the members that its table does not grow to hold
+/// ([`MulticastDispatcher::stated_cap_fits`]), before anything is bound and with
+/// the session left Idle.
 pub async fn open_multicast_session<'l, D, B, Fut, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     link: &'l mut MulticastLink<D, B>,
@@ -628,6 +632,9 @@ where
     B: FnMut() -> Fut,
     Fut: core::future::Future<Output = std::io::Result<D>>,
 {
+    dispatcher
+        .stated_cap_fits()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
     let created = dispatcher.create();
     perform_link_duties(dispatcher, link, created).await?;
     link.driver().ok_or_else(|| {
@@ -940,6 +947,12 @@ where
     // and opens the link here, so a link that cannot be bound ends the session
     // before anything is sent. A session already brought up (by
     // `open_multicast_session`, or by an earlier drive) asks for nothing.
+    // A table that cannot hold the cap its config states is never brought up
+    // (`MulticastDispatcher::create`); the loop says why rather than end quietly.
+    if let Err(refusal) = dispatcher.stated_cap_fits() {
+        log::error!("multicast group not opened: {refusal}");
+        return MulticastOutcome::Stopped;
+    }
     let created = dispatcher.create();
     if perform_link_duties(dispatcher, link, created)
         .await
@@ -1496,6 +1509,7 @@ fn router_group_params(
                 batch_size,
             },
         join_rule,
+        max_sessions,
     } = profile;
     wz_session_core::multicast_params::MulticastParams {
         whatami: wz_session_core::WhatAmI::Router,
@@ -1510,6 +1524,7 @@ fn router_group_params(
         tx_queue,
         link_rx,
         join_rule,
+        max_sessions,
     }
 }
 
@@ -1566,6 +1581,10 @@ pub struct RouterGroupProfile {
     pub beacon: GroupBeacon,
     /// Whose rule the router judges a member's Join by: its preset's upstream's.
     pub join_rule: GroupJoinRule,
+    /// How many members the router holds on the group at once
+    /// (`transport/multicast/max_sessions`), or `None` for no cap of the node's own
+    /// ([`MulticastParams::max_sessions`]).
+    pub max_sessions: Option<usize>,
 }
 
 /// The future a group face's bind returns, borrowing the face's options.
@@ -1763,8 +1782,9 @@ where
 {
     use crate::runtime_impl::TokioTime;
 
-    // A group serves many members; the bound is the multicast dispatcher's fixed
-    // peer-table capacity.
+    // The table's fixed rows. A heap face grows past them to the cap the profile states
+    // (`transport/multicast/max_sessions`), so this is how many members it holds without
+    // allocating, and the bound only when no cap is stated.
     const MCAST_MAX_PEERS: usize = 32;
     let GroupFaceSpec {
         label,
@@ -1785,8 +1805,11 @@ where
     let clock = TokioTime::new();
     let new_dispatcher = || {
         #[cfg_attr(not(feature = "codec-declare"), allow(unused_mut))]
-        let mut dispatcher =
-            MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
+        let mut dispatcher = MulticastDispatcher::<MCAST_MAX_PEERS>::new(
+            MulticastConfig::new(params.lease_ms)
+                .with_max_sessions(params.max_sessions)
+                .growing(),
+        );
         #[cfg(feature = "codec-declare")]
         if scope_members {
             dispatcher.scope_member_declarations();
@@ -2674,6 +2697,7 @@ mod tests {
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             join_rule: GroupJoinRule::Pico,
+            max_sessions: None,
         }
     }
 
@@ -2878,6 +2902,7 @@ mod tests {
                 batch_size: 2_048,
             },
             join_rule: GroupJoinRule::Pico,
+            max_sessions: None,
         });
         assert_eq!(group.tx_queue, operator);
         assert!(group.is_qos);
@@ -2907,8 +2932,10 @@ mod tests {
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             beacon,
             join_rule: GroupJoinRule::Zenoh,
+            max_sessions: Some(9),
         });
         assert_eq!(group.join_rule, GroupJoinRule::Zenoh);
+        assert_eq!(group.max_sessions, Some(9), "the node's member cap");
         assert_eq!(
             (
                 group.lease_ms,
@@ -3724,6 +3751,87 @@ mod tests {
             assert_eq!(dispatcher.active_peers(), 0, "{rule:?}: not admitted");
             assert_eq!(dispatcher.incompatible_joins(), 1, "{rule:?}: counted");
         }
+    }
+
+    /// zenoh asks whether its table has room for a new member before it reads the Join's terms
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @
+    /// `if zread!(self.peers).len() >= self.manager.config.multicast.max_sessions {`), so a Join of
+    /// another batch size that meets a full table is turned away as a refusal under its rule.
+    /// zenoh-pico reads the terms first, and counts the same Join incompatible.
+    #[tokio::test]
+    async fn a_full_table_turns_a_join_away_before_its_terms_under_zenohs_rule_only() {
+        for (rule, refusals, incompatible) in
+            [(GroupJoinRule::Zenoh, 1, 0), (GroupJoinRule::Pico, 0, 1)]
+        {
+            let member = params(&[0x01, 0x02, 0x03, 0x04]);
+            let mut other_batch = params(&[0x05, 0x06, 0x07, 0x08]);
+            other_batch.batch_size = 8_192;
+            let mut link =
+                FakeDriver::link_with([(join0(&member), src(2)), (join0(&other_batch), src(3))]);
+            let mut dispatcher = MulticastDispatcher::<4>::new(
+                MulticastConfig::new(5_000).with_max_sessions(Some(1)),
+            );
+            let clock = TokioTime::new();
+            let (_seen, sink) = departure_sink();
+            let ours = MulticastParams {
+                join_rule: rule,
+                ..params(&[0xAA, 0xBB, 0xCC, 0xDD])
+            };
+            let outcome = drive_multicast_session(
+                &mut dispatcher,
+                MulticastDriveConfig {
+                    params: &ours,
+                    tick_ms: 5,
+                    max_iters: Some(8),
+                },
+                &mut link,
+                &clock,
+                sink,
+                &MulticastTxProducer::new(),
+            )
+            .await;
+            assert_eq!(outcome, MulticastOutcome::IterationLimit, "{rule:?}");
+            assert_eq!(
+                dispatcher.active_peers(),
+                1,
+                "{rule:?}: the first member holds the one place"
+            );
+            assert_eq!(dispatcher.join_refusals(), refusals, "{rule:?}: refusals");
+            assert_eq!(
+                dispatcher.incompatible_joins(),
+                incompatible,
+                "{rule:?}: incompatible Joins"
+            );
+        }
+    }
+
+    /// A dispatcher whose table does not grow and whose config states more members than it has
+    /// rows is not opened: the error names the key, nothing is bound, and the session stays Idle.
+    #[tokio::test]
+    async fn an_open_refuses_a_stated_cap_its_table_cannot_hold() {
+        let (mut link, _sent) = FakeDriver::with([]).into_link();
+        let mut dispatcher =
+            MulticastDispatcher::<4>::new(MulticastConfig::new(5_000).with_max_sessions(Some(5)));
+        let err = match open_multicast_session(&mut dispatcher, &mut link).await {
+            Ok(_) => panic!("a cap of five on a table of four rows is not opened"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            err.to_string().contains("transport/multicast/max_sessions"),
+            "{err}"
+        );
+        assert_eq!(dispatcher.session_state(), SessionFsmMulticastState::Idle);
+        assert!(link.driver().is_none(), "nothing was bound");
+
+        // The control: the same table under a cap it holds opens.
+        let (mut link, _sent) = FakeDriver::with([]).into_link();
+        let mut dispatcher =
+            MulticastDispatcher::<4>::new(MulticastConfig::new(5_000).with_max_sessions(Some(4)));
+        assert!(open_multicast_session(&mut dispatcher, &mut link)
+            .await
+            .is_ok());
+        assert!(dispatcher.is_running());
     }
 
     /// R2379 ANTI-VACUITY twin: a re-JOIN whose capabilities MATCH keeps the

@@ -6247,6 +6247,11 @@ pub(crate) struct RouterHatOpts {
     /// group to offer QoS on. Plain `bool` (not `transport-qos`-gated) so the
     /// run-mode surface stays feature-stable.
     pub multicast_qos: bool,
+    /// `--multicast-max-sessions <N>`: how many members the router's group face holds at once,
+    /// `transport/multicast/max_sessions`. `None` states no cap, and the face's table rows are
+    /// the bound. Consumed only by the `router-multicast-faces` spawn, and a plain field for the
+    /// reason `multicast_qos` is.
+    pub multicast_max_sessions: Option<usize>,
     /// R311y454 — `--multicast-locator udp/<group>:<port>[#iface=<name>]`: the
     /// router's data-plane group spelled as a LOCATOR, so its `#iface=` tail is
     /// honoured by the same parser every unicast locator uses. `None` keeps the
@@ -6452,6 +6457,7 @@ async fn run_router_hat_until(
     // offer QoS on nor one to narrow. They stay in the bundle (rather than being
     // cfg-gated fields) so the run-mode surface is feature-stable.
     let multicast_qos = opts.multicast_qos;
+    let multicast_max_sessions = opts.multicast_max_sessions;
     let multicast_locator = opts.multicast_locator.as_deref();
     // Same shape, one feature over: the admin permit is consumed only by the router
     // admin host below, which is `adminspace-router-linkstate`-gated. The FIELD stays
@@ -6474,6 +6480,8 @@ async fn run_router_hat_until(
     let scout_listen = opts.scout_listen.as_ref();
     #[cfg(not(feature = "router-multicast-faces"))]
     let _ = multicast_qos;
+    #[cfg(not(feature = "router-multicast-faces"))]
+    let _ = multicast_max_sessions;
     #[cfg(not(feature = "router-multicast-faces"))]
     let _ = multicast_locator;
     #[cfg(not(feature = "adminspace-router-linkstate"))]
@@ -6880,6 +6888,9 @@ async fn run_router_hat_until(
                     batch_size: 2_048,
                 },
                 join_rule: wz::runtime_tokio::multicast_glue::GroupJoinRule::Pico,
+                // `--multicast-max-sessions`, which a document's `transport/multicast/max_sessions`
+                // expands to.
+                max_sessions: multicast_max_sessions,
             },
             mcast_opts.clone(),
             node_stats.clone(),

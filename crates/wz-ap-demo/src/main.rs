@@ -1128,6 +1128,15 @@ fn demo_main() -> ExitCode {
                 }
                 false
             };
+            // `--multicast-max-sessions <N>`: the cap on the members of the router's group face
+            // (`args::parse_multicast_max_sessions`). A value that is not a count fails the run.
+            let multicast_max_sessions = match crate::args::parse_multicast_max_sessions(rest) {
+                Ok(cap) => cap,
+                Err(e) => {
+                    eprintln!("wz-ap-demo: {e}");
+                    return ExitCode::from(2);
+                }
+            };
             // `--zid <hex>` (optional): PIN this router's zid so the mesh master
             // election (HRW over shared_nodes) is deterministic — a federation e2e
             // needs a reproducible non-master. Without it the zid derives from the
@@ -1276,6 +1285,7 @@ fn demo_main() -> ExitCode {
                         quic_ca: parse_pair(rest, "--quic-ca"),
                     },
                     multicast_qos,
+                    multicast_max_sessions,
                     // `--govern-multicast`, refused above on every case that cannot act on it.
                     #[cfg(feature = "access-acl-multicast")]
                     govern_multicast: rest.iter().any(|a| a == "--govern-multicast"),

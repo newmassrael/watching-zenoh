@@ -1225,6 +1225,14 @@ pub struct ZenohNodeConfig {
     /// joins ([`C_ABI_SESSION_HONOURED_KEYS`]); upstream's default is 2500
     /// (`DEFAULT_CONFIG.json5` @ `join_interval: 2500,`).
     pub multicast_join_interval_ms: u64,
+    /// `transport/multicast/max_sessions`: how many members a multicast transport holds at once.
+    /// zenoh ignores the Join of a new member past it
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @
+    /// `if zread!(self.peers).len() >= self.manager.config.multicast.max_sessions {`), and so does
+    /// a group a wz node or a zenoh-c session joins (the demo's `--multicast-max-sessions`, the C
+    /// ABI's group profile). Upstream's default is [`UPSTREAM_MULTICAST_MAX_SESSIONS`]; zero is a
+    /// cap upstream takes, under which a group admits no member.
+    pub multicast_max_sessions: usize,
     /// `transport/multicast/compression/enabled`: whether a multicast transport sends its data
     /// as batches with the one-byte `BatchHeader`, lz4-compressed when that is smaller. Read by
     /// the zenoh-c session for the groups it joins ([`C_ABI_SESSION_HONOURED_KEYS`]); multicast
@@ -1656,6 +1664,7 @@ impl Default for ZenohNodeConfig {
             open_declares: None,
             multicast_qos: false,
             multicast_join_interval_ms: 2_500,
+            multicast_max_sessions: UPSTREAM_MULTICAST_MAX_SESSIONS,
             multicast_compression: false,
             shared_memory: true,
             // Upstream's defaults (`DEFAULT_CONFIG.json5` @ `pool_size: 16777216,`).
@@ -2133,9 +2142,9 @@ impl ZenohNodeConfig {
         // and silently drops everything the first carried.
         let _ = writeln!(
             out,
-            "    }},\n    \"multicast\": {{ \"qos\": {{ \"enabled\": {} }}, \
+            "    }},\n    \"multicast\": {{ \"max_sessions\": {}, \"qos\": {{ \"enabled\": {} }}, \
              \"compression\": {{ \"enabled\": {} }} }},",
-            self.multicast_qos, self.multicast_compression
+            self.multicast_max_sessions, self.multicast_qos, self.multicast_compression
         );
         let _ = writeln!(
             out,
@@ -2347,6 +2356,10 @@ pub const UPSTREAM_BATCHING_TIME_LIMIT_MS: u64 = 1;
 /// resolves to (`commons/zenoh-config/src/defaults.rs` @ `open_timeout: 10_000,`).
 pub const UPSTREAM_OPEN_TIMEOUT_MS: u64 = 10_000;
 
+/// Upstream's `transport/multicast/max_sessions`, which a file that states none resolves to
+/// (`commons/zenoh-config/src/defaults.rs` @ `max_sessions: Some(1000),`).
+pub const UPSTREAM_MULTICAST_MAX_SESSIONS: usize = 1_000;
+
 /// R2925 — upstream's `transport/link/tx/queue/size` leaves, each with the
 /// `Priority` wire byte whose queue it sizes, as upstream's transport manager
 /// maps them (`io/zenoh-transport/src/manager.rs` @
@@ -2549,6 +2562,12 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "scouting/delay",
     "open/return_conditions/connect_scouted",
     "transport/multicast/qos/enabled",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, `UNHONOURED_BEYOND_WZ` and the
+    // `TransportUnicastConf` group, so the surface total is unchanged: a group's dispatcher takes
+    // it as its cap on the members, and a heap host's table grows to it
+    // (`MulticastConfig::with_max_sessions`), as upstream's multicast manager holds every group
+    // to it.
+    "transport/multicast/max_sessions",
     "transport/shared_memory/enabled",
     "transport/link/tls/root_ca_certificate",
     "transport/link/tls/listen_certificate",
@@ -3191,7 +3210,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // batches, as upstream's multicast manager does from 1.10.2.
     // Open-debt item 913 — `transport/multicast/join_interval` LEFT this list for
     // [`C_ABI_SESSION_HONOURED_KEYS`]: the zenoh-c session's groups beacon at it.
-    "transport/multicast/max_sessions",
+    // `transport/multicast/max_sessions` LEFT this list for `HONOURED_CONFIG_KEYS`: a group's
+    // dispatcher holds its members to it. Same partition, same total.
     // `transport/shared_memory/mode` LEFT this list for [`SESSION_HONOURED_KEYS`]: the open of
     // a session makes the shared-memory subsystem when it says `init`.
     // R2230 (open-debt item 579) — the four `transport_optimization` knobs
@@ -3241,12 +3261,11 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   reassembly took its bound from it; the queue's allocation mode, its
 ///   batching switch and bound, and the offered SN width followed once a
 ///   session and its writer took each from the file.)
-/// * `transport/multicast/max_sessions` — a configurable session table
-///   (`TransportUnicastConf`): the cap on a multicast group's peer table.
-///   (`transport/shared_memory/mode` LEFT it: the open of a session makes the
-///   shared-memory subsystem, [`SESSION_HONOURED_KEYS`]; and
-///   `transport/unicast/open_timeout` LEFT it: every open of an endpoint runs
-///   within it.)
+/// * (The configurable session table group is GONE. `transport/shared_memory/mode` left it: the
+///   open of a session makes the shared-memory subsystem, [`SESSION_HONOURED_KEYS`];
+///   `transport/unicast/open_timeout` left it: every open of an endpoint runs within it; and its
+///   last key, `transport/multicast/max_sessions`, left once a group's dispatcher held its
+///   members to the cap and a heap host's table grew to it, [`HONOURED_CONFIG_KEYS`].)
 /// * `open/return_conditions/*` — a session-open readiness barrier
 ///   (`ReturnConditionsConf`).
 /// * `routing/router/linkstate/*` — configurable link-state weighting
@@ -3405,7 +3424,9 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // [`C_ABI_SESSION_HONOURED_KEYS`].
     // Open-debt item 913 — `transport/multicast/join_interval` LEFT here, and its group
     // below: the zenoh-c session reads it ([`C_ABI_SESSION_HONOURED_KEYS`]).
-    "transport/multicast/max_sessions",
+    // `transport/multicast/max_sessions` LEFT here, and with it the last of its group below:
+    // the "session table" the group said wz lacked was always the dispatcher's peer table, and
+    // what it lacked was a cap read from the file and rows that grow to it.
     // `transport/shared_memory/mode` and the two `transport_optimization` keys that named the
     // promotion LEFT here for [`SESSION_HONOURED_KEYS`], and the promotion's group went with
     // its last two: a session makes the subsystem and copies a large message by them.
@@ -3611,34 +3632,13 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // moved to `UNHONOURED_READER_GAP`.
         ],
     ),
-    (
-        "a configurable session table",
-        "TransportUnicastConf",
-        &[
-            // `transport/multicast/compression/enabled` LEFT this group: a multicast batch is
-            // wrapped by the same `compression` module a unicast session's is.
-            // Open-debt item 913 — `transport/multicast/join_interval` LEFT this group:
-            // a group's beacon interval is a profile wz's multicast transport holds.
-            "transport/multicast/max_sessions",
-            // `transport/shared_memory/mode` LEFT this group: it says when the shared-memory
-            // subsystem is made, which the open of a session does, and is no session table.
-            // Open-debt item 925 — `transport/unicast/accept_pending` and `accept_timeout`
-            // LEFT this group: the accept loop holds a half-open accept pipeline, bounded.
-            // R2758 — `transport/unicast/max_sessions` LEFT this group, and the
-            // group's own name is why it had to: "a configurable session table"
-            // is two things, and wz had the table all along. `accept_loop`'s
-            // `faces` IS the session table; what it lacked was the
-            // configurable bound, which this round built. The remaining members
-            // still need the half wz has not got — a half-open accept pipeline
-            // (`accept_pending`, the two timeouts) and a multicast peer table.
-            //
-            // This is the outcome the R2159 note below describes, in its own
-            // words: the day wz grows a capability, its group reds rather than
-            // going quietly stale. It redded, and this is the entry moving out.
-            // `transport/unicast/open_timeout` LEFT this group: an open's bound is a timeout
-            // the opener holds, not a table.
-        ],
-    ),
+    // The "a configurable session table" group is GONE, not emptied. R2758 found its name was two
+    // things and wz had the table all along: `accept_loop`'s `faces` for the unicast cap, which
+    // left first. Its members followed one by one as each was built (the half-open accept
+    // pipeline, the open bound, the shared-memory switch, the multicast compression and beacon
+    // interval), and the last, `transport/multicast/max_sessions`, left once the multicast
+    // dispatcher's peer table took its cap from the file and grew to it on a heap host. A group
+    // with no key is a hard failure, so the row went with its last key.
     // R2159 (open-debt item 229) — the `ListenConfig` group ("a dial/listen
     // failure policy") STOOD HERE with four keys and is GONE, because wz grew
     // the thing it named. `crate::startup_phase` carries the budget, the
@@ -3930,11 +3930,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "transport/link/tx/threads",
         "exclude",
         "upstream stores it on its transport manager config and nothing reads it back",
-    ),
-    (
-        "transport/multicast/max_sessions",
-        "build",
-        "a run-time cap on the peers of a group; wz bounds its peer table at compile time",
     ),
 ];
 
@@ -8414,6 +8409,16 @@ impl ZenohNodeConfig {
             out.multicast_join_interval_ms = v;
             named.push("transport/multicast/join_interval");
         }
+        // Any `usize`, as upstream's field takes it, zero included: a group under a cap of none
+        // admits no member, which is what such a file asks of a zenohd too.
+        if let Some(v) = want_u64(&doc, "transport/multicast/max_sessions")? {
+            out.multicast_max_sessions =
+                usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                    path: "transport/multicast/max_sessions",
+                    value: v.to_string(),
+                })?;
+            named.push("transport/multicast/max_sessions");
+        }
         if let Some(v) = want_bool(&doc, "transport/multicast/compression/enabled")? {
             out.multicast_compression = v;
             named.push("transport/multicast/compression/enabled");
@@ -8796,6 +8801,65 @@ mod tests {
         assert!(again.named.contains(&KEY));
         // The sibling `qos` the same table carries is not lost by writing the new key beside it.
         assert_eq!(again.config.multicast_qos, read.config.multicast_qos);
+    }
+
+    /// `transport/multicast/max_sessions` reaches the config's field, is named and not ignored,
+    /// is a key the node honours, and survives the emitter; a silent file leaves upstream's 1000.
+    /// Zero is a cap upstream's `usize` takes, so it is read; a value that is no count is refused
+    /// by the key's name, as upstream's deserializer refuses it.
+    #[test]
+    fn multicast_max_sessions_is_read_named_and_survives_the_emitter() {
+        const KEY: &str = "transport/multicast/max_sessions";
+        let silent = ZenohNodeConfig::from_json5("{}").expect("an empty document reads");
+        assert_eq!(silent.config.multicast_max_sessions, 1_000);
+        assert!(!silent.named.contains(&KEY));
+
+        let read =
+            ZenohNodeConfig::from_json5(r#"{ transport: { multicast: { max_sessions: 9 } } }"#)
+                .expect("the key reads");
+        assert_eq!(read.config.multicast_max_sessions, 9);
+        assert!(read.named.contains(&KEY), "{:?}", read.named);
+        assert!(read.ignored.is_empty(), "{:?}", read.ignored);
+        assert!(HONOURED_CONFIG_KEYS.contains(&KEY));
+        assert!(!UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(&KEY));
+        assert!(!UNHONOURED_BEYOND_WZ.contains(&KEY));
+        assert!(UNHONOURED_DISPOSITIONS.iter().all(|(key, ..)| *key != KEY));
+
+        let again = ZenohNodeConfig::from_json5(&read.config.to_json5()).expect("it round-trips");
+        assert_eq!(again.config.multicast_max_sessions, 9);
+        assert!(again.named.contains(&KEY));
+
+        let none =
+            ZenohNodeConfig::from_json5(r#"{ transport: { multicast: { max_sessions: 0 } } }"#)
+                .expect("zero is a cap");
+        assert_eq!(none.config.multicast_max_sessions, 0);
+
+        for (doc, wrong_type) in [
+            (
+                r#"{ transport: { multicast: { max_sessions: "9" } } }"#,
+                true,
+            ),
+            (
+                r#"{ transport: { multicast: { max_sessions: true } } }"#,
+                true,
+            ),
+            (
+                r#"{ transport: { multicast: { max_sessions: -1 } } }"#,
+                false,
+            ),
+            (
+                r#"{ transport: { multicast: { max_sessions: 1.5 } } }"#,
+                false,
+            ),
+        ] {
+            let err = ZenohNodeConfig::from_json5(doc).expect_err(doc);
+            let by_name = if wrong_type {
+                matches!(err, ConfigIngestError::WrongType { path: KEY, .. })
+            } else {
+                matches!(err, ConfigIngestError::OutOfRange { path: KEY, .. })
+            };
+            assert!(by_name, "{doc} -> {err:?}");
+        }
     }
 
     /// Each key a session applies is read from a document that states another value than
@@ -10203,6 +10267,10 @@ mod tests {
             (
                 "transport/multicast/qos/enabled",
                 r#"{ "transport": { "multicast": { "qos": { "enabled": true } } } }"#,
+            ),
+            (
+                "transport/multicast/max_sessions",
+                r#"{ "transport": { "multicast": { "max_sessions": 9 } } }"#,
             ),
             (
                 "transport/shared_memory/enabled",
