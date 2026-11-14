@@ -800,6 +800,68 @@ pub fn push_run_capture_of(
     crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
 }
 
+/// `flows` unicast TCP sessions at once, each its own client port, each with
+/// the whole handshake and then `pushes` messages, the sessions taking turns a
+/// message at a time: the capture a cost that follows the number of flows a
+/// handle holds is measured on, where every packet is pushed while all the
+/// other flows are held.
+///
+/// The messages are [`push_run_capture`]'s: one literal `Push` of 16 bytes, one
+/// reliable `Frame` each, numbered consecutively within its session.
+pub fn interleaved_flows_capture(flows: usize, pushes: usize) -> Vec<u8> {
+    const ISN: u32 = 1000;
+    let sessions: Vec<Vec<(bool, Vec<u8>)>> = (0..flows)
+        .map(|_| {
+            let mut units = full_handshake();
+            for i in 0..pushes {
+                let record =
+                    wz_session_core::push_build::build_push_literal("gate/flows", &[0xA5u8; 16])
+                        .expect("a literal put builds");
+                units.push((
+                    true,
+                    wz_session_core::frame_encode::encode_frame_with_push_qos(
+                        i as u64, record, true, None,
+                    ),
+                ));
+            }
+            units
+        })
+        .collect();
+    let mut next: Vec<(u32, u32)> = alloc::vec![(ISN, ISN); flows];
+    let mut packets = Vec::new();
+    let longest = sessions.iter().map(Vec::len).max().unwrap_or(0);
+    for step in 0..longest {
+        for (flow, units) in sessions.iter().enumerate() {
+            let Some((from_low, wire)) = units.get(step) else {
+                continue;
+            };
+            let port = 20_000 + flow as u16;
+            let unit = stream_unit(wire);
+            let (low, high) = &mut next[flow];
+            let seq_of = if *from_low { low } else { high };
+            let seq = *seq_of;
+            *seq_of += unit.len() as u32;
+            packets.push(if *from_low {
+                tcp_segment(LOW, port, HIGH, 7447, seq, &unit)
+            } else {
+                tcp_segment(HIGH, 7447, LOW, port, seq, &unit)
+            });
+        }
+    }
+    let refs: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            (
+                (i / 1_000) as u32,
+                ((i % 1_000) as u32) * 1_000,
+                p.as_slice(),
+            )
+        })
+        .collect();
+    crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
+}
+
 /// The SHAPE both fixtures above claim, asserted rather than assumed.
 ///
 /// A fixture that stopped building two flows, or two links, or one session,

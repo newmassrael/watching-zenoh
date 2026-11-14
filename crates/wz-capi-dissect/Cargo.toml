@@ -24,6 +24,13 @@ workspace = true
 name = "wz_capi_dissect"
 crate-type = ["cdylib", "rlib"]
 
+# What holding TLS keys costs a live handle per push, against the flows it
+# holds: the pass runs after every push of a keyed handle. `harness = false`
+# because the deliverable is a table of nanoseconds, not a pass/fail.
+[[bench]]
+name = "live_keys_cost"
+harness = false
+
 # R2103 (open-debt item 521) — build.rs gives the cdylib its SONAME. This is
 # the crate the downstream C/C++ consumer reported: it was linking the artifact
 # by path, so its own DT_NEEDED held an absolute build-tree path and it was
