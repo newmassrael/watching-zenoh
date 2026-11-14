@@ -2466,6 +2466,73 @@ jobs:
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90
 
+  # The consumer bundles' offline build entry (deploy/offline-build.json),
+  # measured: every bundle is built in a bwrap sandbox with no network, no .git
+  # and only the declared inputs (scripts/lib/offline_build.py --build). A job
+  # of its own because the build is of a staged copy of the tree into its own
+  # target directory, from crates vendored for it: nothing another job compiles
+  # is reusable here, and the shared engine of the rocksdb-engine action is
+  # exactly what the sandbox must not see.
+  offline-build:
+    name: consumer bundles built offline (Layer C1ob)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # The entry declares vendor/sce, which the bundles reach through
+        # wz-session-core's path dependencies; the lane stages it from here.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `verdict-legs` copy for the measurement and for why RESTORE
+        # and SAVE are split. Keyed per job.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        run: |
+          # `bubblewrap` is the sandbox the lane builds in: a user and network
+          # namespace of its own, so a fetch fails instead of succeeding.
+          # `clang` and `libclang-dev` are the entry's `libclang` tool, which
+          # bindgen loads while librocksdb-sys's build script runs (ap-demo).
+          # The C and C++ compilers and `ar` are the runner image's
+          # build-essential, which the entry declares as `cc`, `c++` and `ar`.
+          # `pkg-config` is on every job (apt_package_census.py, R311y865); the
+          # sandbox does not put it on PATH.
+          bash scripts/lib/apt-install.sh bubblewrap clang libclang-dev pkg-config
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      # No cargo cache: the lane builds a staged copy into its own target
+      # directory from its own vendored crates, and the cache budget
+      # (.github/cache-classes.json) has no room for another rust-cache class.
+      - name: Layer C1ob — the consumer bundles built offline from the declared inputs
+        run: bash scripts/run-ci.sh --layer C1ob
+
+      - name: Budget margin — this job's own clock
+        # No floor yet: the job has not been timed on a hosted runner, and a
+        # floor guessed before the first run would fail a job for being fast.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90
+
   # ─────────────────────────────────────────────────────────────────
   # R3464 — the NON-DEFAULT TEST LEGS job, peeled off the `dissect` job above.
   #

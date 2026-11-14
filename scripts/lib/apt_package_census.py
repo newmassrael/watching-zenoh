@@ -190,6 +190,9 @@ _add("strace", "Layer C1st's facility oracle reads each packaged artifact's runs
 _add("bubblewrap", "Layer C1st's facility oracle runs a raw Ethernet group on a network of its own "
      "(a user and network namespace), given CAP_NET_RAW over it or not "
      "(scripts/lib/facility_trace.py own_network).", ["capi-c-arms"])
+_add("bubblewrap", "Layer C1ob builds every consumer bundle in a bwrap sandbox with a network "
+     "namespace of its own, no home and the checkout covered, so a build script that fetches "
+     "or reads .git fails (scripts/lib/offline_build.py --build).", ["offline-build"])
 _add("valgrind", "Layer C1cc runs zenoh-c's two leak programs as upstream's CMake does, through "
      "its `run_leak_check.sh` under valgrind (`z_leak_pub_sub_test`, "
      "`z_leak_queryable_get_test`); the job sets WZ_C1CC_REQUIRE.", ["capi-c-arms"])
@@ -655,6 +658,17 @@ _add(
     ],
 )
 _add("python3-yaml", "the workflow-shape lints Layer C0 runs on ci.yml.", ["ci"])
+# Layer C1ob's own job builds the four consumer bundles of deploy/offline-build.json and nothing
+# else. `wz-ap-demo` at `preset-ap-full` holds librocksdb-sys, whose build script loads libclang
+# through bindgen: the entry's `libclang` tool. `perl` is not here, measured: the vendored ring has
+# no `.git` of its own, so its build script takes the pregenerated assembly
+# (third-party/ring/build.rs, `is_git`), and the lane's PATH has no perl to call.
+_add("libclang-dev", "bindgen, reached through librocksdb-sys in the `ap-demo` bundle Layer C1ob "
+     "builds (the entry's `libclang` tool).", ["offline-build"])
+_add("clang", "the compiler driver bindgen's clang-sys resolves against; paired with "
+     "libclang-dev for the `ap-demo` bundle Layer C1ob builds.", ["offline-build"])
+_add("pkg-config", "kept on every job per R311y865 (see the row above); the sandbox Layer C1ob "
+     "builds in does not put it on PATH, so no bundle depends on it.", ["offline-build"])
 # R2104 (open-debt item 522) — the package this file was carrying a hole for.
 # `libxml`'s build script probes pkg-config for `libxml-2.0` and PANICS when it
 # is absent.

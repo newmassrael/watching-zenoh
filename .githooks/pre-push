@@ -1143,6 +1143,9 @@ round_fed_gates=(
     # The oracle installer's `--inputs` listing. Round-fed by the installer and its
     # pin file; it runs the installer in a throwaway sandbox, no network, no build.
     "install_zenoh_c_inputs_selftest.py"
+    # The consumer bundles' offline build entry against the crates graph:
+    # cargo tree and cargo metadata only, no build (Layer C1ob builds it).
+    "offline_build.py --check"
     "capi_c_config_verdict_population.py"
     "dissect_name_census.py"
     "layer_e_oracle_scope_gate.py"

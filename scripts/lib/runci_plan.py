@@ -161,6 +161,9 @@ SANDBOX_CAPABILITY = "userns-netns"
 # The read-only checkout a lane runs another lane in (`scripts/lib/read-only-tree.sh`): a bwrap
 # user namespace, or sudo's mount namespace on a hosted runner.
 RO_TREE_SANDBOX = "scripts/lib/read-only-tree.sh"
+# The offline build of Layer C1ob (`offline_build.py --build`): a bwrap user, network and pid
+# namespace with no sudo fallback, which is what the netns sandbox capability tests.
+OFFLINE_BUILD_SANDBOX = "scripts/lib/offline_build.py --build"
 
 # Programs a lane fails without because its HOSTED JOB arms it, so no arming in run-ci.sh says so
 # and the census cannot (see the docstring). Each entry quotes the lane's failure sentence.
@@ -182,6 +185,9 @@ JOB_ARMED_COMMANDS: dict[str, list[str]] = {"C1cc": ["valgrind"]}
 #   Qz, Qza: `_qz_toolchain ... qemu` -> "qemu-system-arm not on PATH" (Qzb and Qzk build images
 #         and boot none, so they ask the Zephyr SDK of `[tools.zephyr-sdk]` and no qemu)
 #   C1st: `facility_trace.py` refuses a machine without strace or bwrap (`missing_tools`)
+#   C1ob: "bwrap is not on PATH; the offline build is measured in a bwrap sandbox", and
+#         "the declared tool 'cc' (...) has no 'as' on PATH" for each command of the tools
+#         `deploy/offline-build.json` declares (`offline_build.py`)
 # A program is `needs` (bx runs it), never a package name: the package's NAME differs between
 # releases and machines, and the program is what the lane calls.
 LANE_COMMANDS: dict[str, list[str]] = {
@@ -193,6 +199,7 @@ LANE_COMMANDS: dict[str, list[str]] = {
     "Qz": ["qemu-system-arm"],
     "Qza": ["qemu-system-arm"],
     "C1st": ["bwrap", "strace"],
+    "C1ob": ["ar", "as", "bwrap", "c++", "cc", "ld"],
 }
 
 # Packages a lane refuses to run without that are no program: `python3-venv`, the venv the pinned
@@ -200,6 +207,9 @@ LANE_COMMANDS: dict[str, list[str]] = {
 # provision for themselves and which Ubuntu's python3 lacks (`ensurepip is not available`,
 # measured on a build machine 2026-10-30).
 LANE_PACKAGES: dict[str, list[str]] = {
+    # C1ob: bindgen loads libclang while librocksdb-sys's build script runs, and the bundle
+    # `ap-demo` fails there without it (`deploy/offline-build.json`, tool `libclang`).
+    "C1ob": ["libclang-dev"],
     "C1st": ["python3-venv"],
     "E": ["python3-venv"],
     "Qz": ["python3-venv"],
@@ -274,7 +284,7 @@ def lane_asks(text: str, commands: dict[str, list[str]],
         # The read-only checkout of Layer Ero (`RO_TREE_SANDBOX`) is a bwrap user namespace on
         # a machine without sudo, a subset of what the netns sandbox capability tests, so a
         # machine that passes that test can mount it.
-        sandboxed = SANDBOX in body or RO_TREE_SANDBOX in body
+        sandboxed = SANDBOX in body or RO_TREE_SANDBOX in body or OFFLINE_BUILD_SANDBOX in body
         caps = [SANDBOX_CAPABILITY] if sandboxed else []
         out[lane] = Asks(sorted(needs), sorted(packages), caps)
     return out

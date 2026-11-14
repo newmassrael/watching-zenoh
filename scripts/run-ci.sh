@@ -2445,6 +2445,13 @@ layer_c0_test_discipline() {
     # Driven here against a fixture pin and the shipped one, in a sandbox with
     # the network tools stubbed, so it needs no network and no oracle.
     python3 scripts/lib/install_zenoh_c_inputs_selftest.py || return 1
+    # The consumer bundles' offline build entry (deploy/offline-build.json) is
+    # what a hermetic consumer build reads as its input list. --check derives
+    # its build scripts, tools and submodules from the crates graph, so a crate
+    # that enters a bundle's closure with a build script fails here until its
+    # tools are declared; Layer C1ob builds the bundles to prove the entry.
+    python3 scripts/lib/offline_build.py --selftest || return 1
+    python3 scripts/lib/offline_build.py --check || return 1
     # R2281 (open-debt item 617) — and TWO ORACLES AT ONE ARM measure one thing
     # twice. The sibling above says which arm upstream publishes; this one asks
     # what every oracle prefix in the tree is FOR, by deriving each prefix's arm
@@ -17421,6 +17428,26 @@ layer_ero_read_only_tree() {
     echo "  Ero: the oracle built and Layer Ewire passed with nothing written into the checkout"
 }
 
+# Layer C1ob — the consumer bundles' offline build entry, MEASURED.
+#
+# A consumer builds wz as one hermetic action: the pinned source with no .git,
+# the lockfile's crates vendored, a pinned toolchain, no network. What that
+# action needs is declared in deploy/offline-build.json, and Layer C0 holds the
+# declaration to the crates graph (`offline_build.py --check`). Reading a graph
+# cannot show that a build script calls nothing undeclared, so this lane builds
+# every bundle the way the consumer does: in a bwrap sandbox with its own
+# network namespace, an empty home, the checkout covered, PATH holding only the
+# toolchain and the declared tools, and git, curl and wget as stubs that fail
+# and record their call. A bundle passes when cargo exits 0, no stub was called,
+# its declared products exist, and in a bundle holding wz-zenoh that crate's
+# build script handed rustc the version a checkout build of the same tree
+# composes (WZ_SOURCE_COMMIT, read from cargo's build-script-executed message).
+# No skip: a host that cannot make the sandbox fails the lane by name.
+layer_c1ob_offline_build_entry() {
+    python3 scripts/lib/offline_build.py --build || return 1
+    echo "  C1ob: every bundle built offline from the declared inputs alone"
+}
+
 # R311y760 (carry N65) — the same witness against the OTHER reference
 # implementation. Ewire closed "every analyzer witness is self-authored" for
 # zenoh-pico and explicitly did NOT close it for stock zenoh: the two are
@@ -26921,6 +26948,7 @@ run_layer C1by layer_c1by_replay_engine || overall=1
 run_layer Epico layer_epico_library_oracles || overall=1
 run_layer Ewire layer_ewire_pico_wire_dissection || overall=1
 run_layer Ero layer_ero_read_only_tree || overall=1
+run_layer C1ob layer_c1ob_offline_build_entry || overall=1
 run_layer Ewirez layer_ewirez_zenohd_wire_dissection || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
