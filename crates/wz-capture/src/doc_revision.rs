@@ -2748,6 +2748,23 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R66_CARRIES,
     },
+    // Revision 67 IS MODEL 7 OF THE ZENOH TEST (`docs/flow-zenoh-verdict.md`
+    // §6.14), and moves no key and no word. `model` reads 7. A `Frame`'s
+    // records end where the batch's next transport message begins, as
+    // upstream reads a batch, and the priors the development corpus gives
+    // under that reading move: the null side of the `no` sum for a unit read
+    // whole or residual, and the SN prior of the `yes` sum. `no_millibits` of
+    // `unit_reading` and the SN steps' `millibits` move on every flow that
+    // observes them; a document of revision 66 should be read again.
+    DocumentShape {
+        document: FIELDS,
+        revision: 67,
+        keys: FIELDS_R66_KEYS,
+        retiring: &[],
+        families: FIELDS_R66_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R66_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -3748,6 +3765,17 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: SESSION_TABLE,
         revision: 12,
+        keys: SESSION_TABLE_R11_KEYS,
+        retiring: &[],
+        families: SESSION_TABLE_R12_FAMILIES,
+        planes: &[],
+        carries: SESSION_TABLE_R5_CARRIES,
+    },
+    // Revision 13 is the field document's revision 67 on a row and on every
+    // flow of a row: model 7. No key moves and nothing retires.
+    DocumentShape {
+        document: SESSION_TABLE,
+        revision: 13,
         keys: SESSION_TABLE_R11_KEYS,
         retiring: &[],
         families: SESSION_TABLE_R12_FAMILIES,
@@ -33026,7 +33054,8 @@ mod tests {
             // joined per query, an opened `e2e` block gained
             // `unjudged_reason`, a final's entry `ended_transfers` and an ended
             // transfer `ended_by`.
-            (FIELDS, 66),
+            // To 67 with model 7 of the zenoh test: values move.
+            (FIELDS, 67),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -33145,7 +33174,8 @@ mod tests {
             // To 12 when an encrypted flow keys did not reach could say the
             // keys handed in named another connection: `no_matching_key` joins
             // `reason`, no key moves, nothing retires.
-            (SESSION_TABLE, 12),
+            // To 13 with model 7, as the field document's 67.
+            (SESSION_TABLE, 13),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.

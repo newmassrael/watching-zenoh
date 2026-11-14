@@ -2988,7 +2988,7 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":12},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":13},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
@@ -4480,8 +4480,11 @@ int main(void) {
      * pieces joined per query, and every opened `e2e` block gains
      * `unjudged_reason` (`reply`, `sender_unknown`, or null); a final's entry
      * gains `ended_transfers` and an ended transfer `ended_by`. Keys arrive;
-     * nothing retires. */
-    revisioned[2].revision = 66;
+     * nothing retires.
+     * 67: model 7 of the zenoh test: a Frame's records end where the
+     * batch's next transport message begins, and the priors the corpus gives
+     * under that reading. Values move under stationary keys. */
+    revisioned[2].revision = 67;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4645,9 +4648,10 @@ int main(void) {
      * two families gain a word; nothing retires.
      * 12: `no_matching_key`, the reason a row's cells are unstated when key
      * material was handed in and named no secret of this flow's connection.
-     * One family gains a word; nothing retires. */
+     * One family gains a word; nothing retires.
+     * 13: model 7, as the field document's 67. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 12;
+    revisioned[12].revision = 13;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,

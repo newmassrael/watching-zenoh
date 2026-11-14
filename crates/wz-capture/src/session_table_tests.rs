@@ -2376,7 +2376,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
                 \"confirmed\":10,\"violated\":0,\"millibits\":365,\"no_millibits\":32973,\
                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
-        "{{\"document\":{{\"name\":\"session_table\",\"revision\":12}},\"ok\":true,\
+        "{{\"document\":{{\"name\":\"session_table\",\"revision\":13}},\"ok\":true,\
          \"sessions\":[{{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
          \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
          \"first_seen_ts_ns\":\"1700000000000000000\",\

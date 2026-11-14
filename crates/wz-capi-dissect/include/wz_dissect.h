@@ -1688,7 +1688,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":66,"key":"kind","values":[...],
+ *     {"name":"fields","revision":67,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -2703,7 +2703,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":12},"ok":true,
+ *     {"document":{"name":"session_table","revision":13},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
@@ -2863,9 +2863,9 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * version 0x09. `zenoh` is a SEQUENTIAL TEST over what the flow's messages keep
  * that other protocols rarely keep by chance, on every row and flow here and on
  * every flow object of the field document (revision 43). It keeps TWO sums in
- * millibits (model 6, field-document revision 54 and session_table revision
- * 10; model 5 was revisions 53 and 9, model 4 revisions 50 and 8, model 3
- * revisions 49 and 7):
+ * millibits (model 7, field-document revision 67 and session_table revision
+ * 13; model 6 was revisions 54 and 10, model 5 revisions 53 and 9, model 4
+ * revisions 50 and 8, model 3 revisions 49 and 7):
  * the `yes` sum is the log2 of an e-process against "another protocol", the `no`
  * sum of one against "zenoh". Each hypothesis leaves rates unknown; the one a
  * sum rejects is taken at a bound on its likeliest over what the corpus allows
@@ -5975,7 +5975,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":66,"key":"state",
+ *     "value_families":[{"name":"fields","revision":67,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
