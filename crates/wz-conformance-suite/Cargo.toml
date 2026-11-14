@@ -30,6 +30,8 @@ path = "src/lib.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# The digest of the protocol facts' canonical form that `facts_pin.toml` pins.
+sha2 = "0.10"
 toml = "0.9.6"
 
 [lints]

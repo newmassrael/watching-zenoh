@@ -13,7 +13,77 @@
 
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
+
 use crate::{AnswerFile, AnswerKind, PicsProforma, WZ_CONFIG};
+
+/// The committed pin of the protocol facts, `crates/wz-conformance-suite/facts_pin.toml`.
+pub const FACTS_PIN: &str = include_str!("../facts_pin.toml");
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PinFile {
+    pin: Vec<Pin>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Pin {
+    catalog_version: u64,
+    facts_digest: String,
+}
+
+/// Every violation of the facts pin against a declaration: the pin's versions increase, and its
+/// last row is the declaration's catalogue version with the digest of the declaration's facts.
+/// The facts moving while the version stays is the violation the pin exists for.
+pub fn check_facts_pin(pin_text: &str, declaration: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let pins: PinFile = match toml::from_str(pin_text) {
+        Ok(pins) => pins,
+        Err(e) => return vec![format!("facts_pin.toml: {e}")],
+    };
+    let catalogue = match Catalogue::parse(declaration) {
+        Ok(catalogue) => catalogue,
+        Err(e) => return vec![e],
+    };
+    let version = toml::from_str::<toml::Table>(declaration)
+        .ok()
+        .and_then(|t| t.get("catalog_version").and_then(toml::Value::as_integer))
+        .and_then(|v| u64::try_from(v).ok());
+    let Some(version) = version else {
+        return vec!["the declaration has no catalog_version that is a count".to_string()];
+    };
+    for pair in pins.pin.windows(2) {
+        if pair[1].catalog_version <= pair[0].catalog_version {
+            out.push(format!(
+                "facts_pin.toml: catalogue version {} follows {}; the rows increase",
+                pair[1].catalog_version, pair[0].catalog_version
+            ));
+        }
+    }
+    let digest = facts_digest(&catalogue.facts);
+    match pins.pin.last() {
+        None => out.push("facts_pin.toml: pins nothing".to_string()),
+        Some(last) if last.catalog_version == version && last.facts_digest != digest => {
+            out.push(format!(
+                "the protocol facts changed and catalog_version is still {version}: raise it, \
+                 and pin the facts at the new version with {digest}"
+            ))
+        }
+        Some(last) if last.catalog_version < version => out.push(format!(
+            "catalog_version is {version} and the facts are pinned at {}: add the row \
+             catalog_version = {version}, facts_digest = {digest}",
+            last.catalog_version
+        )),
+        Some(last) if last.catalog_version > version => out.push(format!(
+            "facts_pin.toml pins catalogue version {}, which the declaration ({version}) has not \
+             reached",
+            last.catalog_version
+        )),
+        Some(_) => {}
+    }
+    out
+}
 
 /// A capability of the declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,12 +107,53 @@ pub struct CataloguePolicy {
 pub struct CatalogueFact {
     /// The fact's value for each ABI that has it.
     pub values: BTreeMap<String, String>,
-    /// The file of this tree that holds it.
-    pub held_by: String,
-    /// A text that must occur in `held_by`.
-    pub needle: Option<String>,
-    /// A text that must not occur in `held_by`.
-    pub absent: Option<String>,
+    /// Each file of this tree, with a text that must occur in it.
+    pub holds: Vec<(String, String)>,
+    /// Each file of this tree, with a text that must not occur in it.
+    pub lacks: Vec<(String, String)>,
+}
+
+/// A `holds` or `lacks` entry, `<file of this tree> @ <text>`, as its two halves.
+fn fact_entry(id: &str, entry: &str) -> Result<(String, String), String> {
+    match entry.split_once(" @ ") {
+        Some((path, text)) if !path.is_empty() && !text.is_empty() && !path.starts_with('/') => {
+            Ok((path.to_string(), text.to_string()))
+        }
+        _ => Err(format!(
+            "protocol fact {id}: {entry:?} is not <file of this tree> @ <text>"
+        )),
+    }
+}
+
+/// The canonical form of the facts' values: each fact by id, each with its ABIs' values by ABI,
+/// as `id:abi=value,abi=value` joined by `;`. What holds a fact is evidence and is left out; a
+/// change of it is not a change of the fact.
+pub fn facts_canonical(facts: &BTreeMap<String, CatalogueFact>) -> String {
+    facts
+        .iter()
+        .map(|(id, fact)| {
+            let values: Vec<String> = fact
+                .values
+                .iter()
+                .map(|(abi, value)| format!("{abi}={value}"))
+                .collect();
+            format!("{id}:{}", values.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// `sha256:` and the lowercase hex SHA-256 of [`facts_canonical`].
+pub fn facts_digest(facts: &BTreeMap<String, CatalogueFact>) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+
+    let hash = Sha256::digest(facts_canonical(facts).as_bytes());
+    let mut out = String::from("sha256:");
+    for byte in hash {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// The ABIs a protocol fact can name, the ones whose libraries carry their statement.
@@ -94,8 +205,8 @@ fn texts(row: &toml::Value, kind: &str, key: &str) -> Result<Vec<String>, String
 
 impl Catalogue {
     /// Reads the catalogue from a declaration's text. A declaration without protocol facts has
-    /// none; one with a fact that names no ABI's value, or both or neither of `needle` and
-    /// `absent`, is refused.
+    /// none; one with a fact that names no ABI's value, names nothing that holds it, or has an
+    /// entry that is not `<file> @ <text>`, is refused.
     pub fn parse(declaration: &str) -> Result<Catalogue, String> {
         let table: toml::Table =
             toml::from_str(declaration).map_err(|e| format!("the declaration: {e}"))?;
@@ -145,15 +256,23 @@ impl Catalogue {
             if values.is_empty() {
                 return Err(format!("protocol fact {id} names a value for no ABI"));
             }
+            let entries = |key: &str| -> Result<Vec<(String, String)>, String> {
+                if row.get(key).is_none() {
+                    return Ok(Vec::new());
+                }
+                texts(row, "protocol_fact", key)?
+                    .iter()
+                    .map(|entry| fact_entry(id, entry))
+                    .collect()
+            };
             let fact = CatalogueFact {
                 values,
-                held_by: text(row, "protocol_fact", "held_by")?.to_string(),
-                needle: optional_text(row, "needle"),
-                absent: optional_text(row, "absent"),
+                holds: entries("holds")?,
+                lacks: entries("lacks")?,
             };
-            if fact.needle.is_some() == fact.absent.is_some() {
+            if fact.holds.is_empty() && fact.lacks.is_empty() {
                 return Err(format!(
-                    "protocol fact {id} states both or neither of needle and absent"
+                    "protocol fact {id} names nothing of this tree that holds it"
                 ));
             }
             facts.insert(id.to_string(), fact);
@@ -384,25 +503,24 @@ mod tests {
     }
 
     #[test]
-    fn every_protocol_fact_is_held_by_the_file_it_names() {
+    fn every_protocol_fact_is_held_by_the_files_it_names() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let catalogue = Catalogue::committed().unwrap();
         assert!(!catalogue.facts.is_empty());
+        let read = |id: &str, path: &str| {
+            std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| panic!("{id}: {path}: {e}"))
+        };
         for (id, fact) in &catalogue.facts {
-            let text = std::fs::read_to_string(root.join(&fact.held_by))
-                .unwrap_or_else(|e| panic!("{id}: {}: {e}", fact.held_by));
-            if let Some(needle) = &fact.needle {
+            for (path, text) in &fact.holds {
                 assert!(
-                    text.contains(needle.as_str()),
-                    "{id}: {needle:?} is gone from {}",
-                    fact.held_by
+                    read(id, path).contains(text.as_str()),
+                    "{id}: {text:?} is gone from {path}"
                 );
             }
-            if let Some(absent) = &fact.absent {
+            for (path, text) in &fact.lacks {
                 assert!(
-                    !text.contains(absent.as_str()),
-                    "{id}: {absent:?} is in {}",
-                    fact.held_by
+                    !read(id, path).contains(text.as_str()),
+                    "{id}: {text:?} is in {path}"
                 );
             }
         }
@@ -411,15 +529,106 @@ mod tests {
     #[test]
     fn a_malformed_protocol_fact_is_refused() {
         let base = crate::WZ_CONFIG;
-        let no_check = base.replacen("needle = \"pub const CURRENT_PATCH: u8 = 1;\"\n", "", 1);
+        let no_check = base.replacen(
+            "holds = [\"crates/wz-session-core/src/extpatch.rs @ pub const CURRENT_PATCH: u8 = 1;\"]\n",
+            "",
+            1,
+        );
         assert_ne!(no_check, base);
         let err = Catalogue::parse(&no_check).unwrap_err();
-        assert!(err.contains("both or neither"), "{err}");
+        assert!(
+            err.contains("names nothing of this tree that holds it"),
+            "{err}"
+        );
+
+        let no_at = base.replacen(
+            "crates/wz-session-core/src/extpatch.rs @ pub const",
+            "crates/wz-session-core/src/extpatch.rs pub const",
+            1,
+        );
+        assert_ne!(no_at, base);
+        let err = Catalogue::parse(&no_at).unwrap_err();
+        assert!(err.contains("is not <file of this tree> @ <text>"), "{err}");
 
         let no_abi = base.replacen("pico = \"1\"\nc = \"1\"\n", "", 1);
         assert_ne!(no_abi, base);
         let err = Catalogue::parse(&no_abi).unwrap_err();
         assert!(err.contains("names a value for no ABI"), "{err}");
+    }
+
+    #[test]
+    fn the_facts_are_pinned_at_the_catalogue_version() {
+        let found = check_facts_pin(FACTS_PIN, crate::WZ_CONFIG);
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    #[test]
+    fn a_fact_that_moves_without_the_catalogue_version_is_refused() {
+        let base = crate::WZ_CONFIG;
+        let moved = base.replacen(
+            "id = \"patch\"\npico = \"1\"",
+            "id = \"patch\"\npico = \"0\"",
+            1,
+        );
+        assert_ne!(moved, base);
+        let found = check_facts_pin(FACTS_PIN, &moved);
+        assert!(
+            found
+                .iter()
+                .any(|v| v.contains("the protocol facts changed and catalog_version is still 2")),
+            "{found:#?}"
+        );
+
+        let raised = moved.replacen("catalog_version = 2\n", "catalog_version = 3\n", 1);
+        assert_ne!(raised, moved);
+        let found = check_facts_pin(FACTS_PIN, &raised);
+        assert!(
+            found
+                .iter()
+                .any(|v| v.contains("add the row catalog_version = 3")),
+            "{found:#?}"
+        );
+
+        let digest = facts_digest(&Catalogue::parse(&raised).unwrap().facts);
+        let pinned =
+            format!("{FACTS_PIN}\n[[pin]]\ncatalog_version = 3\nfacts_digest = \"{digest}\"\n");
+        let found = check_facts_pin(&pinned, &raised);
+        assert!(
+            found.is_empty(),
+            "a new row for the new version settles it: {found:#?}"
+        );
+
+        let backwards =
+            format!("{FACTS_PIN}\n[[pin]]\ncatalog_version = 1\nfacts_digest = \"{digest}\"\n");
+        let found = check_facts_pin(&backwards, base);
+        assert!(
+            found.iter().any(|v| v.contains("the rows increase")),
+            "{found:#?}"
+        );
+    }
+
+    #[test]
+    fn the_facts_canonical_form_is_by_id_then_abi() {
+        let catalogue = Catalogue::committed().unwrap();
+        let canonical = facts_canonical(&catalogue.facts);
+        assert!(
+            canonical.starts_with("batch-compression:pico=no;patch:c=1,pico=1;"),
+            "{canonical}"
+        );
+        let mut moved = catalogue.facts.clone();
+        moved
+            .get_mut("patch")
+            .unwrap()
+            .values
+            .insert("c".into(), "0".into());
+        assert_ne!(facts_digest(&moved), facts_digest(&catalogue.facts));
+        let mut evidence = catalogue.facts.clone();
+        evidence.get_mut("patch").unwrap().holds.clear();
+        assert_eq!(
+            facts_digest(&evidence),
+            facts_digest(&catalogue.facts),
+            "what holds a fact is not the fact"
+        );
     }
 
     #[test]
@@ -436,7 +645,15 @@ mod tests {
         assert_eq!(pico["T-PATCH"], PicsAnswer::Support(true));
         assert_eq!(pico["T-COMPRESSION"], PicsAnswer::Support(false));
         assert_eq!(pico["N-QUERY"], PicsAnswer::Support(true));
-        assert!(matches!(pico["T-ROLE-ROUTER"], PicsAnswer::Unanswered(_)));
+        assert_eq!(pico["T-ROLE-ROUTER"], PicsAnswer::Support(false));
+        assert_eq!(pico["T-STREAM-LINK"], PicsAnswer::Support(true));
+        assert_eq!(pico["T-RID-RES"], PicsAnswer::Value("32".into()));
+        assert!(
+            !pico
+                .values()
+                .any(|a| matches!(a, PicsAnswer::Unanswered(_))),
+            "every item of a default pico build is answered: {pico:#?}"
+        );
     }
 
     #[test]

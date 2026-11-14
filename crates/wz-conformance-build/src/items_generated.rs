@@ -10,9 +10,15 @@
 /// `format` of the statement.
 pub const FORMAT: &str = "wz-conformance-statement";
 /// `format_version` of the statement.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 /// The declaration's `catalog_version`.
 pub const CATALOG_VERSION: u32 = 2;
+
+/// The features of the pico ABI's crate that run its sessions on the cooperative engine, when
+/// the tokio engine is not in the build; every other build runs them on the tokio engine.
+pub const COOP_ENGINE_FEATURES: &[&str] = &["engine-coop", "os-zephyr"];
+/// The features that build a library for a platform other than a host, each with its word.
+pub const PLATFORM_FEATURES: &[(&str, &str)] = &[("os-zephyr", "zephyr")];
 
 /// Each capability and the ABIs that export it: its cargo feature in those crates has its id.
 pub const CAPABILITIES: &[(&str, &[&str])] = &[

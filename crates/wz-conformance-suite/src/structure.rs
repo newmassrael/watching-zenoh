@@ -331,7 +331,7 @@ fn format_check(out: &mut Vec<String>, at: &str, format: &str, version: u32, wan
 fn id_check<'a>(out: &mut Vec<String>, at: &str, id: &'a str, seen: &mut BTreeSet<&'a str>) {
     if !is_item_id(id) {
         out.push(format!(
-            "{at}: the id is not upper-case letters, digits and hyphens"
+            "{at}: the id is not upper-case words joined by single hyphens, the first not PICS"
         ));
     }
     if !seen.insert(id) {

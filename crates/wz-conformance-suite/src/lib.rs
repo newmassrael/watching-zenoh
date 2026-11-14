@@ -40,8 +40,8 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 pub use answer::{
-    answer, resolve, Catalogue, CatalogueCapability, CatalogueFact, CataloguePolicy, PicsAnswer,
-    Statement,
+    answer, check_facts_pin, facts_canonical, facts_digest, resolve, Catalogue,
+    CatalogueCapability, CatalogueFact, CataloguePolicy, PicsAnswer, Statement, FACTS_PIN,
 };
 pub use check::{check, check_answers};
 pub use selection::Selection;
