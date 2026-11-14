@@ -3097,6 +3097,14 @@ where
         feature = "session-close-ingress"
     ))]
     let mut peer_sessions: BTreeMap<FaceId, Arc<SessionLinkActions>> = BTreeMap::new();
+    // Decision D10 — the sessions this loop accepted whose link's key proved the peer's zid, by
+    // face: what a passive intent holds, at accept or when the intent comes later.
+    #[cfg(all(
+        feature = "router-connect-reconcile",
+        feature = "session-close-ingress"
+    ))]
+    let mut proven_inbound: BTreeMap<FaceId, (DirectoryZid, Arc<SessionLinkActions>)> =
+        BTreeMap::new();
     let mut peer_retries: PeerRetries = FuturesUnordered::new();
     // The planner's view of the loop at this moment.
     #[cfg(feature = "router-connect-reconcile")]
@@ -3161,6 +3169,8 @@ where
         ($id:expr) => {{
             #[cfg(feature = "session-close-ingress")]
             peer_sessions.remove(&$id);
+            #[cfg(feature = "session-close-ingress")]
+            proven_inbound.remove(&$id);
             let cx = peer_cx!();
             if let Some(actions) = peers.face_down($id, &cx, &mut next_id) {
                 take_peer_actions!(actions);
@@ -3743,6 +3753,9 @@ where
                                 .as_deref()
                                 .and_then(wz_session_core::credential_identity::zid_from_wire)
                             {
+                                // Kept for as long as the face lives, so a passive intent that
+                                // comes after the session holds it too.
+                                proven_inbound.insert(id, (zid, opened.actions.clone()));
                                 let cx = peer_cx!();
                                 let actions = peers.inbound_up(zid, id, &cx, &mut next_id);
                                 if peers.state(&crate::loop_peers::PeerKey::Node(zid))
@@ -4318,6 +4331,24 @@ where
                             let cx = peer_cx!();
                             let actions = peers.open_node_passive(zid, &cx, &mut next_id);
                             take_peer_actions!(actions);
+                            // The intent is the node's session, so one the node already
+                            // opened here and proved is held at once, as the fixed-memory
+                            // host holds the sessions it is told of at each tick: an intent
+                            // that waited for the next session would leave this one unheld.
+                            let proven = proven_inbound
+                                .iter()
+                                .find(|(_, (node, _))| *node == zid)
+                                .map(|(id, (_, actions))| (*id, Arc::clone(actions)));
+                            if let Some((id, actions_of)) = proven {
+                                let cx = peer_cx!();
+                                let actions = peers.inbound_up(zid, id, &cx, &mut next_id);
+                                if peers.state(&crate::loop_peers::PeerKey::Node(zid))
+                                    == Some(wz_session_core::peer_connection::PeerConnectionState::PassiveUp)
+                                {
+                                    peer_sessions.insert(id, actions_of);
+                                }
+                                take_peer_actions!(actions);
+                            }
                         }
                         // Decision D6 — a lifecycle `close`: every machine that
                         // holds the node is stopped, so it is not dialled again.
