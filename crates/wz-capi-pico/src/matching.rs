@@ -36,7 +36,7 @@
 //! the id back inside a `z_owned_matching_listener_t`, and
 //! `z_undeclare_matching_listener` retracts it sooner.
 
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 use wz_capi_port::{MatchId, MatchingSink};
 
@@ -44,10 +44,11 @@ use crate::session::Engine;
 
 use crate::abi::handle_ref;
 use crate::ffi::{guarded, CClosure};
+use crate::prelude::*;
 use crate::pubsub::{z_closure_drop_callback_t, z_loaned_publisher_t, PublisherState};
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 use crate::write_filter::WriteFilter;
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 /// pico `z_matching_status_t` — `{ bool matching }`, 1 B measured, field at
 /// offset 0. Passed to the callback BY POINTER, so its layout is read by C.
@@ -91,7 +92,7 @@ impl z_owned_closure_matching_status_t {
     #[inline]
     fn null_value() -> Self {
         Self {
-            context: std::ptr::null_mut(),
+            context: core::ptr::null_mut(),
             call: None,
             drop: None,
         }
@@ -150,7 +151,7 @@ impl MatchingListenerState {
         let boxed = Box::new(MatchingListenerState { shared, id });
         z_owned_matching_listener_t {
             handle: Box::into_raw(boxed) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 2],
+            _pad: [core::ptr::null_mut(); 2],
         }
     }
 }
@@ -179,8 +180,8 @@ impl z_owned_matching_listener_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 2],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 2],
         }
     }
 }
@@ -258,7 +259,7 @@ pub unsafe extern "C" fn z_closure_matching_status_take(
         if closure.is_null() || src.is_null() {
             return Z_ERR_NULL;
         }
-        *closure = std::mem::replace(
+        *closure = core::mem::replace(
             &mut (*src)._this,
             z_owned_closure_matching_status_t::null_value(),
         );
@@ -276,7 +277,7 @@ pub unsafe extern "C" fn z_closure_matching_status_drop(
         if closure.is_null() {
             return Z_OK;
         }
-        let taken = std::mem::replace(
+        let taken = core::mem::replace(
             &mut (*closure)._this,
             z_owned_closure_matching_status_t::null_value(),
         );
@@ -357,7 +358,8 @@ pub unsafe extern "C" fn z_matching_listener_take(
         if listener.is_null() || src.is_null() {
             return Z_ERR_NULL;
         }
-        *listener = std::mem::replace(&mut (*src)._this, z_owned_matching_listener_t::null_value());
+        *listener =
+            core::mem::replace(&mut (*src)._this, z_owned_matching_listener_t::null_value());
         Z_OK
     })
 }
@@ -519,7 +521,7 @@ pub(crate) unsafe fn consume_matching_closure(
     if callback.is_null() {
         return Err(Z_ERR_NULL);
     }
-    let taken = std::mem::replace(
+    let taken = core::mem::replace(
         &mut (*callback)._this,
         z_owned_closure_matching_status_t::null_value(),
     );
@@ -544,13 +546,19 @@ mod tests {
     /// fails the build rather than corrupting the caller's frame.
     #[test]
     fn matching_abi_sizes_match_pico() {
-        assert_eq!(std::mem::size_of::<z_owned_closure_matching_status_t>(), 24);
-        assert_eq!(std::mem::size_of::<z_moved_closure_matching_status_t>(), 24);
-        assert_eq!(std::mem::size_of::<z_owned_matching_listener_t>(), 24);
-        assert_eq!(std::mem::size_of::<z_moved_matching_listener_t>(), 24);
+        assert_eq!(
+            core::mem::size_of::<z_owned_closure_matching_status_t>(),
+            24
+        );
+        assert_eq!(
+            core::mem::size_of::<z_moved_closure_matching_status_t>(),
+            24
+        );
+        assert_eq!(core::mem::size_of::<z_owned_matching_listener_t>(), 24);
+        assert_eq!(core::mem::size_of::<z_moved_matching_listener_t>(), 24);
         // `z_matching_status_t` is `{ bool }` — 1 B, field at offset 0, and it
         // crosses the boundary BY POINTER so C reads this layout directly.
-        assert_eq!(std::mem::size_of::<z_matching_status_t>(), 1);
+        assert_eq!(core::mem::size_of::<z_matching_status_t>(), 1);
     }
 
     /// `z_closure_matching_status_call` reaches the C callback with the status
@@ -558,7 +566,7 @@ mod tests {
     /// (pico tolerates an unset closure).
     #[test]
     fn closure_call_reaches_the_callback_and_tolerates_null() {
-        use std::sync::atomic::{AtomicI32, Ordering};
+        use core::sync::atomic::{AtomicI32, Ordering};
         static SEEN: AtomicI32 = AtomicI32::new(-1);
         unsafe extern "C" fn cb(status: *const z_matching_status_t, _ctx: *mut c_void) {
             SEEN.store(i32::from((*status).matching), Ordering::SeqCst);
@@ -567,7 +575,7 @@ mod tests {
         let mut closure = z_owned_closure_matching_status_t::null_value();
         unsafe {
             assert_eq!(
-                z_closure_matching_status(&mut closure, Some(cb), None, std::ptr::null_mut()),
+                z_closure_matching_status(&mut closure, Some(cb), None, core::ptr::null_mut()),
                 Z_OK
             );
             assert!(z_internal_closure_matching_status_check(&closure));
@@ -581,7 +589,7 @@ mod tests {
             assert_eq!(SEEN.load(Ordering::SeqCst), 0);
 
             // Null closure: no call, no crash.
-            z_closure_matching_status_call(std::ptr::null(), &status);
+            z_closure_matching_status_call(core::ptr::null(), &status);
             assert_eq!(SEEN.load(Ordering::SeqCst), 0);
         }
     }
@@ -618,7 +626,7 @@ mod tests {
     /// nulled) moved closure does not run it again.
     #[test]
     fn closure_drop_runs_the_caller_deleter_exactly_once() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use core::sync::atomic::{AtomicUsize, Ordering};
         static DROPS: AtomicUsize = AtomicUsize::new(0);
         unsafe extern "C" fn dropper(_ctx: *mut c_void) {
             DROPS.fetch_add(1, Ordering::SeqCst);
@@ -627,7 +635,7 @@ mod tests {
 
         let mut closure = z_owned_closure_matching_status_t::null_value();
         unsafe {
-            z_closure_matching_status(&mut closure, Some(cb), Some(dropper), std::ptr::null_mut());
+            z_closure_matching_status(&mut closure, Some(cb), Some(dropper), core::ptr::null_mut());
             let moved = z_closure_matching_status_move(&mut closure);
             assert_eq!(z_closure_matching_status_drop(moved), Z_OK);
             assert_eq!(DROPS.load(Ordering::SeqCst), 1);

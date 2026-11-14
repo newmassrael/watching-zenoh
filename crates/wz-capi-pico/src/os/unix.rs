@@ -31,6 +31,37 @@ pub type Clock = libc::timespec;
 pub type WallTime = libc::timeval;
 
 // ---------------------------------------------------------------------------
+// Memory and sleep
+// ---------------------------------------------------------------------------
+
+/// pico `z_malloc`: plain `malloc` (`system.c:101`), so a program may free the result with its
+/// own `free`.
+pub unsafe fn malloc(size: usize) -> *mut c_void {
+    libc::malloc(size)
+}
+
+/// pico `z_free`: plain `free`, null-tolerant as it is.
+pub unsafe fn free(ptr: *mut c_void) {
+    libc::free(ptr)
+}
+
+/// pico `z_realloc`: plain `realloc`.
+pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+    libc::realloc(ptr, size)
+}
+
+/// Sleep at least `time` of `unit`, as pico's `usleep` and `sleep` do; the standard library
+/// sleeps on across an interruption where `usleep` would report it.
+pub fn sleep(unit: Unit, time: usize) {
+    let time = time as u64;
+    std::thread::sleep(match unit {
+        Unit::Micro => std::time::Duration::from_micros(time),
+        Unit::Milli => std::time::Duration::from_millis(time),
+        Unit::Second => std::time::Duration::from_secs(time),
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Monotonic clock
 // ---------------------------------------------------------------------------
 

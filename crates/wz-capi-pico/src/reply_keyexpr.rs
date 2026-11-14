@@ -7,7 +7,7 @@
 //! It is here and not in either half so that a build with only one of the two planes still
 //! has it, and a build with neither does not.
 
-use std::ffi::c_int;
+use core::ffi::c_int;
 
 /// pico `z_reply_keyexpr_t` (`api/constants.h:288-290`): the reply-keyexpr
 /// policy a query accepts.

@@ -52,7 +52,17 @@
 //!
 //! The design and grounding are recorded in the round ledger; the async-drive
 //! bridge (the crux — wz has no self-driving session) lives in [`session`].
+//!
+//! ## Where it builds
+//!
+//! On a host with `std` (a default feature), and without it `no_std` with `alloc`, so that the
+//! pico C ABI on an MCU is this crate and not a copy of it (`docs/upstream-parity.md` section 5a).
+//! What the ABI layer asks of an operating system beyond `alloc` (a mutex, a condition variable,
+//! the calling thread's identity) is the engine port's `os`, whose host half is `std`'s; what the
+//! platform exports hand to the system is the host layer of this build (`os`). A capability whose
+//! module still names the host's library selects `std` in the manifest.
 
+#![cfg_attr(not(feature = "std"), no_std)]
 // pico's C type names are snake_case (`z_owned_session_t`,
 // `z_closure_sample_callback_t`); reproducing the ABI names verbatim is the
 // point, so the camel-case convention does not apply to this crate's surface.
@@ -66,6 +76,21 @@
 // no information, so the clippy lint is allowed crate-wide; the per-function
 // doc records how each maps to its pico counterpart.
 #![allow(clippy::missing_safety_doc)]
+
+extern crate alloc;
+
+/// What `std`'s prelude gave every module and `alloc` does not: brought in by the modules that
+/// use it, so a build without `std` reads the same source. A build's features decide which of
+/// these it names, so one that names none of an item is not an error.
+#[allow(unused_imports)]
+mod prelude {
+    pub(crate) use alloc::borrow::ToOwned;
+    pub(crate) use alloc::boxed::Box;
+    pub(crate) use alloc::format;
+    pub(crate) use alloc::string::{String, ToString};
+    pub(crate) use alloc::vec;
+    pub(crate) use alloc::vec::Vec;
+}
 
 // A session runs on an engine (`docs/capi-pico-on-coop-engine.md`, decision D4), so a build
 // that names neither has no `z_open` to give; it is refused here, by name, rather than by the

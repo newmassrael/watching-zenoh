@@ -26,8 +26,8 @@
 //!   marshaled sample is opaque to the C code — it only borrows it (valid for
 //!   the duration of `call`) and reads the keyexpr / payload back out.
 
-use std::ffi::{c_int, c_void};
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::ffi::{c_int, c_void};
 
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
@@ -45,6 +45,7 @@ use crate::bytes::ByteBuf;
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::option_fields::unstable_option_fields;
+use crate::prelude::*;
 use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
@@ -83,7 +84,7 @@ const PICO_SAMPLE_PAYLOAD_OFFSET: usize = 48;
 /// the BUILD here rather than producing a leg that mysteriously publishes
 /// garbage.
 const _: () = assert!(
-    std::mem::offset_of!(SampleMarshal, pico_payload) == PICO_SAMPLE_PAYLOAD_OFFSET,
+    core::mem::offset_of!(SampleMarshal, pico_payload) == PICO_SAMPLE_PAYLOAD_OFFSET,
     "SampleMarshal.pico_payload must sit at offsetof(_z_sample_t, payload)"
 );
 
@@ -183,14 +184,14 @@ impl SampleMarshal {
             qos: None,
             reliability: Reliability::default(),
             source_info: None,
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
             loaned_attachment: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
         }
     }
@@ -300,14 +301,14 @@ impl SampleMarshal {
                 .as_ref()
                 // SAFETY: `encoding` is an owned encoding this crate stored.
                 .map(|owned| unsafe { crate::encoding::clone_owned_encoding(owned) }),
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
             loaned_attachment: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
         }
     }
@@ -330,7 +331,7 @@ unsafe fn free_sample_marshal(handle: *mut c_void) {
 /// `src` must be null or a pointer this crate handed to a sample callback.
 unsafe fn clone_sample_marshal(src: *const z_loaned_sample_t) -> *mut c_void {
     if src.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let marshal = &*(src as *const SampleMarshal);
     let mut boxed = Box::new(marshal.deep_copy());
@@ -427,7 +428,7 @@ impl z_owned_closure_sample_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            context: std::ptr::null_mut(),
+            context: core::ptr::null_mut(),
             call: None,
             drop: None,
         }
@@ -508,9 +509,9 @@ pub(crate) fn make_liveliness_callback(
         // drive thread, so it is caught here.
         let ctx = closure.context.0;
         let _in_callback = crate::ffi::InCallback::enter();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        let _ = crate::ffi::catch(|| unsafe {
             call(sample_ptr, ctx);
-        }));
+        });
     }
 }
 
@@ -540,9 +541,9 @@ pub(crate) fn make_subscriber_callback(
         // a misbehaving callback.
         let ctx = closure.context.0;
         let _in_callback = crate::ffi::InCallback::enter();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        let _ = crate::ffi::catch(|| unsafe {
             call(sample_ptr, ctx);
-        }));
+        });
     }
 }
 
@@ -572,11 +573,11 @@ pub unsafe extern "C" fn z_sample_attachment(
     sample: *const z_loaned_sample_t,
 ) -> *const z_loaned_bytes_t {
     if sample.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
     if marshal.attachment.is_none() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     &marshal.loaned_attachment as *const z_loaned_bytes_t
 }
@@ -591,7 +592,7 @@ pub unsafe extern "C" fn z_sample_encoding(
     sample: *const z_loaned_sample_t,
 ) -> *const crate::encoding::z_loaned_encoding_t {
     if sample.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
     match marshal.encoding.as_ref() {
@@ -599,7 +600,7 @@ pub unsafe extern "C" fn z_sample_encoding(
         // A sample that carried no encoding reports the DEFAULT one, which the
         // marshal materialises lazily on first use so the borrow it hands back
         // outlives this call.
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -613,12 +614,12 @@ pub unsafe extern "C" fn z_sample_timestamp(
     sample: *const z_loaned_sample_t,
 ) -> *const z_timestamp_t {
     if sample.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
     match marshal.timestamp.as_ref() {
         Some(ts) => ts as *const z_timestamp_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -745,7 +746,7 @@ pub struct z_publisher_put_options_t {
 }
 
 unstable_option_fields!(z_publisher_put_options_t {
-    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// Fill default publisher-put options (pico `z_publisher_put_options_default`).
@@ -755,11 +756,11 @@ pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publish
         return;
     }
     *options = z_publisher_put_options_t {
-        encoding: std::ptr::null_mut(),
-        timestamp: std::ptr::null_mut(),
-        attachment: std::ptr::null_mut(),
+        encoding: core::ptr::null_mut(),
+        timestamp: core::ptr::null_mut(),
+        attachment: core::ptr::null_mut(),
         #[cfg(feature = "unstable-api")]
-        source_info: std::ptr::null_mut(),
+        source_info: core::ptr::null_mut(),
     };
 }
 
@@ -1120,8 +1121,8 @@ impl z_owned_publisher_t {
     #[inline]
     fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 3],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 3],
         }
     }
 }
@@ -1192,8 +1193,8 @@ impl z_owned_subscriber_t {
     #[inline]
     fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 3],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 3],
         }
     }
 }
@@ -1379,7 +1380,7 @@ crate::locality::locality_option_field!(z_put_options_t, allowed_destination, "l
 
 unstable_option_fields!(z_put_options_t {
     reliability: c_int = Z_RELIABILITY_RELIABLE,
-    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// pico `z_delete_options_t` (`api/types.h:413-425`).
@@ -1408,7 +1409,7 @@ crate::locality::locality_option_field!(
 
 unstable_option_fields!(z_delete_options_t {
     reliability: c_int = Z_RELIABILITY_RELIABLE,
-    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// pico `z_publisher_delete_options_t` (`api/types.h:454-459`).
@@ -1420,7 +1421,7 @@ pub struct z_publisher_delete_options_t {
 }
 
 unstable_option_fields!(z_publisher_delete_options_t {
-    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// Fill default put options (pico `z_put_options_default`).
@@ -1433,18 +1434,18 @@ pub unsafe extern "C" fn z_put_options_default(options: *mut z_put_options_t) {
         return;
     }
     *options = z_put_options_t {
-        encoding: std::ptr::null_mut(),
+        encoding: core::ptr::null_mut(),
         congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
         priority: crate::qos::Z_PRIORITY_DEFAULT,
-        timestamp: std::ptr::null_mut(),
+        timestamp: core::ptr::null_mut(),
         is_express: false,
-        attachment: std::ptr::null_mut(),
+        attachment: core::ptr::null_mut(),
         #[cfg(feature = "local-subscriber")]
         allowed_destination: crate::locality::Z_LOCALITY_ANY,
         #[cfg(feature = "unstable-api")]
         reliability: Z_RELIABILITY_RELIABLE,
         #[cfg(feature = "unstable-api")]
-        source_info: std::ptr::null_mut(),
+        source_info: core::ptr::null_mut(),
     };
 }
 
@@ -1461,13 +1462,13 @@ pub unsafe extern "C" fn z_delete_options_default(options: *mut z_delete_options
         congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
         priority: crate::qos::Z_PRIORITY_DEFAULT,
         is_express: false,
-        timestamp: std::ptr::null_mut(),
+        timestamp: core::ptr::null_mut(),
         #[cfg(feature = "local-subscriber")]
         allowed_destination: crate::locality::Z_LOCALITY_ANY,
         #[cfg(feature = "unstable-api")]
         reliability: Z_RELIABILITY_RELIABLE,
         #[cfg(feature = "unstable-api")]
-        source_info: std::ptr::null_mut(),
+        source_info: core::ptr::null_mut(),
     };
 }
 
@@ -1484,9 +1485,9 @@ pub unsafe extern "C" fn z_publisher_delete_options_default(
         return;
     }
     *options = z_publisher_delete_options_t {
-        timestamp: std::ptr::null_mut(),
+        timestamp: core::ptr::null_mut(),
         #[cfg(feature = "unstable-api")]
-        source_info: std::ptr::null_mut(),
+        source_info: core::ptr::null_mut(),
     };
 }
 
@@ -1836,7 +1837,7 @@ pub unsafe extern "C" fn z_publisher_options_default(options: *mut z_publisher_o
         return;
     }
     *options = z_publisher_options_t {
-        encoding: std::ptr::null_mut(),
+        encoding: core::ptr::null_mut(),
         congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
         priority: crate::qos::Z_PRIORITY_DEFAULT,
         is_express: false,
@@ -1881,12 +1882,12 @@ pub unsafe extern "C" fn z_declare_publisher(
         };
         let mut boxed = Box::new(PublisherState {
             core,
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
         });
         boxed.bind();
         *publisher = z_owned_publisher_t {
             handle: Box::into_raw(boxed) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 3],
+            _pad: [core::ptr::null_mut(); 3],
         };
         Z_OK
     })
@@ -2161,13 +2162,13 @@ pub unsafe extern "C" fn z_declare_subscriber(
             shared: engine,
             id,
             key,
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             released,
         });
         boxed.bind();
         *subscriber = z_owned_subscriber_t {
             handle: Box::into_raw(boxed) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 3],
+            _pad: [core::ptr::null_mut(); 3],
         };
         Z_OK
     })
@@ -2273,7 +2274,7 @@ pub unsafe extern "C" fn z_sample_keyexpr(
     sample: *const z_loaned_sample_t,
 ) -> *const z_loaned_keyexpr_t {
     if sample.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
     &marshal.loaned_keyexpr as *const z_loaned_keyexpr_t
@@ -2285,7 +2286,7 @@ pub unsafe extern "C" fn z_sample_payload(
     sample: *const z_loaned_sample_t,
 ) -> *const z_loaned_bytes_t {
     if sample.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
     &marshal.loaned_payload as *const z_loaned_bytes_t
@@ -2334,8 +2335,8 @@ pub struct z_source_info_t {
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<z_source_info_t>() == 24);
-    assert!(std::mem::align_of::<z_source_info_t>() == 4);
+    assert!(core::mem::size_of::<z_source_info_t>() == 24);
+    assert!(core::mem::align_of::<z_source_info_t>() == 4);
 };
 
 impl z_source_info_t {
@@ -2462,12 +2463,12 @@ pub unsafe extern "C" fn z_source_info_sn(info: *const z_source_info_t) -> u32 {
 pub unsafe extern "C" fn z_sample_source_info(
     sample: *const z_loaned_sample_t,
 ) -> *const z_source_info_t {
-    crate::ffi::guard_val(std::ptr::null(), || match sample_marshal(sample) {
+    crate::ffi::guard_val(core::ptr::null(), || match sample_marshal(sample) {
         Some(m) => match m.source_info.as_ref() {
             Some(info) => info as *const z_source_info_t,
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         },
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     })
 }
 

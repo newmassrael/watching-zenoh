@@ -19,7 +19,8 @@
 //! says so, never a link error in a C program.
 //!
 //! Every backend provides: the types `Clock`, `WallTime`, `RawMutex`, `RawCondvar`,
-//! `RawTask` and `TaskAttr`; the constant `TASK_NULL`; and the functions `clock_now`, `clock_elapsed_between`, `clock_advance`, `wall_now`,
+//! `RawTask` and `TaskAttr`; the constant `TASK_NULL`; and the functions `malloc`, `free`,
+//! `realloc`, `sleep`, `clock_now`, `clock_elapsed_between`, `clock_advance`, `wall_now`,
 //! `wall_elapsed`, `wall_render_local`, `random_fill`, `mutex_init`, `mutex_destroy`,
 //! `mutex_lock`, `mutex_try_lock`, `mutex_unlock`, `condvar_init`, `condvar_destroy`,
 //! `condvar_signal`, `condvar_wait`, `condvar_wait_until`, `task_spawn`, `task_join`
@@ -43,18 +44,20 @@ pub(crate) enum Unit {
 #[cfg(any(windows, test))]
 mod arith;
 
-#[cfg(unix)]
+// The Unix and Windows layers are a host's, and stand on its standard library.
+#[cfg(all(feature = "std", unix))]
 mod unix;
-#[cfg(unix)]
+#[cfg(all(feature = "std", unix))]
 pub(crate) use unix::*;
 
-#[cfg(windows)]
+#[cfg(all(feature = "std", windows))]
 mod windows;
-#[cfg(windows)]
+#[cfg(all(feature = "std", windows))]
 pub(crate) use windows::*;
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(all(feature = "std", any(unix, windows))))]
 compile_error!(
-    "wz-capi-pico has no host layer for this target: add src/os/<host>.rs providing the \
-     names listed in src/os/mod.rs, modelled on zenoh-pico's system/<host>/system.c"
+    "wz-capi-pico has no host layer for this build: a Unix or Windows host builds it with \
+     `std`, and any other system needs src/os/<host>.rs providing the names listed in \
+     src/os/mod.rs, modelled on zenoh-pico's system/<host>/system.c"
 );

@@ -15,8 +15,10 @@
 //! `{ start, len }` self-view on `loan`, so `z_loaned_string_t` is the same
 //! borrowed shape a view string (from `z_keyexpr_as_view_string`) produces.
 
-use std::ffi::{c_char, c_void, CStr};
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::ffi::{c_char, c_void, CStr};
+
+use crate::prelude::*;
 
 use crate::abi::{
     handle_ref, impl_value_ownership, z_loaned_bytes_t, z_loaned_slice_t, z_loaned_string_t,
@@ -105,7 +107,7 @@ impl Backing {
                     &[]
                 } else {
                     // SAFETY: the constructor's contract, above.
-                    unsafe { std::slice::from_raw_parts(*start, *len) }
+                    unsafe { core::slice::from_raw_parts(*start, *len) }
                 }
             }
         }
@@ -146,8 +148,8 @@ pub(crate) struct ByteBuf {
     bounds: Vec<usize>,
 }
 
-impl std::fmt::Debug for ByteBuf {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for ByteBuf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ByteBuf")
             .field("len", &self.len)
             .field("bounds", &self.bounds)
@@ -418,9 +420,13 @@ impl StringState {
 }
 
 /// How many empty boxes a thread keeps for the next payload it makes.
+#[cfg(feature = "std")]
 const BOX_CACHE: usize = 32;
 
-thread_local! {
+// Without `std` there is no thread-local storage to keep them in, and each payload is a box of
+// its own, as zenoh-pico's are.
+#[cfg(feature = "std")]
+std::thread_local! {
     /// The allocations that held a payload this thread made and then consumed, kept empty. A
     /// publisher's loop clones a payload and puts it, over and over: the box the clone allocates
     /// is the box the put frees, on the same thread, so keeping it for the next clone replaces a
@@ -429,19 +435,30 @@ thread_local! {
     /// The boxes ARE the thing kept (an allocation that a `*mut ByteBuf` already points into
     /// is handed out again), so a `Vec` of the values themselves is not the same cache.
     #[allow(clippy::vec_box)]
-    static EMPTY_BOXES: std::cell::RefCell<Vec<Box<std::mem::MaybeUninit<ByteBuf>>>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    static EMPTY_BOXES: core::cell::RefCell<Vec<Box<core::mem::MaybeUninit<ByteBuf>>>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// An empty box this thread kept, if it has one.
+#[cfg(feature = "std")]
+fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
+    EMPTY_BOXES
+        .try_with(|boxes| boxes.try_borrow_mut().ok().and_then(|mut b| b.pop()))
+        .ok()
+        .flatten()
+}
+
+/// None is kept without `std`.
+#[cfg(not(feature = "std"))]
+fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
+    None
 }
 
 /// Box `buf`, in a kept allocation when this thread has one.
 fn box_bytes(buf: ByteBuf) -> *mut ByteBuf {
-    let kept = EMPTY_BOXES
-        .try_with(|boxes| boxes.try_borrow_mut().ok().and_then(|mut b| b.pop()))
-        .ok()
-        .flatten();
     // `Box::new_uninit` is newer than this crate's minimum Rust; an uninitialised value boxed
     // is the same allocation, and the optimiser writes nothing into it.
-    let mut slot = kept.unwrap_or_else(|| Box::new(std::mem::MaybeUninit::uninit()));
+    let mut slot = kept_box().unwrap_or_else(|| Box::new(core::mem::MaybeUninit::uninit()));
     slot.write(buf);
     Box::into_raw(slot).cast::<ByteBuf>()
 }
@@ -452,8 +469,9 @@ fn box_bytes(buf: ByteBuf) -> *mut ByteBuf {
 /// # Safety
 /// `h` must be a live `Box::into_raw::<ByteBuf>` pointer, not used again.
 pub(crate) unsafe fn unbox_bytes(h: *mut ByteBuf) -> ByteBuf {
-    let slot = Box::from_raw(h.cast::<std::mem::MaybeUninit<ByteBuf>>());
+    let slot = Box::from_raw(h.cast::<core::mem::MaybeUninit<ByteBuf>>());
     let buf = slot.assume_init_read();
+    #[cfg(feature = "std")]
     let _ = EMPTY_BOXES.try_with(|boxes| {
         if let Ok(mut boxes) = boxes.try_borrow_mut() {
             if boxes.len() < BOX_CACHE {
@@ -518,10 +536,10 @@ pub unsafe extern "C" fn z_internal_slice_check(obj: *const z_owned_slice_t) -> 
 /// cached `{ start, len }` self-view.
 #[no_mangle]
 pub unsafe extern "C" fn z_slice_loan(obj: *const z_owned_slice_t) -> *const z_loaned_slice_t {
-    guard_val(std::ptr::null(), || {
+    guard_val(core::ptr::null(), || {
         match handle_ref::<z_owned_slice_t, SliceState>(obj) {
             Some(state) => &state.self_view as *const z_loaned_slice_t,
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     })
 }
@@ -530,7 +548,7 @@ pub unsafe extern "C" fn z_slice_loan(obj: *const z_owned_slice_t) -> *const z_l
 #[no_mangle]
 pub unsafe extern "C" fn z_slice_loan_mut(obj: *mut z_owned_slice_t) -> *mut z_loaned_slice_t {
     if obj.is_null() || (*obj).handle.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let state = &mut *((*obj).handle as *mut SliceState);
     &mut state.self_view as *mut z_loaned_slice_t
@@ -587,8 +605,8 @@ pub unsafe extern "C" fn z_slice_take_from_loaned(
         if start.is_null() {
             return Z_ERR_NULL;
         }
-        store_slice(dst, ByteBuf::from(std::slice::from_raw_parts(start, len)));
-        (*src)._start = std::ptr::null();
+        store_slice(dst, ByteBuf::from(core::slice::from_raw_parts(start, len)));
+        (*src)._start = core::ptr::null();
         (*src)._len = 0;
         Z_OK
     })
@@ -599,13 +617,13 @@ pub unsafe extern "C" fn z_slice_take_from_loaned(
 unsafe fn store_bytes(dst: *mut z_owned_bytes_t, buf: ByteBuf) {
     *dst = z_owned_bytes_t {
         handle: box_bytes(buf) as *mut c_void,
-        _pad: [std::ptr::null_mut(); 3],
+        _pad: [core::ptr::null_mut(); 3],
     };
 }
 unsafe fn store_slice(dst: *mut z_owned_slice_t, buf: ByteBuf) {
     *dst = z_owned_slice_t {
         handle: Box::into_raw(SliceState::boxed(buf)) as *mut c_void,
-        _pad: [std::ptr::null_mut(); 3],
+        _pad: [core::ptr::null_mut(); 3],
     };
 }
 /// Build an empty payload (pico `z_bytes_empty`).
@@ -635,7 +653,7 @@ pub unsafe extern "C" fn z_bytes_empty(bytes: *mut z_owned_bytes_t) {
 #[no_mangle]
 pub unsafe extern "C" fn z_string_from_str(
     str_out: *mut z_owned_string_t,
-    value: *mut std::ffi::c_char,
+    value: *mut core::ffi::c_char,
     deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
     context: *mut c_void,
 ) -> ZResult {
@@ -647,7 +665,7 @@ pub unsafe extern "C" fn z_string_from_str(
         if value.is_null() {
             return Z_ERR_NULL;
         }
-        let len = std::ffi::CStr::from_ptr(value).to_bytes().len();
+        let len = core::ffi::CStr::from_ptr(value).to_bytes().len();
         let release = Release::new(deleter, value as *mut c_void, context);
         store_string(
             str_out,
@@ -672,7 +690,7 @@ pub(crate) unsafe fn store_owned_string(dst: *mut z_owned_string_t, bytes: &[u8]
 unsafe fn store_string(dst: *mut z_owned_string_t, s: Box<StringState>) {
     *dst = z_owned_string_t {
         handle: Box::into_raw(s) as *mut c_void,
-        _pad: [std::ptr::null_mut(); 3],
+        _pad: [core::ptr::null_mut(); 3],
     };
 }
 
@@ -697,7 +715,7 @@ pub unsafe extern "C" fn z_bytes_copy_from_buf(
         let buf = if data.is_null() || len == 0 {
             Vec::new()
         } else {
-            std::slice::from_raw_parts(data, len).to_vec()
+            core::slice::from_raw_parts(data, len).to_vec()
         };
         store_bytes(bytes, ByteBuf::from(buf));
         Z_OK
@@ -740,7 +758,7 @@ pub(crate) unsafe fn store_aliased_payload(
         return Z_ERR_NULL;
     }
     let (data, len) = if data.is_null() {
-        (std::ptr::null(), 0)
+        (core::ptr::null(), 0)
     } else {
         (data, len)
     };
@@ -772,7 +790,7 @@ pub unsafe extern "C" fn z_bytes_from_static_str(
             bytes,
             value as *const u8,
             len,
-            Release::new(None, std::ptr::null_mut(), std::ptr::null_mut()),
+            Release::new(None, core::ptr::null_mut(), core::ptr::null_mut()),
         )
     })
 }
@@ -826,9 +844,9 @@ pub unsafe extern "C" fn z_bytes_to_string(
 /// Pointer to a slice's bytes (pico `z_slice_data`).
 #[no_mangle]
 pub unsafe extern "C" fn z_slice_data(slice: *const z_loaned_slice_t) -> *const u8 {
-    guard_val(std::ptr::null(), || {
+    guard_val(core::ptr::null(), || {
         if slice.is_null() {
-            return std::ptr::null();
+            return core::ptr::null();
         }
         (*slice)._start
     })
@@ -866,10 +884,10 @@ pub unsafe extern "C" fn z_internal_string_check(obj: *const z_owned_string_t) -
 /// state's cached `{ start, len }` self-view.
 #[no_mangle]
 pub unsafe extern "C" fn z_string_loan(obj: *const z_owned_string_t) -> *const z_loaned_string_t {
-    guard_val(std::ptr::null(), || {
+    guard_val(core::ptr::null(), || {
         match handle_ref::<z_owned_string_t, StringState>(obj) {
             Some(state) => &state.self_view as *const z_loaned_string_t,
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     })
 }
@@ -878,7 +896,7 @@ pub unsafe extern "C" fn z_string_loan(obj: *const z_owned_string_t) -> *const z
 #[no_mangle]
 pub unsafe extern "C" fn z_string_loan_mut(obj: *mut z_owned_string_t) -> *mut z_loaned_string_t {
     if obj.is_null() || (*obj).handle.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let state = &mut *((*obj).handle as *mut StringState);
     &mut state.self_view as *mut z_loaned_string_t
@@ -920,9 +938,9 @@ pub unsafe extern "C" fn z_string_drop(obj: *mut z_moved_string_t) {
 /// Pointer to a string's (NUL-terminated) bytes (pico `z_string_data`).
 #[no_mangle]
 pub unsafe extern "C" fn z_string_data(string: *const z_loaned_string_t) -> *const c_char {
-    guard_val(std::ptr::null(), || {
+    guard_val(core::ptr::null(), || {
         if string.is_null() {
-            std::ptr::null()
+            core::ptr::null()
         } else {
             (*string)._start as *const c_char
         }
@@ -962,9 +980,9 @@ pub unsafe extern "C" fn z_string_take_from_loaned(
         if start.is_null() {
             return Z_ERR_NULL;
         }
-        let bytes = std::slice::from_raw_parts(start, len);
+        let bytes = core::slice::from_raw_parts(start, len);
         store_string(dst, StringState::boxed(bytes));
-        (*src)._start = std::ptr::null();
+        (*src)._start = core::ptr::null();
         (*src)._len = 0;
         Z_OK
     })
@@ -1025,7 +1043,7 @@ pub unsafe extern "C" fn z_view_slice_empty(slice: *mut z_view_slice_t) {
         return;
     }
     *slice = z_view_slice_t {
-        _start: std::ptr::null(),
+        _start: core::ptr::null(),
         _len: 0,
         _pad: [0usize; 2],
     };
@@ -1133,7 +1151,7 @@ pub unsafe extern "C" fn z_slice_clone(
         }
         store_slice(
             dst,
-            ByteBuf::from(std::slice::from_raw_parts((*src)._start, (*src)._len)),
+            ByteBuf::from(core::slice::from_raw_parts((*src)._start, (*src)._len)),
         );
         Z_OK
     })
@@ -1154,7 +1172,7 @@ pub unsafe extern "C" fn z_string_clone(
         if start.is_null() {
             return Z_ERR_NULL;
         }
-        let bytes = std::slice::from_raw_parts(start, len);
+        let bytes = core::slice::from_raw_parts(start, len);
         store_string(dst, StringState::boxed(bytes));
         Z_OK
     })
@@ -1402,7 +1420,7 @@ pub unsafe extern "C" fn z_slice_copy_from_buf(
         let bytes = if len == 0 {
             Vec::new()
         } else {
-            std::slice::from_raw_parts(data, len).to_vec()
+            core::slice::from_raw_parts(data, len).to_vec()
         };
         store_slice(slice, ByteBuf::from(bytes));
         Z_OK
@@ -1537,7 +1555,7 @@ pub unsafe extern "C" fn z_string_copy_from_substr(
         let bytes: &[u8] = if len == 0 {
             &[]
         } else {
-            std::slice::from_raw_parts(value as *const u8, len)
+            core::slice::from_raw_parts(value as *const u8, len)
         };
         store_string(str_out, StringState::boxed(bytes));
         Z_OK
@@ -1622,7 +1640,7 @@ pub unsafe extern "C" fn z_view_string_empty(str_out: *mut z_view_string_t) {
         return;
     }
     *str_out = z_view_string_t {
-        _start: std::ptr::null(),
+        _start: core::ptr::null(),
         _len: 0,
         _pad: [0usize; 2],
     };
@@ -1725,7 +1743,7 @@ mod box_cache_tests {
     fn dropping_an_owned_payload_keeps_its_box() {
         // SAFETY: `owned` is built and dropped by the ABI's own functions.
         unsafe {
-            let mut owned: z_owned_bytes_t = std::mem::zeroed();
+            let mut owned: z_owned_bytes_t = core::mem::zeroed();
             assert_eq!(z_bytes_copy_from_str(&mut owned, c"dropped".as_ptr()), Z_OK);
             let before = kept();
             free_bytes(owned.handle);

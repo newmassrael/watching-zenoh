@@ -30,8 +30,8 @@
 //! memory would leave every subscriber believing the token is still alive,
 //! which is the exact failure the plane exists to prevent.
 
-use std::ffi::c_void;
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::ffi::c_void;
 
 #[cfg(feature = "liveliness-get")]
 use wz_capi_port::cancellation::CancellationToken;
@@ -43,6 +43,7 @@ use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
 use crate::abi::{handle_ref, z_loaned_keyexpr_t};
 use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
+use crate::prelude::*;
 use crate::pubsub::{
     z_moved_closure_sample_t, z_owned_closure_sample_t, z_owned_subscriber_t, CClosure,
     SubscriberState, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
@@ -94,8 +95,8 @@ impl z_owned_liveliness_token_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 2],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 2],
         }
     }
 }
@@ -216,7 +217,7 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         };
         *token = z_owned_liveliness_token_t {
             handle: Box::into_raw(boxed) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 2],
+            _pad: [core::ptr::null_mut(); 2],
         };
         Z_OK
     })
@@ -370,13 +371,13 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
             shared: engine,
             id,
             key,
-            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             released,
         });
         boxed.bind();
         *sub = z_owned_subscriber_t {
             handle: Box::into_raw(boxed) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 3],
+            _pad: [core::ptr::null_mut(); 3],
         };
         Z_OK
     })
@@ -445,13 +446,13 @@ impl z_liveliness_get_options_t {
 /// it. Without the unstable API the struct is the 8 B timeout alone.
 #[cfg(all(feature = "liveliness-get", feature = "unstable-api"))]
 const _: () = {
-    assert!(std::mem::size_of::<z_liveliness_get_options_t>() == 16);
-    assert!(std::mem::align_of::<z_liveliness_get_options_t>() == 8);
-    assert!(std::mem::offset_of!(z_liveliness_get_options_t, cancellation_token) == 8);
+    assert!(core::mem::size_of::<z_liveliness_get_options_t>() == 16);
+    assert!(core::mem::align_of::<z_liveliness_get_options_t>() == 8);
+    assert!(core::mem::offset_of!(z_liveliness_get_options_t, cancellation_token) == 8);
 };
 
 #[cfg(all(feature = "liveliness-get", not(feature = "unstable-api")))]
-const _: () = assert!(std::mem::size_of::<z_liveliness_get_options_t>() == 8);
+const _: () = assert!(core::mem::size_of::<z_liveliness_get_options_t>() == 8);
 
 /// Fill default liveliness-get options (pico `z_liveliness_get_options_default`,
 /// `src/api/liveliness.c:111`).
@@ -472,7 +473,7 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(
         // from upstream on uninitialised memory.
         #[cfg(feature = "unstable-api")]
         {
-            (*options).cancellation_token = std::ptr::null_mut();
+            (*options).cancellation_token = core::ptr::null_mut();
         }
         Z_OK
     })

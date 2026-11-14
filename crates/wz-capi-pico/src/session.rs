@@ -43,7 +43,7 @@
 //! so `z_close` could not interrupt it). R2 removes it: the bind is the whole
 //! of `z_open(listen)`, and the accept loop races a cancellable shutdown.
 
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 use crate::abi::{z_moved_config_t, z_owned_config_t};
 use crate::config::{
@@ -69,6 +69,7 @@ use crate::config::{
     Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_KEY, Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY,
 };
 use crate::ffi::{guard_val, guarded};
+use crate::prelude::*;
 // The read-task doors' refusal, which only the multi-threaded arm has.
 #[cfg(feature = "multi-thread")]
 use crate::result::Z_EINVAL;
@@ -376,8 +377,8 @@ impl z_owned_session_t {
     #[inline]
     fn null_value() -> Self {
         Self {
-            _val: std::ptr::null_mut(),
-            _cnt: std::ptr::null_mut(),
+            _val: core::ptr::null_mut(),
+            _cnt: core::ptr::null_mut(),
         }
     }
 }
@@ -415,7 +416,7 @@ impl PicoSessionHandle {
     }
 
     /// Keep the latch of a closure with no handle to undeclare it by, for the close to wait on.
-    pub(crate) fn keep_background(&self, latch: std::sync::Arc<crate::ffi::ReleaseLatch>) {
+    pub(crate) fn keep_background(&self, latch: alloc::sync::Arc<crate::ffi::ReleaseLatch>) {
         self.background.keep(latch);
     }
 
@@ -482,7 +483,7 @@ pub(crate) type Engine = dyn wz_capi_port::SessionEngine;
 /// The engine behind a session handle, to keep: what an entity declared on the session holds for
 /// its own life. The engine hands itself out, so this crate never turns an engine's own type into
 /// the port's, which would instantiate the engine's drop glue a second time here.
-pub(crate) fn engine_of(handle: &PicoSessionHandle) -> std::sync::Arc<Engine> {
+pub(crate) fn engine_of(handle: &PicoSessionHandle) -> alloc::sync::Arc<Engine> {
     handle.drive.engine()
 }
 
@@ -965,7 +966,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             let handle = PicoSessionHandle::new(drive, ext);
             *zs = z_owned_session_t {
                 _val: Box::into_raw(Box::new(handle)) as *mut c_void,
-                _cnt: std::ptr::null_mut(),
+                _cnt: core::ptr::null_mut(),
             };
             #[cfg(feature = "admin-space")]
             if start_admin_space {
@@ -1105,7 +1106,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     }
     *zs = z_owned_session_t {
         _val: Box::into_raw(Box::new(handle)) as *mut c_void,
-        _cnt: std::ptr::null_mut(),
+        _cnt: core::ptr::null_mut(),
     };
     #[cfg(feature = "admin-space")]
     if request.start_admin_space {
@@ -1617,14 +1618,14 @@ pub unsafe extern "C" fn z_session_is_closed(zs: *const z_loaned_session_t) -> b
 pub unsafe extern "C" fn z_publisher_keyexpr(
     publisher: *const crate::pubsub::z_loaned_publisher_t,
 ) -> *const crate::abi::z_loaned_keyexpr_t {
-    crate::ffi::guard_val(std::ptr::null(), || {
+    crate::ffi::guard_val(core::ptr::null(), || {
         match crate::abi::handle_ref::<
             crate::pubsub::z_loaned_publisher_t,
             crate::pubsub::PublisherState,
         >(publisher)
         {
             Some(state) => state.loaned_keyexpr(),
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     })
 }
@@ -1656,14 +1657,14 @@ pub unsafe extern "C" fn z_publisher_id(
 pub unsafe extern "C" fn z_querier_keyexpr(
     querier: *const crate::querier::z_loaned_querier_t,
 ) -> *const crate::abi::z_loaned_keyexpr_t {
-    crate::ffi::guard_val(std::ptr::null(), || {
+    crate::ffi::guard_val(core::ptr::null(), || {
         match crate::abi::handle_ref::<
             crate::querier::z_loaned_querier_t,
             crate::querier::QuerierState,
         >(querier)
         {
             Some(state) => state.loaned_keyexpr(),
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     })
 }
@@ -1693,14 +1694,14 @@ pub unsafe extern "C" fn z_querier_id(
 pub unsafe extern "C" fn z_subscriber_keyexpr(
     subscriber: *const crate::pubsub::z_loaned_subscriber_t,
 ) -> *const crate::abi::z_loaned_keyexpr_t {
-    crate::ffi::guard_val(std::ptr::null(), || {
+    crate::ffi::guard_val(core::ptr::null(), || {
         match crate::abi::handle_ref::<
             crate::pubsub::z_loaned_subscriber_t,
             crate::pubsub::SubscriberState,
         >(subscriber)
         {
             Some(state) => &state.loaned_keyexpr as *const crate::abi::z_loaned_keyexpr_t,
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     })
 }
@@ -1890,7 +1891,7 @@ pub struct zp_task_lease_options_t {
 
 const _: () = {
     assert!(
-        std::mem::size_of::<z_subscriber_options_t>()
+        core::mem::size_of::<z_subscriber_options_t>()
             == if cfg!(feature = "local-subscriber") {
                 4
             } else {
@@ -1898,7 +1899,7 @@ const _: () = {
             }
     );
     assert!(
-        std::mem::size_of::<z_open_options_t>()
+        core::mem::size_of::<z_open_options_t>()
             == match (
                 cfg!(feature = "multi-thread"),
                 cfg!(feature = "admin-space")
@@ -1908,18 +1909,18 @@ const _: () = {
                 (false, _) => 1,
             }
     );
-    assert!(std::mem::size_of::<z_close_options_t>() == 1);
+    assert!(core::mem::size_of::<z_close_options_t>() == 1);
 };
 
 #[cfg(feature = "multi-thread")]
 const _: () = {
-    assert!(std::mem::size_of::<zp_task_read_options_t>() == 8);
-    assert!(std::mem::size_of::<zp_task_lease_options_t>() == 8);
+    assert!(core::mem::size_of::<zp_task_read_options_t>() == 8);
+    assert!(core::mem::size_of::<zp_task_lease_options_t>() == 8);
 };
 
 #[cfg(feature = "admin-space")]
 const _: () = assert!(
-    std::mem::offset_of!(z_open_options_t, auto_start_admin_space)
+    core::mem::offset_of!(z_open_options_t, auto_start_admin_space)
         == if cfg!(feature = "multi-thread") {
             16
         } else {
@@ -1963,7 +1964,7 @@ pub unsafe extern "C" fn z_open_options_default(options: *mut z_open_options_t) 
             #[cfg(feature = "multi-thread")]
             auto_start_lease_task: false,
             #[cfg(feature = "multi-thread")]
-            executor_task_attributes: std::ptr::null_mut(),
+            executor_task_attributes: core::ptr::null_mut(),
             // `options->auto_start_admin_space = false;` in pico's default.
             #[cfg(feature = "admin-space")]
             auto_start_admin_space: false,
@@ -1994,7 +1995,7 @@ pub unsafe extern "C" fn z_close_options_default(options: *mut z_close_options_t
 #[no_mangle]
 pub unsafe extern "C" fn zp_task_read_options_default(options: *mut zp_task_read_options_t) {
     if !options.is_null() {
-        (*options).task_attributes = std::ptr::null_mut();
+        (*options).task_attributes = core::ptr::null_mut();
     }
 }
 
@@ -2006,7 +2007,7 @@ pub unsafe extern "C" fn zp_task_read_options_default(options: *mut zp_task_read
 #[no_mangle]
 pub unsafe extern "C" fn zp_task_lease_options_default(options: *mut zp_task_lease_options_t) {
     if !options.is_null() {
-        (*options).task_attributes = std::ptr::null_mut();
+        (*options).task_attributes = core::ptr::null_mut();
     }
 }
 
@@ -2040,7 +2041,7 @@ pub unsafe extern "C" fn zp_lease_task_is_running(zs: *const z_loaned_session_t)
 
 /// pico's default priority (pico `z_priority_default`) — `Z_PRIORITY_DATA`.
 #[no_mangle]
-pub extern "C" fn z_priority_default() -> std::ffi::c_int {
+pub extern "C" fn z_priority_default() -> core::ffi::c_int {
     crate::qos::Z_PRIORITY_DEFAULT
 }
 
@@ -2048,7 +2049,7 @@ pub extern "C" fn z_priority_default() -> std::ffi::c_int {
 /// `Z_RELIABILITY_RELIABLE`, which is 0 on this ABI and 1 in wz's own enum.
 #[cfg(feature = "unstable-api")]
 #[no_mangle]
-pub extern "C" fn z_reliability_default() -> std::ffi::c_int {
+pub extern "C" fn z_reliability_default() -> core::ffi::c_int {
     crate::pubsub::Z_RELIABILITY_RELIABLE
 }
 

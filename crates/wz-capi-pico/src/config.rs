@@ -10,8 +10,10 @@
 //! to pick the dial vs accept role. Values verified against
 //! `~/zenoh-pico/include/zenoh-pico/config.h.in:84-103`.
 
-use std::collections::BTreeMap;
-use std::ffi::{c_char, c_void, CStr};
+use alloc::collections::BTreeMap;
+use core::ffi::{c_char, c_void, CStr};
+
+use crate::prelude::*;
 
 use crate::abi::{
     handle_ref, impl_value_ownership, z_loaned_config_t, z_moved_config_t, z_owned_config_t,
@@ -151,7 +153,7 @@ pub unsafe extern "C" fn z_config_default(config: *mut z_owned_config_t) -> ZRes
         let boxed = Box::new(ConfigState::default());
         *config = z_owned_config_t {
             handle: Box::into_raw(boxed) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 3],
+            _pad: [core::ptr::null_mut(); 3],
         };
         Z_OK
     })
@@ -199,20 +201,20 @@ pub unsafe extern "C" fn zp_config_insert(
 /// it.
 #[no_mangle]
 pub unsafe extern "C" fn zp_config_get(config: *const z_loaned_config_t, key: u8) -> *const c_char {
-    crate::ffi::guard_val(std::ptr::null(), || {
+    crate::ffi::guard_val(core::ptr::null(), || {
         if config.is_null() {
-            return std::ptr::null();
+            return core::ptr::null();
         }
         let handle = (*config).handle;
         if handle.is_null() {
-            return std::ptr::null();
+            return core::ptr::null();
         }
         let state = &*(handle as *const ConfigState);
         match state.entries.get(&key) {
             // The map's values are stored NUL-terminated (see the insert path),
             // so the pointer is a valid C string.
             Some(value) => value.as_ptr() as *const c_char,
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     })
 }
@@ -233,7 +235,7 @@ pub unsafe extern "C" fn z_config_clone(
         };
         *dst = z_owned_config_t {
             handle: Box::into_raw(Box::new(cloned)) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 3],
+            _pad: [core::ptr::null_mut(); 3],
         };
         Z_OK
     })

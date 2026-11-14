@@ -8,7 +8,7 @@
 //!
 //! pico's two types are plain C enums, so each occupies an `int` in the option structs.
 
-use std::ffi::c_int;
+use core::ffi::c_int;
 
 pub type z_congestion_control_t = c_int;
 pub type z_priority_t = c_int;

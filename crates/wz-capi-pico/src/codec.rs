@@ -49,7 +49,7 @@ pub unsafe extern "C" fn _z_zint64_encode_buf(buf: *mut u8, v: u64) -> u8 {
     if buf.is_null() {
         return 0;
     }
-    let out = std::slice::from_raw_parts_mut(buf, VLE_LEN);
+    let out = core::slice::from_raw_parts_mut(buf, VLE_LEN);
     encode_zint(out, v) as u8
 }
 

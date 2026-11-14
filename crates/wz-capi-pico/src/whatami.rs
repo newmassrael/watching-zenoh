@@ -75,13 +75,13 @@ mod tests {
     fn whatami_renders_the_bitmask_combinations() {
         let render = |w: u32| -> String {
             let mut out = z_view_string_t {
-                _start: std::ptr::null(),
+                _start: core::ptr::null(),
                 _len: 0,
                 _pad: [0usize; 2],
             };
             let res = unsafe { z_whatami_to_view_string(w, &mut out) };
             let text = unsafe {
-                std::str::from_utf8(std::slice::from_raw_parts(out._start, out._len)).unwrap()
+                core::str::from_utf8(core::slice::from_raw_parts(out._start, out._len)).unwrap()
             };
             format!("{res}:{text}")
         };

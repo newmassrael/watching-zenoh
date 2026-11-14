@@ -45,7 +45,7 @@
 //! both name the same clock. Windows has no such choice to make: its wait takes
 //! a relative timeout, which the backend derives from the counter reading.
 
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 use crate::ffi::guard_val;
 use crate::os;
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn z_mutex_take(
         if obj.is_null() || src.is_null() {
             return Z_ERR_NULL;
         }
-        std::ptr::copy_nonoverlapping(src, obj, 1);
+        core::ptr::copy_nonoverlapping(src, obj, 1);
         Z_OK
     })
 }
@@ -249,7 +249,7 @@ pub unsafe extern "C" fn z_condvar_take(
         if obj.is_null() || src.is_null() {
             return Z_ERR_NULL;
         }
-        std::ptr::copy_nonoverlapping(src, obj, 1);
+        core::ptr::copy_nonoverlapping(src, obj, 1);
         Z_OK
     })
 }
@@ -473,7 +473,7 @@ pub unsafe extern "C" fn z_internal_task_null(task: *mut z_owned_task_t) {
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_mutex_null(m: *mut z_owned_mutex_t) {
     if !m.is_null() {
-        std::ptr::write_bytes(m.cast::<u8>(), 0, std::mem::size_of::<z_owned_mutex_t>());
+        core::ptr::write_bytes(m.cast::<u8>(), 0, core::mem::size_of::<z_owned_mutex_t>());
     }
 }
 
@@ -484,7 +484,11 @@ pub unsafe extern "C" fn z_internal_mutex_null(m: *mut z_owned_mutex_t) {
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_condvar_null(cv: *mut z_owned_condvar_t) {
     if !cv.is_null() {
-        std::ptr::write_bytes(cv.cast::<u8>(), 0, std::mem::size_of::<z_owned_condvar_t>());
+        core::ptr::write_bytes(
+            cv.cast::<u8>(),
+            0,
+            core::mem::size_of::<z_owned_condvar_t>(),
+        );
     }
 }
 

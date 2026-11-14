@@ -20,7 +20,7 @@
 //!   session (`_admin_space_queryable_id`) and clears with it.
 
 #[cfg(feature = "connectivity")]
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 #[cfg(feature = "connectivity")]
 use wz_capi_port::SessionEngine;

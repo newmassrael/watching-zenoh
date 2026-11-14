@@ -12,7 +12,7 @@
 //! switch, each struct's field is read through one method named as the field
 //! (`locality_option_field`), so a caller is the same in both arms.
 
-use std::ffi::c_int;
+use core::ffi::c_int;
 
 #[cfg(any(feature = "local-subscriber", feature = "local-queryable", test))]
 use wz_session_core::locality::Locality;

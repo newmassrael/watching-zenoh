@@ -34,7 +34,7 @@
 //! self-consistent) and defers the full binary size-match audit to a
 //! follow-up round.
 
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 // A raw pointer used as an FFI handle slot. Zeroed = "null / not present".
 type Handle = *mut c_void;
@@ -105,8 +105,8 @@ macro_rules! define_handle_type {
             #[inline]
             pub(crate) fn null_value() -> Self {
                 Self {
-                    handle: std::ptr::null_mut(),
-                    _pad: [std::ptr::null_mut(); $pad],
+                    handle: core::ptr::null_mut(),
+                    _pad: [core::ptr::null_mut(); $pad],
                 }
             }
         }
@@ -155,8 +155,8 @@ impl z_owned_bytes_t {
             handle: buf as *mut c_void,
             _pad: [
                 HANDLE_BORROWED_TAG as *mut c_void,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
             ],
         }
     }
@@ -211,8 +211,8 @@ impl z_owned_slice_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 3],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 3],
         }
     }
 }
@@ -271,7 +271,7 @@ impl z_loaned_keyexpr_t {
         Self {
             _start: start,
             _len: len,
-            _handle: std::ptr::null_mut(),
+            _handle: core::ptr::null_mut(),
             _mapping: 0,
         }
     }
@@ -314,9 +314,9 @@ impl z_owned_keyexpr_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            _start: std::ptr::null(),
+            _start: core::ptr::null(),
             _len: 0,
-            _handle: std::ptr::null_mut(),
+            _handle: core::ptr::null_mut(),
             _mapping: 0,
             _pad: [0usize; 2],
         }
@@ -358,8 +358,8 @@ impl z_owned_string_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 3],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 3],
         }
     }
 }
@@ -373,7 +373,7 @@ pub(crate) unsafe fn view_bytes<'a>(start: *const u8, len: usize) -> Option<&'a 
     if start.is_null() {
         return None;
     }
-    Some(std::slice::from_raw_parts(start, len))
+    Some(core::slice::from_raw_parts(start, len))
 }
 
 /// Emit the pico ownership 7-function core shared by every handle value type
@@ -486,8 +486,8 @@ macro_rules! impl_value_ownership {
             }
             (*dst).handle = (*src).handle;
             (*dst)._pad = (*src)._pad;
-            (*src).handle = std::ptr::null_mut();
-            (*src)._pad = [std::ptr::null_mut(); 3];
+            (*src).handle = core::ptr::null_mut();
+            (*src)._pad = [core::ptr::null_mut(); 3];
             $crate::result::Z_OK
         }
     };
@@ -530,8 +530,8 @@ macro_rules! impl_boxed_element {
         /// padding to pico's measured size.
         #[repr(C)]
         pub struct $Owned {
-            pub(crate) handle: *mut ::std::ffi::c_void,
-            pub(crate) _pad: [u8; $size - ::std::mem::size_of::<*mut ::std::ffi::c_void>()],
+            pub(crate) handle: *mut ::core::ffi::c_void,
+            pub(crate) _pad: [u8; $size - ::core::mem::size_of::<*mut ::core::ffi::c_void>()],
         }
 
         /// Moved element (pico `z_moved_*_t`).
@@ -544,8 +544,8 @@ macro_rules! impl_boxed_element {
             #[inline]
             pub(crate) fn null_value() -> Self {
                 Self {
-                    handle: ::std::ptr::null_mut(),
-                    _pad: [0u8; $size - ::std::mem::size_of::<*mut ::std::ffi::c_void>()],
+                    handle: ::core::ptr::null_mut(),
+                    _pad: [0u8; $size - ::core::mem::size_of::<*mut ::core::ffi::c_void>()],
                 }
             }
         }
@@ -571,7 +571,7 @@ macro_rules! impl_boxed_element {
         #[no_mangle]
         pub unsafe extern "C" fn $loan(obj: *const $Owned) -> *const $Loaned {
             if obj.is_null() {
-                return ::std::ptr::null();
+                return ::core::ptr::null();
             }
             (*obj).handle as *const $Loaned
         }
@@ -580,7 +580,7 @@ macro_rules! impl_boxed_element {
         #[no_mangle]
         pub unsafe extern "C" fn $loan_mut(obj: *mut $Owned) -> *mut $Loaned {
             if obj.is_null() {
-                return ::std::ptr::null_mut();
+                return ::core::ptr::null_mut();
             }
             (*obj).handle as *mut $Loaned
         }

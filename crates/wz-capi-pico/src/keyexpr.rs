@@ -9,8 +9,10 @@
 //! must keep alive while the keyexpr is used (the pico contract). `z_put` /
 //! `z_declare_*` read the borrowed UTF-8 back via `keyexpr_str`.
 
-use std::ffi::{c_char, c_void, CStr};
-use std::sync::{Arc, Weak};
+use alloc::sync::{Arc, Weak};
+use core::ffi::{c_char, c_void, CStr};
+
+use crate::prelude::*;
 
 use wz_capi_port::WireKey;
 use wz_session_core::declare_form::RetractionKey;
@@ -41,7 +43,7 @@ pub(crate) unsafe fn keyexpr_str<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
         return None;
     }
     let bytes = view_bytes((*ke)._start, (*ke)._len)?;
-    std::str::from_utf8(bytes).ok()
+    core::str::from_utf8(bytes).ok()
 }
 
 /// The [`DeclaredKeyexpr`] behind a loaned keyexpr, or `None` for a view.
@@ -190,7 +192,7 @@ impl DeclaredKeyexpr {
             // By ADDRESS: both are fat pointers to one engine, and their vtable halves are
             // not guaranteed to be one copy, so comparing them whole could say a session is
             // not itself.
-            .filter(|d| std::ptr::addr_eq(d.session.as_ptr(), shared as *const Engine))
+            .filter(|d| core::ptr::addr_eq(d.session.as_ptr(), shared as *const Engine))
     }
 
     /// pico `_z_declared_keyexpr_alias_to_wire`: the declaration's id and the
@@ -451,8 +453,8 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr(
         if keyexpr.is_null() || name.is_null() {
             return Z_ERR_NULL;
         }
-        let bytes = std::slice::from_raw_parts(name.cast::<u8>(), len);
-        let Ok(text) = std::str::from_utf8(bytes) else {
+        let bytes = core::slice::from_raw_parts(name.cast::<u8>(), len);
+        let Ok(text) = core::str::from_utf8(bytes) else {
             return Z_ERR_INVALID;
         };
         if !is_pico_canon(text) {
@@ -485,8 +487,8 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr_unchecked(
             z_view_keyexpr_empty(keyexpr);
             return Z_ERR_INVALID;
         }
-        let bytes = std::slice::from_raw_parts(name.cast::<u8>(), len);
-        if std::str::from_utf8(bytes).is_err() {
+        let bytes = core::slice::from_raw_parts(name.cast::<u8>(), len);
+        if core::str::from_utf8(bytes).is_err() {
             z_view_keyexpr_empty(keyexpr);
             return Z_ERR_INVALID;
         }
@@ -526,7 +528,7 @@ pub unsafe extern "C" fn z_view_keyexpr_loan_mut(
 pub unsafe extern "C" fn z_view_keyexpr_empty(keyexpr: *mut z_view_keyexpr_t) {
     if !keyexpr.is_null() {
         *keyexpr = z_view_keyexpr_t {
-            _start: std::ptr::null(),
+            _start: core::ptr::null(),
             _len: 0,
             _pad: [0usize; 4],
         };
@@ -695,7 +697,7 @@ pub unsafe extern "C" fn z_keyexpr_take(dst: *mut z_owned_keyexpr_t, src: *mut z
     if dst.is_null() || src.is_null() {
         return;
     }
-    std::ptr::copy_nonoverlapping(&(*src)._this, dst, 1);
+    core::ptr::copy_nonoverlapping(&(*src)._this, dst, 1);
     (*src)._this = z_owned_keyexpr_t::null_value();
 }
 
@@ -739,7 +741,7 @@ pub unsafe extern "C" fn z_keyexpr_drop(obj: *mut z_moved_keyexpr_t) {
 // drift would be invisible to every test that reads only this copy.
 
 /// pico `z_keyexpr_intersection_level_t` (`api/constants.h:112-117`).
-pub type z_keyexpr_intersection_level_t = std::ffi::c_int;
+pub type z_keyexpr_intersection_level_t = core::ffi::c_int;
 /// The two key expressions do not intersect.
 pub const Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT: z_keyexpr_intersection_level_t = 0;
 /// They intersect: some key expression is included by both.
@@ -908,8 +910,8 @@ unsafe fn owned_keyexpr_input(
     if name.is_null() {
         return None;
     }
-    let bytes = std::slice::from_raw_parts(name as *const u8, len);
-    std::str::from_utf8(bytes).ok().map(str::to_owned)
+    let bytes = core::slice::from_raw_parts(name as *const u8, len);
+    core::str::from_utf8(bytes).ok().map(str::to_owned)
 }
 
 /// Copy a keyexpr into an owned one (pico `z_keyexpr_clone`, which is
@@ -969,7 +971,7 @@ pub unsafe extern "C" fn z_keyexpr_take_from_loaned(
         }
         let rc = z_keyexpr_clone(dst, src as *const z_loaned_keyexpr_t);
         if rc == Z_OK {
-            (*src)._start = std::ptr::null();
+            (*src)._start = core::ptr::null();
             (*src)._len = 0;
         }
         rc
@@ -1004,7 +1006,7 @@ pub unsafe extern "C" fn z_keyexpr_concat(
         let tail: &str = if right.is_null() || len == 0 {
             ""
         } else {
-            match std::str::from_utf8(std::slice::from_raw_parts(right as *const u8, len)) {
+            match core::str::from_utf8(core::slice::from_raw_parts(right as *const u8, len)) {
                 Ok(t) => t,
                 Err(_) => return Z_ERR_INVALID,
             }
@@ -1161,7 +1163,7 @@ pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) ->
         if start.is_null() {
             return Z_ERR_NULL;
         }
-        let Ok(text) = std::str::from_utf8(std::slice::from_raw_parts(start as *const u8, len))
+        let Ok(text) = core::str::from_utf8(core::slice::from_raw_parts(start as *const u8, len))
         else {
             return Z_ERR_INVALID;
         };
@@ -1220,7 +1222,7 @@ pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize)
         if start.is_null() || len.is_null() {
             return Z_ERR_NULL;
         }
-        let Ok(text) = std::str::from_utf8(std::slice::from_raw_parts(start as *const u8, *len))
+        let Ok(text) = core::str::from_utf8(core::slice::from_raw_parts(start as *const u8, *len))
         else {
             return Z_ERR_INVALID;
         };
@@ -1236,7 +1238,7 @@ pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize)
         if bytes.len() > *len {
             return Z_ERR_GENERIC;
         }
-        std::ptr::copy(bytes.as_ptr(), start as *mut u8, bytes.len());
+        core::ptr::copy(bytes.as_ptr(), start as *mut u8, bytes.len());
         *len = bytes.len();
         Z_OK
     })
@@ -1341,12 +1343,12 @@ mod tests {
     #[test]
     fn the_checked_views_refuse_a_text_not_in_canon_form() {
         let view = |text: &str| unsafe {
-            let c = std::ffi::CString::new(text).unwrap();
-            let mut out: z_view_keyexpr_t = std::mem::zeroed();
+            let c = alloc::ffi::CString::new(text).unwrap();
+            let mut out: z_view_keyexpr_t = core::mem::zeroed();
             z_view_keyexpr_from_str(&mut out, c.as_ptr())
         };
         let view_substr = |text: &str, len: usize| unsafe {
-            let mut out: z_view_keyexpr_t = std::mem::zeroed();
+            let mut out: z_view_keyexpr_t = core::mem::zeroed();
             z_view_keyexpr_from_substr(&mut out, text.as_ptr().cast(), len)
         };
         for refused in [
