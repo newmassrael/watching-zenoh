@@ -2440,6 +2440,11 @@ layer_c0_test_discipline() {
     # correcting rather than deleting.)
     python3 scripts/lib/zenoh_c_archive_arm.py --selftest || return 1
     python3 scripts/lib/zenoh_c_archive_arm.py --check || return 1
+    # The oracle installer's `--inputs` listing is a contract a host that
+    # fetches its own inputs reads instead of copying the installer's rules.
+    # Driven here against a fixture pin and the shipped one, in a sandbox with
+    # the network tools stubbed, so it needs no network and no oracle.
+    python3 scripts/lib/install_zenoh_c_inputs_selftest.py || return 1
     # R2281 (open-debt item 617) — and TWO ORACLES AT ONE ARM measure one thing
     # twice. The sibling above says which arm upstream publishes; this one asks
     # what every oracle prefix in the tree is FOR, by deriving each prefix's arm

@@ -1140,6 +1140,9 @@ round_fed_gates=(
     "zenoh_c_oracle_arms.py --check"
     "discard_site_lint.py"
     "nda_scan_selftest.py"
+    # The oracle installer's `--inputs` listing. Round-fed by the installer and its
+    # pin file; it runs the installer in a throwaway sandbox, no network, no build.
+    "install_zenoh_c_inputs_selftest.py"
     "capi_c_config_verdict_population.py"
     "dissect_name_census.py"
     "layer_e_oracle_scope_gate.py"

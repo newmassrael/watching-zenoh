@@ -60,9 +60,6 @@ EXAMPLES_PARENT="${WZ_ZENOH_C_REF:-$HOME/zenoh-c-ref}"
 
 say() { printf '[install-zenoh-c] %s\n' "$*"; }
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-
 # ── inputs handed in, and what every archive is checked against ─────────────
 #
 # A host that fetches each release input once into its own content-addressed
@@ -78,24 +75,170 @@ trap 'rm -rf "$tmp"' EXIT
 # a fetched archive and a handed-in one are the same claim, that these bytes are
 # upstream's release, and the digest is what makes it one. A directory has no
 # bytes to hash; it is held to the version it states, as a checkout always was.
+#
+# ── listing the inputs: --inputs ─────────────────────────────────────────────
+#
+# `install-zenoh-c.sh --inputs` downloads, installs and creates nothing. It
+# prints what an install run on this host, at the pinned or overridden version,
+# would fetch: one line per input, the release archive first and the source
+# second, each three fields separated by one space:
+#
+#   <sha256> <url> <variable>     the input would be fetched from <url> and
+#                                 held to <sha256>; `-` in place of the digest
+#                                 when there is none to hold it to, which is a
+#                                 version override without its digest variable
+#                                 (WZ_ZENOH_C_SHA256, WZ_ZENOH_C_SOURCE_SHA256),
+#                                 the case an install run refuses until one is
+#                                 given
+#   installed <path> <variable>   nothing would be fetched for that input: it
+#                                 is already installed at <path> ($PREFIX for
+#                                 the archive, the checkout for the source)
+#
+# <variable> is the one that hands the input in, WZ_ZENOH_C_ARCHIVE or
+# WZ_ZENOH_C_SOURCE. The first and last fields never hold a space, so a path
+# that does is everything between them. On success nothing else is printed on
+# either stream and the exit is 0. What the caller has already handed in does
+# not change the listing: it says what the installer needs, not what the caller
+# holds. An arch upstream publishes no archive for, a pin key missing, and an
+# installed checkout or header at another version fail the listing with the
+# message and exit an install run gives for them, and no line is printed. The
+# one refusal reported as a line instead is the override without a digest, as
+# `-`: the caller that fetches the input is the one able to name its digest.
+#
+# The listing calls the same functions the install path does for every
+# decision it reports, so the two cannot disagree about a target, a URL, a
+# digest or what counts as installed.
 
-# The digest an archive must have. The pin's digests belong to the pinned
-# version, so a version override brings its own in the variable named by $2;
-# there is no path on which an archive is unpacked unchecked.
-pinned_digest() {
+# The digest an archive is held to, or nothing when there is none. The pin's
+# digests belong to the pinned version, so a version override brings its own
+# in the variable named by $2.
+held_digest() {
     local given="${!2:-}"
     if [[ -n "$given" ]]; then
         printf '%s' "$given"
         return
     fi
     local pinned
-    pinned="$(pin_get ZENOH_C_VERSION)"
+    pinned="$(pin_get ZENOH_C_VERSION)" || exit 1
     if [[ "$ZENOH_C_VERSION" != "$pinned" ]]; then
-        say "FAIL: zenoh-c $ZENOH_C_VERSION is an override and the pin's digests" >&2
-        say "      are for $pinned; pass the archive's SHA-256 in $2." >&2
-        exit 1
+        return
     fi
     pin_get "$1"
+}
+
+# The digest an archive must have: there is no path on which an archive is
+# unpacked unchecked.
+pinned_digest() {
+    local digest
+    digest="$(held_digest "$1" "$2")" || exit 1
+    if [[ -z "$digest" ]]; then
+        say "FAIL: zenoh-c $ZENOH_C_VERSION is an override and the pin's digests" >&2
+        say "      are for $(pin_get ZENOH_C_VERSION); pass the archive's SHA-256 in $2." >&2
+        exit 1
+    fi
+    printf '%s' "$digest"
+}
+
+# This host's Rust target triple, which names its release archive and the
+# digest key the archive is held to. It sets `target` rather than printing it
+# so that its FAIL reaches the stream an install run has always printed it on.
+host_target() {
+    local arch
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64) target="x86_64-unknown-linux-gnu" ;;
+        aarch64) target="aarch64-unknown-linux-gnu" ;;
+        *) say "FAIL: no published zenoh-c archive for arch $arch"; exit 1 ;;
+    esac
+}
+
+# The release archive's URL for target $1.
+release_url() {
+    local archive url
+    archive="$(pin_get ZENOH_C_ARCHIVE)" || exit 1
+    archive="${archive//@VERSION@/$ZENOH_C_VERSION}"
+    archive="${archive//@TARGET@/$1}"
+    url="$(pin_get ZENOH_C_RELEASE_URL)" || exit 1
+    url="${url//@VERSION@/$ZENOH_C_VERSION}"
+    printf '%s' "${url//@ARCHIVE@/$archive}"
+}
+
+# The source archive's URL.
+source_url() {
+    local url
+    url="$(pin_get ZENOH_C_SOURCE_URL)" || exit 1
+    printf '%s' "${url//@VERSION@/$ZENOH_C_VERSION}"
+}
+
+# Whether the headers and the shared library are already at $PREFIX, in which
+# case the release archive is neither fetched nor unpacked.
+libs_installed() {
+    [[ -f "$PREFIX/include/zenoh.h" && -f "$PREFIX/lib/libzenohc.so" ]]
+}
+
+# Whether a source tree is already at $EXAMPLES_PARENT, in which case the
+# source is neither fetched nor copied; the version it states is checked by
+# `check_source_version`, why in section 3.
+source_installed() {
+    [[ -f "$EXAMPLES_PARENT/examples/z_put.c" ]]
+}
+
+# The source tree at $EXAMPLES_PARENT states the version this run installs.
+check_source_version() {
+    local checkout_version
+    checkout_version="$(tr -d '[:space:]' < "$EXAMPLES_PARENT/version.txt" 2>/dev/null || true)"
+    if [[ "$checkout_version" != "$ZENOH_C_VERSION" ]]; then
+        say "FAIL: the checkout at $EXAMPLES_PARENT is"
+        say "      '${checkout_version:-unreadable}', not the pinned $ZENOH_C_VERSION."
+        say "      It is the source every oracle ARM is built from and the tree"
+        say "      the archive-arm derivation reads, so a stale one grades wz"
+        say "      against an upstream this tree does not pin. Remove it and re-run,"
+        say "      or, if it is a git checkout you keep, move it:"
+        say "        git -C $EXAMPLES_PARENT fetch --depth 1 origin tag $ZENOH_C_VERSION"
+        say "        git -C $EXAMPLES_PARENT checkout $ZENOH_C_VERSION"
+        exit 1
+    fi
+}
+
+# The header at $PREFIX states the version this run installs; why in the PIN
+# assertion section.
+check_installed_pin() {
+    local installed
+    installed="$(sed -n 's/^#define ZENOH_C "\(.*\)"$/\1/p' "$PREFIX/include/zenoh_configure.h" 2>/dev/null || true)"
+    if [[ "$installed" != "$ZENOH_C_VERSION" ]]; then
+        say "FAIL: installed zenoh-c is '${installed:-unknown}', expected $ZENOH_C_VERSION."
+        say "      zenoh_opaque.h is generated per version, so a different oracle is a"
+        say "      DIFFERENT ABI — Layer C1cc's layout leg compares against whatever is"
+        say "      installed here. Remove $PREFIX/include/zenoh*.h and re-run."
+        exit 1
+    fi
+}
+
+# What `--inputs` prints. The checks run in the order an install run reaches
+# them, and every one runs before the first line is printed, so a refusal
+# prints no line.
+list_inputs() {
+    local target url digest archive_line source_line
+    if libs_installed; then
+        archive_line="installed $PREFIX WZ_ZENOH_C_ARCHIVE"
+    else
+        host_target
+        url="$(release_url "$target")"
+        digest="$(held_digest "ZENOH_C_SHA256_$target" WZ_ZENOH_C_SHA256)"
+        archive_line="${digest:--} $url WZ_ZENOH_C_ARCHIVE"
+    fi
+    if source_installed; then
+        check_source_version
+        source_line="installed $EXAMPLES_PARENT WZ_ZENOH_C_SOURCE"
+    else
+        url="$(source_url)"
+        digest="$(held_digest ZENOH_C_SOURCE_SHA256 WZ_ZENOH_C_SOURCE_SHA256)"
+        source_line="${digest:--} $url WZ_ZENOH_C_SOURCE"
+    fi
+    if libs_installed; then
+        check_installed_pin
+    fi
+    printf '%s\n' "$archive_line" "$source_line"
 }
 
 verify_sha256() {
@@ -133,6 +276,26 @@ obtain() {
     printf '%s' "$tmp/$name"
 }
 
+# ── what this run does ───────────────────────────────────────────────────────
+#
+# An argument the script does not take is refused rather than ignored: a typo
+# of `--inputs` would otherwise start an install.
+case "$#:${1:-}" in
+    0:) ;;
+    1:--inputs)
+        list_inputs
+        exit 0
+        ;;
+    *)
+        say "FAIL: unknown arguments: $*" >&2
+        say "      the one argument this takes is --inputs" >&2
+        exit 2
+        ;;
+esac
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
 # ── 1+2. headers and the shared library ──────────────────────────────────────
 #
 # From the upstream RELEASE archive rather than a source build: zenoh-c is a
@@ -140,21 +303,11 @@ obtain() {
 # the whole zenoh dependency graph for an artifact upstream already publishes.
 # The archive is the same thing a zenoh-c user installs, which is the point — the
 # oracle must be what a real consumer has, not something wz assembled.
-if [[ -f "$PREFIX/include/zenoh.h" && -f "$PREFIX/lib/libzenohc.so" ]]; then
+if libs_installed; then
     say "headers + libzenohc.so already at $PREFIX"
 else
-    arch="$(uname -m)"
-    case "$arch" in
-        x86_64) target="x86_64-unknown-linux-gnu" ;;
-        aarch64) target="aarch64-unknown-linux-gnu" ;;
-        *) say "FAIL: no published zenoh-c archive for arch $arch"; exit 1 ;;
-    esac
-    archive="$(pin_get ZENOH_C_ARCHIVE)"
-    archive="${archive//@VERSION@/$ZENOH_C_VERSION}"
-    archive="${archive//@TARGET@/$target}"
-    url="$(pin_get ZENOH_C_RELEASE_URL)"
-    url="${url//@VERSION@/$ZENOH_C_VERSION}"
-    url="${url//@ARCHIVE@/$archive}"
+    host_target
+    url="$(release_url "$target")"
     digest="$(pinned_digest "ZENOH_C_SHA256_$target" WZ_ZENOH_C_SHA256)"
     zip="$(obtain "${WZ_ZENOH_C_ARCHIVE:-}" zenoh-c.zip "$url" "the release archive")"
     verify_sha256 "$zip" "$digest" "the release archive"
@@ -198,7 +351,7 @@ fi
 # unlike a clone it is bytes the pin can hold to a digest, which a host that
 # builds with no network can fetch once and hand in. Nothing downstream needs
 # the history: the arm installer copies the tree without `.git`.
-if [[ -f "$EXAMPLES_PARENT/examples/z_put.c" ]]; then
+if source_installed; then
     say "checkout already at $EXAMPLES_PARENT"
 else
     source_in="${WZ_ZENOH_C_SOURCE:-}"
@@ -212,10 +365,9 @@ else
         # to remove.
         chmod -R u+w "$EXAMPLES_PARENT"
     else
-        source_url="$(pin_get ZENOH_C_SOURCE_URL)"
-        source_url="${source_url//@VERSION@/$ZENOH_C_VERSION}"
+        src_url="$(source_url)"
         source_digest="$(pinned_digest ZENOH_C_SOURCE_SHA256 WZ_ZENOH_C_SOURCE_SHA256)"
-        tarball="$(obtain "$source_in" zenoh-c-src.tar.gz "$source_url" "the source archive")"
+        tarball="$(obtain "$source_in" zenoh-c-src.tar.gz "$src_url" "the source archive")"
         verify_sha256 "$tarball" "$source_digest" "the source archive"
         say "unpacking zenoh-c ${ZENOH_C_VERSION} source into $EXAMPLES_PARENT"
         tar -xzf "$tarball" -C "$EXAMPLES_PARENT" --strip-components=1
@@ -225,33 +377,15 @@ else
         exit 1
     fi
 fi
-checkout_version="$(tr -d '[:space:]' < "$EXAMPLES_PARENT/version.txt" 2>/dev/null || true)"
-if [[ "$checkout_version" != "$ZENOH_C_VERSION" ]]; then
-    say "FAIL: the checkout at $EXAMPLES_PARENT is"
-    say "      '${checkout_version:-unreadable}', not the pinned $ZENOH_C_VERSION."
-    say "      It is the source every oracle ARM is built from and the tree"
-    say "      the archive-arm derivation reads, so a stale one grades wz"
-    say "      against an upstream this tree does not pin. Remove it and re-run,"
-    say "      or, if it is a git checkout you keep, move it:"
-    say "        git -C $EXAMPLES_PARENT fetch --depth 1 origin tag $ZENOH_C_VERSION"
-    say "        git -C $EXAMPLES_PARENT checkout $ZENOH_C_VERSION"
-    exit 1
-fi
-say "source at $EXAMPLES_PARENT is zenoh-c $checkout_version"
+check_source_version
+say "source at $EXAMPLES_PARENT is zenoh-c $ZENOH_C_VERSION"
 
 # ── the PIN assertion ────────────────────────────────────────────────────────
 #
 # Read from the installed header, not from what this script just did: on the
 # already-present path above nothing was installed at all, and an oracle that
 # drifted under a previous install is exactly what this catches.
-installed="$(sed -n 's/^#define ZENOH_C "\(.*\)"$/\1/p' "$PREFIX/include/zenoh_configure.h" 2>/dev/null || true)"
-if [[ "$installed" != "$ZENOH_C_VERSION" ]]; then
-    say "FAIL: installed zenoh-c is '${installed:-unknown}', expected $ZENOH_C_VERSION."
-    say "      zenoh_opaque.h is generated per version, so a different oracle is a"
-    say "      DIFFERENT ABI — Layer C1cc's layout leg compares against whatever is"
-    say "      installed here. Remove $PREFIX/include/zenoh*.h and re-run."
-    exit 1
-fi
+check_installed_pin
 
 # The Z_FEATURE set the archive was built with (the `unstable-shm` pair, derived
 # by `scripts/lib/zenoh_c_archive_arm.py` rather than asserted here) decides
@@ -259,6 +393,6 @@ fi
 # `#if defined(Z_FEATURE_UNSTABLE_API)`-gated — and which examples compile at
 # all. Printed so a hosted log records WHICH ABI the run validated —
 # "wz is a zenoh-c drop-in" is not a complete sentence without it.
-say "oracle ready: zenoh-c $installed at $PREFIX, examples at $EXAMPLES_PARENT/examples"
+say "oracle ready: zenoh-c $ZENOH_C_VERSION at $PREFIX, examples at $EXAMPLES_PARENT/examples"
 say "feature set:"
 grep -E '^#define Z_FEATURE_' "$PREFIX/include/zenoh_configure.h" | sed 's/^/  /'
