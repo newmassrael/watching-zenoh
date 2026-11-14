@@ -6501,38 +6501,49 @@ impl Closee for WeakSession {
         let session = self.0.clone();
         // A close joins the engine's threads, so it is run where blocking is allowed and not on the
         // executor of the caller, which may be the very thread a callback is about to be run on.
-        let _ = ZRuntime::Net
-            .spawn_blocking(move || {
-                // Before the engine closes, so that the faces that go down with the session tell
-                // the listeners of their events of nothing.
-                // The listeners of faces are let go of before the engine closes: the faces that
-                // go down with it, those the session dialled at least, would tell them, where
-                // upstream's close lets go of them before its transports are closed.
-                #[cfg(feature = "unstable")]
-                session.release_connectivity_listeners();
-                if session.owns_engine {
-                    session.engine.close();
-                } else {
-                    // The node goes on, and the session is closed without it: what it declared is
-                    // let go of just below, and nothing is declared on it afresh.
-                    session.closed.store(true, Ordering::Release);
-                }
-                // A closed session takes nothing more, and lets go of the callbacks it was to
-                // call: the channel of a subscriber ends with its session, as upstream's does.
-                session.release_subscriptions();
-                session.release_publishers();
-                session.release_queryables();
-                session.release_queriers();
-                session.release_queries();
-                session.release_matching_listeners();
-                session.release_tokens();
-                // After the callbacks were let go of, so that none is called afresh: the wait ends
-                // when the last one that was being called has returned and been dropped.
-                if close_args.wait_callbacks {
-                    session.callbacks_drop_sync_group.wait();
-                }
-            })
-            .await;
+        let close = move || {
+            // Before the engine closes, so that the faces that go down with the session tell
+            // the listeners of their events of nothing.
+            // The listeners of faces are let go of before the engine closes: the faces that
+            // go down with it, those the session dialled at least, would tell them, where
+            // upstream's close lets go of them before its transports are closed.
+            #[cfg(feature = "unstable")]
+            session.release_connectivity_listeners();
+            if session.owns_engine {
+                // Upstream's record of the close of a session that owns its node
+                // (`zenoh/src/api/session.rs` @ `info!(zid = %self.zid(), "close session");`).
+                tracing::info!(zid = %session.zid, "close session");
+                session.engine.close();
+            } else {
+                // The node goes on, and the session is closed without it: what it declared is
+                // let go of just below, and nothing is declared on it afresh.
+                session.closed.store(true, Ordering::Release);
+            }
+            // A closed session takes nothing more, and lets go of the callbacks it was to
+            // call: the channel of a subscriber ends with its session, as upstream's does.
+            session.release_subscriptions();
+            session.release_publishers();
+            session.release_queryables();
+            session.release_queriers();
+            session.release_queries();
+            session.release_matching_listeners();
+            session.release_tokens();
+            // After the callbacks were let go of, so that none is called afresh: the wait ends
+            // when the last one that was being called has returned and been dropped.
+            if close_args.wait_callbacks {
+                session.callbacks_drop_sync_group.wait();
+            }
+        };
+        // Upstream closes inside the caller's future, which its close builder hands to the
+        // runtime with the caller's span carried (`zenoh/src/api/builders/close.rs` @
+        // `ZRuntime::Net.block_in_place(self.into_future())`): the thread the close is moved to
+        // here enters that span again, so the engine's close happens in it as upstream's does.
+        #[cfg(feature = "engine-tokio")]
+        let close = {
+            let caller = wz_capi_core::caller_span::CallerSpan::current();
+            move || caller.in_scope(close)
+        };
+        let _ = ZRuntime::Net.spawn_blocking(close).await;
     }
 }
 
@@ -7633,20 +7644,44 @@ mod tests {
         assert_eq!(dialler.info().peers_zid().wait().count(), 0);
     }
 
-    /// What the `demux` spans the engine opened said: the `zid` of the node that opened each, and
-    /// whether a span named `opener` was among its ancestors.
-    type DemuxSpans = std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>;
+    /// One thing the engine recorded for a node of the span test: an upstream `demux` span it
+    /// opened or the `close session` event, the node's `zid`, and the names of the spans it was
+    /// opened or emitted in, innermost first.
+    struct Seen {
+        what: &'static str,
+        zid: String,
+        within: Vec<&'static str>,
+    }
 
-    /// The ids of the nodes the span test opens start with this; the recorder keeps the spans of
-    /// those nodes alone, so the other tests of the process, which open spans of their own once a
+    type Recorded = std::sync::Arc<std::sync::Mutex<Vec<Seen>>>;
+
+    /// The ids of the nodes the span test opens start with this; the recorder keeps what those
+    /// nodes record alone, so the other tests of the process, which open spans of their own once a
     /// subscriber is installed, neither grow it nor read into it.
     const SPAN_TEST_IDS: &str = "5ba7c";
 
-    /// Records every `demux` span of the span test's nodes as it is opened, with its node and
-    /// whether it was opened inside a span named `opener`.
-    struct DemuxRecorder(DemuxSpans);
+    /// What `close session` is recorded as.
+    const CLOSE_SESSION: &str = "close session";
 
-    impl<S> tracing_subscriber::layer::Layer<S> for DemuxRecorder
+    /// Records the `demux` spans and the `close session` events of the span test's nodes.
+    struct Recorder(Recorded);
+
+    impl Recorder {
+        fn keep(&self, what: &'static str, fields: Fields, within: Vec<&'static str>) {
+            if fields.zid.starts_with(SPAN_TEST_IDS) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(Seen {
+                        what,
+                        zid: fields.zid,
+                        within,
+                    });
+            }
+        }
+    }
+
+    impl<S> tracing_subscriber::layer::Layer<S> for Recorder
     where
         S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
     {
@@ -7659,29 +7694,46 @@ mod tests {
             if attrs.metadata().name() != "demux" {
                 return;
             }
-            let mut zid = ZidField::default();
-            attrs.record(&mut zid);
-            if !zid.0.starts_with(SPAN_TEST_IDS) {
+            let mut fields = Fields::default();
+            attrs.record(&mut fields);
+            let within = ctx
+                .span(id)
+                .map(|span| span.scope().skip(1).map(|outer| outer.name()).collect())
+                .unwrap_or_default();
+            self.keep("demux", fields, within);
+        }
+
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            if fields.message != CLOSE_SESSION {
                 return;
             }
-            let inside = ctx
-                .span(id)
-                .is_some_and(|span| span.scope().skip(1).any(|outer| outer.name() == "opener"));
-            self.0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((zid.0, inside));
+            let within = ctx
+                .event_scope(event)
+                .map(|scope| scope.map(|span| span.name()).collect())
+                .unwrap_or_default();
+            self.keep(CLOSE_SESSION, fields, within);
         }
     }
 
-    /// The `zid` field of a span, as it prints.
+    /// The `zid` and the message of a span or an event, as they print.
     #[derive(Default)]
-    struct ZidField(String);
+    struct Fields {
+        zid: String,
+        message: String,
+    }
 
-    impl tracing::field::Visit for ZidField {
+    impl tracing::field::Visit for Fields {
         fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "zid" {
-                self.0 = format!("{value:?}");
+            match field.name() {
+                "zid" => self.zid = format!("{value:?}"),
+                "message" => self.message = format!("{value:?}"),
+                _ => {}
             }
         }
     }
@@ -7689,20 +7741,32 @@ mod tests {
     /// The recorder, installed for the process the first time it is asked for: the spans are
     /// opened on the engine's threads, which a subscriber set on the test's own thread would not
     /// reach. A process whose global subscriber is someone else's cannot answer.
-    fn demux_spans() -> DemuxSpans {
+    fn installed_recorder() -> Recorded {
         use tracing_subscriber::layer::SubscriberExt;
 
-        static RECORDED: std::sync::OnceLock<DemuxSpans> = std::sync::OnceLock::new();
+        static RECORDED: std::sync::OnceLock<Recorded> = std::sync::OnceLock::new();
         RECORDED
             .get_or_init(|| {
-                let recorded = DemuxSpans::default();
+                let recorded = Recorded::default();
                 tracing::subscriber::set_global_default(
-                    tracing_subscriber::registry().with(DemuxRecorder(recorded.clone())),
+                    tracing_subscriber::registry().with(Recorder(recorded.clone())),
                 )
                 .expect("no other global subscriber in this test binary");
                 recorded
             })
             .clone()
+    }
+
+    /// For each thing `what` the node `zid` recorded, whether a span named `span` was among those
+    /// it was recorded in.
+    fn recorded_within(recorded: &Recorded, what: &str, zid: &str, span: &str) -> Vec<bool> {
+        recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|seen| seen.what == what && seen.zid == zid)
+            .map(|seen| seen.within.iter().any(|name| *name == span))
+            .collect()
     }
 
     /// `tracing-instrument` carries the span an open is called in onto everything the session
@@ -7713,9 +7777,12 @@ mod tests {
     /// it, which is the same test in a build without the feature, none is, because the face runs
     /// on a thread the opener's span was never entered on. The listener is opened outside the
     /// span, so the spans of its node say nothing either way, and the two are told apart by id.
+    /// The dialler is then closed inside `closer`, and upstream's `close session` event, which
+    /// the close emits on the thread the facade moves it to, is inside `closer` exactly when the
+    /// feature is on.
     #[test]
     fn the_faces_of_a_session_opened_in_a_span_run_in_it_exactly_when_the_feature_is_on() {
-        let recorded = demux_spans();
+        let recorded = installed_recorder();
         let port = unautoselected_port();
         let listener = open(
             Config::from_json5(&format!(
@@ -7749,13 +7816,7 @@ mod tests {
         let zid = dialler.zid().to_string();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let of_dialler: Vec<bool> = loop {
-            let of: Vec<bool> = recorded
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .iter()
-                .filter(|(node, _)| *node == zid)
-                .map(|(_, inside)| *inside)
-                .collect();
+            let of = recorded_within(&recorded, "demux", &zid, "opener");
             if !of.is_empty() || std::time::Instant::now() > deadline {
                 break of;
             }
@@ -7765,24 +7826,33 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .map(|(node, _)| node.clone())
+            .map(|seen| seen.zid.clone())
             .collect();
         assert!(
             !of_dialler.is_empty(),
             "the dialler's node opened no `demux` span; nodes seen: {nodes:?}"
         );
-        if cfg!(feature = "tracing-instrument") {
-            assert!(
-                of_dialler.iter().all(|inside| *inside),
-                "every span of the dialler descends from the span it was opened in: {of_dialler:?}"
-            );
-        } else {
-            assert!(
-                of_dialler.iter().all(|inside| !*inside),
-                "without the feature no span of the dialler descends from it: {of_dialler:?}"
-            );
+        let carried = cfg!(feature = "tracing-instrument");
+        assert!(
+            of_dialler.iter().all(|inside| *inside == carried),
+            "each span of the dialler descends from the span it was opened in exactly when the \
+             feature is on ({carried}): {of_dialler:?}"
+        );
+        // The close is the other end: the facade runs it on a thread where blocking is allowed,
+        // and upstream's record of it is emitted there, inside the span the close was called in
+        // exactly when the feature is on.
+        let closer = tracing::info_span!("closer");
+        {
+            let _inside = closer.enter();
+            dialler.close().wait().expect("closes");
         }
-        dialler.close().wait().expect("closes");
+        let closes = recorded_within(&recorded, CLOSE_SESSION, &zid, "closer");
+        assert_eq!(
+            closes,
+            [carried],
+            "the one close of the dialler is recorded inside the span its close was called in \
+             exactly when the feature is on ({carried})"
+        );
         listener.close().wait().expect("closes");
     }
 
