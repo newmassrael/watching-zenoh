@@ -295,19 +295,68 @@ fn a_clients_own_admin_gets_beside_its_declarations_end_as_upstreams_do() {
     held_against(&control, &subject);
 }
 
-/// The two mixed pairs, which say whether a difference is the router's or the client's.
+/// Every pair of router and client, by the name [`ARMS_CHOSEN`] takes: the router's crate, then
+/// the client's.
+const ARMS: [(&str, fn() -> Measured); 4] = [
+    ("up/up", up_router_up_client::measured),
+    ("up/wz", up_router_wz_client::measured),
+    ("wz/up", wz_router_up_client::measured),
+    ("wz/wz", wz_router_wz_client::measured),
+];
+
+/// The environment variable that names the arms a measurement runs, separated by commas
+/// (`wz/up` or `up/up,wz/up`), so that a profile holds one router's work alone. Unset or empty,
+/// every arm runs.
+const ARMS_CHOSEN: &str = "WZ_ADMIN_GET_ARMS";
+
+/// The arms `chosen` names, in the order of [`ARMS`]; every arm for a list that names none.
+/// Panics on a name that is not an arm, so that a typo does not measure nothing.
+fn arms_named(chosen: Option<&str>) -> Vec<(&'static str, fn() -> Measured)> {
+    let wanted: Vec<&str> = chosen
+        .map(|list| {
+            list.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    for name in &wanted {
+        assert!(
+            ARMS.iter().any(|(arm, _)| arm == name),
+            "{ARMS_CHOSEN} names `{name}`, which is not one of {:?}",
+            ARMS.map(|(arm, _)| arm)
+        );
+    }
+    ARMS.into_iter()
+        .filter(|(arm, _)| wanted.is_empty() || wanted.contains(arm))
+        .collect()
+}
+
+/// The mixed pairs beside the two whole ones, which say whether a difference is the router's or
+/// the client's; [`ARMS_CHOSEN`] runs some of them alone.
 #[test]
 #[ignore = "a measurement that attributes a difference to the router or the client; run with \
-            --ignored --nocapture"]
+            --ignored --nocapture, and WZ_ADMIN_GET_ARMS=wz/up for one arm"]
 fn the_admin_gets_beside_declarations_measured_for_each_router_and_client() {
-    for measured in [
-        up_router_up_client::measured(),
-        up_router_wz_client::measured(),
-        wz_router_up_client::measured(),
-        wz_router_wz_client::measured(),
-    ] {
-        println!("{}", measured.line());
+    let chosen = std::env::var(ARMS_CHOSEN).ok();
+    for (_, measured) in arms_named(chosen.as_deref()) {
+        println!("{}", measured().line());
     }
+}
+
+/// The choice of arms: none named is all of them, a list is those in the order of [`ARMS`], and
+/// a name that is not an arm is refused.
+#[test]
+fn the_arms_are_chosen_by_name() {
+    let names = |chosen: Option<&str>| -> Vec<&str> {
+        arms_named(chosen).into_iter().map(|(arm, _)| arm).collect()
+    };
+    assert_eq!(names(None), ["up/up", "up/wz", "wz/up", "wz/wz"]);
+    assert_eq!(names(Some("")), ["up/up", "up/wz", "wz/up", "wz/wz"]);
+    assert_eq!(names(Some("wz/up")), ["wz/up"]);
+    assert_eq!(names(Some(" wz/wz , up/up ")), ["up/up", "wz/wz"]);
+    let refused = std::panic::catch_unwind(|| arms_named(Some("wz/zz")));
+    assert!(refused.is_err(), "a name that is not an arm is refused");
 }
 
 /// The contract catches a subject that is slower than the control by more than the multiple.
