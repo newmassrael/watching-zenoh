@@ -3088,11 +3088,15 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // false, so the key cannot be honoured quietly. The same went for `user` and
     // `password` once the C ABI presented them when it dials.
     // `transport/link/protocols` LEFT this half: the open refuses an endpoint it leaves out.
-    "transport/link/rx/buffer_size",
+    // `transport/link/rx/buffer_size` LEFT here for [`UNHONOURED_READER_GAP`]: a link's RX
+    // pool is sized from it (`RecyclingArena::for_link`), so the capability the `LinkTxConf`
+    // group says wz lacks is one wz has, and only the reader is missing.
     // `transport/link/rx/max_message_size` left this half too: wz acts on it.
     // R2593 — the four socket-buffer keys left this half with the surface's
     // other half: wz acts on them now.
-    "transport/link/tls/close_link_on_expiration",
+    // `transport/link/tls/close_link_on_expiration` LEFT here for [`UNHONOURED_READER_GAP`]:
+    // the tls and quic links tear a link down at its peer chain's expiry when the locator
+    // asks (R2600, R2608), and the file's key is the per-link default nobody reads.
     // `transport/link/tx/keep_alive` LEFT here, and its group below: the zenoh-c session reads
     // it ([`C_ABI_SESSION_HONOURED_KEYS`]).
     "transport/link/tx/queue/allocation/mode",
@@ -3161,6 +3165,14 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 ///   (R2788: `plugins` itself left this list — the reader carries the section.)
 /// * (`transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
 ///   verify_name_on_connect}` LEFT this list: the reader reads them, [`HONOURED_CONFIG_KEYS`].)
+/// * `transport/link/rx/buffer_size` — the size of a link's RX pool, which
+///   `crate::frame_arena::RecyclingArena::for_link` takes as a parameter and divides by the
+///   link's mtu as upstream's RX task does. Every caller passes upstream's default, so the
+///   reader change is "hand the parsed value to the arena", not "build a pool".
+/// * `transport/link/tls/close_link_on_expiration` — the tls and quic links' teardown at the
+///   peer chain's expiry (`crate::stream_link::ExpirySignal`, R2600 and R2608), armed today by
+///   the locator's `close_link_on_expiration`. The key is upstream's per-link default for that
+///   same flag, so the reader change is "render it onto the tls and quic endpoints".
 /// * `transport/link/unixpipe/file_access_mask` — the unixpipe link's FIFO
 ///   creation mode, which R2363 made configurable:
 ///   `crate::unixpipe_pipeline::DEFAULT_FILE_MASK` and the
@@ -3208,6 +3220,16 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
     // verify_name_on_connect}` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader reads them
     // and the open hands them to the tls links.
+    // MOVED here from `UNHONOURED_BEYOND_WZ` and its `LinkTxConf` group, the R2363 class again:
+    // the link-RX pool has taken its size as a parameter since R2742, and only the default
+    // reaches it, so what is missing is the reader and not a configurable RX surface.
+    "transport/link/rx/buffer_size",
+    // MOVED here from `UNHONOURED_BEYOND_WZ` and its `LinkTxConf` group: R2600 and R2608 built
+    // the expiry teardown on the quic and tls links, armed from the locator's
+    // `close_link_on_expiration`. Upstream renders this key into each tls endpoint's config as
+    // the per-link default (`io/zenoh-links/zenoh-link-tls/src/utils.rs`
+    // @ `.close_link_on_expiration()`), which is the reader change left.
+    "transport/link/tls/close_link_on_expiration",
     // R2363 — MOVED here from `UNHONOURED_BEYOND_WZ`, and the move is the
     // finding rather than the bookkeeping: that list's `LinkTxConf` group said
     // wz lacked "a configurable link-TX surface" for this key, which was true
@@ -3290,10 +3312,12 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         &[
             // `transport/link/protocols` LEFT this group: the open refuses an endpoint whose
             // protocol the whitelist leaves out.
-            "transport/link/rx/buffer_size",
+            // `transport/link/rx/buffer_size` LEFT this group: a link's RX pool is sized from
+            // it, so it is a reader gap, not a link-TX surface wz lacks.
             // `transport/link/rx/max_message_size` LEFT this group: wz now has
             // the bound it configures, a session's reassembly cap.
-            "transport/link/tls/close_link_on_expiration",
+            // `transport/link/tls/close_link_on_expiration` LEFT this group: the tls and quic
+            // links close at the peer chain's expiry when the locator asks.
             // `transport/link/tx/keep_alive` LEFT this group: a keepalive's share of a lease is
             // a parameter of the session, as its lease is.
             "transport/link/tx/queue/allocation/mode",
@@ -3584,6 +3608,20 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // And for `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
     // verify_name_on_connect}`: their rows said the capability was in wz and the reader was
     // not, and the reader reads them now.
+    // The link-RX pool. Its doc in `frame_arena.rs` names the key beside the parameter that
+    // would carry it, and the anchor is the pool type that takes the size.
+    (
+        "transport/link/rx/buffer_size",
+        "wz-has-it",
+        "RecyclingArena",
+    ),
+    // The expiry teardown. Its doc in `tls_pipeline.rs` names the key where the locator's flag
+    // is taken, and the anchor is the function that reads the deadline off the peer's chain.
+    (
+        "transport/link/tls/close_link_on_expiration",
+        "wz-has-it",
+        "peer_chain_deadline",
+    ),
     // R2363 — the unixpipe FIFO mode. The anchor is the DEFAULT rather than the
     // parse, because the default is the whole of wz's declared divergence
     // (0o600 where upstream defaults to 0o777) and it is what a reader
