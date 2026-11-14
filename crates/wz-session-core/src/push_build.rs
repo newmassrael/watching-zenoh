@@ -1158,8 +1158,8 @@ mod tests {
                 .unwrap()
                 .schema
                 .as_ref()
-                .map(|s| s.as_text().into_inner()),
-            Some("application/json")
+                .map(|s| s.as_bytes().into_inner()),
+            Some(&b"application/json"[..])
         );
         // schema_len round-trips from the original schema's byte length.
         assert_eq!(

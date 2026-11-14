@@ -492,7 +492,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
 #[non_exhaustive]
 pub struct PublisherAliased<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     pub(super) session: Session<R, T, Unicast>,
-    pub(super) mapping_id: u64,
+    pub(super) mapping_id: wz_session_core::wire_id::ExprId,
     pub(super) inline_suffix: Option<String>,
     pub(super) options: PublishOptions,
 }

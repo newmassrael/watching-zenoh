@@ -105,19 +105,21 @@ pub(super) enum Seen {
     /// A `Response` as the querier sees it, so the request id is the
     /// querier's own, which both forwarders must restore.
     Response {
-        request_id: u64,
+        request_id: wz_session_core::wire_id::RequestId,
         keyexpr: String,
         payload: Option<Vec<u8>>,
     },
     /// An `Err` `Response` as the querier sees it, the relay's own
     /// `Err("Timeout")` included.
     ResponseErr {
-        request_id: u64,
+        request_id: wz_session_core::wire_id::RequestId,
         keyexpr: String,
         payload: Vec<u8>,
     },
     /// A `ResponseFinal` as the querier sees it.
-    ResponseFinal { request_id: u64 },
+    ResponseFinal {
+        request_id: wz_session_core::wire_id::RequestId,
+    },
     /// A link-state list, as the (zid, sorted link zids) of each entry that
     /// names its node, so the psid numbering is not compared.
     LinkState {

@@ -1698,7 +1698,7 @@ mod tests {
             ),
             (
                 "aliased",
-                build_push_aliased(u64::MAX >> 8, Some("tail"), b"v").unwrap(),
+                build_push_aliased(crate::wire_id::ExprId::MAX, Some("tail"), b"v").unwrap(),
             ),
             ("delete", build_push_del_literal("demo/x").unwrap()),
             (

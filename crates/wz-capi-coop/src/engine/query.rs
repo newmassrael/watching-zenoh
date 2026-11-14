@@ -57,7 +57,7 @@ pub(super) struct OwnedQuery {
     attachment: Option<Vec<u8>>,
     encoding: Option<EncodingHint>,
     source_info: Option<SourceInfo>,
-    rid: u64,
+    rid: wz_session_core::wire_id::RequestId,
     qos: QosLevel,
 }
 
@@ -75,7 +75,7 @@ impl OwnedQuery {
         }
     }
 
-    pub(super) fn rid(&self) -> u64 {
+    pub(super) fn rid(&self) -> wz_session_core::wire_id::RequestId {
         self.rid
     }
 
@@ -110,7 +110,7 @@ impl QueryView for OwnedQuery {
     fn encoding(&self) -> Option<&EncodingHint> {
         self.encoding.as_ref()
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
         self.rid
     }
     fn qos(&self) -> QosLevel {
@@ -121,7 +121,7 @@ impl QueryView for OwnedQuery {
 /// The responder the dispatch would have built for a query: its key, the replies its parameters
 /// accept (`_anyke` admits any key), its QoS.
 fn responder_for<'a>(
-    rid: u64,
+    rid: wz_session_core::wire_id::RequestId,
     keyexpr: &str,
     parameters: Option<&[u8]>,
     qos: QosLevel,
@@ -136,7 +136,7 @@ fn responder_for<'a>(
 /// One request's Final, held while a callback or a kept query may still answer it.
 struct FinalHold {
     generation: u64,
-    rid: u64,
+    rid: wz_session_core::wire_id::RequestId,
     holds: usize,
     /// The QoS of the Final the dispatch owes, once it owes one.
     due: Option<QosLevel>,
@@ -148,7 +148,7 @@ pub(super) struct FinalHolds(Vec<FinalHold>);
 
 impl FinalHolds {
     /// One hold more on the Final of `rid` on link `generation`.
-    pub(super) fn take(&mut self, generation: u64, rid: u64) {
+    pub(super) fn take(&mut self, generation: u64, rid: wz_session_core::wire_id::RequestId) {
         match self
             .0
             .iter_mut()
@@ -166,7 +166,12 @@ impl FinalHolds {
 
     /// The dispatch owes the Final of `rid`: `true` when nothing holds it, so it goes out now,
     /// `false` when it waits for the last hold.
-    pub(super) fn owe(&mut self, generation: u64, rid: u64, qos: QosLevel) -> bool {
+    pub(super) fn owe(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+        qos: QosLevel,
+    ) -> bool {
         match self
             .0
             .iter_mut()
@@ -181,7 +186,11 @@ impl FinalHolds {
     }
 
     /// Let go of one hold: the Final's QoS when it was owed and this was the last hold.
-    pub(super) fn release(&mut self, generation: u64, rid: u64) -> Option<QosLevel> {
+    pub(super) fn release(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Option<QosLevel> {
         let at = self
             .0
             .iter()
@@ -255,7 +264,8 @@ impl QueryPlane {
 /// callback that steps another session and answers that session's query from inside its own
 /// answers the inner one until it returns, and a hold is taken only on the innermost. Kept here
 /// rather than in a thread-local because an MCU kernel gives a Rust image none.
-static ANSWERING: Lock<Vec<(ThreadId, usize, u64, u64)>> = Lock::new(Vec::new());
+static ANSWERING: Lock<Vec<(ThreadId, usize, u64, wz_session_core::wire_id::RequestId)>> =
+    Lock::new(Vec::new());
 
 /// This thread answers a query, from [`Self::enter`] to drop.
 pub(super) struct Answering {
@@ -263,14 +273,18 @@ pub(super) struct Answering {
 }
 
 impl Answering {
-    pub(super) fn enter(engine: usize, generation: u64, rid: u64) -> Self {
+    pub(super) fn enter(
+        engine: usize,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Self {
         let thread = os::current();
         ANSWERING.with(|a| a.push((thread, engine, generation, rid)));
         Self { thread }
     }
 
     /// The query this thread answers innermost: its engine, generation and request id.
-    fn innermost() -> Option<(usize, u64, u64)> {
+    fn innermost() -> Option<(usize, u64, wz_session_core::wire_id::RequestId)> {
         let thread = os::current();
         ANSWERING.with(|a| {
             a.iter()
@@ -331,7 +345,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder fo
 /// and answers nothing.
 struct CoopHeld<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
     engine: Weak<CoopEngine<L, C>>,
-    held: Option<(u64, u64)>,
+    held: Option<(u64, wz_session_core::wire_id::RequestId)>,
     keyexpr: String,
     parameters: Option<Vec<u8>>,
     qos: QosLevel,

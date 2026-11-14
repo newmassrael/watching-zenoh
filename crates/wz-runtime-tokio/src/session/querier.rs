@@ -403,10 +403,10 @@ impl QueryPlace {
     /// `on_final` as the pending entry holds it: the place goes back once it has run.
     pub(crate) fn guard_final(
         &self,
-        mut on_final: impl FnMut(u64) + Send + 'static,
-    ) -> impl FnMut(u64) + Send + 'static {
+        mut on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
+    ) -> impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static {
         let held = self.0.clone();
-        move |rid: u64| {
+        move |rid: wz_session_core::wire_id::RequestId| {
             on_final(rid);
             held.release();
         }
@@ -567,7 +567,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
     pub fn get(
         &self,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         // R311cw — clock fold-in: `Session::query` now reads the Session-
         // owned `Arc<T>` clock internally, so this delegate no longer
@@ -587,7 +587,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
         &self,
         value: &wz_session_core::extshm::ShmSendHandle,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         let place = self.slots.take()?;
         let (on_reply, on_final) = (place.guard_reply(on_reply), place.guard_final(on_final));
@@ -903,7 +903,7 @@ pub struct MatchingStatus {
 #[non_exhaustive]
 pub struct QuerierAliased<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     pub(super) session: Session<R, T, Unicast>,
-    pub(super) mapping_id: u64,
+    pub(super) mapping_id: wz_session_core::wire_id::ExprId,
     pub(super) inline_suffix: Option<String>,
     pub(super) options: QueryOptions,
     /// This declaration's places for queries in flight, shared by every clone.
@@ -956,7 +956,7 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
     pub fn get(
         &self,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         // R311cw — clock fold-in: delegate path no longer threads
         // `clock: &T`; `Session::query_aliased_auto` reads `self.clock`.
@@ -979,7 +979,7 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
         &self,
         value: &wz_session_core::extshm::ShmSendHandle,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(wz_session_core::wire_id::RequestId) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         let place = self.slots.take()?;
         let (on_reply, on_final) = (place.guard_reply(on_reply), place.guard_final(on_final));

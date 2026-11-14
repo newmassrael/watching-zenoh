@@ -2455,7 +2455,11 @@ mod tests {
     /// suffix is a literal keyexpr; any other id is one the peer never declared in
     /// these tests.
     #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
-    fn response_reply_shm(mapping_id: u64, suffix: Option<&str>, qos: Option<u8>) -> ResponseOwned {
+    fn response_reply_shm(
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        qos: Option<u8>,
+    ) -> ResponseOwned {
         let mut response = response_reply_put(42, mapping_id, suffix, b"");
         let descriptor = crate::extshm::ShmDescriptor {
             data_len: 7,

@@ -302,20 +302,8 @@ mod tests {
     #[test]
     fn the_direct_writer_is_the_codecs_bytes() {
         let mut compared = 0usize;
-        // The ids reach every VLE width the codec writes, the nine-byte one included.
-        for id in [
-            0u64,
-            1,
-            127,
-            128,
-            300,
-            16_384,
-            65_535,
-            1 << 35,
-            1 << 56,
-            1 << 63,
-            u64::MAX,
-        ] {
+        // The ids reach every VLE width an `ExprId` takes, the three-byte one included.
+        for id in [0u16, 1, 127, 128, 300, 16_383, 16_384, 65_535] {
             for suffix in [
                 None,
                 Some("a"),
@@ -468,7 +456,7 @@ mod tests {
         use crate::sample::QosLevel;
 
         let mut compared = 0usize;
-        for id in [1u64, 7, 127, 128, 300, 65_535] {
+        for id in [1u16, 7, 127, 128, 300, 65_535] {
             for suffix in [None, Some("tail"), Some("a/longer/suffix/than/one")] {
                 for raw in [QosLevel::DEFAULT.raw, 0x11, 0x1a] {
                     for payload in [&b""[..], &b"x"[..], &[5u8; 400][..]] {

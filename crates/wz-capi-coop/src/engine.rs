@@ -84,6 +84,7 @@ use wz_session_core::session_init_params::{
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{BoxedSink, SampleView};
+use wz_session_core::wire_id::ExprId;
 use wz_session_core::wireexpr_resolve::{OwnMappingSpace, SharedOwnMappingSpace};
 #[cfg(feature = "listen")]
 use wz_session_core::zid_hex::same_zid;
@@ -317,7 +318,7 @@ unsafe impl<T> Send for Confined<T> {}
 struct LinkOwnSpace<C: ClockSource + 'static>(Rc<McuActions<C>>);
 
 impl<C: ClockSource + 'static> OwnMappingSpace for LinkOwnSpace<C> {
-    fn resolve_own_mapping(&self, id: u64) -> Option<String> {
+    fn resolve_own_mapping(&self, id: ExprId) -> Option<String> {
         OwnMappingSpace::resolve_own_mapping(&*self.0, id)
     }
 }
@@ -420,7 +421,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     admission: Arc<dyn LinkAdmission>,
     subscribers: Vec<SubEntry>,
     keyexprs: Vec<KexprEntry>,
-    next_mapping: u64,
+    next_mapping: ExprId,
     filters: Vec<FilterEntry>,
     next_filter: FilterId,
     interests: Vec<InterestHold>,
@@ -589,7 +590,7 @@ impl QblEntry {
 }
 
 struct KexprEntry {
-    id: u64,
+    id: ExprId,
     keyexpr: String,
     holds: usize,
 }
@@ -639,10 +640,11 @@ struct MatchEntry {
 }
 
 /// The high bit of a request id taken by the leg of a get that the session's own queryables
-/// answer (`local-queryable`): the ids the links' actions hand out are the wire's, which carries
-/// far fewer bits, so none of them has it.
+/// answer (`local-queryable`). A request id is the wire's `RequestId`, and the ids the links'
+/// actions hand out count up from 0, so none of them has the bit until a link has asked 2^31
+/// queries.
 #[cfg(feature = "local-queryable")]
-const LOCAL_REQUEST: u64 = 1 << 63;
+const LOCAL_REQUEST: wz_session_core::wire_id::RequestId = 1 << 31;
 
 /// The locality a matching criterion carries: what the entity counts. The session's own
 /// entities of `plane`'s kind count (`Any`) only for one that asked them to and in a build that
@@ -1912,7 +1914,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// of one hold on its Final, sending the Final when it was owed and this was the last hold.
     /// Nothing is sent on a link that is no longer the session's.
     #[cfg(feature = "queryable")]
-    fn answer(&self, generation: u64, rid: u64, replies: ReplyStage, release: bool) {
+    fn answer(
+        &self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+        replies: ReplyStage,
+        release: bool,
+    ) {
         let Some(core) = self.live() else {
             return;
         };
@@ -2087,7 +2095,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn ask_own_queryables(
         &self,
         core: &mut Core<L, C>,
-        rid: u64,
+        rid: wz_session_core::wire_id::RequestId,
         keyexpr: &str,
         opts: &QueryOptions,
     ) {
@@ -2353,14 +2361,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.deliver();
     }
 
-    fn acquire_keyexpr(&self, keyexpr: String) -> Option<u64> {
+    fn acquire_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
         let mut core = self.live()?;
         let core = &mut core.0;
         if let Some(entry) = core.keyexprs.iter_mut().find(|e| e.keyexpr == keyexpr) {
             entry.holds += 1;
             return Some(entry.id);
         }
+        // The id space is the wire's `ExprId`; once it is spent the counter rests at 0, the
+        // literal's id, and every further declaration is refused rather than re-issuing a live
+        // id.
         let id = core.next_mapping;
+        if id == 0 {
+            return None;
+        }
         // A declaration a link refuses is not made, and the links that took it take it back; one
         // made while a link is down, or that a replay has not reached, is sent in its turn.
         let taken = core.announce_or_undo(
@@ -2371,7 +2385,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if !taken {
             return None;
         }
-        core.next_mapping += 1;
+        core.next_mapping = id.wrapping_add(1);
         core.keyexprs.push(KexprEntry {
             id,
             keyexpr,
@@ -2380,7 +2394,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Some(id)
     }
 
-    fn release_keyexpr(&self, mapping_id: u64) {
+    fn release_keyexpr(&self, mapping_id: ExprId) {
         let Some(mut core) = self.live() else {
             return;
         };
@@ -2398,7 +2412,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
     }
 
-    fn keyexpr_declarations(&self) -> Vec<(u64, String)> {
+    fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         self.live()
             .map(|core| {
                 core.0
@@ -2571,7 +2585,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         &self,
         filter: FilterId,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {
@@ -2817,7 +2831,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut guard.0;
             // An id no link will ever hand out, so no peer's answer can be taken for the session's
             // own (`LOCAL_REQUEST`).
-            let rid = LOCAL_REQUEST | self.next_entity_id();
+            let rid = LOCAL_REQUEST
+                | (self.next_entity_id() as wz_session_core::wire_id::RequestId & !LOCAL_REQUEST);
             let timeout_ms = opts.effective_timeout_ms();
             let deadline_ms = (timeout_ms > 0)
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));

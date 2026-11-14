@@ -316,7 +316,11 @@ mod tests {
 
     /// What one dispatch left behind: what the queryables saw, the replies they
     /// staged, and the Finals owed.
-    type Left = (Vec<Seen>, Vec<QueryReply>, Vec<(u64, QosLevel)>);
+    type Left = (
+        Vec<Seen>,
+        Vec<QueryReply>,
+        Vec<(crate::wire_id::RequestId, QosLevel)>,
+    );
 
     type Registry = super::QueryableRegistry<crate::query_sink::BoxedQuerySink>;
 

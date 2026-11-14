@@ -5428,7 +5428,10 @@ mod tests {
         let registry = SubscriberRegistry::new();
         assert_eq!(registry.resolve_inbound_mapping(0), None);
         assert_eq!(registry.resolve_inbound_mapping(1), None);
-        assert_eq!(registry.resolve_inbound_mapping(u64::MAX), None);
+        assert_eq!(
+            registry.resolve_inbound_mapping(crate::wire_id::ExprId::MAX),
+            None
+        );
     }
 
     #[test]
@@ -5479,7 +5482,7 @@ mod tests {
     fn a_frame_of_plain_puts_is_delivered_as_the_owned_path_delivers_it() {
         use crate::driver_loop::IterationEvent;
         let long = vec![5u8; 300];
-        let puts: [(u64, Option<&str>, &[u8], u8); 7] = [
+        let puts: [(crate::wire_id::ExprId, Option<&str>, &[u8], u8); 7] = [
             (7, None, b"alias", 0x05),
             (7, Some("/sub"), b"", 0x05),
             (0, Some("demo/literal"), &long, 0x1a),
@@ -5555,7 +5558,7 @@ mod tests {
     #[test]
     fn a_frame_of_repeated_keys_is_delivered_as_the_owned_path_delivers_it() {
         use crate::driver_loop::IterationEvent;
-        let puts: [(u64, Option<&str>, &[u8]); 16] = [
+        let puts: [(crate::wire_id::ExprId, Option<&str>, &[u8]); 16] = [
             (0, Some("demo/x"), b"1"),
             (0, Some("demo/x"), b"2"),
             (0, Some("demo/x"), b"3"),

@@ -902,7 +902,7 @@ mod tests {
             assert!(!finals.has_room(), "a full table has no room");
             finals.refuse_request();
             assert_eq!(finals.refusals(), 1, "the refused request is counted");
-            finals.owe(N as u64, QosLevel::DEFAULT);
+            finals.owe(N as u32, QosLevel::DEFAULT);
             assert_eq!(finals.owed(), N, "an entry past N is not taken");
             assert_eq!(
                 finals.refusals(),
@@ -911,7 +911,7 @@ mod tests {
             );
         } else {
             assert!(finals.has_room(), "an advisory capacity always has room");
-            finals.owe(N as u64, QosLevel::DEFAULT);
+            finals.owe(N as u32, QosLevel::DEFAULT);
             assert_eq!(finals.owed(), N + 1);
             assert_eq!(finals.refusals(), 0, "the growable table refuses nothing");
         }
@@ -1122,7 +1122,7 @@ mod tests {
             assert_eq!(stage.stage_parts(parts), Ok(()));
         }
 
-        let mut seen = 0u64;
+        let mut seen = 0u32;
         stage.drain_parts(|parts| {
             assert_eq!(parts.rid, seen, "in the order they were staged");
             assert_eq!(parts.keyexpr, "home/temp");

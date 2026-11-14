@@ -2590,7 +2590,7 @@ where
 #[cfg(feature = "transport-stats")]
 pub fn stats_keyexpr<F>(msg: &NetworkMessage, resolve_alias: F) -> Option<alloc::string::String>
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     #[cfg(not(any(
         feature = "codec-push",
@@ -2623,7 +2623,7 @@ pub fn stats_keyexpr_of_wireexpr<F>(
     resolve_alias: &F,
 ) -> Option<alloc::string::String>
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use wz_codecs::wireexpr::WireexprOwnedVariant as V;
     let (id, suffix) = match &keyexpr.body {
@@ -2637,12 +2637,12 @@ where
 /// when `id` is 0, else the alias's key with the suffix after it.
 #[cfg(feature = "transport-stats")]
 pub fn stats_keyexpr_of_key<F>(
-    id: u64,
+    id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     resolve_alias: &F,
 ) -> Option<alloc::string::String>
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     if id == 0 {
         return suffix.map(alloc::string::String::from);

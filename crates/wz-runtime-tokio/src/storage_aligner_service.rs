@@ -465,7 +465,7 @@ where
                     .push(decoded);
             }
         },
-        move |_rid: u64| {
+        move |_rid: wz_session_core::wire_id::RequestId| {
             if let Some(tx) = final_tx
                 .lock()
                 .expect("aligner final oneshot poisoned")

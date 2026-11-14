@@ -27,6 +27,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptions;
 use wz_session_core::sample::TimestampHint;
+use wz_session_core::wire_id::ExprId;
 
 use crate::cancellation::CancellableFan;
 use crate::{
@@ -171,13 +172,13 @@ pub trait SessionEngine: Send + Sync + 'static {
 
     /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: its mapping id, or
     /// `None` when the session has no id left to give.
-    fn acquire_keyexpr(&self, keyexpr: String) -> Option<u64>;
+    fn acquire_keyexpr(&self, keyexpr: String) -> Option<ExprId>;
 
     /// Let go of one hold on declaration `mapping_id`; the last one retracts it.
-    fn release_keyexpr(&self, mapping_id: u64);
+    fn release_keyexpr(&self, mapping_id: ExprId);
 
     /// The key expression declarations the session holds, `(id, keyexpr)` in declaration order.
-    fn keyexpr_declarations(&self) -> Vec<(u64, String)>;
+    fn keyexpr_declarations(&self) -> Vec<(ExprId, String)>;
 
     /// Tell `sink` whether anything a write filter on `plane` counts matches `keyexpr`, now and
     /// each time that changes: a peer's subscriber, or its queryable (only a complete one when
@@ -256,7 +257,7 @@ pub trait SessionEngine: Send + Sync + 'static {
         &self,
         filter: FilterId,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut;

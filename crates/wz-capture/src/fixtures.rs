@@ -121,7 +121,7 @@ fn frame_carrying(record: &[u8]) -> Vec<u8> {
 }
 
 /// `M=1` — the id lives in the SENDER's own space.
-fn sender_space<'a>(id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
+fn sender_space<'a>(id: wz_session_core::wire_id::ExprId, suffix: Option<&'a str>) -> Wireexpr<'a> {
     Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
             id,

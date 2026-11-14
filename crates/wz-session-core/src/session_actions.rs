@@ -1900,7 +1900,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// starting value, so the choice is cosmetic. `Relaxed` ordering
     /// is sufficient — id uniqueness is the only invariant and
     /// `fetch_add` is atomic under every ordering.
-    pub next_outbound_request_id: AtomicU64,
+    pub next_outbound_request_id: AtomicU32,
     /// The earliest moment the application layer needs the drive loop awake for, in this
     /// session's clock (`u64::MAX`: none). The layer owns deadlines the transport does not know
     /// (a pending query's), and a loop whose link sleeps while the session is idle must wake no
@@ -3640,7 +3640,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 namespace_ingress: R::new_mutex(None::<NamespaceIngress>),
                 #[cfg(feature = "alloc")]
                 plain_put_lane: core::sync::atomic::AtomicBool::new(false),
-                next_outbound_request_id: AtomicU64::new(0),
+                next_outbound_request_id: AtomicU32::new(0),
                 app_wake_deadline_ms: AtomicU64::new(u64::MAX),
                 // From 1: the id 0 is a router's (`alloc_next_token_id`).
                 next_outbound_token_id: AtomicU64::new(1),
@@ -12219,13 +12219,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// `Relaxed` ordering is sufficient — uniqueness is the only
     /// invariant the caller depends on and `fetch_add` is atomic
-    /// under every ordering. The wire `req_id_res` resolution window
-    /// (`params.req_id_res = 0..=3` → 8/16/32/64-bit) is not enforced
-    /// here either; production code with long-running sessions
-    /// emitting more than `1 << req_bits` queries needs an explicit
-    /// modulo (same carry as
-    /// [`Self::next_outbound_frame_sn`]).
-    pub fn alloc_next_request_id(&self) -> u64 {
+    /// under every ordering. The counter is a `RequestId` and wraps,
+    /// as upstream's is and does
+    /// (`zenoh/src/api/session.rs` @ `let qid = state.qid_counter.fetch_add(1, Ordering::SeqCst);`).
+    pub fn alloc_next_request_id(&self) -> crate::wire_id::RequestId {
         self.next_outbound_request_id
             .fetch_add(1, Ordering::Relaxed)
     }

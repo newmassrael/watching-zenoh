@@ -322,7 +322,7 @@ impl SubscriberDetection {
 #[derive(Clone, Default)]
 pub struct EntityForm {
     /// The declaration the wire names, `0` for the literal key.
-    mapping_id: u64,
+    mapping_id: wz_session_core::wire_id::ExprId,
     /// What follows the declared prefix; `None` when it covers the whole key.
     suffix: Option<String>,
     /// The key a subscriber's retraction names beside its id, when it names one.
@@ -340,7 +340,7 @@ impl EntityForm {
     }
 
     /// Declaration `mapping_id` followed by `suffix`.
-    pub fn aliased(mapping_id: u64, suffix: Option<String>) -> Self {
+    pub fn aliased(mapping_id: wz_session_core::wire_id::ExprId, suffix: Option<String>) -> Self {
         Self {
             mapping_id,
             suffix,
@@ -372,7 +372,7 @@ impl EntityForm {
     }
 
     /// The declaration the wire names, `0` for the literal key.
-    pub fn mapping_id(&self) -> u64 {
+    pub fn mapping_id(&self) -> wz_session_core::wire_id::ExprId {
         self.mapping_id
     }
 

@@ -10,7 +10,7 @@ type RecDel = (String, u64, RecSource);
 
 /// R311y562 — one recorded emission's value metadata:
 /// `(encoding packed_id + schema, attachment)`.
-type RecMeta = (Option<(u32, Option<String>)>, Option<Vec<u8>>);
+type RecMeta = (Option<(u32, Option<Vec<u8>>)>, Option<Vec<u8>>);
 
 /// Shared `ReplyOut` recorder for the `answer_from_ring` integration
 /// tests: captures each reply's `(keyexpr, payload)` and its source
@@ -336,7 +336,7 @@ fn cached_delete_replays_on_the_del_arm() {
 fn recovery_reply_carries_encoding_and_attachment() {
     let enc = EncodingHint {
         packed_id: 0x0B,
-        schema: Some("utf8".to_string()),
+        schema: Some(b"utf8".to_vec()),
     };
     let mut ring = VecDeque::new();
     // sn 0: a Put carrying BOTH metadata fields.
@@ -386,7 +386,7 @@ fn recovery_reply_carries_encoding_and_attachment() {
         out.metas,
         vec![
             (
-                Some((0x0B, Some("utf8".to_string()))),
+                Some((0x0B, Some(b"utf8".to_vec()))),
                 Some(b"side-band".to_vec())
             ),
             (None, None),

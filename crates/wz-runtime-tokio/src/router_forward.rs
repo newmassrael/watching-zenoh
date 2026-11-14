@@ -2662,7 +2662,9 @@ pub enum LocalFaceEvent {
     },
     /// The end of the replies to the query the face asked under `request_id`: every queryable
     /// has ended, the query timed out, or nothing was left to ask.
-    ReplyFinal { request_id: u64 },
+    ReplyFinal {
+        request_id: wz_session_core::wire_id::RequestId,
+    },
     /// The router's tables were written, so what the face watches ([`MatchPlane`]) may have
     /// changed. Sent once until the face has looked ([`RouterForwarder::tables_looked_at`]), and
     /// only while the face watches anything ([`RouterForwarder::watch_matching`]): it carries no
@@ -27014,7 +27016,7 @@ mod tests {
 
     /// A BestMatching (wire-default) Request for `keyexpr`, self-sourced (no
     /// ext_nodeid — the inbound neighbour is the querier), rid `rid`.
-    fn request_best(rid: u64, keyexpr: &str) -> NetworkMessage {
+    fn request_best(rid: wz_session_core::wire_id::RequestId, keyexpr: &str) -> NetworkMessage {
         NetworkMessage::Request(Box::new(
             wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
                 .expect("build request"),
@@ -27022,7 +27024,11 @@ mod tests {
     }
 
     /// A Request for `keyexpr` with an explicit [`QueryTarget`], self-sourced.
-    fn request_with_target(rid: u64, keyexpr: &str, target: QueryTarget) -> NetworkMessage {
+    fn request_with_target(
+        rid: wz_session_core::wire_id::RequestId,
+        keyexpr: &str,
+        target: QueryTarget,
+    ) -> NetworkMessage {
         NetworkMessage::Request(Box::new(
             wz_session_core::request_build::build_request_query_with_target(
                 rid,
@@ -31128,7 +31134,10 @@ mod tests {
             NetworkMessage::Push(Box::new(push))
         }
 
-        fn stacked_request(rid: u64, conf_flags: u8) -> NetworkMessage {
+        fn stacked_request(
+            rid: wz_session_core::wire_id::RequestId,
+            conf_flags: u8,
+        ) -> NetworkMessage {
             let mut request =
                 wz_session_core::request_build::build_request_query(rid, 0, Some("demo/q"))
                     .expect("build request");

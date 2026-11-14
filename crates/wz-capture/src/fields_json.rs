@@ -14622,7 +14622,10 @@ mod tests {
         const ZID_HIGH: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
 
         /// `M=0`: the id lives in the RECEIVER's space.
-        fn receiver_space(id: u64, suffix: Option<&'static str>) -> Wireexpr<'static> {
+        fn receiver_space(
+            id: wz_session_core::wire_id::ExprId,
+            suffix: Option<&'static str>,
+        ) -> Wireexpr<'static> {
             Wireexpr {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                     id,

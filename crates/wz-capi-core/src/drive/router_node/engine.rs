@@ -256,14 +256,14 @@ impl SessionEngine for RouterState {
         }
     }
 
-    fn acquire_keyexpr(&self, _keyexpr: String) -> Option<u64> {
+    fn acquire_keyexpr(&self, _keyexpr: String) -> Option<wz_session_core::wire_id::ExprId> {
         // A node names every key whole: there is no alias to hold.
         None
     }
 
-    fn release_keyexpr(&self, _mapping_id: u64) {}
+    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
 
-    fn keyexpr_declarations(&self) -> Vec<(u64, String)> {
+    fn keyexpr_declarations(&self) -> Vec<(wz_session_core::wire_id::ExprId, String)> {
         Vec::new()
     }
 
@@ -346,7 +346,7 @@ impl SessionEngine for RouterState {
         &self,
         _filter: FilterId,
         _keyexpr: &str,
-        _mapping_id: u64,
+        _mapping_id: wz_session_core::wire_id::ExprId,
         _payload: &[u8],
         _params: &PlainPutParams,
     ) -> FilteredPut {

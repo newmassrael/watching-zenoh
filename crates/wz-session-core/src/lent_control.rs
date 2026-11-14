@@ -786,7 +786,7 @@ mod tests {
     /// `(mapping id, suffix)` of every shape a declaration names a keyexpr by:
     /// a literal, an alias alone, an alias with a suffix, an empty suffix, a
     /// multi-byte VLE id and a long suffix.
-    fn keys() -> [(u64, Option<&'static str>); 6] {
+    fn keys() -> [(crate::wire_id::ExprId, Option<&'static str>); 6] {
         [
             (0, Some("a/b")),
             (5, None),
@@ -794,7 +794,7 @@ mod tests {
             (0, Some("")),
             (300, Some("k")),
             (
-                u64::MAX,
+                crate::wire_id::ExprId::MAX,
                 Some("a/very/long/keyexpr/chunk/that/runs/on/and/on/and/on"),
             ),
         ]
@@ -887,17 +887,21 @@ mod tests {
             );
             compared += 3;
             if id != 0 {
+                // A keyexpr's id is an `ExprId`; the entity id past its width
+                // stands for the widest one.
+                let kexpr =
+                    crate::wire_id::ExprId::try_from(id).unwrap_or(crate::wire_id::ExprId::MAX);
                 for suffix in ["a/b", "", "x/y/z/w"] {
                     assert_eq!(
-                        declare_kexpr(id, suffix).unwrap().encode_to_vec(),
-                        owned_declare(&owned::build_declare_kexpr(id, suffix).unwrap()),
-                        "kexpr {id} {suffix:?}"
+                        declare_kexpr(kexpr, suffix).unwrap().encode_to_vec(),
+                        owned_declare(&owned::build_declare_kexpr(kexpr, suffix).unwrap()),
+                        "kexpr {kexpr} {suffix:?}"
                     );
                     compared += 1;
                 }
                 assert_eq!(
-                    undeclare_kexpr(id).encode_to_vec(),
-                    owned_declare(&owned::build_undeclare_kexpr(id))
+                    undeclare_kexpr(kexpr).encode_to_vec(),
+                    owned_declare(&owned::build_undeclare_kexpr(kexpr))
                 );
                 compared += 1;
             }
@@ -996,10 +1000,10 @@ mod tests {
             );
         }
         for (id, mapping, suffix) in [
-            (1u64, 7u64, "tail"),
+            (1u64, 7u16, "tail"),
             (9, 7, ""),
             (1 << 33, 300, "k/l"),
-            (5, u64::MAX, "z"),
+            (5, crate::wire_id::ExprId::MAX, "z"),
         ] {
             let key = NamedKeyexpr::new(mapping, suffix).unwrap();
             assert_eq!(
@@ -1028,14 +1032,15 @@ mod tests {
     fn a_key_past_what_a_named_keyexpr_holds_is_refused_and_one_at_the_bound_is_not() {
         let at_bound = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES);
         let past_bound = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES + 1);
-        // Even the widest id (nine VLE bytes) leaves room for a suffix at the bound.
-        let key = NamedKeyexpr::new(u64::MAX, &at_bound).expect("at the bound");
+        // Even the widest id (three VLE bytes) leaves room for a suffix at the bound.
+        let widest = crate::wire_id::ExprId::MAX;
+        let key = NamedKeyexpr::new(widest, &at_bound).expect("at the bound");
         assert_eq!(
             undeclare_token_naming(1, &key).encode_to_vec(),
-            owned_declare(&owned::build_undeclare_token_on_wire(1, u64::MAX, &at_bound).unwrap())
+            owned_declare(&owned::build_undeclare_token_on_wire(1, widest, &at_bound).unwrap())
         );
         assert_eq!(
-            NamedKeyexpr::new(u64::MAX, &past_bound).err(),
+            NamedKeyexpr::new(widest, &past_bound).err(),
             Some(CodecError::BufferOverflow),
             "past the bound is refused, not cut"
         );
@@ -1231,7 +1236,7 @@ mod tests {
             QosLevel::from_parts(Priority::Control, CongestionControl::Block, false),
             QosLevel::from_parts(Priority::DataHigh, CongestionControl::Drop, true),
         ];
-        for request_id in [0u64, 7, 1 << 50] {
+        for request_id in [0u32, 7, 1 << 28, u32::MAX] {
             for qos in levels {
                 let built = crate::response_final_build::build_response_final(request_id, qos);
                 assert_eq!(

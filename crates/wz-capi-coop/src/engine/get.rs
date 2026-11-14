@@ -60,7 +60,7 @@ pub(super) enum GetKind {
 pub(super) struct PendingGet {
     pub(super) face: FaceId,
     pub(super) leg: u64,
-    pub(super) rid: u64,
+    pub(super) rid: wz_session_core::wire_id::RequestId,
     pub(super) kind: GetKind,
 }
 

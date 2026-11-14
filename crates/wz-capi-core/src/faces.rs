@@ -113,6 +113,7 @@ use wz_runtime_tokio::Reliability;
 use wz_session_core::admission_retry::AdmissionRetry;
 use wz_session_core::atomic_tx::{decide, AllOrNone, LegRoom};
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
+use wz_session_core::wire_id::ExprId;
 
 #[cfg(feature = "multicast-transport")]
 mod multicast;
@@ -505,7 +506,7 @@ enum PutKey<'a> {
     // Read only by the group leg, which a build without the multicast transport has not.
     #[cfg_attr(not(feature = "multicast-transport"), allow(dead_code))]
     Alias {
-        mapping_id: u64,
+        mapping_id: ExprId,
         suffix: Option<&'a str>,
     },
     /// A declared alias together with the literal it stands for, which the caller holds:
@@ -514,7 +515,7 @@ enum PutKey<'a> {
     #[cfg_attr(not(feature = "multicast-transport"), allow(dead_code))]
     Declared {
         literal: &'a str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         suffix: Option<&'a str>,
     },
 }
@@ -1164,7 +1165,7 @@ struct QblEntry {
 /// holds our ids in its own inbound table, so two peers cannot collide, and
 /// a peer's own outbound ids live in a different table entirely.
 struct KexprEntry {
-    id: u64,
+    id: ExprId,
     keyexpr: String,
     /// How many holders the declaration has: `1` for one made through
     /// [`SharedSession::declare_keyexpr`], and one more for each
@@ -1809,7 +1810,7 @@ struct Inner {
     /// first id issued is 1: zero is reserved on the wire
     /// (`SendDeclareError::ReservedMappingIdZero`) and is also this crate's
     /// "not declared" discriminant in `z_loaned_keyexpr_t::_mapping`.
-    next_kexpr_id: u64,
+    next_kexpr_id: ExprId,
 }
 
 impl Inner {
@@ -3681,7 +3682,7 @@ impl SharedSession {
     #[cfg(feature = "transport-shm")]
     pub fn publish_shm_aliased_all(
         &self,
-        mapping_id: u64,
+        mapping_id: ExprId,
         suffix: Option<&str>,
         payload: Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>,
         opts: &PublishOptions,
@@ -4114,7 +4115,7 @@ impl SharedSession {
     /// the whole key.
     pub fn publish_aliased_all(
         &self,
-        mapping_id: u64,
+        mapping_id: ExprId,
         suffix: Option<&str>,
         payload: &[u8],
         opts: &PublishOptions,
@@ -4128,7 +4129,7 @@ impl SharedSession {
     fn publish_aliased_all_for(
         &self,
         key: Option<&str>,
-        mapping_id: u64,
+        mapping_id: ExprId,
         suffix: Option<&str>,
         payload: &[u8],
         opts: &PublishOptions,
@@ -4209,7 +4210,7 @@ impl SharedSession {
     pub fn publish_declared_all(
         &self,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
@@ -4254,18 +4255,14 @@ impl SharedSession {
     /// no face yet, nothing goes on the wire and the entry is still recorded,
     /// so every FUTURE face replays it in [`Self::face_up`].
     ///
-    /// Returns `None` when the id space is exhausted. The space is the WIRE's,
-    /// not ours: zenoh types `DeclareKeyExpr.id` as `ExprId = u16` and pico's
-    /// `_z_decl_kexpr_t` holds a `uint16_t`, so ids above `u16::MAX` are
-    /// rejected by `send_declare_keyexpr` and must not be handed out. Refusing
-    /// is the honest answer — wrapping would silently re-issue a live id and
-    /// re-point a peer's existing alias at a different keyexpr.
-    pub fn declare_keyexpr(&self, keyexpr: String) -> Option<u64> {
+    /// Returns `None` when the id space is exhausted. The space is the WIRE's
+    /// `ExprId`, as zenoh's `DeclareKeyExpr.id` and pico's `uint16_t _id` are,
+    /// so the counter is one and exhausts where it does. Refusing is the honest
+    /// answer — wrapping would silently re-issue a live id and re-point a
+    /// peer's existing alias at a different keyexpr.
+    pub fn declare_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
         let mut guard = self.lock();
         let id = guard.next_kexpr_id.checked_add(1)?;
-        if id > u64::from(u16::MAX) {
-            return None;
-        }
         guard.next_kexpr_id = id;
 
         for face in guard.faces.values() {
@@ -4306,7 +4303,7 @@ impl SharedSession {
     /// each call there is its own declaration with its own id.
     ///
     /// `None` when the id space is exhausted, as for [`Self::declare_keyexpr`].
-    pub fn acquire_keyexpr(&self, keyexpr: String) -> Option<u64> {
+    pub fn acquire_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
         {
             let mut guard = self.lock();
             if let Some(entry) = guard.kexprs.iter_mut().find(|e| e.keyexpr == keyexpr) {
@@ -4334,7 +4331,7 @@ impl SharedSession {
     /// The count and the retraction are one step under one lock: releasing the
     /// lock between them would let an [`Self::acquire_keyexpr`] find the entry at
     /// zero, take a holder, and then have its key retracted from under it.
-    pub fn release_keyexpr(&self, mapping_id: u64) {
+    pub fn release_keyexpr(&self, mapping_id: ExprId) {
         let mut guard = self.lock();
         let Some(entry) = guard.kexprs.iter_mut().find(|e| e.id == mapping_id) else {
             return;
@@ -4348,7 +4345,7 @@ impl SharedSession {
 
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
     /// in declaration order — the SSOT every new face is replayed from.
-    pub fn keyexpr_declarations(&self) -> Vec<(u64, String)> {
+    pub fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         self.lock()
             .kexprs
             .iter()
@@ -4362,7 +4359,7 @@ impl SharedSession {
     /// No cross-lock drop dance is needed here, unlike the subscriber and
     /// queryable twins: a `KexprEntry` owns a `String` and no `Arc<CClosure>`,
     /// so releasing it cannot run C code.
-    pub fn undeclare_keyexpr(&self, mapping_id: u64) {
+    pub fn undeclare_keyexpr(&self, mapping_id: ExprId) {
         let mut guard = self.lock();
         self.retract_keyexpr_locked(&mut guard, mapping_id);
     }
@@ -4370,7 +4367,7 @@ impl SharedSession {
     /// The retraction itself, for a caller that already holds the registry lock
     /// — [`Self::undeclare_keyexpr`] and [`Self::release_keyexpr`], which must
     /// not let it go between deciding and doing.
-    fn retract_keyexpr_locked(&self, guard: &mut Inner, mapping_id: u64) {
+    fn retract_keyexpr_locked(&self, guard: &mut Inner, mapping_id: ExprId) {
         if let Some(pos) = guard.kexprs.iter().position(|e| e.id == mapping_id) {
             guard.kexprs.remove(pos);
         }
@@ -4991,7 +4988,7 @@ impl SharedSession {
     pub fn put_plain_declared(
         &self,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> Option<Result<usize, FanoutError>> {
@@ -5026,7 +5023,7 @@ impl SharedSession {
         &self,
         filter: FilterId,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> FilteredPut {
@@ -5080,7 +5077,7 @@ impl SharedSession {
         &self,
         targets: &FanTargets,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> FilteredPut {
@@ -5100,7 +5097,7 @@ impl SharedSession {
         &self,
         targets: &FanTargets,
         keyexpr: &str,
-        mapping_id: u64,
+        mapping_id: ExprId,
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> Option<Result<usize, FanoutError>> {

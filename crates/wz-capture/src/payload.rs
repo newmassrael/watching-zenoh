@@ -1420,14 +1420,14 @@ impl PayloadCensus {
         if let NetworkMessage::ResponseFinal(f) = message {
             let from_low = crate::agg::dir_index(direction) == 0;
             if let Some(judge) = judging {
-                judge.close(ctx.list(), from_low, f.request_id);
+                judge.close(ctx.list(), from_low, u64::from(f.request_id));
             }
             if let Some(sink) = sink {
                 sink(Sighting::Final(FinalSeen {
                     row: RowKey::of(ctx.list(), frame),
                     record,
                     from_low,
-                    request: f.request_id,
+                    request: u64::from(f.request_id),
                 }));
             }
             return;
@@ -1474,7 +1474,7 @@ impl PayloadCensus {
                     keyexpr: keyexpr.as_deref(),
                     missed: keyexpr
                         .is_none()
-                        .then(|| (id, suffix.filter(|s| !s.is_empty()))),
+                        .then(|| (u64::from(id), suffix.filter(|s| !s.is_empty()))),
                     payload: bytes,
                     elsewhere: shm,
                     sender: ctx.zid(direction),
@@ -1560,7 +1560,7 @@ impl PayloadCensus {
                 fixed,
                 missed: keyexpr
                     .is_none()
-                    .then(|| (id, suffix.filter(|s| !s.is_empty()))),
+                    .then(|| (u64::from(id), suffix.filter(|s| !s.is_empty()))),
                 from_low: crate::agg::dir_index(direction) == 0,
                 declared: encoding,
                 bytes,
@@ -1734,7 +1734,7 @@ pub(crate) fn sample_carrier(
             | ResponseOwnedVariant::Default { body: reply, .. } => match &reply.body {
                 ReplyOwnedVariant::CodecZenohMsgPut(_) | ReplyOwnedVariant::Default { .. } => {
                     Some(Carrier::Reply {
-                        request: r.request_id,
+                        request: u64::from(r.request_id),
                     })
                 }
                 ReplyOwnedVariant::CodecZenohMsgDel(_) => None,

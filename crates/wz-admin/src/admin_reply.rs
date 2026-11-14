@@ -289,7 +289,7 @@ mod tests {
                 String::from(keyexpr),
                 String::from_utf8(payload.to_vec()).expect("an admin reply is text"),
                 encoding.packed_id,
-                encoding.schema.clone(),
+                encoding.schema_text().map(String::from),
             ));
             Ok(())
         }

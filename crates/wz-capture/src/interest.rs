@@ -1459,7 +1459,11 @@ mod tests {
             .encode_to_vec()
     }
 
-    fn declare_sub_aliased(id: u64, mapping: u64, suffix: Option<&str>) -> Vec<u8> {
+    fn declare_sub_aliased(
+        id: u64,
+        mapping: wz_session_core::wire_id::ExprId,
+        suffix: Option<&str>,
+    ) -> Vec<u8> {
         declare_build::build_declare_subscriber(id, mapping, suffix)
             .expect("the production builder must build a subscriber")
             .try_as_borrowed()
@@ -1494,7 +1498,7 @@ mod tests {
     /// `allow(dead_code)`: its only caller is the aliased-declaration test,
     /// which needs a matcher to assert coverage.
     #[cfg(feature = "filter-wildcards")]
-    fn declare_kexpr(id: u64, suffix: &str) -> Vec<u8> {
+    fn declare_kexpr(id: wz_session_core::wire_id::ExprId, suffix: &str) -> Vec<u8> {
         declare_build::build_declare_kexpr(id, suffix)
             .expect("the production builder must build a kexpr binding")
             .try_as_borrowed()

@@ -4203,7 +4203,7 @@ mod tests {
     /// subscriber's `demo/data` and carrying the `source_info` the recovered-
     /// sample re-keying requires.
     #[cfg(feature = "ext-pubsub-advanced-history")]
-    fn deliver_history_reply(session: &TokioSession, rid: u64) {
+    fn deliver_history_reply(session: &TokioSession, rid: wz_session_core::wire_id::RequestId) {
         use wz_session_core::reply::{InboundReply, InboundReplyBody};
 
         let inbound = InboundReply {
@@ -4232,7 +4232,7 @@ mod tests {
     /// Inject the terminal Final for `rid` (what runs `finish_history` and
     /// flushes the reorder buffer into `on_sample`).
     #[cfg(feature = "ext-pubsub-advanced-history")]
-    fn deliver_history_final(session: &TokioSession, rid: u64) {
+    fn deliver_history_final(session: &TokioSession, rid: wz_session_core::wire_id::RequestId) {
         session
             .observer()
             .lock()

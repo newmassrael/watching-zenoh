@@ -304,7 +304,7 @@ struct OwnedQueryEvent {
     payload_lent: bool,
     source_info: Option<SourceInfo>,
     encoding: Option<EncodingHint>,
-    rid: u64,
+    rid: wz_session_core::wire_id::RequestId,
     is_local: bool,
     // R2594 — the query's QoS, copied out for the same reason as every field
     // above: the deferred job rebuilds the responder after the borrowed view

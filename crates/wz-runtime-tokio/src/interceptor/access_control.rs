@@ -716,7 +716,7 @@ mod tests {
     /// A Put aliased to `mapping_id`, with the fixed `/data` suffix — the one
     /// message shape the three alias legs below vary the TABLE around, so the
     /// only difference between them is whether (and to what) the id is declared.
-    fn aliased_put(mapping_id: u64) -> NetworkMessage {
+    fn aliased_put(mapping_id: wz_session_core::wire_id::ExprId) -> NetworkMessage {
         NetworkMessage::Push(Box::new(
             build_push_aliased(mapping_id, Some("/data"), b"x").expect("build aliased push"),
         ))

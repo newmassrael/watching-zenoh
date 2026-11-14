@@ -173,7 +173,7 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     #[allow(clippy::too_many_arguments)]
     fn send_plain_put_qos(
         payload: &Self::Payload,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         suffix: Option<&str>,
         value: &[u8],
         qos: Option<wz_session_core::sample::QosLevel>,
@@ -276,7 +276,11 @@ pub trait RemoteReplyRoute: Clone {
     /// Send one reply the handler produced.
     fn send_reply(&self, reply: wz_session_core::query::QueryReply);
     /// Send the query's terminator, once every reply has left.
-    fn send_final(&self, rid: u64, qos: wz_session_core::sample::QosLevel);
+    fn send_final(
+        &self,
+        rid: wz_session_core::wire_id::RequestId,
+        qos: wz_session_core::sample::QosLevel,
+    );
 }
 
 #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
@@ -285,7 +289,11 @@ impl<R: SessionRuntime, T: TimeSource> RemoteReplyRoute for Arc<SessionLinkActio
         super::queryable::send_staged_reply(self, reply);
     }
 
-    fn send_final(&self, rid: u64, qos: wz_session_core::sample::QosLevel) {
+    fn send_final(
+        &self,
+        rid: wz_session_core::wire_id::RequestId,
+        qos: wz_session_core::sample::QosLevel,
+    ) {
         self.send_response_final(rid, qos);
     }
 }
@@ -312,7 +320,11 @@ impl RemoteReplyRoute
         }
     }
 
-    fn send_final(&self, rid: u64, qos: wz_session_core::sample::QosLevel) {
+    fn send_final(
+        &self,
+        rid: wz_session_core::wire_id::RequestId,
+        qos: wz_session_core::sample::QosLevel,
+    ) {
         use wz_session_core::response_sink::ResponseSink as _;
         self.send_response_final(rid, qos);
     }
@@ -336,7 +348,12 @@ pub struct SilentGroupRoute;
 ))]
 impl RemoteReplyRoute for SilentGroupRoute {
     fn send_reply(&self, _reply: wz_session_core::query::QueryReply) {}
-    fn send_final(&self, _rid: u64, _qos: wz_session_core::sample::QosLevel) {}
+    fn send_final(
+        &self,
+        _rid: wz_session_core::wire_id::RequestId,
+        _qos: wz_session_core::sample::QosLevel,
+    ) {
+    }
 }
 
 /// Typestate marker for a UNICAST session: the payload is the per-peer
@@ -485,7 +502,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
     #[cfg(feature = "codec-push")]
     fn send_plain_put_qos(
         payload: &Self::Payload,
-        mapping_id: u64,
+        mapping_id: wz_session_core::wire_id::ExprId,
         suffix: Option<&str>,
         value: &[u8],
         qos: Option<wz_session_core::sample::QosLevel>,

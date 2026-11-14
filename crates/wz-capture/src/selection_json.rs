@@ -1581,7 +1581,10 @@ pub(crate) mod tests {
     }
 
     /// A `Response` whose `Reply` carries a `MsgDel` rather than a put.
-    fn response_reply_del(request_id: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
+    fn response_reply_del(
+        request_id: wz_session_core::wire_id::RequestId,
+        keyexpr: Wireexpr<'static>,
+    ) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
         wz_codecs::lent::Response {
             header: wz_codecs::lent::Response::default().header | n,
@@ -2230,7 +2233,10 @@ pub(crate) mod tests {
     /// A `Request` with a `Del` body, which no zenoh peer sends (upstream's
     /// request body is a query and nothing else) and this reader's codec
     /// decodes, so the dissection classifies it by its body.
-    fn request_del(rid: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
+    fn request_del(
+        rid: wz_session_core::wire_id::RequestId,
+        keyexpr: Wireexpr<'static>,
+    ) -> Vec<u8> {
         let n = if has_suffix(&keyexpr) { FLAG_N_N } else { 0 };
         wz_codecs::lent::Request {
             header: wz_codecs::lent::Request::default().header | n,
