@@ -1024,6 +1024,27 @@ only; AP rows have their own resource discipline (io_uring fixed-
 buffer registration count, QNX shm region count) but not a hard
 no-heap rule.
 
+**The io_uring row reads both link shapes with one submission.** The
+row submits `IORING_OP_READ_FIXED` into a registered slot when a link
+asks to read (a pull: one read armed per link), for every link whose
+socket the ring may read: TCP, unix-domain stream, unixpipe, vsock
+and connected UDP, the set upstream's `get_fd` answers for. What
+differs by link is how a completion is cut into frames. A byte-stream
+completion is any run of the stream, cut by the length prefixes
+across completions; a datagram completion is exactly one datagram,
+which is one frame, and a read that fills the whole slot is the sign
+of a truncation (a slot is wider than any UDP datagram). Upstream
+reads both shapes with a multishot receive over buffers it provides
+to the kernel, which its push model needs (a read is armed at all
+times, so the buffer is chosen when data arrives); in the pull model
+the destination is known when the read is armed, so the datagram
+needs only its framing rule and not that submission shape. The
+trade: a datagram's size is not known when its read is armed, so
+each lands in a slot sized for the largest, as upstream's provided
+buffers are sized at one and a half batches. An unconnected UDP
+socket (an accepted face behind the source demux) stays off the
+ring on both sides.
+
 **Why this matters even in Phase A–C.** Authors writing SCXML for
 MCU today are *implicitly* writing portable substrate code. The
 codec and link kinds they author against the buffer-pool lifecycle

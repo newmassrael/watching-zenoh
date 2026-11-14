@@ -13791,9 +13791,12 @@ layer_c1br_uring_fixed_buffers() {
     # nothing else of this UID registers. Serialized and filtered, this lane is
     # that condition; a whole-`--lib` parallel lane (C1bn) is not, and redded it
     # on the FIRST registration in hosted run 36064882812.
+    # The datagram link chooses its read body in `udp_pipeline`, so its
+    # witnesses are a fourth module path, `udp_pipeline::ring_selection::`,
+    # named here for the reason the third one is.
     out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-tokio-uring \
         --lib --quiet -- --include-ignored --test-threads=1 uring:: uring_reactor:: \
-        stream_link::ring_selection:: 2>&1)" \
+        stream_link::ring_selection:: udp_pipeline::ring_selection:: 2>&1)" \
         || { echo "$out"; return 1; }
     local tests
     tests="$(_runci_passed_count <<<"$out")"

@@ -268,9 +268,14 @@ ANSWERS: tuple[tuple[str, str | None, str], ...] = (
         "the io_uring fixed-buffer read adapter (`uring.rs`) and the reactor "
         "that drives it (`uring_reactor.rs`); on Linux a TCP, unix-domain "
         "stream, unixpipe or vsock link picks the ring body when the feature "
-        "is on (`StreamReadDriver::choose_ring`), as upstream's "
+        "is on (`StreamReadDriver::choose_ring`), and so does a dialed, "
+        "connected UDP link (`UdpReadDriver`), as upstream's "
         "`rx_task_uring` dispatch picks it for a link whose `get_fd` answers "
-        "(`link_ring_fd.rs` holds the table row by row). ARRIVED in 1.10.0 and was judged "
+        "(`link_ring_fd.rs` holds the table row by row). The reactor cuts a "
+        "stream link's completions by its length prefixes and hands a "
+        "datagram link's up one datagram per frame, upstream's "
+        "`setup_fragmented_read` and `setup_read`; an unconnected UDP socket "
+        "stays off the ring on both sides. ARRIVED in 1.10.0 and was judged "
         "UNANSWERED at R2230 on the belief that wz had no io_uring path and "
         "that `uring.rs` shared only a name with it; both were wrong, and the "
         "module headers that said no link selects it were stale too. It adds "
@@ -297,15 +302,6 @@ PARTIAL: dict[str, str] = {
         "its transport and routing tasks run on the engine, whose spawns on "
         "`wz-runtime-tokio` carry no span. What is here is the spawns the "
         "facade makes through `ZRuntime`"
-    ),
-    "uring": (
-        "open-debt item 583 owns the link that is not on the ring: upstream "
-        "hands it the fd of its TCP, unix-domain stream, unixpipe, vsock and "
-        "connected UDP links (the TLS, QUIC, serial and WebSocket links answer "
-        "`get_fd` with an error), and wz hands it all of those but UDP, "
-        "which is a datagram link with no length prefix for the stream body "
-        "to frame by and would need upstream's multishot, provided-buffer "
-        "shape, which `runtime-tokio-uring`'s design row does not choose"
     ),
 }
 

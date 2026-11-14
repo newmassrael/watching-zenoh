@@ -34,7 +34,12 @@
 //!   accept demux's per-src channel (see below). No framing prefix — UDP
 //!   preserves message boundaries, so one datagram is exactly one wire
 //!   message (contrast the TCP `crate::poll_framed` / `StreamEnvelope`
-//!   length-prefix reassembly).
+//!   length-prefix reassembly). Under `runtime-tokio-uring` on Linux a link
+//!   whose socket is CONNECTED (a dialed one) reads through the node's
+//!   `io_uring` reactor instead, attached with the datagram framing (one
+//!   completion, one datagram, one frame); an accepted face and an unconnected
+//!   socket stay on the tokio read, as upstream's unconnected udp link stays
+//!   off its ring. `crate::uring_reactor`'s "Two framings" gives the rule.
 //! - [`UdpWriteDriver`] — holds the channel sender; impls
 //!   [`BoxedLinkDriver`] with a non-blocking enqueue, mirroring
 //!   `crate::link_pipeline::TcpWriteDriver` so the sync-action /
@@ -847,16 +852,61 @@ enum UdpRxSource {
 /// handshake), and send fails loud (the FSM's outbound path is the sibling
 /// [`UdpWriteDriver`]).
 pub struct UdpReadDriver {
+    /// Which read body this link uses, decided at its first read as
+    /// `crate::stream_link::StreamReadDriver` decides it, and declared before
+    /// `source` so the ring body, which borrows the socket's descriptor, is
+    /// dropped before the socket.
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    ring: DatagramRing,
+    /// Whose reactor `choose_ring` consults; `None` is the node's.
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    reactor: Option<Arc<crate::uring_reactor::UringReactor>>,
     source: UdpRxSource,
     /// Item 902 — the watch on this link's write latch: a write the link's
     /// writer could not make is reported here as the link's loss.
     write_fault: DatagramWriteWatch,
 }
 
+/// The read body a [`UdpReadDriver`] dispatched to, or the fact that it has
+/// not asked yet; three states for the reason `stream_link`'s `RingChoice`
+/// gives (a link that was answered no must not ask again on every datagram).
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
+enum DatagramRing {
+    Undecided,
+    /// The tokio read of `UdpReadDriver::receive`.
+    Socket,
+    /// One datagram per ring completion.
+    Ring(Box<crate::uring_reactor::UringRx>),
+}
+
 impl UdpReadDriver {
     /// The dial/scout read driver: `recv_from` this link's own socket.
     fn from_socket(socket: Arc<UdpSocket>, write_fault: DatagramWriteWatch) -> Self {
         Self {
+            #[cfg(all(
+                feature = "runtime-tokio-uring",
+                feature = "transport-link-tcp",
+                target_os = "linux"
+            ))]
+            ring: DatagramRing::Undecided,
+            #[cfg(all(
+                feature = "runtime-tokio-uring",
+                feature = "transport-link-tcp",
+                target_os = "linux"
+            ))]
+            reactor: None,
             source: UdpRxSource::Socket(socket),
             write_fault,
         }
@@ -872,12 +922,93 @@ impl UdpReadDriver {
         write_fault: DatagramWriteWatch,
     ) -> Self {
         Self {
+            #[cfg(all(
+                feature = "runtime-tokio-uring",
+                feature = "transport-link-tcp",
+                target_os = "linux"
+            ))]
+            ring: DatagramRing::Undecided,
+            #[cfg(all(
+                feature = "runtime-tokio-uring",
+                feature = "transport-link-tcp",
+                target_os = "linux"
+            ))]
+            reactor: None,
             source: UdpRxSource::Demux {
                 rx,
                 peer,
                 _pump: pump,
             },
             write_fault,
+        }
+    }
+
+    /// The same driver over a reactor the caller owns, for a witness that must
+    /// not build the node's (`StreamReadDriver::on_reactor` gives the reason).
+    /// Must be called before the first `poll_event`.
+    #[cfg(all(
+        test,
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    pub(crate) fn on_reactor(mut self, reactor: Arc<crate::uring_reactor::UringReactor>) -> Self {
+        self.reactor = Some(reactor);
+        self
+    }
+
+    /// Which body this link settled on; for a witness, as
+    /// `StreamReadDriver::reads_through_ring` is.
+    #[cfg(all(
+        test,
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    pub(crate) fn reads_through_ring(&self) -> bool {
+        matches!(self.ring, DatagramRing::Ring(_))
+    }
+
+    /// THE SELECTION POINT for a datagram link, asked once: upstream's
+    /// conjuncts (`io/zenoh-transport/src/unicast/universal/link.rs` @
+    /// `if transport.manager.state.uring.is_some() && link.link.get_fd().is_ok() {`)
+    /// in the order `StreamReadDriver::choose_ring` asks them, the descriptor
+    /// first because the reactor is built on first use.
+    ///
+    /// Only a link that owns its socket can answer. An accepted face reads the
+    /// listener's shared socket through the demux pump, so it stays on the
+    /// tokio read, as upstream's unconnected link does; and the socket must be
+    /// connected (`RingReadable` for `UdpSocket`), since that is what makes its
+    /// peer the source of every datagram the ring can read from it.
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    fn choose_ring(&self) -> DatagramRing {
+        use crate::link_ring_fd::RingReadable;
+
+        let UdpRxSource::Socket(socket) = &self.source else {
+            return DatagramRing::Socket;
+        };
+        let Some(fd) = socket.ring_fd() else {
+            return DatagramRing::Socket;
+        };
+        let Ok(peer) = socket.peer_addr() else {
+            return DatagramRing::Socket;
+        };
+        let reactor = match self.reactor.as_deref() {
+            Some(owned) => owned,
+            None => match crate::uring_reactor::UringReactor::node() {
+                Some(node) => node,
+                None => return DatagramRing::Socket,
+            },
+        };
+        match reactor.attach_datagram(fd, peer) {
+            Ok(rx) => DatagramRing::Ring(Box::new(rx)),
+            // A reactor whose worker stopped: the tokio read serves the same
+            // socket, so the link loses the ring and not its session.
+            Err(_) => DatagramRing::Socket,
         }
     }
 
@@ -951,6 +1082,27 @@ impl LinkDriver for UdpReadDriver {
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
+        #[cfg(all(
+            feature = "runtime-tokio-uring",
+            feature = "transport-link-tcp",
+            target_os = "linux"
+        ))]
+        {
+            if matches!(self.ring, DatagramRing::Undecided) {
+                self.ring = self.choose_ring();
+            }
+            if let DatagramRing::Ring(rx) = &mut self.ring {
+                // The write latch is raced against the ring read exactly as it
+                // is against the tokio read below, and for the same reason.
+                return tokio::select! {
+                    biased;
+                    () = self.write_fault.tripped() => LinkEvent::Lost {
+                        cause: LostCause::OsError,
+                    },
+                    event = rx.poll_event() => event,
+                };
+            }
+        }
         // Item 902 — a failed write is reported here, as a failed read is. The
         // latch is read FIRST (`biased`): a link that could not write is lost
         // whatever else is waiting on it, as upstream deletes the transport at
@@ -1944,5 +2096,87 @@ mod tests {
             Ok(LinkEvent::Rx(frame)) => assert_eq!(frame.bytes, b"still-served"),
             other => panic!("the sibling face must keep its link; got {other:?}"),
         }
+    }
+}
+
+/// The selection point's witnesses for a datagram link: which read body a
+/// [`UdpReadDriver`] is given. A module of its own so the serialized uring lane
+/// names it by path, as it names `stream_link::ring_selection`; every test here
+/// registers a pool through its own reactor and none builds the node's.
+#[cfg(all(
+    test,
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
+mod ring_selection {
+    use super::*;
+    use crate::link_rx_arena::LinkRxArena;
+    use crate::uring_reactor::UringReactor;
+
+    /// Bounded so a defect reds instead of hanging the lane.
+    async fn within<F: std::future::Future>(f: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(10), f)
+            .await
+            .expect("the link must answer")
+    }
+
+    /// A DIALED link reads through the ring, one datagram per frame, tagged
+    /// with the peer it dialed.
+    ///
+    /// The first datagram begins with what a stream link reads as a two-byte
+    /// length prefix, and both are sent before the link reads, so a body that
+    /// cut datagrams by prefix would hand up `xy` here. CONTROL: answer `None`
+    /// from the udp `ring_fd` and `reads_through_ring` reds while the frames
+    /// still pass, which is what keeps the two halves of this test apart.
+    #[tokio::test]
+    async fn a_dialed_link_reads_its_datagrams_through_the_ring() {
+        let reactor = Arc::new(UringReactor::start(LinkRxArena::new()).expect("a reactor"));
+        let peer = UdpSocket::bind("127.0.0.1:0").await.expect("bind peer");
+        let peer_addr = peer.local_addr().expect("peer address");
+        let socket = dial_udp(peer_addr, &LinkSocket::NONE).await.expect("dial");
+        let local = socket.local_addr().expect("local address");
+        let (read, _write, _writer) = wire_udp_socket(socket, peer_addr);
+        let mut read = read.on_reactor(Arc::clone(&reactor));
+
+        let first = [0x02u8, 0x00, b'x', b'y', b'z'];
+        peer.send_to(&first, local).await.expect("send");
+        peer.send_to(b"second", local).await.expect("send");
+        for want in [&first[..], &b"second"[..]] {
+            match within(read.poll_event()).await {
+                LinkEvent::Rx(frame) => {
+                    assert_eq!(frame.bytes, want, "one datagram, one frame");
+                    assert_eq!(frame.src, Some(peer_addr), "tagged with the peer");
+                }
+                other => panic!("expected a frame, got {other:?}"),
+            }
+        }
+        assert!(
+            read.reads_through_ring(),
+            "a connected socket's link is read through the ring"
+        );
+    }
+
+    /// An UNCONNECTED socket's link stays on the tokio read: the ring cannot
+    /// tell which peer a datagram on it came from. Its datagram still arrives.
+    #[tokio::test]
+    async fn an_unconnected_socket_stays_on_the_tokio_read() {
+        let reactor = Arc::new(UringReactor::start(LinkRxArena::new()).expect("a reactor"));
+        let a = UdpSocket::bind("127.0.0.1:0").await.expect("bind a");
+        let b = UdpSocket::bind("127.0.0.1:0").await.expect("bind b");
+        let a_addr = a.local_addr().expect("a address");
+        let b_addr = b.local_addr().expect("b address");
+        let (read, _write, _writer) = wire_udp_socket(a, b_addr);
+        let mut read = read.on_reactor(reactor);
+
+        b.send_to(b"hi", a_addr).await.expect("send");
+        match within(read.poll_event()).await {
+            LinkEvent::Rx(frame) => assert_eq!(frame.bytes, b"hi"),
+            other => panic!("expected a frame, got {other:?}"),
+        }
+        assert!(
+            !read.reads_through_ring(),
+            "an unconnected socket is not handed to the ring"
+        );
     }
 }
