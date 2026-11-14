@@ -12,7 +12,7 @@
 //! [`crate::handshake_encode`] (the unicast INIT / OPEN / CLOSE encoders,
 //! hoisted for the same reason). The tokio drive loop keeps the IO: it
 //! calls [`encode_join`] on the beacon tick and [`decode_join`] /
-//! [`validate_join`] in its RX classifier.
+//! [`judge_join`] in its RX classifier.
 //!
 //! Alloc note: [`encode_join`] returns an owned `Vec` and exists on the heap
 //! profile only; [`encode_join_into`] writes the same datagram through a sink the
@@ -40,7 +40,7 @@ use wz_codecs::wire_const;
 
 use crate::multicast_dispatch::JoinBaseline;
 use crate::multicast_params::{
-    pack_res_cbyte, unpack_res_cbyte, MulticastParams, PROTOCOL_DEFAULT_BATCH_SIZE,
+    pack_res_cbyte, unpack_res_cbyte, GroupJoinRule, MulticastParams, PROTOCOL_DEFAULT_BATCH_SIZE,
     PROTOCOL_DEFAULT_RESOLUTION,
 };
 use crate::sn::MulticastTxConduits;
@@ -451,8 +451,8 @@ pub use crate::join_decode::{decode_join, decode_join_zid};
 /// `seq_num_res` would refuse every compatible S=1 announcer.
 /// Returns the admitted baselines (per-channel SN + the announcer's
 /// advertised lease, both stored per peer by `ingest_join` — R311ks), or
-/// `None` when the announcement must be ignored (a diagnostic event, not
-/// a peer-FSM transition). The lease is NOT validated — any
+/// the term the announcement does not share with this node when it must be
+/// ignored (counted, not a peer-FSM transition). The lease is NOT validated — any
 /// advertisement is accepted (pico parity; the Router caps the hold
 /// window locally).
 ///
@@ -462,9 +462,19 @@ pub use crate::join_decode::{decode_join, decode_join_zid};
 /// `src/transport/multicast/rx.c` @ `if (msg->_version != Z_PROTO_VERSION) {`).
 /// The version compared against is the protocol's own, which neither reference
 /// lets a node configure.
-pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinBaseline> {
+///
+/// The one judge of a Join, for both rules a node may follow ([`GroupJoinRule`]):
+/// `peer_offers_qos` says whether the Join offers per-priority conduits, which
+/// zenoh's rule refuses a node that offers none. What becomes of a KNOWN member
+/// whose Join is refused is the rule's too, and is the caller's to carry out
+/// (`dispatch_multicast_message`).
+pub fn judge_join(
+    join: &Join<'_>,
+    params: &MulticastParams,
+    peer_offers_qos: bool,
+) -> Result<JoinBaseline, JoinMismatch> {
     if join.version != wz_codecs::wire_const::PROTOCOL_VERSION {
-        return None;
+        return Err(JoinMismatch::Version);
     }
     let res_cbyte = join.s.map_or(
         pack_res_cbyte(PROTOCOL_DEFAULT_RESOLUTION, PROTOCOL_DEFAULT_RESOLUTION),
@@ -472,12 +482,15 @@ pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinBa
     );
     let (seq_num_res, req_id_res) = unpack_res_cbyte(res_cbyte);
     if seq_num_res != params.seq_num_res || req_id_res != params.req_id_res {
-        return None;
+        return Err(JoinMismatch::Resolution);
     }
     if join.s.map_or(PROTOCOL_DEFAULT_BATCH_SIZE, |s| s.batch_size) != params.batch_size {
-        return None;
+        return Err(JoinMismatch::BatchSize);
     }
-    Some(JoinBaseline {
+    if params.join_rule == GroupJoinRule::Zenoh && peer_offers_qos && !params.is_qos {
+        return Err(JoinMismatch::Qos);
+    }
+    Ok(JoinBaseline {
         sn_res: seq_num_res,
         next_sn_reliable: join.next_sn_reliable,
         next_sn_best_effort: join.next_sn_best_effort,
@@ -489,6 +502,19 @@ pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinBa
         // JOIN whatami (Router=0b00); an unrecognized code yields `None`.
         whatami: WhatAmI::from_wire(join.whatami()),
     })
+}
+
+/// The term a refused Join does not share with the node that judged it ([`judge_join`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinMismatch {
+    /// Another protocol version.
+    Version,
+    /// Another sequence-number or request-id resolution.
+    Resolution,
+    /// Another batch size.
+    BatchSize,
+    /// Per-priority conduits offered to a node of zenoh's rule that offers none.
+    Qos,
 }
 
 #[cfg(test)]
@@ -511,7 +537,66 @@ mod tests {
             compression: false,
             tx_queue: crate::session_init_params::TxQueueConf::default(),
             link_rx: crate::session_init_params::LinkRxConf::default(),
+            join_rule: GroupJoinRule::Pico,
         }
+    }
+
+    /// The judge's verdict on a Join that offers no per-priority conduits, as the baseline it
+    /// admits with.
+    fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinBaseline> {
+        judge_join(join, params, false).ok()
+    }
+
+    /// Both rules refuse a member whose batch size is not the node's own, and say why: zenoh's
+    /// 8,192-byte multicast batch and zenoh-pico's 2,048 are not read by each other.
+    #[test]
+    fn a_join_of_another_batch_size_is_refused_by_either_rule() {
+        let zid = [0x01, 0x02, 0x03, 0x04];
+        let mut theirs = params(&zid);
+        theirs.batch_size = 8_192;
+        let bytes = encode_join(
+            &theirs,
+            &MulticastTxConduits::new(sn::mask_from_res(theirs.seq_num_res)),
+        );
+        let join = decode_join(&bytes).expect("a Join");
+        for rule in [GroupJoinRule::Zenoh, GroupJoinRule::Pico] {
+            let mut ours = params(&[0xAA]);
+            ours.join_rule = rule;
+            assert_eq!(
+                judge_join(&join, &ours, false).err(),
+                Some(JoinMismatch::BatchSize),
+                "{rule:?}"
+            );
+            ours.batch_size = 8_192;
+            assert!(
+                judge_join(&join, &ours, false).is_ok(),
+                "{rule:?}, same batch"
+            );
+        }
+    }
+
+    /// A Join that offers per-priority conduits, to a node that offers none: zenoh's rule refuses
+    /// it, zenoh-pico's has no such rule and admits it, and a node that offers them admits it
+    /// under either.
+    #[test]
+    fn a_qos_join_to_a_node_without_qos_is_refused_by_zenohs_rule_only() {
+        let zid = [0x01, 0x02, 0x03, 0x04];
+        let bytes = encode_join(
+            &params(&zid),
+            &MulticastTxConduits::new(sn::mask_from_res(0x02)),
+        );
+        let join = decode_join(&bytes).expect("a Join");
+        let mut ours = params(&[0xAA]);
+        ours.join_rule = GroupJoinRule::Zenoh;
+        assert_eq!(
+            judge_join(&join, &ours, true).err(),
+            Some(JoinMismatch::Qos)
+        );
+        ours.is_qos = true;
+        assert!(judge_join(&join, &ours, true).is_ok(), "a node with QoS");
+        ours.is_qos = false;
+        ours.join_rule = GroupJoinRule::Pico;
+        assert!(judge_join(&join, &ours, true).is_ok(), "zenoh-pico's rule");
     }
 
     /// `encode_join_into` an array of the caller's own writes the datagram

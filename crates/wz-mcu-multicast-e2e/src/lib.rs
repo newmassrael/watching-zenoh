@@ -26,7 +26,7 @@
 //!
 //! 1. **transport-multicast** — a crafted peer JOIN (a `zid` distinct from
 //!    ours so it is not own-zid-filtered, advertising the same `batch_size`
-//!    so [`validate_join`](wz_session_core::multicast_join) admits it) is
+//!    so [`judge_join`](wz_session_core::multicast_join::judge_join) admits it) is
 //!    injected onto the group from our own socket. Multicast loopback
 //!    delivers it back, creating the §3.2 peer entry keyed by our
 //!    `(src_addr, src_port)`.
@@ -145,7 +145,7 @@ const MAX_PEERS: usize = 4;
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const MAX_ITERS: usize = 32;
 /// The tiny group-wide frame budget that forces the oversize Put to fragment.
-/// `validate_join` admits a peer JOIN only when its advertised `batch_size`
+/// `judge_join` admits a peer JOIN only when its advertised `batch_size`
 /// matches the receiver's, so BOTH the self params and the crafted peer JOIN
 /// carry this value (a mismatch would silently reject the JOIN and the echoed
 /// fragments would hit an `UnknownPeer` drop).
@@ -306,7 +306,7 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
     // ── Pre-admit a peer at OUR loopback source: a JOIN with a zid distinct
     //    from ours (so it is admitted, not own-zid-filtered) advertising
     //    next_sn 0 on a fresh ring, and the SAME batch_size as ours (a
-    //    mismatch would fail validate_join -> the echoed fragments would hit
+    //    mismatch would fail judge_join -> the echoed fragments would hit
     //    an UnknownPeer drop). Injected BEFORE wrapping the socket in the
     //    driver so the loop's first poll delivers it ahead of our own beacon
     //    echo, creating the (src_addr, src_port) entry the fragments match.
@@ -448,5 +448,6 @@ fn params(zid: &[u8]) -> MulticastParams {
         compression: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+        join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
     }
 }

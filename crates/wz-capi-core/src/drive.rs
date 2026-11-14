@@ -3721,6 +3721,7 @@ impl ResolvedGroup {
             batch_size,
             is_qos,
             compression,
+            join_rule,
         } = join.profile;
         Some(Self {
             endpoint: join.endpoint.clone(),
@@ -3739,6 +3740,7 @@ impl ResolvedGroup {
                 compression,
                 tx_queue,
                 link_rx,
+                join_rule,
             },
         })
     }
@@ -4277,6 +4279,8 @@ pub struct GroupProfile {
     /// when that pays: `transport/multicast/compression/enabled`. Multicast has no handshake
     /// to switch it on, so every member of the group must state the same.
     pub compression: bool,
+    /// Whose rule the session judges a member's Join by: the calling ABI's upstream's.
+    pub join_rule: wz_session_core::multicast_params::GroupJoinRule,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -6019,6 +6023,7 @@ mod multicast_face_tests {
             compression: false,
             tx_queue: Default::default(),
             link_rx: Default::default(),
+            join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Zenoh,
         }
     }
 

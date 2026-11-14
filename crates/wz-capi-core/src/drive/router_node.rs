@@ -487,6 +487,8 @@ async fn join_group(
                 req_id_res: join.profile.req_id_res,
                 batch_size: join.profile.batch_size,
             },
+            // The rule of the preset that opened the node.
+            join_rule: join.profile.join_rule,
         },
         opts,
         None,

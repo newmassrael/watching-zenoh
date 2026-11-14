@@ -612,6 +612,7 @@ mod tests {
             compression: false,
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         }
     }
 
@@ -1224,7 +1225,7 @@ mod tests {
         // own-filtered) advertising next_sn 0 on a fresh ring; injected before
         // wrapping the socket so the loop's first poll creates the peer entry the
         // echoed fragments attribute to (mirror of the Push round-trip test). Its
-        // advertised batch_size MUST equal ours (64): validate_join admits a JOIN
+        // advertised batch_size MUST equal ours (64): judge_join admits a JOIN
         // only when its batch_size matches the receiver's params (multicast_join
         // §3.2), so a peer on the default 2_048 would be silently rejected and
         // the echoed fragments would hit an UnknownPeer drop.
