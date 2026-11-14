@@ -4243,6 +4243,24 @@ impl GroupDeclarations {
     pub fn asks_for_liveliness(self) -> bool {
         matches!(self, Self::Entities | Self::Mapped)
     }
+
+    /// Whether a get is asked on the group: with [`Self::Entities`] and [`Self::Mapped`], as
+    /// zenoh-pico asks every peer its transport holds and waits for a final from each
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `size_t remote_targets = allow_remote ? _z_transport_get_peers_count(&zn->_tp) : 0;`).
+    /// zenoh routes no query onto a group: the group's face is held apart from the faces
+    /// (`zenoh/src/net/routing/gateway.rs` @ `tables.data.hats[region].mcast_groups.push(face);`),
+    /// the peer hat computes a query's route over the faces alone
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `fn compute_query_route(`) where it adds
+    /// every group to a put's (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `for group in self.multicast_groups(tables) {`), and a member's face sends nothing
+    /// (`zenoh/src/net/routing/gateway.rs` @ `Arc::new(DummyPrimitives),`). Asked on such a
+    /// group, a get would wait for a final from members that send none, and from a member that
+    /// has not heard this session's JOIN yet and drops the query, while a consolidated get holds
+    /// every reply it already has until then.
+    pub fn asks_queries(self) -> bool {
+        matches!(self, Self::Entities | Self::Mapped)
+    }
 }
 
 /// What a session's JOIN beacon advertises on a group, beside its identity and its role:
@@ -5958,7 +5976,9 @@ mod multicast_face_tests {
     use wz_runtime_tokio::sink::SampleView;
     use wz_runtime_tokio_test_support::multicast_bus::GroupBus;
 
-    use super::{serve_group, GroupLabel, GroupLinkSpec, ResolvedGroup, WhatAmI};
+    use super::{
+        serve_group, GroupDeclarations, GroupLabel, GroupLinkSpec, ResolvedGroup, WhatAmI,
+    };
     use crate::faces::{QueryableSink, SharedSession, SubscriberSink};
 
     const ENDPOINT: &str = "udp/224.0.0.224:7447";
@@ -6010,11 +6030,12 @@ mod multicast_face_tests {
     }
 
     /// Serve `shared`'s group face on this task's `LocalSet` until `stop` changes, joined
-    /// over `bus` at `port`.
+    /// over `bus` at `port`, telling the group of its declarations as `declarations` says.
     fn join(
         bus: &GroupBus,
         port: u16,
         shared: &Arc<SharedSession>,
+        declarations: GroupDeclarations,
         stop: watch::Receiver<bool>,
         up: mpsc::UnboundedSender<bool>,
     ) -> tokio::task::JoinHandle<()> {
@@ -6031,7 +6052,7 @@ mod multicast_face_tests {
                 GroupLabel {
                     endpoint: ENDPOINT,
                     is_shm: false,
-                    declarations: super::GroupDeclarations::None,
+                    declarations,
                 },
                 &params(&zid),
                 move || {
@@ -6090,7 +6111,9 @@ mod multicast_face_tests {
     /// A's put reaches B's subscriber, declared before B joined (the face's replay), and
     /// A's get is answered by B's queryable, declared after (the live declaration), and
     /// ends on B's final rather than its own timeout: the get counted the one member it
-    /// held. Once B undeclares its subscriber, A's put reaches nothing on B.
+    /// held. Once B undeclares its subscriber, A's put reaches nothing on B. A joins as
+    /// zenoh-pico does, the kind of group a get is asked on
+    /// ([`GroupDeclarations::asks_queries`]).
     ///
     /// On the real clock, as every test of this module: each face's datagrams are written
     /// by a task on the process-wide transmit runtime
@@ -6114,8 +6137,15 @@ mod multicast_face_tests {
                     Locality::Any,
                     counting_subscriber(&heard),
                 );
-                let a_task = join(&bus, 1, &a, stop_rx.clone(), up_tx.clone());
-                let b_task = join(&bus, 2, &b, stop_rx, up_tx);
+                let a_task = join(
+                    &bus,
+                    1,
+                    &a,
+                    GroupDeclarations::Entities,
+                    stop_rx.clone(),
+                    up_tx.clone(),
+                );
+                let b_task = join(&bus, 2, &b, GroupDeclarations::None, stop_rx, up_tx);
                 assert_eq!(up_rx.recv().await, Some(true), "the first face joined");
                 assert_eq!(up_rx.recv().await, Some(true), "the second face joined");
                 let _qbl = b.declare_queryable(
@@ -6208,6 +6238,69 @@ mod multicast_face_tests {
             .await;
     }
 
+    /// A get asks no group the session joined as zenoh joins one, and still asks the session's
+    /// own plane; a session that joined the same group as zenoh-pico does asks it as well. The
+    /// second session is the control: its group leg shows that the first's face was up when
+    /// the get was fanned.
+    #[tokio::test]
+    async fn a_get_asks_no_group_joined_as_zenoh_joins_one() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bus = GroupBus::new(ENDPOINT);
+                let (stop_tx, stop_rx) = watch::channel(false);
+                let (up_tx, mut up_rx) = mpsc::unbounded_channel();
+                let zenoh = session(0xa1);
+                let pico = session(0xb2);
+                let zenoh_task = join(
+                    &bus,
+                    1,
+                    &zenoh,
+                    GroupDeclarations::Subscribers,
+                    stop_rx.clone(),
+                    up_tx.clone(),
+                );
+                let pico_task = join(&bus, 2, &pico, GroupDeclarations::Entities, stop_rx, up_tx);
+                assert_eq!(up_rx.recv().await, Some(true), "the first face joined");
+                assert_eq!(up_rx.recv().await, Some(true), "the second face joined");
+
+                /// The locality of each leg a get from `shared` would be issued on, in order.
+                fn legs(shared: &SharedSession) -> Vec<Locality> {
+                    let mut legs = Vec::new();
+                    shared.fan_query(Locality::Any, Default::default(), None, |query| {
+                        legs.push(query.locality());
+                        None
+                    });
+                    legs
+                }
+                assert_eq!(
+                    legs(&zenoh),
+                    [Locality::SessionLocal],
+                    "zenoh's group is not asked; the plane is"
+                );
+                assert_eq!(
+                    legs(&pico),
+                    [Locality::Remote, Locality::SessionLocal],
+                    "zenoh-pico's group is asked, then the plane"
+                );
+
+                stop_tx.send(true).expect("the faces watch the stop");
+                zenoh_task.await.expect("the first face ended");
+                pico_task.await.expect("the second face ended");
+            })
+            .await;
+    }
+
+    /// The groups a get is asked on are zenoh-pico's, by what the session tells them, and
+    /// none of zenoh's.
+    #[test]
+    fn a_get_is_asked_on_the_groups_of_zenoh_pico_alone() {
+        assert!(GroupDeclarations::Entities.asks_queries());
+        assert!(GroupDeclarations::Mapped.asks_queries());
+        assert!(!GroupDeclarations::Subscribers.asks_queries());
+        assert!(!GroupDeclarations::None.asks_queries());
+    }
+
     /// A member of A's group is a multicast transport of A's: listed with its one link,
     /// announced as it arrives, and announced again as it leaves when B stops, whose Close
     /// A hears. A's request for a JOIN reaches its one group.
@@ -6240,8 +6333,15 @@ mod multicast_face_tests {
                 a.watch_faces(Arc::new(move |kind, snapshot: &FaceSnapshot| {
                     heard.lock().expect("events").push((kind, snapshot.clone()));
                 }));
-                let a_task = join(&bus, 1, &a, a_stop_rx, up_tx.clone());
-                let b_task = join(&bus, 2, &b, b_stop_rx, up_tx);
+                let a_task = join(
+                    &bus,
+                    1,
+                    &a,
+                    GroupDeclarations::None,
+                    a_stop_rx,
+                    up_tx.clone(),
+                );
+                let b_task = join(&bus, 2, &b, GroupDeclarations::None, b_stop_rx, up_tx);
                 assert_eq!(up_rx.recv().await, Some(true), "the first face joined");
                 assert_eq!(up_rx.recv().await, Some(true), "the second face joined");
                 // B's arrival waits for B's JOIN beacon, which leaves on the loop's clock (every

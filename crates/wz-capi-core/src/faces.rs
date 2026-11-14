@@ -5089,7 +5089,8 @@ impl SharedSession {
     }
 
     /// The fan-out every get shares, the query half of the publish fan-out: the wire leg
-    /// to each face, then to each group the session joined, then the local leg ONCE on
+    /// to each face, then to each group the session joined whose ABI asks gets on it
+    /// ([`crate::drive::GroupDeclarations::asks_queries`]), then the local leg ONCE on
     /// the local plane (`Self::local`), each only where `destination` admits it.
     ///
     /// A C session's queryable is declared on every face AND on the plane, so an `Any`
@@ -5147,13 +5148,12 @@ impl SharedSession {
                 revised.notify_one();
             }
             // A multicast group is a link no slot names and no one node's, so a limited or
-            // addressed query skips it.
+            // addressed query skips it, and so does every query on a group the calling ABI's
+            // upstream asks none on.
             #[cfg(feature = "multicast-transport")]
-            for group in targets
-                .groups
-                .iter()
-                .filter(|_| !links.is_restricted() && target.is_none())
-            {
+            for group in targets.groups.iter().filter(|group| {
+                !links.is_restricted() && target.is_none() && group.declarations.asks_queries()
+            }) {
                 if !issue_recorded(QueryLeg::Group(&group.session)) {
                     return;
                 }

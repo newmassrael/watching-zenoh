@@ -34,7 +34,8 @@
 //! for zenoh-pico with its multicast declarations what a unicast face is told and
 //! asked, keyexprs and write filters included. A member's put and query reach the
 //! face whether or not it heard any declaration, which is what a group carries
-//! without them.
+//! without them. The session's own gets are asked on the group for zenoh-pico alone:
+//! zenoh routes no query onto a group ([`GroupDeclarations::asks_queries`]).
 //!
 //! ## Who drives it
 //!
@@ -217,8 +218,9 @@ pub(super) struct McastLeg {
     pub(super) revised: Arc<Notify>,
     /// What the session tells this group and asks it: whether a write filter asks it, so that
     /// what its members declare decides whether a put leaves
-    /// ([`GroupDeclarations::asks_for_filters`]), and whether a put names its key by a
-    /// declaration the group holds ([`GroupDeclarations::declares_keyexprs`]).
+    /// ([`GroupDeclarations::asks_for_filters`]), whether a put names its key by a
+    /// declaration the group holds ([`GroupDeclarations::declares_keyexprs`]), and whether a
+    /// get is asked on it at all ([`GroupDeclarations::asks_queries`]).
     pub(super) declarations: GroupDeclarations,
     /// Whether the group's transports are shared-memory ones: a chunk of shared memory put on
     /// it goes as its descriptor, one send for every member.
