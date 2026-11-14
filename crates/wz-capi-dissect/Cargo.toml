@@ -122,6 +122,15 @@ features = ["dissect", "compression", "fixtures"]
 [dev-dependencies.wz-packet-fixtures]
 path = "../wz-packet-fixtures"
 
+# The QUIC packet builders, for the decryption doors' QUIC tests: a handle that
+# decrypts QUIC is proved against a connection somebody built, and the builders
+# live once, beside the reader they are written against. A dev-dependency
+# naming the feature, so the shipped library builds no QUIC packet; the crate
+# itself is a dependency above.
+[dev-dependencies.wz-tls-record]
+path = "../wz-tls-record"
+features = ["fixtures"]
+
 # THE ORACLE for the decryption doors' tests, and never a dependency, in the
 # role it plays for `wz-tls-record` and `wz-analyze`: a record these doors open
 # must have been sealed by an implementation that is not this workspace's.

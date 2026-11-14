@@ -355,6 +355,10 @@ pub struct LiveMemory {
     /// The word each selector said of each row, which the selection door keeps to
     /// say which moved.
     pub selection: usize,
+    /// The QUIC packets the decryptor keeps for a key that has not arrived:
+    /// bounded per flow and direction, as the TLS records the dissection keeps
+    /// are, and let go of once the flow opens application data.
+    pub quic_packets: usize,
 }
 
 impl LiveMemory {
@@ -365,6 +369,7 @@ impl LiveMemory {
             + self.fields.total()
             + self.drain
             + self.selection
+            + self.quic_packets
     }
 }
 
@@ -453,10 +458,12 @@ pub struct LiveDissection {
     /// [`Self::from_capture`] leaves it at the end of the file it read, which
     /// is what lets a replayed handle be followed as the writer appends more.
     cursor: CaptureCursor,
-    /// The keys this handle decrypts TLS with (the capture's own Decryption
-    /// Secrets Blocks as the feed meets them, and every key log
-    /// [`Self::add_keylog`] was handed) and one opener per flow it began. Run
-    /// after every feed, so a record is opened in the call that kept it.
+    /// The keys this handle decrypts TLS and QUIC with (the capture's own
+    /// Decryption Secrets Blocks as the feed meets them, and every key log
+    /// [`Self::add_keylog`] was handed) and one opener per flow it began. Shown
+    /// every packet as the handle takes it in, so a QUIC payload reaches its
+    /// opener while it exists, and run after every feed, so a record is opened
+    /// and a recovered stream framed in the call that brought it.
     keys: wz_tls_record::pass::LiveDecryptor,
 }
 
@@ -577,7 +584,9 @@ impl LiveDissection {
     /// not call `finish`, because a container still being written has no last
     /// packet.
     pub fn follow(&mut self, bytes: &[u8]) -> Result<usize, FollowError> {
-        let read = self.dissection.follow_container(&mut self.cursor, bytes);
+        let read = self
+            .dissection
+            .follow_container_tapped(&mut self.cursor, bytes, &mut self.keys);
         self.keys.run(&mut self.dissection);
         read
     }
@@ -586,7 +595,9 @@ impl LiveDissection {
     /// [`wz_capture::Dissection::follow_lent`] for what the handle then holds,
     /// and [`LentCapture`] for what the lender keeps.
     pub fn follow_lent(&mut self, capture: Arc<dyn LentCapture>) -> Result<usize, FollowError> {
-        let read = self.dissection.follow_lent(&mut self.cursor, capture);
+        let read = self
+            .dissection
+            .follow_lent_tapped(&mut self.cursor, capture, &mut self.keys);
         self.keys.run(&mut self.dissection);
         read
     }
@@ -598,8 +609,10 @@ impl LiveDissection {
     /// for it, or the keys held were another connection's -- is opened from
     /// the oldest record it still keeps, so its messages become rows now, at
     /// the packets that carried their records. A flow already opened goes on
-    /// from where it stopped. The text is parsed and dropped; only the secrets
-    /// it names are kept, and never written anywhere.
+    /// from where it stopped. A QUIC flow that opened no application data is
+    /// passed again over the packets the handle kept of it, through a fresh
+    /// opener. The text is parsed and dropped; only the secrets it names are
+    /// kept, and never written anywhere.
     pub fn add_keylog(&mut self, text: &[u8]) -> usize {
         let named = self.keys.absorb(text);
         self.keys.run(&mut self.dissection);
@@ -658,6 +671,10 @@ impl LiveDissection {
         let at = self.dissection.next_packet_index();
         self.dissection
             .push_packet_at_nanos(link_type, at, ts_nanos, bytes);
+        // The packet the follow doors show the decryptor as their tap, shown
+        // here by hand: a QUIC payload exists only in this call.
+        self.keys
+            .offer_packet(&self.dissection, link_type, at, bytes);
         self.keys.run(&mut self.dissection);
     }
 
@@ -716,6 +733,7 @@ impl LiveDissection {
                 .chain(self.scouting_marks.values())
                 .map(|mark| mark.runs.capacity() * std::mem::size_of::<SeqRun>())
                 .sum::<usize>(),
+            quic_packets: self.keys.quic_packets_memory(),
         }
     }
 
@@ -1134,7 +1152,8 @@ impl LiveDissection {
              \"lists\":{{\"rows\":{},\"unit_log\":{},\"whole_rows\":{},\"sparse\":{},\
              \"wire_ends\":{},\"joined\":{},\"chains\":{},\"small\":{}}},\
              \"streams\":{{\"kept\":{},\"runs\":{},\"pending\":{}}},\
-             \"plaintext\":{},\"tls_records\":{},\"scouting\":{},\"packets\":{},\"selection\":{},\
+             \"plaintext\":{},\"tls_records\":{},\"quic_packets\":{},\"scouting\":{},\
+             \"packets\":{},\"selection\":{},\
              \"census\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
              \"fields\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
              \"drain\":{}}}",
@@ -1152,6 +1171,7 @@ impl LiveDissection {
             m.dissection.stream_pending,
             m.dissection.plaintext,
             m.dissection.tls_records,
+            m.quic_packets,
             m.dissection.scouting,
             m.dissection.packets,
             m.selection,

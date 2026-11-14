@@ -3061,12 +3061,15 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *             record it kept is opened, the application data is read as the
  *             zenoh stream it carries, and the row says `decrypted_tls` when
  *             every record opened.
- *   QUIC      A flow is opened from the capture's own packets, which a
- *             document door has: the Initial space needs no key, the later
- *             spaces need the connection's secrets, and the row says
- *             `decrypted_quic` when a stream or a datagram was recovered. A
- *             live handle keeps no QUIC packet, so a QUIC flow read through
- *             one stays `encrypted_unreadable`.
+ *   QUIC      A flow is opened from the capture's own packets: the Initial
+ *             space needs no key, the later spaces need the connection's
+ *             secrets, and the row says `decrypted_quic` when a stream or a
+ *             datagram was recovered. A document door reads the packets from
+ *             the capture it is handed; a live handle opens each as it takes
+ *             it in (push, follow and replay alike) and frames what it
+ *             recovered in the same call, so a handle and a document door
+ *             read one capture to the same rows. What a handle keeps for a
+ *             key that has not arrived is at wz_dissect_live_add_keylog.
  *
  * (session_table revision 12) KEYS GIVEN AND NONE MATCHED. The `encrypted` cell
  * stays `encrypted_unreadable`: nothing was read. What moves is the REASON the
@@ -6322,9 +6325,9 @@ int wz_dissect_live_push(wz_dissect_live *h, unsigned int link_type,
 
 /* ── (ABI 57) — KEYS FOR A HANDLE THAT IS ALREADY OPEN ───────────────────
  *
- * Hand the handle an NSS key log, so the TLS flows it names are decrypted.
- * `keylog` is the BYTES of the log, the text an SSLKEYLOGFILE holds, `len`
- * long: read the file the user picked and hand its contents over. On
+ * Hand the handle an NSS key log, so the TLS and QUIC flows it names are
+ * decrypted. `keylog` is the BYTES of the log, the text an SSLKEYLOGFILE
+ * holds, `len` long: read the file the user picked and hand its contents over. On
  * WZ_DISSECT_OK `*connections` is how many TLS connections the bytes named;
  * zero is an answer and not an error, and says the bytes held no line this
  * reader can act on. Keys add to the ones the handle holds already -- an
@@ -6353,10 +6356,24 @@ int wz_dissect_live_push(wz_dissect_live *h, unsigned int link_type,
  * What it does not do, said plainly. Records the 4096 bound dropped before the
  * keys arrived are gone, and a flow whose oldest kept record is not its first
  * may not frame. A flow one direction of which was opened before a key for
- * its other direction arrived keeps that other direction unread. A QUIC flow
- * is not decrypted on a handle at all: the handle keeps no QUIC packet to open
- * (the document doors read QUIC from the capture you hand them, see
- * wz_dissect_pcap_session_table).
+ * its other direction arrived keeps that other direction unread.
+ *
+ * A QUIC FLOW is opened packet by packet as the handle takes it in, and its
+ * Initial packets need no key, so its handshake is read with none. Until a
+ * packet carrying application data (0-RTT or 1-RTT) opens, the handle keeps
+ * every packet of the flow, up to 4096 a direction: past that bound it keeps
+ * the oldest and not the newest, because a flow read again without its first
+ * flight finds no key at all. When keys arrive the flow is read again from
+ * its first kept packet, in arrival order, through a fresh opener, and its
+ * messages become NEW records and rows exactly as a TLS flow's do. Once
+ * application data has opened, the flow goes on from where it stopped and
+ * keeps nothing (wz_dissect_live_memory counts what is kept, as
+ * `quic_packets`). Limits, said plainly: packets past the bound are not read
+ * again; a flow whose handshake opened under one key log and whose
+ * application secrets arrive in a later one IS read again, but one whose
+ * application data opened in one direction keeps its other direction unread,
+ * as a TLS flow does; a handle states no connection id length, so a QUIC flow
+ * whose capture begins after its handshake opens nothing.
  *
  * THE KEYS GO NOWHERE. The bytes are parsed in this call and dropped; the
  * handle keeps only the secrets they name, writes none of them into a document
@@ -8169,7 +8186,7 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  * Writes {"document":{"name":"memory","revision":R},"unit":"bytes",
  * "scope":"rows","total":T,"lists":{"rows":..,"unit_log":..,"whole_rows":..,
  * "sparse":..,"wire_ends":..,"joined":..,"chains":..,"small":..},"streams":{"kept":..,"runs":..,
- * "pending":..},"plaintext":P,"tls_records":R,"scouting":S,"packets":K,"selection":W,"census":{"payload_rows":
+ * "pending":..},"plaintext":P,"tls_records":R,"quic_packets":Q,"scouting":S,"packets":K,"selection":W,"census":{"payload_rows":
  * ..,"exchange_rows":..,"row_digests":..},"fields":{"payload_rows":..,
  * "exchange_rows":..,"row_digests":..},"drain":D} to *out.
  *
@@ -8205,6 +8222,9 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  *     keys a handle holds are outside the scope: a key log grows with the
  *     connections it names and a flow's opener with the flows, not with the
  *     rows.
+ *   - (revision 2) quic_packets is the QUIC packets a handle keeps for a key
+ *     that has not arrived (see wz_dissect_live_add_keylog): at most 4096 a
+ *     direction of a flow, and none for a flow whose application data opened.
  *   - selection is what wz_dissect_live_selection_since keeps between calls: the
  *     word each selector said of each row, which is how a later call says which
  *     moved, a nibble a row, and the folds that decide the words (the verdict of

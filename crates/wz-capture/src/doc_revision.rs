@@ -4688,6 +4688,21 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // Revision 2 ADDS `quic_packets`, beside `tls_records`, and retires nothing:
+    // the QUIC packets a handle keeps for a key that has not arrived, which it
+    // keeps since a handle decrypts QUIC. Bounded per flow and direction, as the
+    // TLS records are, and zero for a flow that opened application data. No word
+    // moves. A consumer pinned to revision 1 loses nothing it read; its `total`
+    // now includes the new figure.
+    DocumentShape {
+        document: MEMORY,
+        revision: 2,
+        keys: MEMORY_R2_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
 ];
 
 // The key sets below are MEASURED, never transcribed: each was printed by the
@@ -9107,6 +9122,41 @@ pub const MEMORY_R1_KEYS: &[&str] = &[
     "payload_rows",
     "pending",
     "plaintext",
+    "revision",
+    "row_digests",
+    "rows",
+    "runs",
+    "scope",
+    "scouting",
+    "selection",
+    "small",
+    "sparse",
+    "streams",
+    "tls_records",
+    "total",
+    "unit",
+    "unit_log",
+    "whole_rows",
+    "wire_ends",
+];
+
+/// The memory document's key set at revision 2: revision 1's and `quic_packets`.
+pub const MEMORY_R2_KEYS: &[&str] = &[
+    "census",
+    "chains",
+    "document",
+    "drain",
+    "exchange_rows",
+    "fields",
+    "joined",
+    "kept",
+    "lists",
+    "name",
+    "packets",
+    "payload_rows",
+    "pending",
+    "plaintext",
+    "quic_packets",
     "revision",
     "row_digests",
     "rows",
@@ -33138,7 +33188,9 @@ mod tests {
             // `link_type_interfaces`.
             (HEALTH, 5),
             // What a live handle holds in memory, by structure.
-            (MEMORY, 1),
+            // To 2 when it gained `quic_packets`: one key, no word moves and
+            // nothing retires.
+            (MEMORY, 2),
             // The typed values of a few payload field paths.
             // To 3 when a reply's pieces were joined per query, apart from the
             // live ones, and a request's or an error's were joined no more.

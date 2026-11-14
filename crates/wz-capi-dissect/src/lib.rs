@@ -3725,7 +3725,8 @@ pub unsafe extern "C" fn wz_dissect_live_push(
     WZ_DISSECT_OK
 }
 
-/// Hand a live handle an NSS key log, so the TLS flows it names are decrypted.
+/// Hand a live handle an NSS key log, so the TLS and QUIC flows it names are
+/// decrypted.
 ///
 /// `keylog` is the BYTES of the log (the text an `SSLKEYLOGFILE` holds),
 /// `len` long, and `*connections` is set to how many TLS connections it named:
@@ -3742,7 +3743,13 @@ pub unsafe extern "C" fn wz_dissect_live_push(
 /// [`wz_dissect_live_drain`] hands out, and rows every document of the handle
 /// reads, anchored at the packets that carried them. A flow already opened goes
 /// on from where it stopped, and every record pushed afterwards is opened as it
-/// arrives. QUIC is not decrypted on a handle: its packets are not kept.
+/// arrives.
+///
+/// A QUIC flow's packets are opened as the handle takes them in. One that
+/// opened no application data yet is kept, every packet of it, up to 4096 a
+/// direction, and is passed again from its first packet through a fresh opener
+/// when keys arrive; one that opened application data goes on from where it
+/// stopped and keeps nothing.
 ///
 /// # The keys go nowhere
 ///
