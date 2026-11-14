@@ -149,6 +149,19 @@ config WZ_OS_THREAD_PRIORITY
 	depends on WZ_OS
 	default 5
 
+config WZ_PICO_OS
+	bool "The kernel answers the pico C ABI's host layer (wz_pico_*)"
+	depends on WZ_OS && POSIX_API
+	help
+	  An image whose Rust half is `wz-capi-pico` with `os-zephyr` (the pico C ABI on the
+	  cooperative engine, docs/upstream-parity.md section 5a) links the platform exports'
+	  host layer (crates/wz-capi-pico/src/os/zephyr.rs), which calls the kernel heap, Zephyr's
+	  POSIX clocks, mutexes, condition variables and threads, and the C library's local time,
+	  as zenoh-pico's own Zephyr backend does. What the kernel has only as a system call or an
+	  inline (its sleeps, its random source, a condition variable on the monotonic clock) is
+	  answered by deploy/zephyr-common/wz_pico_os_zephyr.c, which also pins each size and
+	  constant the Rust half states against the headers the image compiles.
+
 config WZ_MEMORY_REPORT
 	bool "Report the kernel heap's peak and every thread's stack (a compare build)"
 	select SYS_HEAP_RUNTIME_STATS

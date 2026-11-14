@@ -3947,6 +3947,7 @@ dependencies = [
  "wz-runtime-posix",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
+ "wz-runtime-zephyr",
  "wz-session-core",
  "wz-tls-pem",
 ]

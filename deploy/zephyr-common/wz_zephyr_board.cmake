@@ -174,6 +174,14 @@ function(wz_zephyr_rust_app)
       wz_os_thread_current wz_os_thread_spawn wz_os_thread_join wz_os_thread_is_finished
       wz_os_sleep_ms)
   endif()
+  if(CONFIG_WZ_PICO_OS)
+    list(APPEND kept
+      wz_pico_sleep_us wz_pico_sleep_ms wz_pico_sleep_s wz_pico_random_fill wz_pico_condvar_init
+      clock_gettime localtime strftime
+      pthread_mutex_init pthread_mutex_destroy pthread_mutex_lock pthread_mutex_trylock
+      pthread_mutex_unlock pthread_cond_destroy pthread_cond_signal pthread_cond_wait
+      pthread_cond_timedwait pthread_create pthread_join pthread_detach)
+  endif()
   # CONFIG_WZ_LIBC_MEMCPY_FIRST: the C library goes BEFORE the staticlib, in addition to where
   # Zephyr puts it (last), so that its strong `memcpy` family is the image's and not the
   # staticlib's weak generic one (see the symbol's help for the measurement, which says when it
@@ -230,4 +238,9 @@ endif()
 # when the image has them.
 if(CONFIG_WZ_OS)
   target_sources(app PRIVATE ${WZ_ZEPHYR_COMMON_DIR}/wz_os_zephyr.c)
+endif()
+
+# CONFIG_WZ_PICO_OS: the pico C ABI's host layer on Zephyr (wz_pico_os_zephyr.c), the same way.
+if(CONFIG_WZ_PICO_OS)
+  target_sources(app PRIVATE ${WZ_ZEPHYR_COMMON_DIR}/wz_pico_os_zephyr.c)
 endif()

@@ -95,10 +95,31 @@ mod prelude {
 // A session runs on an engine (`docs/capi-pico-on-coop-engine.md`, decision D4), so a build
 // that names neither has no `z_open` to give; it is refused here, by name, rather than by the
 // unresolved crates of the engine the open would have reached.
-#[cfg(not(any(feature = "engine-tokio", feature = "engine-coop")))]
+#[cfg(not(any(
+    feature = "engine-tokio",
+    feature = "engine-coop",
+    feature = "os-zephyr"
+)))]
 compile_error!(
     "wz-capi-pico: a build needs an engine to run its sessions: `engine-tokio` for the session \
-     on its own thread and runtime, `engine-coop` for the one the program steps"
+     on its own thread and runtime, `engine-coop` for the one the program steps, `os-zephyr` for \
+     that one in a Zephyr image"
+);
+
+// `os-zephyr` is the image's engine and host, and an image has no standard library: a capability
+// that still selects `std` (scouting, the requesting end of a query, the unstable surface, ...) is
+// a host's alone until its module stands without it. Such a build is refused by name here, rather
+// than by the missing `std` of the bare core or by a host layer the image cannot link. A build that
+// names a host engine as well keeps that host's (features add, and the host wins).
+#[cfg(all(
+    feature = "os-zephyr",
+    feature = "std",
+    not(any(feature = "engine-tokio", feature = "engine-coop"))
+))]
+compile_error!(
+    "wz-capi-pico: `os-zephyr` builds without `std`, and a feature of this build selects it; \
+     the capabilities a Zephyr image carries are those whose features do not select `std` \
+     (see Cargo.toml)"
 );
 
 pub mod abi;

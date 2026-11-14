@@ -102,6 +102,16 @@ std = ["wz-capi-port/std", "wz-capi-coop?/std"]
 # (`wz-runtime-posix`), so each selects `std`.
 engine-tokio = ["std", "dep:wz-capi-core", "dep:tokio"]
 engine-coop = ["std", "dep:wz-capi-coop", "dep:wz-runtime-posix"]
+# `os-zephyr`: the library in a Zephyr image, without `std`: the cooperative engine over Zephyr's
+# own sockets, kernel tick and random source (`wz-runtime-zephyr`, `src/coop_host.rs`), the host
+# layer of `src/os/zephyr.rs` under the platform exports (the kernel heap, Zephyr's POSIX clocks
+# and objects, as zenoh-pico's own Zephyr backend uses them), and the port's `os` answered by the
+# kernel. The image links the C seams both name (`deploy/zephyr-common/wz_os_zephyr.c`,
+# `wz_pico_os_zephyr.c`), the board's hooks and a `critical-section` implementation, and builds
+# this crate for the bare core; a build that also names a host engine keeps its host's layer and
+# links. The session core is asked for its `no_std` atomics, which a core without 64-bit atomics
+# (a Cortex-M7) needs. A capability that selects `std` is refused beside it (`src/lib.rs`).
+os-zephyr = ["dep:wz-capi-coop", "dep:wz-runtime-zephyr", "wz-session-core/no_std"]
 # The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,
 # `Z_FEATURE_LIVELINESS`, `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature
 # of this crate: on in a default build, so the drop-in exports what the reference build does,
@@ -422,6 +432,12 @@ wz-capi-coop = { path = "../wz-capi-coop", default-features = false, optional = 
 # the one both engines take it from.
 wz-tls-pem = { path = "../wz-tls-pem", optional = true }
 wz-runtime-posix = { path = "../wz-runtime-posix", optional = true }
+# The cooperative engine's host in a Zephyr image (`os-zephyr`): Zephyr's datagram and stream
+# sockets as the session's links on the heap profile, the kernel's tick as its clock, and the
+# board's random source and wall clock. The heap profile (`alloc`), as the engine allocates.
+wz-runtime-zephyr = { path = "../wz-runtime-zephyr", optional = true, default-features = false, features = [
+    "alloc",
+] }
 # The session core's own types (key expression canon and matching, QoS, locality, samples, the
 # sinks), named where they live and not through the tokio engine's re-exports of them: the ABI
 # layer knows no engine, and the engine this crate drives is a selection
