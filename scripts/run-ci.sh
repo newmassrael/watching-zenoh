@@ -21657,6 +21657,16 @@ layer_z_zenohd_interop() {
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
+    # §5.23 adminspace-core — THREE legs: a client's `@/<zid>/client` asked by
+    # another client through a router. The control is a zenohd client behind a
+    # zenohd router; the two subjects are a wz client behind that router and
+    # behind a wz router, judged by the control's predicate. They ride this
+    # lane's demo build: `routing-peer` composes the demo's `adminspace-core`,
+    # and `router-hat-router` is the wz router.
+    wz_test_args wz-integration-tests wz_client_adminspace_zenohd_interop
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+        || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked
     # against wz's cdylib, must report a REAL zenohd's zid under "Routers IDs".
     #
