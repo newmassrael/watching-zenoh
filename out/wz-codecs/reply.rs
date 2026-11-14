@@ -1,4 +1,4 @@
-// SCE-MAP: reply:74 :: _forge_body
+// SCE-MAP: reply:81 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -105,7 +105,7 @@ impl<'f, S: ReplyStorage + super::ext_entry::ExtEntryFrom<'f> + super::msg_put::
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplyIn<S: ReplyStorage> {
     pub header: u8,
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     pub extensions: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsList<ReplyExtensionsField>>::List<ExtEntryOwned<S>>, { usize::MAX }, 1>>,
     pub body: ReplyVariantIn<S>,
 }
@@ -227,9 +227,7 @@ impl<S: ReplyStorage> ReplyIn<S> {
             _v
         };
         let consolidation = if (header & 0x20u8) != 0 {
-            let raw = cursor.peek_slice(1)?;
-            let _v = raw[0];
-            cursor.advance(1)?;
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
@@ -398,7 +396,7 @@ pub trait ReplySource {
     /// The `header` field.
     fn header(&self) -> u8;
     /// The `consolidation` field.
-    fn consolidation(&self) -> Option<u8>;
+    fn consolidation(&self) -> Option<u64>;
     /// The `extensions` field.
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>;
     /// The arm of the variant this value holds.
@@ -409,7 +407,7 @@ impl<T: ReplySource + ?Sized> ReplySource for &T {
     fn header(&self) -> u8 {
         (**self).header()
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         (**self).consolidation()
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -439,7 +437,7 @@ pub struct ReplyParts<'a> {
     /// The `header` field.
     pub header: u8,
     /// The `consolidation` field.
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     /// The `extensions` field.
     pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], { usize::MAX }, 1>>,
     /// The arm of the variant this value holds.
@@ -450,7 +448,7 @@ impl<'a> ReplySource for ReplyParts<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -469,7 +467,7 @@ impl<S: ReplyStorage> ReplySource for ReplyOwned<S> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -488,7 +486,7 @@ impl<'a> ReplySource for ReplyView<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn extensions(&self) -> Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>> {
@@ -535,7 +533,7 @@ impl ReplyWire {
         let _c_header: u8 = (((src.header() & !0x20) | (u8::from(_p_header_c_0) << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
         if let Some(_v) = src.consolidation() {
-            w.write_u8(_v)?;
+            w.write_vle_u64(_v)?;
         }
         if let Some(_v) = src.extensions() {
             for (_i, _e) in _v.enumerate() {
@@ -634,7 +632,7 @@ impl ListWalk<0> for ReplyExtensionsWalk {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplyView<'a> {
     pub header: u8,
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     pub extensions: Option<Bounded<ListView<'a, ReplyExtensionsWalk, 0>, { usize::MAX }, 1>>,
     pub body: ReplyViewVariant<'a>,
 }
@@ -685,9 +683,7 @@ impl<'a> ReplyView<'a> {
             _v
         };
         let consolidation = if (header & 0x20u8) != 0 {
-            let raw = cursor.peek_slice(1)?;
-            let _v = raw[0];
-            cursor.advance(1)?;
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None

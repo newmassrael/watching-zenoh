@@ -1,4 +1,4 @@
-// SCE-MAP: query:117 :: _forge_body
+// SCE-MAP: query:124 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -71,7 +71,7 @@ impl<'f, S: QueryStorage + ::sce_forge_runtime::codec::StoresBytes<'f, QueryPara
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryIn<S: QueryStorage> {
     pub header: u8,
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     pub parameters_len: Option<u64>,
     pub parameters: Option<::sce_forge_runtime::codec::Bounded<<S as ::sce_forge_runtime::codec::HoldsBytes<QueryParametersField>>::Bytes, { usize::MAX }>>,
     pub extensions: Option<QueryExtensionsList<S>>,
@@ -162,9 +162,7 @@ impl<S: QueryStorage> QueryIn<S> {
             _v
         };
         let consolidation = if (header & 0x20u8) != 0 {
-            let raw = cursor.peek_slice(1)?;
-            let _v = raw[0];
-            cursor.advance(1)?;
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
@@ -343,7 +341,7 @@ pub trait QuerySource {
     /// The `header` field.
     fn header(&self) -> u8;
     /// The `consolidation` field.
-    fn consolidation(&self) -> Option<u8>;
+    fn consolidation(&self) -> Option<u64>;
     /// The `parameters` field.
     fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, { usize::MAX }>>;
     /// The `extensions` field.
@@ -354,7 +352,7 @@ impl<T: QuerySource + ?Sized> QuerySource for &T {
     fn header(&self) -> u8 {
         (**self).header()
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         (**self).consolidation()
     }
     fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, { usize::MAX }>> {
@@ -374,7 +372,7 @@ pub struct QueryParts<'a> {
     /// The `header` field.
     pub header: u8,
     /// The `consolidation` field.
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     /// The `parameters` field.
     pub parameters: Option<::sce_forge_runtime::codec::Bytes<'a, { usize::MAX }>>,
     /// The `extensions` field.
@@ -385,7 +383,7 @@ impl<'a> QuerySource for QueryParts<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, { usize::MAX }>> {
@@ -400,7 +398,7 @@ impl<S: QueryStorage> QuerySource for QueryOwned<S> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, { usize::MAX }>> {
@@ -415,7 +413,7 @@ impl<'a> QuerySource for QueryView<'a> {
     fn header(&self) -> u8 {
         self.header
     }
-    fn consolidation(&self) -> Option<u8> {
+    fn consolidation(&self) -> Option<u64> {
         self.consolidation
     }
     fn parameters(&self) -> Option<::sce_forge_runtime::codec::Bytes<'_, { usize::MAX }>> {
@@ -460,7 +458,7 @@ impl QueryWire {
         let _c_header: u8 = (((((src.header() & !0x20) | (u8::from(_p_header_c_0) << 5)) & !0x40) | (u8::from(_p_header_p_0) << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
         w.write_u8(_c_header)?;
         if let Some(_v) = src.consolidation() {
-            w.write_u8(_v)?;
+            w.write_vle_u64(_v)?;
         }
         if (_c_header & 0x40) != 0 {
             w.write_vle_u64(_d_parameters_len)?;
@@ -543,7 +541,7 @@ impl ListWalk<1> for QueryExtensionsWalk {
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryView<'a> {
     pub header: u8,
-    pub consolidation: Option<u8>,
+    pub consolidation: Option<u64>,
     pub parameters_len: Option<u64>,
     pub parameters: Option<::sce_forge_runtime::codec::Bytes<'a, { usize::MAX }>>,
     pub extensions: Option<::sce_forge_runtime::codec::Lawful<Bounded<ListView<'a, QueryExtensionsWalk, 1>, { usize::MAX }, 1>, QueryExtensionsLaw>>,
@@ -601,9 +599,7 @@ impl<'a> QueryView<'a> {
             _v
         };
         let consolidation = if (header & 0x20u8) != 0 {
-            let raw = cursor.peek_slice(1)?;
-            let _v = raw[0];
-            cursor.advance(1)?;
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
