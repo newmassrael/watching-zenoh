@@ -25,7 +25,12 @@
 //! revision before this round, so there is no earlier number to be compatible with.
 
 /// The revision the stamp carries.
-pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 1;
+///
+/// It moved to 2 when the meaning of a wz-only behaviour changed: with a registered clock
+/// (`wz_ext_clock_source_register`), `z_timestamp_new` gives a program the clock's time whatever
+/// the clock's standing, and the `clock-quality-stamping` policy holds back only the data the node
+/// stamps; at 1 a `trusted-only` build gave a program no time until the clock was reported trusted.
+pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 2;
 
 wz_abi_stamp::stamp!(
     family = "capi-pico",

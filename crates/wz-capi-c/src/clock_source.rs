@@ -8,14 +8,16 @@
 //! A door wz has and zenoh-c has not, so each carries the `wz_capi_c_` prefix and is declared in
 //! `wz_capi_c.h`, not in upstream's header. A zenoh-c node stamps with its own clock; a device
 //! often has a better one, a disciplined hardware clock or a time master on its bus. A program
-//! registers it as a read callback and `z_timestamp_new` then stamps with it.
+//! registers it as a read callback; the node's clock then reads it, and `z_timestamp_new` gives a
+//! program that clock's time.
 //!
 //! What the registry does is [`wz_capi_port::observation::clock`]'s, which the pico ABI's
 //! `wz_ext_clock_*` doors act on too; this file is this ABI's names and result codes for it.
 //!
 //! The library cannot know whether the registered clock follows a reference. The program can, so
 //! it reports it (`wz_capi_c_clock_report`), and a build whose `clock-quality-stamping` policy is
-//! `trusted-only` stamps nothing until it has said so.
+//! `trusted-only` stamps no data until it has said so. The policy is the stamper's: a program
+//! that reads the clock (`z_timestamp_new`) is given its time whatever its standing.
 
 use std::ffi::c_void;
 

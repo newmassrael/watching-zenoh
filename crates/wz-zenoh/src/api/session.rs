@@ -901,8 +901,14 @@ impl Engine {
     #[cfg(feature = "unstable")]
     fn node_clock(&self) -> Box<dyn Fn() -> Option<uhlc::Timestamp> + Send + Sync> {
         match self {
-            // Owed: the router's clock is not read off the node yet.
-            Engine::Router(_) => Box::new(|| None),
+            Engine::Router(router) => {
+                let hlc = router.node.node_hlc();
+                Box::new(move || {
+                    hlc.clock_stamp()
+                        .as_ref()
+                        .and_then(tokio_engine::timestamp_from)
+                })
+            }
             Engine::Tokio(state) => {
                 let shared = state.shared.clone();
                 Box::new(move || {
@@ -921,16 +927,22 @@ impl Engine {
     #[cfg(feature = "internal")]
     fn node_hlc(&self) -> Option<NodeHlc> {
         match self {
-            // Owed with the router's clock, as `node_timestamp` is.
-            Engine::Router(_) => None,
+            Engine::Router(router) => NodeHlc::over(router.node.node_hlc()),
             Engine::Tokio(state) => NodeHlc::over(state.shared.node_hlc().clone()),
         }
     }
 
-    /// The next timestamp off the node's clock, or `None` for a node that holds none.
+    /// The next timestamp off the node's clock, or `None` for a node that holds none: a read of the
+    /// clock, to which no stamping policy applies (upstream's `Session::new_timestamp` reads its
+    /// runtime's clock whatever it is).
     fn node_timestamp(&self) -> Option<uhlc::Timestamp> {
         match self {
-            Engine::Router(_) => None,
+            Engine::Router(router) => router
+                .node
+                .node_hlc()
+                .clock_stamp()
+                .as_ref()
+                .and_then(tokio_engine::timestamp_from),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -5998,8 +6010,8 @@ impl Session {
     /// The clock of the node this session is on, the one its timestamps come from, or `None` when
     /// the node's role does not timestamp (`timestamping/enabled`): upstream's `Session::hlc`.
     /// The clock is lent as a [`NodeHlc`], which has every public method of `uhlc::HLC`; it is not
-    /// that type because the node's clock is not one (see [`NodeHlc`]). A router node lends none
-    /// yet: its clock is not read off the node.
+    /// that type because the node's clock is not one (see [`NodeHlc`]). A router node lends the
+    /// clock its data plane stamps with, which timestamps by default, as upstream's router does.
     #[zenoh_macros::internal]
     pub fn hlc(&self) -> Option<&NodeHlc> {
         self.0.hlc.as_ref()
@@ -6996,6 +7008,44 @@ mod tests {
     fn a_node_whose_role_does_not_timestamp_lends_no_clock() {
         let session = open(peer("a1b2d3")).wait().expect("opens");
         assert!(session.hlc().is_none());
+    }
+
+    /// A router timestamps by default, as upstream's does, and its session lends the clock its data
+    /// plane stamps with: the one `Session::new_timestamp` reads too.
+    #[cfg(feature = "internal")]
+    #[test]
+    fn a_router_lends_the_clock_of_its_data_plane() {
+        let router = open(
+            Config::from_json5(
+                r#"{ id: "a1b2d4", mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     scouting: { multicast: { enabled: false } } }"#,
+            )
+            .expect("a configuration zenoh reads"),
+        )
+        .wait()
+        .expect("a router opens");
+        let hlc = router.hlc().expect("a router timestamps by default");
+        let before = router.new_timestamp();
+        let lent = hlc.new_timestamp();
+        let after = router.new_timestamp();
+        assert!(before < lent && lent < after, "{before} {lent} {after}");
+        assert_eq!(hlc.get_id(), before.get_id());
+        assert_eq!(after.get_id(), before.get_id());
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn a_router_told_not_to_timestamp_lends_no_clock() {
+        let router = open(
+            Config::from_json5(
+                r#"{ id: "a1b2d5", mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     scouting: { multicast: { enabled: false } }, timestamping: { enabled: false } }"#,
+            )
+            .expect("a configuration zenoh reads"),
+        )
+        .wait()
+        .expect("a router opens");
+        assert!(router.hlc().is_none());
     }
 
     #[test]

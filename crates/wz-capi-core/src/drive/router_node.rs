@@ -113,6 +113,13 @@ impl RouterState {
         &self.forwarder
     }
 
+    /// This node's clock itself, as [`SharedSession::node_hlc`](crate::faces::SharedSession::node_hlc)
+    /// is a session's: the one the router stamps with, by the role and the timestamping the
+    /// configuration states, shared and never copied.
+    pub fn node_hlc(&self) -> wz_runtime_tokio::node_clock::NodeHlc {
+        self.forwarder.node_hlc()
+    }
+
     /// The data plane [`Self::forwarder`] is, counted: what a declaration made on the node holds
     /// so that it can be withdrawn after the session that made it has been let go of.
     pub fn shared_forwarder(&self) -> Arc<RouterForwarder> {
