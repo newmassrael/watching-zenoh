@@ -11,6 +11,7 @@
 #                                                  reproducer through each target, once
 #   bash scripts/fuzz.sh run TARGET SECONDS [JOBS] fuzz one target for SECONDS
 #   bash scripts/fuzz.sh sweep SECONDS [JOBS]      fuzz every target in turn, past a failure
+#   bash scripts/fuzz.sh logs TARGET [LINES]       the end of each worker log of TARGET's last run
 #   bash scripts/fuzz.sh targets                   print the targets
 #
 # `regress` is what Layer Fz of scripts/run-ci.sh runs: it passes when every
@@ -19,6 +20,17 @@
 # $WZ_FUZZ_HOME (default crates/target/fuzz) and writes a crash to
 # $WZ_FUZZ_HOME/artifacts/TARGET/; a crash is made a regression by copying the
 # file into crates/wz-fuzz/regressions/TARGET/ in the commit that fixes it.
+#
+# With JOBS above 1 libFuzzer writes each worker's output to fuzz-N.log in its
+# working directory and copies it out only when the worker exits, so a run that
+# is cancelled first shows nothing of what its workers did. `run` therefore
+# starts the fuzzer in $WZ_FUZZ_HOME/logs/TARGET/, prints each worker's
+# milestone lines (the `INFO:` counts, `pulse`, `INITED`, `DONE`, the slowest
+# unit, an error) as they are written, each with the seconds since the run
+# began, and `logs` prints the end of every worker log afterwards. The seconds
+# at a worker's `INITED` line are how long it took to replay its corpus,
+# which `-max_total_time` does not bound: libFuzzer checks that time only in
+# the mutation loop that follows (FuzzerLoop.cpp, `Fuzzer::Loop`).
 #
 # The targets are built by the nightly `crates/wz-fuzz/rust-toolchain.toml`
 # pins (rustup installs it on first use), with the instrumentation flags
@@ -35,7 +47,8 @@ fuzz_dir="$repo_root/crates/wz-fuzz"
 # shellcheck source=scripts/lib/artifact-root.sh
 source "$repo_root/scripts/lib/artifact-root.sh"
 wz_artifact_root_init "$repo_root" || exit 2
-fuzz_home="${WZ_FUZZ_HOME:-$WZ_ARTIFACTS/crates/target/fuzz}"
+# Absolute, because `run` starts the fuzzer in a directory of its own.
+fuzz_home="$(realpath -m "${WZ_FUZZ_HOME:-$WZ_ARTIFACTS/crates/target/fuzz}")"
 build_dir="$fuzz_home/build"
 seeds_py="$repo_root/scripts/lib/fuzz_seeds.py"
 triple="x86_64-unknown-linux-gnu"
@@ -112,7 +125,7 @@ regress() {
     local selected=("$@")
     ((${#selected[@]})) || mapfile -t selected < <(targets)
     build
-    local fail=0 target dir inputs log ran
+    local fail=0 target dir inputs log ran started now
     for target in "${selected[@]}"; do
         dir="$(seed_dir "$target")"
         inputs=("$dir"/*)
@@ -122,14 +135,22 @@ regress() {
             shopt -u nullglob
         fi
         log="$fuzz_home/regress-$target.log"
+        printf -v started '%(%s)T' -1
         if "$(binary "$target")" -rss_limit_mb=4096 -timeout="${input_seconds[$target]:-60}" \
             "${inputs[@]}" >"$log" 2>&1; then
+            printf -v now '%(%s)T' -1
             ran="$(grep -c '^Executed ' "$log" || true)"
             if [[ "$ran" -ne "${#inputs[@]}" ]]; then
                 echo "fuzz.sh: FAIL $target -- ran=$ran of ${#inputs[@]} input(s); log $log" >&2
                 fail=1
             else
-                echo "fuzz.sh: pass $target -- ran=$ran input(s)"
+                echo "fuzz.sh: pass $target -- ran=$ran input(s) in $((now - started))s"
+                # The inputs that took longest, from libFuzzer's own
+                # `Executed <input> in <ms> ms` line for each.
+                sed -n 's/^Executed \(.*\) in \([0-9]*\) ms$/\2 \1/p' "$log" | sort -rn | sed -n '1,3p' |
+                    while read -r ms input; do
+                        echo "fuzz.sh:   slowest $target input: ${ms} ms ${input##*/}"
+                    done
             fi
         else
             echo "fuzz.sh: FAIL $target -- an input failed; log $log" >&2
@@ -154,12 +175,74 @@ run() {
     local other shared=()
     other="$(python3 "$seeds_py" --reads "$target")"
     [[ -n "$other" && -d "$fuzz_home/corpus/$other" ]] && shared=("$fuzz_home/corpus/$other")
+    local logs
+    logs="$(worker_logs "$target")"
+    rm -rf "$logs"
+    mkdir -p "$logs"
+    local started rc=0
+    printf -v started '%(%s)T' -1
     # The first directory is the one libFuzzer adds to; the seeds, the
-    # reproducers and a shared corpus are read and left as they are.
-    "$(binary "$target")" "$corpus" "$seeds" "${regressions[@]}" "${shared[@]}" \
+    # reproducers and a shared corpus are read and left as they are. Started
+    # in the log directory, which is where the workers' fuzz-N.log go.
+    (cd "$logs" && exec "$(binary "$target")" "$corpus" "$seeds" "${regressions[@]}" "${shared[@]}" \
         -max_total_time="$seconds" -max_len="$max_len" -timeout="${input_seconds[$target]:-10}" \
         -rss_limit_mb=4096 \
-        -artifact_prefix="$artifacts" -jobs="$jobs" -workers="$jobs" -print_final_stats=1
+        -artifact_prefix="$artifacts" -jobs="$jobs" -workers="$jobs" -print_final_stats=1) &
+    local fuzzer=$!
+    local follower=
+    if ((jobs > 1)); then
+        follow_workers "$logs" "$fuzzer" "$jobs" "$started" &
+        follower=$!
+    fi
+    wait "$fuzzer" || rc=$?
+    # The follower's tail ends within a second of the fuzzer (`--pid`).
+    [[ -z "$follower" ]] || wait "$follower" || true
+    return "$rc"
+}
+
+# Where `run` starts TARGET's fuzzer, and so where its workers' logs are.
+worker_logs() {
+    echo "$fuzz_home/logs/$1"
+}
+
+# Print the milestone lines of the fuzz-N.log of each of `jobs` workers in
+# `logs` as the workers write them, until the process `fuzzer` ends; each line
+# with the worker and the seconds since `started` (epoch seconds).
+follow_workers() {
+    local logs="$1" fuzzer="$2" jobs="$3" started="$4" i now worker=
+    local files=()
+    for ((i = 0; i < jobs; i++)); do files+=("$logs/fuzz-$i.log"); done
+    # -F follows a file that does not exist yet; with several files tail names
+    # the one each block of lines comes from in a `==> path <==` line.
+    tail -n +1 -F --pid="$fuzzer" "${files[@]}" 2>/dev/null |
+        while IFS= read -r line; do
+            case "$line" in
+                "==> $logs/"*" <==")
+                    worker="${line#"==> $logs/"}"
+                    worker="${worker%.log <==}"
+                    ;;
+                # libFuzzer writes `#<runs>`, a tab, then the event word.
+                "INFO: "* | *[[:space:]]pulse[[:space:]]* | *[[:space:]]INITED[[:space:]]* | \
+                    *[[:space:]]DONE[[:space:]]* | "Slowest unit"* | *"ERROR:"* | "SUMMARY:"* | \
+                    "stat::"* | *"panicked at"*)
+                    printf -v now '%(%s)T' -1
+                    printf 'fuzz.sh: [%s +%ds] %s\n' "${worker:-fuzz-0}" "$((now - started))" "$line"
+                    ;;
+            esac
+        done
+}
+
+# The last `lines` lines of each worker log TARGET's last `run` left.
+logs() {
+    local target="$1" lines="${2:-60}" log found=0
+    shopt -s nullglob
+    for log in "$(worker_logs "$target")"/fuzz-*.log; do
+        found=1
+        echo "==> $log (last $lines lines)"
+        tail -n "$lines" "$log"
+    done
+    shopt -u nullglob
+    ((found)) || echo "fuzz.sh: no worker log of $target under $(worker_logs "$target")"
 }
 
 sweep() {
@@ -180,6 +263,7 @@ case "${1:-}" in
     regress) shift; regress "$@" ;;
     run) shift; (($# >= 2)) || usage; run "$@" ;;
     sweep) shift; (($# >= 1)) || usage; sweep "$@" ;;
+    logs) shift; (($# >= 1)) || usage; logs "$@" ;;
     targets) targets ;;
     *) usage ;;
 esac
