@@ -107,6 +107,18 @@ The table names a mode the node is NOT, so the member can survive only because
 the value was read as a table keyed by mode, and not because something resolved
 it for the node's own mode.
 
+## The decision on the unhonoured half
+
+The surface this sweeps is the honoured parts plus
+`UNHONOURED_UPSTREAM_CONFIG_KEYS`, and every key of that second list must be
+either built or excluded with a reason. `UNHONOURED_DISPOSITIONS` records which,
+one row per key, and this script reads it before any probe runs: a key nobody
+decided about, a row for a key wz now honours, an unknown kind, an empty reason
+or an excluded reader gap is a FAIL, and the split is printed beside the surface
+with every excluded key named. The Rust unit test
+`every_unhonoured_key_carries_one_disposition` holds the same table in every
+lane that compiles the crate; this is the reading the surface count sits next to.
+
 ## Where this runs
 
 Layer Z (`scripts/run-ci.sh`), which the hosted `interop` job runs with
@@ -253,6 +265,71 @@ def rust_const(name: str, text: str | None = None) -> list[str]:
     # entry was never covered by "the line starts with //".
     body = rust_comments.strip_comments(m.group(1))
     return re.findall(r'"([^"]+)"', body)
+
+
+def rust_const_rows(name: str, text: str | None = None) -> list[tuple[str, str, str]]:
+    """Read a `&[(&str, &str, &str)]` constant out of the reader's own source.
+
+    Comments are blanked first, for the reason `rust_const` gives, and the
+    anti-swallow guard is the same one. rustfmt puts each member of a long row
+    on its own line, so a row is read across newlines.
+    """
+    src = SOURCE.read_text() if text is None else text
+    m = re.search(
+        r"(?:pub )?const " + name + r": &\[\(&str, &str, &str\)\] = &\[(.*?)\n\];",
+        src,
+        re.S,
+    )
+    if not m:
+        raise SystemExit(f"deepenable-audit: FAIL -- {name} not found in {SOURCE}")
+    if re.search(r"^\s*(?:pub )?(?:const|fn|struct|enum) ", m.group(1), re.M):
+        raise SystemExit(
+            f"deepenable-audit: FAIL -- the read of {name} ran past its own "
+            f"`];` and swallowed a following item."
+        )
+    body = rust_comments.strip_comments(m.group(1))
+    return re.findall(
+        r'\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,?\s*\)', body, re.S
+    )
+
+
+def disposition_failures(
+    unhonoured: list[str],
+    reader_gap: list[str],
+    rows: list[tuple[str, str, str]],
+    kinds: list[str],
+) -> list[str]:
+    """What is wrong with the decision table, as sentences; empty when nothing.
+
+    The table must decide every unhonoured key exactly once, in a known kind,
+    with a reason, and must not exclude a reader gap: a key whose capability wz
+    already has is not one wz can decline.
+    """
+    failures: list[str] = []
+    if not kinds:
+        failures.append("UNHONOURED_DISPOSITION_KINDS read as empty")
+    if not rows:
+        failures.append("UNHONOURED_DISPOSITIONS read as empty, so it decides nothing")
+    decided: dict[str, str] = {}
+    for key, kind, reason in rows:
+        if key in decided:
+            failures.append(f"{key} carries two dispositions")
+        decided[key] = kind
+        if kind not in kinds:
+            failures.append(f"{key}: kind {kind!r} is not one of {kinds}")
+        if not reason.strip():
+            failures.append(f"{key}: a decision with no reason")
+        if key not in unhonoured:
+            failures.append(f"{key}: decided and not unhonoured; drop its row")
+    for key in unhonoured:
+        if key not in decided:
+            failures.append(f"{key}: unhonoured and nobody decided build or exclude")
+    for key in reader_gap:
+        if decided.get(key) == "exclude":
+            failures.append(
+                f"{key}: excluded while wz has its capability (a reader gap)"
+            )
+    return failures
 
 
 def rust_const_usize(name: str) -> int:
@@ -606,6 +683,41 @@ def selftest() -> int:
         "the second probe refutes",
     )
 
+    gap = ["g"]
+    good = [("a", "build", "why"), ("g", "build", "has it"), ("x", "exclude", "why not")]
+    kinds = ["build", "exclude"]
+    expect(disposition_failures(["a", "g", "x"], gap, good, kinds), [], "a total table")
+    for what, unhonoured, rows in (
+        ("an undecided key", ["a", "g", "x", "y"], good),
+        ("a row for a key wz honours", ["a", "g"], good),
+        ("a duplicate row", ["a", "g", "x"], good + [("a", "build", "again")]),
+        ("an unknown kind", ["a", "g", "x"], [("a", "later", "why")] + good[1:]),
+        ("an empty reason", ["a", "g", "x"], [("a", "build", " ")] + good[1:]),
+        ("an excluded reader gap", ["a", "g", "x"], [good[0], ("g", "exclude", "no"), good[2]]),
+        ("an empty table", ["a"], []),
+    ):
+        expect(
+            bool(disposition_failures(unhonoured, gap, rows, kinds)),
+            True,
+            f"the disposition check passed {what}",
+        )
+    table = (
+        'pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[\n'
+        '    // a "quoted" comment is not a row\n'
+        '    ("k/a", "build", "short"),\n'
+        "    (\n"
+        '        "k/b",\n'
+        '        "exclude",\n'
+        '        "a reason, with a comma",\n'
+        "    ),\n"
+        "];\n"
+    )
+    expect(
+        rust_const_rows("UNHONOURED_DISPOSITIONS", table),
+        [("k/a", "build", "short"), ("k/b", "exclude", "a reason, with a comma")],
+        "a table read across rustfmt's row shapes, comments blanked",
+    )
+
     # The two probe tables are disjoint, name no `mode`, and hand the table
     # probe objects, which is the only shape the comparison above is about.
     expect(
@@ -668,6 +780,20 @@ def main() -> int:
             f"A partial read of the exception list makes every key it lost look "
             f"like a missing entry."
         )
+    # The surface's unhonoured half, and what wz decided about each key of it.
+    # Read before any probe runs: it needs no zenohd, and a table that does not
+    # decide the surface it sits beside is a red the probes cannot change.
+    unhonoured = rust_const("UNHONOURED_UPSTREAM_CONFIG_KEYS")
+    dispositions = rust_const_rows("UNHONOURED_DISPOSITIONS")
+    undecided_table = disposition_failures(
+        unhonoured,
+        rust_const("UNHONOURED_READER_GAP"),
+        dispositions,
+        rust_const("UNHONOURED_DISPOSITION_KINDS"),
+    )
+    for failure in undecided_table:
+        print(f"  deepenable-audit: {failure}")
+
     # A probe for a key the surface does not have would measure nothing anyone
     # counts, and pass by having no subject.
     for name, keys in (
@@ -839,6 +965,18 @@ def main() -> int:
         f"  deepenable-audit: surface {len(surface)}, declared {len(declared)}, "
         f"measured accepting {len(accepts)}"
     )
+    # The split of the surface, and the decision on its unhonoured half. The
+    # excluded keys are named, because an exclusion is a claim a reader checks
+    # against its reason, and a count hides which claim it is.
+    built = sorted(k for k, kind, _ in dispositions if kind == "build")
+    excluded = sorted(k for k, kind, _ in dispositions if kind == "exclude")
+    print(
+        f"  deepenable-audit: surface {len(surface)} = honoured "
+        f"{len(surface) - len(unhonoured)} + unhonoured {len(unhonoured)} "
+        f"(to build {len(built)}, excluded {len(excluded)}"
+        + (": " + ", ".join(excluded) if excluded else "")
+        + ")"
+    )
     print(
         f"  deepenable-audit: mode tables — {len(upstream_tables)} measured "
         f"({len(table_verdicts)} from the resolved config), "
@@ -870,7 +1008,7 @@ def main() -> int:
             "so the constant omits them and the check above does not reach "
             "them: " + ", ".join(outside)
         )
-    return 1 if missing or stale or refuted or undeclared else 0
+    return 1 if missing or stale or refuted or undeclared or undecided_table else 0
 
 
 if __name__ == "__main__":

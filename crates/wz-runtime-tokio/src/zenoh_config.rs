@@ -3690,6 +3690,139 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// The two decisions an [`UNHONOURED_DISPOSITIONS`] row may carry, and the one place a third is
+/// added.
+///
+/// * `build` — wz is to honour the key. The reason names what is missing: the subsystem, or for
+///   a reader gap only the reader.
+/// * `exclude` — wz will not honour the key, and the reason is why there is nothing to honour.
+///
+/// Data rather than an `enum` for the reason [`UNHONOURED_CITATION_KINDS`] gives: a script reads
+/// the vocabulary out of this source instead of carrying a copy of it.
+pub const UNHONOURED_DISPOSITION_KINDS: &[&str] = &["build", "exclude"];
+
+/// What wz DECIDES about each key it does not honour, `(key, kind, reason)`: build it, or
+/// exclude it, and why.
+///
+/// [`UNHONOURED_BEYOND_WZ`] and [`UNHONOURED_READER_GAP`] say why a key is unhonoured today;
+/// neither says whether that is a gap wz means to close. Without the decision every key of
+/// [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] reads as the same open question, and a key upstream
+/// itself does nothing with weighs as much as a missing subsystem. So every one of them carries
+/// exactly one row here, of a kind in [`UNHONOURED_DISPOSITION_KINDS`], and a reader gap is
+/// never excluded: a capability wz already has is not one it declines.
+/// `every_unhonoured_key_carries_one_disposition` holds that, and `deepenable_audit.py` reads
+/// this table and prints the split beside the surface it measures. A reason is plain text with
+/// no quote, backslash or comment marker, so that the script reads every row whole.
+///
+/// Four rows name the Rust API preset's session (`wz-zenoh`'s `acted_on_by_the_session`): that
+/// session applies the key, and the node and the C ABI session, which are what this reader's
+/// census counts, do not. The decision recorded is the census's, and the reason says where
+/// the capability already is.
+///
+/// One row is excluded. Upstream reads `transport/link/tx/threads` into its transport manager's
+/// configuration (`io/zenoh-transport/src/manager.rs` @ `self = self.tx_threads(*link.tx().threads());`)
+/// and copies it on into the built manager (`io/zenoh-transport/src/manager.rs` @ `tx_threads: self.tx_threads,`),
+/// and no line of the pinned checkout reads that field back: its TX tasks run on the shared
+/// runtime whatever the value. There is no behaviour to honour, and wz's own test asserts the
+/// key ignored (the `asserted-ignored` row above).
+pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
+    (
+        "aggregation/publishers",
+        "build",
+        "a session declares one publisher per listed key expression; wz declares each",
+    ),
+    (
+        "aggregation/subscribers",
+        "build",
+        "a session declares one subscriber per listed key expression; wz declares each",
+    ),
+    (
+        "plugins_loading/enabled",
+        "build",
+        "reader gap: PluginRegistry loads plugins and the reader does not gate it on this",
+    ),
+    (
+        "plugins_loading/search_dirs",
+        "build",
+        "finding a plugin library by name in search directories; wz loads by path only",
+    ),
+    (
+        "qos/publication",
+        "build",
+        "applied by the Rust API preset session; no per-key defaults in node or C ABI",
+    ),
+    (
+        "stats/filters",
+        "build",
+        "statistics per key expression; wz counts per session and sees no key expression",
+    ),
+    (
+        "transport/link/rx/buffer_size",
+        "build",
+        "reader gap: RecyclingArena sizes each link RX pool by it; nothing reads the file",
+    ),
+    (
+        "transport/link/tls/close_link_on_expiration",
+        "build",
+        "reader gap: tls and quic links close on expiry per locator; the file is unread",
+    ),
+    (
+        "transport/link/tx/queue/allocation/mode",
+        "build",
+        "allocating queue batches at open rather than on demand; wz has no such switch",
+    ),
+    (
+        "transport/link/tx/queue/batching/enabled",
+        "build",
+        "turning back-pressure batching off; wz always coalesces staged frames",
+    ),
+    (
+        "transport/link/tx/queue/batching/time_limit",
+        "build",
+        "the batching retention bound; wz holds it as a fixed writer constant",
+    ),
+    (
+        "transport/link/tx/sequence_number_resolution",
+        "build",
+        "the frame SN resolution a node offers; wz negotiates but offers a fixed one",
+    ),
+    (
+        "transport/link/tx/threads",
+        "exclude",
+        "upstream stores it on its transport manager config and nothing reads it back",
+    ),
+    (
+        "transport/link/unixpipe/file_access_mask",
+        "build",
+        "reader gap: a unixpipe link takes its FIFO mode from its locator only",
+    ),
+    (
+        "transport/multicast/max_sessions",
+        "build",
+        "a run-time cap on the peers of a group; wz bounds its peer table at compile time",
+    ),
+    (
+        "transport/shared_memory/mode",
+        "build",
+        "applied by the Rust API preset session at open; not by node or C ABI",
+    ),
+    (
+        "transport/shared_memory/transport_optimization/message_size_threshold",
+        "build",
+        "applied by the Rust API preset promoter; the node and C ABI do not promote",
+    ),
+    (
+        "transport/shared_memory/transport_optimization/messages",
+        "build",
+        "applied by the Rust API preset promoter; the node and C ABI do not promote",
+    ),
+    (
+        "transport/unicast/open_timeout",
+        "build",
+        "a deadline over the whole open; wz bounds each dial candidate instead",
+    ),
+];
+
 /// Is `path` a key stock zenoh knows — itself, or under a subtree it knows?
 ///
 /// The DESCENDANT half is not a looseness: several upstream keys are whole
@@ -11984,6 +12117,81 @@ mod tests {
                  member; an unexercised branch is not coverage"
             );
             println!("citation kind {kind}: {} row(s) {rows:?}", rows.len());
+        }
+    }
+
+    /// Every unhonoured key carries exactly one decision, of a legal kind, with a reason a
+    /// script reads whole, and a reader gap is never excluded.
+    ///
+    /// Totality is what makes the table a decision record rather than notes: a key added to
+    /// [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] with no row is a key nobody decided about, and a row
+    /// outliving its key is a decision about something wz now honours.
+    #[test]
+    fn every_unhonoured_key_carries_one_disposition() {
+        assert!(
+            !UNHONOURED_DISPOSITIONS.is_empty(),
+            "an empty disposition table decides nothing and passes every check below"
+        );
+        let kinds = UNHONOURED_DISPOSITION_KINDS;
+        for (key, kind, reason) in UNHONOURED_DISPOSITIONS {
+            assert!(
+                kinds.contains(kind),
+                "{key}: kind `{kind}` is not one of {kinds:?}"
+            );
+            assert!(
+                !reason.trim().is_empty(),
+                "{key}: a decision with no reason is not one a reader can check"
+            );
+            assert!(
+                !reason.contains('"') && !reason.contains('\\') && !reason.contains("//"),
+                "{key}: the reason {reason:?} holds a quote, a backslash or a comment marker, \
+                 and deepenable_audit.py would read the row short"
+            );
+            assert!(
+                UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(key),
+                "{key}: carries a disposition and is not unhonoured -- drop the row in the \
+                 round that honours the key"
+            );
+            assert!(
+                *kind != "exclude" || !UNHONOURED_READER_GAP.contains(key),
+                "{key}: a reader gap is a capability wz has, and excluding its key declines \
+                 something already built"
+            );
+        }
+
+        let mut decided: Vec<&str> = UNHONOURED_DISPOSITIONS
+            .iter()
+            .map(|(key, ..)| *key)
+            .collect();
+        let before = decided.len();
+        decided.sort_unstable();
+        decided.dedup();
+        assert_eq!(
+            before,
+            decided.len(),
+            "a key carries two dispositions -- two decisions about one key"
+        );
+
+        let undecided: Vec<&&str> = UNHONOURED_UPSTREAM_CONFIG_KEYS
+            .iter()
+            .filter(|k| !decided.contains(k))
+            .collect();
+        assert!(
+            undecided.is_empty(),
+            "unhonoured with no decision: {undecided:?}. Each needs a row in \
+             UNHONOURED_DISPOSITIONS: build it, or exclude it and say why."
+        );
+
+        for kind in kinds {
+            let rows: Vec<&str> = UNHONOURED_DISPOSITIONS
+                .iter()
+                .filter(|(_, k, _)| k == kind)
+                .map(|(key, ..)| *key)
+                .collect();
+            println!(
+                "unhonoured disposition {kind}: {} key(s) {rows:?}",
+                rows.len()
+            );
         }
     }
 
