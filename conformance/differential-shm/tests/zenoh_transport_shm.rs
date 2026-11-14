@@ -6,9 +6,11 @@
 //! the loopback, each pair of crates in both places, and what each session is handed compared
 //! with what two upstream sessions hand each other.
 //!
-//! One session listens and the other dials it. A wz session that listens is a router node and one
-//! that only dials is the registry of faces, so both of wz's engines meet upstream's, each way.
-//! Each session sends the other, in shared memory it allocated from its provider:
+//! One session listens and the other, a peer, dials it. The listener is a peer, and then a router,
+//! which carries shared memory as its configuration says whatever its mode. A wz session that
+//! listens is a router node at either role and one that only dials is the registry of faces, so
+//! both of wz's engines meet upstream's, each way. Each session sends the other, in shared memory
+//! it allocated from its provider:
 //!
 //! * a put, which the other's subscriber is handed;
 //! * the value of a get, which the other's queryable is handed;
@@ -24,7 +26,7 @@
 #![cfg(target_os = "linux")]
 
 use std::{
-    net::TcpListener,
+    net::{TcpListener, UdpSocket},
     sync::{mpsc::Receiver, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
@@ -44,7 +46,7 @@ type Seen = (Vec<u8>, bool);
 
 /// A session of one of the two crates, as the scenario drives it.
 trait Peer {
-    /// The number of peers the session is linked to.
+    /// The number of routers and peers the session is linked to.
     fn linked(&self) -> usize;
     /// Subscribe to `key`, and what each sample is.
     fn subscribe(&mut self, key: &str) -> Receiver<Seen>;
@@ -87,15 +89,22 @@ macro_rules! peer {
                 held: Vec<Box<dyn std::any::Any>>,
             }
 
-            /// A peer with id `id` that listens on `listen` and dials `connect` of the loopback,
-            /// scouts for nobody, and has shared memory as `shm` says.
-            pub fn open(id: &str, listen: Option<u16>, connect: Option<u16>, shm: bool) -> Node {
-                let endpoints = |port: Option<u16>| match port {
-                    Some(port) => format!(r#"["tcp/127.0.0.1:{port}"]"#),
+            /// A session of `mode` with id `id` that listens on the endpoint `listen` (a TCP
+            /// endpoint or a multicast group) and dials `connect`, scouts for nobody, and has
+            /// shared memory as `shm` says.
+            pub fn open(
+                id: &str,
+                mode: &str,
+                listen: Option<&str>,
+                connect: Option<&str>,
+                shm: bool,
+            ) -> Node {
+                let endpoints = |endpoint: Option<&str>| match endpoint {
+                    Some(endpoint) => format!(r#"["{endpoint}"]"#),
                     None => "[]".to_owned(),
                 };
                 let config = Config::from_json5(&format!(
-                    r#"{{ id: "{id}", mode: "peer",
+                    r#"{{ id: "{id}", mode: "{mode}",
                           listen: {{ endpoints: {} }}, connect: {{ endpoints: {} }},
                           scouting: {{ multicast: {{ enabled: false }} }},
                           transport: {{ shared_memory: {{ enabled: {shm} }} }} }}"#,
@@ -121,7 +130,8 @@ macro_rules! peer {
 
             impl Peer for Node {
                 fn linked(&self) -> usize {
-                    self.session.info().peers_zid().wait().count()
+                    let info = self.session.info();
+                    info.routers_zid().wait().count() + info.peers_zid().wait().count()
                 }
 
                 fn subscribe(&mut self, key: &str) -> mpsc::Receiver<Seen> {
@@ -227,6 +237,19 @@ fn free_port() -> u16 {
     }
 }
 
+/// [`free_port`] for a multicast group: a UDP port nothing is bound to, given once.
+fn free_group_port() -> u16 {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    loop {
+        let offset = NEXT.fetch_add(1, Ordering::Relaxed);
+        let port = 31_000 + ((std::process::id() % 4_000) as u16 + offset) % 9_000;
+        if UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+    }
+}
+
 /// A session id no other session of this process has.
 fn next_id() -> String {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -234,11 +257,17 @@ fn next_id() -> String {
     format!("d5f{:03x}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
-fn open(of: Crate, listen: Option<u16>, connect: Option<u16>, shm: bool) -> Box<dyn Peer> {
+fn open(
+    of: Crate,
+    mode: &str,
+    listen: Option<&str>,
+    connect: Option<&str>,
+    shm: bool,
+) -> Box<dyn Peer> {
     let id = next_id();
     match of {
-        Crate::Up => Box::new(up::open(&id, listen, connect, shm)) as Box<dyn Peer>,
-        Crate::Wz => Box::new(wz::open(&id, listen, connect, shm)) as Box<dyn Peer>,
+        Crate::Up => Box::new(up::open(&id, mode, listen, connect, shm)) as Box<dyn Peer>,
+        Crate::Wz => Box::new(wz::open(&id, mode, listen, connect, shm)) as Box<dyn Peer>,
     }
 }
 
@@ -282,14 +311,23 @@ fn line(what: &str, body: &[u8], seen: Option<Seen>) -> String {
     }
 }
 
-/// A session of `listener` that listens and a session of `dialler` that dials it, the dialler
-/// with shared memory as `dialler_shm` says, sending each other a put, the value of a get and a
-/// reply in shared memory, each way; what each was handed, in order.
-fn transcript(listener: Crate, dialler: Crate, dialler_shm: bool, tag: &str) -> Vec<String> {
+/// The modes a listener is opened in. The dialler is a peer.
+const LISTENER_MODES: [&str; 2] = ["peer", "router"];
+
+/// A session of `listener` in `mode` that listens and a peer of `dialler` that dials it, the
+/// dialler with shared memory as `dialler_shm` says, sending each other a put, the value of a get
+/// and a reply in shared memory, each way; what each was handed, in order.
+fn transcript(
+    listener: Crate,
+    mode: &str,
+    dialler: Crate,
+    dialler_shm: bool,
+    tag: &str,
+) -> Vec<String> {
     let body: Vec<u8> = (0..64u8).collect();
-    let port = free_port();
-    let mut listening = open(listener, Some(port), None, true);
-    let mut dialling = open(dialler, None, Some(port), dialler_shm);
+    let endpoint = format!("tcp/127.0.0.1:{}", free_port());
+    let mut listening = open(listener, mode, Some(&endpoint), None, true);
+    let mut dialling = open(dialler, "peer", None, Some(&endpoint), dialler_shm);
     let deadline = Instant::now() + Duration::from_secs(5);
     while listening.linked() < 1 || dialling.linked() < 1 {
         assert!(
@@ -340,31 +378,100 @@ const PAIRS: [(Crate, Crate); 4] = [
 #[test]
 fn shared_memory_crosses_a_link_to_and_from_upstream_as_between_two_upstream_sessions() {
     let _g = serial();
-    let reference = transcript(Crate::Up, Crate::Up, true, "on-up-up");
-    assert!(
-        reference.iter().all(|l| l.ends_with("as shared memory")),
-        "two upstream sessions did not hand each other shared memory: {reference:#?}"
-    );
-    for (listener, dialler) in &PAIRS[1..] {
-        let tag = format!("on-{listener:?}-{dialler:?}").to_lowercase();
-        assert_eq!(
-            transcript(*listener, *dialler, true, &tag),
-            reference,
-            "{listener:?} listening, {dialler:?} dialling"
+    for mode in LISTENER_MODES {
+        let reference = transcript(
+            Crate::Up,
+            mode,
+            Crate::Up,
+            true,
+            &format!("on-{mode}-up-up"),
         );
+        assert!(
+            reference.iter().all(|l| l.ends_with("as shared memory")),
+            "two upstream sessions, the listener a {mode}, did not hand each other shared \
+             memory: {reference:#?}"
+        );
+        for (listener, dialler) in &PAIRS[1..] {
+            let tag = format!("on-{mode}-{listener:?}-{dialler:?}").to_lowercase();
+            assert_eq!(
+                transcript(*listener, mode, *dialler, true, &tag),
+                reference,
+                "{listener:?} listening as a {mode}, {dialler:?} dialling"
+            );
+        }
     }
 }
 
 #[test]
 fn with_shared_memory_off_on_one_side_every_payload_crosses_as_its_bytes() {
     let _g = serial();
-    for (listener, dialler) in PAIRS {
-        let tag = format!("off-{listener:?}-{dialler:?}").to_lowercase();
-        let seen = transcript(listener, dialler, false, &tag);
-        assert_eq!(seen.len(), 6, "{seen:#?}");
+    for mode in LISTENER_MODES {
+        for (listener, dialler) in PAIRS {
+            let tag = format!("off-{mode}-{listener:?}-{dialler:?}").to_lowercase();
+            let seen = transcript(listener, mode, dialler, false, &tag);
+            assert_eq!(seen.len(), 6, "{seen:#?}");
+            assert!(
+                seen.iter().all(|l| l.ends_with("as plain bytes")),
+                "{listener:?} listening as a {mode}, {dialler:?} dialling without shared \
+                 memory: {seen:#?}"
+            );
+        }
+    }
+}
+
+/// A peer of `receiver` and then a peer of `sender` that join one multicast group, each with
+/// shared memory as said, and what the receiver is handed of a put of a buffer of shared memory
+/// the sender makes. A group negotiates nothing: a member with shared memory sends a buffer as its
+/// descriptor to every member, and maps a descriptor it receives.
+fn group_line(sender: Crate, sender_shm: bool, receiver: Crate, receiver_shm: bool) -> String {
+    let group = format!("udp/224.0.0.1:{}", free_group_port());
+    let mut receiving = open(receiver, "peer", Some(&group), None, receiver_shm);
+    let sending = open(sender, "peer", Some(&group), None, sender_shm);
+    let key = format!("diff/shm/group/{}", next_id());
+    let told = receiving.subscribe(&key);
+    let body: Vec<u8> = (0..64u8).collect();
+    let seen = until_told(|| sending.put_shm(&key, &body), &told);
+    line("a put to the group", &body, seen)
+}
+
+#[test]
+fn shared_memory_crosses_a_multicast_group_to_and_from_upstream_as_between_two_upstream_members() {
+    let _g = serial();
+    for (sender_shm, expected) in [(true, "as shared memory"), (false, "as plain bytes")] {
+        let reference = group_line(Crate::Up, sender_shm, Crate::Up, true);
         assert!(
-            seen.iter().all(|l| l.ends_with("as plain bytes")),
-            "{listener:?} listening, {dialler:?} dialling without shared memory: {seen:#?}"
+            reference.ends_with(expected),
+            "two upstream members, the sender's shared memory {sender_shm}: {reference}"
+        );
+        for (sender, receiver) in &PAIRS[1..] {
+            assert_eq!(
+                group_line(*sender, sender_shm, *receiver, true),
+                reference,
+                "{sender:?} sending, {receiver:?} receiving, the sender's shared memory \
+                 {sender_shm}"
+            );
+        }
+    }
+}
+
+/// The one place the two crates differ, by decision: a member whose shared memory is disabled
+/// holds no reader, and is sent a descriptor all the same. Upstream's maps nothing and hands the
+/// message up with the descriptor where the data was; wz's refuses the message, as it refuses a
+/// descriptor on any link that did not negotiate shared memory, and counts it. Neither is handed
+/// the data, which is what is held of upstream's.
+#[test]
+fn a_member_without_shared_memory_is_never_handed_a_descriptor_as_the_data() {
+    let _g = serial();
+    for sender in [Crate::Up, Crate::Wz] {
+        let upstream = group_line(sender, true, Crate::Up, false);
+        assert!(
+            !upstream.contains("the bytes"),
+            "{sender:?} sending, upstream's member without shared memory: {upstream}"
+        );
+        assert_eq!(
+            group_line(sender, true, Crate::Wz, false),
+            "a put to the group: never handed over",
+            "{sender:?} sending, wz's member without shared memory"
         );
     }
 }
