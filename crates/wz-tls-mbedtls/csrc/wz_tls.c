@@ -97,6 +97,25 @@ void wz_tls_arena_peak_reset(void)
 #endif
 }
 
+int wz_tls_key_store_slots(size_t *declared, size_t *built)
+{
+#if defined(MBEDTLS_PSA_KEY_STORE_DYNAMIC)
+	*declared = 0;
+	*built = 0;
+	return -1;
+#else
+	mbedtls_psa_stats_t stats;
+
+	/* The library walks its own array of MBEDTLS_PSA_KEY_SLOT_COUNT slots, as it was compiled,
+	 * and counts each one once: empty, or holding a volatile or a persistent key. */
+	mbedtls_psa_get_stats(&stats);
+	*declared = MBEDTLS_PSA_KEY_SLOT_COUNT;
+	*built = stats.MBEDTLS_PRIVATE(empty_slots) + stats.MBEDTLS_PRIVATE(volatile_slots) +
+		 stats.MBEDTLS_PRIVATE(persistent_slots);
+	return 0;
+#endif
+}
+
 /* ── The zid of a key: the first 16 bytes of SHA-256 over its DER SubjectPublicKeyInfo (D1). ── */
 
 static int zid_of(const mbedtls_pk_context *pk, uint8_t zid[WZ_TLS_ZID_BYTES])

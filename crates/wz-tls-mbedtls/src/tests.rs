@@ -12,8 +12,8 @@ use std::vec::Vec;
 use wz_session_core::credential_identity::zid_from_spki_der;
 
 use crate::channel::{
-    arena_peak, arena_peak_reset, make_identity_der, pem, start, Identity, Io, PemLabel, Role,
-    Session, Step, Transport, Want, MADE_CERT_DER_MAX, MADE_KEY_DER_MAX,
+    arena_peak, arena_peak_reset, key_store_slots, make_identity_der, pem, start, Identity, Io,
+    PemLabel, Role, Session, Step, Transport, Want, MADE_CERT_DER_MAX, MADE_KEY_DER_MAX,
 };
 
 /// The library keeps process-wide state with no lock (the profile has one thread), and the test
@@ -249,4 +249,31 @@ fn both_ends_prove_their_keys_and_each_names_the_others_zid() {
             "every record {direction} fits the 1,500-byte send buffer"
         );
     }
+}
+
+#[test]
+fn the_library_holds_the_key_store_the_channels_configuration_declares() {
+    let _library = library();
+    let slots = key_store_slots().expect("this crate's configuration keeps a store of fixed size");
+    assert_eq!(
+        slots.built, slots.declared,
+        "the library was compiled to another key store than the channel's C side was"
+    );
+}
+
+#[cfg(feature = "host-lock")]
+#[test]
+fn the_host_build_holds_the_key_store_the_host_declares() {
+    use crate::channel::HOST_KEY_SLOTS;
+
+    let _library = library();
+    let slots = key_store_slots().expect("this crate's configuration keeps a store of fixed size");
+    assert_eq!(
+        slots.declared, HOST_KEY_SLOTS,
+        "the channel's C side was not compiled with the host's key store (WZ_TLS_HOST)"
+    );
+    assert_eq!(
+        slots.built, HOST_KEY_SLOTS,
+        "the library was not compiled with the host's key store (WZ_TLS_HOST)"
+    );
 }
