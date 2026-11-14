@@ -1029,7 +1029,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // `// First, try to open the optional listen locator.`).
     #[cfg(feature = "admin-space")]
     let transport_endpoint = listen.first().or_else(|| connect.first()).cloned();
-    let links = crate::coop_host::links();
+    // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
+    // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
+    // negotiated, and a node pays its batch for each link and not the largest datagram.
+    let links =
+        crate::coop_host::links().with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES);
     // The `tls/` link: the secure channel over the host's streams, for the dial and the listen,
     // made from the material the config's keys named. A config whose material cannot make a
     // channel (half a listener, a key that is not its chain's) fails the open, as a malformed
