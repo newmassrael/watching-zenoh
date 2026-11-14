@@ -2720,9 +2720,25 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     // `unjudged_reason` is `sender_unknown` where there is no slot to judge
     // against (`slot.zid` is `null`), and `null` where the counter was judged.
     //
+    // A query's `ResponseFinal` closes its reply streams, and every `carried`
+    // entry gains `ended_transfers` after `answers`: on a final read under a
+    // declared segment rule, the reply transfers it ended before they completed
+    // (an empty array when it ended none), `null` on every other entry. Every
+    // ended transfer, there and in a piece's `segment.ended_transfers`, gains
+    // `ended_by`, what ended it: `superseded` (its stream began another),
+    // `evicted` (the bound on held bytes; the `evicted` boolean stays beside
+    // it) or `closed` (its query's final). Two keys and a family arrive.
+    //
+    // The selector's `e2e` words read a reply as this block does: its CRC
+    // judged, its counter and timeout `unjudged`; a door handed no
+    // declarations leaves a reply's `e2e` terms undecided, as it leaves a
+    // published sample's, where they were `none`.
+    //
     // ⚠ A VALUE MOVES: a reply entry a rule covers gains `e2e` or `segment`,
     // and its `payload_decode` stays `segment_piece` with the message now
-    // decoded under `segment.joined`.
+    // decoded under `segment.joined`; a row's `selected` under an `e2e` term
+    // moves for a reply; a reply piece after its query's final begins a
+    // transfer afresh.
     DocumentShape {
         document: FIELDS,
         revision: 66,
@@ -4258,6 +4274,20 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTION_R1_CARRIES,
     },
+    // Revision 7 moves no key: a `Reply` carrying a `put` may carry an
+    // end-to-end frame, as the field document's revision 66 reads it, so this
+    // door, which takes no declarations, leaves its `e2e` terms undecided where
+    // they were `none`. A row of such a reply may read `undecided` where it
+    // read `yes` or `no` under an `e2e` term.
+    DocumentShape {
+        document: SELECTION,
+        revision: 7,
+        keys: SELECTION_R5_KEYS,
+        retiring: &[],
+        families: SELECTION_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_R1_CARRIES,
+    },
     // THE VERDICTS OF THE ROWS AFTER A CURSOR, AND THE EARLIER ROWS THAT MOVED.
     //
     // A document of its own and not a mode of `selection`, for that document's
@@ -4328,6 +4358,19 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: SELECTION_SINCE,
         revision: 4,
+        keys: SELECTION_SINCE_R3_KEYS,
+        retiring: &[],
+        families: SELECTION_SINCE_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_SINCE_R1_CARRIES,
+    },
+    // Revision 5: the selection document's revision 7 on the rows after a
+    // cursor, and no key moves. A reply's `e2e` terms are undecided where they
+    // were `none`; a consumer holding words a revision-4 handle gave such rows
+    // asks the selector again from 0.
+    DocumentShape {
+        document: SELECTION_SINCE,
+        revision: 5,
         keys: SELECTION_SINCE_R3_KEYS,
         retiring: &[],
         families: SELECTION_SINCE_R1_FAMILIES,
@@ -4591,6 +4634,21 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: CENSUS,
         revision: 22,
+        keys: CENSUS_R21_KEYS,
+        retiring: &[],
+        families: CENSUS_R20_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R20_CARRIES,
+    },
+    // Revision 23 moves no key and no word. A `Reply` carrying a `put` may
+    // carry an end-to-end frame, as the field document's revision 66 reads
+    // it, so under a selector the census's `e2e` terms over such a record
+    // are undecided, as they are over a published sample, where they were
+    // `none`: the planes a selector narrows may count it in `undecided`
+    // where they counted it in or out.
+    DocumentShape {
+        document: CENSUS,
+        revision: 23,
         keys: CENSUS_R21_KEYS,
         retiring: &[],
         families: CENSUS_R20_FAMILIES,
@@ -8018,6 +8076,7 @@ pub const ROW_FACTS_R7_KEYS: &[&str] = &[
     "e2e",
     "encoding",
     "end",
+    "ended_by",
     "ended_chains",
     "ended_transfers",
     "ending",
@@ -8200,8 +8259,8 @@ pub const ROW_FACTS_R7_KEYS: &[&str] = &[
     "zid",
 ];
 
-/// The row-facts document's value families at revision 7: revision 6's and
-/// `unjudged_reason`.
+/// The row-facts document's value families at revision 7: revision 6's,
+/// `unjudged_reason` and `ended_by`.
 pub const ROW_FACTS_R7_FAMILIES: &[ValueFamily] = &[
     ValueFamily {
         key: "announced_version",
@@ -8234,6 +8293,10 @@ pub const ROW_FACTS_R7_FAMILIES: &[ValueFamily] = &[
     ValueFamily {
         key: "direction",
         values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "ended_by",
+        values: ENDED_BY_R66,
     },
     ValueFamily {
         key: "ending",
@@ -8349,8 +8412,8 @@ pub const ROW_FACTS_R7_FAMILIES: &[ValueFamily] = &[
     },
 ];
 
-/// What the row-facts document's words decide at revision 7: revision 6's and
-/// `unjudged_reason`, a passenger.
+/// What the row-facts document's words decide at revision 7: revision 6's,
+/// `unjudged_reason` and `ended_by`, two passengers.
 pub const ROW_FACTS_R7_CARRIES: &[KeyCarries] = &[
     KeyCarries {
         key: "announced_version",
@@ -8382,6 +8445,10 @@ pub const ROW_FACTS_R7_CARRIES: &[KeyCarries] = &[
     },
     KeyCarries {
         key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "ended_by",
         shape: CarriesShape::Passenger,
     },
     KeyCarries {
@@ -26420,8 +26487,12 @@ pub const FIELDS_R65_CARRIES: &[KeyCarries] = &[
 /// (field document 66): [`crate::e2e_slots::Unjudged`]'s words.
 pub const UNJUDGED_REASON_R66: &[&str] = &["reply", "sender_unknown"];
 
-/// The field document's key set at revision 66: revision 65's and
-/// `unjudged_reason`.
+/// What ended a transfer before it completed (field document 66):
+/// [`crate::segment_chain::Ending`]'s words.
+pub const ENDED_BY_R66: &[&str] = &["closed", "evicted", "superseded"];
+
+/// The field document's key set at revision 66: revision 65's,
+/// `unjudged_reason` and `ended_by`.
 pub const FIELDS_R66_KEYS: &[&str] = &[
     "abandoned_at_end",
     "abandoned_on_eviction",
@@ -26482,6 +26553,7 @@ pub const FIELDS_R66_KEYS: &[&str] = &[
     "e2e",
     "encoding",
     "end",
+    "ended_by",
     "ended_chains",
     "ended_transfers",
     "ending",
@@ -26666,8 +26738,8 @@ pub const FIELDS_R66_KEYS: &[&str] = &[
     "zid",
 ];
 
-/// The field document's value families at revision 66: revision 65's and
-/// `unjudged_reason`.
+/// The field document's value families at revision 66: revision 65's,
+/// `unjudged_reason` and `ended_by`.
 pub const FIELDS_R66_FAMILIES: &[ValueFamily] = &[
     ValueFamily {
         key: "announced_version",
@@ -26700,6 +26772,10 @@ pub const FIELDS_R66_FAMILIES: &[ValueFamily] = &[
     ValueFamily {
         key: "direction",
         values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "ended_by",
+        values: ENDED_BY_R66,
     },
     ValueFamily {
         key: "ending",
@@ -26819,9 +26895,10 @@ pub const FIELDS_R66_FAMILIES: &[ValueFamily] = &[
     },
 ];
 
-/// What the field document's words decide at revision 66: revision 65's, and
+/// What the field document's words decide at revision 66: revision 65's,
 /// `unjudged_reason`, which decides no key (every opened block carries every
-/// key of one, whichever word it says).
+/// key of one, whichever word it says), and `ended_by`, which decides none
+/// either (every ended transfer carries the same four keys beside it).
 pub const FIELDS_R66_CARRIES: &[KeyCarries] = &[
     KeyCarries {
         key: "announced_version",
@@ -26853,6 +26930,10 @@ pub const FIELDS_R66_CARRIES: &[KeyCarries] = &[
     },
     KeyCarries {
         key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "ended_by",
         shape: CarriesShape::Passenger,
     },
     KeyCarries {
@@ -32625,7 +32706,9 @@ mod tests {
             // flow: one key, no word moves and nothing retires.
             // To 22 when a `Join` on a link with a handshake became
             // inadmissible: values only.
-            (CENSUS, 22u32),
+            // To 23 when a reply carrying a put left its `e2e` terms
+            // undecided under a selector, as a published sample's are.
+            (CENSUS, 23u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -32788,8 +32871,9 @@ mod tests {
             // `timestamp_ntp64`, and a `payload` its `span_of`.
             // To 65 when every `carried` entry gained `keyexpr_carriage`.
             // To 66 when a reply was read as a published sample is, its pieces
-            // joined per query, and an opened `e2e` block gained
-            // `unjudged_reason`.
+            // joined per query, an opened `e2e` block gained
+            // `unjudged_reason`, a final's entry `ended_transfers` and an ended
+            // transfer `ended_by`.
             (FIELDS, 66),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
@@ -32919,7 +33003,8 @@ mod tests {
             // To 5 when `caps` gained `frames_total`, the ceiling over every
             // flow: one key, no word moves and nothing retires.
             // To 6 when every row was judged: values only.
-            (SELECTION, 6),
+            // To 7 when a reply's `e2e` terms became undecided: values only.
+            (SELECTION, 7),
             // The same verdicts for the rows after a cursor, and the earlier
             // rows whose word moved.
             // To 2 when its `window` gained `continued`: whether the call found
@@ -32928,7 +33013,8 @@ mod tests {
             // To 3 when `caps` gained `frames_total`, the ceiling over every
             // flow: one key, no word moves and nothing retires.
             // To 4 when every row was judged: values only.
-            (SELECTION_SINCE, 4),
+            // To 5 with the selection document's 7: values only.
+            (SELECTION_SINCE, 5),
             // What a live handle holds, beside its ceilings.
             // To 2 when `oldest_ts_ns` became a number, a string or null: a
             // nanosecond clock is past 2^53.

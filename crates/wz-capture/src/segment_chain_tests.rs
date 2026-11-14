@@ -8,7 +8,9 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::segment_chain::{Carrier, Ended, KeyRef, Place, SegmentLedger, Unjoined, Verdict};
+use crate::segment_chain::{
+    Carrier, Ended, Ending, KeyRef, Place, SegmentLedger, Unjoined, Verdict,
+};
 use crate::segment_profile::{Misplaced, SegmentProfile};
 use crate::segment_profile_tests::{demo_piece, demo_profile};
 
@@ -141,7 +143,7 @@ fn a_new_transfer_number_ends_the_previous_one_and_says_how_far_it_got() {
             transfer: 1,
             total: 12,
             received: 8,
-            evicted: false
+            ending: Ending::Superseded
         }]
     );
     // A completed transfer ends nothing a reader is told about.
@@ -278,13 +280,58 @@ fn the_bound_on_held_bytes_ends_the_least_recently_fed_transfer() {
             transfer: 1,
             total: 12,
             received: 4,
-            evicted: true
+            ending: Ending::Evicted
         }]
     );
     assert_eq!((l.evicted(), l.held()), (1, 2 * MESSAGE.len()));
     // Origin 1 is still being joined.
     let w = feed_on(&mut l, &p, key(), 1, 1, 8..12);
     assert_eq!(w.place, Some(Place::Closing));
+}
+
+/// A query's final lets go of its reply streams and of nothing else: the
+/// stream count returns to what it was before the query, a completed reply
+/// transfer leaves without a word, an open one is ended `closed` with what it
+/// had received, and the bytes it held are given back. A piece of the query
+/// after its final starts a stream afresh.
+#[test]
+fn a_final_ends_its_querys_replies_and_nothing_else() {
+    let (p, mut l) = (demo_profile(), SegmentLedger::new());
+    let live = feed_carried(&mut l, &p, Carrier::Push, key(), (1, 1), 0..4);
+    assert_eq!(live.place, Some(Place::First));
+    let before = l.streams();
+    let other = Carrier::Reply { request: 2 };
+    let _ = feed_carried(&mut l, &p, other, key(), (1, 1), 0..4);
+    let asked = Carrier::Reply { request: 1 };
+    // Two streams of the one query: one completes, one stays open.
+    let _ = feed_carried(&mut l, &p, asked, key(), (1, 1), 0..12);
+    let _ = feed_carried(&mut l, &p, asked, key(), (2, 1), 0..4);
+    assert_eq!(l.streams(), before + 3);
+    let held = l.held();
+    let ended = l.close(0, Some(true), 1);
+    assert_eq!(
+        ended,
+        [Ended {
+            transfer: 1,
+            total: 12,
+            received: 4,
+            ending: Ending::Closed
+        }]
+    );
+    assert_eq!(l.streams(), before + 1, "the other query's stream stays");
+    assert_eq!(l.held(), held - MESSAGE.len());
+    // Another list or direction names other streams: nothing to close.
+    assert_eq!(l.close(1, Some(true), 2), Vec::new());
+    assert_eq!(l.close(0, Some(false), 2), Vec::new());
+    assert_eq!(l.streams(), before + 1);
+    // The live stream and the other query go on.
+    let w = feed_carried(&mut l, &p, Carrier::Push, key(), (1, 1), 4..12);
+    assert_eq!(w.place, Some(Place::Closing));
+    let x = feed_carried(&mut l, &p, other, key(), (1, 1), 4..12);
+    assert_eq!(x.place, Some(Place::Closing));
+    // A late piece of the closed query begins again.
+    let y = feed_carried(&mut l, &p, asked, key(), (1, 1), 4..8);
+    assert_eq!((y.place, y.ended.len()), (Some(Place::First), 0));
 }
 
 #[cfg(feature = "dissect")]

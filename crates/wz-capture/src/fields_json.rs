@@ -3338,7 +3338,7 @@ fn piece_carrier(
     word: &str,
 ) -> Option<crate::segment_chain::Carrier> {
     use crate::segment_chain::Carrier;
-    use wz_session_core::dissect::{BodyName, FieldValue, MessageName};
+    use wz_session_core::dissect::{BodyName, MessageName};
     if word == MessageName::Push.name() {
         return (record.body() == Some(BodyName::Put)).then_some(Carrier::Push);
     }
@@ -3351,13 +3351,20 @@ fn piece_carrier(
     if reply.body() != Some(BodyName::Put) {
         return None;
     }
+    request_id(record).map(|request| Carrier::Reply { request })
+}
+
+/// The `request_id` a `Response` or a `ResponseFinal` echoes: a direct child
+/// of the message's own node.
+fn request_id(record: &wz_session_core::dissect::Field) -> Option<u64> {
+    use wz_session_core::dissect::FieldValue;
     let FieldValue::Nested(children) = &record.value else {
         return None;
     };
     children
         .iter()
         .find_map(|child| match (child.name.as_ref(), &child.value) {
-            ("request_id", FieldValue::Uint(request)) => Some(Carrier::Reply { request: *request }),
+            ("request_id", FieldValue::Uint(request)) => Some(*request),
             _ => None,
         })
 }
@@ -3390,6 +3397,15 @@ fn judge_record<'d>(
     // looking at a payload to find that out.
     if !declarations.has_stateful_rules() {
         return none;
+    }
+    // A final closes its query's reply streams; it travels the way the
+    // replies did, so its own direction names them.
+    if word == wz_session_core::dissect::MessageName::ResponseFinal.name() {
+        return RecordJudged {
+            closed: request_id(record)
+                .and_then(|request| declarations.close_replies(request, source.from_low)),
+            ..none
+        };
     }
     let Some(carrier) = piece_carrier(record, word) else {
         return none;
@@ -3429,6 +3445,7 @@ fn judge_record<'d>(
                     judged: segment,
                     joined_e2e,
                 }),
+                closed: None,
             };
         }
     }
@@ -3438,6 +3455,7 @@ fn judge_record<'d>(
     RecordJudged {
         e2e: judge_frame(declarations, carrier, keyexpr, payload, source),
         segment: None,
+        closed: None,
     }
 }
 
@@ -3469,6 +3487,9 @@ fn judge_frame<'d>(
 struct RecordJudged<'d> {
     e2e: Option<crate::payload_decode::E2eJudged<'d>>,
     segment: Option<SegmentEntry<'d>>,
+    /// On a `ResponseFinal` under declared segment rules, the reply transfers
+    /// it ended unfinished; `None` on every other record.
+    closed: Option<Vec<crate::segment_chain::Ended>>,
 }
 
 /// One piece's verdict as an entry writes it.
@@ -3799,6 +3820,9 @@ fn push_carried(
         // The same rule: on every entry, `null` on one that is not a `Response`.
         out.push_str(",\"answers\":");
         out.push_str(answered.as_deref().unwrap_or("null"));
+        // Revision 66: what a final ended of its query's replies, by the same
+        // rule.
+        push_final_ends(judged.closed.as_deref(), out);
         out.push('}');
     };
     // The first listing entry is the row itself; subsequent entries are its
@@ -3885,7 +3909,8 @@ fn push_carried(
 ///            "missing_ranges":[[from,to], ...],
 ///            "out_of_order":false,"overlap":false,
 ///            "ended_transfers":[{"transfer":N,"whole_bytes":N,
-///                                "received_bytes":N,"evicted":false}],
+///                                "received_bytes":N,"evicted":false,
+///                                "ended_by":"superseded"}],
 ///            "joined":null}
 /// ```
 ///
@@ -3903,7 +3928,9 @@ fn push_carried(
 ///   furthest byte its transfer has received, after this piece; empty when the
 ///   piece joined nothing.
 /// * `ended_transfers` is the transfers this piece ended unjoined: its stream's
-///   previous one, and any the bound on held bytes ended (`evicted`).
+///   previous one (`ended_by` `superseded`), and any the bound on held bytes
+///   ended (`evicted`). A query's final names what it ended on its own entry
+///   (`closed`; [`push_final_ends`]).
 /// * `joined` is `null` except on the piece that completed its transfer
 ///   (`closing` or `whole`), where it is the message: its length, its
 ///   `payload_decode` under the key's own rule (spans relative to the joined
@@ -3996,22 +4023,11 @@ fn push_segment(
     }
     let _ = write!(
         out,
-        "],\"out_of_order\":{},\"overlap\":{},\"ended_transfers\":[",
+        "],\"out_of_order\":{},\"overlap\":{},\"ended_transfers\":",
         verdict.out_of_order, verdict.overlap
     );
-    for (i, ended) in verdict.ended.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"transfer\":");
-        integer(ended.transfer, out);
-        out.push_str(",\"whole_bytes\":");
-        integer(ended.total, out);
-        out.push_str(",\"received_bytes\":");
-        integer(ended.received, out);
-        let _ = write!(out, ",\"evicted\":{}}}", ended.evicted);
-    }
-    out.push_str("],\"joined\":");
+    push_ended_transfers(&verdict.ended, out);
+    out.push_str(",\"joined\":");
     match (&verdict.joined, declarations) {
         (Some(joined), Some(declarations)) => {
             let _ = write!(out, "{{\"whole_bytes\":{}", joined.len());
@@ -4038,6 +4054,49 @@ fn push_segment(
 /// cell of the integer rule rather than twelve that could drift apart.
 fn push_segment_integer(value: u64, out: &mut String) {
     wz_session_core::json::u64_into(value, out);
+}
+
+/// An `ended_transfers` array: each transfer ended before it completed, with
+/// how many of its bytes had arrived and what ended it. One writer for a
+/// piece's `segment` block and a final's entry, so the two cannot spell an
+/// ended transfer two ways.
+///
+/// `ended_by` is the word (`superseded`, `evicted`, `closed`;
+/// [`crate::segment_chain::Ending`]) and `evicted` the boolean the block wrote
+/// before the word, kept beside it.
+fn push_ended_transfers(ended: &[crate::segment_chain::Ended], out: &mut String) {
+    let integer = push_segment_integer;
+    out.push('[');
+    for (i, ended) in ended.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"transfer\":");
+        integer(ended.transfer, out);
+        out.push_str(",\"whole_bytes\":");
+        integer(ended.total, out);
+        out.push_str(",\"received_bytes\":");
+        integer(ended.received, out);
+        let _ = write!(
+            out,
+            ",\"evicted\":{},\"ended_by\":\"{}\"}}",
+            ended.evicted(),
+            ended.ending.word()
+        );
+    }
+    out.push(']');
+}
+
+/// The `ended_transfers` key of one `carried` entry: on a `ResponseFinal` read
+/// under declared segment rules, the reply transfers of its query it ended
+/// before they completed (an empty array when it ended none); `null` on every
+/// other entry, on the rule `closes` keeps.
+fn push_final_ends(closed: Option<&[crate::segment_chain::Ended]>, out: &mut String) {
+    out.push_str(",\"ended_transfers\":");
+    match closed {
+        Some(ended) => push_ended_transfers(ended, out),
+        None => out.push_str("null"),
+    }
 }
 
 /// The `e2e` key of one `carried` entry: the end-to-end verdict, or nothing.
@@ -4662,6 +4721,7 @@ fn push_above_transport(
                 Some(c) => out.push_str(&c.answer_value(i)),
                 None => out.push_str("null"),
             }
+            push_final_ends(judged.closed.as_deref(), out);
             out.push('}');
         }
         out.push(']');
@@ -10896,7 +10956,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 95] = [
+        let live: [(&str, &str, Vec<&'static str>); 96] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -11021,6 +11081,16 @@ mod tests {
                 crate::e2e_slots::Unjudged::ALL
                     .iter()
                     .map(|r| r.word())
+                    .collect(),
+            ),
+            // Revision 66 — what ended a transfer before it completed. The
+            // walk is the ledger's own enum.
+            (
+                rev::FIELDS,
+                "ended_by",
+                crate::segment_chain::Ending::ALL
+                    .iter()
+                    .map(|e| e.word())
                     .collect(),
             ),
             // Revision 59 — where a piece sits in its transfer, and why a piece

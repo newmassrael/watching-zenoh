@@ -439,6 +439,44 @@ impl<'a> Declarations<'a> {
         })
     }
 
+    /// Close the replies to the query `request` at its `ResponseFinal`, which
+    /// travelled in the direction `from_low` says
+    /// ([`crate::segment_chain::SegmentLedger::close`]), and answer the
+    /// transfers that were still open; `None` when no segment rule is
+    /// declared, so no stream was ever kept.
+    ///
+    /// Counted among the row's pieces, in the order the caller hands records
+    /// in, so a row behind the list's frontier is answered from what was kept
+    /// and closes nothing a second time.
+    pub fn close_replies(
+        &self,
+        request: u64,
+        from_low: Option<bool>,
+    ) -> Option<Vec<crate::segment_chain::Ended>> {
+        if !self.map.has_segment_rules() {
+            return None;
+        }
+        let list = self.list.get();
+        let at = self.segment_row.get().map(|(produced, ordinal)| {
+            self.segment_row.set(Some((produced, ordinal + 1)));
+            (produced, ordinal)
+        });
+        let mut ledger = self.e2e.borrow_mut();
+        let behind = at.filter(|(produced, _)| *produced < ledger.frontier(list).produced);
+        if let Some(kept) = behind
+            .and_then(|(produced, ordinal)| ledger.segments().recall_close(list, produced, ordinal))
+        {
+            return Some(kept);
+        }
+        let ended = ledger.segments_mut().close(list, from_low, request);
+        if let Some((produced, ordinal)) = at {
+            ledger
+                .segments_mut()
+                .remember_close(list, produced, ordinal, &ended);
+        }
+        Some(ended)
+    }
+
     /// Judge ONE sample under the profile rule that governs its key, or say
     /// that none does.
     ///

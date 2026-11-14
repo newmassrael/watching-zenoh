@@ -186,6 +186,10 @@ struct Held {
     fed: bool,
     /// What joining made of it, when it is a piece of a split message.
     piece: Option<HeldPiece>,
+    /// `Some(request)` for a query's `ResponseFinal` and not a payload: kept in
+    /// the order taken so joining closes the query's replies where the wire
+    /// did, and never written as a record.
+    closes: Option<u64>,
 }
 
 /// One piece as joining judged it.
@@ -231,6 +235,13 @@ impl ValuesFold {
         let Self { held, segments, .. } = self;
         for held in held.iter_mut().filter(|h| !h.fed) {
             held.fed = true;
+            // A final lets go of its query's reply streams. This document
+            // writes no record for it, so a reply message it left unfinished is
+            // told only by its pieces, none of which completed it.
+            if let Some(request) = held.closes {
+                let _ = segments.close(held.list, Some(held.from_low), request);
+                continue;
+            }
             if held.elsewhere || !map.has_segment_rules() {
                 continue;
             }
@@ -293,26 +304,49 @@ impl crate::ordered_fold::OrderedFold for ValuesFold {
         grouping: &crate::node::SessionGrouping,
     ) {
         let held = &mut self.held;
-        let mut sink = |payload: crate::payload::SelectedPayload<'_>| {
-            let (list, _, produced) = payload.row.parts();
-            held.push(Held {
-                list,
-                produced: produced as u64,
-                record: payload.record,
-                observed_at_ns: payload.observed_at_ns,
-                keyexpr: payload.keyexpr.map(String::from),
-                fixed: payload.fixed,
-                missed: payload
-                    .missed
-                    .map(|(id, suffix)| (id, suffix.map(String::from))),
-                from_low: payload.from_low,
-                carrier: payload.carrier,
-                declared: HeldEncoding::of(payload.declared),
-                bytes: payload.bytes.to_vec(),
-                elsewhere: payload.elsewhere,
-                fed: false,
-                piece: None,
-            });
+        let mut sink = |sighting: crate::payload::Sighting<'_>| match sighting {
+            crate::payload::Sighting::Payload(payload) => {
+                let (list, _, produced) = payload.row.parts();
+                held.push(Held {
+                    list,
+                    produced: produced as u64,
+                    record: payload.record,
+                    observed_at_ns: payload.observed_at_ns,
+                    keyexpr: payload.keyexpr.map(String::from),
+                    fixed: payload.fixed,
+                    missed: payload
+                        .missed
+                        .map(|(id, suffix)| (id, suffix.map(String::from))),
+                    from_low: payload.from_low,
+                    carrier: payload.carrier,
+                    declared: HeldEncoding::of(payload.declared),
+                    bytes: payload.bytes.to_vec(),
+                    elsewhere: payload.elsewhere,
+                    fed: false,
+                    piece: None,
+                    closes: None,
+                });
+            }
+            crate::payload::Sighting::Final(seen) => {
+                let (list, _, produced) = seen.row.parts();
+                held.push(Held {
+                    list,
+                    produced: produced as u64,
+                    record: seen.record,
+                    observed_at_ns: None,
+                    keyexpr: None,
+                    fixed: false,
+                    missed: None,
+                    from_low: seen.from_low,
+                    carrier: None,
+                    declared: HeldEncoding::Absent,
+                    bytes: Vec::new(),
+                    elsewhere: false,
+                    fed: false,
+                    piece: None,
+                    closes: Some(seen.request),
+                });
+            }
         };
         self.plane.feed_selecting(
             flow,
@@ -394,6 +428,10 @@ impl Outcome {
 /// Read one held payload by `map`, keeping the fields at `paths`; `None` when
 /// no rule covers its key, which is a record nobody asked about.
 fn read(map: &FormatMap<'_>, paths: &[String], held: &Held) -> Option<Outcome> {
+    // A final is held for joining and is no record.
+    if held.closes.is_some() {
+        return None;
+    }
     if let Some(piece) = &held.piece {
         return read_piece(map, paths, held, piece);
     }
@@ -527,7 +565,9 @@ impl ValuesMemory {
 
     /// The payloads held, waiting to be written or passed by a cursor.
     pub fn held(&self) -> usize {
-        self.fold.fold().map_or(0, |fold| fold.held.len())
+        self.fold.fold().map_or(0, |fold| {
+            fold.held.iter().filter(|h| h.closes.is_none()).count()
+        })
     }
 }
 
@@ -782,7 +822,7 @@ fn push_piece(piece: &HeldPiece, out: &mut String) {
         integer(ended.total, out);
         out.push_str(",\"received_bytes\":");
         integer(ended.received, out);
-        let _ = write!(out, ",\"evicted\":{}}}", ended.evicted);
+        let _ = write!(out, ",\"evicted\":{}}}", ended.evicted());
     }
     out.push_str("]}");
 }

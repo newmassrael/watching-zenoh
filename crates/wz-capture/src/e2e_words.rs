@@ -31,14 +31,18 @@
 //!
 //! The counter of a slot's first frame has nothing before it to be judged
 //! against, a frame from a sender the capture never named has no slot, and a
-//! frame whose packet carried no time is not judged for its timeout. Each of
-//! those reads `unjudged`, and never `error`: a reader filtering for failures
-//! writes `e2e == error` and is not shown the first frame of every stream.
+//! frame whose packet carried no time is not judged for its timeout. A frame
+//! that came in a reply to a query is not judged for its counter or its timeout
+//! either (the block's `unjudged_reason` is `reply`): an answer is not the live
+//! stream. Each of those reads `unjudged`, and never `error`: a reader filtering
+//! for failures writes `e2e == error` and is not shown the first frame of every
+//! stream. A reply's CRC is judged, so a damaged one reads `error`.
 //!
 //! # `none` is decided
 //!
-//! A `Push` whose key no profile rule covers, a `del`, a query and a reply carry
-//! no frame, so `e2e == none` is `yes` over them and the three parts are absent
+//! A `Push` or a `Reply` whose key no profile rule covers, a `del`, a query, a
+//! request's put and an error carry no frame, so `e2e == none` is `yes` over
+//! them and the three parts are absent
 //! (`e2e.crc == ok` is `no`, `e2e.crc != ok` is `yes`, as a path the walked tree
 //! lacks answers). Whether a record IS a frame is undecidable only where the
 //! judge could not be asked: the plane was handed no declarations, or the key
@@ -166,27 +170,16 @@ impl E2eWords {
     }
 }
 
-/// Whether `message` is a published sample: a `Push` carrying a `put`, the one
-/// record that is a frame when a profile rule covers its key. The field
-/// document reads only these as frames, and so does every plane here.
-#[cfg(feature = "network-codecs")]
-pub(crate) fn is_published_sample(
-    message: &wz_session_core::network_message::NetworkMessage,
-) -> bool {
-    matches!(
-        message,
-        wz_session_core::network_message::NetworkMessage::Push(_)
-    ) && crate::agg::classify(message)
-        .is_some_and(|(_, _, kind)| kind == crate::filter::RecordKind::Put)
-}
-
 /// What a plane that does not judge frames reads of `message`: `none` for a
 /// record that carries no frame, which needs no declarations to decide, and
-/// undecided for a published sample, whose verdict only the payload plane's
-/// judge gives ([`crate::e2e_plane`]).
+/// undecided for one that may (a `Push` or a `Reply` carrying a `put`, the
+/// records the field document reads frames from; `payload::sample_carrier`),
+/// whose verdict only the payload plane's judge gives (`crate::e2e_plane`).
 #[cfg(feature = "network-codecs")]
 pub(crate) fn unjudged(
     message: &wz_session_core::network_message::NetworkMessage,
 ) -> Option<E2eWords> {
-    (!is_published_sample(message)).then_some(E2eWords::NONE)
+    crate::payload::sample_carrier(message)
+        .is_none()
+        .then_some(E2eWords::NONE)
 }

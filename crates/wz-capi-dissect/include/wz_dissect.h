@@ -461,10 +461,13 @@
  * covers the reply's own key, in a stream of its own per query (the request id
  * the `Response` echoes), apart from the sender's live pieces and from every
  * other query's replies, so a transfer number reused across them joins each
- * message apart. A `ResponseFinal` ends nothing; a reply transfer that never
- * completes is ended as a live one is, by the bound on bytes held. The joined
- * message of a reply is decoded as a live one is, and its `e2e` says
- * `unjudged_reason` `reply`. A payload is a piece when it is at least a header long
+ * message apart. The query's `ResponseFinal` lets go of its reply streams:
+ * nothing answers the query after it, so a transfer it finds still open can no
+ * longer complete, and the final's entry names it (see `ended_transfers`
+ * below); a reply piece of that query arriving after the final begins a
+ * transfer afresh. The joined message of a reply is decoded as a live one is,
+ * and its `e2e` says `unjudged_reason` `reply`. A payload is a piece when it
+ * is at least a header long
  * and every `equals` field holds; the CRC is then a verdict, and a profile with
  * no `equals` field is recognised by its CRC alone. The rule `**` covers a
  * reference this capture cannot resolve as well (any other pattern cannot be
@@ -483,7 +486,8 @@
  *                "missing_ranges":[[from,to],...],"out_of_order":false,
  *                "overlap":false,
  *                "ended_transfers":[{"transfer":N,"whole_bytes":N,
- *                                    "received_bytes":N,"evicted":false}],
+ *                                    "received_bytes":N,"evicted":false,
+ *                                    "ended_by":"superseded"}],
  *                "joined":null}
  *
  * `header` is every declared field with its offset, width and value; `stream`,
@@ -512,8 +516,27 @@
  * completes yields no message. `segment` and everything in it can change in an
  * issued row (see the list of revisable cells).
  *
+ * WHAT ENDED A TRANSFER, and a query's final, at field-document revision 66.
+ * Every ended transfer says what ended it:
+ *
+ *     `ended_by`  `superseded` (its stream began another transfer), `evicted`
+ *                 (the bound on bytes held; the `evicted` boolean beside it
+ *                 says the same), or `closed` (its query's `ResponseFinal`)
+ *
+ * and every `carried` entry gains, after `answers`,
+ *
+ *     `ended_transfers`  on a `ResponseFinal` read under a declared segment
+ *                        rule: the reply transfers of its query it ended
+ *                        before they completed, each as above, or `[]` when it
+ *                        ended none; `null` on every other entry
+ *
+ * A final's list is the only place a reply message that will never complete is
+ * named: no later piece of that query will end it. Its integers take the same
+ * door as a `segment` block's.
+ *
  * @values fields place
  * @values fields unjoined
+ * @values fields ended_by
  *
  * AND WHERE THE KEY CAME FROM, at field-document revision 61.
  *
@@ -1619,7 +1642,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":22,
+ *     {"document":{"name":"census","revision":23,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1671,7 +1694,7 @@
  *                 {"word":"opaque",
  *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
- *     {"name":"census","revision":22,"key":"mode","values":[...],
+ *     {"name":"census","revision":23,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1705,6 +1728,7 @@
  * @carries fields check passenger
  * @carries fields counter_reason passenger
  * @carries fields direction passenger
+ * @carries fields ended_by passenger
  * @carries fields eps_basis passenger
  * @carries fields family passenger
  * @carries fields ending passenger
@@ -2372,7 +2396,11 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *   e2e.timeout  ok error unjudged                           == !=
  *
  * THE END-TO-END JUDGE'S VERDICT. A Push carrying a put under a key a profile
- * rule covers is a FRAME, and the four `e2e` fields read what the judge that
+ * rule covers is a FRAME, and so (since field-document revision 66, selection
+ * revision 7, selection_since revision 5 and census revision 23) is a Reply
+ * carrying a put, read by the rule its own key falls to: its CRC is judged and
+ * its counter and timeout read `unjudged`, as its block's `unjudged_reason`
+ * `reply` says. The four `e2e` fields read what the judge that
  * writes the field document's `e2e` block made of it: `e2e.crc` is its
  * `crc_error`, `e2e.counter` its `counter_reason`, `e2e.timeout` its
  * `timeout_error`, and `e2e` all three (`error` when any part was an error or
@@ -2382,13 +2410,15 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  * sender the capture never named, the timeout of a frame whose packet carried
  * no time, and `e2e` itself for a payload that is not one run of bytes. Select
  * failures with `e2e == error` or `e2e.crc == error`. A record that carries no
- * frame (no profile rule covers its key, a del, a query, a reply) is
+ * frame (no profile rule covers its key, a del, a query, a request's put, an
+ * error) is
  * `e2e == none`, decided, and carries no part: `e2e.crc == ok` is `no` over it
  * and `e2e.crc != ok` is `yes`. A frame's verdict depends on the frames of its
  * slot before it, so the payload plane judges every sample it walks, in capture
  * order, under the declarations the door was handed. Over a door that takes
  * none (the selection doors, the census doors) every `e2e` term over a
- * published sample is UNDECIDED, and so it is over a sample whose key did not
+ * published sample or a reply carrying a put is UNDECIDED, and so it is over a
+ * sample whose key did not
  * resolve; a door that takes declarations (the field documents) decides them.
  *
  * `zenoh` reads the word WHETHER A FLOW IS ZENOH (wz_dissect_pcap_session_table
@@ -7413,6 +7443,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @values row_facts check
  * @values row_facts counter_reason
  * @values row_facts direction
+ * @values row_facts ended_by
  * @values row_facts eps_basis
  * @values row_facts family
  * @values row_facts ending
@@ -7449,6 +7480,7 @@ int wz_dissect_live_field_values_since(wz_dissect_live *h,
  * @carries row_facts check passenger
  * @carries row_facts counter_reason passenger
  * @carries row_facts direction passenger
+ * @carries row_facts ended_by passenger
  * @carries row_facts eps_basis passenger
  * @carries row_facts family passenger
  * @carries row_facts ending passenger
@@ -7675,7 +7707,7 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * had issued) and, from revision 2, whether this call CONTINUED the selector's
  * memory (true) or BEGAN it (false); see WHAT THE HANDLE REMEMBERS.
  *
- *     {"document":{"name":"selection_since","revision":4},
+ *     {"document":{"name":"selection_since","revision":5},
  *      "window":{"after_seq":7,"through_seq":9,"continued":true},
  *      "rows":[{"seq":8,"direction":"b","list_id":3,"anchor":7,"batch_index":0,
  *               "selected":"undecided"}, ...],

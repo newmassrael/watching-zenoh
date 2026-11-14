@@ -141,18 +141,20 @@
 //!
 //! ## The `e2e` fields read the end-to-end judge's verdict
 //!
-//! A `Push` carrying a `put` under a key a profile rule covers is a FRAME, and
-//! the judge that writes the field document's `e2e` block says what became of
-//! it. The four fields read that verdict in closed words, made in one place
-//! ([`crate::e2e_words`], which has the table of what each word restates):
-//! `e2e.crc == error` selects the frames whose CRC did not match, and
-//! `e2e == error` every frame anything was wrong with. `unjudged` is not a
+//! A `Push` or a `Reply` carrying a `put` under a key a profile rule covers is
+//! a FRAME, and the judge that writes the field document's `e2e` block says
+//! what became of it. The four fields read that verdict in closed words, made
+//! in one place ([`crate::e2e_words`], which has the table of what each word
+//! restates): `e2e.crc == error` selects the frames whose CRC did not match,
+//! and `e2e == error` every frame anything was wrong with. `unjudged` is not a
 //! failure: the first frame of a slot, a frame from a sender the capture never
-//! named and a frame whose packet carried no time are judged as far as they can
-//! be, and say which part was not.
+//! named, a frame whose packet carried no time and a frame that came in a
+//! reply to a query (whose counter and timeout are never judged) are judged as
+//! far as they can be, and say which part was not.
 //!
 //! A record that carries no frame (no profile rule covers its key, or it is a
-//! `del`, a query, a reply) reads `e2e == none`, decided, with no parts. A
+//! `del`, a query, a request's put, an error) reads `e2e == none`, decided,
+//! with no parts. A
 //! frame's verdict depends on the frames of its slot before it, so only the
 //! payload plane judges one, as it walks the capture, and only when the door
 //! was handed the declarations that name the profiles

@@ -38,13 +38,23 @@
 //! its message hands the joined message to the judge under the key, at the
 //! piece's instant; a piece that completes none carries no frame, and reads
 //! `none`.
+//!
+//! # A reply as the field document reads it
+//!
+//! A `Reply` carrying a `put` is read too, by the rule its own key falls to:
+//! its pieces join a stream of their own per query, its frame's CRC and length
+//! are judged and its counter and timeout are not (they read `unjudged`, the
+//! block's `unjudged_reason` `reply`), and no slot moves for it. A query's
+//! `ResponseFinal` lets go of its reply streams (`E2eJudging::close`).
 
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::e2e_profile::Profile;
-use crate::e2e_slots::{Outcome, Reception, SlotLedger, UNREADABLE_PAYLOAD};
+use crate::e2e_slots::{
+    read_unjudged, Outcome, Reception, SlotLedger, Unjudged, UNREADABLE_PAYLOAD,
+};
 use crate::e2e_words::E2eWords;
 use crate::payload::formats::{first_covering, first_segment_covering, SegmentKey};
 use crate::segment_chain::{Carrier, KeyRef, SegmentLedger};
@@ -110,6 +120,9 @@ pub(crate) struct Sample<'a> {
     pub(crate) observed_at_ns: Option<u64>,
     /// Whether it travelled from the half of its list named first.
     pub(crate) from_low: bool,
+    /// What carried it: a published sample, judged against its slot, or a
+    /// reply to a query, whose frame is read and whose counter is not judged.
+    pub(crate) carrier: Carrier,
 }
 
 /// The judging a payload plane keeps while it folds: the rules and the state
@@ -131,9 +144,17 @@ impl E2eJudging {
         }
     }
 
-    /// Judge one published sample (a `Push` carrying a `put`), in the order the
-    /// plane meets them, and say what the selector reads of it; `None` where
-    /// whether a rule covers it cannot be decided (its key did not resolve).
+    /// Let go of the streams of the replies to the query `request` on `list`,
+    /// at its `ResponseFinal`, which travelled as `from_low` says. What it ends
+    /// unfinished is the field document's to state; here nothing is said of it.
+    pub(crate) fn close(&mut self, list: usize, from_low: bool, request: u64) {
+        let _ = self.pieces.close(list, Some(from_low), request);
+    }
+
+    /// Judge one sample (a `Push` or a `Reply` carrying a `put`), in the order
+    /// the plane meets them, and say what the selector reads of it; `None`
+    /// where whether a rule covers it cannot be decided (its key did not
+    /// resolve).
     pub(crate) fn judge(&mut self, sample: Sample<'_>) -> Option<E2eWords> {
         if !self.rules.judges_frames() {
             return Some(E2eWords::NONE);
@@ -168,14 +189,13 @@ impl E2eJudging {
         };
         let profile = self.rules.segment_for(covering)?;
         let piece = profile.recognise(sample.payload)?;
-        // Only published samples reach this plane (`is_published_sample`).
         let verdict = self.pieces.receive(
             profile,
             &piece,
             sample.list,
             Some(sample.from_low),
             key,
-            Carrier::Push,
+            sample.carrier,
         );
         Some(match (verdict.joined, sample.keyexpr) {
             // The message it completed, judged at this piece's instant.
@@ -194,16 +214,20 @@ impl E2eJudging {
             return E2eWords::NONE;
         };
         let outcome = match payload {
-            Some(payload) => self.frames.receive_from(
-                sample.list,
-                &Reception {
+            Some(payload) => {
+                let reception = Reception {
                     profile,
                     keyexpr,
                     payload,
                     sender: sample.sender,
                     observed_at_ns: sample.observed_at_ns,
-                },
-            ),
+                };
+                match sample.carrier {
+                    Carrier::Push => self.frames.receive_from(sample.list, &reception),
+                    // As the field document reads a reply: no slot moves.
+                    Carrier::Reply { .. } => read_unjudged(&reception, Unjudged::Reply),
+                }
+            }
             None => Outcome::Unreadable {
                 why: UNREADABLE_PAYLOAD,
             },

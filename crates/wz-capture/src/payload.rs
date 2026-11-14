@@ -1412,6 +1412,24 @@ impl PayloadCensus {
             spaces.absorb(direction, d);
             return;
         }
+        // A final carries no payload and is no row this plane judges, and it
+        // closes its query's replies for every holder of pieces: the judge's,
+        // and a walk that takes payloads. It travels the way the replies did.
+        if let NetworkMessage::ResponseFinal(f) = message {
+            let from_low = crate::agg::dir_index(direction) == 0;
+            if let Some(judge) = judging {
+                judge.close(ctx.list(), from_low, f.request_id);
+            }
+            if let Some(sink) = sink {
+                sink(Sighting::Final(FinalSeen {
+                    row: RowKey::of(ctx.list(), frame),
+                    record,
+                    from_low,
+                    request: f.request_id,
+                }));
+            }
+            return;
+        }
         // The kind comes from the throughput plane's classifier, so a payload
         // that arrived inside a `Response` answers `kind == reply` here exactly
         // as it does there; deriving it locally is the second spelling that
@@ -1439,29 +1457,30 @@ impl PayloadCensus {
         // Walked only for a selector that names a path: see `Filter::reads_tree`.
         let tree = at.tree(frame);
         let names = crate::filter::MessageNames::of(frame, Some(message.name()));
-        // What the end-to-end judge made of the record. Only a `Push` carrying a
-        // `put` is a frame, as the field document reads one; every other record
-        // carries none, which is decided whatever the declarations say. A sample
-        // is judged here, before the selector is asked, so every sample of a
-        // slot is judged in the order this walk meets it.
-        let e2e = match payload {
-            Some((_, _, bytes, shm)) if crate::e2e_words::is_published_sample(message) => judging
-                .and_then(|judge| {
-                    let (id, suffix) =
-                        wz_session_core::wireexpr_resolve::id_and_suffix(keyexpr_body);
-                    judge.judge(crate::e2e_plane::Sample {
-                        list: ctx.list(),
-                        keyexpr: keyexpr.as_deref(),
-                        missed: keyexpr
-                            .is_none()
-                            .then(|| (id, suffix.filter(|s| !s.is_empty()))),
-                        payload: bytes,
-                        elsewhere: shm,
-                        sender: ctx.zid(direction),
-                        observed_at_ns: frame.observed_at_ns,
-                        from_low: crate::agg::dir_index(direction) == 0,
-                    })
-                }),
+        // What the end-to-end judge made of the record. A `Push` carrying a
+        // `put` and a `Reply` carrying one are read, as the field document
+        // reads them ([`sample_carrier`]); every other record carries no frame,
+        // which is decided whatever the declarations say. A sample is judged
+        // here, before the selector is asked, so every sample of a slot is
+        // judged in the order this walk meets it.
+        let carrier = sample_carrier(message);
+        let e2e = match (payload, carrier) {
+            (Some((_, _, bytes, shm)), Some(carrier)) => judging.and_then(|judge| {
+                let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(keyexpr_body);
+                judge.judge(crate::e2e_plane::Sample {
+                    list: ctx.list(),
+                    keyexpr: keyexpr.as_deref(),
+                    missed: keyexpr
+                        .is_none()
+                        .then(|| (id, suffix.filter(|s| !s.is_empty()))),
+                    payload: bytes,
+                    elsewhere: shm,
+                    sender: ctx.zid(direction),
+                    observed_at_ns: frame.observed_at_ns,
+                    from_low: crate::agg::dir_index(direction) == 0,
+                    carrier,
+                })
+            }),
             _ => Some(crate::e2e_words::E2eWords::NONE),
         };
         // R311y618 — asked after resolution and before the bytes are inspected.
@@ -1532,7 +1551,7 @@ impl PayloadCensus {
             // The id and suffix of a reference neither the wire nor a fixed id
             // answered: a reader that joins pieces keys their stream by it.
             let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(keyexpr_body);
-            sink(SelectedPayload {
+            sink(Sighting::Payload(SelectedPayload {
                 row: RowKey::of(ctx.list(), frame),
                 record,
                 keyexpr: keyexpr.as_deref(),
@@ -1545,8 +1564,8 @@ impl PayloadCensus {
                 bytes,
                 elsewhere: shm,
                 observed_at_ns: frame.observed_at_ns,
-                carrier: sample_carrier(message),
-            });
+                carrier,
+            }));
             return;
         }
         // R311y622 (§1.1o) — the marker is read BEFORE the bytes are, because
@@ -1658,6 +1677,34 @@ pub(crate) struct SelectedPayload<'a> {
     pub(crate) carrier: Option<crate::segment_chain::Carrier>,
 }
 
+/// What a walk that takes payloads is handed, in the order the walk meets them:
+/// a payload the selector said `yes` to, or a query's `ResponseFinal`, which
+/// closes the streams of pieces its replies were joined in. A final is handed
+/// whatever the selector says of it: it ends state, it is no record.
+#[cfg(feature = "network-codecs")]
+#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+pub(crate) enum Sighting<'a> {
+    /// A payload the selector picked.
+    Payload(SelectedPayload<'a>),
+    /// A query's final.
+    Final(FinalSeen),
+}
+
+/// A `ResponseFinal` as the payload plane met it.
+#[cfg(feature = "network-codecs")]
+#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+pub(crate) struct FinalSeen {
+    /// The row that carried it.
+    pub(crate) row: RowKey,
+    /// Its place among the records of that row's batch, from 0.
+    pub(crate) record: usize,
+    /// Whether it travelled from the low end of its list, which is the way the
+    /// replies it closes travelled.
+    pub(crate) from_low: bool,
+    /// The request id it echoes.
+    pub(crate) request: u64,
+}
+
 /// What carried `message`'s payload, when it is one a piece of a split message
 /// may ride in: a `Push` carrying a `put`, or a `Response` whose `Reply`
 /// carries a `put`, named by the request id it echoes. `None` for every other
@@ -1711,7 +1758,7 @@ struct Seen<'r, 's, 'f> {
 /// holds its object's lifetime fixed and a reborrow for one record must not
 /// demand the closure live only as long.
 #[cfg(feature = "network-codecs")]
-pub(crate) type PayloadSink<'s, 'f> = &'s mut (dyn FnMut(SelectedPayload<'_>) + 'f);
+pub(crate) type PayloadSink<'s, 'f> = &'s mut (dyn FnMut(Sighting<'_>) + 'f);
 
 /// The declared encoding and the bytes a record carries, with its keyexpr.
 ///

@@ -445,11 +445,30 @@ fn a_reply_is_covered_by_the_rule_for_its_own_key_and_no_other() {
     }
 }
 
-/// A `ResponseFinal` closes a query and ends no transfer: not the live one it
-/// interleaves with, not another query's, and not its own query's unfinished
-/// one, which no piece will join again and no piece reports as ended.
+/// Every `carried` entry of a `ResponseFinal`, in document order.
+fn finals(doc: &str) -> Vec<Json5Value> {
+    let tree = json5::parse(doc).expect("the document is JSON");
+    let mut carried = Vec::new();
+    collect(&tree, "carried", &mut carried);
+    carried
+        .iter()
+        .filter_map(|list| match list {
+            Json5Value::Array(items) => Some(items.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|e| word(member(e, "message")) == Some("ResponseFinal"))
+        .collect()
+}
+
+/// A query's `ResponseFinal` ends its own query's unfinished reply transfer,
+/// and says so on its entry (`ended_by` `closed`, with what had arrived); it
+/// ends nothing of the live stream it interleaves with or of another query,
+/// whose transfers complete as they would have. A final whose replies all
+/// completed ends nothing and says so with an empty list, and a piece of a
+/// closed query that comes after its final begins afresh.
 #[test]
-fn a_final_ends_no_transfer() {
+fn a_final_ends_its_own_querys_unfinished_transfer_and_says_so() {
     for link in LINKS {
         let mut wire = Wire::new(link, true);
         ask(&mut wire, 1, HISTORY);
@@ -461,17 +480,95 @@ fn a_final_ends_no_transfer() {
         publish(&mut wire, LIVE, &piece_of(MESSAGE, 1, 4..11));
         answer(&mut wire, 2, HISTORY, &piece_of(MESSAGE, 1, 4..11));
         close(&mut wire, 2);
+        // A straggler of the closed query.
+        answer(&mut wire, 1, HISTORY, &piece_of(MESSAGE, 1, 4..8));
         let doc = document(&mut wire, &declarations(""));
         let found = entries(&doc);
         assert_eq!(
             places(&found),
-            ["first", "first", "first", "closing", "closing"],
+            ["first", "first", "first", "closing", "closing", "first"],
             "{link:?}: {doc}"
         );
         for entry in &found {
             let segment = member(entry, "segment").expect("a piece");
             assert!(empty(member(segment, "ended_transfers")), "{link:?}: {doc}");
+            // The entry's own key is a final's; here it is `null`.
+            assert!(
+                matches!(member(entry, "ended_transfers"), Some(Json5Value::Null)),
+                "{link:?}: {doc}"
+            );
         }
+        let closed = finals(&doc);
+        assert_eq!(closed.len(), 2, "{link:?}: {doc}");
+        let Some(Json5Value::Array(ended)) = member(&closed[0], "ended_transfers") else {
+            panic!("{link:?}: the first final says what it ended: {doc}");
+        };
+        assert_eq!(ended.len(), 1, "{link:?}: {doc}");
+        assert_eq!(cell(&ended[0], "ended_by"), "closed", "{link:?}");
+        assert_eq!(cell(&ended[0], "transfer"), "1", "{link:?}");
+        assert_eq!(cell(&ended[0], "whole_bytes"), "11", "{link:?}");
+        assert_eq!(cell(&ended[0], "received_bytes"), "4", "{link:?}");
+        assert_eq!(cell(&ended[0], "evicted"), "false", "{link:?}");
+        assert!(
+            empty(member(&closed[1], "ended_transfers")),
+            "{link:?}: the second query's reply completed: {doc}"
+        );
+    }
+}
+
+/// Without a segment rule nothing was ever joined, and a final's entry says
+/// `null`, as every other entry does.
+#[test]
+fn a_final_says_nothing_where_no_piece_is_joined() {
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        ask(&mut wire, 1, HISTORY);
+        answer(&mut wire, 1, HISTORY, &piece_of(MESSAGE, 1, 0..4));
+        close(&mut wire, 1);
+        let doc = document(&mut wire, &format!("{HISTORY}=json"));
+        let closed = finals(&doc);
+        assert_eq!(closed.len(), 1, "{link:?}: {doc}");
+        assert!(
+            matches!(
+                member(&closed[0], "ended_transfers"),
+                Some(Json5Value::Null)
+            ),
+            "{link:?}: {doc}"
+        );
+    }
+}
+
+/// The values door closes a query's replies at its final too: a piece of the
+/// query after the final begins a message afresh rather than completing the
+/// one the final ended.
+#[test]
+fn the_values_door_closes_a_querys_replies_at_its_final() {
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        ask(&mut wire, 1, HISTORY);
+        answer(&mut wire, 1, HISTORY, &piece_of(MESSAGE, 1, 0..4));
+        close(&mut wire, 1);
+        answer(&mut wire, 1, HISTORY, &piece_of(MESSAGE, 1, 4..11));
+        let doc = values(
+            &mut wire,
+            &declarations(&format!("{HISTORY}=json")),
+            "$.temp",
+        );
+        let recs = value_records(&doc);
+        let places: Vec<&str> = recs
+            .iter()
+            .map(|r| {
+                member(r, "segment")
+                    .and_then(|s| word(member(s, "place")))
+                    .unwrap_or("-")
+            })
+            .collect();
+        assert_eq!(places, ["first", "first"], "{link:?}: {doc:?}");
+        let states: Vec<&str> = recs
+            .iter()
+            .map(|r| word(member(r, "state")).unwrap_or("-"))
+            .collect();
+        assert_eq!(states, ["segment_piece", "segment_piece"], "{link:?}");
     }
 }
 
@@ -664,10 +761,117 @@ fn a_replys_frame_is_read_and_its_counter_left_unjudged() {
 /// shape the end-to-end pins' `sender_unknown` arrives in.
 ///
 /// A stream capture, for the reason `e2e_row_tests::pin_documents` gives.
+///
+/// And a query whose final ends its reply unfinished, so a final's
+/// `ended_transfers` holds an entry and `ended_by` says `closed` beside the
+/// `superseded` the segment pins render.
 pub(crate) fn pin_documents() -> Vec<String> {
     let mut wire = Wire::new(Link::Tcp, true);
     answered_history(&mut wire);
+    ask(&mut wire, 3, HISTORY);
+    answer(&mut wire, 3, HISTORY, &piece_of(MESSAGE, 1, 0..4));
+    close(&mut wire, 3);
     alloc::vec![document(&mut wire, &e2e_declarations())]
+}
+
+/// Every message row of `doc`: an object with a `direction` and an
+/// `offset_space`.
+fn rows(doc: &str) -> Vec<Json5Value> {
+    fn walk(value: &Json5Value, out: &mut Vec<Json5Value>) {
+        match value {
+            Json5Value::Object(entries) => {
+                if value.get("direction").is_some() && value.get("offset_space").is_some() {
+                    out.push(value.clone());
+                    return;
+                }
+                entries.iter().for_each(|(_, v)| walk(v, out));
+            }
+            Json5Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    let tree = json5::parse(doc).expect("the document is JSON");
+    let mut out = Vec::new();
+    walk(&tree, &mut out);
+    out
+}
+
+/// Whether a row carries a record of `message`.
+fn carries(row: &Json5Value, message: &str) -> bool {
+    let mut carried = Vec::new();
+    collect(row, "carried", &mut carried);
+    carried.iter().any(|list| match list {
+        Json5Value::Array(items) => items
+            .iter()
+            .any(|e| word(member(e, "message")) == Some(message)),
+        _ => false,
+    })
+}
+
+/// THE SELECTOR READS A REPLY AS THE BLOCK DOES. Over one capture of live
+/// frames and replies, through the door that takes declarations, a row of a
+/// `Push` or a `Response` carries an `e2e` block exactly where `e2e == none`
+/// says `no`; the rows of the replies' frames (the completing piece's, the
+/// whole reply's, the reply on the live key) answer `e2e.counter == unjudged`
+/// `yes` and `e2e.crc == ok` `yes`, as their blocks say; and a door handed no
+/// declarations leaves every reply row undecided, as it leaves a published
+/// sample, rather than deciding `none`.
+#[test]
+fn the_selector_reads_a_replys_frame_as_its_block_does() {
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        answered_history(&mut wire);
+        wire.d.finish();
+        let mut map = FormatMap::new();
+        map.declare_all(&e2e_declarations()).expect("installs");
+        let run = Declarations::new(&map);
+        let file = wire.file();
+        let under = |selector: &str| {
+            let filter = crate::filter::Filter::parse(selector).expect("a selector");
+            rows(&crate::fields_json::fields_json_where(
+                &wire.d,
+                &file,
+                None,
+                Some(&run),
+                &filter,
+            ))
+        };
+        let none = under("e2e == none");
+        let samples: Vec<&Json5Value> = none
+            .iter()
+            .filter(|r| carries(r, "Push") || carries(r, "Response"))
+            .collect();
+        assert_eq!(samples.len(), 7, "{link:?}: two live frames, five replies");
+        for row in &samples {
+            let mut blocks = Vec::new();
+            collect(row, "e2e", &mut blocks);
+            let word = cell(row, "selected");
+            assert_eq!(
+                word == "no",
+                !blocks.is_empty(),
+                "{link:?}: `e2e == none` says {word} of a row whose blocks are {blocks:?}"
+            );
+        }
+        for selector in ["e2e.counter == unjudged", "e2e.crc == ok"] {
+            let judged = under(selector);
+            for row in judged.iter().filter(|r| carries(r, "Response")) {
+                let mut blocks = Vec::new();
+                collect(row, "e2e", &mut blocks);
+                if blocks.is_empty() {
+                    continue;
+                }
+                assert_eq!(cell(row, "selected"), "yes", "{link:?}: {selector}");
+            }
+        }
+        // A door handed no declarations decides nothing about a reply.
+        let filter = crate::filter::Filter::parse("e2e == none").expect("a selector");
+        let plain = rows(&crate::fields_json::fields_json_where(
+            &wire.d, &file, None, None, &filter,
+        ));
+        for row in plain.iter().filter(|r| carries(r, "Response")) {
+            assert_eq!(cell(row, "selected"), "undecided", "{link:?}");
+        }
+    }
 }
 
 #[test]
@@ -680,5 +884,14 @@ fn the_pin_documents_say_reply_on_a_block_that_names_its_body_schema() {
             ),
             "{doc}"
         );
+        let closed = finals(&doc)
+            .iter()
+            .any(|f| match member(f, "ended_transfers") {
+                Some(Json5Value::Array(ended)) => {
+                    ended.iter().any(|e| cell(e, "ended_by") == "closed")
+                }
+                _ => false,
+            });
+        assert!(closed, "a final names the transfer it ended: {doc}");
     }
 }

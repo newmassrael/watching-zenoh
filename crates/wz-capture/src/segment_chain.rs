@@ -46,6 +46,16 @@
 //! named on the piece that caused it, so a capture with many abandoned
 //! transfers cannot make the reader hold them all.
 //!
+//! # A query's replies end with its final
+//!
+//! The replies to one query are a stream that its `ResponseFinal` closes for
+//! good: nothing after it answers that query. [`SegmentLedger::close`] lets go
+//! of the query's streams there. A completed transfer leaves without a word;
+//! one still open can no longer complete, so it is ended and named
+//! ([`Ending::Closed`]), as a transfer the bound ends is. Without this a
+//! capture with many queries would keep one stream per query for good, and
+//! the bound, which counts held bytes, never reclaims a completed one.
+//!
 //! # Order, and a walk that goes on between calls
 //!
 //! Pieces are joined in the order they are handed in, which is the order the
@@ -191,7 +201,34 @@ impl Unjoined {
     }
 }
 
-/// A transfer a piece ended before it completed.
+/// What ended a transfer before it completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    /// Its stream began another transfer: the word a fragment chain that a
+    /// new chain on its key ended is told by.
+    Superseded,
+    /// The bound on held bytes ended it to make room.
+    Evicted,
+    /// The `ResponseFinal` of the query it answered: the responder is done
+    /// with that query, so no piece will complete it.
+    Closed,
+}
+
+impl Ending {
+    /// Every ending, so a document's vocabulary and a test's walk are one list.
+    pub const ALL: [Self; 3] = [Self::Superseded, Self::Evicted, Self::Closed];
+
+    /// The word a machine reads for this ending.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Superseded => "superseded",
+            Self::Evicted => "evicted",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+/// A transfer ended before it completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ended {
     /// Its number.
@@ -200,9 +237,16 @@ pub struct Ended {
     pub total: u64,
     /// How many of those bytes had arrived.
     pub received: u64,
-    /// Whether the bound on held bytes ended it (`true`), rather than its
-    /// stream beginning another transfer (`false`).
-    pub evicted: bool,
+    /// What ended it.
+    pub ending: Ending,
+}
+
+impl Ended {
+    /// Whether the bound on held bytes ended it: the boolean the documents
+    /// wrote before they named the ending.
+    pub fn evicted(&self) -> bool {
+        self.ending == Ending::Evicted
+    }
 }
 
 /// What the ledger made of one piece.
@@ -317,12 +361,12 @@ impl Transfer {
         self.have.as_slice() == [(0, self.total)]
     }
 
-    fn ended(&self, evicted: bool) -> Ended {
+    fn ended(&self, ending: Ending) -> Ended {
         Ended {
             transfer: self.number,
             total: self.total,
             received: self.received(),
-            evicted,
+            ending,
         }
     }
 }
@@ -348,6 +392,11 @@ pub struct SegmentLedger {
     /// so built with it, as [`crate::e2e_slots::SlotLedger`]'s is.
     #[cfg(feature = "dissect")]
     judged: BTreeMap<(usize, u64, u32), Verdict>,
+    /// What each `ResponseFinal` [`Self::close`]d, kept by the same key as a
+    /// piece's verdict: a final read again behind the frontier is answered
+    /// from here and ends nothing a second time.
+    #[cfg(feature = "dissect")]
+    closed: BTreeMap<(usize, u64, u32), Vec<Ended>>,
 }
 
 impl Default for SegmentLedger {
@@ -373,6 +422,8 @@ impl SegmentLedger {
             clock: 0,
             #[cfg(feature = "dissect")]
             judged: BTreeMap::new(),
+            #[cfg(feature = "dissect")]
+            closed: BTreeMap::new(),
         }
     }
 
@@ -413,6 +464,39 @@ impl SegmentLedger {
         for key in gone {
             let _ = self.judged.remove(&key);
         }
+        let gone: Vec<(usize, u64, u32)> = self
+            .closed
+            .range((list, 0, 0)..(list, first_held, 0))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in gone {
+            let _ = self.closed.remove(&key);
+        }
+    }
+
+    /// What was kept for the final at `ordinal` of the row `produced` of
+    /// `list`.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn recall_close(
+        &self,
+        list: usize,
+        produced: u64,
+        ordinal: u32,
+    ) -> Option<Vec<Ended>> {
+        self.closed.get(&(list, produced, ordinal)).cloned()
+    }
+
+    /// Keep what the final at `ordinal` of the row `produced` of `list` ended.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn remember_close(
+        &mut self,
+        list: usize,
+        produced: u64,
+        ordinal: u32,
+        ended: &[Ended],
+    ) {
+        self.closed
+            .insert((list, produced, ordinal), ended.to_vec());
     }
 
     /// Join one payload `profile` recognised as a piece, published on `key`,
@@ -472,7 +556,7 @@ impl SegmentLedger {
                 if let Some(previous) = self.streams.remove(&stream) {
                     self.held -= previous.buffer.len();
                     if !previous.completed {
-                        verdict.ended.push(previous.ended(false));
+                        verdict.ended.push(previous.ended(Ending::Superseded));
                     }
                 }
                 // `place` held `total` to the profile's maximum, which the
@@ -528,6 +612,37 @@ impl SegmentLedger {
         verdict
     }
 
+    /// Let go of every stream of the replies to the query `request` that
+    /// travelled `list` in the direction `from_low` says: the query's
+    /// `ResponseFinal` came that way, and nothing after it answers the query.
+    /// Answers the transfers that were still open, ended
+    /// ([`Ending::Closed`]); a completed one leaves without a word, its
+    /// message already given.
+    pub fn close(&mut self, list: usize, from_low: Option<bool>, request: u64) -> Vec<Ended> {
+        let carrier = Carrier::Reply { request };
+        let gone: Vec<StreamKey> = self
+            .streams
+            .keys()
+            .filter(|k| k.list == list && k.from_low == from_low && k.carrier == carrier)
+            .cloned()
+            .collect();
+        let mut ended = Vec::new();
+        for key in gone {
+            if let Some(transfer) = self.streams.remove(&key) {
+                self.held -= transfer.buffer.len();
+                if !transfer.completed {
+                    ended.push(transfer.ended(Ending::Closed));
+                }
+            }
+        }
+        ended
+    }
+
+    /// How many streams the ledger keeps, open or completed.
+    pub fn streams(&self) -> usize {
+        self.streams.len()
+    }
+
     /// End the least recently fed open transfers until `need` more bytes fit
     /// under the bound. A transfer larger than the bound by itself is still
     /// joined once every other has been ended: the profile's `total_max`
@@ -547,7 +662,7 @@ impl SegmentLedger {
             if let Some(gone) = self.streams.remove(&oldest) {
                 self.held -= gone.buffer.len();
                 self.evicted += 1;
-                ended.push(gone.ended(true));
+                ended.push(gone.ended(Ending::Evicted));
             }
         }
     }

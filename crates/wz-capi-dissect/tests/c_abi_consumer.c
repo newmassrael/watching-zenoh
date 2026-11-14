@@ -582,7 +582,7 @@ static int check_selection_since_door(void) {
     /* From zero: every row, numbered, with the window to ask next. */
     rc = wz_dissect_live_selection_since(h, "bytes >= 0", 0, &doc);
     CHECK(rc == WZ_DISSECT_OK && doc != NULL, "since from 0 rc=%d", rc);
-    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":4") !=
+    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":5") !=
               NULL,
           "the since document must open with its name and revision: %s", doc);
     CHECK(strstr(doc, "\"continued\":false") != NULL,
@@ -4077,8 +4077,11 @@ int main(void) {
      * flow. A key arrives; nothing retires.
      * 22: a `Join` on a link with a handshake is inadmissible there, and the
      * node it names is counted under `evidence.inadmissible`. Values move under
-     * stationary keys. */
-    revisioned[0].revision = 22;
+     * stationary keys.
+     * 23: a reply carrying a put leaves its `e2e` terms undecided under a
+     * selector, as a published sample's are, where they were `none`. Values
+     * move under stationary keys. */
+    revisioned[0].revision = 23;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -4350,7 +4353,8 @@ int main(void) {
      * not. A key arrives; nothing retires.
      * 66: a reply carrying a put is read as a published sample is, its
      * pieces joined per query, and every opened `e2e` block gains
-     * `unjudged_reason` (`reply`, `sender_unknown`, or null). A key arrives;
+     * `unjudged_reason` (`reply`, `sender_unknown`, or null); a final's entry
+     * gains `ended_transfers` and an ended transfer `ended_by`. Keys arrive;
      * nothing retires. */
     revisioned[2].revision = 66;
     revisioned[2].doc = NULL;
