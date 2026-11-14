@@ -3662,7 +3662,12 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
 /// other side of the wire) LEFT with its last row: `qos/publication` and
 /// `transport/link/tx/sequence_number_resolution` are both honoured now, and a kind with no
 /// population is a branch nobody runs, the reason `upstream-only` was dropped above.
-pub const UNHONOURED_CITATION_KINDS: &[&str] = &["asserted-ignored", "not-this-key", "wz-has-it"];
+pub const UNHONOURED_CITATION_KINDS: &[&str] = &[
+    "asserted-ignored",
+    // `foreign-node-config` stood here; see above for why it left.
+    "not-this-key",
+    "wz-has-it",
+];
 
 /// WHY wz's own source spells an upstream key wz does not honour — one row per
 /// such key, `(key, kind, anchor)`.
