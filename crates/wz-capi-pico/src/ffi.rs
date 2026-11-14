@@ -259,11 +259,16 @@ impl LatchList {
 
 /// Marks the thread as running one of the program's callbacks until it is dropped; held across
 /// the C call at every site that makes one.
-pub(crate) struct InCallback(callback_depth::Entered);
+pub(crate) struct InCallback {
+    // Held for its drop, which leaves the callback; never read.
+    _entered: callback_depth::Entered,
+}
 
 impl InCallback {
     pub(crate) fn enter() -> Self {
-        Self(callback_depth::enter())
+        Self {
+            _entered: callback_depth::enter(),
+        }
     }
 
     /// Whether the calling thread is inside one of the program's callbacks.
