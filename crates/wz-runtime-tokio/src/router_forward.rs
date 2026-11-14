@@ -419,9 +419,9 @@ use crate::linkstate_forward::{
     Cached, ClientQablStore, ClientQueryRoutes, ClientQueryable, ClientRoutes, ClientSubStore,
     DataRoutes, QueryCandidate, QueryRoutes,
 };
-use crate::persistent_map::PersistentMap;
 #[cfg(feature = "routing-token-tables")]
 use crate::persistent_map::PersistentSet;
+use crate::persistent_map::{AssignedKeyMap, PersistentMap};
 #[cfg(feature = "router-multicast-faces")]
 use crate::routing_region::is_primary_gateway;
 use crate::routing_region::{
@@ -1144,8 +1144,9 @@ struct MeshDeclaredIds {
     tokens: DeclaredIdsOf,
 }
 
-/// One plane's declarations of [`MeshDeclaredIds`]: per face, the key of each id.
-type DeclaredIdsOf = PersistentMap<FaceId, PersistentMap<u64, String>>;
+/// One plane's declarations of [`MeshDeclaredIds`]: per face, the key of each id. The ids are the
+/// remote's, so the inner map is keyed by a keyed hasher; the faces are the node's own numbers.
+type DeclaredIdsOf = AssignedKeyMap<FaceId, PersistentMap<u64, String>>;
 
 impl MeshDeclaredIds {
     fn of(&self, plane: DeclKind) -> &DeclaredIdsOf {
@@ -1179,19 +1180,13 @@ impl MeshDeclaredIds {
     /// Forget `id` of `face`. Looked up before it is written, so that an id the face does not
     /// hold (every client's, whose ids its broker hat keeps) copies nothing.
     fn forget(&mut self, plane: DeclKind, face: FaceId, id: u64) {
-        if !self
-            .of(plane)
-            .get(&face)
-            .is_some_and(|ids| ids.contains_key(&id))
-        {
-            return;
-        }
         let by_face = self.of_mut(plane);
-        if let Some(ids) = by_face.get_mut(&face) {
-            ids.remove(&id);
-            if ids.is_empty() {
-                by_face.remove(&face);
-            }
+        let Some(ids) = by_face.get_mut_if(&face, |ids| ids.contains_key(&id)) else {
+            return;
+        };
+        ids.remove(&id);
+        if ids.is_empty() {
+            by_face.remove(&face);
         }
     }
 

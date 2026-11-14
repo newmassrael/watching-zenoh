@@ -34,7 +34,7 @@
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::fmt;
-use std::hash::{BuildHasher, Hash};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::Arc;
 
 /// The bits of the hash each level consumes.
@@ -42,6 +42,84 @@ const BITS: u32 = 5;
 
 /// The slots of a node.
 const MASK: u64 = (1 << BITS) - 1;
+
+/// A key this node gives out itself and no remote chooses: a face's number, a log's sequence
+/// number. Only such a key may be hashed by its own bits ([`AssignedKeyHasher`]).
+///
+/// The bound is the whole contract. A key a remote chooses (a declaration id, a key expression) is
+/// hashed by a keyed hasher, [`RandomState`]: hashed by its own bits, a remote could choose keys
+/// that share a whole hash and turn every lookup of the map into a scan of one bucket. Do not
+/// implement this for a type a remote can name, nor for `u64` or `String`, which both kinds use.
+pub(crate) trait AssignedHere: Hash + Eq {}
+
+/// The accept loop numbers the faces in the order they come, and never takes a number from the
+/// wire (`accept_loop::FaceId`).
+impl AssignedHere for crate::accept_loop::FaceId {}
+
+/// The hasher of a map whose keys are [`AssignedHere`]: the key's own bits, which for a number
+/// the node counts up are already spread over the low bits each level of the trie reads. It costs
+/// nothing to compute, where a keyed hasher costs a few dozen instructions a lookup.
+///
+/// Built only by [`HasherFor`], which gives it to a map of [`AssignedHere`] keys and to no other,
+/// so it cannot be named into a map whose keys a remote chooses.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AssignedKeyHasher(());
+
+/// The state of [`AssignedKeyHasher`]: the bits written, folded.
+pub(crate) struct AssignedKeyBits(u64);
+
+impl Hasher for AssignedKeyBits {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(byte);
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        // A key of one number hashes to the number itself: the state starts at zero.
+        self.0 = self.0.rotate_left(BITS) ^ n;
+    }
+}
+
+impl BuildHasher for AssignedKeyHasher {
+    type Hasher = AssignedKeyBits;
+
+    fn build_hasher(&self) -> AssignedKeyBits {
+        AssignedKeyBits(0)
+    }
+}
+
+/// The hashers a map of keys `K` is built with: [`RandomState`], keyed, for every key, and
+/// [`AssignedKeyHasher`] for an [`AssignedHere`] key alone. Every constructor of a map asks for
+/// it, so a map of remote keys with the unkeyed hasher does not compile.
+pub(crate) trait HasherFor<K: ?Sized>: BuildHasher + Clone {
+    /// The hasher of a new map.
+    fn for_new_map() -> Self;
+}
+
+impl<K: ?Sized> HasherFor<K> for RandomState {
+    fn for_new_map() -> Self {
+        RandomState::new()
+    }
+}
+
+impl<K: AssignedHere + ?Sized> HasherFor<K> for AssignedKeyHasher {
+    fn for_new_map() -> Self {
+        AssignedKeyHasher(())
+    }
+}
+
+/// A [`PersistentMap`] whose keys this node assigns ([`AssignedHere`]), hashed by their own bits.
+pub(crate) type AssignedKeyMap<K, V> = PersistentMap<K, V, AssignedKeyHasher>;
+
+/// A [`PersistentSet`] whose members this node assigns ([`AssignedHere`]). The router's face
+/// table's (`routing-router-hat`).
+#[cfg(any(test, feature = "routing-router-hat"))]
+pub(crate) type AssignedKeySet<T> = PersistentSet<T, AssignedKeyHasher>;
 
 /// A hash map whose copies share their nodes. See the module documentation.
 pub(crate) struct PersistentMap<K, V, S = RandomState> {
@@ -177,7 +255,7 @@ impl<K, V> PersistentMap<K, V, RandomState> {
     }
 }
 
-impl<K, V, S> PersistentMap<K, V, S> {
+impl<K, V, S: HasherFor<K>> PersistentMap<K, V, S> {
     /// An empty map hashing with `hasher`.
     pub(crate) fn with_hasher(hasher: S) -> Self {
         Self {
@@ -186,7 +264,9 @@ impl<K, V, S> PersistentMap<K, V, S> {
             hasher,
         }
     }
+}
 
+impl<K, V, S> PersistentMap<K, V, S> {
     /// How many keys the map holds.
     pub(crate) fn len(&self) -> usize {
         self.len
@@ -228,7 +308,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> PersistentMap<K, V, S> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let hash = self.hash_of(key);
+        self.find_hashed(self.hash_of(key), key)
+    }
+
+    /// [`find`](Self::find) with the hash of `key` already computed by this map's hasher.
+    fn find_hashed<Q>(&self, hash: u64, key: &Q) -> Option<&Entry<K, V>>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         let mut node: &Node<K, V> = &self.root;
         let mut shift = 0;
         loop {
@@ -298,10 +386,40 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> PersistentMap<K, V, S> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        if !self.contains_key(key) {
+        let hash = self.hash_of(key);
+        self.find_hashed(hash, key)?;
+        self.walk_mut(hash, key)
+    }
+
+    /// [`get_mut`](Self::get_mut), when `wanted` answers `true` of the value as it stands: a value
+    /// it refuses is not copied out of the versions that share it. One hash of `key` for the read
+    /// and the write, where a [`get`](Self::get) and then a `get_mut` hash it twice.
+    ///
+    /// Read by the tests and by the forwarder's client stores (`routing-router-hat`).
+    #[cfg(any(test, feature = "routing-router-hat"))]
+    pub(crate) fn get_mut_if<Q>(
+        &mut self,
+        key: &Q,
+        wanted: impl FnOnce(&V) -> bool,
+    ) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let hash = self.hash_of(key);
+        if !wanted(&self.find_hashed(hash, key)?.value) {
             return None;
         }
-        let hash = self.hash_of(key);
+        self.walk_mut(hash, key)
+    }
+
+    /// The value of `key`, whose hash is `hash`, for writing: the path to it copied where another
+    /// version shares it. Called once the key is known to be held, so a miss copies nothing.
+    fn walk_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         let mut node = Arc::make_mut(&mut self.root);
         let mut shift = 0;
         loop {
@@ -325,11 +443,32 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> PersistentMap<K, V, S> {
 
     /// The value of `key`, for writing, inserted from `default` first if the map does not hold it.
     pub(crate) fn get_mut_or_insert_with(&mut self, key: K, default: impl FnOnce() -> V) -> &mut V {
-        if !self.contains_key(&key) {
-            let hash = self.hash_of(&key);
-            self.insert_hashed(hash, key.clone(), default());
+        self.get_mut_or_insert_by(&key, || key.clone(), default)
+    }
+
+    /// The value of the key `key` borrows, for writing, inserted from `default` under the key
+    /// `owned` makes if the map does not hold it: `key` is hashed once, and an owned key is made
+    /// only for an insertion, so a key the map holds is found by a borrow and allocates nothing.
+    pub(crate) fn get_mut_or_insert_by<Q>(
+        &mut self,
+        key: &Q,
+        owned: impl FnOnce() -> K,
+        default: impl FnOnce() -> V,
+    ) -> &mut V
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let hash = self.hash_of(key);
+        if self.find_hashed(hash, key).is_none() {
+            let owned = owned();
+            debug_assert!(
+                <K as Borrow<Q>>::borrow(&owned) == key,
+                "the key made is the key asked for"
+            );
+            self.insert_hashed(hash, owned, default());
         }
-        self.get_mut(&key)
+        self.walk_mut(hash, key)
             .expect("the key was held or has just been inserted")
     }
 
@@ -407,10 +546,8 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher> PersistentMap<K, V, S> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        if !self.contains_key(key) {
-            return None;
-        }
         let hash = self.hash_of(key);
+        self.find_hashed(hash, key)?;
         let removed = remove_from(Arc::make_mut(&mut self.root), hash, key, 0);
         debug_assert!(removed.is_some(), "the key was found before the removal");
         self.len -= 1;
@@ -536,9 +673,9 @@ impl<K, V, S: Clone> Clone for PersistentMap<K, V, S> {
     }
 }
 
-impl<K, V, S: Default> Default for PersistentMap<K, V, S> {
+impl<K, V, S: HasherFor<K>> Default for PersistentMap<K, V, S> {
     fn default() -> Self {
-        Self::with_hasher(S::default())
+        Self::with_hasher(S::for_new_map())
     }
 }
 
@@ -560,7 +697,7 @@ impl<K: Hash + Eq, V: PartialEq, S: BuildHasher> PartialEq for PersistentMap<K, 
 
 impl<K: Hash + Eq, V: Eq, S: BuildHasher> Eq for PersistentMap<K, V, S> {}
 
-impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher + Default> FromIterator<(K, V)>
+impl<K: Hash + Eq + Clone, V: Clone, S: HasherFor<K>> FromIterator<(K, V)>
     for PersistentMap<K, V, S>
 {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
@@ -620,7 +757,7 @@ impl<T, S: Clone> Clone for PersistentSet<T, S> {
     }
 }
 
-impl<T, S: Default> Default for PersistentSet<T, S> {
+impl<T, S: HasherFor<T>> Default for PersistentSet<T, S> {
     fn default() -> Self {
         Self(PersistentMap::default())
     }
@@ -658,6 +795,12 @@ mod tests {
                 mask: self.mask,
                 value: 0,
             }
+        }
+    }
+
+    impl<K: ?Sized> HasherFor<K> for Masked {
+        fn for_new_map() -> Self {
+            Self::default()
         }
     }
 
@@ -728,7 +871,7 @@ mod tests {
         for step in 0..steps {
             let key = draw.next() % keys;
             let value = draw.next();
-            match draw.next() % 6 {
+            match draw.next() % 8 {
                 0 | 1 => assert_eq!(map.insert(key, value), model.insert(key, value)),
                 2 => assert_eq!(map.remove(&key), model.remove(&key)),
                 3 => {
@@ -742,6 +885,18 @@ mod tests {
                 4 => {
                     *map.get_mut_or_insert_with(key, || value) ^= 1;
                     *model.entry(key).or_insert(value) ^= 1;
+                }
+                5 => {
+                    if let Some(v) = map.get_mut_if(&key, |held| held % 2 == 0) {
+                        *v = value;
+                    }
+                    if let Some(v) = model.get_mut(&key).filter(|held| **held % 2 == 0) {
+                        *v = value;
+                    }
+                }
+                6 => {
+                    *map.get_mut_or_insert_by(&key, || key, || value) ^= 2;
+                    *model.entry(key).or_insert(value) ^= 2;
                 }
                 _ => {
                     // A copy kept aside must answer, later, what the map answered now.
@@ -886,6 +1041,79 @@ mod tests {
             root,
             "a map that shares nothing is written in place"
         );
+    }
+
+    #[test]
+    fn a_refused_write_copies_nothing_and_an_accepted_one_copies_one_path() {
+        let mut original: PersistentMap<u64, u64> = PersistentMap::new();
+        for i in 0..10_000 {
+            original.insert(i, i);
+        }
+        let mut copy = original.clone();
+        assert!(copy.get_mut_if(&77, |held| *held != 77).is_none());
+        assert!(
+            copy.get_mut_if(&20_000, |_| true).is_none(),
+            "a key not held"
+        );
+        assert_eq!(own(&copy, &original), 0, "nothing was copied for a refusal");
+        *copy
+            .get_mut_if(&77, |held| *held == 77)
+            .expect("77 is wanted") += 1;
+        assert!(
+            own(&copy, &original) > 0,
+            "the accepted write copied its path"
+        );
+        assert_eq!(original.get(&77), Some(&77));
+        assert_eq!(copy.get(&77), Some(&78));
+    }
+
+    #[test]
+    fn a_key_held_is_found_by_its_borrow_and_an_owned_key_is_made_only_to_insert() {
+        let mut map: PersistentMap<String, u64> = PersistentMap::new();
+        let mut made = 0;
+        *map.get_mut_or_insert_by(
+            "demo/a",
+            || {
+                made += 1;
+                "demo/a".to_owned()
+            },
+            || 1,
+        ) += 10;
+        *map.get_mut_or_insert_by(
+            "demo/a",
+            || {
+                made += 1;
+                "demo/a".to_owned()
+            },
+            || 1,
+        ) += 10;
+        assert_eq!(made, 1, "the second call found the key by its borrow");
+        assert_eq!(map.get("demo/a"), Some(&21));
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn a_face_number_is_its_own_hash_and_its_map_answers_as_a_keyed_one() {
+        use crate::accept_loop::FaceId;
+        let hasher = <AssignedKeyHasher as HasherFor<FaceId>>::for_new_map();
+        assert_eq!(hasher.hash_one(FaceId(77)), 77);
+        let mut assigned: AssignedKeyMap<FaceId, u64> = AssignedKeyMap::default();
+        let mut keyed: PersistentMap<FaceId, u64> = PersistentMap::new();
+        for n in 0..5_000 {
+            assigned.insert(FaceId(n), n * 3);
+            keyed.insert(FaceId(n), n * 3);
+        }
+        for n in (0..5_000).step_by(3) {
+            assert_eq!(assigned.remove(&FaceId(n)), keyed.remove(&FaceId(n)));
+        }
+        assert_eq!(assigned.len(), keyed.len());
+        assert_eq!(check_shape(&assigned.root, true), assigned.len());
+        for n in 0..5_001 {
+            assert_eq!(assigned.get(&FaceId(n)), keyed.get(&FaceId(n)), "face {n}");
+        }
+        let mut set: AssignedKeySet<FaceId> = AssignedKeySet::default();
+        assert!(set.insert(FaceId(1)));
+        assert!(set.contains(&FaceId(1)));
     }
 
     #[test]

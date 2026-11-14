@@ -42,7 +42,7 @@ use wz_session_core::queryable_info::QueryableInfo;
 
 use crate::accept_loop::FaceId;
 use crate::keyexpr_index::KeyexprIndex;
-use crate::persistent_map::PersistentMap;
+use crate::persistent_map::{AssignedHere, AssignedKeyMap, PersistentMap};
 
 /// How many changed keys the log keeps. A cache consulted by every message is never this far behind;
 /// one that is drops its routes instead.
@@ -72,14 +72,22 @@ impl Held for QueryableInfo {
     }
 }
 
-/// The declarations on one key: per face, the ids declaring it and the value each carries.
-pub(crate) type Holders<V> = PersistentMap<FaceId, PersistentMap<u64, V>>;
+/// The declarations on one key: per face, the ids declaring it and the value each carries. The
+/// faces are the node's own numbers and the ids the remote's, so only the inner map is keyed.
+pub(crate) type Holders<V> = AssignedKeyMap<FaceId, PersistentMap<u64, V>>;
+
+/// The number of an entry of the change log, counted by the store itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LogEntryNo(u64);
+
+/// The store numbers its log entries; no remote names one.
+impl AssignedHere for LogEntryNo {}
 
 /// The client faces' declarations on one plane: per face, by declaration id; and by key.
 #[derive(Debug, Clone)]
 pub(crate) struct ClientStore<V> {
     /// Per face, the declaration ids and the key each names.
-    by_face: PersistentMap<FaceId, PersistentMap<u64, String>>,
+    by_face: AssignedKeyMap<FaceId, PersistentMap<u64, String>>,
     /// Per key some client declares, the faces declaring it, each with its ids on it and their values.
     by_key: PersistentMap<String, Holders<V>>,
     /// The keys in `by_key`, each held under itself: the keys an asked keyexpr may intersect, found
@@ -90,7 +98,7 @@ pub(crate) struct ClientStore<V> {
     /// The keys changed, each under the version its change produced, by the order they were logged
     /// in: the entries numbered from `log_first` up to before `log_next`. A change that drops a face
     /// logs several keys under one version, so the log is numbered by entry and not by version.
-    log: PersistentMap<u64, (u64, String)>,
+    log: AssignedKeyMap<LogEntryNo, (u64, String)>,
     /// The number of the oldest entry the log holds.
     log_first: u64,
     /// The number the next entry is logged under.
@@ -114,11 +122,11 @@ pub(crate) type ClientTokenStore = ClientStore<()>;
 impl<V> Default for ClientStore<V> {
     fn default() -> Self {
         Self {
-            by_face: PersistentMap::default(),
+            by_face: AssignedKeyMap::default(),
             by_key: PersistentMap::default(),
             keys: KeyexprIndex::default(),
             version: 0,
-            log: PersistentMap::default(),
+            log: AssignedKeyMap::default(),
             log_first: 0,
             log_next: 0,
             log_floor: 0,
@@ -127,7 +135,7 @@ impl<V> Default for ClientStore<V> {
 }
 
 impl<V> Deref for ClientStore<V> {
-    type Target = PersistentMap<FaceId, PersistentMap<u64, String>>;
+    type Target = AssignedKeyMap<FaceId, PersistentMap<u64, String>>;
 
     fn deref(&self) -> &Self::Target {
         &self.by_face
@@ -217,10 +225,9 @@ impl<V: Held> ClientStore<V> {
     /// Withdraw `id` of `face`, returning the key it named. A face left with nothing is dropped.
     pub(crate) fn remove_id(&mut self, face: FaceId, id: u64) -> Option<String> {
         // Looked up before it is written, so that an id the face does not hold copies nothing.
-        if !self.by_face.get(&face)?.contains_key(&id) {
-            return None;
-        }
-        let by_id = self.by_face.get_mut(&face)?;
+        let by_id = self
+            .by_face
+            .get_mut_if(&face, |by_id| by_id.contains_key(&id))?;
         let removed = by_id.remove(&id)?;
         if by_id.is_empty() {
             self.by_face.remove(&face);
@@ -344,7 +351,7 @@ impl<V: Held> ClientStore<V> {
             entry = entry.wrapping_sub(1);
             let (at, keyexpr) = self
                 .log
-                .get(&entry)
+                .get(&LogEntryNo(entry))
                 .expect("the log holds every entry from the first to before the next");
             if self.version.wrapping_sub(*at) >= behind {
                 break;
@@ -362,11 +369,13 @@ impl<V: Held> ClientStore<V> {
 
     /// Log `keyexpr` under the current version, dropping the oldest entry past the capacity.
     fn log_key(&mut self, keyexpr: &str) {
-        self.log
-            .insert(self.log_next, (self.version, keyexpr.to_owned()));
+        self.log.insert(
+            LogEntryNo(self.log_next),
+            (self.version, keyexpr.to_owned()),
+        );
         self.log_next = self.log_next.wrapping_add(1);
         while self.log.len() > LOG_CAPACITY {
-            if let Some((at, _)) = self.log.remove(&self.log_first) {
+            if let Some((at, _)) = self.log.remove(&LogEntryNo(self.log_first)) {
                 self.log_floor = at;
             }
             self.log_first = self.log_first.wrapping_add(1);

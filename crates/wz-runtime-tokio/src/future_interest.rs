@@ -98,7 +98,7 @@ use wz_session_core::queryable_info::QueryableInfo;
 
 use crate::accept_loop::FaceId;
 use crate::keyexpr_index::KeyexprIndex;
-use crate::persistent_map::PersistentMap;
+use crate::persistent_map::{AssignedKeyMap, PersistentMap};
 
 /// The subscriber-plane store: presence-only (no value), so a pushed
 /// `DeclareSubscriber` is never re-pushed.
@@ -271,7 +271,7 @@ impl<V: Copy + PartialEq> FaceFutureInterests<V> {
 /// `Client` ones, through the single private `push_faces` filter.
 #[derive(Debug, Clone)]
 pub struct FutureInterestStore<V> {
-    by_face: PersistentMap<FaceId, FaceFutureInterests<V>>,
+    by_face: AssignedKeyMap<FaceId, FaceFutureInterests<V>>,
     /// Every stored interest, `(face, interest id)`, under its target: the faces a declaration
     /// may meet an interest of, found without trying every face's interests (see the module
     /// documentation). Written with a face's `interests`, always.
@@ -284,7 +284,7 @@ pub struct FutureInterestStore<V> {
 impl<V> Default for FutureInterestStore<V> {
     fn default() -> Self {
         Self {
-            by_face: PersistentMap::new(),
+            by_face: AssignedKeyMap::default(),
             by_target: KeyexprIndex::new(),
             by_reply: KeyexprIndex::new(),
         }

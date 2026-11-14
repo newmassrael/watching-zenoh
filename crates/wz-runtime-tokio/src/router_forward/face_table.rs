@@ -22,16 +22,17 @@
 //! removed and inserted again.
 
 use super::*;
-use crate::persistent_map::{Iter, PersistentSet};
+use crate::persistent_map::{AssignedKeyMap, AssignedKeySet, Iter, PersistentSet};
 use std::ops::Index;
 
-/// The router's faces by id and by tier.
+/// The router's faces by id and by tier. Keyed by the face numbers the accept loop gives out, so
+/// hashed by their own bits: every message a face brings looks its face up here.
 #[derive(Clone, Default)]
 pub(super) struct FaceTable {
     /// Every face, by id.
-    all: PersistentMap<FaceId, Arc<RouterFaceState>>,
+    all: AssignedKeyMap<FaceId, Arc<RouterFaceState>>,
     /// The ids of the faces of each tier.
-    by_tier: RegionMap<PersistentSet<FaceId>>,
+    by_tier: RegionMap<AssignedKeySet<FaceId>>,
 }
 
 impl FaceTable {
