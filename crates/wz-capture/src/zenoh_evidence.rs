@@ -932,6 +932,110 @@ impl ZenohEvidence {
     }
 }
 
+/// THE FREEZES (`docs/flow-zenoh-verdict.md` §6.4, §6.12): every model a ledger
+/// entry froze before its validation corpus was collected, with the digest that
+/// entry registered and the corpus registered to be read against it.
+///
+/// A validation corpus is evidence about the one model it was registered for,
+/// and only while nothing has been tuned on it. So it is read under that
+/// model's number AND digest and under nothing else: a model that has changed
+/// since, or a later one, does not read it, because a reading that could move
+/// what is built next would make the corpus a development corpus without
+/// saying so.
+#[cfg(test)]
+pub(crate) mod freeze {
+    use super::*;
+
+    /// A model frozen by a ledger entry, and its validation corpus.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct Freeze {
+        /// The model's number ([`model::MODEL`]).
+        pub(crate) model: u32,
+        /// [`digest`] as the freezing entry registered it.
+        pub(crate) digest: u64,
+        /// The validation corpus registered to be read against it, from the
+        /// repository's root.
+        pub(crate) corpus: &'static str,
+    }
+
+    /// In model order; a freeze is never rewritten, and a model that changes
+    /// after its freeze is a new model with a number of its own.
+    pub(crate) const FREEZES: &[Freeze] = &[Freeze {
+        model: 6,
+        digest: 0xace0_3889_00a8_cc99,
+        corpus: "captures/validation",
+    }];
+
+    /// What a model may do with the validation corpora.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Seal {
+        /// It is the frozen model of this freeze: its corpus is read against it.
+        Read(Freeze),
+        /// It is numbered after every freeze and not frozen itself: it reads no
+        /// validation corpus until a freezing entry registers its digest.
+        Unfrozen,
+        /// It carries a frozen number with other numbers in it, or a number
+        /// below the last freeze: it is neither a frozen model nor a new one.
+        Refused,
+    }
+
+    /// The seal of the model numbered `model` whose [`digest`] is `digest`.
+    pub(crate) fn seal(model: u32, digest: u64) -> Seal {
+        if let Some(f) = FREEZES.iter().find(|f| f.model == model) {
+            return if f.digest == digest {
+                Seal::Read(*f)
+            } else {
+                Seal::Refused
+            };
+        }
+        if FREEZES.iter().all(|f| f.model < model) {
+            Seal::Unfrozen
+        } else {
+            Seal::Refused
+        }
+    }
+
+    /// Every number the sums are computed from, in one text, as a digest:
+    /// the rule, the thresholds, the bounds, the fixed-point constants, every
+    /// check's strength and bases, and the parameters.
+    pub(crate) fn digest() -> u64 {
+        let checks: Vec<alloc::string::String> = Check::ALL
+            .iter()
+            .map(|c| {
+                alloc::format!(
+                    "{}:{}:{}:{}",
+                    c.name(),
+                    c.strength().name(),
+                    c.q_basis().name(),
+                    c.eps_basis().name()
+                )
+            })
+            .collect();
+        let text = alloc::format!(
+            "model={} yes_at={} no_at={} cookie={}x{} altered={}/{} break={} \
+             one={} max={} err={} checks={:?} params={:?}",
+            model::MODEL,
+            model::YES_AT,
+            model::NO_AT,
+            model::COOKIE_ECHO_PER_BYTE,
+            model::COOKIE_ECHO_MAX_BYTES,
+            model::LOG2_ALTERED_VERIFIED,
+            model::LOG2_ALTERED_UNCHECKED,
+            LOG2_BREAK_NULL_Q64,
+            ONE_Q64,
+            MAX_COUNT,
+            LOG_ERR_Q64,
+            checks,
+            model::PARAMS,
+        );
+        // FNV-1a, 64 bits: a change detector over a text this crate writes, not
+        // a defence against anyone choosing the text.
+        text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1215,57 +1319,75 @@ pub(crate) mod tests {
         });
     }
 
-    /// THE MODEL FROZEN BEFORE THE VALIDATION CORPUS (`docs/flow-zenoh-verdict.md`
-    /// §6.12, D5): every number the sums are computed from, in one text, and
-    /// its digest as the freezing entry registered it. Any change to the rule,
-    /// a threshold, a bound, a prior, a region or a check's bases changes the
-    /// digest, and this fails until a new ledger entry registers the new one,
-    /// which is what makes the validation corpus's single reading a reading of
-    /// the model it was registered against.
+    /// THE MODEL FROZEN BEFORE ITS VALIDATION CORPUS (`docs/flow-zenoh-verdict.md`
+    /// §6.12, D5): a model whose number a freezing entry registered is the
+    /// model it registered, digest for digest. Any change to the rule, a
+    /// threshold, a bound, a prior, a region or a check's bases changes the
+    /// digest, and a frozen number with another digest fails here. A model
+    /// numbered after every freeze is not frozen yet; this prints the digest a
+    /// freezing entry would register for it.
     #[test]
     fn the_model_is_the_one_frozen_before_the_validation_corpus() {
-        // The model 6 digest, registered by the freezing entry (§6.12).
-        const FROZEN: (u32, u64) = (6, 0xace0_3889_00a8_cc99);
-        let checks: Vec<alloc::string::String> = Check::ALL
-            .iter()
-            .map(|c| {
-                alloc::format!(
-                    "{}:{}:{}:{}",
-                    c.name(),
-                    c.strength().name(),
-                    c.q_basis().name(),
-                    c.eps_basis().name()
-                )
-            })
-            .collect();
-        let text = alloc::format!(
-            "model={} yes_at={} no_at={} cookie={}x{} altered={}/{} break={} \
-             one={} max={} err={} checks={:?} params={:?}",
-            model::MODEL,
-            model::YES_AT,
-            model::NO_AT,
-            model::COOKIE_ECHO_PER_BYTE,
-            model::COOKIE_ECHO_MAX_BYTES,
-            model::LOG2_ALTERED_VERIFIED,
-            model::LOG2_ALTERED_UNCHECKED,
-            LOG2_BREAK_NULL_Q64,
-            ONE_Q64,
-            MAX_COUNT,
-            LOG_ERR_Q64,
-            checks,
-            model::PARAMS,
-        );
-        // FNV-1a, 64 bits: a change detector over a text this crate writes, not
-        // a defence against anyone choosing the text.
-        let digest = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
-        });
+        let digest = freeze::digest();
+        match freeze::seal(model::MODEL, digest) {
+            freeze::Seal::Read(f) => assert_eq!((f.model, f.digest), (model::MODEL, digest)),
+            freeze::Seal::Unfrozen => std::println!(
+                "model {} is not frozen; a freezing entry registers its digest {digest:#018x}",
+                model::MODEL
+            ),
+            freeze::Seal::Refused => panic!(
+                "model {} is not the model frozen under its number, nor numbered after every \
+                 freeze; a changed model takes a new number, and a ledger entry freezes it \
+                 with this digest ({digest:#018x})",
+                model::MODEL
+            ),
+        }
+    }
+
+    /// A FROZEN NUMBER READS ITS CORPUS WITH ITS OWN DIGEST ONLY: the same
+    /// number with another digest is refused, a number after every freeze is
+    /// unfrozen, and a number below the last freeze that no entry froze is
+    /// refused.
+    #[test]
+    fn a_frozen_number_reads_its_corpus_only_with_its_own_digest() {
+        let last = *freeze::FREEZES.last().expect("a model was frozen");
         assert_eq!(
-            (model::MODEL, digest),
-            FROZEN,
-            "the model differs from the one frozen before the validation corpus; \
-             a change to it is registered by a new ledger entry, which sets this \
-             digest ({digest:#018x})"
+            freeze::seal(last.model, last.digest),
+            freeze::Seal::Read(last)
+        );
+        assert_eq!(
+            freeze::seal(last.model, !last.digest),
+            freeze::Seal::Refused
+        );
+        assert_eq!(
+            freeze::seal(last.model + 1, last.digest),
+            freeze::Seal::Unfrozen
+        );
+        let unfrozen_below = (0..last.model)
+            .rev()
+            .find(|m| freeze::FREEZES.iter().all(|f| f.model != *m))
+            .expect("a number below the last freeze that no entry froze");
+        assert_eq!(freeze::seal(unfrozen_below, 0), freeze::Seal::Refused);
+    }
+
+    /// The freezes are in model order, each with a validation corpus of its
+    /// own, and the first is model 6 as its freezing entry registered it.
+    #[test]
+    fn the_freezes_are_in_model_order_each_with_a_corpus_of_its_own() {
+        let f = freeze::FREEZES;
+        assert!(f.windows(2).all(|w| w[0].model < w[1].model), "{f:?}");
+        let mut corpora: Vec<&str> = f.iter().map(|x| x.corpus).collect();
+        corpora.sort_unstable();
+        corpora.dedup();
+        assert_eq!(corpora.len(), f.len(), "a corpus is read against one model");
+        assert!(f.iter().all(|x| x.corpus.starts_with("captures/")), "{f:?}");
+        assert_eq!(
+            f[0],
+            freeze::Freeze {
+                model: 6,
+                digest: 0xace0_3889_00a8_cc99,
+                corpus: "captures/validation",
+            }
         );
     }
 
