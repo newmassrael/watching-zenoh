@@ -78,7 +78,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::net::IpAddr;
 
-use wz_codecs::lent::{Hello, Locator};
+use sce_forge_runtime::codec::VecSink;
+use wz_codecs::hello::HelloParts;
+use wz_codecs::locator::LocatorParts;
+use wz_codecs::scouting_hello::{ScoutingHelloParts, ScoutingHelloWire};
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 
@@ -412,17 +415,7 @@ pub fn hello_datagram(identity: &ResponderIdentity) -> Vec<u8> {
 /// [`hello_datagram`] carrying `advertised` in place of the identity's own list, for the asker the
 /// list was chosen for.
 fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> Vec<u8> {
-    let mut hello = Hello::new();
-    hello.version = wz_codecs::wire_const::PROTOCOL_VERSION;
-    hello.set_whatami(identity.whatami.to_wire());
-    // Neither arithmetic can go wrong: `try_new` refuses an empty zid and one
-    // longer than the 4-bit field, which is the whole reason it is a
-    // constructor rather than a struct literal.
-    hello.set_zid_len_m1((identity.zid.len() - 1) as u8);
-    hello.zid = sce_forge_runtime::codec::Bounded::new(identity.zid.as_slice())
-        .expect("`try_new` holds a zid of 1..=16 bytes, the codec's bounds");
-
-    let mut locators = sce_forge_runtime::heapless::Vec::<Locator<'_>, 64>::new();
+    let mut locators = Vec::with_capacity(advertised.len().min(HELLO_LOCATORS_HELD));
     for l in advertised {
         // A locator past the `u8` length the protocol reads one with has no
         // frame, so it is left out of the list as a locator the list has no
@@ -430,36 +423,46 @@ fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> V
         let Some(locator) = sce_forge_runtime::codec::Bounded::new(l.as_str()) else {
             continue;
         };
-        // The bound is the codec's declared `sce:max-count`, so overflowing it
-        // is not an error to propagate but a list to TRUNCATE: a Hello carrying
-        // 64 of a node's locators is still a usable dial hint, while a
-        // responder that returned an error would stop answering entirely.
-        if locators
-            .push(Locator {
-                locator_len: l.len() as u64,
-                locator,
-            })
-            .is_err()
-        {
+        // The bound is what a node holds of a Hello's list (the `hello` capacity
+        // of `deploy/codec_node.yaml`), so overflowing it is not an error to
+        // propagate but a list to TRUNCATE: a Hello carrying 64 of a node's
+        // locators is still a usable dial hint that every wz node can read, while
+        // a responder that returned an error would stop answering entirely.
+        if locators.len() == HELLO_LOCATORS_HELD {
             break;
         }
+        locators.push(LocatorParts { locator });
     }
-    let has_locators = !locators.is_empty();
-    if has_locators {
-        hello.num_locators = Some(locators.len() as u64);
-        hello.locators = Some(locators.into());
-    }
-
-    let body = hello.encode_to_vec();
-    let mut datagram = Vec::with_capacity(1 + body.len());
-    let mut header = wire_const::S_MID_HELLO;
-    if has_locators {
-        header |= wire_const::FLAG_S_HELLO_L;
-    }
-    datagram.push(header);
-    datagram.extend_from_slice(&body);
+    let body = HelloParts {
+        version: wz_codecs::wire_const::PROTOCOL_VERSION,
+        // The role in the low two bits; the zid's length above them is the
+        // document's, from the zid.
+        cbyte: identity.whatami.to_wire(),
+        // `try_new` refuses an empty zid and one longer than the 4-bit field,
+        // which is the whole reason it is a constructor rather than a struct
+        // literal.
+        zid: sce_forge_runtime::codec::Bounded::new(identity.zid.as_slice())
+            .expect("`try_new` holds a zid of 1..=16 bytes, the codec's bounds"),
+        // A list only when there is a locator: the document sets `L` from it.
+        locators: sce_forge_runtime::codec::Bounded::new(locators.as_slice())
+            .filter(|_| !locators.is_empty()),
+    };
+    // The whole message, header and chain included, by its document
+    // (`sources/codecs/scouting_hello.scxml`).
+    let message = ScoutingHelloParts {
+        header: wire_const::S_MID_HELLO,
+        body: &body,
+        extensions: None,
+    };
+    let mut datagram = Vec::with_capacity(ScoutingHelloWire::measure(&message).len());
+    let Ok(()) = ScoutingHelloWire::encode_source(&message, &mut VecSink::new(&mut datagram));
     datagram
 }
+
+/// How many locators a Hello written here carries at most: what a wz node holds
+/// of a received Hello's list (`deploy/codec_node.yaml`, `hello`), so every Hello
+/// this writes is one a node can read whole.
+const HELLO_LOCATORS_HELD: usize = 64;
 
 /// Append each of `more` that `list` does not already hold, in the order given.
 fn append_new(list: &mut Vec<String>, more: &[String]) {

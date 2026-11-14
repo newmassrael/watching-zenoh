@@ -35,7 +35,7 @@ use alloc::vec::Vec;
 use crate::parse_error::InboundParseError;
 
 #[cfg(any(feature = "codec-scout", feature = "codec-hello"))]
-use crate::ext_chain::decode_ext_chain;
+use crate::ext_chain::collect_ext_chain;
 #[cfg(any(feature = "codec-scout", feature = "codec-hello"))]
 use sce_forge_runtime::codec::SceCursor;
 #[cfg(any(feature = "codec-scout", feature = "codec-hello"))]
@@ -48,7 +48,11 @@ use crate::transport_profile::owned::HelloOwned;
 #[cfg(feature = "codec-hello")]
 use wz_codecs::lent::Hello;
 #[cfg(feature = "codec-scout")]
-use wz_codecs::scout::{Scout, ScoutOwned};
+use wz_codecs::scout::ScoutOwned;
+#[cfg(feature = "codec-hello")]
+use wz_codecs::scouting_hello::ScoutingHelloView;
+#[cfg(feature = "codec-scout")]
+use wz_codecs::scouting_scout::ScoutingScoutView;
 
 /// One decoded scouting message.
 ///
@@ -119,14 +123,13 @@ pub fn parse_scouting_consuming(bytes: &[u8]) -> Result<(ScoutingFrame, usize), 
     match mid {
         #[cfg(feature = "codec-scout")]
         wire_const::S_MID_SCOUT => {
-            let mut cursor = SceCursor::new(&bytes[1..]);
-            let body = Scout::decode(&mut cursor)?.try_into_owned()?;
-            let has_ext = (header & wire_const::FLAG_T_Z) != 0;
-            let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
-            } else {
-                Vec::new()
-            };
+            // The whole message is read by its document
+            // (`sources/codecs/scouting_scout.scxml`).
+            let mut cursor = SceCursor::new(bytes);
+            let view = ScoutingScoutView::decode(&mut cursor)?;
+            let has_ext = view.z();
+            let extensions = collect_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))?;
+            let body = view.body.try_into_owned()?;
             Ok((
                 ScoutingFrame::Scout {
                     has_ext,
@@ -138,19 +141,18 @@ pub fn parse_scouting_consuming(bytes: &[u8]) -> Result<(ScoutingFrame, usize), 
         }
         #[cfg(feature = "codec-hello")]
         wire_const::S_MID_HELLO => {
-            let mut cursor = SceCursor::new(&bytes[1..]);
-            // The locator list is present-if-gated on the header's L bit, so
-            // the flag is an INPUT to the body decode rather than something
-            // read back off it — the same shape `Open`'s T bit has.
-            let l = u8::from((header & wire_const::FLAG_S_HELLO_L) != 0);
-            let body = Hello::decode(&mut cursor, l)?
-                .try_into_owned_in::<crate::transport_profile::TransportStorage>()?;
-            let has_ext = (header & wire_const::FLAG_T_Z) != 0;
-            let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
-            } else {
-                Vec::new()
-            };
+            // The whole message is read by its document
+            // (`sources/codecs/scouting_hello.scxml`), which binds the header's
+            // L bit to the body's locator list.
+            let mut cursor = SceCursor::new(bytes);
+            let view = ScoutingHelloView::decode(&mut cursor)?;
+            let has_ext = view.z();
+            let extensions = collect_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))?;
+            // Held as the lent form first: its list is a node's, which refuses a
+            // list past the capacity a node keeps, as the storing decode did.
+            let mut lent = Hello::default();
+            view.body.into_builder(&mut lent)?;
+            let body = lent.try_into_owned_in::<crate::transport_profile::TransportStorage>()?;
             Ok((
                 ScoutingFrame::Hello {
                     has_ext,
@@ -289,6 +291,8 @@ pub fn parse_scouting_observed(bytes: &[u8]) -> Result<(ScoutingFrame, usize), I
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "codec-scout")]
+    use wz_codecs::scout::Scout;
 
     /// The whole reason this module exists, stated as an assertion: the two
     /// namespaces disagree on what byte `0x01` means, so a decoder that reads

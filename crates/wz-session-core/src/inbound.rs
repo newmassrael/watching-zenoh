@@ -5,8 +5,8 @@
 //!
 //! [`parse_inbound`] decodes one raw transport datagram into a typed
 //! [`InboundFrame`]; [`inbound_to_fsm_event`] projects a parsed frame to the
-//! matching `session_fsm_unicast` external event; `decode_ext_chain` is the
-//! shared Z-flag ext-chain decoder both consume.
+//! matching `session_fsm_unicast` external event. Every message, its
+//! extension chain included, is read by its message's document.
 //!
 //! Hoisted from `wz-runtime-tokio::session_glue` so both runtime profiles
 //! (tokio AP + lwIP MCU) decode through one SSOT — the MCU `#![no_std]`
@@ -41,8 +41,6 @@ use crate::parse_error::InboundParseError;
     feature = "codec-keep-alive"
 ))]
 use crate::ext_chain::collect_handshake_ext_chain;
-#[cfg(feature = "alloc")]
-use crate::ext_chain::decode_ext_chain;
 pub use crate::ext_chain::ExtChainOwned;
 #[cfg(feature = "alloc")]
 use crate::link::RxBytes;
@@ -118,7 +116,7 @@ pub use crate::transport_profile::HandshakeStorage;
 /// `Init` / `Open` / `Close`. The `has_ext` field on each variant
 /// records whether the parent header's Z flag was set so the caller
 /// can dispatch ext-chain decoding (R68c) without re-parsing the
-/// header byte; the chain itself is decoded by `decode_ext_chain`.
+/// header byte; the chain itself is read by the message's document.
 /// `Unknown { mid }` covers MIDs outside the {INIT, OPEN, CLOSE}
 /// triad — the caller may forward them to a higher-layer dispatch
 /// (e.g. KeepAlive / Frame / Fragment) or drop them.
@@ -1228,7 +1226,7 @@ fn parse_unit_into(
         // profile's message, so it is handed back by value and written to `out`.
         #[cfg(feature = "alloc")]
         wire_const::T_MID_OAM => {
-            let (frame, used) = decode_oam(header, bytes)?;
+            let (frame, used) = decode_oam(bytes)?;
             *out = frame;
             Ok(used)
         }
@@ -1487,7 +1485,8 @@ fn decode_keep_alive(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, Inbo
     Ok(bytes.len() - cursor.remaining())
 }
 
-/// The transport-OAM body (`T_MID_OAM`, 0x00), decoded off its own cursor.
+/// The transport OAM (`T_MID_OAM`, 0x00), read whole by its document
+/// (`sources/codecs/transport_oam.scxml`) off its own cursor.
 ///
 /// # Why it is a function and not a match arm
 ///
@@ -1514,68 +1513,42 @@ fn decode_keep_alive(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, Inbo
 /// would have been the silencing.
 #[cfg(feature = "alloc")]
 #[inline(never)]
-fn decode_oam(header: u8, bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
-    let mut cursor = SceCursor::new(&bytes[1..]);
-    // The id's WIRE width is a full zint and its VALUE width is 16 bits, and
-    // upstream bridges the two by TRUNCATING (`oam_id_from_wire`). Reading it
-    // with the refusing `read_vle_u16` — which R311y878 did — makes this
-    // decoder answer `Err` on a message stock zenoh reads to the end, and an
-    // `Err` here consumes nothing, so the batch walk stops and every message
-    // behind the OAM is lost. That is the very defect the arm was added to
-    // remove, moved from the MID to one of its fields.
-    let id = wz_codecs::wire_const::oam_id_from_wire(
-        cursor.read_vle_u64().map_err(InboundParseError::Codec)?,
-    );
-    // `0x80` spelled out: `wire_const::FLAG_T_Z` is itself gated on the
-    // `codec-*` union this function deliberately stays out of, and the ungated
-    // `transport_flag_mask` table spells the same bit the same way.
-    let has_ext = (header & 0x80) != 0;
-    let extensions = if has_ext {
-        decode_ext_chain(&mut cursor)?
-    } else {
-        Vec::new()
-    };
-    // The body LAST, and only after the chain: reversing the two would read
-    // the first extension's header byte as a Z64 body.
-    let encoding = (header & wire_const::FLAG_T_OAM_ENC) >> 5;
-    let mut value = 0u64;
-    let mut body = Vec::new();
-    match encoding {
-        0 => {}
-        1 => {
-            value = cursor.read_vle_u64().map_err(InboundParseError::Codec)?;
-        }
-        2 => {
-            let n = cursor.read_vle_u64().map_err(InboundParseError::Codec)? as usize;
-            body = cursor
-                .peek_slice(n)
-                .map_err(InboundParseError::Codec)?
-                .to_vec();
-            cursor.advance(n).map_err(InboundParseError::Codec)?;
-        }
+fn decode_oam(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
+    use wz_codecs::transport_oam::{TransportOamView, TransportOamViewVariant};
+
+    let mut cursor = SceCursor::new(bytes);
+    let view = TransportOamView::decode(&mut cursor)?;
+    let (value, body) = match &view.body {
+        TransportOamViewVariant::CodecZenohExtUnit(_) => (0, Vec::new()),
+        TransportOamViewVariant::CodecZenohExtZint(z64) => (z64.value, Vec::new()),
+        TransportOamViewVariant::CodecZenohExtZbuf(zbuf) => (0, zbuf.value.into_inner().to_vec()),
         // 0b11 is RESERVED and zenoh's own decoder returns `DidntRead` for it
-        // (`transport/oam.rs`). Refused here for the same reason a corrupt body
-        // is: a sender that wrote it wrote a message no conforming peer
-        // retrieves, and reporting a length for it would step the batch walk
-        // onto invented bytes.
-        _ => return Err(InboundParseError::ReservedEncoding),
-    }
+        // (`transport/oam.rs`), where the document reads it through its default
+        // arm. Refused here for the same reason a corrupt body is: a sender that
+        // wrote it wrote a message no conforming peer retrieves, and reporting a
+        // length for it would step the batch walk onto invented bytes.
+        TransportOamViewVariant::Default { .. } => return Err(InboundParseError::ReservedEncoding),
+    };
+    let extensions =
+        crate::ext_chain::collect_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))?;
     Ok((
         InboundFrame::Oam {
-            id,
-            encoding,
+            // The id's WIRE width is a full zint and its VALUE width is 16
+            // bits, and upstream bridges the two by TRUNCATING
+            // (`oam_id_from_wire`). Refusing a wider id would answer `Err` on a
+            // message stock zenoh reads to the end, and an `Err` here consumes
+            // nothing, so the batch walk would stop and lose every message
+            // behind the OAM.
+            id: wz_codecs::wire_const::oam_id_from_wire(view.id),
+            encoding: view.enc(),
             value,
             body,
-            has_ext,
+            has_ext: view.z(),
             extensions,
         },
         bytes.len() - cursor.remaining(),
     ))
 }
-
-// R2 (R311ww) — `decode_ext_chain` moved to the shared `crate::ext_chain` SSOT
-// (encode counterpart + the extauth dispatch's inner method chain consume it
-// too); imported above. Was an inline `fn` here.
 
 // ── R311y578 — G6: `InboundFrame` prints. Measured from OUTSIDE the
 //    workspace as a hard `E0277` on `panic!("{other:?}")`, so the gap was
