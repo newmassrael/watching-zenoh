@@ -4372,6 +4372,51 @@ fn declare_adminspace_with_config_announces_a_clients_queryable_on_the_wire() {
     );
 }
 
+/// The admin queryable is declared NOT complete, as upstream declares it in every
+/// mode (`zenoh/src/net/runtime/adminspace.rs` @ `ext_info: QueryableInfoType::DEFAULT,`):
+/// an `AllComplete` GET of the root meets no queryable, and the `All` twin, the
+/// anti-vacuity control, is answered.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-target",
+    feature = "adminspace-core"
+))]
+#[test]
+fn the_admin_queryable_is_declared_incomplete() {
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    let root = format!("@/{zid_hex}/{whatami}");
+    let _admin = session
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+    let replies = |target: QueryTarget| {
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        session
+            .query(
+                &root,
+                QueryOptions::get()
+                    .with_allowed_destination(Locality::SessionLocal)
+                    .with_target(target),
+                move |_| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                },
+                |_| {},
+            )
+            .expect("query-get ON in this build");
+        count.load(Ordering::SeqCst)
+    };
+    assert_eq!(
+        replies(QueryTarget::AllComplete),
+        0,
+        "no complete queryable"
+    );
+    assert_eq!(replies(QueryTarget::All), 1, "the root is answered");
+}
+
 /// A peer session answers the graph of its `north` region, as upstream's peer hat
 /// does: the single-hop graph of the node and the nodes it links to, here the node
 /// alone since the fixture has no peer named. A client session's hat holds no

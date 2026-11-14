@@ -1206,6 +1206,12 @@ pub fn single_hop_graph_text<'a>(labels: impl IntoIterator<Item = &'a str>) -> S
     text
 }
 
+/// Whether the admin queryable is declared complete: not, in every mode, as
+/// upstream declares it with the default queryable info
+/// (`zenoh/src/net/runtime/adminspace.rs` @ `ext_info: QueryableInfoType::DEFAULT,`,
+/// whose `complete` is `false`). Every host declares it with this value.
+pub const ADMIN_QUERYABLE_COMPLETE: bool = false;
+
 /// The built-in admin queryable keyexpr `@/<zid>/<whatami>/**` — zenoh declares
 /// its admin queryable on `[root_key, "/**"].concat()` (`adminspace.rs:341`), so
 /// any admin GET under the node prefix routes to it.

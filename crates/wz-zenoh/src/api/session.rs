@@ -937,21 +937,21 @@ impl Engine {
     /// declared to every node the session is linked to, as upstream's runtime declares it through
     /// a face of its routing tables in every mode
     /// (`zenoh/src/net/runtime/adminspace.rs` @ `let primitives = runtime.state.router.new_session(admin.clone());`).
-    /// A registry of faces answers on the face the query came in on and declares the queryable
-    /// as upstream does, not complete (`zenoh/src/net/runtime/adminspace.rs` @
-    /// `ext_info: QueryableInfoType::DEFAULT,`). A node answers from the router's own thread and
-    /// declares it complete, as the router hosts of the demo do: docs/adminspace-client-mode.md
-    /// records that difference.
+    /// A node answers from the router's own thread and a registry of faces on the face the query
+    /// came in on; both declare it as upstream does, not complete
+    /// (`ADMIN_QUERYABLE_COMPLETE`, after `zenoh/src/net/runtime/adminspace.rs` @
+    /// `ext_info: QueryableInfoType::DEFAULT,`).
     #[cfg(feature = "unstable")]
     fn host_admin_queryable(&self, key: &str, handler: AdminQueryHandler) {
         use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
+        use wz_runtime_tokio::adminspace::ADMIN_QUERYABLE_COMPLETE;
         use wz_session_core::query_sink::{QueryView, ReplyOut};
 
         match self {
             Engine::Router(router) => {
                 router.node.forwarder().register_local_queryable(
                     key,
-                    true,
+                    ADMIN_QUERYABLE_COMPLETE,
                     Box::new(move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
                         handler(view, out)
                     }),
@@ -970,7 +970,7 @@ impl Engine {
                 let _ = state.shared.declare_port_queryable_on_links(
                     key.to_owned(),
                     tokio_engine::wire_key_of(0, None),
-                    false,
+                    ADMIN_QUERYABLE_COMPLETE,
                     tokio_engine::engine_locality(Locality::Any),
                     ANY_LINKS,
                     None,

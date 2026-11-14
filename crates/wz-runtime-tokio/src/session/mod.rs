@@ -7454,7 +7454,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             }
         };
 
-        self.declare_queryable(queryable_key, QueryableOptions::default(), handler)
+        self.declare_queryable(
+            queryable_key,
+            QueryableOptions::default()
+                .with_complete(wz_admin::adminspace::ADMIN_QUERYABLE_COMPLETE),
+            handler,
+        )
     }
 
     /// R246 — aliased-keyexpr counterpart of

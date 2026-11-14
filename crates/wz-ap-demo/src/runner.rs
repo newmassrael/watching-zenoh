@@ -5116,7 +5116,11 @@ async fn run_peer_until(
                 let _ = answer_router_admin_query(view, out, &rctx);
             }
         };
-        forwarder.register_local_queryable(&queryable_key, true, Box::new(handler));
+        forwarder.register_local_queryable(
+            &queryable_key,
+            wz::runtime_tokio::adminspace::ADMIN_QUERYABLE_COMPLETE,
+            Box::new(handler),
+        );
         log::info!("wz-ap-demo peer: adminspace config GET at {config_key}");
 
         // The resource snapshot, under the wz-owned root beside the router host's, with the same
@@ -7173,7 +7177,11 @@ async fn run_router_hat_until(
                 );
             }
         };
-        forwarder.register_local_queryable(&queryable_key, true, Box::new(handler));
+        forwarder.register_local_queryable(
+            &queryable_key,
+            wz::runtime_tokio::adminspace::ADMIN_QUERYABLE_COMPLETE,
+            Box::new(handler),
+        );
         log::info!(
             "wz-ap-demo router-hat: adminspace router legs hosted at {queryable_key} \
              (linkstate/<region>, route/successor)"
