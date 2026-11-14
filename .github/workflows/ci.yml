@@ -2461,10 +2461,15 @@ jobs:
         run: bash scripts/run-ci.sh --layer Fz
 
       - name: Budget margin — this job's own clock
-        # No floor yet: the job has not been timed on a hosted runner, and a
-        # floor guessed before the first run would fail a job for being fast.
+        # Measured over the 19 completed runs 42545915501..43558506583
+        # (2026-11-09..14): 623-1090 s, 34-60% of 1800 s. In six of them
+        # Layer Fz took 578-1039 s: the build 101-171 s and selector_term's
+        # 195 seeds 332-604 s, its largest part; `fuzz.sh regress` prints each
+        # target's seconds and slowest inputs. The floor at 20% holds the
+        # budget to the job: a job that fell under 360 s no longer needs 30
+        # minutes.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
   # The consumer bundles' offline build entry (deploy/offline-build.json),
   # measured: every bundle is built in a bwrap sandbox with no network, no .git
