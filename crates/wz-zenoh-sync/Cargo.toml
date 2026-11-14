@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# This package reproduces the public API and the documentation of the crate of the same name of
+# eclipse-zenoh/zenoh, which is EPL-2.0 OR Apache-2.0, so the whole package is under that expression.
+# The notices of the upstream files it derives from are kept in its sources (see LICENSES/ and
+# THIRD_PARTY.md at the root of this repository).
+#
+# zenoh-sync -- the synchronisation primitives of the zenoh family, over watching-zenoh (inventory
+# atom `api-compat-rust`, docs/build-configuration.md C13).
+#
+# Named `zenoh-sync` and versioned as the pinned zenoh, like every crate of the family (see
+# `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). `zenoh` re-exports its
+# `Condition` under `zenoh::internal`, the ecosystem waits on it (`zenoh-ext`'s group does), and
+# upstream's transport and links, which a graph the family is patched into builds over it, take its
+# event, mvar, signal and object pool: the crate is whole, because a `[patch]` gives every crate of
+# the graph this one and a part of it would leave those without what they name.
+
+[package]
+name = "zenoh-sync"
+version = "1.10.2"
+edition.workspace = true
+rust-version.workspace = true
+license = "EPL-2.0 OR Apache-2.0"
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The synchronisation primitives of the zenoh family (1.10.2), as a drop-in over watching-zenoh."
+
+[lib]
+name = "zenoh_sync"
+path = "src/lib.rs"
+
+# Upstream's requirements, at the lower bounds upstream's workspace states: the public API names
+# arc-swap's `Guard` (the cache), event-listener's `EventListener` (a condition's waiter), tokio's
+# `MutexGuard` (a condition's wait) and the family's `ZSliceBuffer` (a recycled buffer); `futures`
+# polls the boxed future.
+[dependencies]
+arc-swap = "1.7.1"
+event-listener = "5.4.1"
+futures = "0.3.31"
+tokio = { version = "1.47.1", default-features = false, features = ["sync"] }
+zenoh-buffers = { path = "../wz-zenoh-buffers", default-features = false }
+zenoh-collections = { path = "../wz-zenoh-collections", features = ["std"] }
+zenoh-core = { path = "../wz-zenoh-core" }
+
+# Upstream's tests: the waiters run on a runtime of several threads and wait with a bound, and the
+# mvar's test answers a `ZResult`.
+[dev-dependencies]
+tokio = { version = "1.47.1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
+zenoh-result = { path = "../wz-zenoh-result" }
+
+[lints]
+workspace = true

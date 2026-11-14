@@ -26128,6 +26128,9 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh-task)" 3 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_task || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-sync)" 3 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_sync || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-macros)" 4 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_macros || return 1

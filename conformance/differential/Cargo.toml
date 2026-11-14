@@ -105,6 +105,9 @@ wz_collections = { package = "zenoh-collections", path = "../../crates/wz-zenoh-
 # above), so each controller spawns on, and waits on, its own crate's pool.
 up_task = { package = "zenoh-task", version = "=1.10.2" }
 wz_task = { package = "zenoh-task", path = "../../crates/wz-zenoh-task" }
+# `zenoh-sync`: the pair, for the condition variable `zenoh::internal` re-exports.
+up_sync = { package = "zenoh-sync", version = "=1.10.2" }
+wz_sync = { package = "zenoh-sync", path = "../../crates/wz-zenoh-sync" }
 # `zenoh-macros`: a macro cannot be called with the same input to two crates, so each crate's macros
 # are compiled into a probe program (`probes/`) and the programs' transcripts are compared. Each probe
 # has its own stub of the `zenoh` that the expanded code names.

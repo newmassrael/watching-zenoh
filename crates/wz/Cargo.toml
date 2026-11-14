@@ -115,6 +115,7 @@ zenoh-keyexpr = { path = "../wz-zenoh-keyexpr", optional = true }
 zenoh-macros = { path = "../wz-zenoh-macros", optional = true }
 zenoh-collections = { path = "../wz-zenoh-collections", optional = true }
 zenoh-task = { path = "../wz-zenoh-task", optional = true }
+zenoh-sync = { path = "../wz-zenoh-sync", optional = true }
 zenoh-buffers = { path = "../wz-zenoh-buffers", optional = true }
 zenoh-protocol = { path = "../wz-zenoh-protocol", optional = true }
 zenoh-codec = { path = "../wz-zenoh-codec", optional = true }
@@ -1245,6 +1246,7 @@ api-compat-rust = [
     "dep:zenoh-macros",
     "dep:zenoh-collections",
     "dep:zenoh-task",
+    "dep:zenoh-sync",
     "dep:zenoh-buffers",
     "dep:zenoh-protocol",
     "dep:zenoh-codec",

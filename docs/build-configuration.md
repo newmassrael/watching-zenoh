@@ -359,6 +359,12 @@ original reproduced by naming it. Three things follow from it:
   The task controller `zenoh-task` (`TaskController` and `TerminatableTask`, which `zenoh::internal`
   re-exports and the ecosystem's crates spawn and stop their tasks with) is in the family under
   upstream's name and held by a differential test; it joins `MEMBERS` with its emitted surface.
+  So is `zenoh-sync`, whole: `zenoh::internal` re-exports its `Condition`, which `zenoh-ext`'s
+  group waits on, and upstream's transport and links take its event, mvar, signal and object pool,
+  so a part of it patched into a graph would leave those crates without what they name. Two items
+  are not copied as they are (a shared `Arc` refused by `get_mut_unchecked`, the waiting counts of
+  `Mvar` held for the time a call waits); a differential test holds the condition and the event to
+  upstream's, and it joins `MEMBERS` as `zenoh-task` does.
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each
   crate against upstream's, a graph in which an upstream crate and the wz crate meet one type once
   patched, and the same graph unpatched as its control. The packages are not published (the
