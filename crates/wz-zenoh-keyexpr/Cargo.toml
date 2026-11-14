@@ -18,8 +18,9 @@
 #
 # It was built in slices, each landing whole with the ratchet of `scripts/lib/rust_api_surface.py`
 # lowered in its own round: the key expression types, the formats, the key expression trees with an
-# owning root, and the tree whose nodes are shared. The surface of the default and the `unstable` arm is
-# complete; what no arm lists, the `internal` prefix-stripping items, joins with the `zenoh` slice.
+# owning root, and the tree whose nodes are shared. The surface of the default, the `unstable` and the
+# `internal` arm is complete; the last holds the doc-hidden items upstream's `zenoh` turns on for this
+# crate in every build, the prefix-stripping ones among them.
 
 [package]
 name = "zenoh-keyexpr"
@@ -41,8 +42,9 @@ path = "src/lib.rs"
 # slice that gives it meaning, as the family's manifest rule says.
 [features]
 default = ["std"]
-# `internal` carries the doc-hidden items zenoh's own crates use. So far it holds `chunks` and
-# `is_wild`; the prefix-stripping ones join with the `zenoh` slice that needs them.
+# `internal` carries the doc-hidden items zenoh's own crates and its plugins use: `chunks`,
+# `is_wild`, `get_nonwild_prefix`, `strip_prefix` and `strip_nonwild_prefix`. Upstream's `zenoh`
+# depends on this crate with it on, so every user of `zenoh` builds them.
 internal = []
 std = ["dep:schemars", "zenoh-result/std"]
 unstable = []

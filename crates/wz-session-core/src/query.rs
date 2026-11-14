@@ -945,6 +945,31 @@ impl QueryReply {
         Ok((response, reservation))
     }
 
+    /// The buffer of shared memory this reply's payload is, when it is a Put reply of one.
+    #[cfg(feature = "transport-shm")]
+    pub fn shared_payload(&self) -> Option<&crate::extshm::ShmSendHandle> {
+        match self {
+            QueryReply::Reply {
+                body: ReplyBody::PutShared(handle),
+                ..
+            } => Some(handle),
+            _ => None,
+        }
+    }
+
+    /// [`Self::into_response`] for a reply that a forwarder sends as the buffer its payload is,
+    /// holding the buffer for the faces it sends to: a Put reply of a buffer of shared memory
+    /// names `descriptor`, and the forwarder gives each face a reference of its own or the bytes
+    /// as it sends. No reference is taken here. Any other reply is what
+    /// [`Self::into_response`] builds.
+    #[cfg(all(feature = "codec-response", feature = "transport-shm"))]
+    pub fn into_response_naming(
+        self,
+        descriptor: crate::extshm::ShmDescriptor,
+    ) -> Result<ResponseOwned, CodecError> {
+        self.response_with(Some(descriptor))
+    }
+
     /// The one body of [`Self::into_response`] and [`Self::into_response_shm`]: `descriptor` is
     /// the descriptor of the reply's buffer when it is to go out as one, `None` for the bytes.
     #[cfg(feature = "codec-response")]
@@ -7641,6 +7666,57 @@ mod shm_reply_tests {
         assert!(
             reservation.is_some(),
             "the same buffer on a face that lists its protocol is the descriptor"
+        );
+    }
+
+    /// A forwarder that sends a reply as the buffer reads the buffer off the staged reply; a reply
+    /// of bytes has none.
+    #[test]
+    fn the_buffer_of_a_reply_is_read_off_it_and_a_reply_of_bytes_has_none() {
+        let (shared, reservations) = handle();
+        let reply = staged(&shared);
+        assert_eq!(reply.shared_payload(), Some(&shared));
+        assert_eq!(as_plain_bytes(&reply).shared_payload(), None);
+        assert_eq!(
+            reservations.counts(),
+            (0, 0, 0),
+            "reading the buffer takes nothing"
+        );
+    }
+
+    /// A reply a forwarder sends as the buffer names the descriptor it is given, and takes no
+    /// reference: the forwarder's pass gives each face its own. A reply of bytes is what
+    /// `into_response` builds whatever descriptor is named.
+    #[test]
+    fn a_reply_built_naming_a_descriptor_carries_it_and_takes_no_reference() {
+        let (shared, reservations) = handle();
+        let response = staged(&shared)
+            .into_response_naming(FakeSendBuffer::descriptor())
+            .expect("builds");
+        assert_eq!(
+            reservations.counts(),
+            (0, 0, 0),
+            "naming a descriptor reserves nothing"
+        );
+        let wire = response.clone().wire();
+        assert!(!contains(&wire, BYTES), "the bytes are not on the wire");
+        let mut asked = Vec::new();
+        crate::put_payload::collect_wire_payload(&put_of(response), |descriptor| {
+            asked.push(decode_shm_descriptor(descriptor));
+            Some(crate::link::RxBytes::from(BYTES.to_vec()))
+        })
+        .expect("the sliced Put reads back");
+        assert_eq!(asked, [Some(FakeSendBuffer::descriptor())]);
+
+        let plain = as_plain_bytes(&staged(&shared));
+        assert_eq!(
+            plain
+                .clone()
+                .into_response_naming(FakeSendBuffer::descriptor())
+                .unwrap()
+                .wire(),
+            plain.into_response().unwrap().wire(),
+            "a reply of bytes names no descriptor"
         );
     }
 }

@@ -130,6 +130,125 @@ fn chunks_come_from_both_ends() {
 }
 
 #[test]
+#[cfg(feature = "internal")]
+fn a_prefix_is_stripped_every_way_it_can_match() {
+    let cases: [(&str, &str, &[&str]); 11] = [
+        ("demo/example/test/**", "demo/example/test", &["**"]),
+        ("demo/example/**", "demo/example/test", &["**"]),
+        ("**", "demo/example/test", &["**"]),
+        (
+            "demo/example/test/**/x$*/**",
+            "demo/example/test",
+            &["**/x$*/**"],
+        ),
+        ("demo/**/xyz", "demo/example/test", &["**/xyz"]),
+        ("demo/**/test/**", "demo/example/test", &["**"]),
+        (
+            "demo/**/ex$*/*/xyz",
+            "demo/example/test",
+            &["xyz", "**/ex$*/*/xyz"],
+        ),
+        (
+            "demo/**/ex$*/t$*/xyz",
+            "demo/example/test",
+            &["xyz", "**/ex$*/t$*/xyz"],
+        ),
+        (
+            "demo/**/te$*/*/xyz",
+            "demo/example/test",
+            &["*/xyz", "**/te$*/*/xyz"],
+        ),
+        // The whole key expression is the prefix: nothing remains.
+        ("demo/example/test", "demo/example/test", &[]),
+        ("demo/example/test/**", "not/a/prefix", &[]),
+    ];
+    for (target, prefix, expected) in cases {
+        let got: Vec<&str> = ke(target)
+            .strip_prefix(ke(prefix))
+            .iter()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(got, expected, "`{target}` without `{prefix}`");
+    }
+}
+
+#[test]
+#[cfg(feature = "internal")]
+fn a_nonwild_prefix_is_stripped_to_the_longest_suffix() {
+    let cases: [(&str, &str, Option<&str>); 29] = [
+        ("demo/example/test/**", "demo/example/test", Some("**")),
+        ("demo/example/**", "demo/example/test", Some("**")),
+        ("**", "demo/example/test", Some("**")),
+        ("*/example/test/1", "demo/example/test", Some("1")),
+        ("demo/*/test/1", "demo/example/test", Some("1")),
+        ("*/*/test/1", "demo/example/test", Some("1")),
+        ("*/*/*/1", "demo/example/test", Some("1")),
+        ("*/test/1", "demo/example/test", None),
+        ("*/*/1", "demo/example/test", None),
+        ("*/*/**", "demo/example/test", Some("**")),
+        (
+            "demo/example/test/**/x$*/**",
+            "demo/example/test",
+            Some("**/x$*/**"),
+        ),
+        ("demo/**/xyz", "demo/example/test", Some("**/xyz")),
+        ("demo/**/test/**", "demo/example/test", Some("**/test/**")),
+        (
+            "demo/**/ex$*/*/xyz",
+            "demo/example/test",
+            Some("**/ex$*/*/xyz"),
+        ),
+        (
+            "demo/**/ex$*/t$*/xyz",
+            "demo/example/test",
+            Some("**/ex$*/t$*/xyz"),
+        ),
+        (
+            "demo/**/te$*/*/xyz",
+            "demo/example/test",
+            Some("**/te$*/*/xyz"),
+        ),
+        // The prefix must leave a chunk: a key expression that is the prefix has no suffix.
+        ("demo/example/test", "demo/example/test", None),
+        ("demo/example/test1/something", "demo/example/test", None),
+        (
+            "demo/example/test$*/something",
+            "demo/example/test",
+            Some("something"),
+        ),
+        // A verbatim chunk is matched by itself only, never by a wildcard.
+        ("*/example/test/something", "@demo/example/test", None),
+        ("**/test/something", "@demo/example/test", None),
+        ("**/test/something", "demo/example/@test", None),
+        (
+            "@demo/*/test/something",
+            "@demo/example/test",
+            Some("something"),
+        ),
+        ("@demo/*/test/something", "@demo/@example/test", None),
+        ("**/@demo/test/something", "@demo/test", Some("something")),
+        ("**/@test/something", "demo/@test", Some("something")),
+        (
+            "@demo/**/@test/something",
+            "@demo/example/@test",
+            Some("something"),
+        ),
+        // A `**` that ends the key expression cannot stand for a verbatim chunk of the prefix.
+        ("demo/**", "demo/@a", None),
+        ("a/b", "a", Some("b")),
+    ];
+    for (target, prefix, expected) in cases {
+        let prefix = nonwild_keyexpr::new(prefix).unwrap();
+        assert_eq!(
+            ke(target).strip_nonwild_prefix(prefix).map(|k| k.as_str()),
+            expected,
+            "`{target}` without `{}`",
+            prefix.as_str()
+        );
+    }
+}
+
+#[test]
 fn join_and_div() {
     let w = OwnedKeyExpr::new("some/workspace").unwrap();
     assert_eq!(

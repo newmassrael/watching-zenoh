@@ -111,6 +111,13 @@ TARGET_DIR = artifact("target/rust-api-surface")
 # The arms of `zenoh`, by name and the features each passes. `internal` and `plugins` are not
 # arms: they widen visibility for zenoh's own crates (the census excludes `internal` on that
 # ground), and a user replacing zenoh does not build with them.
+#
+# A member below `zenoh` is another matter where upstream's `zenoh` turns a crate's `internal` on
+# in its own dependency line, so that every user of `zenoh` builds it. Upstream's manifest of
+# `zenoh` takes `zenoh-keyexpr` with `features = ["internal"]` in `[dependencies]`, not behind a
+# feature of its own, and an ecosystem crate calls what that adds through `zenoh`'s re-export of
+# `keyexpr` (`plugins/zenoh-plugin-storage-manager/src/lib.rs` @
+# `match key_expr.strip_prefix(prefix).as_slice() {`). So such a member has an `internal` arm.
 ARMS: tuple[tuple[str, str], ...] = (
     ("default", ""),
     ("unstable", "unstable"),
@@ -119,6 +126,15 @@ ARMS: tuple[tuple[str, str], ...] = (
 
 # A crate of upstream's own that no feature splits has the one arm.
 DEFAULT_ARM: tuple[tuple[str, str], ...] = (("default", ""),)
+
+
+def documents_hidden(features: str) -> bool:
+    """Whether an arm is read with the items rustdoc hides. Upstream marks every item its `internal`
+    feature adds `#[doc(hidden)]` (`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @
+    `pub fn strip_nonwild_prefix(&self, prefix: &nonwild_keyexpr) -> Option<&keyexpr> {` sits under
+    `#[cfg(feature = "internal")]` and `#[doc(hidden)]`), and rustdoc leaves a hidden item out of
+    its JSON, so an arm with `internal` read the default way would list none of what it is for."""
+    return "internal" in features.split(",")
 
 
 @dataclass(frozen=True)
@@ -160,8 +176,8 @@ MEMBERS: tuple[Member, ...] = (
     Member("zenoh-runtime", "zenoh_runtime", "zenoh-runtime", DEFAULT_ARM, {"default": 0}),
     Member("zenoh-core", "zenoh_core", "zenoh-core", DEFAULT_ARM, {"default": 0}),
     Member("zenoh-keyexpr", "zenoh_keyexpr", "zenoh-keyexpr",
-           (("default", ""), ("unstable", "unstable")), {"default": 0, "unstable": 0},
-           split_wz=True),
+           (("default", ""), ("unstable", "unstable"), ("internal", "internal")),
+           {"default": 0, "unstable": 0, "internal": 0}, split_wz=True),
     Member("zenoh-macros", "zenoh_macros", "zenoh-macros", DEFAULT_ARM, {"default": 0}),
     Member("zenoh-collections", "zenoh_collections", "zenoh-collections", DEFAULT_ARM,
            {"default": 0}),
@@ -580,6 +596,15 @@ def upstream_root() -> Path:
     return Path(root)
 
 
+def rustdoc_args(features: str) -> list[str]:
+    """What rustdoc is passed for one feature set: JSON, and the hidden items where the arm is
+    about them (`documents_hidden`). Upstream's crate and the wz crate of an arm are read alike."""
+    args = ["--", "-Z", "unstable-options", "--output-format", "json"]
+    if documents_hidden(features):
+        args.append("--document-hidden-items")
+    return args
+
+
 def emit(toolchain: str, member: Member, features: str) -> dict:
     """rustdoc JSON of one upstream crate of the family with one feature set, from the pinned source."""
     source = upstream_root()
@@ -587,7 +612,7 @@ def emit(toolchain: str, member: Member, features: str) -> dict:
            "--target-dir", str(TARGET_DIR)]
     if features:
         cmd += ["--features", features]
-    cmd += ["--", "-Z", "unstable-options", "--output-format", "json"]
+    cmd += rustdoc_args(features)
     proc = subprocess.run(cmd, cwd=source, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise InputError(
@@ -608,7 +633,7 @@ def emit_wz(toolchain: str, member: Member, features: str = "") -> dict:
            "--target-dir", str(target_dir)]
     if features:
         cmd += ["--features", features]
-    cmd += ["--", "-Z", "unstable-options", "--output-format", "json"]
+    cmd += rustdoc_args(features)
     proc = subprocess.run(cmd, cwd=ROOT / "crates", capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise InputError(
@@ -975,6 +1000,16 @@ def selftest() -> int:
         if m.lib != m.package.replace("-", "_") or set(m.missing) != {a for a, _f in m.arms}:
             print(f"  selftest FAIL [member {m.package} is inconsistent with its own arms]", file=sys.stderr)
             return 1
+    # An arm with `internal` is read with the hidden items, both crates of it alike, and no other
+    # arm is: read the default way it would list none of the items it exists for, and a default arm
+    # read with them would hold the crates to what upstream does not publish.
+    hidden = "--document-hidden-items"
+    if (hidden not in rustdoc_args("internal") or hidden not in rustdoc_args("unstable,internal")
+            or hidden in rustdoc_args("") or hidden in rustdoc_args("unstable,shared-memory")
+            or hidden in rustdoc_args("internal_config")):
+        print("  selftest FAIL [only an arm with `internal` documents the hidden items]",
+              file=sys.stderr)
+        return 1
     print(f"  rust-api-surface: selftest -- the normaliser over {len(want)} lines, {len(type_cases)} "
           f"type shapes, the generics, qualifiers and refusals, and the comparison pass")
     return 0

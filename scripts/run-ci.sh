@@ -26002,7 +26002,7 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh-core)" 6 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_core || return 1
-    _runci_guarded_test "Layer E18 (differential, zenoh-keyexpr)" 7 \
+    _runci_guarded_test "Layer E18 (differential, zenoh-keyexpr)" 8 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_keyexpr || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-keyexpr formats)" 5 \
@@ -26122,6 +26122,10 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh session shared-memory)" 2 \
         cargo test --locked --manifest-path ../conformance/differential-shm/Cargo.toml \
         --test zenoh_session_shm || return 1
+    # Sessions of both crates in one process, linked over TCP, hand each other shared memory.
+    _runci_guarded_test "Layer E18 (differential, zenoh transport shared-memory)" 2 \
+        cargo test --locked --manifest-path ../conformance/differential-shm/Cargo.toml \
+        --test zenoh_transport_shm || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-buffers)" 5 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_buffers || return 1

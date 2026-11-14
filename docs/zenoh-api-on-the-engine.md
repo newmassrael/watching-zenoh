@@ -958,10 +958,14 @@ Each lands whole with its surface lines, tests and faults in one round.
   `io/zenoh-transport/src/multicast/link.rs` @ `ext_shm: None,`, and reads a member's as
   `join.ext_shm.is_some()` only for the report of its transports; the descriptor of a group is
   read by any member that holds a reader, announced or not), so a Join that announced it would
-  differ from upstream's. **Owed:** a query value and a reply in shared memory (and the `query`
-  and `reply` lists of the optimisation), a differential of a `ZShm` over a link and a group to
-  an upstream node, and a unit test of a group's descriptor in the engine (the upstream file is
-  its test).
+  differ from upstream's. The design, the rules by which a buffer falls back to its bytes and the
+  stages left are `docs/shm-transport.md`: a reply in shared memory, from the registry and from a
+  node, and the `query` and `reply` lists of the optimisation have landed since; an error reply
+  goes as its bytes, as upstream's codec writes it, and a differential holds an upstream session
+  and a wz session in one process to what two upstream sessions hand each other over TCP.
+  **Owed:** what that note's section 7 lists as owed (the differential over a group, one
+  shared-memory system per process), and a unit test of a group's descriptor in the engine (the
+  upstream file is its test).
 - **Z8. The graph.** Upstream's tests and examples and `zenoh-ext` built and run against the
   patched graph, on Linux and on Windows. A test that cannot pass is a recorded difference with its
   reason, never a deleted test.

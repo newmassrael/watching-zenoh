@@ -2642,6 +2642,14 @@ pub enum LocalFaceEvent {
     TokenDown { id: u64, keyexpr: Option<String> },
     /// A reply to a query the face asked, carrying the request id the face gave it.
     Reply(Box<ResponseOwned>),
+    /// A reply to a query the face asked whose value went through shared memory, read already by
+    /// the node's session: `payload` is the buffer the session reads the value as, holding a
+    /// reference of its own. The face takes the value from here and not from the reply, whose
+    /// value names a chunk the node has read.
+    ReplyRead {
+        response: Box<ResponseOwned>,
+        payload: wz_session_core::link::RxBytes,
+    },
     /// The end of the replies to the query the face asked under `request_id`: every queryable
     /// has ended, the query timed out, or nothing was left to ask.
     ReplyFinal { request_id: u64 },
@@ -4224,19 +4232,8 @@ impl RouterForwarder {
             let _ = handler.call(|h| h(view, &mut responder));
             HOSTED_QUERY.with(|current| *current.borrow_mut() = previous);
         }
-        {
-            let on = self.on_tables();
-            for reply in replies {
-                if let Ok(mut resp) = reply.into_response() {
-                    if record.namespaced {
-                        self.put_under_namespace(&mut resp);
-                    }
-                    on.send_hosted_reply(inbound, reliable, || {
-                        NetworkMessage::Response(Box::new(resp.clone()))
-                    });
-                }
-            }
-        }
+        self.on_tables()
+            .send_hosted_replies(replies, inbound, reliable, record.namespaced);
         // The handler has returned: its hold is let go, and the branch ends with the last.
         self.release_held(&record);
     }
@@ -10823,6 +10820,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         read
     }
 
+    /// [`Self::session_reads_chunk`] for a value the node's own session sent itself: the chunk
+    /// the pass holds is the session's own buffer, handed over as its owner views it
+    /// ([`ShmSendBuffer::receiver_view`](wz_session_core::extshm::ShmSendBuffer::receiver_view)),
+    /// and as its bytes when its owner hands none, as for a copy the implicit optimisation made
+    /// for the links. `None` when the value is not one chunk or the chunk is not held here.
+    #[cfg(feature = "transport-shm")]
+    fn session_holds_own_chunk(
+        &self,
+        descriptors: &[&[u8]],
+    ) -> Option<wz_session_core::link::RxBytes> {
+        use wz_session_core::extshm::ShmRelayHolds;
+        let [slice] = descriptors else {
+            return None;
+        };
+        let held = self
+            .shm_relay
+            .held(&wz_session_core::extshm::decode_shm_descriptor(slice)?)?;
+        Some(
+            held.receiver_view()
+                .unwrap_or_else(|| wz_session_core::link::RxBytes::from(held.bytes().to_vec())),
+        )
+    }
+
     /// Hand a publication to the subscribers this router hosts: `full` carries its key as the
     /// router names it and `relative` as the node's own session does (`None` for a key outside
     /// the namespace of the session, which is not the session's). `from_local` says whether the
@@ -11358,15 +11378,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // the session reads the chunk the pass of this Query holds, as it reads a Put's. A value
         // it cannot read is not shown as no value; the query is not handed to the session, as a
         // session drops a query whose slice does not resolve.
+        // A query of the node's own session names a chunk the session gave itself, and its
+        // queryables are handed the value as the session holds it.
         #[cfg(feature = "transport-shm")]
         let view = match &request.body {
             wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
                 match wz_session_core::request_build::query_value_shm_parts(query) {
                     None => view,
-                    Some((encoding, descriptors)) => match self.session_reads_chunk(&descriptors) {
-                        Some(bytes) => view.with_lent_value(encoding, bytes),
-                        None => return 0,
-                    },
+                    Some((encoding, descriptors)) => {
+                        let read = if inbound == LOCAL_FACE {
+                            self.session_holds_own_chunk(&descriptors)
+                        } else {
+                            self.session_reads_chunk(&descriptors)
+                        };
+                        match read {
+                            Some(bytes) => view.with_lent_value(encoding, bytes),
+                            None => return 0,
+                        }
+                    }
                 }
             }
             #[allow(unreachable_patterns)]
@@ -11444,16 +11473,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             );
             answer(&mut responder);
         }
-        for reply in replies {
-            if let Ok(mut resp) = reply.into_response() {
-                if record.namespaced {
-                    self.fwd.put_under_namespace(&mut resp);
-                }
-                self.send_hosted_reply(to.face, record.reliable, || {
-                    NetworkMessage::Response(Box::new(resp.clone()))
-                });
-            }
-        }
+        self.send_hosted_replies(replies, to.face, record.reliable, record.namespaced);
     }
 
     /// Let go of one hold of a held query; the last one ends its branch of the fan, which sends
@@ -12484,6 +12504,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         ) else {
             return;
         };
+        // transport-shm -- a reply to a get of the node's own session whose value went through
+        // shared memory is read here, from the chunk the pass above holds, as a publication for
+        // the node's own subscribers is read: the pass took the reference the sender made for
+        // this node, so the session is handed a buffer with a reference of its own. The face's
+        // registry negotiates nothing and would refuse the descriptor.
+        #[cfg(feature = "transport-shm")]
+        if to.face == LOCAL_FACE {
+            let read = {
+                let descriptors =
+                    wz_session_core::response_build::response_shm_descriptors(&carrier);
+                (!descriptors.is_empty()).then(|| self.session_reads_chunk(&descriptors))
+            };
+            if let Some(read) = read {
+                // A value the session cannot read is not handed over as no value.
+                if let Some(payload) = read {
+                    self.tell_local_face_read_reply(carrier, payload, true);
+                }
+                return;
+            }
+        }
         self.send_to_face(to.face, reliable, || {
             NetworkMessage::Response(Box::new(carrier.clone()))
         });
@@ -12615,6 +12655,35 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         true
     }
 
+    /// [`Self::tell_local_face`] for a reply whose value the node's session holds already as
+    /// `payload`, read from a chunk of shared memory as it was routed or handed over by a
+    /// queryable of the session itself: the face is told the reply with the value it reads, as
+    /// [`LocalFaceEvent::ReplyRead`]. `routed` is [`Self::tell_local_face`]'s.
+    #[cfg(feature = "transport-shm")]
+    fn tell_local_face_read_reply(
+        &self,
+        response: ResponseOwned,
+        payload: wz_session_core::link::RxBytes,
+        routed: bool,
+    ) {
+        let Some(sink) = &self.tables.local_face_sink else {
+            return;
+        };
+        let mut msg = NetworkMessage::Response(Box::new(response));
+        if !self.fwd.strip_namespace(&mut msg) {
+            return;
+        }
+        #[cfg(feature = "pubsub-ts-stack")]
+        if routed {
+            self.record_route(&mut msg);
+        }
+        #[cfg(not(feature = "pubsub-ts-stack"))]
+        let _ = routed;
+        if let NetworkMessage::Response(response) = msg {
+            sink(LocalFaceEvent::ReplyRead { response, payload });
+        }
+    }
+
     /// A reply of a queryable of the node's own session to the face that asked. A query the
     /// session asked of its own queryable is answered without a router between the two, as
     /// upstream's session answers it, so that reply is not routed; any other face is sent the
@@ -12629,6 +12698,80 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return self.tell_local_face(build(), false);
         }
         self.send_to_face(target, reliable, build)
+    }
+
+    /// Send what a queryable of the node's own session staged in `replies` to the face `target`
+    /// that asked, each under the session's namespace when the queryable is `namespaced`. A
+    /// reply whose payload is a buffer of shared memory goes as the buffer, as a publication of
+    /// one does ([`Self::publish_shm_with`]): the faces are sent its descriptor with a reference
+    /// of their own or its bytes, through the pass that holds it, and a get of the session
+    /// itself is handed the buffer.
+    fn send_hosted_replies(
+        &self,
+        replies: wz_session_core::reply_stage::ReplyStage,
+        target: FaceId,
+        reliable: bool,
+        namespaced: bool,
+    ) {
+        for reply in replies {
+            #[cfg(feature = "transport-shm")]
+            if let Some(handle) = reply.shared_payload().cloned() {
+                self.send_hosted_shm_reply(reply, handle, target, reliable, namespaced);
+                continue;
+            }
+            let Ok(mut resp) = reply.into_response() else {
+                continue;
+            };
+            if namespaced {
+                self.fwd.put_under_namespace(&mut resp);
+            }
+            self.send_hosted_reply(target, reliable, || {
+                NetworkMessage::Response(Box::new(resp.clone()))
+            });
+        }
+    }
+
+    /// [`Self::send_hosted_replies`] for one reply whose payload is the buffer `handle`.
+    #[cfg(feature = "transport-shm")]
+    fn send_hosted_shm_reply(
+        &self,
+        reply: wz_session_core::query::QueryReply,
+        handle: wz_session_core::extshm::ShmSendHandle,
+        target: FaceId,
+        reliable: bool,
+        namespaced: bool,
+    ) {
+        // The session's own get is answered without a router between the two: its face reads
+        // no descriptor, so it is told the reply with the buffer as the value, and with the bytes
+        // where the buffer cannot be viewed.
+        if target == LOCAL_FACE {
+            let Ok(mut resp) = reply.into_response() else {
+                return;
+            };
+            if namespaced {
+                self.fwd.put_under_namespace(&mut resp);
+            }
+            match handle.receiver_view() {
+                Some(payload) => self.tell_local_face_read_reply(resp, payload, false),
+                None => {
+                    self.tell_local_face(NetworkMessage::Response(Box::new(resp)), false);
+                }
+            }
+            return;
+        }
+        // Only the descriptor is wanted of this reservation: the reference it took goes back
+        // when it drops, and the face is sent a reference of its own by the pass.
+        let descriptor = handle.reserve_for_receiver().descriptor();
+        let _pass = self.shm_relay.adopt(descriptor, handle);
+        let Ok(mut resp) = reply.into_response_naming(descriptor) else {
+            return;
+        };
+        if namespaced {
+            self.fwd.put_under_namespace(&mut resp);
+        }
+        self.send_to_face(target, reliable, || {
+            NetworkMessage::Response(Box::new(resp.clone()))
+        });
     }
 
     /// [`send_to_face`](Self::send_to_face) for a message that names no key although it is about
