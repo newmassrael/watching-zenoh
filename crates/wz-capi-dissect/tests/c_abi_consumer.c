@@ -2919,7 +2919,7 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":11},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":12},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"

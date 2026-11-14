@@ -3736,6 +3736,24 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SESSION_TABLE_R5_CARRIES,
     },
+    // Revision 12 ADDS `no_matching_key` to the `reason` family and moves no
+    // key. A TLS flow the decryption pass did not open, where key material was
+    // handed to the pass (a key log, or the capture's own Decryption Secrets
+    // Blocks) and none of it named the flow's connection, gives that reason for
+    // its unstated cells (`initiator`, `acceptor`, `phase`, `frames`) where it
+    // gave `encrypted`. `encrypted` stays the reason where no key material
+    // reached the pass, and where keys matched and the flow still did not open.
+    // The `encrypted` cell keeps `encrypted_unreadable` in both. Nothing
+    // retires; a consumer's switch on `reason` learns one word.
+    DocumentShape {
+        document: SESSION_TABLE,
+        revision: 12,
+        keys: SESSION_TABLE_R11_KEYS,
+        retiring: &[],
+        families: SESSION_TABLE_R12_FAMILIES,
+        planes: &[],
+        carries: SESSION_TABLE_R5_CARRIES,
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -28838,6 +28856,90 @@ pub const SESSION_TABLE_R11_FAMILIES: &[ValueFamily] = &[
     },
 ];
 
+/// The value families the `session_table` document declares at revision 12:
+/// revision 11's, with `no_matching_key` in `reason`.
+pub const SESSION_TABLE_R12_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "cell",
+        values: &[
+            "acceptor",
+            "first_seen_ts_ns",
+            "frames",
+            "initiator",
+            "last_seen_ts_ns",
+            "link",
+            "phase",
+            "stream_anomalies",
+        ],
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R50,
+    },
+    ValueFamily {
+        key: "encrypted",
+        values: &[
+            "clear",
+            "decrypted_quic",
+            "decrypted_tls",
+            "encrypted_unreadable",
+            "mixed",
+            "unknown",
+        ],
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_EPS_BASIS_R50,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "reason",
+        values: &[
+            "encrypted",
+            "mixed",
+            "no_clock",
+            "no_matching_key",
+            "no_sequence",
+            "not_in_capture",
+        ],
+    },
+    ValueFamily {
+        key: "refusal",
+        values: &["damaged", "not_a_capture", "truncated"],
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "why",
+        values: &["multicast_group", "scouting_only"],
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
 /// The keys the `session_table` document carries at revision 7: revision 6's
 /// PLUS the field document's revision 49 keys, on every row and on every flow
 /// of a row.
@@ -32990,7 +33092,10 @@ mod tests {
             // `unstated`, and the document `evicted_stream_anomalies`: keys
             // arrive, `no_sequence` and `stream_anomalies` join two families,
             // nothing retires.
-            (SESSION_TABLE, 11),
+            // To 12 when an encrypted flow keys did not reach could say the
+            // keys handed in named another connection: `no_matching_key` joins
+            // `reason`, no key moves, nothing retires.
+            (SESSION_TABLE, 12),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.

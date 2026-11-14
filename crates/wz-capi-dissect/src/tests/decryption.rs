@@ -231,11 +231,29 @@ fn a_tls_capture_reads_decrypted_tls_with_its_key_and_encrypted_unreadable_witho
     let unmatched = call_session_table_keyed(&file, none, Some(other.as_bytes())).expect("reads");
     assert!(
         unmatched.contains("\"encrypted\":\"encrypted_unreadable\""),
-        "keys given and none matched read as no key applied: {unmatched}"
+        "keys given and none matched read nothing: {unmatched}"
     );
     assert!(
         !unmatched.contains("\"encrypted\":\"decrypted_tls\""),
         "{unmatched}"
+    );
+    // ...and say why, where the run with no key at all says `encrypted`.
+    assert!(
+        unmatched.contains("{\"cell\":\"phase\",\"reason\":\"no_matching_key\"}"),
+        "a key log for another connection reads no_matching_key: {unmatched}"
+    );
+    assert!(
+        without.contains("{\"cell\":\"phase\",\"reason\":\"encrypted\"}"),
+        "no key material at all reads encrypted: {without}"
+    );
+    assert!(!without.contains("no_matching_key"), "{without}");
+    // The capture's own secrets block naming another connection is key
+    // material too.
+    let carrying_other = tls_capture(Some(&other));
+    let from_block = session_table::call_pcap(&carrying_other, none).expect("reads");
+    assert!(
+        from_block.contains("{\"cell\":\"phase\",\"reason\":\"no_matching_key\"}"),
+        "{from_block}"
     );
 
     // The summary counts the messages the key opened, and none without it.

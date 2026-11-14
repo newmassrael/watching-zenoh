@@ -3340,9 +3340,10 @@ pub unsafe extern "C" fn wz_dissect_pcap_session_table(
 /// A TLS flow every kept record of which opened reads `decrypted_tls`, a QUIC
 /// flow from which a stream or a datagram was recovered reads `decrypted_quic`,
 /// and both state the session inside them. A flow the keys do not reach stays
-/// `encrypted_unreadable`, whatever the reason: no key named its connection,
-/// the capture holds no ClientHello to match one by, or a record did not open.
-/// The words and the document's shape do not move.
+/// `encrypted_unreadable`; its unstated cells give `no_matching_key` where no
+/// key named its connection (session_table revision 12), and `encrypted`
+/// otherwise: no key material at all, no ClientHello to match one by, or a
+/// record that did not open under the keys that matched.
 ///
 /// # The keys go nowhere
 ///

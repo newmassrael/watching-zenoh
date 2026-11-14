@@ -2701,7 +2701,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":11},"ok":true,
+ *     {"document":{"name":"session_table","revision":12},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
@@ -3020,6 +3020,10 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *   `not_in_capture`  the message that would state it is not in what was read (a
  *                     capture that began after the handshake);
  *   `encrypted`       the flow is an encrypted transport and no key was applied;
+ *   `no_matching_key` the flow is an encrypted transport, key material was
+ *                     handed to the decryption pass, and none of it named the
+ *                     flow's connection (session_table revision 12): see THE
+ *                     DECRYPTION PASS;
  *   `no_clock`        no packet of the session carried a timestamp;
  *   `mixed`           the evidence disagrees: the row's flows differ, or one
  *                     flow's own Inits do (two InitSyns and no InitAck);
@@ -3027,9 +3031,10 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                     revision 11): see STREAM ANOMALIES.
  *
  * The reasons a cell can carry:
- *   `initiator`, `acceptor`            `not_in_capture`, `encrypted`, `mixed`
+ *   `initiator`, `acceptor`            `not_in_capture`, `encrypted`,
+ *                                      `no_matching_key`, `mixed`
  *   `link`                             `mixed`
- *   `phase`, `frames`                  `encrypted`
+ *   `phase`, `frames`                  `encrypted`, `no_matching_key`
  *   `first_seen_ts_ns`, `last_seen_ts_ns`   `no_clock`
  *   `stream_anomalies` (a flow's)      `no_sequence`
  * An `evicted` reason does not exist: a flow the table's ceiling evicted has no
@@ -3063,16 +3068,31 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *             live handle keeps no QUIC packet, so a QUIC flow read through
  *             one stays `encrypted_unreadable`.
  *
- * KEYS GIVEN AND NONE MATCHED reads `encrypted_unreadable`, with the row's cells
- * unstated for the reason `encrypted`, exactly as a flow with no key at all:
- * both words say what the row can state, and in both no key was applied. No
- * word is added for it and the document's revision does not move. The same
- * word stands for a flow the keys reach only partly: a capture with no
- * ClientHello to match a key by, a direction no key covers, or a record that
- * did not open. A consumer that wants to tell a user the key log matched
- * nothing compares the rows before and after the keys, and reads the count of
- * connections wz_dissect_live_add_keylog returns (zero says the bytes held no
- * key log at all).
+ * (session_table revision 12) KEYS GIVEN AND NONE MATCHED. The `encrypted` cell
+ * stays `encrypted_unreadable`: nothing was read. What moves is the REASON the
+ * row's unstated cells (`initiator`, `acceptor`, `phase`, `frames`) give:
+ *
+ *   `no_matching_key`  key material reached the pass -- a key log handed to a
+ *                      keyed door or to wz_dissect_live_add_keylog, or the
+ *                      capture's own Decryption Secrets Blocks -- and none of
+ *                      it named this TLS flow's connection (its ClientHello
+ *                      random). Fetch the key log of THIS connection.
+ *   `encrypted`        no key material reached the pass at all, or what reached
+ *                      it matched and the flow still did not open: a capture
+ *                      with no ClientHello to match a key by, a direction no key
+ *                      covers, a record that did not open under the matching
+ *                      keys (most often a key change the log does not cover),
+ *                      or a record the stream no longer held. Those finer
+ *                      findings are the command line's (`wz-analyze --keylog`)
+ *                      and reach no document of this library, so a matched key
+ *                      that failed reads `encrypted` and not a second new word.
+ *
+ * A QUIC flow the keys did not open always gives `encrypted`: its pass keeps no
+ * per-flow finding in what the documents are read from. A row whose flows give
+ * different reasons gives `encrypted` for `phase`, and `mixed` for the role
+ * cells as for any disagreement. The count of connections
+ * wz_dissect_live_add_keylog returns says the other thing a consumer tells a
+ * user: zero means the bytes held no key log at all.
  *
  * An encrypted flow is a row because zenoh over TLS or QUIC cannot be told from
  * other TLS or QUIC without keys, so a capture of a whole network lists every

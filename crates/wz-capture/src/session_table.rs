@@ -761,7 +761,9 @@ impl LinkIngest {
 pub enum Unstated {
     /// The handshake that would state it is not in the capture.
     NotInCapture,
-    /// The flow is encrypted and unreadable here.
+    /// The flow is encrypted and unreadable here: no key material reached the
+    /// decryption pass, or what reached it did not open the flow for a reason
+    /// other than naming no key for its connection ([`Self::NoMatchingKey`]).
     Encrypted,
     /// No packet of the flow carried a timestamp.
     NoClock,
@@ -769,6 +771,9 @@ pub enum Unstated {
     Mixed,
     /// The link numbers no bytes on the wire.
     NoSequence,
+    /// The flow is encrypted, key material was handed to the decryption pass,
+    /// and none of it named this flow's connection.
+    NoMatchingKey,
 }
 
 impl Unstated {
@@ -780,18 +785,20 @@ impl Unstated {
             Unstated::NoClock => "no_clock",
             Unstated::Mixed => "mixed",
             Unstated::NoSequence => "no_sequence",
+            Unstated::NoMatchingKey => "no_matching_key",
         }
     }
 
     /// Every reason, from an exhaustive match so the array cannot fall behind
     /// the enum.
-    pub fn all() -> [Unstated; 5] {
+    pub fn all() -> [Unstated; 6] {
         let one = |u: Unstated| match u {
             Unstated::NotInCapture => Unstated::NotInCapture,
             Unstated::Encrypted => Unstated::Encrypted,
             Unstated::NoClock => Unstated::NoClock,
             Unstated::Mixed => Unstated::Mixed,
             Unstated::NoSequence => Unstated::NoSequence,
+            Unstated::NoMatchingKey => Unstated::NoMatchingKey,
         };
         [
             one(Unstated::NotInCapture),
@@ -799,6 +806,7 @@ impl Unstated {
             one(Unstated::NoClock),
             one(Unstated::Mixed),
             one(Unstated::NoSequence),
+            one(Unstated::NoMatchingKey),
         ]
     }
 
@@ -909,11 +917,14 @@ impl Cell {
     /// there, so a consumer reading the header's table is told the truth.
     pub const fn reasons(self) -> &'static [Unstated] {
         match self {
-            Cell::Initiator | Cell::Acceptor => {
-                &[Unstated::NotInCapture, Unstated::Encrypted, Unstated::Mixed]
-            }
+            Cell::Initiator | Cell::Acceptor => &[
+                Unstated::NotInCapture,
+                Unstated::Encrypted,
+                Unstated::NoMatchingKey,
+                Unstated::Mixed,
+            ],
             Cell::Link => &[Unstated::Mixed],
-            Cell::Phase | Cell::Frames => &[Unstated::Encrypted],
+            Cell::Phase | Cell::Frames => &[Unstated::Encrypted, Unstated::NoMatchingKey],
             Cell::FirstSeen | Cell::LastSeen => &[Unstated::NoClock],
             Cell::StreamAnomalies => &[Unstated::NoSequence],
         }
@@ -1235,10 +1246,17 @@ impl SessionRow {
         let initiator = agreed(links.iter().map(|l| l.initiator.clone()));
         let acceptor = agreed(links.iter().map(|l| l.acceptor.clone()));
         let link = agreed(links.iter().map(|l| Ok(l.kind)));
-        let phase = combined_phase(links.iter().filter_map(|l| l.phase.ok())).ok_or(
-            // No flow of the row stated its phase: every one is unreadable.
-            Unstated::Encrypted,
-        );
+        // No flow of the row stated its phase: every one is unreadable, and the
+        // row gives their reason where they agree on one.
+        let phase = combined_phase(links.iter().filter_map(|l| l.phase.ok())).ok_or_else(|| {
+            let mut reasons = links.iter().filter_map(|l| l.phase.err());
+            let first = reasons.next().unwrap_or(Unstated::Encrypted);
+            if reasons.all(|r| r == first) {
+                first
+            } else {
+                Unstated::Encrypted
+            }
+        });
         let encryption = match agreed(links.iter().map(|l| Ok(l.encryption))) {
             Ok(one) => one,
             Err(_) => Encryption::Mixed,
@@ -1289,22 +1307,23 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
 
     for f in d.flows() {
         let frames = f.frames.produced();
-        let encryption = match f.framing() {
+        let (encryption, unread) = match f.framing() {
             Framing::Encrypted(state) => {
                 // The report's own finding: a decryption pass ran and left
                 // nothing undecrypted. `None` there is `Some(None)` here.
                 if matches!(state.outcome, Some(None)) {
-                    Encryption::DecryptedTls
+                    (Encryption::DecryptedTls, Unstated::Encrypted)
                 } else {
-                    Encryption::EncryptedUnreadable
+                    (Encryption::EncryptedUnreadable, unread_reason(state))
                 }
             }
-            _ if f.ingest.understood() => Encryption::Clear,
-            _ => Encryption::Unknown,
+            _ if f.ingest.understood() => (Encryption::Clear, Unstated::Encrypted),
+            _ => (Encryption::Unknown, Unstated::Encrypted),
         };
         links.push(link_of(
             f.flow,
             encryption,
+            unread,
             f.session.context().phase,
             frames,
             f.residue().recovered,
@@ -1348,6 +1367,10 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
         links.push(link_of(
             f.flow,
             encryption,
+            // A QUIC flow's outcome stays with the caller's pass, which hands
+            // the dissection only what it recovered; nothing here says whether
+            // keys were tried, so an unread QUIC flow gives the plain reason.
+            Unstated::Encrypted,
             phase,
             frames,
             f.residue().recovered,
@@ -1367,6 +1390,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
         links.push(link_of(
             FlowKey::serial_line(),
             encryption,
+            Unstated::Encrypted,
             d.serial_session.context().phase,
             frames,
             census.bytes as u64,
@@ -1436,15 +1460,37 @@ impl SessionObservations {
     }
 }
 
+/// Why an encrypted TLS flow a pass did not open is unreadable: `no_matching_key`
+/// where key material was handed in and none of it named the flow's connection,
+/// `encrypted` otherwise.
+///
+/// `encrypted` covers, beside a flow no pass reached (no key material at all),
+/// the findings that are not a key that failed to match: a flow with no
+/// ClientHello to match a key by, a direction no key covered, a record that did
+/// not open under keys that matched, and a record the stream no longer held.
+/// Those finer reasons are the report's (`no_session_identity`,
+/// `no_key_for_direction`, `record_refused_keys`, `record_not_held`) and do not
+/// reach this document.
+fn unread_reason(state: &crate::tls::TlsFlowState) -> Unstated {
+    match state.outcome {
+        Some(Some(crate::tls::NotDecrypted::NoKeyForSession)) => Unstated::NoMatchingKey,
+        _ => Unstated::Encrypted,
+    }
+}
+
 /// One flow's link, the cells that depend on whether it could be read decided
 /// in ONE place.
 ///
 /// `stream_anomalies` does not depend on that: the counters are of the
 /// transport under any encryption, so an unreadable TLS flow states them.
+///
+/// `unread` is the reason the cells of an unreadable flow give
+/// ([`unread_reason`]); it is not read for a flow that is readable.
 #[allow(clippy::too_many_arguments)]
 fn link_of(
     flow: FlowKey,
     encryption: Encryption,
+    unread: Unstated,
     phase: SessionPhase,
     frames: u64,
     bytes: u64,
@@ -1460,7 +1506,7 @@ fn link_of(
         if contradicted {
             Unstated::Mixed
         } else if unreadable {
-            Unstated::Encrypted
+            unread
         } else {
             Unstated::NotInCapture
         }
@@ -1486,16 +1532,8 @@ fn link_of(
         flow,
         kind: flow.link(),
         encryption,
-        phase: if unreadable {
-            Err(Unstated::Encrypted)
-        } else {
-            Ok(phase)
-        },
-        frames: if unreadable {
-            Err(Unstated::Encrypted)
-        } else {
-            Ok(frames)
-        },
+        phase: if unreadable { Err(unread) } else { Ok(phase) },
+        frames: if unreadable { Err(unread) } else { Ok(frames) },
         bytes,
         first_ns: ingest.first_ns(),
         last_ns: ingest.last_ns(),

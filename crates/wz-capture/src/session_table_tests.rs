@@ -1162,6 +1162,39 @@ fn an_instant_past_two_to_the_53_is_a_string() {
 
 // ── encryption ─────────────────────────────────────────────────────────────
 
+/// KEYS FOR ANOTHER CONNECTION: the flow stays `encrypted_unreadable` and its
+/// unstated cells say `no_matching_key`, where the same flow with no key
+/// material says `encrypted`.
+#[test]
+fn keys_that_name_another_connection_read_no_matching_key() {
+    let d = no_matching_key();
+    assert_eq!(
+        d.encrypted_flows()[0].not_decrypted,
+        Some(crate::tls::NotDecrypted::NoKeyForSession),
+        "the population: the pass ran and found no key for this connection"
+    );
+    let table = session_table(&d);
+    let row = only(&table);
+    assert_eq!(row.encryption, Encryption::EncryptedUnreadable);
+    assert_eq!(row.initiator, Err(Unstated::NoMatchingKey));
+    assert_eq!(row.acceptor, Err(Unstated::NoMatchingKey));
+    assert_eq!(row.phase, Err(Unstated::NoMatchingKey));
+    assert_eq!(row.frames, Err(Unstated::NoMatchingKey));
+    let doc = session_table_json(&d);
+    assert!(
+        doc.contains("{\"cell\":\"phase\",\"reason\":\"no_matching_key\"}"),
+        "{doc}"
+    );
+
+    // The control: the same flow, no pass at all.
+    let client = |wire: &[u8]| protected(&stream_unit(wire));
+    let bare = tls_flow(&[client(&init(&ZID_A, false)), client(&keepalive())]).dissect();
+    let table = session_table(&bare);
+    let row = only(&table);
+    assert_eq!(row.encryption, Encryption::EncryptedUnreadable);
+    assert_eq!(row.phase, Err(Unstated::Encrypted));
+}
+
 /// A TLS FLOW WITH NO KEYS: `encrypted_unreadable`, and the row states what it
 /// can. The bytes are counted (they are ciphertext, and they are real), the
 /// messages and the phase are not stated, and the identity is encrypted.
@@ -1814,6 +1847,10 @@ fn every_fixture_document() -> Vec<(String, String)> {
         "decrypted quic".to_string(),
         session_table_json(&decrypted_quic()),
     ));
+    docs.push((
+        "no matching key".to_string(),
+        session_table_json(&no_matching_key()),
+    ));
     docs.push(("no clock".to_string(), session_table_json(&no_clock())));
     docs.push(("mixed".to_string(), session_table_json(&mixed_roles())));
     docs
@@ -1824,6 +1861,43 @@ fn decrypted_tls() -> Dissection {
     let packets = tls_flow(&[client(&init(&ZID_A, false)), client(&keepalive())]);
     let mut d = packets.dissect();
     d.decrypt_with(&mut SliceOpener);
+    d
+}
+
+/// An opener holding keys for other connections only: it declines every flow
+/// as a pass declines one whose ClientHello random no key names.
+struct OtherConnectionsKeys;
+
+impl crate::tls::RecordOpener for OtherConnectionsKeys {
+    fn begin_flow(
+        &mut self,
+        _client_random: Option<&[u8; 32]>,
+        _client_direction: Option<Direction>,
+    ) -> Result<(), crate::tls::NotDecrypted> {
+        Err(crate::tls::NotDecrypted::NoKeyForSession)
+    }
+
+    fn open(
+        &mut self,
+        _direction: Direction,
+        _record: &crate::tls::EncryptedRecord,
+        _bytes: &[u8],
+    ) -> Option<crate::tls::OpenedRecord> {
+        None
+    }
+
+    fn has_keys(&self, _direction: Direction) -> bool {
+        false
+    }
+}
+
+/// The flow `decrypted_tls` opens, passed with keys that name another
+/// connection.
+fn no_matching_key() -> Dissection {
+    let client = |wire: &[u8]| protected(&stream_unit(wire));
+    let packets = tls_flow(&[client(&init(&ZID_A, false)), client(&keepalive())]);
+    let mut d = packets.dissect();
+    d.decrypt_with(&mut OtherConnectionsKeys);
     d
 }
 
@@ -2232,7 +2306,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
                 \"confirmed\":10,\"violated\":0,\"millibits\":365,\"no_millibits\":31679,\
                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
-        "{{\"document\":{{\"name\":\"session_table\",\"revision\":11}},\"ok\":true,\
+        "{{\"document\":{{\"name\":\"session_table\",\"revision\":12}},\"ok\":true,\
          \"sessions\":[{{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
          \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
          \"first_seen_ts_ns\":\"1700000000000000000\",\
