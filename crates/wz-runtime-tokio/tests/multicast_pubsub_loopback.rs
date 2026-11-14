@@ -85,6 +85,7 @@ fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroup
         zid,
         qos: false,
         compression: false,
+        seq_num_res: 0x02,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
     }

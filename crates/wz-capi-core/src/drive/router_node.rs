@@ -468,6 +468,7 @@ async fn join_group(
             zid: zid.to_vec(),
             qos: join.profile.is_qos,
             compression: join.profile.compression,
+            seq_num_res: join.profile.seq_num_res,
             tx_queue: link_conf.tx.queue,
             link_rx: link_conf.rx,
         },

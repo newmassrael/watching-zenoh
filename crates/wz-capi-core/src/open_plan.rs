@@ -405,8 +405,8 @@ const ZENOH_MULTICAST_BATCH: u16 = 8_192;
 /// `join_interval: self.manager.config.multicast.join_interval,`, beside the batch capped at
 /// `batch_size::MULTICAST`): the link lease of `transport/link/tx/lease`, the beacon interval of
 /// `transport/multicast/join_interval`, the default resolution of both sequence numbers and
-/// request ids (32 bits; the build's `sn-resolution` policy states another width of the
-/// sequence number), the session's batch size held to the multicast cap (the UDP link's own
+/// request ids (32 bits; `transport/link/tx/sequence_number_resolution`, or the build's
+/// `sn-resolution` policy, states another width of the sequence number), the session's batch size held to the multicast cap (the UDP link's own
 /// MTU is above it on every target zenoh names), per-priority conduits when
 /// `transport/multicast/qos/enabled` asks for them, and batch compression when
 /// `transport/multicast/compression/enabled` does.
@@ -625,7 +625,9 @@ pub struct OpenPlan {
     /// is zenoh's default.
     pub keep_alive: KeepAliveConf,
     /// The width of the sequence numbers the session advertises, unicast and in a group's Join:
-    /// the build's `sn-resolution` policy, 32 bits unless it states another.
+    /// `transport/link/tx/sequence_number_resolution` when the document states a width other than
+    /// upstream's 32 bits, and the build's `sn-resolution` policy, 32 bits unless it states
+    /// another, when it does not.
     pub sn_resolution: SnResolution,
     /// How long an inbound link gets to complete its handshake and how many get it at once:
     /// `transport/unicast/accept_timeout` and `accept_pending`. A config that states none is
@@ -822,6 +824,16 @@ impl OpenPlan {
             .as_ref()
             .map_or_else(Vec::new, |ingest| ingest.ignored.clone());
         let node = ingest.map(|ingest| ingest.config);
+        // The width of the sequence numbers the sessions offer, unicast and in a group's Join:
+        // `transport/link/tx/sequence_number_resolution` when the document states a width other
+        // than upstream's, the build's `sn-resolution` policy otherwise. A document rendered from
+        // a whole configuration states every key at its default, so upstream's own width there is
+        // no instruction, and the build's policy stands.
+        let upstream_width = ZenohNodeConfig::default().sn_resolution;
+        let sn_resolution = match node.as_ref().map(|node| node.sn_resolution) {
+            Some(stated) if stated != upstream_width => stated,
+            _ => SessionPolicy::from_build().sn_resolution,
+        };
         let namespace_text = node.as_ref().and_then(|node| node.namespace.clone());
         // How the node keeps its south apart (`gateway/south`): the preset unless the document
         // states subregions.
@@ -1040,9 +1052,6 @@ impl OpenPlan {
                 pool_size: node.shm_pool_size,
             },
         );
-        // The width of the sequence numbers the build advertises (`sn-resolution`); the document
-        // has no key for it, since neither zenoh nor zenoh-pico does.
-        let sn_resolution = SessionPolicy::from_build().sn_resolution;
         let groups = node.as_ref().map_or_else(Vec::new, |node| {
             let profile = zenoh_group_profile(node, batch_size, sn_resolution);
             // zenoh announces each subscriber on the groups it holds, on every target but
@@ -1798,6 +1807,39 @@ mod tests {
             assert_eq!(profile.seq_num_res, code, "{}", width.id());
             assert_eq!(profile.req_id_res, 0x02, "the request id is untouched");
         }
+    }
+
+    /// The width a document states is the one its sessions offer and its groups' Joins state,
+    /// and a document that states none, or states upstream's own, offers the build's
+    /// `sn-resolution` policy.
+    #[test]
+    fn the_width_a_document_states_is_the_one_its_sessions_offer() {
+        let plan = |document: &str| {
+            plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
+                .expect("a client with an endpoint opens")
+        };
+        let stated =
+            plan(r#"{ transport: { link: { tx: { sequence_number_resolution: "16bit" } } } }"#);
+        assert_eq!(stated.sn_resolution, SnResolution::Bits16);
+        // Control: silence is the build's policy, so the width above is the document's; and so
+        // is upstream's own width, which a rendered configuration states for every open.
+        let build = SessionPolicy::from_build().sn_resolution;
+        assert_eq!(plan("{}").sn_resolution, build);
+        assert_eq!(
+            plan(r#"{ transport: { link: { tx: { sequence_number_resolution: "32bit" } } } }"#)
+                .sn_resolution,
+            build
+        );
+        // A width zenoh has no name for is a document the reader refuses.
+        assert_eq!(
+            refusal_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:7447"],
+                &[],
+                r#"{ transport: { link: { tx: { sequence_number_resolution: "12bit" } } } }"#,
+            ),
+            OpenRefusal::DocumentUnreadable
+        );
     }
 
     /// The role is read from the `mode` key, and the default is the build's.

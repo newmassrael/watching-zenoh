@@ -1484,6 +1484,7 @@ fn router_group_params(
         zid,
         qos,
         compression,
+        seq_num_res,
         tx_queue,
         link_rx,
     } = profile;
@@ -1492,7 +1493,7 @@ fn router_group_params(
         zid,
         lease_ms: 5_000,
         join_interval_ms: 100,
-        seq_num_res: 0x02,
+        seq_num_res,
         req_id_res: 0x02,
         batch_size: 2_048,
         is_qos: qos,
@@ -1522,6 +1523,12 @@ pub struct RouterGroupProfile {
     /// Whether the group's datagrams are batches with the one-byte `BatchHeader`, compressed
     /// when that pays (`transport/multicast/compression/enabled`). Group-agreed.
     pub compression: bool,
+    /// The two-bit width code of the sequence numbers the group's JOIN states: the node's
+    /// `transport/link/tx/sequence_number_resolution`, the one its unicast sessions offer, as
+    /// upstream's multicast transport states its manager's one resolution. Group-agreed: a
+    /// member whose JOIN states another is ignored
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @ `if join.resolution != self.manager.config.resolution {`).
+    pub seq_num_res: u8,
     /// The node's transmission queue: lane sizes and congestion waits.
     pub tx_queue: wz_session_core::session_init_params::TxQueueConf,
     /// The node's `transport/link/rx`: the largest message the group rejoins
@@ -2828,10 +2835,13 @@ mod tests {
             zid: vec![0x0A],
             qos: true,
             compression: true,
+            // 16 bits, not the 32 the face stated before it took the node's width.
+            seq_num_res: 0x01,
             tx_queue: operator,
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         });
         assert_eq!(group.tx_queue, operator);
+        assert_eq!(group.seq_num_res, 0x01, "the JOIN states the node's width");
         assert!(group.is_qos);
         assert!(group.compression);
         assert_eq!(group.zid, [0x0A]);

@@ -6836,6 +6836,27 @@ mod init_advertisement_tests {
         assert_eq!(body.s.map(|s| s.batch_size), Some(1024));
     }
 
+    /// The width a session's parameters carry is the width its InitSyn offers, for each of the
+    /// four, with the request-id half of the byte left alone: what
+    /// `transport/link/tx/sequence_number_resolution` reaches is this field, and before the key
+    /// was read only the 32-bit code was ever put on the wire.
+    #[test]
+    fn an_initsyn_offers_each_width_its_params_carry() {
+        for code in 0..=3u8 {
+            let mut params = fixture_session_init_params();
+            params.seq_num_res = code;
+            params.req_id_res = 2;
+            let wire = encode_init(&params, false, &[], None).expect("encode InitSyn");
+            let InboundFrame::Init { body, .. } = parse_inbound(&wire).expect("parse own InitSyn")
+            else {
+                panic!("encoded InitSyn must parse as Init");
+            };
+            let sn_res = body.s.map(|s| s.sn_res).expect("a sized InitSyn");
+            assert_eq!(sn_res & 0x03, code, "the frame SN width");
+            assert_eq!(sn_res >> 2, 2, "the request-id width is not moved");
+        }
+    }
+
     /// The batch a session advertises is capped by the largest frame its link
     /// receives, as zenoh caps it
     /// (`io/zenoh-transport/src/unicast/establishment/open.rs` @

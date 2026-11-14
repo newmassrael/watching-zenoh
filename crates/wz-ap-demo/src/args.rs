@@ -1273,6 +1273,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // The third InitSyn field the file moves: the width of the sequence numbers this node
+    // offers. Honoured at any of its four values, for the reason the two above are.
+    if named("transport/link/tx/sequence_number_resolution") {
+        exp.pair(
+            "transport/link/tx/sequence_number_resolution",
+            "--sn-resolution",
+            String::from(cfg.sn_resolution.zenoh_name()),
+            None,
+        );
+    }
     // R2925 — the queue sizes and the two congestion waits: local policy, not
     // wire values, but honoured at any value for the reason `batch_size` is —
     // there is no "off" for a size or a deadline. One flag per key, because an
@@ -3211,6 +3221,16 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          weighted and an unweighted router shows the option and the value. What \
          no leg does yet is drive it from the FILE: the flooded weight is read \
          off a frame today only by a unit test that calls the setter directly.",
+    ),
+    (
+        "transport/link/tx/sequence_number_resolution",
+        KIND_NOT_YET_READ,
+        "expands to `--sn-resolution`. The width rides the InitSyn's `sn_res` byte \
+         (`handshake_encode.rs` @ `sn_res: pack_sn_res(caps.seq_num_res, caps.req_id_res)`, \
+         upstream `init.rs` behind the `S` flag) and the Join of a group the router hat \
+         holds, so a fixture pair of 32 and 16 bits shows two codes. The demo's own test \
+         `the_width_a_config_names_reaches_the_init_the_node_sends` reads it off the \
+         encoded InitSyn; no leg of the wire sweep does yet.",
     ),
     (
         "gateway/south",
@@ -5219,6 +5239,12 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { lease: 3000 } } } }"#,
+            ),
+            (
+                "transport/link/tx/sequence_number_resolution",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { sequence_number_resolution: "16bit" } } } }"#,
             ),
             // R2925 — the queue sizes and the two congestion waits.
             (
@@ -7534,6 +7560,56 @@ mod stock_config_tests {
         );
     }
 
+    /// The width of the sequence numbers a config names is the one the node offers: the file
+    /// reaches `--sn-resolution`, the flag reaches the session's parameters, and those are what
+    /// the InitSyn's `sn_res` byte carries (`an_initsyn_offers_each_width_its_params_carry` in
+    /// the runtime). Against a stock zenoh peer, which offers 32 bits, the smaller is the 16 the
+    /// file asked for.
+    #[test]
+    fn the_width_a_config_names_reaches_the_init_the_node_sends() {
+        use wz::runtime_tokio::policy::{SessionPolicy, SnResolution};
+        use wz::runtime_tokio::session_glue::PeerInitCaps;
+        let exp = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "client",
+                 connect: { endpoints: ["tcp/r:7447"] },
+                 transport: { link: { tx: { sequence_number_resolution: "16bit" } } } }"#,
+        )
+        .unwrap();
+        assert!(
+            exp.added.contains(&String::from("--sn-resolution")),
+            "added = {:?}",
+            exp.added
+        );
+        let tuned = TransportTuning::from_argv(&exp.argv).expect("the expansion is parseable");
+        assert_eq!(tuned.sn_resolution, SnResolution::Bits16);
+        let params = demo_session_init_params(NodeKind::Initiator, vec![0x0a], &tuned)
+            .expect("OS entropy for the cookie signing key");
+        assert_eq!(params.seq_num_res, SnResolution::Bits16.wire_code());
+        let stock_peer = PeerInitCaps {
+            seq_num_res: SnResolution::Bits32.wire_code(),
+            req_id_res: 2,
+            batch_size: 65535,
+        };
+        assert_eq!(
+            PeerInitCaps::negotiated_seq_num_res(params.seq_num_res, Some(stock_peer)),
+            SnResolution::Bits16.wire_code(),
+            "the session settles on the width the file offered"
+        );
+
+        // CONTROL: without the key the node offers the build's width, so the 16 above is the
+        // file's.
+        let bare = TransportTuning::from_argv(&argv(&["--connect", "tcp/r:7447"])).unwrap();
+        assert_eq!(
+            bare.sn_resolution,
+            SessionPolicy::from_build().sn_resolution
+        );
+
+        // A width zenoh has no name for is refused by the flag, not offered as some other one.
+        let refused = TransportTuning::from_argv(&argv(&["--sn-resolution", "12bit"])).unwrap_err();
+        assert!(refused.contains("--sn-resolution"), "{refused}");
+    }
+
     /// The exact argv the adminspace block and the compression flag produce.
     ///
     /// The census gate is a DIFFERENCE test and would accept any change at all;
@@ -9175,6 +9251,10 @@ pub(crate) struct TransportTuning {
     pub(crate) batch_size: u16,
     /// OpenSyn lease, in milliseconds.
     pub(crate) lease_ms: u64,
+    /// `--sn-resolution <8bit|16bit|32bit|64bit>`: the width of the frame sequence numbers the
+    /// InitSyn offers, which the session then negotiates down to the peer's. The build's
+    /// `sn-resolution` policy unless given, 32 bits when the build states none.
+    pub(crate) sn_resolution: wz::runtime_tokio::policy::SnResolution,
     /// R2592 — every `--link-config <kind>#<span>`, layered in argv order.
     pub(crate) link_defaults: wz::runtime_tokio::link_socket::LinkDefaults,
     /// R2925 — the per-priority queue sizes and the two congestion waits:
@@ -9205,6 +9285,7 @@ impl Default for TransportTuning {
         Self {
             batch_size: 65535,
             lease_ms: 10_000,
+            sn_resolution: wz::runtime_tokio::policy::SessionPolicy::from_build().sn_resolution,
             link_defaults: Default::default(),
             tx_queue: Default::default(),
             link_rx: Default::default(),
@@ -9245,6 +9326,12 @@ impl TransportTuning {
                     "--lease-ms 0 would announce a lease that is already expired",
                 ));
             }
+        }
+        if let Some(v) = parse_pair(rest, "--sn-resolution") {
+            out.sn_resolution = wz::runtime_tokio::policy::SnResolution::from_zenoh_name(&v)
+                .ok_or_else(|| {
+                    format!("--sn-resolution expects 8bit, 16bit, 32bit or 64bit, got '{v}'")
+                })?;
         }
         // R2925 — a size outside upstream's `1..=16` is refused, as upstream's
         // config refuses it; the waits take any microsecond count.
@@ -9481,7 +9568,10 @@ pub(crate) fn session_init_params_for(
     Ok(SessionInitParams {
         whatami,
         zid,
-        seq_num_res: 2,
+        // The width the operator offered, which the session negotiates down to the peer's.
+        seq_num_res: tuning.sn_resolution.wire_code(),
+        // Upstream exposes no key for the request-id width: its half of `Resolution` is always
+        // the width of a `u32` request id.
         req_id_res: 2,
         // R311y843 — the two handshake fields an operator's stock zenoh config
         // can move. They were literals here until the config reader had a way

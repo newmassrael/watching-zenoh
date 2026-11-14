@@ -6791,6 +6791,9 @@ async fn run_router_hat_until(
                 zid: params.zid.clone(),
                 qos: multicast_qos,
                 compression: false,
+                // And the width its unicast sessions offer
+                // (`transport/link/tx/sequence_number_resolution`).
+                seq_num_res: params.seq_num_res,
                 tx_queue: params.tx_queue,
                 link_rx: params.link_rx,
             },

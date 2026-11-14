@@ -1091,6 +1091,14 @@ pub struct ZenohNodeConfig {
     pub batch_size: u16,
     /// `transport/link/tx/lease` (milliseconds).
     pub lease_ms: u64,
+    /// `transport/link/tx/sequence_number_resolution`: the width of the frame sequence numbers
+    /// this node OFFERS in its InitSyn, which both ends then take the smaller of
+    /// (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
+    /// `res.set(Field::FrameSN, i_fsn_res.min(m_fsn_res));`), and states in the Join of a
+    /// group it is a member of. Upstream's transport manager reads the key into its own resolution
+    /// (`io/zenoh-transport/src/manager.rs` @
+    /// `resolution.set(Field::FrameSN, *link.tx().sequence_number_resolution());`).
+    pub sn_resolution: crate::policy::SnResolution,
     /// `transport/link/tx/keep_alive`: keepalives in one lease, so a session sends one whenever
     /// its line has been idle for the lease divided by this. Read by the zenoh-c session
     /// ([`C_ABI_SESSION_HONOURED_KEYS`]), which divides its own lease as upstream does
@@ -1535,6 +1543,11 @@ impl Default for ZenohNodeConfig {
             peer_linkstate: false,
             batch_size: 65_535,
             lease_ms: 10_000,
+            // Upstream's default, the width of its transport SN type
+            // (`commons/zenoh-config/src/defaults.rs` @
+            // `sequence_number_resolution: Bits::from(TransportSn::MAX),`, a `u32`), and not the
+            // build's `sn-resolution` policy: this struct is what a zenoh node makes of a file.
+            sn_resolution: crate::policy::SnResolution::Bits32,
             keep_alive: wz_session_core::session_init_params::KEEP_ALIVE_PER_LEASE,
             accept_timeout_ms: crate::config::ACCEPT_TIMEOUT_MS,
             accept_pending: crate::config::ACCEPT_PENDING,
@@ -2039,6 +2052,11 @@ impl ZenohNodeConfig {
         out.push_str("    \"link\": {\n      \"tx\": {\n");
         let _ = writeln!(out, "        \"batch_size\": {},", self.batch_size);
         let _ = writeln!(out, "        \"lease\": {},", self.lease_ms);
+        let _ = writeln!(
+            out,
+            "        \"sequence_number_resolution\": \"{}\",",
+            self.sn_resolution.zenoh_name()
+        );
         let _ = writeln!(out, "        \"keep_alive\": {},", self.keep_alive);
         // R2925 — the queue sizes and the two congestion waits, in upstream's
         // `queue` shape.
@@ -2246,6 +2264,10 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/unicast/compression/enabled",
     "transport/link/tx/batch_size",
     "transport/link/tx/lease",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, `UNHONOURED_BEYOND_WZ` and the `LinkTxConf`
+    // group, so the surface total is unchanged: the width a node offers, which its sessions
+    // already negotiated down to the peer's and could not be told.
+    "transport/link/tx/sequence_number_resolution",
     // R2925 — the queue sizes (in `TX_QUEUE_SIZE_KEYS` order) and the two
     // congestion waits. They left `UNHONOURED_BEYOND_WZ` because the capability
     // its `LinkTxConf` row said wz lacked — bounded per-priority queues with
@@ -2886,7 +2908,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/link/tx/queue/allocation/mode",
     "transport/link/tx/queue/batching/enabled",
     "transport/link/tx/queue/batching/time_limit",
-    "transport/link/tx/sequence_number_resolution",
+    // `transport/link/tx/sequence_number_resolution` LEFT this list for `HONOURED_CONFIG_KEYS`:
+    // the width a node offers comes from the file. Same partition, same total.
     "transport/link/tx/threads",
     "transport/link/unixpipe/file_access_mask",
     // `transport/multicast/compression/enabled` LEFT this list for
@@ -3102,7 +3125,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "transport/link/tx/queue/allocation/mode",
     "transport/link/tx/queue/batching/enabled",
     "transport/link/tx/queue/batching/time_limit",
-    "transport/link/tx/sequence_number_resolution",
+    // `transport/link/tx/sequence_number_resolution` LEFT here and its group below: the width
+    // a node offers is a parameter of its sessions, which negotiate it with the peer.
     "transport/link/tx/threads",
     // R2363 — `transport/link/unixpipe/file_access_mask` LEFT here for
     // [`UNHONOURED_READER_GAP`]. Its `LinkTxConf` group sentence said wz had no
@@ -3327,7 +3351,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // now has the per-priority bounded queues and the drop-vs-block
             // waits they configure. R2926 — and the per-fragment drop cap
             // followed, once a fragment chain asked for room per fragment.
-            "transport/link/tx/sequence_number_resolution",
+            // `transport/link/tx/sequence_number_resolution` LEFT this group: the width a
+            // session offers is its own parameter, as its lease is.
             "transport/link/tx/threads",
             // R2363 removed `transport/link/unixpipe/file_access_mask` from
             // this group: wz now HAS the surface for it (a per-locator FIFO
@@ -3640,40 +3665,10 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // fixture that spells it (`spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp`)
     // still configures the far side exactly as before.
     //
-    // R2221 (open-debt item 568) — wz's source spells
-    // `transport/link/tx/sequence_number_resolution` to configure the GENUINE
-    // zenohd, never itself, and the `qos/publication` row above is the same
-    // shape for the same reason: it is the only way to put a non-default value
-    // on the OTHER side of the wire.
-    //
-    // The axis needs that. `Resolution` is `min()`ed by both peers
-    // (`unicast/establishment/accept.rs:198-213` at zenoh 1.5.0), so a small
-    // value advertised by WZ makes the negotiated ring equal wz's own
-    // advertisement — which an implementation that ignored the InitAck entirely
-    // also produces. Only a value that exists on the ROUTER's side until its
-    // InitAck carries it back can measure whether wz ADOPTS it.
-    //
-    // wz honours nothing here: the key stays in the `LinkTxConf` beyond-wz
-    // group, whose subject is a configurable link-TX surface wz does not have.
-    // What wz has is the wire negotiation, which is a different thing from a
-    // config key that sets the local advertisement.
-    // R2224 (open-debt item 572) — the anchor is the helper-name PREFIX, not one
-    // helper. That round needed a router carrying this key AND a named
-    // `qos/enabled`, so the axes fixture moved to
-    // `spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp` and this row went
-    // RED — correctly: it had named an exact function and the function was no
-    // longer what the fixture called.
-    //
-    // Shortening it is not a weakening, and the reason is measurable: nothing
-    // else in the tree begins with these characters, so the prefix names the
-    // FAMILY of helpers that put this key on a genuine router and nothing else.
-    // Keeping the full name would have forced the axes fixture to spawn a
-    // second router to satisfy a table, which is the tail wagging the dog.
-    (
-        "transport/link/tx/sequence_number_resolution",
-        "foreign-node-config",
-        "spawn_zenohd_sn_resolution",
-    ),
+    // `transport/link/tx/sequence_number_resolution`'s row is GONE for the same reason: a
+    // node's own file now sets the width it offers. The zenohd fixtures that spell the key
+    // (`spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp`) still put a width on the far
+    // side, which is the half only a genuine router's InitAck can show wz adopting.
     ("transport/link/tx/threads", "asserted-ignored", "ignored"),
     // Open-debt item 913 — `transport/multicast/join_interval`'s row is GONE: the zenoh-c
     // session honours the key now, and this ledger carries evidence for unhonoured keys.
@@ -3780,11 +3775,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "transport/link/tx/queue/batching/time_limit",
         "build",
         "the batching retention bound; wz holds it as a fixed writer constant",
-    ),
-    (
-        "transport/link/tx/sequence_number_resolution",
-        "build",
-        "the frame SN resolution a node offers; wz negotiates but offers a fixed one",
     ),
     (
         "transport/link/tx/threads",
@@ -7687,6 +7677,19 @@ impl ZenohNodeConfig {
             out.lease_ms = v;
             named.push("transport/link/tx/lease");
         }
+        // One of the four widths upstream's `Bits` deserializes, and nothing else: a width no
+        // session can offer is refused at the key, as a zenohd refuses to start on it.
+        const SN_RESOLUTION: &str = "transport/link/tx/sequence_number_resolution";
+        const SN_RESOLUTION_EXPECTED: &str = "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"";
+        if let Some(text) = want_string(&doc, SN_RESOLUTION, SN_RESOLUTION_EXPECTED)? {
+            out.sn_resolution = crate::policy::SnResolution::from_zenoh_name(&text).ok_or(
+                ConfigIngestError::WrongType {
+                    path: SN_RESOLUTION,
+                    expected: SN_RESOLUTION_EXPECTED,
+                },
+            )?;
+            named.push(SN_RESOLUTION);
+        }
         if let Some(v) = want_u64(&doc, "transport/link/tx/keep_alive")? {
             out.keep_alive = u32::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
                 path: "transport/link/tx/keep_alive",
@@ -9109,6 +9112,7 @@ mod tests {
                 mode: WhatAmI::Router,
                 batch_size: 4096,
                 lease_ms: 7000,
+                sn_resolution: crate::policy::SnResolution::Bits8,
                 max_links: 4,
                 qos: false,
                 lowlatency: true,
@@ -9302,6 +9306,11 @@ mod tests {
             (
                 "transport/link/tx/lease",
                 r#"{ "transport": { "link": { "tx": { "lease": 7000 } } } }"#,
+            ),
+            // 16 bits against upstream's 32, so the ingest has to move.
+            (
+                "transport/link/tx/sequence_number_resolution",
+                r#"{ "transport": { "link": { "tx": { "sequence_number_resolution": "16bit" } } } }"#,
             ),
             (
                 "transport/link/tx/queue/size/control",
@@ -11198,6 +11207,22 @@ mod tests {
                 ConfigIngestError::OutOfRange {
                     path: "transport/link/tx/queue/size/real_time",
                     value: "17".into(),
+                },
+            ),
+            (
+                // Upstream's `Bits` deserializes four spellings; a width it has no name for, or
+                // the bit count as a number, is not one of them.
+                r#"{ "transport": { "link": { "tx": { "sequence_number_resolution": "128bit" } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: "transport/link/tx/sequence_number_resolution",
+                    expected: "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"",
+                },
+            ),
+            (
+                r#"{ "transport": { "link": { "tx": { "sequence_number_resolution": 16 } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: "transport/link/tx/sequence_number_resolution",
+                    expected: "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"",
                 },
             ),
         ] {

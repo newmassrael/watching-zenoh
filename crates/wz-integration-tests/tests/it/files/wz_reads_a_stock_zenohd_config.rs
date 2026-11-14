@@ -845,6 +845,12 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         ),
         ("transport/link/tx/batch_size", wz.batch_size.to_string()),
         ("transport/link/tx/lease", wz.lease_ms.to_string()),
+        // Upstream serializes its `Bits` by name (32bit, quoted), so a silent file resolves to
+        // the name and wz's struct answers with its own width's.
+        (
+            "transport/link/tx/sequence_number_resolution",
+            quoted(wz.sn_resolution.zenoh_name()),
+        ),
         // R2925 — the queue sizes and the two congestion waits: zenohd resolves
         // a silent file to numbers (2 per priority, 1000 and 5000000
         // microseconds), so each is compared against wz's own default.
@@ -3646,6 +3652,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
       tx: {{
         batch_size: 4096,
         lease: 3000,
+        // 16 bits against the router's 32: the session settles on the smaller, the file's.
+        sequence_number_resolution: "16bit",
         queue: {{
           size: {{
             control: 3, real_time: 3, interactive_high: 3, interactive_low: 3,

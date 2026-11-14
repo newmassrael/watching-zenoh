@@ -179,6 +179,11 @@ pub(crate) fn print_usage() {
     eprintln!("                             default 65535). zenoh transport/link/tx/batch_size");
     eprintln!("    --lease-ms <ms>          OpenSyn session lease announced to the peer");
     eprintln!("                             (default 10000). zenoh transport/link/tx/lease");
+    eprintln!("    --sn-resolution <8bit|16bit|32bit|64bit>");
+    eprintln!("                             width of the frame sequence numbers the InitSyn");
+    eprintln!("                             offers; the session takes the smaller of it and the");
+    eprintln!("                             peer's (default the build's, 32bit).");
+    eprintln!("                             zenoh transport/link/tx/sequence_number_resolution");
     eprintln!("    --tx-queue-size-control <n>, --tx-queue-size-real-time <n>,");
     eprintln!("    --tx-queue-size-interactive-high <n>, --tx-queue-size-interactive-low <n>,");
     eprintln!("    --tx-queue-size-data-high <n>, --tx-queue-size-data <n>,");
