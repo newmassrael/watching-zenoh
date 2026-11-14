@@ -86,9 +86,18 @@ pub struct RouterState {
     /// provider is one): the one place the shim attaches it, as it does on a
     /// [`SessionState`](super::SessionState). Set once, right after the open.
     abi_extension: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
+    /// What the node's own session applies itself above its faces, as the open was told
+    /// ([`OpenStance::session_defaults`]).
+    session_defaults: crate::session_defaults::SessionDefaults,
 }
 
 impl RouterState {
+    /// What the node's own session applies itself above its faces, which every ABI that
+    /// publishes through the node reads here, as it does on a [`SessionState`](super::SessionState).
+    pub fn session_defaults(&self) -> &crate::session_defaults::SessionDefaults {
+        &self.session_defaults
+    }
+
     /// Attach this ABI's per-node state. Once: a second call is refused and returns the value it
     /// was handed, so a shim cannot silently replace state a live handle already reads.
     pub fn set_abi_extension<E: std::any::Any + Send + Sync>(&self, ext: E) -> Result<(), E> {
@@ -543,6 +552,7 @@ pub(crate) fn open_router_blocking(
         namespace,
         gateway_south,
         groups,
+        session_defaults,
         ..
     } = stance;
     // The prefix as the forwarder takes it. The plan validated the text, so one that does not
@@ -774,6 +784,9 @@ pub(crate) fn open_router_blocking(
                 }
                 NodeRole::Peer | NodeRole::Client => {}
             }
+            // Upstream makes the subsystem at the end of an open that succeeded, whatever the
+            // mode of the runtime.
+            crate::session_defaults::init_shared_memory(session_defaults.shm_init);
             Ok(RouterState {
                 zid: wire_zid,
                 forwarder,
@@ -785,6 +798,7 @@ pub(crate) fn open_router_blocking(
                 stop,
                 driver: StdMutex::new(Some(handle)),
                 abi_extension: std::sync::OnceLock::new(),
+                session_defaults,
             })
         }
         Ok(Err(cause)) => {

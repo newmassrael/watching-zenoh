@@ -358,6 +358,15 @@ pub(crate) unsafe fn put_stated(
         ) else {
             return Z_ENULL;
         };
+        // The QoS the configuration gives the key, over what the call states.
+        let publish = held.publication_options(keyexpr, publish);
+        // A large plain payload the session copies into its provider, so that a peer that
+        // negotiated shared memory is sent its descriptor.
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        let promoted = crate::shm::promoted_put(held, &payload);
         // A build without `router-node` holds the registry alone, and the match has the one arm.
         #[cfg_attr(
             not(feature = "router-node"),
@@ -376,6 +385,13 @@ pub(crate) unsafe fn put_stated(
                 if statement != PublishStatement::default() {
                     return Z_EUNAVAILABLE;
                 }
+                #[cfg(all(
+                    feature = "zenoh-c-shared-memory",
+                    not(feature = "zenoh-c-no-unstable-api")
+                ))]
+                if let Some(handle) = promoted {
+                    return node_publish_handle(node, keyexpr, handle, &publish);
+                }
                 return node_publish_payload(node, keyexpr, &payload, &publish);
             }
         };
@@ -387,6 +403,16 @@ pub(crate) unsafe fn put_stated(
         // shared memory goes out as its descriptor on either (R3059).
         // SAFETY: the caller's contract for the handle.
         let mapping = unsafe { crate::keyexpr::keyexpr_mapping(key_expr) };
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        if let Some(handle) = promoted {
+            return match publish_promoted(&state.shared, keyexpr, mapping, handle, &publish) {
+                Ok(_) => Z_OK,
+                Err(why) => publish_refusal(why),
+            };
+        }
         let sent = publish_outbound(&state.shared, keyexpr, mapping, payload, &publish);
         match sent {
             Ok(_) => Z_OK,
@@ -424,6 +450,46 @@ pub(crate) fn node_publish_payload(
             }
         }
     }
+}
+
+/// Publish a put whose payload the session copied into its provider, as the node publishes a
+/// buffer of shared memory: its descriptor to a face that negotiated shared memory, and its bytes
+/// to any other and to the node's own subscribers (`RouterState::publish_shm`).
+#[cfg(all(
+    feature = "router-node",
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+pub(crate) fn node_publish_handle(
+    node: &wz_capi_core::drive::RouterState,
+    keyexpr: &str,
+    handle: wz_session_core::extshm::ShmSendHandle,
+    options: &wz_runtime_tokio::session::PublishOptions,
+) -> ZResult {
+    match node.publish_shm(keyexpr, handle, options) {
+        Ok(()) => Z_OK,
+        Err(_) => publish_refusal(wz_capi_core::faces::FanoutError::ExceedsCapacity),
+    }
+}
+
+/// Publish a put whose payload the session copied into its provider, on the registry: the
+/// descriptor to each face that negotiated shared memory, the bytes to every other face and to
+/// the session's own subscribers, under the declared id where the key was declared (`mapping`).
+#[cfg(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+pub(crate) fn publish_promoted(
+    shared: &wz_capi_core::faces::SharedSession,
+    keyexpr: &str,
+    mapping: Option<u64>,
+    handle: wz_session_core::extshm::ShmSendHandle,
+    options: &PublishOptions,
+) -> Result<usize, wz_capi_core::faces::FanoutError> {
+    let wire = mapping.map_or_else(wz_capi_core::faces::WireKey::literal, |id| {
+        wz_capi_core::faces::WireKey::aliased(id, None)
+    });
+    shared.publish_shm_handle_on_wire_all(keyexpr, &wire, handle, options)
 }
 
 /// Publish `payload` on `keyexpr` as the session of `node`: to the subscribers it hosts and to
@@ -494,6 +560,8 @@ pub(crate) unsafe fn delete_stated(
         };
         // SAFETY: the caller's contract for the options struct.
         let publish = unsafe { resolve_delete_options(options) };
+        // The QoS the configuration gives the key, over what the call states, as on a put.
+        let publish = held.publication_options(keyexpr, publish);
         // A build without `router-node` holds the registry alone, and the match has the one arm.
         #[cfg_attr(
             not(feature = "router-node"),

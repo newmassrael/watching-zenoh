@@ -141,6 +141,8 @@ use wz_session_core::link::InterceptorLink;
 // `qos/network` is typed at the parse for the same reason: its priorities and congestion controls
 // are enums upstream, so the reader holds the enum and not the text it has already validated.
 use wz_session_core::qos::{CongestionControl, Priority};
+// `qos/publication` names where a publication may go in the session's own vocabulary.
+use wz_session_core::locality::Locality;
 // Item 751 — what `gateway/south` reads into: the partition a node places its
 // remotes by.
 use wz_session_core::region_partition::{RegionFilter, SouthPartition, SouthSubregion};
@@ -1230,13 +1232,28 @@ pub struct ZenohNodeConfig {
     /// whether the session owns a shared-memory provider of its own
     /// (upstream's `ShmContext::new` @ `if *cfg.transport_optimization.enabled() {`).
     /// Read by the zenoh-c ABI's session, which hands that provider out
-    /// through `z_obtain_shm_provider`; the implicit large-message promotion
-    /// the same switch also turns on upstream is not built here. Default
-    /// zenoh's, `true`.
+    /// through `z_obtain_shm_provider` and copies a large message into it
+    /// ([`Self::shm_message_size_threshold`]). Default zenoh's, `true`.
     pub shm_transport_optimization: bool,
     /// R2957 — `transport/shared_memory/transport_optimization/pool_size`: the
     /// size in bytes of that provider, zenoh's default 16 MiB.
     pub shm_pool_size: u64,
+    /// `transport/shared_memory/mode`: whether the shared-memory subsystem of the process is made
+    /// when a session opens or at its first use. Applied by the open of a session
+    /// ([`SESSION_HONOURED_KEYS`]); upstream's default is `lazy`
+    /// (`commons/zenoh-config/src/lib.rs` @ `pub enum ShmInitMode {`).
+    pub shm_init_mode: ShmInitMode,
+    /// `transport/shared_memory/transport_optimization/message_size_threshold`: the size in bytes
+    /// from which a plain payload is copied into the session's provider, so that it crosses a
+    /// link that negotiated shared memory as a descriptor. Applied by a session
+    /// ([`SESSION_HONOURED_KEYS`]); upstream's default is 3072
+    /// (`commons/zenoh-config/src/defaults.rs` @ `message_size_threshold: 3072,`).
+    pub shm_message_size_threshold: u64,
+    /// `transport/shared_memory/transport_optimization/messages`: the messages that copy is made
+    /// for, each one of [`DATA_MESSAGE_LITERALS`], in the order stated. A `delete` carries no
+    /// payload and is accepted and copies nothing. Upstream's default is `put`, `query` and
+    /// `reply`.
+    pub shm_optimised_messages: Vec<String>,
     /// `transport/link/tls/root_ca_certificate`. wz's `--tls-ca`.
     pub tls_root_ca: Option<String>,
     /// `transport/link/tls/listen_certificate`. wz's `--tls-cert`.
@@ -1473,6 +1490,13 @@ pub struct ZenohNodeConfig {
     /// empty list), so the absent and the empty document say the same thing and neither is a
     /// wildcard.
     pub qos_network: Vec<QosNetworkItemConf>,
+    /// `qos/publication[]`, exactly as the document stated it: the QoS a session gives the
+    /// publications on the keys each item names, over what the publication itself states.
+    /// Applied by a session ([`SESSION_HONOURED_KEYS`]).
+    ///
+    /// Empty = no item, which is upstream's default (an empty list), so the absent and the empty
+    /// document say the same thing.
+    pub publication_qos: Vec<PublicationQosItemConf>,
     /// R2652 — the five `access_control/*` keys, in the document's own shape.
     ///
     /// Unlike the two interceptor keys above, these do NOT map one-to-one onto a
@@ -1596,6 +1620,14 @@ impl Default for ZenohNodeConfig {
             // Upstream's defaults (`DEFAULT_CONFIG.json5` @ `pool_size: 16777216,`).
             shm_transport_optimization: true,
             shm_pool_size: 16 * 1024 * 1024,
+            shm_init_mode: ShmInitMode::Lazy,
+            // Upstream's (`commons/zenoh-config/src/defaults.rs` @
+            // `messages: vec![DataMessage::Put, DataMessage::Query, DataMessage::Reply],`).
+            shm_message_size_threshold: 3072,
+            shm_optimised_messages: ["put", "query", "reply"]
+                .iter()
+                .map(|message| (*message).to_owned())
+                .collect(),
             tls_root_ca: None,
             tls_listen_certificate: None,
             tls_connect_certificate: None,
@@ -1663,6 +1695,7 @@ impl Default for ZenohNodeConfig {
             low_pass_filter: Vec::new(),
             downsampling: Vec::new(),
             qos_network: Vec::new(),
+            publication_qos: Vec::new(),
             access_control: AclConfigInputs::default(),
             plugins: None,
             // The library's `false`, not the `true` zenohd sets over its file.
@@ -2372,8 +2405,8 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // `qos/network`, MOVED here from `UNHONOURED_UPSTREAM_CONFIG_KEYS` when the QoS overwrite
     // interceptor was built, for the reason the two above record: the acceptance boundary is the
     // two lists chained, so honouring a key is a move and the surface total is unchanged. Its
-    // sibling `qos/publication` stays behind: that is the API's per-key publisher defaults, a
-    // different capability.
+    // sibling `qos/publication` is the API's per-key publisher defaults, a different capability,
+    // and a session applies it ([`SESSION_HONOURED_KEYS`]).
     "qos/network",
     // R2652 — the five that close the interceptor seam, moved together because
     // upstream compiles them together: they are ONE subtree, and its
@@ -2928,7 +2961,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "plugins_loading/search_dirs",
     // `qos/network` LEFT this list for `HONOURED_CONFIG_KEYS`: the QoS overwrite interceptor is
     // built. Same partition, same total.
-    "qos/publication",
+    // `qos/publication` LEFT this list for [`SESSION_HONOURED_KEYS`]: a session gives the
+    // publications of the keys it names their QoS.
     // `region_name` LEFT this list for [`C_ABI_SESSION_HONOURED_KEYS`]: the open hands the name
     // to every session of the node, which announces it in its Init.
     // R2230 (open-debt item 579/582) — `routing/peer/linkstate/transport_weights`
@@ -3005,13 +3039,12 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // Open-debt item 913 — `transport/multicast/join_interval` LEFT this list for
     // [`C_ABI_SESSION_HONOURED_KEYS`]: the zenoh-c session's groups beacon at it.
     "transport/multicast/max_sessions",
-    "transport/shared_memory/mode",
+    // `transport/shared_memory/mode` LEFT this list for [`SESSION_HONOURED_KEYS`]: the open of
+    // a session makes the shared-memory subsystem when it says `init`.
     // R2230 (open-debt item 579) — the four `transport_optimization` knobs
-    // ARRIVED in 1.10.0. Their group sentence carries the evidence.
-    // R2957 — `enabled` and `pool_size` LEFT: the zenoh-c session reads them
-    // ([`C_ABI_SESSION_HONOURED_KEYS`]). The two left name the promotion alone.
-    "transport/shared_memory/transport_optimization/message_size_threshold",
-    "transport/shared_memory/transport_optimization/messages",
+    // ARRIVED in 1.10.0. R2957 — `enabled` and `pool_size` LEFT: the zenoh-c session reads them
+    // ([`C_ABI_SESSION_HONOURED_KEYS`]). The two that named the promotion LEFT too, for
+    // [`SESSION_HONOURED_KEYS`]: a session copies a large message into its provider by them.
     // Open-debt item 925 — `transport/unicast/accept_pending` and `accept_timeout` LEFT this
     // list for [`C_ABI_SESSION_HONOURED_KEYS`]: the zenoh-c session's accept loop bounds its
     // handshakes by them ([`crate::accept_loop::AcceptBounds`]).
@@ -3041,11 +3074,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// the gate checks that they do, so the two cannot drift.
 ///
 /// * `aggregation/*` — a declaration-aggregation strategy (`AggregationConf`).
-/// * `qos/publication` — the API's per-key publisher defaults (`PublisherQoSConfList`):
-///   a congestion control, a priority, an express flag, a reliability and an allowed destination
-///   that a publisher takes from the first rule whose keys include its own. Its sibling
-///   `qos/network` is the QoS overwrite interceptor, which wz has since `interceptor/` gained
-///   `qos_overwrite`.
+/// * (`qos/publication` LEFT this list: a session gives the publications of the keys it names
+///   their QoS, [`SESSION_HONOURED_KEYS`]. Its sibling `qos/network` is the QoS overwrite
+///   interceptor, which wz has since `interceptor/` gained `qos_overwrite`.)
 /// * `plugins_loading/search_dirs` — plugin auto-discovery from a search path
 ///   (`PluginSearchDirs`). wz loads a plugin by explicit path only.
 /// * `transport/auth/*` — a credential store (`CredentialStore`). wz has the
@@ -3057,9 +3088,10 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   and the two congestion waits left for `HONOURED_CONFIG_KEYS`; R2926 — the
 ///   per-fragment drop cap followed them, and `rx/max_message_size` followed
 ///   once a session's reassembly took its bound from it.)
-/// * `transport/{unicast,multicast}/*`, `transport/shared_memory/mode` — a
-///   configurable session table (`TransportUnicastConf`): accept backlog,
-///   session caps, open/accept timeouts.
+/// * `transport/{unicast,multicast}/*` — a configurable session table
+///   (`TransportUnicastConf`): accept backlog, session caps, open/accept
+///   timeouts. (`transport/shared_memory/mode` LEFT it: the open of a session
+///   makes the shared-memory subsystem, [`SESSION_HONOURED_KEYS`].)
 /// * `open/return_conditions/*` — a session-open readiness barrier
 ///   (`ReturnConditionsConf`).
 /// * `routing/router/linkstate/*` — configurable link-state weighting
@@ -3074,12 +3106,11 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// * `stats/filters` — per-keyexpr statistics (`StatsFilterConfig`). ⚠ Not
 ///   answered by wz's `transport-stats`, which answers upstream's `stats`
 ///   FEATURE; see the row's own comment.
-/// * `transport/shared_memory/transport_optimization/*` — an implicit
-///   large-message SHM promotion path (`LargeMessageTransportOpt`). wz HAS
-///   shared memory and still lacks this one, which is why it is worth a group.
-///   (R2957 — `enabled` and `pool_size` left it: the zenoh-c session's own
-///   provider reads them, [`C_ABI_SESSION_HONOURED_KEYS`]. The promotion's
-///   threshold and message set stay.)
+/// * (`transport/shared_memory/transport_optimization/*` LEFT this list. R2957
+///   moved `enabled` and `pool_size` to [`C_ABI_SESSION_HONOURED_KEYS`], and the
+///   promotion's threshold and message set followed to
+///   [`SESSION_HONOURED_KEYS`] once a session copied a large message into its
+///   provider by them.)
 /// * `scouting/delay` — a startup scouting delay (`ScoutingDelay`).
 /// * (§5.23 `adminspace-core`: `metadata` LEFT this list. The row said upstream
 ///   "never reads" it, which was true of the node and false of the adminspace:
@@ -3148,7 +3179,7 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // [`C_ABI_SESSION_HONOURED_KEYS`] once the open held on the end of the peers' declarations.
     "plugins_loading/search_dirs",
     // `qos/network` LEFT this list as it left its sibling above: wz has the interceptor now.
-    "qos/publication",
+    // `qos/publication` LEFT it for [`SESSION_HONOURED_KEYS`], with its group.
     // ⚠ R2539 — `region_name` LEFT THIS LIST for [`UNHONOURED_READER_GAP`],
     // and the gate is what said it had to. R2230 filed it here as a capability
     // wz does not have; this round BUILT the capability
@@ -3229,13 +3260,9 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // Open-debt item 913 — `transport/multicast/join_interval` LEFT here, and its group
     // below: the zenoh-c session reads it ([`C_ABI_SESSION_HONOURED_KEYS`]).
     "transport/multicast/max_sessions",
-    "transport/shared_memory/mode",
-    // R2230 (open-debt item 579) — the four `transport_optimization` knobs
-    // ARRIVED in 1.10.0. Their group sentence carries the evidence.
-    // R2957 — `enabled` and `pool_size` LEFT: the zenoh-c session reads them
-    // ([`C_ABI_SESSION_HONOURED_KEYS`]). The two left name the promotion alone.
-    "transport/shared_memory/transport_optimization/message_size_threshold",
-    "transport/shared_memory/transport_optimization/messages",
+    // `transport/shared_memory/mode` and the two `transport_optimization` keys that named the
+    // promotion LEFT here for [`SESSION_HONOURED_KEYS`], and the promotion's group went with
+    // its last two: a session makes the subsystem and copies a large message by them.
     // Open-debt item 925 — `transport/unicast/accept_pending` and `accept_timeout` LEFT here,
     // and their group below: the zenoh-c session reads them ([`C_ABI_SESSION_HONOURED_KEYS`]).
     // R2758 — `transport/unicast/max_sessions` LEFT this list too, and this is
@@ -3397,11 +3424,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "AggregationConf",
         &["aggregation/publishers", "aggregation/subscribers"],
     ),
-    (
-        "per-key publisher QoS defaults",
-        "PublisherQoSConfList",
-        &["qos/publication"],
-    ),
+    // The per-key publisher QoS group is GONE, not emptied: a session applies its one key
+    // ([`SESSION_HONOURED_KEYS`]).
     (
         "plugin auto-discovery from a search path",
         "PluginSearchDirs",
@@ -3452,7 +3476,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // Open-debt item 913 — `transport/multicast/join_interval` LEFT this group:
             // a group's beacon interval is a profile wz's multicast transport holds.
             "transport/multicast/max_sessions",
-            "transport/shared_memory/mode",
+            // `transport/shared_memory/mode` LEFT this group: it says when the shared-memory
+            // subsystem is made, which the open of a session does, and is no session table.
             // Open-debt item 925 — `transport/unicast/accept_pending` and `accept_timeout`
             // LEFT this group: the accept loop holds a half-open accept pipeline, bounded.
             // R2758 — `transport/unicast/max_sessions` LEFT this group, and the
@@ -3506,14 +3531,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "StatsFilterConfig",
         &["stats/filters"],
     ),
-    (
-        "an implicit large-message SHM promotion path",
-        "LargeMessageTransportOpt",
-        &[
-            "transport/shared_memory/transport_optimization/message_size_threshold",
-            "transport/shared_memory/transport_optimization/messages",
-        ],
-    ),
+    // The implicit large-message promotion group is GONE, not emptied: a session copies a large
+    // message into its provider by its two keys ([`SESSION_HONOURED_KEYS`]).
     // R2950 — the `ScoutingDelay` group is GONE, not emptied: wz grew "a
     // startup scouting delay" (the C-ABI peer open's start window), and its one
     // key moved to [`HONOURED_CONFIG_KEYS`].
@@ -3667,20 +3686,11 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "not-this-key",
         "PluginRegistry",
     ),
-    // R2200 (open-debt item 558) — wz's source spells `qos/publication` to
-    // configure the GENUINE zenoh `z_pub` example, never itself. The key is the
-    // only way any oracle this tree provisions can be told which PRIORITY to
-    // publish at (that binary has no priority flag; zenoh-pico's `z_pub` and
-    // `z_advanced_pub` have neither flag nor `--cfg`), and a per-conduit
-    // reassembly witness needs two priorities on one link before it has a
-    // subject at all. wz honours nothing here: the key stays in the
-    // `PublisherQoSConfList` beyond-wz group, whose subject is the API's per-key
-    // publisher defaults, which wz does not read.
-    (
-        "qos/publication",
-        "foreign-node-config",
-        "spawn_publishing_zenoh_zpub",
-    ),
+    // R2200 (open-debt item 558) — the `qos/publication` / `foreign-node-config` row is GONE:
+    // wz's source still spells the key to configure the genuine zenoh `z_pub` example
+    // (`spawn_publishing_zenoh_zpub`), and a session of wz now applies it for itself
+    // ([`SESSION_HONOURED_KEYS`]), so this ledger, whose population is the unhonoured keys,
+    // has no verdict to give about it.
     // R2633 — the `routing/router/linkstate/transport_weights` / `wz-has-it` /
     // `update_router_link_weights` row R2632 added is GONE, deleted one round
     // after it was written, because the key is honoured now and this ledger's
@@ -3731,9 +3741,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     //
     // R2221 (open-debt item 568) — wz's source spells
     // `transport/link/tx/sequence_number_resolution` to configure the GENUINE
-    // zenohd, never itself, and the `qos/publication` row above is the same
-    // shape for the same reason: it is the only way to put a non-default value
-    // on the OTHER side of the wire.
+    // zenohd, never itself: it is the only way to put a non-default value on
+    // the OTHER side of the wire.
     //
     // The axis needs that. `Resolution` is `min()`ed by both peers
     // (`unicast/establishment/accept.rs:198-213` at zenoh 1.5.0), so a small
@@ -3803,11 +3812,6 @@ pub const UNHONOURED_DISPOSITION_KINDS: &[&str] = &["build", "exclude"];
 /// this table and prints the split beside the surface it measures. A reason is plain text with
 /// no quote, backslash or comment marker, so that the script reads every row whole.
 ///
-/// Four rows name the Rust API preset's session (`wz-zenoh`'s `acted_on_by_the_session`): that
-/// session applies the key, and the node and the C ABI session, which are what this reader's
-/// census counts, do not. The decision recorded is the census's, and the reason says where
-/// the capability already is.
-///
 /// One row is excluded. Upstream reads `transport/link/tx/threads` into its transport manager's
 /// configuration (`io/zenoh-transport/src/manager.rs` @ `self = self.tx_threads(*link.tx().threads());`)
 /// and copies it on into the built manager (`io/zenoh-transport/src/manager.rs` @ `tx_threads: self.tx_threads,`),
@@ -3829,11 +3833,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "plugins_loading/search_dirs",
         "build",
         "finding a plugin library by name in search directories; wz loads by path only",
-    ),
-    (
-        "qos/publication",
-        "build",
-        "applied by the Rust API preset session; no per-key defaults in node or C ABI",
     ),
     (
         "stats/filters",
@@ -3869,21 +3868,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "transport/multicast/max_sessions",
         "build",
         "a run-time cap on the peers of a group; wz bounds its peer table at compile time",
-    ),
-    (
-        "transport/shared_memory/mode",
-        "build",
-        "applied by the Rust API preset session at open; not by node or C ABI",
-    ),
-    (
-        "transport/shared_memory/transport_optimization/message_size_threshold",
-        "build",
-        "applied by the Rust API preset promoter; the node and C ABI do not promote",
-    ),
-    (
-        "transport/shared_memory/transport_optimization/messages",
-        "build",
-        "applied by the Rust API preset promoter; the node and C ABI do not promote",
     ),
     (
         "transport/unicast/open_timeout",
@@ -4110,8 +4094,8 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// What each changes: `transport_optimization/enabled` whether the session
 /// owns a shared-memory provider (`z_obtain_shm_provider` answers DISABLED
 /// without it), `pool_size` that provider's size. The implicit promotion the
-/// first key ALSO turns on upstream is not built; its two remaining keys stay
-/// unhonoured, under the promotion group.
+/// first key ALSO turns on upstream is a session's, and its two remaining keys
+/// are in [`SESSION_HONOURED_KEYS`].
 ///
 /// R2963 — it is a PART of [`HONOURED_SURFACE_PARTS`], which is the whole point
 /// of that list existing: R2957 gave it to the predicate and to nothing that
@@ -4163,6 +4147,32 @@ pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
     "transport/unicast/accept_timeout",
 ];
 
+/// The SEVENTH organ of [`honours_config_key`]: keys a SESSION applies itself, above the
+/// engine's links, and which the wz node does not.
+///
+/// Upstream applies each of them in its session or its runtime and not in the transport it
+/// configures: the per-key publication QoS when a publisher is declared and when a put or a
+/// delete is made (`zenoh/src/api/builders/publisher.rs` @
+/// `pub(crate) fn apply_qos_overwrites(self) -> Self {`), the shared-memory subsystem at the
+/// end of the open (`zenoh/src/net/runtime/mod.rs` @
+/// `zenoh_config::ShmInitMode::Init => zenoh_shm::init::init(),`), and the copy of a large
+/// plain payload into the session's provider (`io/zenoh-transport/src/common/shm/interop.rs` @
+/// `pub struct ShmOptimizationPolicy {`). In wz each is read once by this reader, compiled once
+/// into the session's defaults by the open plan of the engine both the C ABI and the Rust API
+/// preset open through, and applied by each session from that one value.
+///
+/// Its own list and not rows of [`C_ABI_SESSION_HONOURED_KEYS`], because whether a key here is
+/// acted on is a fact of the SESSION's build and not of this reader's: the promotion needs a
+/// provider the session holds, the subsystem a build with shared memory. So a session answers
+/// for its own build (`wz_capi_core::open_plan::key_state`, which takes what the session
+/// reaches), and [`honours_config_key`] says only that some session of wz applies the key.
+pub const SESSION_HONOURED_KEYS: &[&str] = &[
+    "qos/publication",
+    "transport/shared_memory/mode",
+    "transport/shared_memory/transport_optimization/message_size_threshold",
+    "transport/shared_memory/transport_optimization/messages",
+];
+
 /// R2963 (open-debt item 843) — the flat lists whose members are HONOURED keys
 /// of the UPSTREAM surface, and the one place that says so.
 ///
@@ -4191,7 +4201,11 @@ pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
 /// are not flat lists of upstream surface keys — a leaf below `metadata` is a
 /// leaf a real zenohd never resolves, and counting it would inflate the
 /// denominator without any fixture changing.
-pub const HONOURED_SURFACE_PARTS: &[&[&str]] = &[HONOURED_CONFIG_KEYS, C_ABI_SESSION_HONOURED_KEYS];
+pub const HONOURED_SURFACE_PARTS: &[&[&str]] = &[
+    HONOURED_CONFIG_KEYS,
+    C_ABI_SESSION_HONOURED_KEYS,
+    SESSION_HONOURED_KEYS,
+];
 
 /// Every key wz honours that the pinned upstream carries: the members of
 /// [`HONOURED_SURFACE_PARTS`], in order.
@@ -6907,6 +6921,194 @@ pub struct QosNetworkItemConf {
     pub payload_size: Option<(Option<u64>, Option<u64>)>,
 }
 
+/// How the shared-memory subsystem of the process is made (`transport/shared_memory/mode`,
+/// upstream's `ShmInitMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShmInitMode {
+    /// `lazy`: at the first buffer the process allocates or receives. Upstream's default.
+    #[default]
+    Lazy,
+    /// `init`: when a session opens, so that the first buffer pays nothing for it.
+    Init,
+}
+
+/// The spellings of [`ShmInitMode`], upstream's `#[serde(rename_all = "snake_case")]`.
+pub const SHM_INIT_MODE_LITERALS: &[(&str, ShmInitMode)] =
+    &[("init", ShmInitMode::Init), ("lazy", ShmInitMode::Lazy)];
+
+/// The destinations a `qos/publication` item spells (`PublisherLocalityConf`).
+pub const PUBLICATION_DESTINATION_LITERALS: &[(&str, Locality)] = &[
+    ("session_local", Locality::SessionLocal),
+    ("remote", Locality::Remote),
+    ("any", Locality::Any),
+];
+
+/// What a `qos/publication` item sets on the publications of its keys (`PublisherQoSConfig`):
+/// each field stated replaces what the publication states, and a field left `None` leaves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PublicationQosConf {
+    /// The congestion control, one of [`QOS_CONGESTION_LITERALS`].
+    pub congestion_control: Option<CongestionControl>,
+    /// The priority, one of [`QOS_PRIORITY_LITERALS`].
+    pub priority: Option<Priority>,
+    /// The express flag.
+    pub express: Option<bool>,
+    /// The reliability: `true` for `reliable`, `false` for `best_effort`.
+    pub reliable: Option<bool>,
+    /// The destinations the publication may reach, one of
+    /// [`PUBLICATION_DESTINATION_LITERALS`].
+    pub allowed_destination: Option<Locality>,
+}
+
+/// One `qos/publication[]` entry as the document spells it (`PublisherQoSConf`): the key
+/// expressions it governs and what it sets on them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationQosItemConf {
+    /// The key expressions the item governs, each validated; possibly empty, as upstream's is a
+    /// plain list.
+    pub key_exprs: Vec<String>,
+    /// What the item sets.
+    pub config: PublicationQosConf,
+}
+
+/// The literal `value` spells in `table`, `None` for a `null` (an option upstream leaves unset),
+/// and `WrongType` naming `expected` for anything else.
+fn optional_literal<T: Copy>(
+    value: &Json5Value,
+    table: &[(&str, T)],
+    path: &'static str,
+    expected: &'static str,
+) -> Result<Option<T>, ConfigIngestError> {
+    match value {
+        Json5Value::Null => Ok(None),
+        Json5Value::String(text) => table
+            .iter()
+            .find(|(name, _)| name == text)
+            .map(|(_, literal)| Some(*literal))
+            .ok_or(ConfigIngestError::WrongType { path, expected }),
+        _ => Err(ConfigIngestError::WrongType { path, expected }),
+    }
+}
+
+/// `qos/publication` as a list of [`PublicationQosItemConf`].
+///
+/// Exactly as strict as upstream's deserialization and no stricter: an item needs `key_exprs`
+/// and `config`, each key expression must be one, and each setting must be a value its enum
+/// has; neither the item nor its `config` refuses a field it does not know, because neither
+/// carries `deny_unknown_fields` upstream (`commons/zenoh-config/src/qos.rs` @
+/// `pub(crate) struct PublisherQoSConf {`).
+fn publication_qos_items_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<PublicationQosItemConf>, ConfigIngestError> {
+    const SHAPE: &str = "a list of { key_exprs: [\"<keyexpr>\"], config: { congestion_control?: \
+                         drop|block|block_first, priority?: <name>, express?: bool, \
+                         reliability?: best_effort|reliable, allowed_destination?: \
+                         session_local|remote|any } }";
+    let bad = || ConfigIngestError::WrongType {
+        path,
+        expected: SHAPE,
+    };
+    let Json5Value::Array(items) = value else {
+        return Err(bad());
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::Object(fields) = item else {
+            return Err(bad());
+        };
+        let mut key_exprs = None;
+        let mut config = None;
+        for (key, field) in fields {
+            match key.as_str() {
+                "key_exprs" => {
+                    let list = string_list_of(field, path, SHAPE)?;
+                    if list
+                        .iter()
+                        .any(|text| wz_session_core::keyexpr_canon::validate_keyexpr(text).is_err())
+                    {
+                        return Err(bad());
+                    }
+                    key_exprs = Some(list);
+                }
+                "config" => config = Some(publication_qos_conf_of(field, path, SHAPE)?),
+                _ => {}
+            }
+        }
+        let (Some(key_exprs), Some(config)) = (key_exprs, config) else {
+            return Err(bad());
+        };
+        out.push(PublicationQosItemConf { key_exprs, config });
+    }
+    Ok(out)
+}
+
+/// The `config` of one `qos/publication` item.
+fn publication_qos_conf_of(
+    value: &Json5Value,
+    path: &'static str,
+    shape: &'static str,
+) -> Result<PublicationQosConf, ConfigIngestError> {
+    let Json5Value::Object(fields) = value else {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: shape,
+        });
+    };
+    let mut conf = PublicationQosConf::default();
+    for (name, setting) in fields {
+        match name.as_str() {
+            "congestion_control" => {
+                conf.congestion_control =
+                    optional_literal(setting, QOS_CONGESTION_LITERALS, path, shape)?;
+            }
+            "priority" => {
+                conf.priority = optional_literal(setting, QOS_PRIORITY_LITERALS, path, shape)?;
+            }
+            "express" => {
+                conf.express = match setting {
+                    Json5Value::Null => None,
+                    other => Some(bool_of(other, path)?),
+                };
+            }
+            "reliability" => {
+                conf.reliable = optional_literal(
+                    setting,
+                    &[("best_effort", false), ("reliable", true)],
+                    path,
+                    shape,
+                )?;
+            }
+            "allowed_destination" => {
+                conf.allowed_destination =
+                    optional_literal(setting, PUBLICATION_DESTINATION_LITERALS, path, shape)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(conf)
+}
+
+/// `transport/shared_memory/transport_optimization/messages`: every member one of
+/// [`DATA_MESSAGE_LITERALS`], as upstream's `Vec<DataMessage>`, and an empty list allowed.
+fn data_messages_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<String>, ConfigIngestError> {
+    const SHAPE: &str = "a list of put|delete|query|reply";
+    let list = string_list_of(value, path, SHAPE)?;
+    if list
+        .iter()
+        .any(|message| !DATA_MESSAGE_LITERALS.contains(&message.as_str()))
+    {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: SHAPE,
+        });
+    }
+    Ok(list)
+}
+
 /// `"a..b"`, `"a.."`, `"..b"` or `".."`: an inclusive range of sizes whose bounds may each be
 /// left out. Upstream's `ConfRange` reads it the same way, and refuses a text without `..` and a
 /// bound that is not an unsigned integer.
@@ -8066,6 +8268,40 @@ impl ZenohNodeConfig {
             out.shm_pool_size = v;
             named.push("transport/shared_memory/transport_optimization/pool_size");
         }
+        // The keys a session applies itself (`SESSION_HONOURED_KEYS`). Read in every build, as
+        // upstream's configuration reads them whatever its build: what a build without shared
+        // memory does with the three shared-memory ones is the session's to say.
+        if let Some(value) = honoured(&doc, "transport/shared_memory/mode") {
+            out.shm_init_mode = optional_literal(
+                value,
+                SHM_INIT_MODE_LITERALS,
+                "transport/shared_memory/mode",
+                "init|lazy",
+            )?
+            .unwrap_or_default();
+            named.push("transport/shared_memory/mode");
+        }
+        if let Some(v) = want_u64(
+            &doc,
+            "transport/shared_memory/transport_optimization/message_size_threshold",
+        )? {
+            out.shm_message_size_threshold = v;
+            named.push("transport/shared_memory/transport_optimization/message_size_threshold");
+        }
+        if let Some(value) = honoured(
+            &doc,
+            "transport/shared_memory/transport_optimization/messages",
+        ) {
+            out.shm_optimised_messages = data_messages_of(
+                value,
+                "transport/shared_memory/transport_optimization/messages",
+            )?;
+            named.push("transport/shared_memory/transport_optimization/messages");
+        }
+        if let Some(value) = honoured(&doc, "qos/publication") {
+            out.publication_qos = publication_qos_items_of(value, "qos/publication")?;
+            named.push("qos/publication");
+        }
         // The certificate material of the `tls/` and `quic/` links, read where the
         // build has either link (`CAPABILITY_HONOURED_KEYS`).
         #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
@@ -8348,6 +8584,133 @@ mod tests {
         assert!(again.named.contains(&KEY));
         // The sibling `qos` the same table carries is not lost by writing the new key beside it.
         assert_eq!(again.config.multicast_qos, read.config.multicast_qos);
+    }
+
+    /// Each key a session applies is read from a document that states another value than
+    /// upstream's default, named, and not reported ignored; a silent document leaves upstream's
+    /// defaults. The case list is the list, so a key added to one and not the other fails here.
+    #[test]
+    fn every_session_key_is_read_named_and_not_ignored() {
+        let silent = ZenohNodeConfig::from_json5("{}").expect("an empty document reads");
+        assert_eq!(silent.config.shm_init_mode, ShmInitMode::Lazy);
+        assert_eq!(silent.config.shm_message_size_threshold, 3072);
+        assert_eq!(
+            silent.config.shm_optimised_messages,
+            ["put", "query", "reply"]
+        );
+        assert!(silent.config.publication_qos.is_empty());
+        for key in SESSION_HONOURED_KEYS {
+            assert!(!silent.named.contains(key), "{key}");
+        }
+
+        let cases: &[(&str, &str)] = &[
+            (
+                "qos/publication",
+                r#"{ qos: { publication: [ { key_exprs: ["a/**"], config: { priority: "data_high" } } ] } }"#,
+            ),
+            (
+                "transport/shared_memory/mode",
+                r#"{ transport: { shared_memory: { mode: "init" } } }"#,
+            ),
+            (
+                "transport/shared_memory/transport_optimization/message_size_threshold",
+                r#"{ transport: { shared_memory: { transport_optimization: { message_size_threshold: 64 } } } }"#,
+            ),
+            (
+                "transport/shared_memory/transport_optimization/messages",
+                r#"{ transport: { shared_memory: { transport_optimization: { messages: ["put"] } } } }"#,
+            ),
+        ];
+        let covered: Vec<&str> = cases.iter().map(|(key, _)| *key).collect();
+        assert_eq!(covered, SESSION_HONOURED_KEYS);
+        for (key, doc) in cases {
+            let read = ZenohNodeConfig::from_json5(doc).unwrap_or_else(|e| panic!("{key}: {e}"));
+            assert!(read.named.contains(key), "{key}: {:?}", read.named);
+            assert!(read.ignored.is_empty(), "{key}: {:?}", read.ignored);
+            assert_ne!(
+                read.config, silent.config,
+                "{key} parsed but changed nothing"
+            );
+            assert!(honours_config_key(key), "{key}");
+            assert!(!UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(key), "{key}");
+        }
+    }
+
+    /// A `qos/publication` item carries every setting upstream's has, a `null` setting is one
+    /// left unset, and the shapes upstream's deserialization refuses are refused here at the key.
+    #[test]
+    fn a_publication_qos_item_reads_every_setting_and_refuses_what_upstream_refuses() {
+        let read = ZenohNodeConfig::from_json5(
+            r#"{ qos: { publication: [
+                { key_exprs: ["a/**", "b/c"], config: { congestion_control: "block",
+                  priority: "real_time", express: true, reliability: "best_effort",
+                  allowed_destination: "remote" } },
+                { key_exprs: [], config: { priority: null, express: null } }
+            ] } }"#,
+        )
+        .expect("a list zenoh reads");
+        assert_eq!(
+            read.config.publication_qos,
+            vec![
+                PublicationQosItemConf {
+                    key_exprs: vec!["a/**".to_owned(), "b/c".to_owned()],
+                    config: PublicationQosConf {
+                        congestion_control: Some(CongestionControl::Block),
+                        priority: Some(Priority::RealTime),
+                        express: Some(true),
+                        reliable: Some(false),
+                        allowed_destination: Some(Locality::Remote),
+                    },
+                },
+                PublicationQosItemConf {
+                    key_exprs: Vec::new(),
+                    config: PublicationQosConf::default(),
+                },
+            ]
+        );
+        for bad in [
+            r#"[{ key_exprs: ["a//b"], config: {} }]"#,
+            r#"[{ key_exprs: "a", config: {} }]"#,
+            r#"[{ config: {} }]"#,
+            r#"[{ key_exprs: ["a"] }]"#,
+            r#"[{ key_exprs: ["a"], config: { priority: "control" } }]"#,
+            r#"[{ key_exprs: ["a"], config: { allowed_destination: "elsewhere" } }]"#,
+            r#"[{ key_exprs: ["a"], config: { express: "yes" } }]"#,
+        ] {
+            let doc = format!("{{ qos: {{ publication: {bad} }} }}");
+            assert!(
+                matches!(
+                    ZenohNodeConfig::from_json5(&doc),
+                    Err(ConfigIngestError::WrongType { .. })
+                ),
+                "{bad} is refused upstream"
+            );
+        }
+        for (doc, key) in [
+            (
+                r#"{ transport: { shared_memory: { mode: "eager" } } }"#,
+                "mode",
+            ),
+            (
+                r#"{ transport: { shared_memory: { transport_optimization: { messages: ["nope"] } } } }"#,
+                "messages",
+            ),
+            (
+                r#"{ transport: { shared_memory: { transport_optimization: { message_size_threshold: -1 } } } }"#,
+                "message_size_threshold",
+            ),
+        ] {
+            assert!(
+                ZenohNodeConfig::from_json5(doc).is_err(),
+                "{key}: {doc} is refused upstream"
+            );
+        }
+        // CONTROL: an empty message list is upstream's plain `Vec`, and reads.
+        let none = ZenohNodeConfig::from_json5(
+            r#"{ transport: { shared_memory: { transport_optimization: { messages: [] } } } }"#,
+        )
+        .expect("an empty list reads");
+        assert!(none.config.shm_optimised_messages.is_empty());
     }
 
     /// `open/return_conditions/declares` is read, named and written back beside its sibling
