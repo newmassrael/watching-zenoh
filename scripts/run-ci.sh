@@ -26070,6 +26070,12 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh timestamp stack stamp)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_ts_stack_stamp || return 1
+    # A batch of several transport messages (Frames of both reliabilities, a KeepAlive behind a
+    # Frame), written by upstream's codec: the observer's reader and the participant's read the
+    # same messages, in the same Frames and order, as upstream's reader. Two tests, one a reader.
+    _runci_guarded_test "Layer E18 (differential, zenoh rx batch)" 2 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_rx_batch || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-config files)" 4 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_config_file || return 1
