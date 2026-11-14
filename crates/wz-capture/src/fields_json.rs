@@ -10682,6 +10682,9 @@ mod tests {
         // Revision 63 — a flow's `ended_chains` with an entry in it, which only a
         // chain that never closed brings.
         rendered.extend(crate::unresolved_chain_tests::ended_chain_documents());
+        // Revision 67 — `schema_hex`, which only a schema that is not UTF-8
+        // brings.
+        rendered.push(schema_document());
 
         let mut seen: Vec<&str> = Vec::new();
         for doc in &rendered {
@@ -14058,12 +14061,10 @@ mod tests {
         }
     }
 
-    /// Revision 67: an encoding's schema is written in `encoding` when it is
-    /// UTF-8, and as `schema_hex` beside an `encoding` that names the id alone
-    /// when it is not, which upstream accepts
-    /// (`commons/zenoh-protocol/src/core/encoding.rs` @ `pub schema: Option<ZSlice>,`).
-    #[test]
-    fn a_schema_is_written_as_text_when_it_is_utf8_and_as_hex_when_it_is_not() {
+    /// The field document of two puts under `application/protobuf`: `demo/text`
+    /// with the UTF-8 schema `pkg.Msg`, `demo/raw` with the schema bytes
+    /// `ff fe 78`, which are not UTF-8. The only rows that write `schema_hex`.
+    fn schema_document() -> String {
         use crate::payload::tests_support as build;
 
         let protobuf = encoding_id("application/protobuf");
@@ -14080,7 +14081,16 @@ mod tests {
             ),
         ];
         let (d, file, _) = one_frame_per_record(&records);
-        let doc = fields_json(&d, &file, None, None);
+        fields_json(&d, &file, None, None)
+    }
+
+    /// Revision 67: an encoding's schema is written in `encoding` when it is
+    /// UTF-8, and as `schema_hex` beside an `encoding` that names the id alone
+    /// when it is not, which upstream accepts
+    /// (`commons/zenoh-protocol/src/core/encoding.rs` @ `pub schema: Option<ZSlice>,`).
+    #[test]
+    fn a_schema_is_written_as_text_when_it_is_utf8_and_as_hex_when_it_is_not() {
+        let doc = schema_document();
 
         let text = raw(&entry_named(&doc, "demo/text"), "payload");
         assert!(
