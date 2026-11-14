@@ -27,10 +27,12 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../zephyr-common/wz_zephyr_board.cmake)
 target_sources(app PRIVATE src/main.c)
 
 # The UNDEFINED list is the POSIX socket layer the profile's network seam calls
-# (`zephyr_sys::socket`).
+# (`zephyr_sys::socket`) and the board's socket hooks a datagram socket reads. The image reads no
+# board address (its two ends are the loopback), so no address hook of either family.
 wz_zephyr_rust_app(
   RUST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rust
   LIB      wz_zephyr_app
   UNDEFINED
     socket bind getsockname sendto recvfrom poll close
+    ${WZ_SOCKET_HOOKS}
 )
