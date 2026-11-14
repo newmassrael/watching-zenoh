@@ -22254,8 +22254,12 @@ layer_z_zenohd_interop() {
     # as a whole document, read out of a file that is the node's only source of
     # the endpoint and dialled to a real zenohd. Counted on the file's `#[ignore]`
     # tests: 12 before the leg, 13 after.
+    # Raises 13 -> 14 for LEG 14: the handshake keys of the wire list asked of a
+    # real zenohd with the same document first, each key's effect on zenohd's
+    # own frame the positive control, and the demo's frame held to zenohd's.
+    # Counted on the file's `#[ignore]` tests: 13 before the leg, 14 after.
     wz_test_args wz-integration-tests wz_reads_a_stock_zenohd_config
-    _runci_guarded_test Z 13 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    _runci_guarded_test Z 14 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R2222 (open-debt items 568 + 569, and the lane hole they exposed) — the
