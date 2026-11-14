@@ -14104,11 +14104,13 @@ mod tests {
             bytes.contains("\"encoding\":\"application/protobuf\",\"schema_hex\":\"fffe78\""),
             "{bytes}"
         );
-        assert_eq!(
-            crate::doc_revision::revision(crate::doc_revision::FIELDS),
-            Some(67),
-            "the key arrived with its revision"
-        );
+        let arrived = crate::doc_revision::DOCUMENT_HISTORY
+            .iter()
+            .filter(|s| s.document == crate::doc_revision::FIELDS)
+            .filter(|s| s.keys.contains(&"schema_hex"))
+            .map(|s| s.revision)
+            .min();
+        assert_eq!(arrived, Some(67), "the key arrived with its revision");
     }
 
     /// A row whose key does not resolve still names its payload.
