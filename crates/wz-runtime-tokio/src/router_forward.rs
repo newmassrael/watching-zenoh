@@ -1160,7 +1160,8 @@ impl<T: std::ops::Deref<Target = Tables>> GatewayView<Zid> for OnTables<'_, T> {
 enum Crossing<'a> {
     /// A data `Push`.
     Push(&'a PushOwned),
-    /// A liveliness token's advertisement, by key.
+    /// A liveliness token's advertisement, by key. Only the token tables advertise one.
+    #[cfg(feature = "routing-token-tables")]
     Token(&'a str),
     /// A query.
     Query,
@@ -1176,6 +1177,7 @@ impl core::fmt::Display for Crossing<'_> {
                     wz_session_core::push_build::read_push_timestamp(push).as_ref()
                 )
             ),
+            #[cfg(feature = "routing-token-tables")]
             Crossing::Token(keyexpr) => write!(f, "token key={keyexpr}"),
             Crossing::Query => f.write_str("query"),
         }
