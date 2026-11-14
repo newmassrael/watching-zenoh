@@ -271,7 +271,8 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
         | OpenRefusal::MulticastCompressionNotInBuild
         | OpenRefusal::Namespace
         | OpenRefusal::GatewayNotCarried
-        | OpenRefusal::LinkNotInBuild => Z_EINVAL,
+        | OpenRefusal::LinkNotInBuild
+        | OpenRefusal::PluginHostNotInBuild => Z_EINVAL,
         OpenRefusal::QosWithLowlatency
         | OpenRefusal::GossipTarget
         | OpenRefusal::NothingToDial

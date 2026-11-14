@@ -243,6 +243,10 @@ pub enum OpenRefusal {
     /// table. Told how to make a link in a way it has no means of, the open refuses rather than
     /// accept an instruction it could only drop.
     LinkNotInBuild,
+    /// The document turns on `plugins_loading/enabled`, the by-name lookup of plugins, in a
+    /// build with no plugin host to look one up in. A node told to load the plugins its
+    /// section names that opens and loads none would be doing less than it was told.
+    PluginHostNotInBuild,
 }
 
 impl OpenRefusal {
@@ -267,6 +271,7 @@ impl OpenRefusal {
             Self::Namespace => "namespace",
             Self::GatewayNotCarried => "gateway/south",
             Self::LinkNotInBuild => "transport/link/unixpipe, transport/link/rx/buffer_size",
+            Self::PluginHostNotInBuild => "plugins_loading/enabled",
         }
     }
 }
@@ -519,6 +524,7 @@ fn refusal_of_unbuilt_key(path: &str) -> OpenRefusal {
         _ if path.starts_with("transport/link/tls/") => OpenRefusal::TlsMaterial,
         _ if path.starts_with("transport/link/unixpipe/") => OpenRefusal::LinkNotInBuild,
         "transport/link/rx/buffer_size" => OpenRefusal::LinkNotInBuild,
+        "plugins_loading/enabled" => OpenRefusal::PluginHostNotInBuild,
         "gateway/south" => OpenRefusal::GatewayNotCarried,
         _ => OpenRefusal::DocumentUnreadable,
     }
@@ -1415,6 +1421,7 @@ mod tests {
                 OpenRefusal::LinkNotInBuild,
             ),
             ("transport/link/rx/buffer_size", OpenRefusal::LinkNotInBuild),
+            ("plugins_loading/enabled", OpenRefusal::PluginHostNotInBuild),
             ("gateway/south", OpenRefusal::GatewayNotCarried),
             ("transport/link/protocols", OpenRefusal::DocumentUnreadable),
         ] {

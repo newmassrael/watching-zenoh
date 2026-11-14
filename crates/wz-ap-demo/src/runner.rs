@@ -8474,6 +8474,10 @@ pub(crate) struct StorageHostOpts {
     /// text, which this host runs its storage manager from. A `--config` file
     /// naming `plugins` expands to it.
     pub plugins: Option<String>,
+    /// `--plugins-loading`: a plugin the section names with no `__path__` is
+    /// looked up by name (`plugins_loading/enabled: true`). Absent is the
+    /// library's default, under which such a plugin is left unloaded.
+    pub plugins_loading: bool,
     /// `--batch-size` / `--lease-ms`.
     pub tuning: TransportTuning,
 }
@@ -8492,6 +8496,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         no_admin_read,
         config_write_permit,
         plugins: startup_plugins,
+        plugins_loading,
         metadata,
         tuning,
     } = opts;
@@ -8548,7 +8553,11 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // leak below used to state.
     #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
     let library_plane = {
-        let mut plane = wz::runtime_tokio::plugin_plane::DynamicPluginPlane::new();
+        // `plugins_loading/enabled` as the library reads it: this host is configured by its
+        // file, unlike zenohd, which turns by-name loading on whatever its file says.
+        let mut plane = wz::runtime_tokio::plugin_plane::DynamicPluginPlane::new(
+            wz::runtime_tokio::plugin_plane::PluginsLoading::from_config(Some(plugins_loading)),
+        );
         let registry = plane.registry_mut();
         for path in plugin_paths {
             // R2673 — DECLARE before loading, so a load that fails leaves a
@@ -8621,6 +8630,12 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
             log::warn!(
                 "wz-ap-demo storage-host: --plugin given but this binary lacks the \
                  `plugin-dynamic-loading` feature — INERT, nothing was loaded"
+            );
+        }
+        if plugins_loading {
+            log::warn!(
+                "wz-ap-demo storage-host: --plugins-loading given but this binary lacks the \
+                 `plugin-dynamic-loading` feature — INERT, no plugin is looked up"
             );
         }
         NoLibraryPlane

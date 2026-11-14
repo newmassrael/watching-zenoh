@@ -2306,6 +2306,26 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             .unwrap_or_default();
         exp.pair("plugins", "--plugins", section, blocked);
     }
+    // `plugins_loading/enabled`, onto the storage host's `--plugins-loading`, under the
+    // `plugins` site's precondition: only that run-mode hosts plugins. A named `false` is the
+    // library's default, which the absent flag already means; this host reads the file as a
+    // library session does, and not as zenohd, which turns the lookup on over its file.
+    if named("plugins_loading/enabled") {
+        let run_flag = typed_role
+            .map(|(flag, _)| flag)
+            .or(selected.map(|s| s.flag));
+        let blocked = no_sink("plugins_loading/enabled").or_else(|| {
+            (run_flag != Some("--storage-host")).then_some(KeyEffect::WithheldFromThisRun(
+                "a plugin host (only --storage-host runs one)",
+            ))
+        });
+        exp.presence(
+            "plugins_loading/enabled",
+            "--plugins-loading",
+            cfg.plugins_loading_enabled == Some(true),
+            blocked,
+        );
+    }
     // The run-mode the expanded argv runs, typed or selected by the file, and,
     // when it is a single-session run that cannot host the admin space a
     // document enables, the verdict its admin keys get instead of a flag it
@@ -3872,6 +3892,15 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
     // are the storage's, not the key's: what the key does is make a storage
     // SERVE, and that is observed end to end rather than read off a field.
     (
+        "plugins_loading/enabled",
+        KIND_OFF_WIRE,
+        "expands to `--plugins-loading` on a `--storage-host` run. Whether a plugin \
+         the section names with no path is looked up, visible as that plugin left \
+         unloaded with a warning or refused by name, which \
+         by_name_loading_off_leaves_an_unnamed_plugin_unloaded_and_fails_nothing \
+         reads; no zenoh frame carries it.",
+    ),
+    (
         "plugins",
         KIND_LEG_JUDGED,
         "expands to `--plugins <section>` on a `--storage-host` run, typed or \
@@ -4087,6 +4116,11 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // compiles that run-mode at all: `--storage-host` exits(2) without it.
     if !cfg!(feature = "adminspace-config-hotreload") {
         out.push("plugins");
+    }
+    // `plugins_loading/enabled`'s sink is the storage host's library plugin plane, which only a
+    // `plugin-dynamic-loading` build compiles: without it `--plugins-loading` is inert.
+    if !cfg!(all(unix, feature = "plugin-dynamic-loading")) {
+        out.push("plugins_loading/enabled");
     }
     // §5.23 `adminspace-core` — `metadata`'s sink is an adminspace host's
     // `local_data`, and this binary has four: `--peer` (`routing-peer`),
@@ -5263,7 +5297,11 @@ mod stock_config_tests {
             // storage manager. A file cannot select it (`mode` never maps to
             // it), so the row types it, and the role-parity sweep below skips
             // this row by MEASURING that the file supplies a different role.
-            "plugins" => &["--config", "z.json5", "--storage-host", "tcp/127.0.0.1:0"],
+            // `plugins_loading/enabled` shares the precondition: the storage host is the one
+            // run-mode with a plugin plane.
+            "plugins" | "plugins_loading/enabled" => {
+                &["--config", "z.json5", "--storage-host", "tcp/127.0.0.1:0"]
+            }
             _ => &["--config", "z.json5"],
         }
     }
@@ -5936,6 +5974,12 @@ mod stock_config_tests {
                 r#"{ mode: "peer" }"#,
                 r#"{ mode: "peer", plugins: { storage_manager: { storages:
                      { demo: { key_expr: "demo/**", volume: "memory" } } } } }"#,
+            ),
+            // The by-name lookup turned on, the one value the absent flag does not mean.
+            (
+                "plugins_loading/enabled",
+                r#"{ mode: "peer" }"#,
+                r#"{ mode: "peer", plugins_loading: { enabled: true } }"#,
             ),
             // §5.23 `adminspace-core` — a value, which the peer run-mode's
             // adminspace serves.
@@ -6785,6 +6829,9 @@ mod stock_config_tests {
             // is what a `--config` file's `plugins` key expands to, and prints
             // when that run-mode's flags do.
             "plugins",
+            // The storage host's `plugins_loading/enabled`, undocumented with its
+            // `plugins` sibling above and for the same reason.
+            "plugins-loading",
             "publish-after-ms",
             "put-key",
             "put-payload",

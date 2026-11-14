@@ -1494,6 +1494,14 @@ pub struct ZenohNodeConfig {
     /// `None` = the document named no section, which a running zenohd resolves
     /// to an empty one; a present-but-empty section is `Some({})`.
     pub plugins: Option<Json5Value>,
+    /// `plugins_loading/enabled`: whether a plugin the `plugins` section names
+    /// with no `__path__` is looked up by name. `None` is an unnamed key, which
+    /// a library session reads as `false` (`Config::default()`); zenohd sets it
+    /// `true` over whatever its file says, a property of that binary and not of
+    /// the document, so the value carried here is the document's. The storage
+    /// host's plugin plane takes it as `PluginsLoading::from_config` reads it,
+    /// wz's `--plugins-loading`.
+    pub plugins_loading_enabled: Option<bool>,
     /// §5.23 `adminspace-core` — `metadata`, the operator's free-form value,
     /// which upstream carries without interpreting and serves as the
     /// `metadata` field of the adminspace's `local_data`
@@ -1657,6 +1665,8 @@ impl Default for ZenohNodeConfig {
             qos_network: Vec::new(),
             access_control: AclConfigInputs::default(),
             plugins: None,
+            // The library's `false`, not the `true` zenohd sets over its file.
+            plugins_loading_enabled: None,
             metadata: None,
         }
     }
@@ -2191,6 +2201,13 @@ impl ZenohNodeConfig {
                 admin.read, admin.write
             );
         }
+        // Only a value the caller stated: an absent key is the library's `false`.
+        if let Some(enabled) = self.plugins_loading_enabled {
+            let _ = write!(
+                out,
+                ",\n  \"plugins_loading\": {{ \"enabled\": {enabled} }}"
+            );
+        }
         out.push_str("\n}\n");
         out
     }
@@ -2483,6 +2500,11 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // leaf by leaf wherever it names something no plugin of wz reads — another
     // plugin entirely, or a storage manager field wz does not act on.
     "plugins",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and `UNHONOURED_READER_GAP`, so the surface
+    // total is unchanged: whether the plugin plane looks a plugin named with no `__path__` up by
+    // name. Off, the library's default, it leaves the plugin unloaded with upstream's warning;
+    // on, it refuses the lookup by name, as `plugins_loading/search_dirs` stays unhonoured.
+    "plugins_loading/enabled",
     // §5.23 `adminspace-core` — `metadata`, MOVED here from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS`, so the surface total is unchanged. The
     // reader carries the value and every adminspace host serves it as
@@ -2597,6 +2619,16 @@ pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
         "transport/link/rx/buffer_size",
         "a per-link RX pool (a build without runtime-zero-copy)",
         cfg!(not(feature = "runtime-zero-copy")),
+    ),
+    // The by-name lookup of the plugin plane, which only a build with a library plugin host has.
+    (
+        "plugins_loading/enabled",
+        "plugin-dynamic-loading and adminspace-config-hotreload",
+        cfg!(all(
+            unix,
+            feature = "plugin-dynamic-loading",
+            feature = "adminspace-config-hotreload"
+        )),
     ),
     // The partition a node places its remotes by, which only the region hats hold
     // (`RouterForwarder::with_south_partition`).
@@ -2891,7 +2923,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // carries the section and the storage host runs the storage manager from
     // it. Its two `plugins_loading/*` siblings stay: they govern how a zenohd
     // DISCOVERS plugin libraries, which is a different capability.
-    "plugins_loading/enabled",
+    // `plugins_loading/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: the plugin plane
+    // switches its by-name lookup on it. `search_dirs`, where that lookup would search, stays.
     "plugins_loading/search_dirs",
     // `qos/network` LEFT this list for `HONOURED_CONFIG_KEYS`: the QoS overwrite interceptor is
     // built. Same partition, same total.
@@ -3235,11 +3268,9 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 /// * `low_pass_filter` — `LowPassRule` on the same chain, driven by
 ///   `--max-payload`. R2150 moved both: the group sentence that held them
 ///   claimed wz needed an interceptor chain, and wz has one.
-/// * `plugins_loading/enabled` — `PluginRegistry`, which loads, starts, stops
-///   and admin-reports `DynamicPlugin`s, driven today by the demo's repeated
-///   `--plugin`. `plugins_loading/search_dirs` stays in
-///   [`UNHONOURED_BEYOND_WZ`]: wz loads by explicit path and has no discovery.
-///   (R2788: `plugins` itself left this list — the reader carries the section.)
+/// * (`plugins_loading/enabled` LEFT this list: the plugin plane switches its by-name lookup on
+///   it, [`HONOURED_CONFIG_KEYS`]. `plugins_loading/search_dirs` stays in
+///   [`UNHONOURED_BEYOND_WZ`]: wz loads by explicit path and has no discovery.)
 /// * (`transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
 ///   verify_name_on_connect}` LEFT this list: the reader reads them, [`HONOURED_CONFIG_KEYS`].)
 /// * (`transport/link/rx/buffer_size` LEFT this list: a session's `LinkRxConf` carries it to the
@@ -3254,6 +3285,13 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 /// moved one at a time, and `scouting/multicast/autoconnect` needed R2141 to
 /// build a strategy representation first. This list says the capability EXISTS,
 /// not that the reader change is free.
+///
+/// EMPTY is a state this list may be in, and the one it is meant to reach: a key
+/// leaves it only by its reader being built. What keeps an empty list from
+/// reading as the split having gone unexamined is that every unhonoured key must
+/// still be classed, so with nothing here every one of them is a claim in
+/// [`UNHONOURED_BEYOND_WZ`] that its group's anchor is absent from wz's code,
+/// and a capability wz grows reds that claim and brings the key back here.
 pub const UNHONOURED_READER_GAP: &[&str] = &[
     // R2159 (open-debt item 229) — `connect/timeout_ms` LEFT this list for
     // `HONOURED_CONFIG_KEYS`, and it is the one member of item 229's four that
@@ -3269,7 +3307,8 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // rules-x-subjects-x-policies join demanded is `WzConfig::acl_inputs`, and
     // with it built, none of the seven interceptor keys is a reader gap.
     // R2788 — `plugins` LEFT this list: the reader now carries the section.
-    "plugins_loading/enabled",
+    // `plugins_loading/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: the plugin plane takes
+    // it from the reader.
     // R2539 — `region_name` ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
     // capability (`SessionLinkActions::set_local_region`, `wz_session_core::extregion`), and it
     // LEFT for [`C_ABI_SESSION_HONOURED_KEYS`] once the reader fed that setter through the offer
@@ -3618,7 +3657,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // R2864 — `gateway/south`'s row is GONE (item 751, step 7d-2): the reader
     // honours the key now, and `extbound.rs`'s "not this key" disclaimer went
     // with it.
-    ("plugins_loading/enabled", "wz-has-it", "PluginRegistry"),
+    // The `plugins_loading/enabled` row is GONE: the reader honours the key now, and this ledger
+    // carries evidence for unhonoured keys only.
     // The citing site is `PluginRegistry`'s doc, drawing the line at this key:
     // the host is wz's, the DISCOVERY is not. A citation that says "not this
     // one" is still a citation, and it needs a verdict like any other.
@@ -3784,11 +3824,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "aggregation/subscribers",
         "build",
         "a session declares one subscriber per listed key expression; wz declares each",
-    ),
-    (
-        "plugins_loading/enabled",
-        "build",
-        "reader gap: PluginRegistry loads plugins and the reader does not gate it on this",
     ),
     (
         "plugins_loading/search_dirs",
@@ -7939,6 +7974,26 @@ impl ZenohNodeConfig {
             out.plugins = Some(value.clone());
             named.push("plugins");
         }
+        // Whether a plugin named with no `__path__` is looked up by name, read where the build
+        // has a plugin plane to look it up in (`CAPABILITY_HONOURED_KEYS`). A build without one
+        // reads the library's `false` as stating nothing.
+        #[cfg(all(
+            unix,
+            feature = "plugin-dynamic-loading",
+            feature = "adminspace-config-hotreload"
+        ))]
+        if let Some(v) = want_bool(&doc, "plugins_loading/enabled")? {
+            out.plugins_loading_enabled = Some(v);
+            named.push("plugins_loading/enabled");
+        }
+        #[cfg(not(all(
+            unix,
+            feature = "plugin-dynamic-loading",
+            feature = "adminspace-config-hotreload"
+        )))]
+        refuse_unbuilt_instruction(&doc, "plugins_loading/enabled", |value| {
+            matches!(value, Json5Value::Bool(false))
+        })?;
         // §5.23 `adminspace-core` — `metadata`, kept whole. Any JSON value is
         // legal, as upstream's `Value` field makes it; the only refusal is the
         // one upstream's own parser makes, a number literal it cannot read.
@@ -9714,6 +9769,11 @@ mod tests {
                 "plugins",
                 r#"{ "plugins": { "storage_manager": { "storages": { "demo":
                      { "key_expr": "demo/**", "volume": "memory" } } } } }"#,
+            ),
+            // By-name lookup on; the library's default is off.
+            (
+                "plugins_loading/enabled",
+                r#"{ "plugins_loading": { "enabled": true } }"#,
             ),
             // §5.23 `adminspace-core` — a nested value with a number, so the
             // leaves below the key are exercised and `ignored` must stay empty.
@@ -12049,12 +12109,17 @@ mod tests {
     #[test]
     fn every_unhonoured_key_says_which_kind_of_unhonoured_it_is() {
         assert!(!UNHONOURED_BEYOND_WZ.is_empty());
-        assert!(
-            !UNHONOURED_READER_GAP.is_empty(),
-            "an empty reader-gap list makes the split vacuous — every key would \
-             be 'wz cannot', which is the undivided state this test exists to \
-             end"
-        );
+        // An empty reader-gap list is the state that list is meant to reach,
+        // not the undivided one: every key below must still be classed, and
+        // with no reader gap left each is a beyond-wz claim its group's anchor
+        // stands behind (`UNHONOURED_READER_GAP`'s doc).
+        if UNHONOURED_READER_GAP.is_empty() {
+            println!(
+                "unhonoured reader gap is EXHAUSTED: every key wz has the capability for is \
+                 read; the {} left are each claimed beyond wz",
+                UNHONOURED_BEYOND_WZ.len()
+            );
+        }
 
         let both: Vec<&&str> = UNHONOURED_BEYOND_WZ
             .iter()
@@ -12205,17 +12270,30 @@ mod tests {
         // The breakdown, per kind, and a floor on each: a kind with no rows is
         // a branch of the static gate nobody has ever run, and "19 rows" reads
         // the same whether that is true or not.
+        //
+        // `wz-has-it` is the one kind whose rows ARE a list: the two checks
+        // above bind its rows to `UNHONOURED_READER_GAP` one for one, so it is
+        // empty exactly when every reader gap has been paid, which is that
+        // list's goal rather than a branch gone quiet. Its floor is that list's.
         for kind in UNHONOURED_CITATION_KINDS {
             let rows: Vec<&str> = UNHONOURED_CITATION_LEDGER
                 .iter()
                 .filter(|(_, k, _)| k == kind)
                 .map(|(key, ..)| *key)
                 .collect();
-            assert!(
-                !rows.is_empty(),
-                "citation kind `{kind}` has no rows — drop the kind or find its \
-                 member; an unexercised branch is not coverage"
-            );
+            if *kind == "wz-has-it" {
+                assert_eq!(
+                    rows.len(),
+                    UNHONOURED_READER_GAP.len(),
+                    "every `wz-has-it` row is a reader gap and every reader gap has one"
+                );
+            } else {
+                assert!(
+                    !rows.is_empty(),
+                    "citation kind `{kind}` has no rows — drop the kind or find its \
+                     member; an unexercised branch is not coverage"
+                );
+            }
             println!("citation kind {kind}: {} row(s) {rows:?}", rows.len());
         }
     }
@@ -13014,6 +13092,10 @@ mod tests {
                 r#"{ transport: { link: { rx: { buffer_size: 262140 } } } }"#,
             ),
             (
+                "plugins_loading/enabled",
+                r#"{ plugins_loading: { enabled: true } }"#,
+            ),
+            (
                 "gateway/south",
                 r#"{ gateway: { south: [{ filters: [{ modes: ["peer"] }] }] } }"#,
             ),
@@ -13038,6 +13120,49 @@ mod tests {
                 }
                 None => panic!("{key} is a capability's key"),
             }
+        }
+    }
+
+    /// `plugins_loading/enabled` is read where a plugin host is built, absent when the file is
+    /// silent (the library's `false`, not the `true` zenohd sets over its file), and written
+    /// back by the emitter. A build without the host reads the library's `false` as stating
+    /// nothing and refuses `true` by the key.
+    #[test]
+    fn plugins_loading_is_read_where_a_plugin_host_is_built() {
+        let read = |doc: &str| ZenohNodeConfig::from_json5(doc);
+        let on = r#"{ plugins_loading: { enabled: true } }"#;
+        let off = r#"{ plugins_loading: { enabled: false } }"#;
+        assert_eq!(
+            read("{}").expect("silence").config.plugins_loading_enabled,
+            None
+        );
+        match config_key_capability("plugins_loading/enabled") {
+            Some((_, true)) => {
+                let stated = read(on).expect("a bool");
+                assert_eq!(stated.config.plugins_loading_enabled, Some(true));
+                let off = read(off).expect("a bool");
+                assert_eq!(off.config.plugins_loading_enabled, Some(false));
+                assert!(off.named.contains(&"plugins_loading/enabled"));
+                let again = read(stated.config.to_json5().as_str()).expect("it round-trips");
+                assert_eq!(again.config, stated.config);
+                assert!(again.ignored.is_empty(), "{:?}", again.ignored);
+            }
+            Some((_, false)) => {
+                assert!(matches!(
+                    read(on),
+                    Err(ConfigIngestError::NotInBuild {
+                        path: "plugins_loading/enabled",
+                        ..
+                    })
+                ));
+                let off = read(off).expect("the library's default states nothing");
+                assert_eq!(off.config.plugins_loading_enabled, None);
+                assert!(off
+                    .ignored
+                    .iter()
+                    .any(|leaf| leaf == "plugins_loading/enabled"));
+            }
+            None => panic!("plugins_loading/enabled is a capability's key"),
         }
     }
 

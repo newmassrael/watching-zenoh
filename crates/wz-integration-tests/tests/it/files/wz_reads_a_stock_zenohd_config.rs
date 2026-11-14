@@ -763,6 +763,13 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "adminspace/permissions/write",
     ];
 
+    // Keys the zenohd BINARY sets over whatever its file says, so its resolved tree
+    // answers the binary's value and not the default a file gets from the library
+    // (`zenohd/src/main.rs` @ `config.plugins_loading.set_enabled(true).unwrap();`).
+    // wz's reader carries the document's value, `None` for silence, which a host the
+    // file configures reads as the library's `false`; both halves are asserted below.
+    const THE_ZENOHD_BINARY_SETS_IT: &[&str] = &["plugins_loading/enabled"];
+
     let reservation = PortReservation::pick();
     let port = reservation.port();
     let source = census_config(port);
@@ -1031,6 +1038,15 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         Some(&Json5Value::Bool(false)),
         "{captured}"
     );
+    assert_eq!(
+        resolved.get("plugins_loading/enabled"),
+        Some(&Json5Value::Bool(true)),
+        "zenohd turns by-name plugin loading on over a silent file\n{captured}"
+    );
+    assert_eq!(
+        wz.plugins_loading_enabled, None,
+        "wz's reader carries the silent document, not the zenohd binary's override"
+    );
 
     // EXHAUSTIVE: every honoured key is in exactly one class. A key added to
     // the surface without a decision about its silent default reds here, which
@@ -1041,6 +1057,7 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         .chain(claims.iter().map(|(k, _)| *k))
         .chain(THE_TREE_ANSWERS_NULL.iter().copied())
         .chain(A_BLOCK_ON_ONE_SIDE_AND_LEAVES_ON_THE_OTHER.iter().copied())
+        .chain(THE_ZENOHD_BINARY_SETS_IT.iter().copied())
         .collect();
     accounted.sort_unstable();
     let before = accounted.len();
@@ -3871,6 +3888,10 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     // reason: only a region-hat node (`--peer` or `--router-hat`) places its
     // remotes by a partition, and a connecting client holds no hat, so its run is
     // told the key was withheld from it rather than handed `--gateway-south`.
+    // `plugins_loading/enabled` is the FIFTH, beside `plugins` and for its reason: only
+    // `--storage-host` runs a plugin plane, so a connecting client looks no plugin up and its
+    // run is told the key was withheld. This process's reader is also built with no plugin host,
+    // so the one value the file could state and still be read here is the library's `false`.
     let mut every_honoured: Vec<&str> = HONOURED_CONFIG_KEYS
         .iter()
         .chain(WZ_EXTENSION_HONOURED_KEYS)
@@ -3879,6 +3900,7 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         .filter(|k| *k != "transport/auth/usrpwd/dictionary_file")
         .filter(|k| *k != "plugins")
         .filter(|k| *k != "gateway/south")
+        .filter(|k| *k != "plugins_loading/enabled")
         .collect();
     fixture_names.sort_unstable();
     every_honoured.sort_unstable();

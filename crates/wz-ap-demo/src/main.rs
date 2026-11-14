@@ -1408,6 +1408,8 @@ fn demo_main() -> ExitCode {
                     // R2788 — the `plugins` section as JSON5 text, which a
                     // `--config` file's `plugins` key expands to.
                     plugins: parse_pair(rest, "--plugins"),
+                    // `plugins_loading/enabled`, a bare presence flag like the two above.
+                    plugins_loading: rest.iter().any(|a| a == "--plugins-loading"),
                     // §5.23 `adminspace-core` — the one value read above.
                     metadata: metadata.clone(),
                     tuning,
