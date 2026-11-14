@@ -27,7 +27,7 @@ use core::mem::size_of;
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use zephyr_sys::socket::{
-    accept, bind, close, connect, getpeername, getsockname, listen, poll, recv, send, setsockopt,
+    accept, bind, connect, getpeername, getsockname, listen, poll, recv, send, setsockopt,
     shutdown, socket, PollFd, SockLen, SockaddrIn, AF_INET, IPPROTO_TCP, POLLIN, SHUT_RDWR,
     SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR, TCP_NODELAY,
 };
@@ -43,6 +43,9 @@ pub struct ZephyrTcpSocket {
     /// them since: the next read needs no second `poll`. Only the one thread that drives the
     /// link touches the socket.
     readable: Cell<bool>,
+    /// The descriptor's close, shared with every wait made on it from another thread
+    /// (`crate::fd`).
+    _close: crate::fd::FdClose,
 }
 
 /// `TCP_NODELAY` on `fd`, as zenoh and zenoh-pico set it on every TCP link.
@@ -113,6 +116,7 @@ impl ZephyrTcpSocket {
             local: ([0; 4], 0),
             peer: (addr, port),
             readable: Cell::new(false),
+            _close: crate::fd::FdClose::new(fd),
         };
         set_nodelay(fd)?;
         let peer = sockaddr(addr, port);
@@ -135,6 +139,7 @@ impl ZephyrTcpSocket {
             local: ([0; 4], 0),
             peer,
             readable: Cell::new(false),
+            _close: crate::fd::FdClose::new(fd),
         };
         set_nodelay(fd)?;
         this.local = name_of(fd, getsockname).map_err(ZephyrNetError::SockName)?;
@@ -214,12 +219,18 @@ impl StreamSocket for ZephyrTcpSocket {
         // error worth reporting: the link is ending either way.
         unsafe { shutdown(self.fd, SHUT_RDWR) };
     }
-}
 
-impl Drop for ZephyrTcpSocket {
-    fn drop(&mut self) {
-        // SAFETY: `fd` is this socket's own descriptor, closed exactly once.
-        unsafe { close(self.fd) };
+    // Any thread may `poll` a descriptor, so the session's owner waits for this stream outside its
+    // lock, as it waits for a datagram socket.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        target_has_atomic = "ptr"
+    ))]
+    fn readiness(
+        &self,
+    ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkReadiness>> {
+        Some(self._close.readiness())
     }
 }
 
@@ -255,6 +266,9 @@ pub struct ZephyrTcpListener {
     /// to report (the way `StreamDriver::error` keeps a link's last failure). Only the one thread
     /// that drives the node touches the listener.
     failed: Cell<Option<ZephyrNetError>>,
+    /// The descriptor's close, shared with every wait made on it from another thread
+    /// (`crate::fd`).
+    _close: crate::fd::FdClose,
 }
 
 impl ZephyrTcpListener {
@@ -271,6 +285,7 @@ impl ZephyrTcpListener {
             fd,
             local: (addr, port),
             failed: Cell::new(None),
+            _close: crate::fd::FdClose::new(fd),
         };
         set_reuseaddr(fd)?;
         let local = sockaddr(addr, port);
@@ -337,11 +352,16 @@ impl StreamListen for ZephyrTcpListener {
             }
         }
     }
-}
 
-impl Drop for ZephyrTcpListener {
-    fn drop(&mut self) {
-        // SAFETY: `fd` is this listener's own descriptor, closed exactly once.
-        unsafe { close(self.fd) };
+    // A listening descriptor polls readable while a connection is queued on it.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        target_has_atomic = "ptr"
+    ))]
+    fn readiness(
+        &self,
+    ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkReadiness>> {
+        Some(self._close.readiness())
     }
 }

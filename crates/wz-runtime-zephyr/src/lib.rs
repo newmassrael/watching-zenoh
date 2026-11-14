@@ -62,6 +62,8 @@ extern crate alloc;
 extern crate std;
 
 pub mod core_clock;
+// The close of a socket descriptor, shared with the waits made on it from another thread.
+mod fd;
 pub mod glue;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub mod links;

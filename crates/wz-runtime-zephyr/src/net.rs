@@ -43,7 +43,7 @@ pub use wz_runtime_coop::link_storage::TxStore;
 pub use wz_runtime_coop::udp_link::{DatagramSocket, SERVICE_WAIT_MS, UDP_RX_CAPACITY};
 use wz_session_core::byte_cells::ByteBuf;
 use zephyr_sys::socket::{
-    bind, close, getsockname, poll, recvfrom, sendto, setsockopt, socket, IpMreqn, PollFd, SockLen,
+    bind, getsockname, poll, recvfrom, sendto, setsockopt, socket, IpMreqn, PollFd, SockLen,
     SockaddrIn, AF_INET, IPPROTO_IP, IPPROTO_UDP, IP_ADD_MEMBERSHIP, IP_DROP_MEMBERSHIP, POLLIN,
     SOCK_DGRAM,
 };
@@ -191,6 +191,9 @@ pub struct ZephyrUdpSocket {
     /// [`Self::recv_waiting`] waits for a datagram and takes it in one call, as zenoh-pico's
     /// reads do. False on an image without the option: the wait is then `poll`'s.
     times_out: bool,
+    /// The descriptor's close, shared with every wait made on it from another thread
+    /// (`crate::fd`).
+    _close: crate::fd::FdClose,
 }
 
 pub(crate) fn sockaddr(addr: [u8; 4], port: u16) -> SockaddrIn {
@@ -218,6 +221,7 @@ impl ZephyrUdpSocket {
             local: (addr, port),
             readable: Cell::new(false),
             times_out,
+            _close: crate::fd::FdClose::new(fd),
         };
         let local = sockaddr(addr, port);
         // SAFETY: `local` is a live `sockaddr_in` of the length passed.
@@ -436,13 +440,6 @@ impl ZephyrUdpSocket {
     }
 }
 
-impl Drop for ZephyrUdpSocket {
-    fn drop(&mut self) {
-        // SAFETY: `fd` is this socket's own descriptor, closed exactly once.
-        unsafe { close(self.fd) };
-    }
-}
-
 /// The session's link driver reaches this socket through the shared seam. Each method is the
 /// inherent one of the same name (an inherent method wins over a trait method of the same name,
 /// so none of these calls itself).
@@ -488,6 +485,20 @@ impl DatagramSocket for ZephyrUdpSocket {
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<Option<(usize, [u8; 4], u16)>, ZephyrNetError> {
         ZephyrUdpSocket::try_recv(self, buf)
+    }
+
+    // Zephyr's `poll` is a call any thread may make on a descriptor, so the owner of a session
+    // waits for this socket outside its lock (the pico C ABI's read task) and the link never waits
+    // in its own loop.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        target_has_atomic = "ptr"
+    ))]
+    fn readiness(
+        &self,
+    ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkReadiness>> {
+        Some(self._close.readiness())
     }
 }
 
