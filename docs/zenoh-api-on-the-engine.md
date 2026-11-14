@@ -1221,6 +1221,40 @@ Each lands whole with its surface lines, tests and faults in one round.
       minutes (three green; the fourth lost one test of `regions`, a registration that a late peer
       of the scenario 7 group did not count, and ran to the end), so the job's ceiling is 60 minutes and it carries the margin gate of the
       other jobs (alarm at 90%, floor at 20%). It was 150 minutes with no gate.
+  - **Z8b. The ecosystem crate and the examples (harness written, not measured).** The other two
+    thirds of the gate. `zenoh-ext` is not a member of the family: it is the crate the family must
+    meet, so the harness copies its source at the pin into a workspace of its own beside the suite
+    (`zenoh-ext-suite`, sharing the suite's build directory), resolves its manifest's workspace
+    inheritance to the registry and patches the family in, and runs its library's unit tests with
+    and without its unstable half (`zenoh-ext.lib`, `zenoh-ext.lib-stable`) and its two test files,
+    as rows of the suite's report and of `docs/z8-expected.tsv`. A workspace of its own, because a
+    crate that does not resolve against the family must not stop the files of `zenoh/tests`.
+    The examples are run by `z8_upstream_suite.py examples-run`: upstream's examples package is
+    generated twice, over upstream's crates (the control) and with the family patched in, every one
+    of its 31 programs declared and compiled on its own, and `zenoh-ext` made optional behind a
+    feature that the three programs naming it require, so that crate's compile hides none of the
+    other 28. `docs/z8-examples-expected.tsv` declares 28 scenarios that together run all 31 (a
+    subscriber and the put, delete or publisher it hears, a queryable and the get or querier it
+    answers, a storage between a put and a get, a forward, a pull, the three liveliness programs,
+    ping and pong, the two throughput pairs, info, scout, and the programs that run alone), each with
+    what it must show: a count of the lines that hold a text, or how a program ended. A scenario is
+    `same` when the family's run shows what the control's does, line shapes and endings included;
+    `z8_expectation_gate.py --check-examples` grades the report, and a control that does not show its
+    row fails the row. Every new row is `unmeasured`, a status that turns a measurement into a note
+    and never into a failure; the rows of the ecosystem crate are in the hosted lane, the scenarios
+    are not until a build host has measured both arms once. **What `zenoh-ext`'s unstable half
+    names that the family does not have, read from its source and not yet from a compiler:**
+    `zenoh::internal::{TaskController, TerminatableTask}` and `zenoh::internal::Condition`, which
+    upstream re-exports from `zenoh-task` and `zenoh-sync`, crates the family does not have (each
+    would be a member, open-debt item 201 names the first); `Session::hlc`, a clock the session
+    does not hold as upstream's `uhlc::HLC`; a `WeakSession` that dereferences to its `Session`,
+    which the family's, an `Arc` of the session's state, does not; and the `KE_*` chunks of the
+    admin space (`KE_ADV_PREFIX`, `KE_PUB`, `KE_SUB`, `KE_STAR`, `KE_STARSTAR`, `KE_EMPTY`) at the
+    crate's root with `internal`, which the family keeps private in a module that only `unstable`
+    compiles. Built with the harness: the helpers `internal` re-exports from the family's own crates
+    (`bail`, `zerror`, `zlock`, `zread`, `zwrite`, `zasynclock`, `ztimeout`, `ResolveFuture`,
+    `ErrNo`), `internal::runtime::ZRuntime`, and `Session::downgrade` public with `internal`. The
+    serialization half (`zenoh-ext.lib-stable`) names none of the missing items.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

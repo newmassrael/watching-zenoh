@@ -11565,6 +11565,14 @@ layer_c1cs_capability_cost() {
 # The pinned tree is a shallow clone of the tag (the harness asserts its commit), the package is
 # generated under `target/z8-suite` and never committed, and the open files limit is raised by the
 # harness (a shell's 1,024 is passed by a dozen sessions of one process).
+#
+# The same table holds the rows of upstream's ecosystem crate (`zenoh-ext.<target>`), which the
+# harness builds over the family in a workspace of its own and measures in the same report. The
+# second bridge is upstream's example programs: `docs/z8-examples-expected.tsv` declares scenarios
+# of them (a subscriber and the put it receives, ...), `z8_upstream_suite.py examples-run` runs each
+# over upstream's own crates and over the family, and `--check-examples` holds the verdicts to the
+# table. Each bridge runs the rows its table puts in the lane; `WZ_Z8_ALL_ROWS=1` runs every row,
+# which is how a build host measures a row before the lane takes it.
 layer_z8_upstream_suite() {
     # Opt-in on a machine: it needs the network (the tag is cloned) and about an hour. The hosted
     # lane names it (`--layer Z8`); a person asks with `WZ_RUN_LAYER_Z8=1`.
@@ -11572,12 +11580,25 @@ layer_z8_upstream_suite() {
         echo "Layer Z8 SKIP (opt-in: needs the network and an hour; --layer Z8 or WZ_RUN_LAYER_Z8=1)"
         return 0
     fi
-    local names
-    names="$(python3 scripts/lib/z8_expectation_gate.py --names)" || return 1
+    local rows=()
+    if [[ "${WZ_Z8_ALL_ROWS:-0}" -eq 1 ]]; then
+        rows=(--all)
+    fi
+    local names scenarios
+    names="$(python3 scripts/lib/z8_expectation_gate.py --names ${rows[@]+"${rows[@]}"})" || return 1
     # The names are words by construction (file stems), so they are left to split.
     # shellcheck disable=SC2086
     python3 scripts/lib/z8_upstream_suite.py measure $names || return 1
     python3 scripts/lib/z8_expectation_gate.py --check "${Z8_OUT:-$WZ_ARTIFACTS/target/z8-suite}/report.tsv" || return 1
+    scenarios="$(python3 scripts/lib/z8_expectation_gate.py --names --examples ${rows[@]+"${rows[@]}"})" || return 1
+    if [[ -z "$scenarios" ]]; then
+        echo "Layer Z8: the examples bridge has no row in the lane (docs/z8-examples-expected.tsv); WZ_Z8_ALL_ROWS=1 runs them all"
+        return 0
+    fi
+    # Scenario names are words by the table's grammar, so they are left to split.
+    # shellcheck disable=SC2086
+    python3 scripts/lib/z8_upstream_suite.py examples-run $scenarios || return 1
+    python3 scripts/lib/z8_expectation_gate.py --check-examples "${Z8_EXAMPLES_OUT:-$WZ_ARTIFACTS/target/z8-examples}/report.tsv" || return 1
 }
 
 # ─── Layer C1co — the pico client-only build dials a listener ──────────
