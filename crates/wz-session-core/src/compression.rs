@@ -114,6 +114,30 @@ mod tests {
         assert_eq!(decompress_batch(&wire, 65536), Some(payload));
     }
 
+    /// Every batch `compress_batch` writes, compressed or shipped as it is, is
+    /// read whole by its document (`sources/codecs/compressed_batch.scxml`) and
+    /// written back byte for byte, with the flag and the payload
+    /// `decompress_batch` reads.
+    #[test]
+    fn every_batch_written_here_is_the_batch_the_document_reads() {
+        use sce_forge_runtime::codec::SceCursor;
+        use wz_codecs::compressed_batch::CompressedBatchView;
+        let payloads: [Vec<u8>; 3] = [Vec::new(), (0u8..=63).collect(), vec![0xAB; 4096]];
+        let mut compressed = 0usize;
+        for payload in payloads {
+            let wire = compress_batch(&payload);
+            let mut cursor = SceCursor::new(&wire);
+            let view = CompressedBatchView::decode(&mut cursor).expect("the document reads it");
+            assert_eq!(cursor.remaining(), 0, "read whole");
+            assert_eq!(view.compression(), wire[0] & BATCH_HEADER_COMPRESSION != 0);
+            assert_eq!(view.payload.into_inner(), &wire[1..]);
+            assert_eq!(view.encode_to_vec(), wire, "written back");
+            compressed += usize::from(view.compression());
+            assert_eq!(decompress_batch(&wire, 65536), Some(payload));
+        }
+        assert_eq!(compressed, 1, "one batch of the three is kept compressed");
+    }
+
     /// An empty wire (no header byte) is rejected as malformed.
     #[test]
     fn empty_wire_is_rejected() {
