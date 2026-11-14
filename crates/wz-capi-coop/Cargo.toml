@@ -121,9 +121,17 @@ ticker = []
 # the kernel (one socket on the default route, which asks no other interface).
 scout = [
     "std",
+    "scout-datagram",
     "dep:wz-host-net",
     "dep:log",
     "wz-host-net/locator-iface",
+]
+# Active scouting over ONE datagram socket of the stack the engine runs on (`scout_datagram`),
+# without `std`: zenoh-pico's window on a platform with no interface iterator (Zephyr), a socket the
+# Scout leaves by and the Hellos come back to. The session's window rules and the two codecs, and
+# the runtime's datagram socket trait the window is written over.
+scout-datagram = [
+    "wz-runtime-coop/session-unicast",
     "wz-session-core/scouting-active",
     "wz-session-core/codec-scout",
     "wz-session-core/codec-hello",

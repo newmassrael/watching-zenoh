@@ -14,7 +14,10 @@ config PICO_COMPARE_LOCATOR
 	default "udp/192.168.100.1:7447"
 	help
 	  The program runs as a client of a router on the bench host, over UDP unicast, as the
-	  comparison image does. The router listens on this locator.
+	  comparison image does. The router listens on this locator. Empty, the program leaves
+	  the open to scout for a router, as upstream's z_queryable.c does with an empty LOCATOR:
+	  both images carry scouting (Z_FEATURE_SCOUTING), as zenoh-pico's default build does, and
+	  this one scouts over one datagram socket of Zephyr's stack, as zenoh-pico does on Zephyr.
 
 config WZ_PICO_ABI_MULTI_THREAD
 	bool "zenoh-pico's multi-threaded arm (Z_FEATURE_MULTI_THREAD)"

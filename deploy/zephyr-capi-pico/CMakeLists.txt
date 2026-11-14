@@ -20,7 +20,9 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../zephyr-common/wz_zephyr_board.cmake)
 
 # zenoh-pico's headers, with the `zenoh-pico/config.h` its own CMake makes from its switches
 # (cmake/feature_config.cmake, which its Zephyr module includes too), and none of its sources: the
-# library is wz's staticlib. The switches are the comparison image's (its prj.conf, from which the
+# library is wz's staticlib. `scripts/kit-lane.sh --selftest` holds the two lists below to the
+# comparison image's CONFIG_ZENOH_PICO_* switches, one by one, and refuses a switch on in one image
+# and off in the other. The switches are the comparison image's (its prj.conf, from which the
 # planes of the wz client it is compared with were taken), so the program compiles to the same
 # header in both images; the multi-threaded arm is this image's Kconfig, and the Rust half is built
 # with the matching feature below. The value switches (batch and fragment sizes, the lease, the
@@ -35,11 +37,11 @@ foreach(on
     Z_FEATURE_QUERYABLE Z_FEATURE_LINK_UDP_UNICAST Z_FEATURE_LIVELINESS Z_FEATURE_INTEREST
     Z_FEATURE_FRAGMENTATION Z_FEATURE_ENCODING_VALUES Z_FEATURE_MULTICAST_TRANSPORT
     Z_FEATURE_UNICAST_TRANSPORT Z_FEATURE_TCP_NODELAY Z_FEATURE_SESSION_CHECK Z_FEATURE_BATCHING
-    Z_FEATURE_MATCHING Z_FEATURE_UNICAST_PEER Z_FEATURE_AUTO_RECONNECT)
+    Z_FEATURE_MATCHING Z_FEATURE_UNICAST_PEER Z_FEATURE_AUTO_RECONNECT Z_FEATURE_SCOUTING)
   set(${on} 1 CACHE STRING "" FORCE)
 endforeach()
 foreach(off
-    Z_FEATURE_PUBLICATION Z_FEATURE_SUBSCRIPTION Z_FEATURE_QUERY Z_FEATURE_SCOUTING
+    Z_FEATURE_PUBLICATION Z_FEATURE_SUBSCRIPTION Z_FEATURE_QUERY
     Z_FEATURE_LINK_TCP Z_FEATURE_LINK_UDP_MULTICAST Z_FEATURE_UNSTABLE_API Z_FEATURE_CONNECTIVITY
     Z_FEATURE_ADVANCED_PUBLICATION Z_FEATURE_ADVANCED_SUBSCRIPTION Z_FEATURE_LOCAL_SUBSCRIBER
     Z_FEATURE_LOCAL_QUERYABLE Z_FEATURE_ADMIN_SPACE Z_FEATURE_RAWETH_TRANSPORT
@@ -48,12 +50,12 @@ foreach(off
     Z_FEATURE_BATCH_TX_MUTEX Z_FEATURE_BATCH_PEER_MUTEX)
   set(${off} 0 CACHE STRING "" FORCE)
 endforeach()
+set(rust_features "")
 if(CONFIG_WZ_PICO_ABI_MULTI_THREAD)
   set(Z_FEATURE_MULTI_THREAD 1 CACHE STRING "" FORCE)
-  set(rust_arm multi-thread)
+  list(APPEND rust_features multi-thread)
 else()
   set(Z_FEATURE_MULTI_THREAD 0 CACHE STRING "" FORCE)
-  set(rust_arm "")
 endif()
 set(ZENOH_PICO_INCLUDEDIR ${pico_src}/include)
 include(${pico_src}/cmake/feature_config.cmake)
@@ -95,7 +97,7 @@ endif()
 wz_zephyr_rust_app(
   RUST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rust
   LIB      wz_zephyr_capi_pico
-  FEATURES ${rust_arm}
+  FEATURES ${rust_features}
   UNDEFINED
     socket bind getsockname sendto recvfrom poll close
     connect send recv getpeername shutdown setsockopt

@@ -403,10 +403,17 @@ engine for the MCU would copy that logic. So the pico C ABI on the MCU runs on t
   the crate's LP64 layout pins hold on a 64-bit target only, and a 32-bit image compiles
   `crates/wz-capi-pico/csrc/pico_layout_pins.c` against pico's header; the image
   `deploy/zephyr-capi-pico`, the comparison image's program linked to wz in pico's place, run by the
-  kit lane as `zephyr-wz-pico-queryable` and `-st`. Open: the heap profile's datagram link holds a
-  65,535-byte receive buffer where the negotiated batch would do (`ZephyrLinks::with_rx_capacity`
-  has the knob, `IpLinks` not yet); Zephyr's sockets offer the engine no readiness, so a read task
-  waits in the link's loop; scouting stays a host's.
+  kit lane as `zephyr-wz-pico-queryable` and `-st`. Then: a heap datagram link reads into the batch
+  it advertises (`IpLinks::with_rx_capacity`); Zephyr's sockets give the engine a readiness
+  (`poll`, the descriptor held open by every wait, as Zephyr cannot duplicate one), so the read
+  task waits outside the session's lock; and `scout-mcu` scouts over one datagram socket of the
+  stack, as zenoh-pico does on Zephyr, so the image's empty locator scouts as upstream's example
+  does. Both pico images carry scouting, as pico's default build does, and the kit lane's selftest
+  refuses a switch on in one and off in the other. Open: an IPv6 scouting group. zenoh-pico on
+  Zephyr opens one (`udp_zephyr.c` resolves the locator with `PF_UNSPEC` and opens the socket of
+  the family it gets), and wz's datagram seam names an IPv4 address in every signature
+  (`DatagramSocket::bind` and `send_to` take `[u8; 4]`), so it waits on the step that takes the
+  peer address out of the datagram signatures (docs/build-configuration.md, step 6).
 
 ## 5b. H1 on the host: upstream's examples, two arms, alternating boots
 

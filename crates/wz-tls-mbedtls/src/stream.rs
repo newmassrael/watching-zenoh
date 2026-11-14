@@ -458,13 +458,17 @@ where
         }
     }
 
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn listen(
-        &self,
-        addr: [u8; 4],
-        port: u16,
-    ) -> Result<alloc::boxed::Box<dyn StreamListen<Stream = Self::Stream>>, LinkOpenError> {
-        Ok(alloc::boxed::Box::new(self.listen_counted(addr, port)?))
+    // The trait declares the method where the runtime has its heap link layer
+    // (`with_heap_link_seams!`), and this crate's own form of it is the typed `listen_counted`.
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        fn listen(
+            &self,
+            addr: [u8; 4],
+            port: u16,
+        ) -> Result<alloc::boxed::Box<dyn StreamListen<Stream = Self::Stream>>, LinkOpenError> {
+            Ok(alloc::boxed::Box::new(self.listen_counted(addr, port)?))
+        }
     }
 }
 

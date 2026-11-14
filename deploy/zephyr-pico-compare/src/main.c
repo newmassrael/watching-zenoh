@@ -74,7 +74,13 @@ int main(void)
 
 		z_config_default(&config);
 		zp_config_insert(z_loan_mut(config), Z_CONFIG_MODE_KEY, "client");
-		zp_config_insert(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, CONFIG_PICO_COMPARE_LOCATOR);
+		/* As upstream's examples/zephyr/z_queryable.c: a locator given is dialled, and an
+		 * empty one leaves the open to scout for a router (Z_FEATURE_SCOUTING).
+		 */
+		if (strlen(CONFIG_PICO_COMPARE_LOCATOR) > 0) {
+			zp_config_insert(z_loan_mut(config), Z_CONFIG_CONNECT_KEY,
+					 CONFIG_PICO_COMPARE_LOCATOR);
+		}
 		z_result_t rc = z_open(&session, z_move(config), NULL);
 
 		if (rc >= 0) {
