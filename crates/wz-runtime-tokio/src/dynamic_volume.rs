@@ -1026,7 +1026,7 @@ mod tests {
                     b"body".to_vec(),
                     Some(EncodingHint {
                         packed_id: 0x2B,
-                        schema: Some(String::from("application/json")),
+                        schema: Some(b"application/json".to_vec()),
                     }),
                     TimestampHint {
                         time: 0xDEAD_BEEF,
@@ -1050,7 +1050,7 @@ mod tests {
         );
         let enc = d.encoding.as_ref().expect("the encoding survived");
         assert_eq!(enc.packed_id, 0x2B);
-        assert_eq!(enc.schema.as_deref(), Some("application/json"));
+        assert_eq!(enc.schema.as_deref(), Some(&b"application/json"[..]));
     }
 
     #[test]

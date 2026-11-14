@@ -24302,7 +24302,7 @@ mod tests {
                 }),
             );
         }
-        let askers: Vec<_> = [(1u64, "demo/a"), (2, "demo/b")]
+        let askers: Vec<_> = [(1u32, "demo/a"), (2, "demo/b")]
             .into_iter()
             .map(|(rid, key)| {
                 let asking = Arc::clone(&fwd);
@@ -26734,7 +26734,7 @@ mod tests {
         sink_c.reset();
 
         // A declares three aliases of its own, then uses each one.
-        for (id, keyexpr) in [(7u64, "demo/tok"), (8, "demo/q"), (9, "demo/data")] {
+        for (id, keyexpr) in [(7u16, "demo/tok"), (8, "demo/q"), (9, "demo/data")] {
             forward_one(
                 &fwd,
                 FaceId(0),
@@ -29969,7 +29969,9 @@ mod tests {
 
     /// Every `Request` a sink recorded, as (the keyexpr id, its literal
     /// suffix); frames that are not a Request are skipped.
-    fn recorded_request_keyexprs(sink: &RecordingLinkDriver) -> Vec<(u64, Option<String>)> {
+    fn recorded_request_keyexprs(
+        sink: &RecordingLinkDriver,
+    ) -> Vec<(wz_session_core::wire_id::ExprId, Option<String>)> {
         use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
         (0..sink.frame_count())
             .filter_map(|i| {

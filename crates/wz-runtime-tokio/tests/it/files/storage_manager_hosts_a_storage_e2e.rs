@@ -167,7 +167,7 @@ async fn a_storage_the_manager_hosts_answers_a_peer_with_its_put_and_ends_by_nam
                     move |view: &dyn ReplyView| {
                         replies_cb.lock().unwrap().push(view.payload().to_vec());
                     },
-                    |_rid: u64| {},
+                    |_rid| {},
                 ) {
                     handles.push(handle);
                 }

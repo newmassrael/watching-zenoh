@@ -55,14 +55,14 @@ pub type ReplyIngress =
     std::sync::Arc<dyn Fn(&mut wz_session_core::wire::ResponseOwned) + Send + Sync + 'static>;
 
 /// The hooks of the queries the face holds, by request id.
-type Ingresses = std::sync::Arc<Mutex<HashMap<u64, ReplyIngress>>>;
+type Ingresses = std::sync::Arc<Mutex<HashMap<wz_session_core::wire_id::RequestId, ReplyIngress>>>;
 
 /// A query the face is asked to hold: what it asks, how its replies are accepted and when it runs
 /// out of time, the hook its replies pass through as the router hands them over, and the
 /// handlers it is told its replies and its end with.
 pub(super) struct QueryHold {
     /// The request id the router is asked under.
-    pub(super) rid: u64,
+    pub(super) rid: wz_session_core::wire_id::RequestId,
     pub(super) keyexpr: String,
     pub(super) accept: ReplyKeyExpr,
     pub(super) timeout_ms: u32,
@@ -100,7 +100,7 @@ enum Command {
     /// The program asked a query under the request id `rid`; the router is asked next, so the
     /// replies it tells the face find the query held.
     Get {
-        rid: u64,
+        rid: wz_session_core::wire_id::RequestId,
         /// The key the query asks, which the replies are held to unless `accept` lifts it.
         keyexpr: String,
         accept: ReplyKeyExpr,
@@ -111,7 +111,7 @@ enum Command {
     },
     /// The program cancelled the query it asked under `rid`: it ends there and then, without the
     /// replies that have not come, as a query of a session ends when its token is cancelled.
-    CancelQuery(u64),
+    CancelQuery(wz_session_core::wire_id::RequestId),
     /// The program watches whether anything of `plane` matches `key` among the declarations
     /// `origin` admits.
     Watch {
@@ -726,7 +726,7 @@ impl LocalLiveliness {
 
     /// End the query held under the request id `rid` now. A query that has already ended is not
     /// found, and nothing happens.
-    pub(super) fn cancel_query(&self, rid: u64) {
+    pub(super) fn cancel_query(&self, rid: wz_session_core::wire_id::RequestId) {
         let _ = self.commands.send(Command::CancelQuery(rid));
     }
 

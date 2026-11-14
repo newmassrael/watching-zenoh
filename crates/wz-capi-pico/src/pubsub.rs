@@ -225,7 +225,7 @@ impl SampleMarshal {
     pub(crate) fn with_reply_metadata(
         mut self,
         attachment: Option<&[u8]>,
-        encoding: Option<(u32, Option<&str>)>,
+        encoding: Option<(u32, Option<&[u8]>)>,
         timestamp: Option<&wz_session_core::sample::TimestampHint>,
         source_info: Option<&wz_session_core::sample::SourceInfo>,
     ) -> Self {
@@ -234,7 +234,7 @@ impl SampleMarshal {
         self.encoding = encoding.map(|(packed_id, schema)| {
             own_encoding(wz_session_core::sample::EncodingHint {
                 packed_id,
-                schema: schema.map(str::to_owned),
+                schema: schema.map(<[u8]>::to_vec),
             })
         });
         // R311y562 — the FOURTH field, and it went missing for the same reason
@@ -1104,7 +1104,10 @@ pub(crate) struct PlainPublisher {
     /// id the key is named by when its declaration covers the whole key. Both
     /// `Some` is what lets [`PlainPublisher::publish_plain`] skip the per-put clone
     /// of the options and the per-put look-up of the key's wire form.
-    plain: Option<(wz_session_core::publish_options::PlainPutParams, u64)>,
+    plain: Option<(
+        wz_session_core::publish_options::PlainPutParams,
+        wz_session_core::wire_id::ExprId,
+    )>,
 }
 
 /// What a pico publisher is declared with, and sends with on every put and

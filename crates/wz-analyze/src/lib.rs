@@ -7866,15 +7866,15 @@ mod tests {
     fn the_field_listing_resolves_a_key_declared_on_the_sessions_other_link() {
         const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
         const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
-        const ID: u64 = 7;
+        const ID: u16 = 7;
 
-        fn declare_kexpr(id: u64, suffix: &str) -> Vec<u8> {
+        fn declare_kexpr(id: u16, suffix: &str) -> Vec<u8> {
             wz_codecs::lent::Declare {
                 body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
                     wz_codecs::lent::DeclKexpr {
                         header: wz_session_core::wire_const::D_MID_KEXPR
                             | wz_session_core::wire_const::FLAG_D_N,
-                        id,
+                        id: u64::from(id),
                         keyexpr: multilink_sender_space(0, Some(suffix)),
                         extensions: None,
                     },
@@ -8117,7 +8117,7 @@ mod tests {
 
     /// A `WireExpr` in the SENDER's space (`M = 1`).
     pub(crate) fn multilink_sender_space(
-        id: u64,
+        id: u16,
         suffix: Option<&str>,
     ) -> wz_codecs::lent::Wireexpr<'_> {
         wz_codecs::lent::Wireexpr {
@@ -8138,7 +8138,7 @@ mod tests {
     /// `MsgPut` body is `put_declaring`'s unchanged, because the `0x40` header
     /// flag and the encoding group travel together and a body without them
     /// walks as `unparsed` too.
-    pub(crate) fn multilink_push_by_id(id: u64, payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn multilink_push_by_id(id: u16, payload: &[u8]) -> Vec<u8> {
         wz_codecs::lent::Push {
             header: wz_codecs::lent::Push::default().header,
             keyexpr: multilink_sender_space(id, None),
@@ -9765,7 +9765,7 @@ mod quic_pass_tests {
 
         const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
         const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
-        const ID: u64 = 7;
+        const ID: u16 = 7;
         const PORTS: (u16, u16) = (50000, 7447);
 
         /// A framed unit on a QUIC stream: `u16` little-endian length, then the
@@ -9776,13 +9776,13 @@ mod quic_pass_tests {
             out
         }
 
-        fn declare_kexpr(id: u64, suffix: &str) -> Vec<u8> {
+        fn declare_kexpr(id: u16, suffix: &str) -> Vec<u8> {
             wz_codecs::lent::Declare {
                 body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
                     wz_codecs::lent::DeclKexpr {
                         header: wz_session_core::wire_const::D_MID_KEXPR
                             | wz_session_core::wire_const::FLAG_D_N,
-                        id,
+                        id: u64::from(id),
                         keyexpr: multilink_sender_space(0, Some(suffix)),
                         extensions: None,
                     },

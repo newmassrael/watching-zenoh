@@ -1578,7 +1578,7 @@ fn inbound_push_aliased_in_our_space(
 /// back as the wire carries them, then read by the same reader the loop uses.
 #[cfg(all(feature = "codec-push", feature = "pubsub-put"))]
 fn plain_puts_frame(
-    puts: &[(u64, Option<&str>, &[u8])],
+    puts: &[(wz_session_core::wire_id::ExprId, Option<&str>, &[u8])],
 ) -> wz_session_core::driver_loop::DriverLoopOutcome {
     let mut batch = Vec::new();
     for (id, suffix, payload) in puts {
@@ -2022,7 +2022,7 @@ fn publish_options_with_metadata_setters_chain() {
     assert_eq!(ts.zid, vec![0xAA, 0xBB]);
     let enc = opts.encoding.as_ref().unwrap();
     assert_eq!(enc.packed_id, 13);
-    assert_eq!(enc.schema.as_deref(), Some("application/json"));
+    assert_eq!(enc.schema.as_deref(), Some(&b"application/json"[..]));
     let si = opts.source_info.as_ref().unwrap();
     assert_eq!(si.zid_len, 4);
     assert_eq!(si.eid, 7);
@@ -2298,7 +2298,7 @@ fn publish_loopback_propagates_encoding_to_put_sample() {
     let s = captured.lock().unwrap();
     let enc = s[0].encoding.as_ref().unwrap();
     assert_eq!(enc.packed_id, 5);
-    assert_eq!(enc.schema.as_deref(), Some("text/plain"));
+    assert_eq!(enc.schema.as_deref(), Some(&b"text/plain"[..]));
 }
 
 #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-encoding"))]
@@ -3447,7 +3447,7 @@ fn query_loopback_propagates_err_body_with_encoding_tuple() {
         .unwrap()
         .queryables
         .register("error/path", |_q, responder| {
-            responder.reply_err(Some(4), Some("schema_v1"), b"oops");
+            responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
         });
 
     session
@@ -4230,7 +4230,7 @@ fn declare_adminspace_answers_root_get_with_local_data_json() {
                 *p.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -4836,7 +4836,7 @@ fn declare_adminspace_config_get_returns_typed_config_json() {
                 *p.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -4893,7 +4893,7 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
                 *p.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -5086,7 +5086,7 @@ fn declare_adminspace_surface_document_arrives_over_the_query_path() {
                 *b.lock().unwrap() = Some(reply.payload().to_vec());
                 *e.lock().unwrap() = reply
                     .put_encoding()
-                    .map(|(id, s)| (id, s.map(str::to_string)));
+                    .map(|(id, s)| (id, s.map(|s| String::from_utf8_lossy(s).into_owned())));
             },
             |_| {},
         )
@@ -17101,7 +17101,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
         .expect("offloaded saw it");
     assert_eq!(offloaded, inline);
     assert_eq!(inline.2.as_deref(), Some(&b"attached"[..]), "not vacuous");
-    assert_eq!(inline.4, Some((0x2d, Some("text/plain".to_string()))));
+    assert_eq!(inline.4, Some((0x2d, Some(b"text/plain".to_vec()))));
 }
 
 /// Dropping the handle undeclares the subscription: nothing is delivered after it, and a sample

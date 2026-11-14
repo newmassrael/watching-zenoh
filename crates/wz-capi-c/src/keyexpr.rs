@@ -43,7 +43,7 @@ pub(crate) struct KeyexprState {
     ///
     /// The publish path consults it to choose between an aliased Push — the
     /// bandwidth saving a declaration exists to enable — and a literal one.
-    pub(crate) mapping: Option<u64>,
+    pub(crate) mapping: Option<wz_session_core::wire_id::ExprId>,
 }
 
 impl KeyexprState {
@@ -997,7 +997,9 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr_unchecked(
 ///
 /// # Safety
 /// `ke` must be null or a valid loaned keyexpr whose handle is live.
-pub(crate) unsafe fn keyexpr_mapping(ke: *const z_loaned_keyexpr_t) -> Option<u64> {
+pub(crate) unsafe fn keyexpr_mapping(
+    ke: *const z_loaned_keyexpr_t,
+) -> Option<wz_session_core::wire_id::ExprId> {
     if ke.is_null() {
         return None;
     }

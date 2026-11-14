@@ -17590,7 +17590,7 @@ mod tests {
     /// and the closes), for a test that feeds them to a live handle one at a
     /// time.
     fn selector_packets() -> (Vec<u8>, Vec<u8>) {
-        let request = |rid: u64| {
+        let request = |rid: u32| {
             wz_codecs::lent::Request {
                 header: wz_codecs::lent::Request::default().header
                     | wz_codecs::wire_const::FLAG_N_N,
@@ -17603,7 +17603,7 @@ mod tests {
             }
             .encode_to_vec()
         };
-        let reply = |request_id: u64| {
+        let reply = |request_id: u32| {
             wz_codecs::lent::Response {
                 header: wz_codecs::lent::Response::default().header
                     | wz_codecs::wire_const::FLAG_N_N,
@@ -17627,7 +17627,7 @@ mod tests {
             }
             .encode_to_vec()
         };
-        let close_of = |request_id: u64| {
+        let close_of = |request_id: u32| {
             wz_codecs::lent::ResponseFinal {
                 request_id,
                 ..Default::default()

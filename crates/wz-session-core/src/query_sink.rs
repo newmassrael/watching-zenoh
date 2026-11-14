@@ -792,8 +792,9 @@ pub trait ReplyOut {
         self.reply_del();
         Ok(())
     }
-    /// Emit an Err-form reply carrying an optional encoding id + schema.
-    fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]);
+    /// Emit an Err-form reply carrying an optional encoding id + schema, the schema as
+    /// the bytes the wire carries.
+    fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&[u8]>, payload: &[u8]);
     /// Attach a responder identity (`zid` + entity id) to every
     /// subsequent [`Self::reply`] / [`Self::reply_del`] /
     /// [`Self::reply_err`] call.
@@ -1043,7 +1044,7 @@ mod tests {
         fn reply_del(&mut self) {
             self.dels += 1;
         }
-        fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&str>, payload: &[u8]) {
+        fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&[u8]>, payload: &[u8]) {
             self.errs += 1;
             self.last_len = payload.len();
         }
@@ -1182,7 +1183,7 @@ mod tests {
         assert_eq!(out.responder(), Some((&b"node-7"[..], 3)));
 
         out.reply_del();
-        out.reply_err(Some(1), Some("text/plain"), b"boom");
+        out.reply_err(Some(1), Some(&b"text/plain"[..]), b"boom");
         assert_eq!(out.dels, 1);
         assert_eq!(out.errs, 1);
         assert_eq!(out.last_len, 4);

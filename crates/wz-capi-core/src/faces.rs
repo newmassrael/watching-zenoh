@@ -759,7 +759,7 @@ impl QueryLeg<'_> {
 
     /// What undoes the leg issued as `rid` when its get is cancelled: its pending
     /// query, taken off the session it was issued on.
-    fn canceller(&self, rid: u64) -> Box<dyn FnOnce() + Send> {
+    fn canceller(&self, rid: wz_session_core::wire_id::RequestId) -> Box<dyn FnOnce() + Send> {
         match self {
             QueryLeg::Face(session) | QueryLeg::Local(session) => {
                 let session = (*session).clone();
@@ -5177,7 +5177,7 @@ impl SharedSession {
         destination: Locality,
         reach: QueryReach<'_>,
         fan: Option<&CancellableFan>,
-        mut issue: impl FnMut(QueryLeg<'_>) -> Option<u64>,
+        mut issue: impl FnMut(QueryLeg<'_>) -> Option<wz_session_core::wire_id::RequestId>,
     ) {
         let links = reach.links;
         let target = reach.target_peer;

@@ -293,7 +293,7 @@ mod tests {
             ));
             Ok(())
         }
-        fn reply_err(&mut self, encoding_id: Option<u32>, _schema: Option<&str>, payload: &[u8]) {
+        fn reply_err(&mut self, encoding_id: Option<u32>, _schema: Option<&[u8]>, payload: &[u8]) {
             self.errors.push((
                 encoding_id,
                 String::from_utf8(payload.to_vec()).expect("an error body is text"),

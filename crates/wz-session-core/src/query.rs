@@ -1786,7 +1786,7 @@ impl<'a> QueryResponder<'a> {
     pub fn send_err(
         &mut self,
         encoding_id: Option<u32>,
-        schema: Option<&str>,
+        schema: Option<&[u8]>,
         payload: &[u8],
     ) -> Result<(), ReplyError> {
         self.replies.stage_parts(ReplyParts {
@@ -1797,7 +1797,7 @@ impl<'a> QueryResponder<'a> {
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Err {
-                encoding: encoding_id.map(|id| (id, schema.map(str::as_bytes))),
+                encoding: encoding_id.map(|id| (id, schema)),
                 payload,
             },
         })
@@ -2066,7 +2066,7 @@ impl ReplyOut for QueryResponder<'_> {
     ) -> Result<(), ReplyError> {
         self.send_reply_keyed_del_meta(keyexpr, meta)
     }
-    fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
+    fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&[u8]>, payload: &[u8]) {
         #[cfg(feature = "query-reply-err")]
         let _ = self.send_err(encoding_id, schema, payload);
         #[cfg(not(feature = "query-reply-err"))]
@@ -4645,7 +4645,7 @@ mod tests {
     fn responder_send_err_emits_err_with_encoding_tuple() {
         let mut reg = QueryableRegistry::new();
         reg.register("error/path", |_q, responder| {
-            responder.reply_err(Some(4), Some("schema_v1"), b"oops");
+            responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
         });
 
         let mut replies = ReplyStage::new();
@@ -4793,7 +4793,7 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("error/path", |_q, responder| {
             responder.with_responder(&[0xCC; 2], 5);
-            responder.reply_err(Some(4), Some("schema_v1"), b"oops");
+            responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
         });
 
         let mut replies = ReplyStage::new();

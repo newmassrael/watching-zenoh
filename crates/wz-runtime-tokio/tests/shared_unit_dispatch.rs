@@ -606,7 +606,7 @@ fn census_reply_wire(attached: bool, del: bool) -> Vec<u8> {
 }
 
 #[cfg(all(feature = "query-reply", feature = "pubsub-put"))]
-const CENSUS_RID: u64 = 42;
+const CENSUS_RID: u32 = 42;
 
 /// [`large_allocations_to_a_kept_sample`] for a reply: drive `wire` and hand the
 /// Response to a registry whose callback RETAINS the reply it is handed, as a

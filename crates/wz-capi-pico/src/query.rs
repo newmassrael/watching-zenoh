@@ -289,7 +289,7 @@ struct QueryMarshal {
     /// The request id this query answers — the correlator a DEFERRED reply and
     /// the terminator both need, and the one piece of the query that is not
     /// reachable through any accessor.
-    rid: u64,
+    rid: wz_session_core::wire_id::RequestId,
     /// R2594 — the query's QoS, which a DEFERRED reply inherits. Like `rid` it
     /// has no pico accessor; it is carried only so the escaped responder can
     /// seed its replies from it.
@@ -1888,7 +1888,7 @@ mod tests {
     impl ReplyOut for QosTap {
         fn reply(&mut self, _payload: &[u8]) {}
         fn reply_del(&mut self) {}
-        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {}
+        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&[u8]>, _payload: &[u8]) {}
         fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
         fn clear_responder(&mut self) {}
         fn responder(&self) -> Option<(&[u8], u32)> {

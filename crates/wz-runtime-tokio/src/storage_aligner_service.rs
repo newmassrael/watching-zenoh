@@ -673,7 +673,12 @@ mod tests {
             self.plain += 1;
         }
         fn reply_del(&mut self) {}
-        fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {
+        fn reply_err(
+            &mut self,
+            _encoding_id: Option<u32>,
+            _schema: Option<&[u8]>,
+            _payload: &[u8],
+        ) {
         }
         fn reply_keyed_attached(
             &mut self,

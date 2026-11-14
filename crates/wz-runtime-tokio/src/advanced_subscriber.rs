@@ -4171,7 +4171,7 @@ mod tests {
         Arc<Mutex<Vec<u8>>>,
         TokioSession,
         AdvancedSubscriber<crate::runtime_impl::TokioRuntime>,
-        u64,
+        wz_session_core::wire_id::RequestId,
     ) {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));

@@ -78,7 +78,7 @@ pub struct RouterState {
     engine: engine::EngineState,
     /// The request ids the node's own face gives its queries, so that the replies the router
     /// tells the face find the query they answer.
-    next_request: AtomicU64,
+    next_request: std::sync::atomic::AtomicU32,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     driver: StdMutex<Option<JoinHandle<()>>>,
@@ -222,7 +222,7 @@ impl RouterState {
     /// End the query [`Self::get_numbered`] answered `id` for, now: its handlers are let go and
     /// it is told its end, without the replies that have not come. A query that has already
     /// ended is not found, and nothing happens.
-    pub fn cancel_get(&self, id: u64) {
+    pub fn cancel_get(&self, id: wz_session_core::wire_id::RequestId) {
         self.liveliness.cancel_query(id);
     }
 
@@ -235,7 +235,7 @@ impl RouterState {
         ingress: Option<ReplyIngress>,
         on_reply: ReplyHandler,
         on_final: FinalHandler,
-    ) -> Result<u64, String> {
+    ) -> Result<wz_session_core::wire_id::RequestId, String> {
         let (rid, request) = self.hold_query(keyexpr, options, ingress, on_reply, on_final)?;
         self.forwarder.local_get(&request);
         Ok(rid)
@@ -255,7 +255,7 @@ impl RouterState {
         ingress: Option<ReplyIngress>,
         on_reply: ReplyHandler,
         on_final: FinalHandler,
-    ) -> Result<u64, String> {
+    ) -> Result<wz_session_core::wire_id::RequestId, String> {
         // The value rides beside the query: a query built with a value of its own would carry
         // two, which the chain refuses.
         let mut options = options.clone();
@@ -279,7 +279,13 @@ impl RouterState {
         ingress: Option<ReplyIngress>,
         on_reply: ReplyHandler,
         on_final: FinalHandler,
-    ) -> Result<(u64, wz_session_core::wire::RequestOwned), String> {
+    ) -> Result<
+        (
+            wz_session_core::wire_id::RequestId,
+            wz_session_core::wire::RequestOwned,
+        ),
+        String,
+    > {
         use wz_session_core::request_build::{build_request_query, build_request_query_with_meta};
 
         let rid = self.next_request.fetch_add(1, Ordering::Relaxed);
@@ -799,7 +805,7 @@ pub(crate) fn open_router_blocking(
                 listen_locators,
                 liveliness: Arc::new(liveliness),
                 engine: engine::EngineState::new(),
-                next_request: AtomicU64::new(1),
+                next_request: std::sync::atomic::AtomicU32::new(1),
                 shutdown,
                 stop,
                 driver: StdMutex::new(Some(handle)),

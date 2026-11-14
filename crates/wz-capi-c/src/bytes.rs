@@ -659,7 +659,7 @@ pub(crate) unsafe fn take_query_value(
 pub(crate) fn publish_outbound(
     shared: &wz_capi_core::faces::SharedSession,
     keyexpr: &str,
-    mapping: Option<u64>,
+    mapping: Option<wz_session_core::wire_id::ExprId>,
     payload: Outbound,
     opts: &wz_runtime_tokio::session::PublishOptions,
 ) -> Result<usize, wz_capi_core::faces::FanoutError> {
