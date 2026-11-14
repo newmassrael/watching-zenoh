@@ -646,6 +646,75 @@ static int check_selection_since_door(void) {
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null selector rc=%d", rc);
     rc = wz_dissect_live_selection_since(h, "bytes >= 0", 0, NULL);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
+
+    /* (ABI 58) -- the two doors that read samples by declarations. KeepAlive
+     * rows carry no sample, so the words are the older doors' words; what the
+     * declarations decide is held where samples can be built (the Rust tests). */
+    {
+        char *older = NULL;
+        char *declaring = NULL;
+
+        rc = wz_dissect_live_selection(h, "bytes >= 0", &older);
+        CHECK(rc == WZ_DISSECT_OK && older != NULL, "selection rc=%d", rc);
+        rc = wz_dissect_live_selection_declaring(h, "", "bytes >= 0", &declaring);
+        CHECK(rc == WZ_DISSECT_OK && declaring != NULL,
+              "selection_declaring rc=%d", rc);
+        CHECK(strcmp(older, declaring) == 0,
+              "rows that carry no sample read the same words:\n%s\n%s", older,
+              declaring);
+        wz_dissect_string_free(declaring);
+        wz_dissect_string_free(older);
+        declaring = NULL;
+
+        /* The same selector under a declaration text is another memory: the
+         * one memory the handle keeps was the no-text one, so this call
+         * begins its own. */
+        rc = wz_dissect_live_selection_since_declaring(h, "", "bytes >= 0", 0,
+                                                       &declaring);
+        CHECK(rc == WZ_DISSECT_OK && declaring != NULL,
+              "selection_since_declaring rc=%d", rc);
+        CHECK(strstr(declaring,
+                     "\"document\":{\"name\":\"selection_since\",\"revision\":5") !=
+                  NULL,
+              "the since document under declarations: %s", declaring);
+        CHECK(strstr(declaring, "\"continued\":false") != NULL,
+              "a declaration text begins a memory of its own: %s", declaring);
+        wz_dissect_string_free(declaring);
+        declaring = NULL;
+        rc = wz_dissect_live_selection_since_declaring(h, "", "bytes >= 0", 0,
+                                                       &declaring);
+        CHECK(rc == WZ_DISSECT_OK && declaring != NULL &&
+                  strstr(declaring, "\"continued\":true") != NULL,
+              "the same selector and text find their memory: rc=%d %s", rc,
+              declaring ? declaring : "(null)");
+        wz_dissect_string_free(declaring);
+        declaring = NULL;
+
+        /* Refusals: no string with any of them. */
+        rc = wz_dissect_live_selection_declaring(h, "not a declaration",
+                                                 "bytes >= 0", &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_DECLARATION && declaring == NULL,
+              "a refused text is ERR_DECLARATION, rc=%d", rc);
+        rc = wz_dissect_live_selection_since_declaring(h, "not a declaration",
+                                                       "bytes >= 0", 0, &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_DECLARATION && declaring == NULL,
+              "a refused text on the since door is ERR_DECLARATION, rc=%d", rc);
+        rc = wz_dissect_live_selection_declaring(h, "", "kind ==", &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_SELECTOR && declaring == NULL,
+              "a bad selector is ERR_SELECTOR, rc=%d", rc);
+        rc = wz_dissect_live_selection_since_declaring(h, "", "kind ==", 0,
+                                                       &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_SELECTOR && declaring == NULL,
+              "a bad selector on the since door is ERR_SELECTOR, rc=%d", rc);
+        rc = wz_dissect_live_selection_declaring(h, NULL, "bytes >= 0", &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null declarations rc=%d", rc);
+        rc = wz_dissect_live_selection_declaring(NULL, "", "bytes >= 0", &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle rc=%d", rc);
+        rc = wz_dissect_live_selection_since_declaring(h, "", NULL, 0, &declaring);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null selector rc=%d", rc);
+        rc = wz_dissect_live_selection_since_declaring(h, "", "bytes >= 0", 0, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
+    }
     wz_dissect_live_close(h);
     return 0;
 }

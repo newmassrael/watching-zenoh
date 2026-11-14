@@ -119,6 +119,8 @@ mod e2e_tests;
 #[cfg(feature = "network-codecs")]
 mod e2e_plane;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod e2e_selection_tests;
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod e2e_selector_tests;
 pub mod e2e_words;
 /// R311y615 (§1.1f) — the second ANALYSIS plane: Query/Reply exchanges and

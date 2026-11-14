@@ -367,6 +367,7 @@ fn selection_of(d: &Dissection, selector: &str) -> String {
     crate::selection_json::selection_json_where_coordinated(
         d,
         &Filter::parse(selector).expect("parses"),
+        None,
         &EveryListNumbered,
     )
 }

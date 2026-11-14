@@ -497,17 +497,22 @@ pub(crate) fn for_each_row_after<'d>(
 /// `coordinates` is the caller's numbering, exactly as
 /// `fields_json_where_coordinated` takes it: this crate renders rows and does
 /// not mint the ids a handle in another crate publishes.
+///
+/// `declarations` is what the payload plane reads a sample by, as the field
+/// document reads it: the key a declaration fixes for an id the wire did not
+/// answer, and the profile rules an `e2e` term is decided by. With none, every
+/// `e2e` term over a published sample or a reply carrying a put is `undecided`.
 pub fn selection_json_where_coordinated(
     d: &crate::Dissection,
     filter: &crate::filter::Filter,
+    declarations: Option<&crate::payload::formats::FormatMap<'_>>,
     coordinates: &dyn RowCoordinates,
 ) -> String {
     let grouping = crate::node::session_grouping(d);
     // No question, no walk: an empty selector is the identity and judges nothing,
     // so it pays nothing either. The rule lives in `judged_by`, which the field
-    // document asks too. Handed no declarations: an `e2e` term is undecided
-    // over a sample here.
-    let verdicts = judged_by(d, filter, &grouping, Some(coordinates), None);
+    // document asks too.
+    let verdicts = judged_by(d, filter, &grouping, Some(coordinates), declarations);
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::SELECTION, &mut out);
     out.push_str(",\"rows\":[");
@@ -610,11 +615,13 @@ struct SelectionPlanes {
 
 impl SelectionFold {
     /// Every plane empty, against `filter` (numbered by the caller's list ids)
-    /// and `grouping`: what [`RowJudgement`] begins its walk with.
+    /// and `grouping`, the payload plane reading samples by `declarations`:
+    /// what [`RowJudgement`] begins its walk with.
     fn begin(
         d: &crate::Dissection,
         filter: &crate::filter::Filter,
         grouping: &crate::node::SessionGrouping,
+        declarations: Option<&crate::payload::formats::FormatMap<'_>>,
     ) -> Self {
         if filter.is_any() {
             return Self {
@@ -631,12 +638,16 @@ impl SelectionFold {
                 ambiguities: resolved.into_ambiguities(),
             };
         }
+        let mut payloads = crate::payload::PayloadFold::begin(d, filter, grouping);
+        if let Some(map) = declarations {
+            payloads.read_by(map);
+        }
         Self {
             judged: true,
             planes: Some(SelectionPlanes {
                 filter: resolved.filter().clone(),
                 origin: d.capture_origin_ms(),
-                payloads: crate::payload::PayloadFold::begin(d, filter, grouping),
+                payloads,
                 exchanges: crate::exchange::ExchangeFold::begin(d, filter, grouping),
                 rows: crate::row_plane::RowPlane::default(),
             }),
@@ -664,19 +675,19 @@ impl SelectionFold {
     /// is asked again only while its list holds it. What the planes keep that is
     /// not a row's (the exchanges still open) stays.
     fn forget_rows_not_held(&mut self, d: &crate::Dissection) {
+        let first = first_held(d);
+        self.forget_rows(&|key: &RowKey| is_held(&first, key));
+    }
+
+    /// Give up what the planes hold of the rows `keep` says no to. What the
+    /// planes keep that is not a row's (the exchanges still open) stays.
+    fn forget_rows(&mut self, keep: &impl Fn(&RowKey) -> bool) {
         let Some(p) = self.planes.as_mut() else {
             return;
         };
-        let first = first_held(d);
-        let keep = |key: &RowKey| {
-            let (list, _, produced) = key.parts();
-            first
-                .get(list)
-                .is_some_and(|first| produced as u64 >= *first)
-        };
-        p.payloads.forget_rows(&keep);
-        p.exchanges.forget_rows(&keep);
-        p.rows.forget_rows(&keep);
+        p.payloads.forget_rows(keep);
+        p.exchanges.forget_rows(keep);
+        p.rows.forget_rows(keep);
     }
 
     /// Who says each row's word now, with `open` the exchanges still open judged
@@ -755,6 +766,47 @@ impl OrderedFold for SelectionFold {
     }
 }
 
+/// The word of a row read by a memory whose planes went on: what was said of a
+/// row whose word was final when it was said, which the planes have given up,
+/// and the planes' word for every other row (one that arrived since, one whose
+/// exchange was open at the last call, one with no number to remember it by).
+struct Remembered<'j> {
+    planes: &'j dyn JudgesRows,
+    said: &'j Said,
+    /// The rows whose exchange was open at the last call: the planes kept them,
+    /// and what was said of them may have moved since.
+    kept_open: &'j BTreeSet<RowKey>,
+    coordinates: &'j dyn RowCoordinates,
+}
+
+impl JudgesRows for Remembered<'_> {
+    fn word(&self, key: &RowKey) -> RowVerdict {
+        if !self.kept_open.contains(key) {
+            if let Some(word) = said_of(self.said, self.coordinates, key) {
+                return word;
+            }
+        }
+        self.planes.word(key)
+    }
+}
+
+/// What was said of the row `key`, by the number `coordinates` gives it.
+fn said_of(said: &Said, coordinates: &dyn RowCoordinates, key: &RowKey) -> Option<RowVerdict> {
+    let (list, _, produced) = key.parts();
+    coordinates
+        .row_seq(list, produced as u64)
+        .and_then(|seq| said.get(seq))
+}
+
+/// Whether the list of `key` still holds its row, by the produced-index of each
+/// list's oldest row ([`first_held`]).
+fn is_held(first: &[u64], key: &RowKey) -> bool {
+    let (list, _, produced) = key.parts();
+    first
+        .get(list)
+        .is_some_and(|first| produced as u64 >= *first)
+}
+
 /// The word of a row read of a [`SelectionFold`]'s planes: `unjudged` for every
 /// row when the selector was ambiguous and no plane was made.
 struct FoldJudge<'p> {
@@ -805,8 +857,9 @@ pub struct SelectionWork {
     pub continued: u64,
     /// Calls that read every row.
     pub whole: u64,
-    /// Times the planes gave up the rows no list held any more, instead of
-    /// beginning again.
+    /// Times the planes gave up verdicts nothing will ask them for again (of the
+    /// rows no list holds, and of the rows whose word is final and remembered),
+    /// instead of beginning again.
     pub forgets: u64,
 }
 
@@ -820,6 +873,12 @@ pub struct SelectionWork {
 /// only the new rows would hold every earlier row at the word it was first given.
 /// Remembering what was said is what lets the next call say what changed, and it
 /// costs a word per row the handle still holds, not a copy of any row.
+///
+/// The words are also what a later call reads of a row whose word was final when
+/// it was said, so the planes give up their verdict of such a row at the end of
+/// the call that said it: between calls they hold only the rows whose exchange is
+/// open and the rows with no number, and a call that reads every row reads the
+/// others from here.
 #[derive(Debug, Default)]
 pub struct SelectionMemory {
     said: Said,
@@ -836,10 +895,17 @@ pub struct SelectionMemory {
     /// ids: a `flow` term compares those ids, so another numbering is another
     /// selector.
     asked: Option<crate::filter::Filter>,
+    /// The declaration text the payload plane was begun reading samples by, or
+    /// `None` when it was handed none: another text can decide another word for
+    /// a sample, so it begins the planes again as another selector does.
+    declared: Option<String>,
     fold: crate::ordered_fold::Resumable<SelectionFold>,
     /// The entries the planes kept when they last gave up the rows no list
     /// held, or were begun: they give them up again when they have doubled.
     kept_after_forget: usize,
+    /// The rows whose exchange was open when the last call ended: the planes
+    /// kept their verdicts, because their word could still move.
+    kept_open: BTreeSet<RowKey>,
     /// Never give up a row nor begin again for what the planes keep: the memory
     /// a test holds one that gives them up against.
     #[cfg(test)]
@@ -938,19 +1004,83 @@ impl SelectionMemory {
         }
         fold.kept_entries() > outgrown
     }
+
+    /// Let the planes give up the verdict of every row nothing will ask them for
+    /// again, once a call has said its words: a row no list holds, and a held
+    /// row whose word is final (its exchange is not among `open`) and is
+    /// remembered by its number. A later call reads such a row from what was
+    /// said ([`Remembered`]), so what the planes keep of the held rows is only
+    /// the words that can still move and the rows with no number.
+    fn give_up_what_was_said(
+        &mut self,
+        d: &crate::Dissection,
+        coordinates: &dyn RowCoordinates,
+        open: BTreeSet<RowKey>,
+    ) {
+        if self.gives_rows_up() {
+            let first = first_held(d);
+            let said = &self.said;
+            let keep = |key: &RowKey| {
+                is_held(&first, key)
+                    && (open.contains(key) || said_of(said, coordinates, key).is_none())
+            };
+            if let Some(fold) = self.fold.fold_mut() {
+                let before = fold.kept_entries();
+                fold.forget_rows(&keep);
+                let after = fold.kept_entries();
+                if after < before {
+                    self.work.forgets += 1;
+                }
+                self.kept_after_forget = after;
+            }
+        }
+        self.kept_open = open;
+    }
+
+    /// Whether the planes give up the rows nothing will ask them for: always,
+    /// but in the memory a test holds one that does against.
+    fn gives_rows_up(&self) -> bool {
+        #[cfg(test)]
+        if self.keeps_everything {
+            return false;
+        }
+        true
+    }
+}
+
+/// The declarations a selection's payload plane reads samples by, and the text
+/// they were declared from, which is what tells one memory's from another's.
+#[derive(Clone, Copy)]
+pub struct Declared<'a, 'm> {
+    /// The declarations, parsed from `text`.
+    pub map: &'a crate::payload::formats::FormatMap<'m>,
+    /// The text `map` was declared from, compared as given.
+    pub text: &'a str,
+}
+
+/// What a selection memory is for: the selector's text and the declaration
+/// text its words were judged under, or `None` for a door handed none. An empty
+/// declaration text is not `None`: it declares that no rule covers any key, so
+/// an `e2e` term reads `none` under it where it reads `undecided` under none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryKey {
+    selector: String,
+    declarations: Option<String>,
 }
 
 /// The [`SelectionMemory`] of each selector a handle has been asked under, up to
 /// a count, the most recently used kept.
 ///
-/// A selection memory is for ONE selector: it holds the words that selector said.
-/// A caller that alternates between selectors therefore needs one per selector,
+/// A selection memory is for ONE selector under ONE declaration text: it holds
+/// the words that selector said when samples were read by those declarations. A
+/// caller that alternates between selectors therefore needs one per selector,
 /// or every change of selector empties the memory and the next call writes every
 /// row as new. With one memory, which is the default, a change of selector does
-/// exactly that. A selector is told apart by its text, as it always was.
+/// exactly that, and so does a change of declaration text. Each is told apart by
+/// its text, as the selector always was.
 #[derive(Debug, Default)]
 pub struct SelectionMemories {
-    slots: crate::bounded_slots::BoundedSlots<String, SelectionMemory>,
+    slots: crate::bounded_slots::BoundedSlots<MemoryKey, SelectionMemory>,
 }
 
 impl SelectionMemories {
@@ -966,11 +1096,19 @@ impl SelectionMemories {
         self.slots.set_capacity(n)
     }
 
-    /// The memory of `selector`, made empty if it has none, and marked the most
-    /// recently used.
-    pub fn for_selector(&mut self, selector: &str) -> &mut SelectionMemory {
-        self.slots
-            .touch(&String::from(selector), SelectionMemory::default)
+    /// The memory of `selector` judged under the declaration text
+    /// `declarations` (`None` for none), made empty if it has none, and marked
+    /// the most recently used.
+    pub fn for_selector(
+        &mut self,
+        selector: &str,
+        declarations: Option<&str>,
+    ) -> &mut SelectionMemory {
+        let key = MemoryKey {
+            selector: String::from(selector),
+            declarations: declarations.map(String::from),
+        };
+        self.slots.touch(&key, SelectionMemory::default)
     }
 
     /// How many selectors have a memory now.
@@ -1076,10 +1214,13 @@ fn first_held(d: &crate::Dissection) -> Vec<u64> {
 /// is not a reason: the planes go on across it, as the field document's pairing
 /// does, so a word given while a message was held is not taken back when a
 /// ceiling takes that message (a request whose final arrives after the request
-/// was trimmed still closes it). What the planes keep of the rows a ceiling took
-/// is given up once it has doubled, in one pass over what they keep, so a
-/// handle under a ceiling holds the planes of the rows it holds and does not
-/// begin them again. Every row is read again, as before, when
+/// was trimmed still closes it). What the planes keep of a row nothing will ask
+/// them for again (one a ceiling took, or one whose word was final and was said)
+/// is given up at the end of the call, and the rows a ceiling took also before a
+/// call whenever what is kept has doubled, so a handle under a ceiling holds the
+/// planes of the rows whose word can still move and does not begin them again.
+/// A row whose word was given up is read from the memory's words when every row
+/// is read and the planes went on. Every row is read again, as before, when
 /// the planes began again, when the cursor is below the `through_seq` the last
 /// document gave, when the last document wrote a row with no number, and when the
 /// rows that arrived do not all sort after the ones read (a segment held behind a
@@ -1134,9 +1275,19 @@ fn first_held(d: &crate::Dissection) -> Vec<u64> {
 /// consumer must act on: no row at or below the cursor is compared and none
 /// is written again, so a word the consumer holds for such a row may be stale, and
 /// the way to be right is to ask that selector again from 0.
+///
+/// # The declarations
+///
+/// `declarations` is what the payload plane reads a sample by, as
+/// [`selection_json_where_coordinated`] takes it, with the text it was declared
+/// from. The words depend on it (an `e2e` term is decided under a profile rule
+/// and `undecided` with no declarations), so a memory is for one text: another
+/// text, or none where there was one, begins the planes again and compares
+/// every row, as another selector does.
 pub fn selection_since_json_coordinated(
     d: &crate::Dissection,
     filter: &crate::filter::Filter,
+    declarations: Option<Declared<'_, '_>>,
     coordinates: &dyn RowCoordinates,
     since: SelectionWindow,
     memory: &mut SelectionMemory,
@@ -1153,10 +1304,16 @@ pub fn selection_since_json_coordinated(
         let lists = d.message_lists_with_origin().count();
         filter.numbered_by(lists, &|list| coordinates.list_id(list))
     };
-    if memory.asked.as_ref() != Some(&numbered) || memory.keep_to_what_is_held(d) {
+    let text = declarations.map(|declared| declared.text);
+    if memory.asked.as_ref() != Some(&numbered)
+        || memory.declared.as_deref() != text
+        || memory.keep_to_what_is_held(d)
+    {
         memory.fold = crate::ordered_fold::Resumable::default();
         memory.asked = Some(numbered.clone());
+        memory.declared = text.map(String::from);
     }
+    let map = declarations.map(|declared| declared.map);
     let restarts = memory.work.fold.restarts;
     let fold = memory
         .fold
@@ -1165,7 +1322,7 @@ pub fn selection_since_json_coordinated(
             &grouping,
             &mut memory.work.fold,
             None,
-            || SelectionFold::begin(d, &numbered, &grouping),
+            || SelectionFold::begin(d, &numbered, &grouping, map),
             None,
         )
         .expect("a walk nobody can stop runs to its end");
@@ -1176,7 +1333,20 @@ pub fn selection_since_json_coordinated(
 
     let open = fold.planes.as_ref().map(|p| p.exchanges.open_judged());
     let judge = fold.judge(open.as_ref());
-    let verdicts = judge.as_ref().map(|j| j as &dyn JudgesRows);
+    let planes = judge.as_ref().map(|j| j as &dyn JudgesRows);
+    // Planes that went on gave up, at the end of every call, the rows whose word
+    // was final and was said (see below), so those rows are read from what was
+    // said. Planes that began again judged every held row afresh.
+    let remembered = planes.filter(|_| resumed).map(|planes| Remembered {
+        planes,
+        said: &memory.said,
+        kept_open: &memory.kept_open,
+        coordinates,
+    });
+    let verdicts = match &remembered {
+        Some(remembered) => Some(remembered as &dyn JudgesRows),
+        None => planes,
+    };
     let open_rows: BTreeSet<RowKey> = fold
         .planes
         .as_ref()
@@ -1245,7 +1415,7 @@ pub fn selection_since_json_coordinated(
         None => for_each_row_after(d, verdicts, coordinates, None, &mut visit)
             .expect("rows enumerated from the first have nothing before them to disagree with"),
     };
-    if let (false, Some(left), Some(judge)) = (whole, &left, verdicts) {
+    if let (false, Some(left), Some(judge)) = (whole, &left, planes) {
         // The rows written before whose word can still move: the requests of
         // exchanges that were open. Each is asked again, while its list still
         // holds it: a row a ceiling has taken is in no document, whatever number
@@ -1312,6 +1482,7 @@ pub fn selection_since_json_coordinated(
         through_seq: since.through_seq,
         unsettled,
     });
+    memory.give_up_what_was_said(d, coordinates, open_rows);
     // Read BEFORE it is set: whether this call found a memory an earlier call
     // had written, which is the only answer the caller cannot get anywhere else.
     let continued = core::mem::replace(&mut memory.written, true);
@@ -1591,6 +1762,7 @@ pub(crate) mod tests {
         selection_since_json_coordinated(
             d,
             &filter,
+            None,
             &EveryRowNumbered,
             SelectionWindow {
                 after_seq: after,
@@ -1729,7 +1901,13 @@ pub(crate) mod tests {
             }
         };
         let ask = |memories: &mut SelectionMemories, selector: &str, after: u64| {
-            since(&d, n, selector, after, memories.for_selector(selector))
+            since(
+                &d,
+                n,
+                selector,
+                after,
+                memories.for_selector(selector, None),
+            )
         };
 
         let mut one = SelectionMemories::default();
@@ -1933,7 +2111,7 @@ pub(crate) mod tests {
     /// `Y` yes, `N` no, `?` undecided, `U` unjudged.
     pub(crate) fn letters(d: &Dissection, selector: &str) -> String {
         let filter = crate::filter::Filter::parse(selector).expect("the selector parses");
-        let doc = selection_json_where_coordinated(d, &filter, &EveryListNumbered);
+        let doc = selection_json_where_coordinated(d, &filter, None, &EveryListNumbered);
         doc.split("\"selected\":\"")
             .skip(1)
             .map(|rest| match rest.split('"').next() {
@@ -2354,13 +2532,13 @@ mod memories_tests {
 
     fn said(memories: &mut SelectionMemories, selector: &str, row: u64) {
         memories
-            .for_selector(selector)
+            .for_selector(selector, None)
             .said
             .insert(row, RowVerdict::Yes);
     }
 
     fn held(memories: &mut SelectionMemories, selector: &str) -> usize {
-        memories.for_selector(selector).len()
+        memories.for_selector(selector, None).len()
     }
 
     /// One memory is the default and a second selector empties it, which is how a

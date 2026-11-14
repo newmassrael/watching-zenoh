@@ -431,9 +431,7 @@ pub struct FieldsMemory {
     /// so a `ResponseFinal` row can name the request it closed without the call
     /// folding the whole capture again. It depends on no declaration text, so a
     /// change of text does not empty it.
-    #[cfg(feature = "network-codecs")]
     pairing: crate::ordered_fold::Resumable<crate::exchange::ExchangeFold>,
-    #[cfg(feature = "network-codecs")]
     pairing_work: crate::FoldStats,
     saved: Option<FieldsSaved>,
     /// What the walker left: the keyexpr table, and for each list where it
@@ -479,7 +477,6 @@ pub struct FieldsStats {
     pub messages_walked: u64,
 }
 
-#[cfg(feature = "network-codecs")]
 impl FieldsMemory {
     /// What the memory holds that follows the row count: the pairing fold's
     /// verdict for every row that ends an exchange, and the digest of every row
@@ -566,7 +563,6 @@ impl FieldsMemory {
     /// and what it gives up is only the pairing of finals whose requests the
     /// ceiling had already taken (a row written after it then names no request, as
     /// a reader that began at the front would have written it).
-    #[cfg(feature = "network-codecs")]
     fn pairing_outgrew(&self, d: &crate::Dissection) -> bool {
         let Some(fold) = self.pairing.fold() else {
             return false;
@@ -624,17 +620,13 @@ pub fn fields_json_since_remembering_progress(
 ) -> Option<String> {
     if memory.key.as_deref() != Some(key) {
         let nodes = core::mem::take(&mut memory.nodes);
-        #[cfg(feature = "network-codecs")]
         let pairing = core::mem::take(&mut memory.pairing);
-        #[cfg(feature = "network-codecs")]
         let pairing_work = memory.pairing_work;
         *memory = FieldsMemory {
             key: Some(String::from(key)),
             trees: memory.trees,
             nodes,
-            #[cfg(feature = "network-codecs")]
             pairing,
-            #[cfg(feature = "network-codecs")]
             pairing_work,
             ..FieldsMemory::default()
         };
@@ -811,13 +803,10 @@ pub fn fields_json_since_remembering_progress(
     // or of every message into a new one, and a list decodes a message each time it
     // is read. When the pairing's walk takes exactly those messages, it hands each
     // to the absorption as well, so the call decodes it once.
-    #[cfg(feature = "network-codecs")]
     if memory.pairing_outgrew(d) {
         memory.pairing = Default::default();
     }
-    #[cfg(feature = "network-codecs")]
     let mut absorbed_anew = CaptureTables::default();
-    #[cfg(feature = "network-codecs")]
     let (pairing_table, absorbed) = {
         let FieldsMemory {
             pairing,
@@ -869,12 +858,7 @@ pub fn fields_json_since_remembering_progress(
             }
         }
     };
-    #[cfg(not(feature = "network-codecs"))]
-    let absorbed = false;
-    #[cfg(feature = "network-codecs")]
     let closings: Option<&PairingTable> = Some(&pairing_table);
-    #[cfg(not(feature = "network-codecs"))]
-    let closings: Option<&PairingTable> = None;
 
     let mut revised = alloc::collections::BTreeSet::new();
     if memory.saved.is_some() && !memory.digests.is_empty() {
@@ -955,10 +939,7 @@ pub fn fields_json_since_remembering_progress(
     };
     // A walk that begins with a new table takes the one the pairing's walk filled,
     // when it did.
-    #[cfg(feature = "network-codecs")]
     let absorbed_anew = (!keep_table && absorbed).then_some(absorbed_anew);
-    #[cfg(not(feature = "network-codecs"))]
-    let absorbed_anew = None;
     let document = fields_json_selected(
         d,
         capture,
@@ -1411,13 +1392,9 @@ struct RowAttachments<'a> {
     trees: Trees,
 }
 
-/// What names the request a `ResponseFinal` row closed. Without the record plane
-/// there is no pairing to read, and the type says so by being empty.
-#[cfg(feature = "network-codecs")]
+/// What names the request a `ResponseFinal` row closed: the exchange plane's
+/// pairing.
 type PairingTable = crate::exchange::ExchangeTable;
-/// See above.
-#[cfg(not(feature = "network-codecs"))]
-type PairingTable = ();
 
 /// What the field walker keeps of ONE message list between calls: where it
 /// stopped and the folds it left, so a walk that continues visits only the
@@ -1724,9 +1701,7 @@ fn fields_json_selected(
     // document with neither folds the exchange plane once under the identity
     // selector. Whichever it is, it is the exchange plane's own pairing and not a
     // second opinion of this renderer.
-    #[cfg(feature = "network-codecs")]
     let own_pairing;
-    #[cfg(feature = "network-codecs")]
     let closings: Option<&PairingTable> =
         match closings.or_else(|| verdicts.and_then(RowJudgement::exchanges)) {
             Some(table) => Some(table),
@@ -1736,8 +1711,6 @@ fn fields_json_selected(
                 Some(&own_pairing)
             }
         };
-    #[cfg(not(feature = "network-codecs"))]
-    let _ = closings;
     // A map with no rules answers `NoRules` for every message, so it renders
     // nothing either way -- folded here so the row renderers ask one question
     // rather than two.
@@ -1928,7 +1901,6 @@ fn fields_json_selected(
                 progress,
                 zids: lists.stream.get(i).and_then(|&list| grouping.zids(list)),
                 sink,
-                #[cfg(feature = "network-codecs")]
                 closings: RowClosings::of(closings, lists.stream.get(i).copied()),
                 requests: list_requests(
                     list_requests_of,
@@ -1982,7 +1954,6 @@ fn fields_json_selected(
                 progress,
                 zids: lists.datagram.get(i).and_then(|&list| grouping.zids(list)),
                 sink,
-                #[cfg(feature = "network-codecs")]
                 closings: RowClosings::of(closings, lists.datagram.get(i).copied()),
                 requests: list_requests(
                     list_requests_of,
@@ -2982,7 +2953,6 @@ fn push_datagram_flow(
 /// The key a message head names is resolved against the tables as they stand
 /// after the flow's last row (or a key a declaration fixed); its id and suffix
 /// are written beside it, as on a `carried` entry.
-#[cfg(feature = "reassembly")]
 fn push_ended_chains(
     list: &crate::messages::MessageList,
     spaces: &crate::agg::KeyexprSpaces,
@@ -3067,20 +3037,8 @@ fn push_ended_chains(
     out.push(']');
 }
 
-/// A build without `reassembly` routes no fragment, so no chain ended: the
-/// array is empty, which is the true answer.
-#[cfg(not(feature = "reassembly"))]
-fn push_ended_chains(
-    _list: &crate::messages::MessageList,
-    _spaces: &crate::agg::KeyexprSpaces,
-    out: &mut String,
-) {
-    out.push_str(",\"ended_chains\":[]");
-}
-
 /// Every integer of an `ended_chains` entry that is a wire value, through the
 /// shared integer door: `first_sn`, `last_sn` and `keyexpr_id`.
-#[cfg(feature = "reassembly")]
 fn push_ended_integer(value: u64, out: &mut String) {
     wz_session_core::json::u64_into(value, out);
 }
@@ -3544,7 +3502,6 @@ fn judge_unwritten_row(row: RowWalk<'_>) {
             }
         }
     }
-    #[cfg(feature = "reassembly")]
     if let Some(wz_session_core::passive::Carried::Reassembled { joined, .. }) = carried {
         for record in &wz_session_core::dissect::dissect_batch(joined, 0).records {
             let keyexpr = crate::payload_decode::subtree_keyexpr_outcome(record, at);
@@ -3557,8 +3514,6 @@ fn judge_unwritten_row(row: RowWalk<'_>) {
             );
         }
     }
-    #[cfg(not(feature = "reassembly"))]
-    let _ = carried;
 }
 
 fn push_declined(why: &str, out: &mut String) {
@@ -4218,11 +4173,7 @@ fn push_row_header_facts(row: &wz_session_core::dissect::Field, out: &mut String
 /// of a parsed message is that message. Not by index alone, because the two
 /// readers stop at different places when a record will not decode, and an
 /// index would then pair an entry with a message it is not.
-///
-/// Without `network-codecs` there is no census to size what the join finds, so
-/// the fields are carried and not read.
 #[derive(Clone, Copy)]
-#[cfg_attr(not(feature = "network-codecs"), allow(dead_code))]
 struct SessionBatch<'a> {
     parse: &'a wz_session_core::network_message::BatchParse,
     /// Where offset 0 of `parse.spans` sits in the walk's coordinates.
@@ -4258,14 +4209,12 @@ impl<'a> SessionBatch<'a> {
 
     /// The batch a completed chain's records are, walked from offset 0 of the
     /// joined buffer the session parsed.
-    #[cfg(feature = "reassembly")]
     fn joined(parse: &'a wz_session_core::network_message::BatchParse) -> Self {
         Self { parse, base: 0 }
     }
 
     /// The parsed message at the walked record's place, or `None` when the
     /// session parsed none there.
-    #[cfg(feature = "network-codecs")]
     fn message_at(
         &self,
         record: &wz_session_core::dissect::Field,
@@ -4327,39 +4276,30 @@ fn push_payload_size(
     record: Option<&wz_session_core::dissect::Field>,
     out: &mut String,
 ) {
+    use crate::agg::PayloadSize;
     out.push_str(",\"payload_size\":");
-    #[cfg(feature = "network-codecs")]
-    {
-        use crate::agg::PayloadSize;
-        let size = record
-            .zip(session)
-            .and_then(|(record, session)| session.message_at(record))
-            .and_then(crate::agg::payload_size);
-        let Some(size) = size else {
-            out.push_str("null");
-            return;
-        };
-        out.push_str("{\"size_verdict\":");
-        escape_into(size.name(), out);
-        // Both numbers on every word, `null` where the word gives none, so the
-        // word decides the values and not which keys arrive.
-        let (bytes, at_most) = match size {
-            PayloadSize::Measured(n) => (Some(n), None),
-            PayloadSize::Elsewhere => (None, None),
-            PayloadSize::Unresolved { at_most } => (None, Some(at_most)),
-        };
-        out.push_str(",\"bytes\":");
-        push_opt_u64(bytes, out);
-        out.push_str(",\"at_most_bytes\":");
-        push_opt_u64(at_most, out);
-        out.push('}');
-    }
-    #[cfg(not(feature = "network-codecs"))]
-    {
-        // Without the record plane there is no census to size anything.
-        let _ = (session, record);
+    let size = record
+        .zip(session)
+        .and_then(|(record, session)| session.message_at(record))
+        .and_then(crate::agg::payload_size);
+    let Some(size) = size else {
         out.push_str("null");
-    }
+        return;
+    };
+    out.push_str("{\"size_verdict\":");
+    escape_into(size.name(), out);
+    // Both numbers on every word, `null` where the word gives none, so the
+    // word decides the values and not which keys arrive.
+    let (bytes, at_most) = match size {
+        PayloadSize::Measured(n) => (Some(n), None),
+        PayloadSize::Elsewhere => (None, None),
+        PayloadSize::Unresolved { at_most } => (None, Some(at_most)),
+    };
+    out.push_str(",\"bytes\":");
+    push_opt_u64(bytes, out);
+    out.push_str(",\"at_most_bytes\":");
+    push_opt_u64(at_most, out);
+    out.push('}');
 }
 
 /// The `body` key of one `carried` entry, after its `message`: the name of the
@@ -4536,11 +4476,8 @@ fn carried_state(carried: &wz_session_core::passive::Carried) -> CarriedState {
         Carried::Nothing => CarriedState::Nothing,
         Carried::Batch(_) => CarriedState::Batch,
         Carried::Undecompressible => CarriedState::Undecompressible,
-        #[cfg(feature = "reassembly")]
         Carried::Fragment(_) => CarriedState::Fragment,
-        #[cfg(feature = "reassembly")]
         Carried::Reassembled { .. } => CarriedState::Reassembled,
-        #[cfg(feature = "reassembly")]
         Carried::FragmentWithoutResolution => CarriedState::FragmentWithoutResolution,
     }
 }
@@ -4553,13 +4490,11 @@ fn carried_state(carried: &wz_session_core::passive::Carried) -> CarriedState {
 /// chain below visits every word without a written list, so a state added here
 /// fails at `cargo build` rather than at review.
 ///
-/// ⚠ NOT `#[cfg]`-gated, while [`carried_state`]'s match arms are. The six
-/// words are what this DOCUMENT can ever report, and a consumer switching on
-/// one must handle all six however the producer was built — a vocabulary that
-/// shrank with the emitter's feature set would make "this build cannot say
-/// `reassembled`" and "this capture had no chains" the same answer, which is
-/// the class this whole object exists to separate.
-#[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
+/// The six words are what this DOCUMENT can ever report, and a consumer
+/// switching on one must handle all six — a vocabulary that shrank with the
+/// emitter's feature set would make "this build cannot say `reassembled`" and
+/// "this capture had no chains" the same answer, which is the class this whole
+/// object exists to separate.
 #[derive(Clone, Copy)]
 enum CarriedState {
     Batch,
@@ -4632,10 +4567,6 @@ impl CarriedState {
 /// chain's records at the fragment that completed it, which is this row, in the
 /// order of this array; a fragment row carries no records of its own, so the
 /// record's place here is its place in the pairing.
-// `at` resolves the keys of a reassembled batch's records, `declarations`
-// decodes their payloads and `closes` pairs them; all exist only with
-// `reassembly`.
-#[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
 fn push_above_transport(
     carried: Option<&wz_session_core::passive::Carried>,
     at: KeyexprAt<'_>,
@@ -4652,7 +4583,6 @@ fn push_above_transport(
     };
     out.push_str("{\"carried_state\":");
     escape_into(carried_state(carried).name(), out);
-    #[cfg(feature = "reassembly")]
     if let wz_session_core::passive::Carried::Reassembled { joined, batch } = carried {
         let walked = wz_session_core::dissect::dissect_batch(joined, 0);
         // Walked from offset 0 of the buffer the session parsed, so the two
@@ -4726,9 +4656,6 @@ fn push_above_transport(
         }
         out.push(']');
     }
-    // Only a completed chain carries trees here.
-    #[cfg(not(feature = "reassembly"))]
-    let _ = trees;
     out.push('}');
 }
 
@@ -4872,9 +4799,6 @@ impl SnVerdictWord {
 /// A joined payload is never decompressed on its own (compression wraps the
 /// whole batch, before any fragment is read), so `reassembled` always sits
 /// beside `carried_state: reassembled`.
-// The words are the document's in every build, as `CarriedState`'s are; only
-// the router that produces them is feature-gated.
-#[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
 #[derive(Clone, Copy)]
 enum ChainOutcome {
     Aborted,
@@ -4932,7 +4856,6 @@ impl ChainOutcome {
 /// and it is not `out_of_order`: that word says the router judged the step on a
 /// ring it knows and found it wrong, and a flow whose handshake the capture
 /// missed has no such ring. The two never appear on one flow.
-#[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
 #[derive(Clone, Copy)]
 enum ChainReason {
     CapacityOverflow,
@@ -4946,7 +4869,6 @@ enum ChainReason {
 }
 
 impl ChainReason {
-    #[cfg(feature = "reassembly")]
     fn of_abort(reason: wz_session_core::reassembly_dispatch::AbortReason) -> Self {
         use wz_session_core::reassembly_dispatch::AbortReason;
         match reason {
@@ -4958,7 +4880,6 @@ impl ChainReason {
         }
     }
 
-    #[cfg(feature = "reassembly")]
     fn of_refusal(reason: wz_session_core::reassembly_dispatch::RefuseReason) -> Self {
         use wz_session_core::reassembly_dispatch::RefuseReason;
         match reason {
@@ -5067,7 +4988,6 @@ impl ChainIds {
     /// sequence number a chain expects after its last is that one plus one on
     /// the ring, and plain plus one where there is no ring, which is the step a
     /// chain of such a flow is followed by.
-    #[cfg(feature = "reassembly")]
     fn chain_row(
         list: &wz_session_core::passive_messages::MessageList,
         produced: u64,
@@ -5101,18 +5021,6 @@ impl ChainIds {
             held: fact.held_at_abort.map(|b| (b.fragments, b.bytes)),
         })
     }
-
-    /// A build without `reassembly` routes no fragment, so no row touched a
-    /// chain — the true answer, not a stub.
-    #[cfg(not(feature = "reassembly"))]
-    fn chain_row(
-        _list: &wz_session_core::passive_messages::MessageList,
-        _produced: u64,
-        _frame: &PassiveFrame,
-        _ring: Option<u64>,
-    ) -> Option<ChainRow> {
-        None
-    }
 }
 
 /// The SN half of a row, off the frame's own verdict and the conduit fields
@@ -5124,7 +5032,6 @@ fn sn_row(frame: &PassiveFrame) -> Option<SnRow> {
         Ok(InboundFrame::Frame {
             reliable, priority, ..
         }) => (*reliable, *priority),
-        #[cfg(feature = "reassembly")]
         Ok(InboundFrame::Fragment {
             reliable, priority, ..
         }) => (*reliable, *priority),
@@ -6058,7 +5965,6 @@ struct RowTags<'a> {
     /// list index in it. `None` where the list has no index (a row this document
     /// does not render), which leaves its finals without a `closes` key rather
     /// than guessing.
-    #[cfg(feature = "network-codecs")]
     closings: Option<RowClosings<'a>>,
     /// Where each request of this flow's list was produced, from the capture's
     /// tables ([`CaptureTables`]), for the finals that close them; `None` for a
@@ -6069,14 +5975,12 @@ struct RowTags<'a> {
 }
 
 /// The exchange plane's pairing, and the list it is read for.
-#[cfg(feature = "network-codecs")]
 #[derive(Clone, Copy)]
 struct RowClosings<'a> {
     table: &'a crate::exchange::ExchangeTable,
     list: usize,
 }
 
-#[cfg(feature = "network-codecs")]
 impl<'a> RowClosings<'a> {
     fn of(table: Option<&'a crate::exchange::ExchangeTable>, list: Option<usize>) -> Option<Self> {
         Some(Self {
@@ -6100,7 +6004,6 @@ impl<'a> RowClosings<'a> {
 pub(crate) struct RequestIndex {
     /// The produced-index of the oldest row the list still holds, as the last
     /// [`Self::forget_before`] was told it.
-    #[cfg(feature = "network-codecs")]
     first_held: u64,
 }
 
@@ -6110,18 +6013,12 @@ impl RequestIndex {
     ///
     /// A request a trim took has no row for a final to name the sequence number
     /// of (`request_seq` reads `null` for it). The front only moves forward.
-    #[cfg(feature = "network-codecs")]
     fn forget_before(&mut self, first_held: u64) {
         self.first_held = self.first_held.max(first_held);
     }
 
-    /// Without the record plane nothing is kept, so nothing is forgotten.
-    #[cfg(not(feature = "network-codecs"))]
-    fn forget_before(&mut self, _: u64) {}
-
     /// Where the request that stood at `request` in its list was produced,
     /// while the list still holds it.
-    #[cfg(feature = "network-codecs")]
     fn produced_of(&self, request: &crate::payload::RowKey) -> Option<u64> {
         let produced = request.produced();
         (produced >= self.first_held).then_some(produced)
@@ -6163,7 +6060,6 @@ impl RequestIndex {
 /// chain's records at the fragment that completed it, which is the row they are
 /// written on, and `request_record` of a request that arrived in a chain is its
 /// place in that row's `above_transport.carried`.
-#[cfg(feature = "network-codecs")]
 #[derive(Clone, Copy)]
 struct RowCloses<'a> {
     table: &'a crate::exchange::ExchangeTable,
@@ -6173,7 +6069,6 @@ struct RowCloses<'a> {
     numbering: Option<RowNumbering<'a>>,
 }
 
-#[cfg(feature = "network-codecs")]
 impl<'a> RowCloses<'a> {
     /// The pairing for the row `frame` is, or `None` where the document has none
     /// for this list.
@@ -6270,37 +6165,12 @@ impl<'a> RowCloses<'a> {
 }
 
 /// An unsigned integer, or `null`.
-#[cfg(feature = "network-codecs")]
 fn push_opt_u64(value: Option<u64>, out: &mut String) {
     match value {
         Some(v) => {
             let _ = write!(out, "{v}");
         }
         None => out.push_str("null"),
-    }
-}
-
-/// Without the record plane there is no pairing, and no entry says anything.
-#[cfg(not(feature = "network-codecs"))]
-#[derive(Clone, Copy)]
-struct RowCloses<'a>(core::marker::PhantomData<&'a ()>);
-
-#[cfg(not(feature = "network-codecs"))]
-impl<'a> RowCloses<'a> {
-    fn of(
-        _: &RowTags<'a>,
-        _: Option<&'a RequestIndex>,
-        _: &crate::messages::Row<'_>,
-    ) -> Option<Self> {
-        None
-    }
-
-    fn value(&self, _: usize) -> String {
-        String::new()
-    }
-
-    fn answer_value(&self, _: usize) -> String {
-        String::new()
     }
 }
 
@@ -6643,7 +6513,6 @@ fn push_coordinates(
 /// ⚠ THE LAST TWO ARE THE POINT. Folding them into one null is what lets a
 /// reader mistake a gap in the capture for a measured exclusion, which is the
 /// failure this axis was asked for in the first place.
-#[cfg(feature = "network-codecs")]
 fn push_selected(
     selection: Option<RowSelection<'_>>,
     frame: &crate::messages::Row<'_>,
@@ -6699,7 +6568,6 @@ fn push_selected(
 /// refusal travels with the verdict (`ambiguities`) for the document to write. `unjudged` and not `undecided` because the second says the
 /// capture lacked a fact a decision needed, and the fact missing here is the
 /// reader's: which node they meant.
-#[cfg(feature = "network-codecs")]
 pub(crate) struct RowJudgement {
     /// What the two planes made of the selector, or `None` when it was
     /// ambiguous in this capture and no walk was made. One value and not two
@@ -6713,14 +6581,12 @@ pub(crate) struct RowJudgement {
 /// The three planes' verdicts, over one selector, over one capture: the two
 /// census planes that judge records, and the row plane that judges what they
 /// leave ([`crate::row_plane`]).
-#[cfg(feature = "network-codecs")]
 struct PlaneVerdicts {
     payloads: crate::payload::PayloadCensus,
     exchanges: crate::exchange::ExchangeTable,
     rows: crate::row_plane::RowPlane,
 }
 
-#[cfg(feature = "network-codecs")]
 impl RowJudgement {
     fn of(
         d: &crate::Dissection,
@@ -6786,7 +6652,6 @@ impl RowJudgement {
 /// The planes that judge a row, read in place: the ONE list of which planes
 /// speak of a row, for a judgement made by one walk ([`RowJudgement`]) and for
 /// one kept between calls ([`crate::selection_json`]'s selection fold).
-#[cfg(feature = "network-codecs")]
 pub(crate) struct PlaneReadings<'p> {
     pub(crate) payloads: &'p crate::payload::PayloadCensus,
     /// The exchanges the walk closed (or displaced).
@@ -6798,7 +6663,6 @@ pub(crate) struct PlaneReadings<'p> {
     pub(crate) rows: &'p crate::row_plane::RowPlane,
 }
 
-#[cfg(feature = "network-codecs")]
 impl PlaneReadings<'_> {
     /// The row's answer folded over the records any plane judged on it, or
     /// `None` when none judged one.
@@ -6834,7 +6698,6 @@ impl PlaneReadings<'_> {
 /// drift, and a row whose word differs between the document with trees and the
 /// document without is the one disagreement neither consumer could debug from
 /// its own half.
-#[cfg(feature = "network-codecs")]
 pub(crate) fn row_verdict_of(
     judged: &RowJudgement,
     list: usize,
@@ -6924,19 +6787,6 @@ impl RowVerdict {
     fn push(self, out: &mut String) {
         let _ = write!(out, "\"selected\":\"{}\",", self.word());
     }
-}
-
-/// The same, where the record plane is not compiled in at all.
-///
-/// A build without `network-codecs` has no `RecordView` to judge, so it has no
-/// verdict to report and says nothing rather than saying "unjudged" about
-/// every row — which would be this document claiming a walk it never made.
-#[cfg(not(feature = "network-codecs"))]
-fn push_selected(
-    _selection: Option<RowSelection<'_>>,
-    _frame: &crate::messages::Row<'_>,
-    _out: &mut String,
-) {
 }
 
 fn message_name(frame: &PassiveFrame) -> String {
@@ -7521,7 +7371,6 @@ mod tests {
 
     /// Every `(keyexpr, keyexpr_cause)` pair the document carries, as the raw
     /// JSON values so `null` and `"null"` cannot be confused.
-    #[cfg(feature = "network-codecs")]
     fn carried_keys(doc: &str) -> Vec<(&str, &str)> {
         crate::doc_revision::object_scopes(doc)
             .into_iter()
@@ -7537,7 +7386,6 @@ mod tests {
     /// the raw JSON values. An entry that has the first two and not the third is
     /// returned with `"<absent>"` for it, which is not a JSON value, so a document
     /// that stopped writing the id cannot be mistaken for one that wrote `null`.
-    #[cfg(feature = "network-codecs")]
     fn carried_triples(doc: &str) -> Vec<(&str, &str, &str)> {
         crate::doc_revision::object_scopes(doc)
             .into_iter()
@@ -7558,7 +7406,6 @@ mod tests {
     /// one. `RowVerdict::push` writes the key with its trailing comma, and the
     /// four words are the whole vocabulary, so this removes exactly what the
     /// selector put there.
-    #[cfg(feature = "network-codecs")]
     fn without_selected(doc: &str) -> String {
         let mut out = String::from(doc);
         for word in RowVerdict::names() {
@@ -7586,7 +7433,6 @@ mod tests {
     /// by a door that never writes the key: a narrowing selector DOES write it,
     /// and what it adds is that key and nothing else — so the two documents are
     /// one document, differing by exactly the question asked.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn an_empty_selector_asks_no_question_and_writes_no_verdict() {
         let (d, file) = crate::agg::tests::multilink_session_with_file();
@@ -7628,7 +7474,6 @@ mod tests {
     ///
     /// The coordinates are a separate axis from the verdict and stay when the
     /// verdict goes: an empty selector must not cost a consumer its join key.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn an_empty_selector_keeps_the_coordinates_and_drops_only_the_verdict() {
         let (d, file) = crate::agg::tests::multilink_session_with_file();
@@ -7662,7 +7507,6 @@ mod tests {
     /// JSON values `(direction, list_id, anchor, batch_index, selected)` — the
     /// last empty when the row has no verdict. Rows are found by the key only a
     /// row carries, so the objects nested inside a row's tree never join them.
-    #[cfg(feature = "network-codecs")]
     fn coordinate_rows(doc: &str) -> Vec<(String, String, String, String, String)> {
         // A ROW is an object with coordinates: `list_id` AND `anchor`. A flow
         // object carries `list_id` too since revision 40, and is not a row.
@@ -7691,10 +7535,8 @@ mod tests {
     }
 
     /// A numbering that numbers nothing — a caller whose handle minted no ids.
-    #[cfg(feature = "network-codecs")]
     struct NoListNumbered;
 
-    #[cfg(feature = "network-codecs")]
     impl RowCoordinates for NoListNumbered {
         fn list_id(&self, _list: usize) -> Option<u64> {
             None
@@ -7709,7 +7551,6 @@ mod tests {
     /// links with a datagram flow, a flow with no handshake, a compressed
     /// session, and — where the build reassembles — a capture that starts
     /// mid-chain. Each carries rows the others do not.
-    #[cfg(feature = "network-codecs")]
     fn verdict_fixtures() -> Vec<(&'static str, crate::Dissection, Vec<u8>)> {
         let mut out = Vec::new();
         let (d, file) = crate::agg::tests::multilink_session_with_file();
@@ -7718,7 +7559,6 @@ mod tests {
         out.push(("orphan flow", d, file));
         let (d, file) = crate::datagram_tests::compressed_session_dissection_with_file();
         out.push(("compressed", d, file));
-        #[cfg(feature = "reassembly")]
         {
             let (d, file) = crate::datagram_tests::midsession_fragment_dissection_with_file();
             out.push(("midsession", d, file));
@@ -7748,7 +7588,6 @@ mod tests {
     /// rows as an ORDERED SUBSET where it did: a datagram row is dropped there
     /// when its second read disagrees, and this document has no second read to
     /// disagree.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn the_verdict_document_is_the_field_documents_rows_without_the_trees() {
         let mut compared = 0usize;
@@ -7774,6 +7613,7 @@ mod tests {
                 let light = crate::selection_json::selection_json_where_coordinated(
                     &d,
                     &filter,
+                    None,
                     &EveryListNumbered,
                 );
                 let (in_full, in_light) = (coordinate_rows(&full), coordinate_rows(&light));
@@ -7839,7 +7679,6 @@ mod tests {
     /// the argument: the container-less field document has fewer rows than the
     /// one with a container, and the verdict document has at least as many as
     /// the latter.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn the_verdict_document_has_datagram_rows_a_container_less_field_document_cannot() {
         let (d, file) = crate::agg::tests::multilink_session_with_file();
@@ -7856,6 +7695,7 @@ mod tests {
         let light = crate::selection_json::selection_json_where_coordinated(
             &d,
             &filter,
+            None,
             &EveryListNumbered,
         );
 
@@ -7888,17 +7728,24 @@ mod tests {
     /// that would be the census-and-field family's one exception again, and a
     /// consumer that passed an empty selector because it was not narrowing would
     /// read a verdict nobody asked for.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn the_verdict_document_under_an_empty_selector_lists_rows_and_says_nothing_of_them() {
         let (d, _file) = crate::agg::tests::multilink_session_with_file();
         let any = crate::filter::Filter::parse("  ").expect("parses");
         let picky = crate::filter::Filter::parse("bytes > 6").expect("parses");
 
-        let asked_nothing =
-            crate::selection_json::selection_json_where_coordinated(&d, &any, &EveryListNumbered);
-        let asked =
-            crate::selection_json::selection_json_where_coordinated(&d, &picky, &EveryListNumbered);
+        let asked_nothing = crate::selection_json::selection_json_where_coordinated(
+            &d,
+            &any,
+            None,
+            &EveryListNumbered,
+        );
+        let asked = crate::selection_json::selection_json_where_coordinated(
+            &d,
+            &picky,
+            None,
+            &EveryListNumbered,
+        );
         assert!(
             !asked_nothing.contains("\"selected\""),
             "an empty selector asks nothing and must write no verdict: {asked_nothing}"
@@ -7928,13 +7775,16 @@ mod tests {
     /// A list the caller does not number gets no coordinate keys and
     /// no invented ones, on the field document's own rule, and the verdict still
     /// arrives: a consumer that cannot join a row can still count it.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_row_of_a_list_nobody_numbered_carries_no_coordinates_and_still_a_verdict() {
         let (d, _file) = crate::agg::tests::multilink_session_with_file();
         let picky = crate::filter::Filter::parse("bytes > 6").expect("parses");
-        let doc =
-            crate::selection_json::selection_json_where_coordinated(&d, &picky, &NoListNumbered);
+        let doc = crate::selection_json::selection_json_where_coordinated(
+            &d,
+            &picky,
+            None,
+            &NoListNumbered,
+        );
         assert!(
             !doc.contains("\"list_id\"")
                 && !doc.contains("\"anchor\"")
@@ -7982,7 +7832,6 @@ mod tests {
     /// not carry what deciding needs" and "no record on this row could be
     /// judged at all" are different facts, and a reader that cannot separate
     /// them reads a silent gap as a measured exclusion.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_selector_picks_rows_in_the_field_document_and_says_which() {
         let (d, file) = crate::agg::tests::multilink_session_with_file();
@@ -8035,7 +7884,6 @@ mod tests {
     /// unjudged, its Pushes with an unresolved keyexpr are undecided under a
     /// `key` selector, and its three payload sizes split yes from no under a
     /// `bytes` one.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn the_field_documents_selection_words_do_not_collapse_into_one_absence() {
         let (d, file) = crate::agg::tests::multilink_session_with_file();
@@ -8125,7 +7973,6 @@ mod tests {
     /// ⚠ THE TWO PAYLOADS DIFFER IN SIZE ON PURPOSE. Same-size payloads would
     /// make both rows answer alike, and a key that merged them would be
     /// indistinguishable from one that did not.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn two_stream_flows_at_the_same_offset_do_not_share_a_verdict() {
         use crate::census_json::fed_tests::framed_frame;
@@ -8174,7 +8021,6 @@ mod tests {
     /// started late from a genuine gap and searches the wrong thing. That is
     /// the consumer's own sentence, and it is why the second half is asserted
     /// as hard as the first.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_session_resolves_across_its_links_in_the_field_document() {
         let (d, file) = crate::agg::tests::multilink_session_with_file();
@@ -8258,7 +8104,6 @@ mod tests {
     /// `crate::exchange` simply changed the order they walk in, and a renderer
     /// cannot -- its rows have to come out per flow. So resolution is separated
     /// from rendering instead.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_reference_resolves_against_the_later_links_declaration_in_the_field_document() {
         let (d, file) =
@@ -8313,7 +8158,6 @@ mod tests {
     /// A pair, then, not a single claim. The guard above says a reader now sees
     /// a declaration the OTHER LINK carried; this one says it still does not see
     /// one from the FUTURE.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_declaration_that_followed_a_reference_still_does_not_name_it() {
         let (d, file) =
@@ -8365,7 +8209,6 @@ mod tests {
     /// The population is asserted non-empty and to hold at least one entry of each
     /// kind first: a document with no unresolved entry would make the iff below
     /// true of nothing.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn an_unresolved_reference_names_its_id_and_a_resolved_one_does_not() {
         let (d, file) =
@@ -8427,7 +8270,6 @@ mod tests {
 
     /// Every `(keyexpr_cause, keyexpr_id, keyexpr_suffix)` triple the document
     /// carries, raw, with `"<absent>"` for a suffix key that is not there.
-    #[cfg(feature = "network-codecs")]
     fn carried_suffixes(doc: &str) -> Vec<(&str, &str, &str)> {
         crate::doc_revision::object_scopes(doc)
             .into_iter()
@@ -8453,7 +8295,6 @@ mod tests {
     /// * with none, it says `7` and `null`, which is a value and not an absence;
     /// * in both, every entry has the key, and no entry that is not a miss
     ///   carries a suffix: a resolved key has its suffix appended already.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn an_unresolved_reference_names_the_suffix_it_wrote_after_its_id() {
         let (d, file) =
@@ -8499,7 +8340,6 @@ mod tests {
 
     /// Every `Push` entry's `(keyexpr, keyexpr_cause, keyexpr_carriage)`, raw,
     /// with `"<absent>"` for a carriage key that is not there.
-    #[cfg(feature = "network-codecs")]
     fn push_carriages(doc: &str) -> Vec<(&str, &str, &str)> {
         crate::doc_revision::object_scopes(doc)
             .into_iter()
@@ -8534,7 +8374,6 @@ mod tests {
     ///
     /// Every other entry carries the key too: an entry with a reference names
     /// its carriage and an entry with none says `null`.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn how_the_wire_carried_a_key_is_written_whether_it_resolved_or_not() {
         use crate::agg::tests::{
@@ -8606,7 +8445,6 @@ mod tests {
     /// the `no_session` arm above would be satisfied by a build that had simply
     /// stopped resolving on unattributed flows — a regression wearing the new
     /// word as a costume.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_field_row_on_a_handshakeless_flow_still_resolves_its_own_declaration() {
         let (d, file) = crate::agg::tests::orphan_flow_session_with_file();
@@ -8666,11 +8504,6 @@ mod tests {
     /// The union is compared against `newest`, not against `FIELDS_R1_KEYS` by
     /// name — R2123's correction on the census, which this test had not had.
     ///
-    /// Gated on `network-codecs` because the fixture is: without the decoders a
-    /// Push inside a frame is an unknown MID, so the document would be pinned
-    /// over a capture whose rows never rendered — a pin taken on a shape that
-    /// only exists in that build.
-    #[cfg(feature = "network-codecs")]
     /// R2211 (open-debt item 565) — THE MARKER NAMES REACH THE FIELD DOCUMENT,
     /// and this is the half of that item that was already true.
     ///
@@ -8722,7 +8555,6 @@ mod tests {
     /// this test would pass on an emitter that prints the word for every
     /// capture; and its entry must carry a span, or "the location is absent"
     /// would be this document's answer everywhere and say nothing here.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     #[test]
     fn a_completed_chains_records_are_named_in_the_field_document() {
         use crate::datagram_tests::{push, sender_space};
@@ -8902,7 +8734,6 @@ mod tests {
     /// This is the bit-CLEAR arm: the payload is the batch as it would otherwise be,
     /// so the record must be read with no lz4 in the build at all. Reading the
     /// header byte as a transport MID is the failure this names.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_raw_batch_behind_a_clear_batch_header_is_read_as_the_batch() {
         let record = crate::datagram_tests::push(
@@ -8929,7 +8760,6 @@ mod tests {
     ///
     /// The body is a literal-only lz4 block built from the format, see
     /// [`lz4_literal_block`].
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn an_lz4_batch_is_read_when_this_build_has_lz4_and_named_when_it_does_not() {
         let record = crate::datagram_tests::push(
@@ -8964,7 +8794,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "reassembly")]
     #[test]
     fn a_fragments_chain_boundary_markers_are_named_in_the_field_document() {
         let (d, file) =
@@ -9345,7 +9174,6 @@ mod tests {
     /// numbered by its sender, so skipping sn 4 is a gap of one on the SAME
     /// conduit the others were judged on — the router refusing a fragment and
     /// the SN tracker counting it are two verdicts about one frame.
-    #[cfg(feature = "reassembly")]
     #[test]
     fn each_fragment_row_names_its_chains_outcome_and_identity() {
         let (d, file) = crate::datagram_tests::marked_fragment_dissection_with_file(&[
@@ -9407,7 +9235,6 @@ mod tests {
     /// WITH, while a chain the capture stopped inside is counted by the
     /// top-level `reassembly` group, which is the only place a chain with no
     /// closing row can be accounted for.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     #[test]
     fn a_completed_chain_closes_under_its_identity_and_an_open_one_is_counted() {
         use crate::datagram_tests::{push, sender_space};
@@ -9449,7 +9276,6 @@ mod tests {
     /// THE FLOW SAYS WHAT ITS HANDSHAKE NEGOTIATED, and a flow
     /// whose handshake this capture never saw says THAT rather than reporting
     /// the `&=` fold's starting `true` as an agreement.
-    #[cfg(feature = "reassembly")]
     #[test]
     fn a_flows_context_is_its_negotiation_and_null_where_none_was_seen() {
         let (d, file) =
@@ -10196,7 +10022,6 @@ mod tests {
     /// stream row is checked, and a length-prefixed stream puts every message
     /// at least two bytes into its segment, so a locator that ignored the
     /// prefix or the segment boundary would miss on every row.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_stream_rows_first_byte_is_the_byte_the_capture_holds_there() {
         let (d, file) =
@@ -10278,7 +10103,6 @@ mod tests {
     /// `length` of eighteen would have been the header plus a layer this object
     /// does not describe; the fourteen is written as a literal so the constant
     /// does not grade itself.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn l2_places_the_ethernet_header_and_holds_no_vlan_tag() {
         use crate::datagram_tests::{init_message, udp_packet};
@@ -10395,7 +10219,6 @@ mod tests {
     /// cut prefix is asserted to be one the whole-file parser REFUSES, which is
     /// the precondition that makes this a test of the failure and not of a
     /// prefix that never had one.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_container_cut_inside_a_record_reads_as_its_whole_records_do() {
         use crate::datagram_tests::{init_message, udp_packet};
@@ -10525,7 +10348,6 @@ mod tests {
     /// Every stream row is checked, and every packet of the capture is handed
     /// out and compared with what `pcap::parse` holds for it, link header
     /// included.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_rows_packet_number_names_the_frame_the_door_hands_out() {
         let (d, file) =
@@ -10684,7 +10506,6 @@ mod tests {
     /// The union of the document AND the renderings, because neither alone is
     /// the document a consumer reads: the capture supplies the surrounding
     /// rows, the renderings supply the arms it did not take.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn the_field_documents_payload_plane_is_pinned_over_every_arm() {
         use crate::doc_revision as rev;
@@ -10851,7 +10672,6 @@ mod tests {
         rendered.push(named_disagreement_document());
         // Revision 63 — a flow's `ended_chains` with an entry in it, which only a
         // chain that never closed brings.
-        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
         rendered.extend(crate::unresolved_chain_tests::ended_chain_documents());
 
         let mut seen: Vec<&str> = Vec::new();
@@ -11730,7 +11550,6 @@ mod tests {
     /// The floor is asserted so this cannot decay into a gate over an empty
     /// listing: a fixture that stopped rendering rows would otherwise make the
     /// subset trivially true.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn the_field_documents_kind_words_are_all_declared() {
         use crate::payload::formats::FormatMap;
@@ -11849,7 +11668,6 @@ mod tests {
     /// tree produces — item 555's measurement — and it is the one whose object
     /// carries nothing at all, so a population taken from captures alone would
     /// have been derived with exactly the hole this axis exists to close.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn the_declared_carries_axis_is_the_one_the_emitters_render() {
         use crate::doc_revision as rev;
@@ -12008,23 +11826,19 @@ mod tests {
         // PASSENGER over a population that holds no discriminating word. This
         // one completes a chain, which is the only shape whose object brings
         // `carried` and `fields`.
-        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
         let (chain_d, chain_file) = crate::datagram_tests::reassembled_record_dissection_with_file(
             &crate::datagram_tests::push(
                 crate::datagram_tests::sender_space(0, Some("split/across")),
                 &[0u8; 8],
             ),
         );
-        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
         let chain_fields = fields_json(&chain_d, &chain_file, None, None);
         // R2706 — and the two states no other fixture reaches. Every word this
         // family declares must be RENDERED by something here, which is the rule
         // that found both of these: a shape asserted by nobody is a declaration
         // a consumer parses by and nothing checks.
-        #[cfg(feature = "reassembly")]
         let (midsession_d, midsession_file) =
             crate::datagram_tests::midsession_fragment_dissection_with_file();
-        #[cfg(feature = "reassembly")]
         let midsession_fields = fields_json(&midsession_d, &midsession_file, None, None);
         let (compressed_d, compressed_file) =
             crate::datagram_tests::compressed_session_dissection_with_file();
@@ -12051,7 +11865,6 @@ mod tests {
         closes_docs.extend(crate::payload_size_tests::pin_documents());
         closes_docs.extend(crate::payload_size_tests::datagram_pin_documents());
         // Revision 63 — a flow's `ended_chains`, with two of its endings.
-        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
         closes_docs.extend(crate::unresolved_chain_tests::ended_chain_documents());
         let mut fields_docs: Vec<&String> = alloc::vec![
             &with,
@@ -12088,9 +11901,7 @@ mod tests {
             (&multilink_d, &multilink_file[..], None),
             (&compressed_d, &compressed_file[..], None),
         ];
-        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
         through.push((&chain_d, &chain_file[..], None));
-        #[cfg(feature = "reassembly")]
         through.push((&midsession_d, &midsession_file[..], None));
         // And a selector a record cannot decide on a plane that does not
         // correlate exchanges (`replies == 0` over a Push), since the row plane
@@ -12128,6 +11939,7 @@ mod tests {
                 verdict_docs.push(crate::selection_json::selection_json_where_coordinated(
                     dissection,
                     selector,
+                    None,
                     &EveryListNumbered,
                 ));
             }
@@ -12230,9 +12042,7 @@ mod tests {
                 &alloc::format!("{example}=protobuf"),
             ));
         }
-        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
         fields_docs.push(&chain_fields);
-        #[cfg(feature = "reassembly")]
         fields_docs.push(&midsession_fields);
         fields_docs.extend(arms.iter());
         // The transport build document, over every message the door builds in
@@ -12891,7 +12701,6 @@ mod tests {
     /// payload-relative offsets, so a walker that forgot to rebase would report
     /// `start: 0` -- a number that is in range, looks plausible beside every
     /// other span in the row, and points at the message header.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn the_misbinding_counts_say_they_are_a_floor_when_a_cap_bit() {
         use crate::payload::formats::FormatMap;
@@ -12984,14 +12793,6 @@ mod tests {
     /// for the ordinary record beside the SHM one. Without that arm this test
     /// is satisfied by an emitter that reverted to a block on every row, which
     /// is the change item 563 does NOT ask for.
-    ///
-    /// ⚠ `network-codecs`, because `payload::tests_support` is -- the Put
-    /// builders this fixture needs live there. MEASURED the hard way: without
-    /// the gate the test does not compile into the default `--lib` target at
-    /// all, and `cargo test … an_shm_record_names_itself` printed
-    /// `running 0 tests … ok`, which is this workspace's most-repeated way of
-    /// reading a green over nothing.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn an_shm_record_names_itself_to_a_reader_that_declared_no_format() {
         // TWO records in one capture on one topic: one whose payload slot holds
@@ -13213,7 +13014,6 @@ mod tests {
     /// The raw values of every object of `doc` that holds `marker`, read by the
     /// library's own scope walker so a test never reads a nested group as its
     /// parent.
-    #[cfg(feature = "network-codecs")]
     fn objects_holding<'a>(doc: &'a str, marker: &str) -> Vec<Vec<(&'a str, &'a str)>> {
         crate::doc_revision::object_scopes(doc)
             .into_iter()
@@ -13221,7 +13021,6 @@ mod tests {
             .collect()
     }
 
-    #[cfg(feature = "network-codecs")]
     fn raw<'a>(scope: &[(&'a str, &'a str)], key: &str) -> &'a str {
         scope
             .iter()
@@ -13238,7 +13037,6 @@ mod tests {
     /// contiguous on the wire. Everything a reader switches on agrees between
     /// the two; what differs is the coordinate space of the spans, which here
     /// index the joined buffer and so run from the record's own first byte.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     #[test]
     fn a_chains_record_decodes_its_payload_as_its_contiguous_twin_does() {
         use crate::payload::formats::FormatMap;
@@ -13317,7 +13115,6 @@ mod tests {
 
     /// A reader that declared nothing is told nothing about a chain's payloads,
     /// as for a row's own message.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     #[test]
     fn a_chains_record_says_nothing_of_payloads_to_a_reader_who_declared_none() {
         let record =
@@ -13334,7 +13131,6 @@ mod tests {
     /// A chain that joined two messages decodes each under its own key, and the
     /// row's own block, which names the first message that has a key and a
     /// payload, does not speak for the second.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     #[test]
     fn each_record_of_a_chain_is_decoded_under_its_own_key() {
         use crate::payload::formats::FormatMap;
@@ -13384,7 +13180,6 @@ mod tests {
     /// records a decode also gives the tally their refusals. Before revision 22
     /// a capture whose only refused samples were reassembled wrote an empty
     /// array and said `payload_mapping_counts_exact: true`.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     #[test]
     fn a_chains_refused_decode_reaches_the_documents_refusal_tally() {
         use crate::payload::formats::FormatMap;
@@ -13414,7 +13209,6 @@ mod tests {
 
     /// A record whose key is an id nobody declared says so, which is the state
     /// that changes when a declaration is decoded late.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     #[test]
     fn a_chains_record_under_an_undeclared_id_is_unresolved() {
         use crate::payload::formats::FormatMap;
@@ -13495,7 +13289,6 @@ mod tests {
     /// `id == 0` literal path is not taken at all. A gate over the every-plane
     /// capture, whose records are `id 0` plus a suffix, would pass on a build
     /// holding no table.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn every_carried_entry_names_its_key_without_a_payload_format() {
         use crate::doc_revision::object_scopes;
@@ -14075,7 +13868,6 @@ mod tests {
     /// One transport `Frame` per record, all in one TCP segment: the dissection,
     /// its capture, and each frame's length (a record rides at the END of its
     /// frame, so a payload's offsets are measured back from it).
-    #[cfg(feature = "network-codecs")]
     fn one_frame_per_record(records: &[Vec<u8>]) -> (Dissection, Vec<u8>, Vec<usize>) {
         let mut framed = Vec::new();
         let mut lengths = Vec::new();
@@ -14095,7 +13887,6 @@ mod tests {
     }
 
     /// The `carried` entry of `doc` that names `keyexpr`, whole.
-    #[cfg(feature = "network-codecs")]
     fn entry_named<'a>(doc: &'a str, keyexpr: &str) -> Vec<(&'a str, &'a str)> {
         let want = alloc::format!("\"{keyexpr}\"");
         objects_holding(doc, "keyexpr_id")
@@ -14106,7 +13897,6 @@ mod tests {
 
     /// A `Push` carrying a `MsgDel` under `keyexpr`: a message with a key and no
     /// payload slot.
-    #[cfg(feature = "network-codecs")]
     fn push_del(keyexpr: &'static str) -> Vec<u8> {
         wz_codecs::lent::Push {
             header: wz_codecs::lent::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
@@ -14121,7 +13911,6 @@ mod tests {
 
     /// The table id of an encoding NAME, so a fixture asks for the encoding it
     /// means and not for the number it happens to sit at today.
-    #[cfg(feature = "network-codecs")]
     fn encoding_id(name: &str) -> u16 {
         wz_codecs::encoding_ids::ENCODING_ID_TO_STR
             .iter()
@@ -14148,7 +13937,6 @@ mod tests {
     /// at the end of, and every message is one frame of its own, so the offsets
     /// come from the builders' lengths and not from a second reading of the
     /// document under test.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_reader_that_declared_nothing_is_told_where_every_payload_is() {
         use crate::exchange::tests as fx;
@@ -14266,7 +14054,6 @@ mod tests {
     /// The case an editor opening a capture that began after the declarations is
     /// in: the key is `null` with its cause, and the bytes are exactly where
     /// they would have been. The summary needs the key to be nowhere.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn a_row_whose_key_does_not_resolve_still_names_its_payload() {
         let json = encoding_id("application/json");
@@ -14300,7 +14087,6 @@ mod tests {
     /// to the line that installed it through `declarations_diagnose`'s
     /// `rule_index`, by equality and with no counting: the join an editor does
     /// to light up the winning line.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn the_rule_a_row_names_is_the_rule_the_diagnosis_numbers() {
         use crate::payload::formats::FormatMap;
@@ -14355,7 +14141,6 @@ mod tests {
     /// both a key and bytes is the pairing `keyexpr_and_payload` records as the
     /// defect. The second message's range is the last bytes of the frame and the
     /// first's ends where the second record begins.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     #[test]
     fn a_frame_that_batches_two_messages_gives_each_its_own_payload() {
         use crate::payload::tests_support as build;
@@ -14402,7 +14187,6 @@ mod tests {
     /// The population is the shared every-plane capture, so this holds over
     /// declarations, interests, queries, replies and the handshake rows the
     /// builders above do not make. A transport message's entry is `null`.
-    #[cfg(feature = "network-codecs")]
     #[test]
     fn every_carried_entry_writes_a_payload_and_only_a_message_with_a_slot_fills_it() {
         let (d, file) =
@@ -14454,7 +14238,6 @@ mod tests {
     /// claim includes the `null`.
     ///
     /// Gated as its one caller is, which needs the reassembled-chain fixture too.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     fn body_population() -> Vec<(&'static str, Option<&'static str>, Vec<u8>)> {
         use crate::datagram_tests::{push, sender_space};
         use wz_codecs::lent::{
@@ -14679,7 +14462,6 @@ mod tests {
     /// document order, `None` for a `null` body. Every entry must carry the key,
     /// and the entry of a TRANSPORT message is checked in passing: its body is
     /// `null`, whatever it carries.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     fn network_entries(doc: &str) -> Vec<(String, Option<String>)> {
         let network = [
             "Push",
@@ -14727,7 +14509,6 @@ mod tests {
     /// single `Frame` has to give each of its items its own answer), and all in
     /// a fragment chain (so the second list, `above_transport.carried`, gives
     /// the same answers). The expectation is the same list each time.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     #[test]
     fn every_carried_entry_names_the_body_it_carries() {
         let population = body_population();

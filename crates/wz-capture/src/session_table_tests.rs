@@ -3002,7 +3002,8 @@ impl crate::fields_json::RowCoordinates for ListNumbers {
 fn selected_words(d: &Dissection, selector: &str) -> Vec<String> {
     let filter =
         crate::filter::Filter::parse(selector).unwrap_or_else(|e| panic!("{selector}: {e}"));
-    let doc = crate::selection_json::selection_json_where_coordinated(d, &filter, &ListNumbers);
+    let doc =
+        crate::selection_json::selection_json_where_coordinated(d, &filter, None, &ListNumbers);
     doc.split("\"selected\":\"")
         .skip(1)
         .map(|s| s.split('"').next().unwrap_or_default().to_string())
@@ -3105,6 +3106,7 @@ fn the_arrival_of_an_init_revises_the_rows_a_cursor_passed() {
         crate::selection_json::selection_since_json_coordinated(
             d,
             &filter,
+            None,
             &ListNumbers,
             crate::selection_json::SelectionWindow {
                 after_seq,

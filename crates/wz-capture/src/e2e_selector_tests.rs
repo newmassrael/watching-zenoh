@@ -23,7 +23,7 @@ use crate::payload_decode::Declarations;
 
 const MS: u64 = 1_000_000;
 
-fn declarations() -> String {
+pub(crate) fn declarations() -> String {
     format!("#prof={}\ndemo/e2e/**=prof\n", profile_text("prof", 3))
 }
 
@@ -45,7 +45,7 @@ fn declarations() -> String {
 /// The timeout of row 7 is an error because a repetition moves nothing, so it
 /// is judged against the last valid frame's instant, row 6's; a valid frame
 /// clears its own timeout however late it is ([`crate::e2e_judge`]).
-fn capture(link: crate::e2e_row_tests::Link) -> Wire {
+pub(crate) fn capture(link: crate::e2e_row_tests::Link) -> Wire {
     let mut wire = Wire::new(link, true);
     wire.put(true, Some(MS), "demo/e2e/a", &frame(1, b"one"));
     wire.put(true, Some(2 * MS), "demo/e2e/a", &frame(2, b"two"));
@@ -65,14 +65,14 @@ fn capture(link: crate::e2e_row_tests::Link) -> Wire {
 
 /// The words the table above gives each Push row, in order: `e2e`, `e2e.crc`,
 /// `e2e.counter`, `e2e.timeout`, `None` for a part the record does not carry.
-type Expected = (
+pub(crate) type Expected = (
     &'static str,
     Option<&'static str>,
     Option<&'static str>,
     Option<&'static str>,
 );
 
-const TABLE: [Expected; 8] = [
+pub(crate) const TABLE: [Expected; 8] = [
     ("unjudged", Some("ok"), Some("unjudged"), Some("ok")),
     ("ok", Some("ok"), Some("none"), Some("ok")),
     ("error", Some("ok"), Some("repeat"), Some("ok")),

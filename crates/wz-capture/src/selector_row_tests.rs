@@ -59,8 +59,12 @@ fn capture() -> crate::Dissection {
 /// The word each row of the selection document carries, in row order.
 fn words(selector: &str) -> Vec<String> {
     let filter = Filter::parse(selector).unwrap_or_else(|e| panic!("{selector}: {e}"));
-    let doc =
-        crate::selection_json::selection_json_where_coordinated(&capture(), &filter, &Numbered);
+    let doc = crate::selection_json::selection_json_where_coordinated(
+        &capture(),
+        &filter,
+        None,
+        &Numbered,
+    );
     doc.split("\"selected\":\"")
         .skip(1)
         .map(|s| s.split('"').next().unwrap_or_default().to_string())

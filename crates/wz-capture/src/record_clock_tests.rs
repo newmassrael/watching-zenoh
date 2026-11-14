@@ -1177,6 +1177,7 @@ fn the_selection_document_lists_rows_in_the_field_documents_order() {
     let doc = crate::selection_json::selection_json_where_coordinated(
         &wire.d,
         &filter,
+        None,
         &EveryListNumbered,
     );
     let directions: Vec<&str> = doc
