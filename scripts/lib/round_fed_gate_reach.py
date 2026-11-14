@@ -267,6 +267,20 @@ DEFERRED: dict[str, str] = {
         "grade whatever stale artifact `crates/target` happened to hold -- the "
         "exact failure `binary_freshness_lint.py` exists to count."
     ),
+    "abi_stamp_gate.py": (
+        "Round 4479 -- it JOINED this population in that round, when its "
+        "capi-c pin became an import of `capi_c_abi_pin.EXPECTED_REVISION` "
+        "instead of a second literal; the import, not its own subject, is "
+        "what makes it round-fed. Its subject is the ELF note of BUILT "
+        "artifacts -- the pico and zenoh-c C libraries, the ap-demo and "
+        "declared-node executables, each in debug and release, plus a "
+        "stripped copy -- and it loads the capi-c library to call its doors. "
+        "The hook builds none of them, so wiring it here would either red "
+        "every push or grade whatever stale artifact `crates/target` held, "
+        "the reason `capi_c_abi_pin.py` is deferred above. Hosted Layer C1st "
+        "owns it: it runs the --selftest, builds every artifact alone in both "
+        "profiles, then calls this with --call-doors."
+    ),
     "prose_named_identifier_gate.py": (
         "16.49s in --check mode. R2576 recorded that as twice the whole rest "
         "of this population; R2578's widening retired that comparison rather "
