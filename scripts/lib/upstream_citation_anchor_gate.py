@@ -383,6 +383,35 @@ ROOTLESS_BARE_CITE = re.compile(rf"(?<![\w/.-])({_ROOTLESS_PATH})(?!:\d)")
 #: (a known root) and nothing else.
 _ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
 
+#: Every form whose occurrence `scan` looks up in the pinned checkout when it is
+#: given one. `_ANY_TOKEN` is not among them: it sizes the undeclared residue,
+#: and a residue token is counted, never resolved.
+RESOLVED_FORMS = (
+    GONE_CITE,
+    ABSENT_CITE,
+    ANCHOR_CITE,
+    LINE_CITE,
+    BARE_CITE,
+    ROOTLESS_LINE_CITE,
+    ROOTLESS_BARE_CITE,
+)
+
+
+def resolved_spans(text: str) -> list[tuple[int, int]]:
+    """The spans of `text` that the resolving arm grades against the pin.
+
+    For a reader that finds a path in prose and has to say whether an oracle
+    judges it: a path inside one of these spans is an upstream claim that
+    `scan` resolves, and one outside all of them is a path no resolver here
+    reads. Taking the answer from the grammar itself, rather than from a second
+    copy of the roots and segments, is what keeps the two readers of one
+    sentence from disagreeing. `scan` masks the forms in a fixed order; a form
+    that matches only in the unmasked text matches inside a span an earlier
+    form masked, so the union names no path outside what `scan` grades.
+    """
+    return sorted(m.span() for form in RESOLVED_FORMS for m in form.finditer(text))
+
+
 #: BUDGETS. Measured, frozen, and checked in BOTH directions -- see the module
 #: doc. Not a threshold anyone chose.
 #: R2349 — 300 -> 294. Six line citations into upstream's session API module
@@ -2779,6 +2808,25 @@ def selftest() -> int:
         if got != want:
             failures.append(f"resolve_mode on {label}: expected {want}, got {got}")
 
+    # `resolved_spans` answers for another reader, so it is held to what `scan`
+    # does with the same four paths: an anchored rooted path and a declared
+    # root-less one are looked up at the pin, an undeclared root-less token is
+    # residue, and a path under no upstream root is not upstream's.
+    WZ_PATH = _p("crates", "wz-probe", "src", "lib.rs")
+    probe = f"`{UNICAST}` @ `fn keeper(` then {RL} beside {RL_OTHER} and {WZ_PATH}"
+    spans = resolved_spans(probe)
+
+    def _graded(token: str) -> bool:
+        at = probe.index(token)
+        return any(a <= at and at + len(token) <= b for a, b in spans)
+
+    placed = tuple(_graded(t) for t in (UNICAST, RL, RL_OTHER, WZ_PATH))
+    if placed != (True, True, False, False):
+        failures.append(
+            f"resolved_spans graded (anchored, declared root-less, residue, wz) "
+            f"as {placed}, expected (True, True, False, False)"
+        )
+
     for f in failures:
         print(f"  upstream-citation-anchor: SELFTEST FAIL -- {f}", file=sys.stderr)
     if failures:
@@ -2836,7 +2884,8 @@ def selftest() -> int:
         "on nothing else), and the paragraph repaired to the anchored form in "
         "both arms (green). Mutation-checked: skipping markdown in the residue "
         "tally reds three of them, and disabling the residue and conservation "
-        "ratchets reds both red rows"
+        "ratchets reds both red rows; and `resolved_spans` grades an anchored "
+        "and a declared root-less path and neither a residue token nor a wz path"
     )
     return 0
 

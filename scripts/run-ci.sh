@@ -21089,7 +21089,8 @@ layer_z_zenohd_interop() {
     # frozen history. That reason does not reach `inventory_entries[*].reason`,
     # the live impl-axis verdicts, which are rewritten on every re-grade -- so
     # they were the one population with upstream claims and no oracle, exactly
-    # what `depth_axis_census` reports as "read as upstream and NOT judged".
+    # what `depth_axis_census` reported as "read as upstream and NOT judged"
+    # before it asked this gate's grammar which of them are graded here.
     #
     # HERE and not in C0, for the reason the arm above is here: this one
     # RESOLVES, so it needs the source tree this lane provisions. It has no
