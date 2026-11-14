@@ -1117,7 +1117,9 @@ pub struct ZenohNodeConfig {
     /// `transport/link/rx/max_message_size`, the largest message a session
     /// rejoins from fragments (bytes). The session takes it through
     /// `SessionInitParams`, and its reassembly ends a chain that would pass it;
-    /// the build's reassembly slot bounds it from above.
+    /// the build's reassembly slot bounds it from above. Beside it
+    /// `transport/link/rx/buffer_size`, the read storage each stream link the
+    /// session wires pools (bytes), wz's `--rx-buffer-size`.
     pub link_rx: wz_session_core::session_init_params::LinkRxConf,
     /// `transport/unicast/max_links`.
     pub max_links: usize,
@@ -1253,6 +1255,12 @@ pub struct ZenohNodeConfig {
     /// `transport/link/tls/verify_name_on_connect`: a dial checks the name it dials against the
     /// server's certificate. `None` is an unnamed key, which upstream resolves to `true`.
     pub tls_verify_name_on_connect: Option<bool>,
+    /// `transport/link/tls/close_link_on_expiration`: a tls, quic or quic-datagram link closes
+    /// when its peer's certificate chain expires, unless its locator states otherwise. wz's
+    /// `--link-config <kind>#close_link_on_expiration=<bool>` for each of the three kinds, which
+    /// is where upstream's inspectors render it. `None` is an unnamed key, which upstream
+    /// resolves to `false`.
+    pub tls_close_link_on_expiration: Option<bool>,
     /// `transport/link/protocols`: the whitelist of the link protocols this node makes. `None`
     /// is an unnamed key, which leaves every protocol the build carries open.
     pub link_protocols: Option<Vec<String>>,
@@ -1263,6 +1271,12 @@ pub struct ZenohNodeConfig {
     /// `--link-config <kind>#so_rcvbuf=<n>` / `so_sndbuf=<n>`. `None` is an
     /// unnamed key, which upstream resolves to "leave the kernel's default".
     pub link_socket_buffers: LinkSocketBuffers,
+    /// `transport/link/unixpipe/file_access_mask`: the FIFO creation mode
+    /// upstream's unixpipe inspector renders into every unixpipe endpoint as
+    /// `file_mask`, under the endpoint's own parameters. wz's
+    /// `--link-config unixpipe#file_mask=<n>`. `None` is an unnamed key, which
+    /// leaves the link's own default (`unixpipe_pipeline::DEFAULT_FILE_MASK`).
+    pub unixpipe_file_access_mask: Option<u32>,
     /// R311y845 — the three below say WHERE a node listens for its peers, and
     /// until this round wz's answer was a constant. `wz-ap-demo`'s `SCOUT_GROUP`
     /// was `224.0.0.224` compiled in, with a doc that named this very key as
@@ -1480,6 +1494,14 @@ pub struct ZenohNodeConfig {
     /// `None` = the document named no section, which a running zenohd resolves
     /// to an empty one; a present-but-empty section is `Some({})`.
     pub plugins: Option<Json5Value>,
+    /// `plugins_loading/enabled`: whether a plugin the `plugins` section names
+    /// with no `__path__` is looked up by name. `None` is an unnamed key, which
+    /// a library session reads as `false` (`Config::default()`); zenohd sets it
+    /// `true` over whatever its file says, a property of that binary and not of
+    /// the document, so the value carried here is the document's. The storage
+    /// host's plugin plane takes it as `PluginsLoading::from_config` reads it,
+    /// wz's `--plugins-loading`.
+    pub plugins_loading_enabled: Option<bool>,
     /// §5.23 `adminspace-core` — `metadata`, the operator's free-form value,
     /// which upstream carries without interpreting and serves as the
     /// `metadata` field of the adminspace's `local_data`
@@ -1580,11 +1602,14 @@ impl Default for ZenohNodeConfig {
             tls_connect_private_key: None,
             tls_enable_mtls: None,
             tls_verify_name_on_connect: None,
+            tls_close_link_on_expiration: None,
             link_protocols: None,
             tls_listen_private_key: None,
             // R2593 — all four resolve to `null` on a running zenohd: no buffer
             // size is set, and the kernel's defaults stand.
             link_socket_buffers: LinkSocketBuffers::default(),
+            // An `Option<u32>` upstream with no default, so a silent file resolves it to `null`.
+            unixpipe_file_access_mask: None,
             // R311y845 — all three resolve to `null` on a running zenohd (no
             // instruction), NOT to the values `DEFAULT_CONFIG.json5` documents
             // in its comments. Defaulting them to `224.0.0.224:7446` / `auto` /
@@ -1640,6 +1665,8 @@ impl Default for ZenohNodeConfig {
             qos_network: Vec::new(),
             access_control: AclConfigInputs::default(),
             plugins: None,
+            // The library's `false`, not the `true` zenohd sets over its file.
+            plugins_loading_enabled: None,
             metadata: None,
         }
     }
@@ -2061,6 +2088,15 @@ impl ZenohNodeConfig {
             self.tx_queue.wait_before_close_us
         );
         out.push_str("      }");
+        // `buffer_size` only where the build reads it: a build without a per-link pool reports
+        // the key ignored, and nothing wz emits may be a key it cannot read back.
+        #[cfg(not(feature = "runtime-zero-copy"))]
+        let _ = write!(
+            out,
+            ",\n      \"rx\": {{ \"buffer_size\": {}, \"max_message_size\": {} }}",
+            self.link_rx.buffer_size, self.link_rx.max_message_size
+        );
+        #[cfg(feature = "runtime-zero-copy")]
         let _ = write!(
             out,
             ",\n      \"rx\": {{ \"max_message_size\": {} }}",
@@ -2121,6 +2157,10 @@ impl ZenohNodeConfig {
         for (key, value) in [
             ("enable_mtls", self.tls_enable_mtls),
             ("verify_name_on_connect", self.tls_verify_name_on_connect),
+            (
+                "close_link_on_expiration",
+                self.tls_close_link_on_expiration,
+            ),
         ] {
             if let Some(value) = value {
                 tls.push((key, value.to_string()));
@@ -2144,6 +2184,14 @@ impl ZenohNodeConfig {
             }
             out.push_str("\n      }");
         }
+        // The unixpipe block, only for a mode the caller set: an absent key is the link's own
+        // default, so emitting nothing is exact.
+        if let Some(mask) = self.unixpipe_file_access_mask {
+            let _ = write!(
+                out,
+                ",\n      \"unixpipe\": {{ \"file_access_mask\": {mask} }}"
+            );
+        }
         out.push_str("\n    }\n  }");
         if let Some(admin) = self.adminspace {
             out.push_str(",\n  \"adminspace\": { \"enabled\": true, \"permissions\": ");
@@ -2151,6 +2199,13 @@ impl ZenohNodeConfig {
                 out,
                 "{{ \"read\": {}, \"write\": {} }} }}",
                 admin.read, admin.write
+            );
+        }
+        // Only a value the caller stated: an absent key is the library's `false`.
+        if let Some(enabled) = self.plugins_loading_enabled {
+            let _ = write!(
+                out,
+                ",\n  \"plugins_loading\": {{ \"enabled\": {enabled} }}"
             );
         }
         out.push_str("\n}\n");
@@ -2270,6 +2325,14 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // (`io/zenoh-transport/src/common/defragmentation.rs` @
     // `if new_len > self.capacity {`).
     "transport/link/rx/max_message_size",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and `UNHONOURED_READER_GAP`, so the surface
+    // total is unchanged: the read storage each stream link pools, which a session's `LinkRxConf`
+    // carries to the links it wires, `buffer_size / mtu` buffers and at least one, as upstream's
+    // RX task pools them. The udp, ws, quic-datagram and serial links read each message into
+    // storage of its own and keep no pool, so the key sizes nothing there; a `runtime-zero-copy`
+    // build reads every link into the node's shared table and refuses the key
+    // (`CAPABILITY_HONOURED_KEYS`).
+    "transport/link/rx/buffer_size",
     "adminspace/enabled",
     "adminspace/permissions/read",
     "adminspace/permissions/write",
@@ -2344,6 +2407,10 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/link/tls/connect_private_key",
     "transport/link/tls/enable_mtls",
     "transport/link/tls/verify_name_on_connect",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and `UNHONOURED_READER_GAP`, so the surface
+    // total is unchanged: the expiry teardown of the tls and quic links, which the layer of each
+    // of those kinds in `LinkDefaults` carries under the locator's own flag.
+    "transport/link/tls/close_link_on_expiration",
     "transport/link/protocols",
     // R2593 — the per-link-kind socket buffers. MOVED from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS` (and its beyond-wz group), so the
@@ -2354,6 +2421,11 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/link/tcp/so_sndbuf",
     "transport/link/tls/so_rcvbuf",
     "transport/link/tls/so_sndbuf",
+    // The unixpipe link's FIFO mode. MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and
+    // `UNHONOURED_READER_GAP`, so the surface total is unchanged: it reaches every unixpipe link
+    // through the unixpipe layer of `LinkDefaults`, under the locator's own `file_mask`, as
+    // upstream's inspector renders it under the endpoint's parameters.
+    "transport/link/unixpipe/file_access_mask",
     // R311y845 — WHERE the node looks for its peers. These three MOVED from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS`, so the surface total below is
     // unchanged: they are resolved leaves of a real zenohd either way, and all
@@ -2428,6 +2500,11 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // leaf by leaf wherever it names something no plugin of wz reads — another
     // plugin entirely, or a storage manager field wz does not act on.
     "plugins",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` and `UNHONOURED_READER_GAP`, so the surface
+    // total is unchanged: whether the plugin plane looks a plugin named with no `__path__` up by
+    // name. Off, the library's default, it leaves the plugin unloaded with upstream's warning;
+    // on, it refuses the lookup by name, as `plugins_loading/search_dirs` stays unhonoured.
+    "plugins_loading/enabled",
     // §5.23 `adminspace-core` — `metadata`, MOVED here from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS`, so the surface total is unchanged. The
     // reader carries the value and every adminspace host serves it as
@@ -2513,6 +2590,12 @@ pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
         TLS_MATERIAL_CAPABILITY,
         TLS_MATERIAL_BUILT,
     ),
+    // Not material, and read by the same two links: each closes at its peer chain's expiry.
+    (
+        "transport/link/tls/close_link_on_expiration",
+        TLS_MATERIAL_CAPABILITY,
+        TLS_MATERIAL_BUILT,
+    ),
     // The socket buffers of a `tls/` link, which the `quic/` link does not have.
     (
         "transport/link/tls/so_rcvbuf",
@@ -2523,6 +2606,29 @@ pub const CAPABILITY_HONOURED_KEYS: &[(&str, &str, bool)] = &[
         "transport/link/tls/so_sndbuf",
         "transport-link-tls",
         cfg!(feature = "transport-link-tls"),
+    ),
+    // The FIFO mode of a `unixpipe/` link, which a build has on a Unix target with the link.
+    (
+        "transport/link/unixpipe/file_access_mask",
+        "transport-link-unixpipe",
+        cfg!(all(feature = "transport-link-unixpipe", unix)),
+    ),
+    // The per-link RX pool the size counts out, which a `runtime-zero-copy` build replaces with
+    // the node's one table, sized by its deploy declaration (`frame_arena::link_arena`).
+    (
+        "transport/link/rx/buffer_size",
+        "a per-link RX pool (a build without runtime-zero-copy)",
+        cfg!(not(feature = "runtime-zero-copy")),
+    ),
+    // The by-name lookup of the plugin plane, which only a build with a library plugin host has.
+    (
+        "plugins_loading/enabled",
+        "plugin-dynamic-loading and adminspace-config-hotreload",
+        cfg!(all(
+            unix,
+            feature = "plugin-dynamic-loading",
+            feature = "adminspace-config-hotreload"
+        )),
     ),
     // The partition a node places its remotes by, which only the region hats hold
     // (`RouterForwarder::with_south_partition`).
@@ -2817,7 +2923,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // carries the section and the storage host runs the storage manager from
     // it. Its two `plugins_loading/*` siblings stay: they govern how a zenohd
     // DISCOVERS plugin libraries, which is a different capability.
-    "plugins_loading/enabled",
+    // `plugins_loading/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: the plugin plane
+    // switches its by-name lookup on it. `search_dirs`, where that lookup would search, stays.
     "plugins_loading/search_dirs",
     // `qos/network` LEFT this list for `HONOURED_CONFIG_KEYS`: the QoS overwrite interceptor is
     // built. Same partition, same total.
@@ -2872,12 +2979,14 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // [`HONOURED_CONFIG_KEYS`].
     // `transport/link/protocols` LEFT this list for `HONOURED_CONFIG_KEYS`: the open refuses an
     // endpoint whose protocol it leaves out.
-    "transport/link/rx/buffer_size",
+    // `transport/link/rx/buffer_size` LEFT this list for `HONOURED_CONFIG_KEYS`: a session's
+    // `LinkRxConf` sizes the RX pool of every stream link it wires.
     // `transport/link/rx/max_message_size` LEFT this list for
     // `HONOURED_CONFIG_KEYS`: a session's reassembly now ends a chain past it.
     // R2593 — `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` LEFT this list for
     // `HONOURED_CONFIG_KEYS`: `LinkDefaults` now carries them to every link.
-    "transport/link/tls/close_link_on_expiration",
+    // `transport/link/tls/close_link_on_expiration` LEFT this list for `HONOURED_CONFIG_KEYS`:
+    // `LinkDefaults` carries it to every tls and quic link.
     // `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
     // verify_name_on_connect}` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader reads them
     // and the open hands them to the tls links.
@@ -2888,7 +2997,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/link/tx/queue/batching/time_limit",
     "transport/link/tx/sequence_number_resolution",
     "transport/link/tx/threads",
-    "transport/link/unixpipe/file_access_mask",
+    // `transport/link/unixpipe/file_access_mask` LEFT this list for `HONOURED_CONFIG_KEYS`: the
+    // unixpipe layer of `LinkDefaults` carries it to every unixpipe link.
     // `transport/multicast/compression/enabled` LEFT this list for
     // [`C_ABI_SESSION_HONOURED_KEYS`]: a group the zenoh-c session joins wraps its datagrams in
     // batches, as upstream's multicast manager does from 1.10.2.
@@ -3158,36 +3268,30 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 /// * `low_pass_filter` — `LowPassRule` on the same chain, driven by
 ///   `--max-payload`. R2150 moved both: the group sentence that held them
 ///   claimed wz needed an interceptor chain, and wz has one.
-/// * `plugins_loading/enabled` — `PluginRegistry`, which loads, starts, stops
-///   and admin-reports `DynamicPlugin`s, driven today by the demo's repeated
-///   `--plugin`. `plugins_loading/search_dirs` stays in
-///   [`UNHONOURED_BEYOND_WZ`]: wz loads by explicit path and has no discovery.
-///   (R2788: `plugins` itself left this list — the reader carries the section.)
+/// * (`plugins_loading/enabled` LEFT this list: the plugin plane switches its by-name lookup on
+///   it, [`HONOURED_CONFIG_KEYS`]. `plugins_loading/search_dirs` stays in
+///   [`UNHONOURED_BEYOND_WZ`]: wz loads by explicit path and has no discovery.)
 /// * (`transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
 ///   verify_name_on_connect}` LEFT this list: the reader reads them, [`HONOURED_CONFIG_KEYS`].)
-/// * `transport/link/rx/buffer_size` — the size of a link's RX pool, which
-///   `crate::frame_arena::RecyclingArena::for_link` takes as a parameter and divides by the
-///   link's mtu as upstream's RX task does. Every caller passes upstream's default, so the
-///   reader change is "hand the parsed value to the arena", not "build a pool".
-/// * `transport/link/tls/close_link_on_expiration` — the tls and quic links' teardown at the
-///   peer chain's expiry (`crate::stream_link::ExpirySignal`, R2600 and R2608), armed today by
-///   the locator's `close_link_on_expiration`. The key is upstream's per-link default for that
-///   same flag, so the reader change is "render it onto the tls and quic endpoints".
-/// * `transport/link/unixpipe/file_access_mask` — the unixpipe link's FIFO
-///   creation mode, which R2363 made configurable:
-///   `crate::unixpipe_pipeline::DEFAULT_FILE_MASK` and the
-///   `wz_session_core::locator::UnixpipeEndpoint::file_mask` the locator's
-///   `#file_mask=<n>` fills, threaded into every `mkfifo` the bind and the dial
-///   perform. Upstream's own path from the CONFIG KEY to the link is the same
-///   shape: `UnixPipeConfigurator::inspect_config` renders it into the
-///   endpoint's config span as a per-link DEFAULT, which the endpoint's own
-///   parameters then overwrite. So the reader change is "render the key onto
-///   the unixpipe endpoints", not "build a mode".
+/// * (`transport/link/rx/buffer_size` LEFT this list: a session's `LinkRxConf` carries it to the
+///   RX pool of every stream link the session wires, [`HONOURED_CONFIG_KEYS`].)
+/// * (`transport/link/tls/close_link_on_expiration` LEFT this list: the reader renders it onto
+///   the tls, quic and quic-datagram layers of `crate::link_socket::LinkDefaults`,
+///   [`HONOURED_CONFIG_KEYS`].)
+/// * (`transport/link/unixpipe/file_access_mask` LEFT this list: the reader renders it onto the
+///   unixpipe layer of `crate::link_socket::LinkDefaults`, [`HONOURED_CONFIG_KEYS`].)
 ///
 /// ⚠ Being here is NOT a claim that the move is mechanical. R311y844's ten were
 /// moved one at a time, and `scouting/multicast/autoconnect` needed R2141 to
 /// build a strategy representation first. This list says the capability EXISTS,
 /// not that the reader change is free.
+///
+/// EMPTY is a state this list may be in, and the one it is meant to reach: a key
+/// leaves it only by its reader being built. What keeps an empty list from
+/// reading as the split having gone unexamined is that every unhonoured key must
+/// still be classed, so with nothing here every one of them is a claim in
+/// [`UNHONOURED_BEYOND_WZ`] that its group's anchor is absent from wz's code,
+/// and a capability wz grows reds that claim and brings the key back here.
 pub const UNHONOURED_READER_GAP: &[&str] = &[
     // R2159 (open-debt item 229) — `connect/timeout_ms` LEFT this list for
     // `HONOURED_CONFIG_KEYS`, and it is the one member of item 229's four that
@@ -3203,7 +3307,8 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // rules-x-subjects-x-policies join demanded is `WzConfig::acl_inputs`, and
     // with it built, none of the seven interceptor keys is a reader gap.
     // R2788 — `plugins` LEFT this list: the reader now carries the section.
-    "plugins_loading/enabled",
+    // `plugins_loading/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: the plugin plane takes
+    // it from the reader.
     // R2539 — `region_name` ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
     // capability (`SessionLinkActions::set_local_region`, `wz_session_core::extregion`), and it
     // LEFT for [`C_ABI_SESSION_HONOURED_KEYS`] once the reader fed that setter through the offer
@@ -3223,13 +3328,15 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // MOVED here from `UNHONOURED_BEYOND_WZ` and its `LinkTxConf` group, the R2363 class again:
     // the link-RX pool has taken its size as a parameter since R2742, and only the default
     // reaches it, so what is missing is the reader and not a configurable RX surface.
-    "transport/link/rx/buffer_size",
+    // It then LEFT for `HONOURED_CONFIG_KEYS` once a session's `LinkRxConf` carried the read
+    // value to the links it wires.
     // MOVED here from `UNHONOURED_BEYOND_WZ` and its `LinkTxConf` group: R2600 and R2608 built
     // the expiry teardown on the quic and tls links, armed from the locator's
     // `close_link_on_expiration`. Upstream renders this key into each tls endpoint's config as
     // the per-link default (`io/zenoh-links/zenoh-link-tls/src/utils.rs`
     // @ `.close_link_on_expiration()`), which is the reader change left.
-    "transport/link/tls/close_link_on_expiration",
+    // It then LEFT for `HONOURED_CONFIG_KEYS` once the reader rendered the key onto the tls and
+    // quic layers of `LinkDefaults`.
     // R2363 — MOVED here from `UNHONOURED_BEYOND_WZ`, and the move is the
     // finding rather than the bookkeeping: that list's `LinkTxConf` group said
     // wz lacked "a configurable link-TX surface" for this key, which was true
@@ -3241,7 +3348,8 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // JSON5 reader has no field for it. This is the exact class the ledger's
     // own doc warns about — a beyond-wz row that becomes a reader gap because
     // wz grew the capability, and reds nothing on its own.
-    "transport/link/unixpipe/file_access_mask",
+    // It then LEFT for `HONOURED_CONFIG_KEYS` once the reader rendered the key onto the unixpipe
+    // layer of `LinkDefaults`.
 ];
 
 /// WHICH subsystem each [`UNHONOURED_BEYOND_WZ`] key would need, as data —
@@ -3549,7 +3657,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // R2864 — `gateway/south`'s row is GONE (item 751, step 7d-2): the reader
     // honours the key now, and `extbound.rs`'s "not this key" disclaimer went
     // with it.
-    ("plugins_loading/enabled", "wz-has-it", "PluginRegistry"),
+    // The `plugins_loading/enabled` row is GONE: the reader honours the key now, and this ledger
+    // carries evidence for unhonoured keys only.
     // The citing site is `PluginRegistry`'s doc, drawing the line at this key:
     // the host is wz's, the DISCOVERY is not. A citation that says "not this
     // one" is still a citation, and it needs a verdict like any other.
@@ -3608,32 +3717,12 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // And for `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
     // verify_name_on_connect}`: their rows said the capability was in wz and the reader was
     // not, and the reader reads them now.
-    // The link-RX pool. Its doc in `frame_arena.rs` names the key beside the parameter that
-    // would carry it, and the anchor is the pool type that takes the size.
-    (
-        "transport/link/rx/buffer_size",
-        "wz-has-it",
-        "RecyclingArena",
-    ),
-    // The expiry teardown. Its doc in `tls_pipeline.rs` names the key where the locator's flag
-    // is taken, and the anchor is the function that reads the deadline off the peer's chain.
-    (
-        "transport/link/tls/close_link_on_expiration",
-        "wz-has-it",
-        "peer_chain_deadline",
-    ),
-    // R2363 — the unixpipe FIFO mode. The anchor is the DEFAULT rather than the
-    // parse, because the default is the whole of wz's declared divergence
-    // (0o600 where upstream defaults to 0o777) and it is what a reader
-    // rendering the key would have to override. `UnixpipeEndpoint::file_mask`
-    // is the other half and lives in `wz-session-core`; the anchor has to be a
-    // symbol in THIS crate's own sweep, so the one that is here is the one
-    // named.
-    (
-        "transport/link/unixpipe/file_access_mask",
-        "wz-has-it",
-        "DEFAULT_FILE_MASK",
-    ),
+    // The `transport/link/rx/buffer_size` row is GONE: the reader honours the key now, and this
+    // ledger carries evidence for unhonoured keys only.
+    // The `transport/link/tls/close_link_on_expiration` row is GONE: the reader honours the key
+    // now, and this ledger carries evidence for unhonoured keys only.
+    // The `transport/link/unixpipe/file_access_mask` row is GONE: the reader honours the key
+    // now, and this ledger carries evidence for unhonoured keys only.
     // R2925 — the `queue/size/data` row R2226 (open-debt item 575) kept here is
     // GONE, for the reason R2593's `so_sndbuf` row went: wz honours the key now,
     // and the ledger answers only for keys wz does not act on. The zenohd
@@ -3737,11 +3826,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "a session declares one subscriber per listed key expression; wz declares each",
     ),
     (
-        "plugins_loading/enabled",
-        "build",
-        "reader gap: PluginRegistry loads plugins and the reader does not gate it on this",
-    ),
-    (
         "plugins_loading/search_dirs",
         "build",
         "finding a plugin library by name in search directories; wz loads by path only",
@@ -3755,16 +3839,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "stats/filters",
         "build",
         "statistics per key expression; wz counts per session and sees no key expression",
-    ),
-    (
-        "transport/link/rx/buffer_size",
-        "build",
-        "reader gap: RecyclingArena sizes each link RX pool by it; nothing reads the file",
-    ),
-    (
-        "transport/link/tls/close_link_on_expiration",
-        "build",
-        "reader gap: tls and quic links close on expiry per locator; the file is unread",
     ),
     (
         "transport/link/tx/queue/allocation/mode",
@@ -3790,11 +3864,6 @@ pub const UNHONOURED_DISPOSITIONS: &[(&str, &str, &str)] = &[
         "transport/link/tx/threads",
         "exclude",
         "upstream stores it on its transport manager config and nothing reads it back",
-    ),
-    (
-        "transport/link/unixpipe/file_access_mask",
-        "build",
-        "reader gap: a unixpipe link takes its FIFO mode from its locator only",
     ),
     (
         "transport/multicast/max_sessions",
@@ -4792,8 +4861,12 @@ fn is_empty_list(value: &Json5Value) -> bool {
 }
 
 /// The value of a key whose every spelling is an instruction: a path, a size. Only its absence,
-/// or `null`, states nothing, and those never reach the predicate.
-#[cfg(not(feature = "transport-link-tls"))]
+/// or `null`, states nothing, and those never reach the predicate. Compiled where some such
+/// key's capability is out of the build: the `tls/` link's, or the `unixpipe/` link's.
+#[cfg(any(
+    not(feature = "transport-link-tls"),
+    not(all(feature = "transport-link-unixpipe", unix))
+))]
 fn never_states_nothing(_: &Json5Value) -> bool {
     false
 }
@@ -7746,6 +7819,23 @@ impl ZenohNodeConfig {
                 })?;
             named.push("transport/link/rx/max_message_size");
         }
+        // The read storage a stream link pools, a `usize` upstream, read where the build pools
+        // per link (`CAPABILITY_HONOURED_KEYS`).
+        #[cfg(not(feature = "runtime-zero-copy"))]
+        if let Some(v) = want_u64(&doc, "transport/link/rx/buffer_size")? {
+            out.link_rx.buffer_size =
+                usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                    path: "transport/link/rx/buffer_size",
+                    value: v.to_string(),
+                })?;
+            named.push("transport/link/rx/buffer_size");
+        }
+        #[cfg(feature = "runtime-zero-copy")]
+        refuse_unbuilt_instruction(&doc, "transport/link/rx/buffer_size", |value| {
+            matches!(value, Json5Value::Number(text)
+                if number_as_u64(text)
+                    == Some(wz_session_core::session_init_params::RX_BUFFER_SIZE as u64))
+        })?;
         // R311y844 — the ten keys wz already acts on. Read in
         // HONOURED_CONFIG_KEYS order so `named` reports them the way the table
         // lists them.
@@ -7884,6 +7974,26 @@ impl ZenohNodeConfig {
             out.plugins = Some(value.clone());
             named.push("plugins");
         }
+        // Whether a plugin named with no `__path__` is looked up by name, read where the build
+        // has a plugin plane to look it up in (`CAPABILITY_HONOURED_KEYS`). A build without one
+        // reads the library's `false` as stating nothing.
+        #[cfg(all(
+            unix,
+            feature = "plugin-dynamic-loading",
+            feature = "adminspace-config-hotreload"
+        ))]
+        if let Some(v) = want_bool(&doc, "plugins_loading/enabled")? {
+            out.plugins_loading_enabled = Some(v);
+            named.push("plugins_loading/enabled");
+        }
+        #[cfg(not(all(
+            unix,
+            feature = "plugin-dynamic-loading",
+            feature = "adminspace-config-hotreload"
+        )))]
+        refuse_unbuilt_instruction(&doc, "plugins_loading/enabled", |value| {
+            matches!(value, Json5Value::Bool(false))
+        })?;
         // §5.23 `adminspace-core` — `metadata`, kept whole. Any JSON value is
         // legal, as upstream's `Value` field makes it; the only refusal is the
         // one upstream's own parser makes, a number literal it cannot read.
@@ -7991,6 +8101,10 @@ impl ZenohNodeConfig {
                 out.tls_verify_name_on_connect = Some(v);
                 named.push("transport/link/tls/verify_name_on_connect");
             }
+            if let Some(v) = want_bool(&doc, "transport/link/tls/close_link_on_expiration")? {
+                out.tls_close_link_on_expiration = Some(v);
+                named.push("transport/link/tls/close_link_on_expiration");
+            }
         }
         // Upstream's defaults: no file named, no client certificate asked for, and the
         // dialled name verified.
@@ -8012,6 +8126,11 @@ impl ZenohNodeConfig {
                 &doc,
                 "transport/link/tls/verify_name_on_connect",
                 |value| matches!(value, Json5Value::Bool(true)),
+            )?;
+            refuse_unbuilt_instruction(
+                &doc,
+                "transport/link/tls/close_link_on_expiration",
+                |value| matches!(value, Json5Value::Bool(false)),
             )?;
         }
         // `transport/link/protocols` is `Option<Vec<String>>` upstream: absent is every protocol,
@@ -8052,6 +8171,22 @@ impl ZenohNodeConfig {
                 }
             }
         }
+        // The unixpipe link's FIFO mode, a `u32` upstream, read where the build has the link.
+        #[cfg(all(feature = "transport-link-unixpipe", unix))]
+        if let Some(v) = want_u64(&doc, "transport/link/unixpipe/file_access_mask")? {
+            out.unixpipe_file_access_mask =
+                Some(u32::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                    path: "transport/link/unixpipe/file_access_mask",
+                    value: v.to_string(),
+                })?);
+            named.push("transport/link/unixpipe/file_access_mask");
+        }
+        #[cfg(not(all(feature = "transport-link-unixpipe", unix)))]
+        refuse_unbuilt_instruction(
+            &doc,
+            "transport/link/unixpipe/file_access_mask",
+            never_states_nothing,
+        )?;
         // `adminspace` is a block rather than a field: an absent block is not
         // `enabled: false`, which is why the struct models it as an Option and
         // why `enabled: false` here has to erase the block rather than record
@@ -9351,6 +9486,11 @@ mod tests {
                 "transport/link/rx/max_message_size",
                 r#"{ "transport": { "link": { "rx": { "max_message_size": 65536 } } } }"#,
             ),
+            // Four widest batches of read storage; upstream's default is one.
+            (
+                "transport/link/rx/buffer_size",
+                r#"{ "transport": { "link": { "rx": { "buffer_size": 262140 } } } }"#,
+            ),
             (
                 "adminspace/enabled",
                 r#"{ "adminspace": { "enabled": true } }"#,
@@ -9488,6 +9628,11 @@ mod tests {
                 "transport/link/tls/verify_name_on_connect",
                 r#"{ "transport": { "link": { "tls": { "verify_name_on_connect": false } } } }"#,
             ),
+            // The expiry teardown, to `true`; upstream's default is `false`.
+            (
+                "transport/link/tls/close_link_on_expiration",
+                r#"{ "transport": { "link": { "tls": { "close_link_on_expiration": true } } } }"#,
+            ),
             (
                 "transport/link/protocols",
                 r#"{ "transport": { "link": { "protocols": ["tls", "quic"] } } }"#,
@@ -9509,6 +9654,12 @@ mod tests {
             (
                 "transport/link/tls/so_sndbuf",
                 r#"{ "transport": { "link": { "tls": { "so_sndbuf": 8192 } } } }"#,
+            ),
+            // The unixpipe FIFO mode, to 0o660 (decimal, upstream's spelling); absent is the
+            // default.
+            (
+                "transport/link/unixpipe/file_access_mask",
+                r#"{ "transport": { "link": { "unixpipe": { "file_access_mask": 432 } } } }"#,
             ),
             // R311y845 — WHERE the node looks. Each is driven to a value that
             // is NOT the upstream default (`224.0.0.224:7446` / `auto` / `1`),
@@ -9618,6 +9769,11 @@ mod tests {
                 "plugins",
                 r#"{ "plugins": { "storage_manager": { "storages": { "demo":
                      { "key_expr": "demo/**", "volume": "memory" } } } } }"#,
+            ),
+            // By-name lookup on; the library's default is off.
+            (
+                "plugins_loading/enabled",
+                r#"{ "plugins_loading": { "enabled": true } }"#,
             ),
             // §5.23 `adminspace-core` — a nested value with a number, so the
             // leaves below the key are exercised and `ignored` must stay empty.
@@ -11953,12 +12109,17 @@ mod tests {
     #[test]
     fn every_unhonoured_key_says_which_kind_of_unhonoured_it_is() {
         assert!(!UNHONOURED_BEYOND_WZ.is_empty());
-        assert!(
-            !UNHONOURED_READER_GAP.is_empty(),
-            "an empty reader-gap list makes the split vacuous — every key would \
-             be 'wz cannot', which is the undivided state this test exists to \
-             end"
-        );
+        // An empty reader-gap list is the state that list is meant to reach,
+        // not the undivided one: every key below must still be classed, and
+        // with no reader gap left each is a beyond-wz claim its group's anchor
+        // stands behind (`UNHONOURED_READER_GAP`'s doc).
+        if UNHONOURED_READER_GAP.is_empty() {
+            println!(
+                "unhonoured reader gap is EXHAUSTED: every key wz has the capability for is \
+                 read; the {} left are each claimed beyond wz",
+                UNHONOURED_BEYOND_WZ.len()
+            );
+        }
 
         let both: Vec<&&str> = UNHONOURED_BEYOND_WZ
             .iter()
@@ -12109,17 +12270,30 @@ mod tests {
         // The breakdown, per kind, and a floor on each: a kind with no rows is
         // a branch of the static gate nobody has ever run, and "19 rows" reads
         // the same whether that is true or not.
+        //
+        // `wz-has-it` is the one kind whose rows ARE a list: the two checks
+        // above bind its rows to `UNHONOURED_READER_GAP` one for one, so it is
+        // empty exactly when every reader gap has been paid, which is that
+        // list's goal rather than a branch gone quiet. Its floor is that list's.
         for kind in UNHONOURED_CITATION_KINDS {
             let rows: Vec<&str> = UNHONOURED_CITATION_LEDGER
                 .iter()
                 .filter(|(_, k, _)| k == kind)
                 .map(|(key, ..)| *key)
                 .collect();
-            assert!(
-                !rows.is_empty(),
-                "citation kind `{kind}` has no rows — drop the kind or find its \
-                 member; an unexercised branch is not coverage"
-            );
+            if *kind == "wz-has-it" {
+                assert_eq!(
+                    rows.len(),
+                    UNHONOURED_READER_GAP.len(),
+                    "every `wz-has-it` row is a reader gap and every reader gap has one"
+                );
+            } else {
+                assert!(
+                    !rows.is_empty(),
+                    "citation kind `{kind}` has no rows — drop the kind or find its \
+                     member; an unexercised branch is not coverage"
+                );
+            }
             println!("citation kind {kind}: {} row(s) {rows:?}", rows.len());
         }
     }
@@ -12836,7 +13010,8 @@ mod tests {
             r#"{ low_pass_filter: [], downsampling: [], qos: { network: [] },
                  access_control: { enabled: false, default_permission: "deny",
                                    rules: [], subjects: [], policies: [] },
-                 transport: { link: { tls: { enable_mtls: false, verify_name_on_connect: true } } },
+                 transport: { link: { tls: { enable_mtls: false, verify_name_on_connect: true,
+                                             close_link_on_expiration: false } } },
                  gateway: { south: "auto" } }"#,
         )
         .expect("upstream's defaults state no instruction");
@@ -12852,6 +13027,7 @@ mod tests {
             "access_control/policies",
             "transport/link/tls/enable_mtls",
             "transport/link/tls/verify_name_on_connect",
+            "transport/link/tls/close_link_on_expiration",
             "gateway/south",
         ];
         for key in stated {
@@ -12908,6 +13084,18 @@ mod tests {
                 r#"{ transport: { link: { tls: { so_rcvbuf: 4096 } } } }"#,
             ),
             (
+                "transport/link/unixpipe/file_access_mask",
+                r#"{ transport: { link: { unixpipe: { file_access_mask: 432 } } } }"#,
+            ),
+            (
+                "transport/link/rx/buffer_size",
+                r#"{ transport: { link: { rx: { buffer_size: 262140 } } } }"#,
+            ),
+            (
+                "plugins_loading/enabled",
+                r#"{ plugins_loading: { enabled: true } }"#,
+            ),
+            (
                 "gateway/south",
                 r#"{ gateway: { south: [{ filters: [{ modes: ["peer"] }] }] } }"#,
             ),
@@ -12933,6 +13121,134 @@ mod tests {
                 None => panic!("{key} is a capability's key"),
             }
         }
+    }
+
+    /// `plugins_loading/enabled` is read where a plugin host is built, absent when the file is
+    /// silent (the library's `false`, not the `true` zenohd sets over its file), and written
+    /// back by the emitter. A build without the host reads the library's `false` as stating
+    /// nothing and refuses `true` by the key.
+    #[test]
+    fn plugins_loading_is_read_where_a_plugin_host_is_built() {
+        let read = |doc: &str| ZenohNodeConfig::from_json5(doc);
+        let on = r#"{ plugins_loading: { enabled: true } }"#;
+        let off = r#"{ plugins_loading: { enabled: false } }"#;
+        assert_eq!(
+            read("{}").expect("silence").config.plugins_loading_enabled,
+            None
+        );
+        match config_key_capability("plugins_loading/enabled") {
+            Some((_, true)) => {
+                let stated = read(on).expect("a bool");
+                assert_eq!(stated.config.plugins_loading_enabled, Some(true));
+                let off = read(off).expect("a bool");
+                assert_eq!(off.config.plugins_loading_enabled, Some(false));
+                assert!(off.named.contains(&"plugins_loading/enabled"));
+                let again = read(stated.config.to_json5().as_str()).expect("it round-trips");
+                assert_eq!(again.config, stated.config);
+                assert!(again.ignored.is_empty(), "{:?}", again.ignored);
+            }
+            Some((_, false)) => {
+                assert!(matches!(
+                    read(on),
+                    Err(ConfigIngestError::NotInBuild {
+                        path: "plugins_loading/enabled",
+                        ..
+                    })
+                ));
+                let off = read(off).expect("the library's default states nothing");
+                assert_eq!(off.config.plugins_loading_enabled, None);
+                assert!(off
+                    .ignored
+                    .iter()
+                    .any(|leaf| leaf == "plugins_loading/enabled"));
+            }
+            None => panic!("plugins_loading/enabled is a capability's key"),
+        }
+    }
+
+    /// `transport/link/rx/buffer_size` reads into the session's `LinkRxConf` in a build that
+    /// pools per link, upstream's default when the file is silent, and the emitter writes it
+    /// back where the reader finds it. A build whose links read into the node's table reads
+    /// upstream's default as stating nothing and refuses any other value by the key.
+    #[test]
+    fn the_rx_buffer_size_reaches_the_sessions_link_rx() {
+        use wz_session_core::session_init_params::RX_BUFFER_SIZE;
+        let read = |doc: &str| ZenohNodeConfig::from_json5(doc);
+        let stated = r#"{ transport: { link: { rx: { buffer_size: 262140 } } } }"#;
+        let silent = read("{}").expect("silence");
+        assert_eq!(silent.config.link_rx.buffer_size, RX_BUFFER_SIZE);
+        let default = read(r#"{ transport: { link: { rx: { buffer_size: 65535 } } } }"#)
+            .expect("upstream's default states nothing a build cannot carry");
+        if cfg!(feature = "runtime-zero-copy") {
+            assert!(matches!(
+                read(stated),
+                Err(ConfigIngestError::NotInBuild {
+                    path: "transport/link/rx/buffer_size",
+                    ..
+                })
+            ));
+            assert!(!default.named.contains(&"transport/link/rx/buffer_size"));
+            return;
+        }
+        assert!(default.named.contains(&"transport/link/rx/buffer_size"));
+        let ingest = read(stated).expect("a usize");
+        assert_eq!(ingest.config.link_rx.buffer_size, 262_140);
+        assert!(ingest.named.contains(&"transport/link/rx/buffer_size"));
+        let again = read(ingest.config.to_json5().as_str()).expect("it round-trips");
+        assert_eq!(again.config, ingest.config);
+        assert!(again.ignored.is_empty(), "{:?}", again.ignored);
+        assert!(matches!(
+            read(r#"{ transport: { link: { rx: { buffer_size: "big" } } } }"#),
+            Err(ConfigIngestError::WrongType {
+                path: "transport/link/rx/buffer_size",
+                ..
+            })
+        ));
+    }
+
+    /// The unixpipe FIFO mode is a `u32` upstream: read as the number it is, absent when the
+    /// file is silent, and refused by the key's name past `u32` or as anything but a number.
+    #[cfg(all(feature = "transport-link-unixpipe", unix))]
+    #[test]
+    fn the_unixpipe_file_mask_is_read_as_a_u32() {
+        let read = |doc: &str| ZenohNodeConfig::from_json5(doc);
+        assert_eq!(
+            read(r#"{ transport: { link: { unixpipe: { file_access_mask: 432 } } } }"#)
+                .expect("a u32")
+                .config
+                .unixpipe_file_access_mask,
+            Some(432)
+        );
+        assert_eq!(
+            read("{}")
+                .expect("silence")
+                .config
+                .unixpipe_file_access_mask,
+            None
+        );
+        assert_eq!(
+            read(r#"{ transport: { link: { unixpipe: { file_access_mask: 4294967296 } } } }"#)
+                .err(),
+            Some(ConfigIngestError::OutOfRange {
+                path: "transport/link/unixpipe/file_access_mask",
+                value: String::from("4294967296"),
+            })
+        );
+        assert!(matches!(
+            read(r#"{ transport: { link: { unixpipe: { file_access_mask: "0o660" } } } }"#),
+            Err(ConfigIngestError::WrongType {
+                path: "transport/link/unixpipe/file_access_mask",
+                ..
+            })
+        ));
+        // The emitter writes the mode back where the reader finds it.
+        let stated = ZenohNodeConfig {
+            unixpipe_file_access_mask: Some(432),
+            ..ZenohNodeConfig::default()
+        };
+        let again = read(stated.to_json5().as_str()).expect("it round-trips");
+        assert_eq!(again.config, stated);
+        assert!(again.ignored.is_empty(), "{:?}", again.ignored);
     }
 
     /// R2797 — why the C door cannot be an ENUMERATION.

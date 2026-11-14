@@ -164,9 +164,11 @@ pub async fn accept_vsock_on(listener: &mut VsockListener) -> io::Result<VsockSt
 /// join handle. Mirrors [`crate::tls_pipeline::wire_tls_stream`] — a vsock
 /// stream is split with [`tokio::io::split`] (no owned-half split) but
 /// otherwise the StreamEnvelope framing + write driver are the SAME shared
-/// [`crate::stream_link`] code.
+/// [`crate::stream_link`] code. `rx_buffer_size` is the session's
+/// `transport/link/rx/buffer_size`: the read storage the link pools.
 pub fn wire_vsock_stream(
     stream: VsockStream,
+    rx_buffer_size: usize,
 ) -> (VsockReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y473 — the adminspace `{src,dst}` pair, rendered in wz's OWN vsock
     // locator form `vsock/<CID>:<PORT>` (module doc) so an admin client reads back
@@ -195,6 +197,7 @@ pub fn wire_vsock_stream(
             fd,
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        rx_buffer_size,
     );
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
@@ -291,7 +294,8 @@ mod tests {
         let _client_stream = client.await.expect("client task").expect("client connect");
 
         let expected = server.as_raw_fd();
-        let (inbound, _outbound, _writer) = wire_vsock_stream(server);
+        let (inbound, _outbound, _writer) =
+            wire_vsock_stream(server, wz_session_core::session_init_params::RX_BUFFER_SIZE);
         assert_eq!(
             inbound.reader_ring_fd(),
             Some(expected),
@@ -331,7 +335,8 @@ mod tests {
             .expect("accept one peer");
         let _client_stream = client.await.expect("client task").expect("client connect");
 
-        let (_inbound, outbound, _writer) = wire_vsock_stream(server);
+        let (_inbound, outbound, _writer) =
+            wire_vsock_stream(server, wz_session_core::session_init_params::RX_BUFFER_SIZE);
         let subject = outbound
             .link_subject()
             .expect("the vsock pipeline states a §5.16 subject");

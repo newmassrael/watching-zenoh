@@ -120,7 +120,12 @@ const fn pico_batch(bytes: usize) -> u16 {
 /// `transport/link/rx/max_message_size` (a chain a fragment would take past it is dropped,
 /// `vendor/zenoh-pico/src/transport/unicast/rx.c` @
 /// `if ((_z_wbuf_len(dbuf) + msg->_payload.len) > Z_FRAG_MAX_SIZE) {`).
+///
+/// The read storage a stream link pools is upstream's default, which pools exactly one buffer:
+/// pico reads each unicast transport into one buffer of its own
+/// (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._zbuf = _z_zbuf_make(zbuf_size);`).
 const PICO_LINK_RX: LinkRxConf = LinkRxConf {
+    buffer_size: wz_session_core::session_init_params::RX_BUFFER_SIZE,
     max_message_size: wz_session_core::caps::PICO_FRAG_MAX_BYTES,
 };
 

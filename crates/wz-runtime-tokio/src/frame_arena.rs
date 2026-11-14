@@ -229,31 +229,34 @@ impl RecyclingArena {
     /// its reader keeps the length prefix IN the frame for the codec, so the
     /// storage a frame needs is the prefix plus the payload the prefix names.
     ///
-    /// ⚠ `rx_buffer_size` is an ARGUMENT, not a read of upstream's RX
-    /// buffer-size key: `transport/link/rx/buffer_size` is a reader gap
-    /// (`zenoh_config::UNHONOURED_READER_GAP`), and the production callers
-    /// below pass the pinned default. Plumbing the parsed value here is what
-    /// would make the key honoured, and this signature is the place it arrives.
+    /// `rx_buffer_size` is upstream's `transport/link/rx/buffer_size`, which a
+    /// session's `LinkRxConf` carries from the config file to the link it
+    /// wires (`link_arena`).
     pub fn for_link(rx_buffer_size: usize, mtu: usize) -> Self {
         let count = (rx_buffer_size / mtu.max(1)).max(1);
         Self::new(count, MAX_FRAME)
     }
 
-    /// The arena a stream link's read half gets today: [`Self::for_link`] at
-    /// the PINNED UPSTREAM DEFAULTS, both of which are `u16::MAX`
-    /// (`commons/zenoh-config/src/defaults.rs`
-    /// @ `buffer_size: BatchSize::MAX as usize,`), against a batch size of the
-    /// same width.
-    ///
-    /// ONE function rather than two literals at two constructors, and that is
-    /// the point of it: honouring upstream's RX buffer-size key is then a
-    /// change to what reaches here, not a search for every link that decided
-    /// its own number. A constant repeated per driver is how a configurable
-    /// value stays unconfigurable.
-    pub fn for_link_default() -> Self {
-        Self::for_link(u16::MAX as usize, u16::MAX as usize)
+    /// Buffers on the free list now: the pool's population while no frame
+    /// holds one.
+    pub fn free_buffers(&self) -> usize {
+        self.free.lock().map_or(0, |free| free.len())
     }
 }
+
+/// The mtu a stream link's RX pool is divided by: the widest batch, because a
+/// link's arena is built when it is wired, before its handshake settles a
+/// batch size, and every buffer is [`MAX_FRAME`] wide whatever is settled.
+/// Upstream divides by the settled one
+/// (`io/zenoh-transport/src/unicast/lowlatency/link.rs` @ `let mtu = link_rx.config.batch.mtu as usize;`),
+/// which for a batch narrower than the widest pools more buffers of less
+/// storage each; wz pools the same bytes in buffers that each hold any frame.
+pub const LINK_RX_MTU: usize = u16::MAX as usize;
+
+/// Whether a stream link pools its own RX buffers, sized by
+/// `transport/link/rx/buffer_size`: true but in a `runtime-zero-copy` build,
+/// whose links read into the node's one table instead.
+pub const LINK_RX_POOLED_PER_LINK: bool = cfg!(not(feature = "runtime-zero-copy"));
 
 impl FrameArena for RecyclingArena {
     type Buf = RecycledBuf;
@@ -375,10 +378,9 @@ impl Drop for RecycledBuf {
 /// R2742 — THE ARENA A PRODUCTION STREAM LINK READS THROUGH, chosen once.
 ///
 /// Both read halves in this crate name this alias rather than an impl, for the
-/// reason [`RecyclingArena::for_link_default`] exists one level down: a driver
-/// that picks its own arena is a driver that has to be found again when the
-/// answer changes, and there are two of them plus nine `wire_*` sites behind
-/// one of those.
+/// reason [`link_arena`] is the one constructor: a driver that picks its own
+/// arena is a driver that has to be found again when the answer changes, and
+/// there are two of them plus nine `wire_*` sites behind one of those.
 ///
 /// The pooled arm is `runtime-zero-copy`'s, which is what that atom means by
 /// "opt-in determinism": a build that does not ask for pooled receive keeps the
@@ -400,20 +402,25 @@ pub(crate) type LinkArena = crate::link_rx_arena::LinkRxArena;
 /// and reads as machinery.
 pub(crate) type LinkFrame = <LinkArena as FrameArena>::Buf;
 
-/// The [`LinkArena`] a read half is built with.
+/// The [`LinkArena`] a read half is built with, for a link whose session reads
+/// `transport/link/rx/buffer_size` as `rx_buffer_size`.
 ///
 /// A function rather than a `Default` impl: the two arms are constructed
-/// differently on purpose — the recycling arm takes its size from upstream's
-/// pinned defaults, and the pooled arm takes a handle on the NODE's table
-/// rather than building a table of its own.
+/// differently on purpose — the recycling arm pools `rx_buffer_size` of
+/// storage for the link, upstream's per-link pool, and the pooled arm takes a
+/// handle on the NODE's table rather than building a table of its own.
 #[cfg(not(feature = "runtime-zero-copy"))]
-pub(crate) fn link_arena() -> LinkArena {
-    RecyclingArena::for_link_default()
+pub(crate) fn link_arena(rx_buffer_size: usize) -> LinkArena {
+    RecyclingArena::for_link(rx_buffer_size, LINK_RX_MTU)
 }
 
-/// The pooled arm — see the other arm's docs.
+/// The pooled arm. The node's table is the size its deploy declaration gives
+/// it, so this build has no per-link pool for `rx_buffer_size` to size. Its
+/// config reader refuses any value of the key but upstream's default
+/// (`zenoh_config::CAPABILITY_HONOURED_KEYS`), so no document asks this arm
+/// for another.
 #[cfg(feature = "runtime-zero-copy")]
-pub(crate) fn link_arena() -> LinkArena {
+pub(crate) fn link_arena(_rx_buffer_size: usize) -> LinkArena {
     crate::link_rx_arena::LinkRxArena::node()
 }
 
@@ -578,6 +585,44 @@ mod tests {
     fn a_links_arena_is_one_buffer_at_the_pinned_defaults() {
         let arena = RecyclingArena::for_link(u16::MAX as usize, u16::MAX as usize);
         assert_eq!(arena.free.lock().expect("uncontended").len(), 1);
+    }
+
+    /// `transport/link/rx/buffer_size` sizes a stream link's pool: four widest
+    /// batches of storage pool four buffers, a size below one batch still pools
+    /// one, as upstream's RX task floors it, and the arena a link is wired with
+    /// is the one the value asks for.
+    #[test]
+    fn the_rx_buffer_size_sizes_a_links_pool() {
+        assert_eq!(
+            RecyclingArena::for_link(4 * LINK_RX_MTU, LINK_RX_MTU).free_buffers(),
+            4
+        );
+        assert_eq!(
+            RecyclingArena::for_link(4 * LINK_RX_MTU - 1, LINK_RX_MTU).free_buffers(),
+            3
+        );
+        assert_eq!(RecyclingArena::for_link(1, LINK_RX_MTU).free_buffers(), 1);
+        #[cfg(not(feature = "runtime-zero-copy"))]
+        {
+            use wz_session_core::session_init_params::RX_BUFFER_SIZE;
+            assert_eq!(link_arena(RX_BUFFER_SIZE).free_buffers(), 1);
+            assert_eq!(link_arena(8 * RX_BUFFER_SIZE).free_buffers(), 8);
+        }
+    }
+
+    /// A pooled buffer that a frame still holds is off the free list, and the
+    /// pool hands the next frame storage of its own rather than waiting: the
+    /// size bounds what is reused, never what is read.
+    #[test]
+    fn a_pool_whose_buffers_are_held_still_serves_the_next_frame() {
+        let mut arena = RecyclingArena::for_link(2 * LINK_RX_MTU, LINK_RX_MTU);
+        let first = arena.take(100);
+        let second = arena.take(100);
+        assert_eq!(arena.free_buffers(), 0);
+        let third = arena.take(100);
+        assert_eq!(third.as_ref().len(), 100);
+        drop((first, second, third));
+        assert_eq!(arena.free_buffers(), 2, "the two pooled buffers go home");
     }
 
     /// A buffer's whole declared width is writable and reads back — the arena

@@ -3145,11 +3145,15 @@ where
 impl TcpDriver {
     /// Wrap an already-open TcpStream (acceptor side). The
     /// `open()` method is a no-op for this constructor.
+    ///
+    /// This driver carries no session parameters, so its RX pool is upstream's
+    /// default `transport/link/rx/buffer_size`; a link opened through
+    /// `session_open` pools the size its session reads instead.
     pub fn from_stream(stream: TcpStream) -> Self {
         Self {
             stream: Some(stream),
             read_state: ReadState::Idle,
-            arena: frame_arena::link_arena(),
+            arena: frame_arena::link_arena(wz_session_core::session_init_params::RX_BUFFER_SIZE),
         }
     }
 

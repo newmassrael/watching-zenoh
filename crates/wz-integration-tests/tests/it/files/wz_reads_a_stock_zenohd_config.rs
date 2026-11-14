@@ -636,6 +636,12 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // open applies the same two (`unwrap_or(false)` and `unwrap_or(true)`).
         "transport/link/tls/enable_mtls",
         "transport/link/tls/verify_name_on_connect",
+        // The expiry teardown is the third of those `Option` booleans, declared beside them
+        // (`commons/zenoh-config/src/lib.rs` @ `close_link_on_expiration: Option<bool>,`) with
+        // its `false` applied where it is read, so a silent file resolves it to null on the
+        // same reasoning. DERIVED from the declaration, not measured on a running zenohd: if a
+        // hosted run shows the tree answering `false`, move the key into `claims`.
+        "transport/link/tls/close_link_on_expiration",
         // R2593 — MEASURED on a running zenohd with no file key: its resolved
         // tree prints `"tcp":{"so_rcvbuf":null,"so_sndbuf":null}` and the same
         // two nulls inside `tls`. No buffer size is a kernel default, which the
@@ -644,6 +650,11 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "transport/link/tcp/so_sndbuf",
         "transport/link/tls/so_rcvbuf",
         "transport/link/tls/so_sndbuf",
+        // An `Option<u32>` with no default upstream
+        // (`commons/zenoh-config/src/lib.rs` @ `file_access_mask: Option<u32>`), so a silent file
+        // resolves it to null: the mode a unixpipe link takes is then the link's own default,
+        // which the resolved tree cannot show.
+        "transport/link/unixpipe/file_access_mask",
         // R2568 — honoured by R2567 and left unclassed, which this leg's own
         // gate caught. Upstream states no value for it either: DEFAULT_CONFIG
         // carries `dictionary_file: null` beside `user` and `password`, so the
@@ -751,6 +762,13 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "adminspace/permissions/read",
         "adminspace/permissions/write",
     ];
+
+    // Keys the zenohd BINARY sets over whatever its file says, so its resolved tree
+    // answers the binary's value and not the default a file gets from the library
+    // (`zenohd/src/main.rs` @ `config.plugins_loading.set_enabled(true).unwrap();`).
+    // wz's reader carries the document's value, `None` for silence, which a host the
+    // file configures reads as the library's `false`; both halves are asserted below.
+    const THE_ZENOHD_BINARY_SETS_IT: &[&str] = &["plugins_loading/enabled"];
 
     let reservation = PortReservation::pick();
     let port = reservation.port();
@@ -896,6 +914,12 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "transport/link/rx/max_message_size",
             wz.link_rx.max_message_size.to_string(),
         ),
+        // A plain `usize` upstream with its default applied at declaration (one widest batch),
+        // so the tree answers it and wz's struct answers the same.
+        (
+            "transport/link/rx/buffer_size",
+            wz.link_rx.buffer_size.to_string(),
+        ),
         (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
@@ -1014,6 +1038,15 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         Some(&Json5Value::Bool(false)),
         "{captured}"
     );
+    assert_eq!(
+        resolved.get("plugins_loading/enabled"),
+        Some(&Json5Value::Bool(true)),
+        "zenohd turns by-name plugin loading on over a silent file\n{captured}"
+    );
+    assert_eq!(
+        wz.plugins_loading_enabled, None,
+        "wz's reader carries the silent document, not the zenohd binary's override"
+    );
 
     // EXHAUSTIVE: every honoured key is in exactly one class. A key added to
     // the surface without a decision about its silent default reds here, which
@@ -1024,6 +1057,7 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         .chain(claims.iter().map(|(k, _)| *k))
         .chain(THE_TREE_ANSWERS_NULL.iter().copied())
         .chain(A_BLOCK_ON_ONE_SIDE_AND_LEAVES_ON_THE_OTHER.iter().copied())
+        .chain(THE_ZENOHD_BINARY_SETS_IT.iter().copied())
         .collect();
     accounted.sort_unstable();
     let before = accounted.len();
@@ -3636,10 +3670,16 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         connect_certificate: "/etc/wz/client.pem",
         connect_private_key: "/etc/wz/client.key",
         verify_name_on_connect: false,
+        // Off its `false` default; it reaches each certificate kind's `--link-config` and
+        // waits unused, since nothing here dials tls or quic.
+        close_link_on_expiration: true,
         so_rcvbuf: 12288,
         so_sndbuf: 24576,
       }},
       tcp: {{ so_rcvbuf: 65536, so_sndbuf: 65536 }},
+      // The unixpipe kind's FIFO mode (0o660, decimal as upstream reads it), off its absent
+      // default; it reaches `--link-config` and waits unused, as the tls pair does.
+      unixpipe: {{ file_access_mask: 432 }},
       protocols: ["tcp", "tls"],
       // R2925 — the queue sizes and the two congestion waits, each off its
       // default so the demo has something to apply.
@@ -3658,8 +3698,9 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         }},
       }},
       // The largest message a session rejoins from fragments, off its 1 GiB
-      // default and still far above anything this leg sends.
-      rx: {{ max_message_size: 65536 }},
+      // default and still far above anything this leg sends; and the read storage
+      // each stream link pools, two widest batches where the default is one.
+      rx: {{ buffer_size: 131070, max_message_size: 65536 }},
     }},
   }},
   // R311y844 — this file now names EVERY honoured key, which turns this leg
@@ -3847,6 +3888,10 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     // reason: only a region-hat node (`--peer` or `--router-hat`) places its
     // remotes by a partition, and a connecting client holds no hat, so its run is
     // told the key was withheld from it rather than handed `--gateway-south`.
+    // `plugins_loading/enabled` is the FIFTH, beside `plugins` and for its reason: only
+    // `--storage-host` runs a plugin plane, so a connecting client looks no plugin up and its
+    // run is told the key was withheld. This process's reader is also built with no plugin host,
+    // so the one value the file could state and still be read here is the library's `false`.
     let mut every_honoured: Vec<&str> = HONOURED_CONFIG_KEYS
         .iter()
         .chain(WZ_EXTENSION_HONOURED_KEYS)
@@ -3855,6 +3900,7 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         .filter(|k| *k != "transport/auth/usrpwd/dictionary_file")
         .filter(|k| *k != "plugins")
         .filter(|k| *k != "gateway/south")
+        .filter(|k| *k != "plugins_loading/enabled")
         .collect();
     fixture_names.sort_unstable();
     every_honoured.sort_unstable();

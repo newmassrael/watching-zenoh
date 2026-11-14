@@ -458,7 +458,7 @@ mod tests {
     /// THE SELECTION IS THE PRODUCTION ONE, and rustc is what says so.
     ///
     /// `StreamReadDriver::new` and `TcpDriver::from_stream` both build their
-    /// arena from `frame_arena::link_arena()`, whose type is
+    /// arena from `frame_arena::link_arena`, whose type is
     /// `frame_arena::LinkArena`. This signature compiles only while that alias
     /// IS this module's arena in a `runtime-zero-copy` build, which is the one
     /// step between "the arena fills slots" (the tests below) and "a production

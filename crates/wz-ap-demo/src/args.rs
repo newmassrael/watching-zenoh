@@ -790,6 +790,8 @@ pub(crate) fn split_endpoint_list(raw: &str) -> Vec<String> {
 /// | `transport/link/tx/batch_size` | `--batch-size <n>` |
 /// | `transport/link/tx/lease` | `--lease-ms <n>` |
 /// | `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` | `--link-config <kind>#<key>=<n>` (R2593) |
+/// | `transport/link/unixpipe/file_access_mask` | `--link-config unixpipe#file_mask=<n>` |
+/// | `transport/link/tls/close_link_on_expiration: true` | `--link-config <kind>#close_link_on_expiration=true` for tls, quic and quic-datagram |
 /// | an `adminspace` block at all | `--config-queryable` |
 /// | `adminspace/permissions/read: false` | `--no-admin-read` |
 /// | `adminspace/permissions/write: true` | `--config-writable` `--config-write-permit` |
@@ -1332,6 +1334,15 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // The read storage each stream link pools, honoured at any value for the same reason.
+    if named("transport/link/rx/buffer_size") {
+        exp.pair(
+            "transport/link/rx/buffer_size",
+            "--rx-buffer-size",
+            cfg.link_rx.buffer_size.to_string(),
+            None,
+        );
+    }
     // R311y844 — the ten keys wz already acted on. Each row is a flag that has
     // been in this binary for rounds, so what changed is not the capability but
     // the ability to ask for it from the file an operator already has. The
@@ -1454,12 +1465,38 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             "so_sndbuf",
             buffers.tls_so_sndbuf,
         ),
+        // The unixpipe kind's FIFO mode, onto the same flag for the same reason: upstream
+        // renders it whether or not the node opens a unixpipe link.
+        (
+            "transport/link/unixpipe/file_access_mask",
+            "unixpipe",
+            "file_mask",
+            cfg.unixpipe_file_access_mask,
+        ),
     ] {
         if named(key) {
             match value {
-                Some(value) => exp.link_config(key, kind, span_key, value),
+                Some(value) => exp.link_config(key, kind, span_key, value.to_string()),
                 None => exp.record(key, KeyEffect::AlreadyTheBehaviour),
             }
+        }
+    }
+    // The expiry teardown, onto `--link-config <kind>#close_link_on_expiration=true` for each
+    // kind upstream renders it under: the tls, quic and quic-datagram inspectors all read the one
+    // key. No precondition, for the reason the buffers take none. A named `false` is what an
+    // absent layer already means, as upstream's own default is `false`.
+    if named("transport/link/tls/close_link_on_expiration") {
+        match cfg.tls_close_link_on_expiration {
+            Some(true) => exp.link_config_kinds(
+                "transport/link/tls/close_link_on_expiration",
+                &["tls", "quic", "quic-datagram"],
+                "close_link_on_expiration",
+                String::from("true"),
+            ),
+            _ => exp.record(
+                "transport/link/tls/close_link_on_expiration",
+                KeyEffect::AlreadyTheBehaviour,
+            ),
         }
     }
     // The millisecond keys, each gated on the PRECONDITION its flag carries.
@@ -2338,6 +2375,26 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             .unwrap_or_default();
         exp.pair("plugins", "--plugins", section, blocked);
     }
+    // `plugins_loading/enabled`, onto the storage host's `--plugins-loading`, under the
+    // `plugins` site's precondition: only that run-mode hosts plugins. A named `false` is the
+    // library's default, which the absent flag already means; this host reads the file as a
+    // library session does, and not as zenohd, which turns the lookup on over its file.
+    if named("plugins_loading/enabled") {
+        let run_flag = typed_role
+            .map(|(flag, _)| flag)
+            .or(selected.map(|s| s.flag));
+        let blocked = no_sink("plugins_loading/enabled").or_else(|| {
+            (run_flag != Some("--storage-host")).then_some(KeyEffect::WithheldFromThisRun(
+                "a plugin host (only --storage-host runs one)",
+            ))
+        });
+        exp.presence(
+            "plugins_loading/enabled",
+            "--plugins-loading",
+            cfg.plugins_loading_enabled == Some(true),
+            blocked,
+        );
+    }
     // The run-mode the expanded argv runs, typed or selected by the file, and,
     // when it is a single-session run that cannot host the admin space a
     // document enables, the verdict its admin keys get instead of a flag it
@@ -2882,30 +2939,50 @@ impl Expansion<'_> {
     /// typed value for this same key decides the key. The expanded flag lands
     /// after the typed argv, where a later span would win, which is exactly why
     /// a key the operator typed is never expanded over.
-    fn link_config(&mut self, key: &'static str, kind: &str, span_key: &str, value: u32) {
-        use wz::runtime_tokio::locator::{config_span_keys, LinkSocketOptions};
-        let typed: Option<Option<u32>> = parse_pairs(self.rest, "--link-config")
-            .iter()
-            .filter_map(|v| v.split_once('#'))
-            .filter(|(k, span)| *k == kind && config_span_keys(span).any(|s| s == span_key))
-            .map(|(_, span)| {
-                LinkSocketOptions::from_config_span(span)
-                    .ok()
-                    .and_then(|o| match span_key {
-                        "so_rcvbuf" => o.so_rcvbuf,
-                        _ => o.so_sndbuf,
-                    })
-            })
-            // The LAST typed span for the key is the one the binary keeps.
-            .next_back();
-        let effect = match typed {
-            Some(Some(typed)) if typed == value => KeyEffect::AlreadyOnTheCommandLine,
-            Some(_) => KeyEffect::OverriddenOnTheCommandLine,
-            None => {
-                self.added.push(String::from("--link-config"));
-                self.added.push(format!("{kind}#{span_key}={value}"));
-                KeyEffect::Expanded
+    fn link_config(&mut self, key: &'static str, kind: &str, span_key: &str, value: String) {
+        self.link_config_kinds(key, &[kind], span_key, value);
+    }
+
+    /// `link_config` for a key upstream renders under SEVERAL kinds at
+    /// once (`transport/link/tls/close_link_on_expiration` is the tls, quic and
+    /// quic-datagram inspectors' alike): each kind is decided as that function
+    /// decides one, and the key's one verdict is `Expanded` when any kind took
+    /// the file's value, else `OverriddenOnTheCommandLine` when any kind's typed
+    /// value differs, else `AlreadyOnTheCommandLine`.
+    fn link_config_kinds(
+        &mut self,
+        key: &'static str,
+        kinds: &[&str],
+        span_key: &str,
+        value: String,
+    ) {
+        use wz::runtime_tokio::locator::{config_span_keys, config_span_value};
+        let typed_spans = parse_pairs(self.rest, "--link-config");
+        let (mut expanded, mut overridden) = (false, false);
+        for kind in kinds {
+            let typed: Option<Option<String>> = typed_spans
+                .iter()
+                .filter_map(|v| v.split_once('#'))
+                .filter(|(k, span)| k == kind && config_span_keys(span).any(|s| s == span_key))
+                .map(|(_, span)| config_span_value(span, span_key).map(str::to_string))
+                // The LAST typed span for the key is the one the binary keeps.
+                .next_back();
+            match typed {
+                Some(Some(typed)) if typed == value => {}
+                Some(_) => overridden = true,
+                None => {
+                    self.added.push(String::from("--link-config"));
+                    self.added.push(format!("{kind}#{span_key}={value}"));
+                    expanded = true;
+                }
             }
+        }
+        let effect = if expanded {
+            KeyEffect::Expanded
+        } else if overridden {
+            KeyEffect::OverriddenOnTheCommandLine
+        } else {
+            KeyEffect::AlreadyOnTheCommandLine
         };
         self.record(key, effect);
     }
@@ -3434,6 +3511,14 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          rejoins from fragments: a local bound no frame carries, visible only as \
          a fragmented message that is not delivered.",
     ),
+    (
+        "transport/link/rx/buffer_size",
+        KIND_OFF_WIRE,
+        "expands to `--rx-buffer-size`. The read storage each stream link pools: a \
+         local resource no frame carries, visible only as the pool a wired link \
+         holds, which a_sessions_rx_buffer_size_sizes_the_pool_of_the_link_it_wires \
+         reads.",
+    ),
     // R2758 — OFF-WIRE and not leg-judged, and the distinction is the point.
     // The bound IS judged by a leg, but that leg lives in the runtime crate
     // (`accept_loop.rs`, `max_sessions_refuses_the_peer_past_the_bound`), while
@@ -3774,6 +3859,15 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          not the endpoint's host, decided in the TLS handshake under every zenoh frame.",
     ),
     (
+        "transport/link/tls/close_link_on_expiration",
+        KIND_OFF_WIRE,
+        "expands to `--link-config <kind>#close_link_on_expiration=true` for tls, quic \
+         and quic-datagram. Its effect is the link ending when the peer's certificate \
+         chain expires, visible as the link lost with a certificate-expired cause, \
+         which an_expiring_peer_chain_closes_a_tls_link_whose_kind_asked_for_it reads; \
+         no zenoh frame carries the flag.",
+    ),
+    (
         "transport/link/protocols",
         KIND_OFF_WIRE,
         "expands to NO flag: the demo opens every link kind it was built with and \
@@ -3821,6 +3915,14 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
         KIND_OFF_WIRE,
         "expands to `--link-config tls#so_sndbuf=<n>`. SO_SNDBUF on the TCP \
          socket under a tls link, the same kernel-side effect as tcp's.",
+    ),
+    (
+        "transport/link/unixpipe/file_access_mask",
+        KIND_OFF_WIRE,
+        "expands to `--link-config unixpipe#file_mask=<n>`. The mode every FIFO of \
+         a unixpipe link is created with, visible as the permission bits of the \
+         nodes on disk, which the_file_mask_reaches_every_fifo_the_link_creates \
+         reads; no field in commons/zenoh-protocol carries a file mode.",
     ),
     (
         "namespace",
@@ -3879,6 +3981,15 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
     // wire (a capture subscriber and a queryable per storage), but those frames
     // are the storage's, not the key's: what the key does is make a storage
     // SERVE, and that is observed end to end rather than read off a field.
+    (
+        "plugins_loading/enabled",
+        KIND_OFF_WIRE,
+        "expands to `--plugins-loading` on a `--storage-host` run. Whether a plugin \
+         the section names with no path is looked up, visible as that plugin left \
+         unloaded with a warning or refused by name, which \
+         by_name_loading_off_leaves_an_unnamed_plugin_unloaded_and_fails_nothing \
+         reads; no zenoh frame carries it.",
+    ),
     (
         "plugins",
         KIND_LEG_JUDGED,
@@ -4121,6 +4232,11 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     if !cfg!(feature = "adminspace-config-hotreload") {
         out.push("plugins");
     }
+    // `plugins_loading/enabled`'s sink is the storage host's library plugin plane, which only a
+    // `plugin-dynamic-loading` build compiles: without it `--plugins-loading` is inert.
+    if !cfg!(all(unix, feature = "plugin-dynamic-loading")) {
+        out.push("plugins_loading/enabled");
+    }
     // §5.23 `adminspace-core` — `metadata`'s sink is an adminspace host's
     // `local_data`, and this binary has four: `--peer` (`routing-peer`),
     // `--router-hat` (its admin host is `adminspace-router-linkstate`, not the
@@ -4185,6 +4301,14 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         out.push("listen/retry");
         out.push("listen/timeout_ms");
         out.push("listen/exit_on_failure");
+    }
+    // A key whose reader is a capability this build was made without: the reader refuses a
+    // document that states it before any site here decides it, so it reaches nothing in this
+    // binary, whichever site would have carried it in a build with the capability.
+    for (key, _, built) in wz::runtime_tokio::zenoh_config::CAPABILITY_HONOURED_KEYS {
+        if !*built && !out.contains(key) {
+            out.push(*key);
+        }
     }
     out
 }
@@ -4273,6 +4397,73 @@ mod stock_config_tests {
             (Some(2048), Some(8192)),
             "the typed key stands and the file's other key still arrives"
         );
+    }
+
+    /// The expiry teardown reaches the layers of all three certificate kinds
+    /// from the one key, a kind the operator typed keeps its own value, and a
+    /// named `false` adds nothing. Read back through `TransportTuning`, the
+    /// call `main` makes, so this judges what the node's links get.
+    #[test]
+    fn the_expiry_flag_expands_onto_every_certificate_kind() {
+        use wz::runtime_tokio::locator::{LinkTlsMaterial, Proto};
+        let key = "transport/link/tls/close_link_on_expiration";
+        let file = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                        transport: { link: { tls: { close_link_on_expiration: true } } } }"#;
+        if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
+            let refused = expand(&["--config", "z.json5"], file)
+                .expect_err("a build without tls or quic refuses the flag by its key");
+            assert!(refused.contains(key), "{refused}");
+            return;
+        }
+        let silent = LinkTlsMaterial::NONE;
+        let effect = |exp: &StockConfigExpansion| {
+            exp.effects
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, e)| *e)
+                .unwrap_or_else(|| panic!("{key}: no decision recorded"))
+        };
+
+        let alone = expand(&["--config", "z.json5"], file).expect("a valid file");
+        assert_eq!(effect(&alone), KeyEffect::Expanded);
+        let tuning = TransportTuning::from_argv(&alone.argv).expect("parseable argv");
+        for proto in [Proto::Tls, Proto::Quic, Proto::QuicDatagram] {
+            assert!(
+                tuning.link_defaults.closes_on_expiration(proto, &silent),
+                "{proto:?}"
+            );
+        }
+        assert!(!tuning
+            .link_defaults
+            .closes_on_expiration(Proto::Tcp, &silent));
+
+        let typed = expand(
+            &[
+                "--config",
+                "z.json5",
+                "--link-config",
+                "quic#close_link_on_expiration=false",
+            ],
+            file,
+        )
+        .expect("a valid file");
+        assert_eq!(effect(&typed), KeyEffect::Expanded);
+        let tuning = TransportTuning::from_argv(&typed.argv).expect("parseable argv");
+        assert!(!tuning
+            .link_defaults
+            .closes_on_expiration(Proto::Quic, &silent));
+        assert!(tuning
+            .link_defaults
+            .closes_on_expiration(Proto::Tls, &silent));
+
+        let off = expand(
+            &["--config", "z.json5"],
+            r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                 transport: { link: { tls: { close_link_on_expiration: false } } } }"#,
+        )
+        .expect("a valid file");
+        assert_eq!(effect(&off), KeyEffect::AlreadyTheBehaviour);
+        assert!(!off.argv.iter().any(|a| a == "--link-config"));
     }
 
     /// [`expand`] as a build that carries EVERY link zenoh does.
@@ -5250,7 +5441,11 @@ mod stock_config_tests {
             // storage manager. A file cannot select it (`mode` never maps to
             // it), so the row types it, and the role-parity sweep below skips
             // this row by MEASURING that the file supplies a different role.
-            "plugins" => &["--config", "z.json5", "--storage-host", "tcp/127.0.0.1:0"],
+            // `plugins_loading/enabled` shares the precondition: the storage host is the one
+            // run-mode with a plugin plane.
+            "plugins" | "plugins_loading/enabled" => {
+                &["--config", "z.json5", "--storage-host", "tcp/127.0.0.1:0"]
+            }
             _ => &["--config", "z.json5"],
         }
     }
@@ -5439,6 +5634,12 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { rx: { max_message_size: 65536 } } } }"#,
+            ),
+            (
+                "transport/link/rx/buffer_size",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { rx: { buffer_size: 262140 } } } }"#,
             ),
             (
                 "adminspace/enabled",
@@ -5700,6 +5901,14 @@ mod stock_config_tests {
                 r#"{ connect: { endpoints: ["tls/r:7447"] },
                      transport: { link: { tls: { verify_name_on_connect: false } } } }"#,
             ),
+            // The expiry teardown takes no tls endpoint: like the buffers, it is each kind's
+            // configuration whether or not the node opens a link of that kind.
+            (
+                "transport/link/tls/close_link_on_expiration",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tls: { close_link_on_expiration: true } } } }"#,
+            ),
             (
                 "transport/link/protocols",
                 LISTEN_ONLY,
@@ -5737,6 +5946,13 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tls: { so_sndbuf: 8192 } } } }"#,
+            ),
+            // The unixpipe kind's FIFO mode, onto `--link-config unixpipe#file_mask=<n>`.
+            (
+                "transport/link/unixpipe/file_access_mask",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { unixpipe: { file_access_mask: 432 } } } }"#,
             ),
             // R311y845 — the scouting SOCKET. Both sides of each pair are a
             // `--scout` invocation (see `cli_for`), so the control expands to
@@ -5903,6 +6119,12 @@ mod stock_config_tests {
                 r#"{ mode: "peer" }"#,
                 r#"{ mode: "peer", plugins: { storage_manager: { storages:
                      { demo: { key_expr: "demo/**", volume: "memory" } } } } }"#,
+            ),
+            // The by-name lookup turned on, the one value the absent flag does not mean.
+            (
+                "plugins_loading/enabled",
+                r#"{ mode: "peer" }"#,
+                r#"{ mode: "peer", plugins_loading: { enabled: true } }"#,
             ),
             // §5.23 `adminspace-core` — a value, which the peer run-mode's
             // adminspace serves.
@@ -7058,6 +7280,9 @@ mod stock_config_tests {
             // is what a `--config` file's `plugins` key expands to, and prints
             // when that run-mode's flags do.
             "plugins",
+            // The storage host's `plugins_loading/enabled`, undocumented with its
+            // `plugins` sibling above and for the same reason.
+            "plugins-loading",
             "publish-after-ms",
             "put-key",
             "put-payload",
@@ -7983,6 +8208,32 @@ mod stock_config_tests {
             bare.link_rx,
             wz::runtime_tokio::session_glue::LinkRxConf::default()
         );
+    }
+
+    /// `transport/link/rx/buffer_size` reaches the session the node opens through
+    /// `--rx-buffer-size`, read back the way `main` reads it; a build with no
+    /// per-link pool refuses the file by the key instead.
+    #[test]
+    fn the_rx_buffer_size_a_config_names_reaches_the_params_the_node_opens_with() {
+        let key = "transport/link/rx/buffer_size";
+        let file = r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] },
+                        transport: { link: { rx: { buffer_size: 262140 } } } }"#;
+        if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
+            let refused = expand(&["--config", "z.json5"], file)
+                .expect_err("a build with no per-link pool refuses the key");
+            assert!(refused.contains(key), "{refused}");
+            return;
+        }
+        let exp = expand(&["--config", "z.json5"], file).expect("a valid file");
+        assert!(
+            exp.added.contains(&String::from("--rx-buffer-size")),
+            "added = {:?}",
+            exp.added
+        );
+        let tuned = TransportTuning::from_argv(&exp.argv).expect("the expansion is parseable");
+        let params = demo_session_init_params(NodeKind::Initiator, vec![0x0a], &tuned)
+            .expect("OS entropy for the cookie signing key");
+        assert_eq!(params.link_rx.buffer_size, 262_140);
     }
 
     /// The exact argv the adminspace block and the compression flag produce.
@@ -9727,29 +9978,42 @@ impl TransportTuning {
                 .parse::<usize>()
                 .map_err(|_| format!("--rx-max-message-size expects bytes, got '{v}'"))?;
         }
+        if let Some(v) = parse_pair(rest, "--rx-buffer-size") {
+            let bytes = v
+                .parse::<usize>()
+                .map_err(|_| format!("--rx-buffer-size expects bytes, got '{v}'"))?;
+            // A build whose links read into the node's one table has no per-link pool to size,
+            // so a size other than the default is an instruction it would only drop.
+            if !wz::runtime_tokio::frame_arena::LINK_RX_POOLED_PER_LINK
+                && bytes != out.link_rx.buffer_size
+            {
+                return Err(String::from(
+                    "--rx-buffer-size: this build reads every link into the node's shared RX \
+                     table (runtime-zero-copy) and has no per-link pool to size",
+                ));
+            }
+            out.link_rx.buffer_size = bytes;
+        }
         // R2592 — `<kind>#<span>`, the shape upstream gives each link kind's
         // configuration: a parameter span keyed by the kind. A refusal names the
         // flag occurrence, since several may be given.
         for value in parse_pairs(rest, "--link-config") {
-            use wz::runtime_tokio::link_socket::LinkDefaultsError;
-            use wz::runtime_tokio::locator::Proto;
+            use wz::runtime_tokio::link_socket::{LinkDefaultsError, LinkKind};
             let Some((kind, span)) = value.split_once('#') else {
                 return Err(format!(
                     "--link-config expects <kind>#<key=value;...>, got '{value}'"
                 ));
             };
-            let proto = match kind {
-                "tcp" => Proto::Tcp,
-                "tls" => Proto::Tls,
-                other => {
-                    return Err(format!(
-                        "--link-config '{value}': zenoh carries no per-link socket \
-                         configuration for `{other}` (tcp and tls have one)"
-                    ))
-                }
+            let Some(kind) = LinkKind::from_scheme(kind) else {
+                let carried: Vec<&str> = LinkKind::ALL.iter().map(|k| k.scheme()).collect();
+                return Err(format!(
+                    "--link-config '{value}': zenoh carries no per-link configuration for \
+                     `{kind}` (these kinds have one: {})",
+                    carried.join(", ")
+                ));
             };
             out.link_defaults
-                .set(proto, span)
+                .set(kind, span)
                 .map_err(|e: LinkDefaultsError| format!("--link-config '{value}': {e}"))?;
         }
         Ok(out)
@@ -10620,16 +10884,60 @@ mod link_config_flag_tests {
     fn a_link_config_the_layer_cannot_carry_is_refused() {
         for (value, needle) in [
             ("tcp", "expects <kind>#"),
-            (
-                "udp#so_rcvbuf=4096",
-                "no per-link socket configuration for `udp`",
-            ),
+            ("udp#so_rcvbuf=4096", "no per-link configuration for `udp`"),
             ("tcp#bind=127.0.0.1:0", "`bind` is not a key"),
             ("tls#so_rcvbuf=big", "--link-config 'tls#so_rcvbuf=big'"),
+            ("unixpipe#so_rcvbuf=4096", "`so_rcvbuf` is not a key"),
+            (
+                "unixpipe#file_mask=0o660",
+                "--link-config 'unixpipe#file_mask=0o660'",
+            ),
         ] {
             let err = tuning(&["--link-config", value]).expect_err(value);
             assert!(err.contains(needle), "{value} -> {err}");
         }
+    }
+
+    /// The unixpipe kind carries `file_mask`, layered like the socket kinds: the
+    /// last span that names it is the mode a silent locator gets.
+    #[test]
+    fn link_config_carries_the_unixpipe_file_mask() {
+        let t = tuning(&[
+            "--link-config",
+            "unixpipe#file_mask=438",
+            "--link-config",
+            "unixpipe#file_mask=432",
+        ])
+        .expect("two valid spans");
+        assert_eq!(t.link_defaults.unixpipe_file_mask(), Some(432));
+        assert_eq!(
+            tuning(&[]).unwrap().link_defaults.unixpipe_file_mask(),
+            None
+        );
+    }
+
+    /// Each certificate kind takes `close_link_on_expiration` on its own
+    /// layer, and the flag on tcp is refused by name.
+    #[test]
+    fn link_config_carries_each_kinds_expiry_flag() {
+        let t = tuning(&[
+            "--link-config",
+            "quic-datagram#close_link_on_expiration=true",
+        ])
+        .expect("a valid span");
+        assert_eq!(
+            t.link_defaults
+                .close_link_on_expiration(Proto::QuicDatagram),
+            Some(true)
+        );
+        assert_eq!(t.link_defaults.close_link_on_expiration(Proto::Quic), None);
+        assert_eq!(t.link_defaults.close_link_on_expiration(Proto::Tls), None);
+        let err = tuning(&["--link-config", "tcp#close_link_on_expiration=true"])
+            .expect_err("tcp carries no expiry flag");
+        assert!(
+            err.contains("`close_link_on_expiration` is not a key"),
+            "{err}"
+        );
     }
 }
 

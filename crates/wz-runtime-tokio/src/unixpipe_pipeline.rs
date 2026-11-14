@@ -170,14 +170,13 @@ fn dedicated_channels(base: &str, suffix: u32) -> (String, String) {
 /// (`unixpipe//tmp/p#file_mask=438` = 0o666); as the same uid, the default
 /// suffices and is what run-ci's Layer Z unixpipe leg uses.
 ///
-/// This constant is also wz's answer for the zenoh CONFIG key
-/// `transport/link/unixpipe/file_access_mask`, which upstream renders into
-/// every unixpipe endpoint's config span as a per-link DEFAULT that the
-/// endpoint's own parameters then overwrite. wz has the endpoint half and not
-/// the rendering, so the key sits in `zenoh_config::UNHONOURED_READER_GAP` with
-/// this symbol as its anchor: the capability exists, the JSON5 reader was never
-/// told. (A code span, not an intra-doc link — that module is behind the
-/// `zenoh-config` feature and the link would not resolve in a default build.)
+/// The zenoh CONFIG key `transport/link/unixpipe/file_access_mask` sits one
+/// layer above this constant: upstream renders it into every unixpipe
+/// endpoint's config span as a per-link default that the endpoint's own
+/// parameters then overwrite, and wz carries it as the unixpipe layer of
+/// `crate::link_socket::LinkDefaults`, which the dial and bind arms lay under
+/// the locator's own `file_mask`. This constant answers only when neither
+/// states a mode.
 pub const DEFAULT_FILE_MASK: u32 = 0o600;
 
 /// Resolve a locator's optional `#file_mask=<n>` against [`DEFAULT_FILE_MASK`].
@@ -867,9 +866,11 @@ pub async fn bind_unixpipe(path: &str, file_mask: Option<u32>) -> io::Result<Uni
 /// `Arc<`[`StreamWriteDriver`]`>`, and the [`writer_task`] join handle. The FIFO
 /// read + write halves are ALREADY separate, so this is the unixsock wiring minus
 /// the split. StreamEnvelope framing + the write driver are the SAME shared
-/// [`crate::stream_link`] code as TCP/unixsock.
+/// [`crate::stream_link`] code as TCP/unixsock. `rx_buffer_size` is the
+/// session's `transport/link/rx/buffer_size`: the read storage the link pools.
 pub fn wire_unixpipe_stream(
     link: UnixpipeLink,
+    rx_buffer_size: usize,
 ) -> (UnixpipeReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     let UnixpipeLink {
         read,
@@ -903,7 +904,11 @@ pub fn wire_unixpipe_stream(
     let endpoints = read
         .node_path()
         .map(|src| addressless_link_endpoints(LinkKind::Unixpipe, src, write_node.as_str()));
-    let inbound = StreamReadDriver::new(read, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let inbound = StreamReadDriver::new(
+        read,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        rx_buffer_size,
+    );
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(sender, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
@@ -1037,8 +1042,9 @@ mod tests {
             dialer.write_node,
             "the acceptor reads the node the dialer writes"
         );
-        let (_d_in, d_out, _d_writer) = wire_unixpipe_stream(dialer);
-        let (mut a_in, _a_out, _a_writer) = wire_unixpipe_stream(acceptor);
+        let rx = wz_session_core::session_init_params::RX_BUFFER_SIZE;
+        let (_d_in, d_out, _d_writer) = wire_unixpipe_stream(dialer, rx);
+        let (mut a_in, _a_out, _a_writer) = wire_unixpipe_stream(acceptor, rx);
         assert_eq!(
             d_out.send_blocking(payload, Reliability::Reliable),
             LinkSendOutcome::Sent
