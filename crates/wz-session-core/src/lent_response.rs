@@ -433,8 +433,10 @@ impl<'a> ResponseWriter<'a> {
             body,
             qos_extension,
         } = self.direct_view();
-        let mut len =
-            1 + vle_len(parts.rid, VLE_U64) + 1 + vle_len(parts.keyexpr.len() as u64, VLE_U64);
+        let mut len = 1
+            + vle_len(u64::from(parts.rid), VLE_U32)
+            + 1
+            + vle_len(parts.keyexpr.len() as u64, VLE_U64);
         len += parts.keyexpr.len();
         if qos_extension {
             len += 1 + vle_len(u64::from(parts.qos.raw), VLE_U64);
@@ -481,7 +483,7 @@ impl<'a> ResponseWriter<'a> {
             RESPONSE_HEADER
         };
         out.byte(header | LOCAL_KEY);
-        out.vle(parts.rid, VLE_U64);
+        out.vle(u64::from(parts.rid), VLE_U32);
         out.vle(0, VLE_U64);
         out.vle(parts.keyexpr.len() as u64, VLE_U64);
         out.bytes(parts.keyexpr.as_bytes());
@@ -798,7 +800,7 @@ impl<'a> ResponseWriter<'a> {
     fn write_err<S: SceSink>(
         &self,
         sink: &mut S,
-        encoding: Option<(u32, Option<&str>)>,
+        encoding: Option<(u32, Option<&[u8]>)>,
         payload: &[u8],
     ) -> Result<(), CodecError>
     where
@@ -935,7 +937,7 @@ mod tests {
     fn the_plain_reply_is_written_directly_and_as_the_codec_writes_it() {
         let big = [0xA5u8; 1000];
         let mut taken = 0usize;
-        for rid in [0u64, 1, 127, 128, 16_384, u64::from(u32::MAX) + 1] {
+        for rid in [0u32, 1, 127, 128, 16_384, 1 << 28, u32::MAX] {
             for keyexpr in ["a", "demo/status/node-0001", &"k".repeat(200)] {
                 for payload_len in [0usize, 1, 127, 128, 255, 1000] {
                     for with_encoding in [false, true] {
@@ -998,7 +1000,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(taken, 6 * 3 * 6 * 2 * 4, "the matrix ran whole");
+        assert_eq!(taken, 7 * 3 * 6 * 2 * 4, "the matrix ran whole");
     }
 
     fn slice_bytes<B: crate::tx_buf::TxBuf + ?Sized>(buf: &B) -> &[u8] {
@@ -1120,8 +1122,8 @@ mod tests {
     #[cfg(feature = "query-reply-err")]
     #[test]
     fn an_err_is_written_as_the_owned_path_writes_it() {
-        let encodings: [Option<(u32, Option<&str>)>; 3] =
-            [None, Some((5, None)), Some((5, Some("s")))];
+        let encodings: [Option<(u32, Option<&[u8]>)>; 3] =
+            [None, Some((5, None)), Some((5, Some(&b"s"[..])))];
         let responders: [Option<(&[u8], u32)>; 2] = [None, Some((&[1, 2, 3, 4], 5))];
         let mut compared = 0usize;
         for encoding in encodings {
@@ -1221,8 +1223,8 @@ mod tests {
     #[test]
     fn an_err_is_written_directly_and_as_the_codec_writes_it() {
         let big = [0x5Au8; 1000];
-        let encodings: [Option<(u32, Option<&str>)>; 3] =
-            [None, Some((5, None)), Some((70_000, Some("v=1")))];
+        let encodings: [Option<(u32, Option<&[u8]>)>; 3] =
+            [None, Some((5, None)), Some((70_000, Some(&b"v=1"[..])))];
         let responders: [Option<(&[u8], u32)>; 2] = [None, Some((&[1, 2, 3, 4], 5))];
         let mut taken = 0usize;
         for encoding in encodings {

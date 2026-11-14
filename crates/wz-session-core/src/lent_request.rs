@@ -261,7 +261,7 @@ mod tests {
         let parameters: [&[u8]; 3] = [b"", b"_time=[..]", &[b'p'; 200]];
         let mut compared = 0usize;
         for keyexpr in ["demo/**", "a", "demo/example/zenoh-rs-pub"] {
-            for rid in [0u64, 1, 300, 1 << 40] {
+            for rid in [0u32, 1, 300, u32::MAX] {
                 for consolidation in consolidations {
                     for target in targets {
                         for params in parameters {

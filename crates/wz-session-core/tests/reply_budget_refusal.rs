@@ -128,7 +128,7 @@ fn registry(payloads: Vec<Vec<u8>>) -> (QueryableRegistry<Replier>, Arc<Mutex<Se
     (registry, seen)
 }
 
-fn request(rid: u64) -> NetworkMessage {
+fn request(rid: wz_session_core::wire_id::RequestId) -> NetworkMessage {
     NetworkMessage::Request(Box::new(
         RequestQueryBuilder::new(rid, 0, Some("demo/a"))
             .build()
@@ -136,7 +136,7 @@ fn request(rid: u64) -> NetworkMessage {
     ))
 }
 
-fn no_aliases() -> hashbrown::HashMap<wz_session_core::wire_id::ExprId, String> {
+fn no_aliases() -> hashbrown::HashMap<u64, String> {
     hashbrown::HashMap::new()
 }
 
@@ -214,7 +214,7 @@ fn the_request_past_pending_finals_never_reaches_a_queryable_and_is_counted() {
     let (mut reg, seen) = registry(Vec::new());
     let (mut replies, mut finals) = (ReplyStage::new(), FinalStage::new());
     let aliases = no_aliases();
-    let msgs: Vec<NetworkMessage> = (1..=n as u64 + 1).map(request).collect();
+    let msgs: Vec<NetworkMessage> = (1..=n as u32 + 1).map(request).collect();
     for m in &msgs[..n] {
         reg.dispatch_messages(std::slice::from_ref(m), &aliases, &mut replies, &mut finals);
     }
@@ -228,8 +228,8 @@ fn the_request_past_pending_finals_never_reaches_a_queryable_and_is_counted() {
         "(finals owed, requests refused, handler runs, allocations of the refused request)"
     );
     // The Finals owed are the ones that were admitted, in order, and a drain makes room.
-    let rids: Vec<u64> = finals.drain_owed().map(|(rid, _)| rid).collect();
-    assert_eq!(rids, (1..=n as u64).collect::<Vec<_>>());
+    let rids: Vec<u32> = finals.drain_owed().map(|(rid, _)| rid).collect();
+    assert_eq!(rids, (1..=n as u32).collect::<Vec<_>>());
     reg.dispatch_messages(&msgs[n..], &aliases, &mut replies, &mut finals);
     assert_eq!(
         finals.owed(),
@@ -244,7 +244,7 @@ fn one_session_with_full_tables_leaves_the_other_sessions_replies_and_finals_alo
     let aliases = no_aliases();
     let (mut flooded_replies, mut flooded_finals) = (ReplyStage::new(), FinalStage::new());
     let (mut quiet_replies, mut quiet_finals) = (ReplyStage::new(), FinalStage::new());
-    for rid in 1..=(caps::MAX_PENDING_FINALS as u64 + 4) {
+    for rid in 1..=(caps::MAX_PENDING_FINALS as u32 + 4) {
         reg.dispatch_messages(
             &[request(rid)],
             &aliases,

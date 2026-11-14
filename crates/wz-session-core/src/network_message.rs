@@ -2464,7 +2464,7 @@ mod chain_saturation_tests {
 #[cfg(feature = "transport-stats")]
 pub fn stats_class<F>(msg: &NetworkMessage, resolve_alias: F) -> crate::stats::NetworkStatsClass
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use crate::stats::{MessageLabel, NetworkStatsClass};
     // The three arms below are `resolve_alias`'s ONLY consumers and each is
@@ -2545,7 +2545,7 @@ fn stats_space_of<F>(
     resolve_alias: &F,
 ) -> crate::stats::StatSpace
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use wz_codecs::wireexpr::WireexprOwnedVariant as V;
     let (id, suffix) = match &keyexpr.body {
@@ -2566,12 +2566,12 @@ where
     )
 ))]
 fn stats_space_of_key<F>(
-    id: u64,
+    id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     resolve_alias: &F,
 ) -> crate::stats::StatSpace
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     if id == 0 {
         // Fully literal: the suffix IS the whole expression.
@@ -2589,13 +2589,13 @@ where
 /// [`push_stats_class`] gives the owned message of the same parts.
 #[cfg(all(feature = "transport-stats", feature = "codec-push"))]
 pub fn plain_put_stats_class<F>(
-    id: u64,
+    id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     pl_bytes: usize,
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage};
     NetworkStatsClass::net(
@@ -2755,7 +2755,7 @@ pub fn push_stats_class<F>(
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use crate::stats::{MessageLabel, StatMessage};
     use wz_codecs::push::PushOwnedVariant as V;
@@ -2781,7 +2781,7 @@ pub fn request_stats_class<F>(
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use crate::stats::{MessageLabel, StatMessage};
     use wz_codecs::request::RequestOwnedVariant as V;
@@ -2834,7 +2834,7 @@ pub fn response_stats_class<F>(
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
-    F: Fn(u64) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use crate::stats::{MessageLabel, StatMessage};
     use wz_codecs::response::ResponseOwnedVariant as V;
@@ -4011,12 +4011,12 @@ mod payload_size_tests {
     /// parts does: literal and aliased, user and admin space, an alias resolved or not.
     #[test]
     fn a_plain_put_classifies_as_its_owned_message_does() {
-        let resolve = |id: u64| match id {
+        let resolve = |id: crate::wire_id::ExprId| match id {
             7 => Some(alloc::string::String::from("@/router/abc")),
             8 => Some(alloc::string::String::from("demo/declared")),
             _ => None,
         };
-        let cases: [(u64, Option<&str>); 6] = [
+        let cases: [(crate::wire_id::ExprId, Option<&str>); 6] = [
             (0, Some("demo/plain")),
             (0, Some("@/admin/key")),
             (7, None),

@@ -186,7 +186,7 @@ pub fn relay_response_shm(
 
 #[cfg(feature = "codec-response")]
 pub fn build_response_reply_literal(
-    request_id: u64,
+    request_id: crate::wire_id::RequestId,
     keyexpr_suffix: &str,
     payload: &[u8],
 ) -> Result<ResponseOwned, CodecError> {
@@ -233,7 +233,7 @@ pub fn build_response_reply_literal(
 /// for literal replies use [`build_response_reply_literal`].
 #[cfg(feature = "codec-response")]
 pub fn build_response_reply_aliased(
-    request_id: u64,
+    request_id: crate::wire_id::RequestId,
     mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     payload: &[u8],
@@ -296,7 +296,7 @@ pub fn build_response_reply_aliased(
 /// encoding hint, no source-info, no attachment.
 #[cfg(feature = "codec-response")]
 pub fn build_response_err_literal(
-    request_id: u64,
+    request_id: crate::wire_id::RequestId,
     keyexpr_suffix: &str,
     payload: &[u8],
 ) -> Result<ResponseOwned, CodecError> {
@@ -329,7 +329,7 @@ pub fn build_response_err_literal(
 /// (N,Some) compound). Panics on mapping_id=0.
 #[cfg(feature = "codec-response")]
 pub fn build_response_err_aliased(
-    request_id: u64,
+    request_id: crate::wire_id::RequestId,
     mapping_id: crate::wire_id::ExprId,
     suffix: Option<&str>,
     payload: &[u8],
@@ -405,7 +405,7 @@ pub fn build_response_err_aliased(
 /// ```
 #[cfg(feature = "codec-response")]
 pub fn build_response_err_empty(
-    request_id: u64,
+    request_id: crate::wire_id::RequestId,
     payload: &[u8],
 ) -> Result<ResponseOwned, CodecError> {
     // W3: bounded payload copy in, fallible past declared capacity.
@@ -436,7 +436,7 @@ pub fn build_response_err_empty(
 /// upstream's encoder orders them.
 #[cfg(feature = "codec-response")]
 pub fn build_response_timeout_err(
-    request_id: u64,
+    request_id: crate::wire_id::RequestId,
     silent_face_zid: &[u8],
 ) -> Result<ResponseOwned, CodecError> {
     let mut err = build_response_err_empty(request_id, b"Timeout")?;
@@ -674,7 +674,7 @@ fn err_body(payload: &[u8]) -> Result<ResponseOwnedVariant, CodecError> {
 /// query replies byte-unchanged.
 #[cfg(feature = "codec-response")]
 pub struct ResponseReplyBuilder {
-    request_id: u64,
+    request_id: crate::wire_id::RequestId,
     keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<String>,
     payload: Vec<u8>,
@@ -798,7 +798,7 @@ impl ResponseReplyBuilder {
     /// minimal Response(Reply) envelope with the keyexpr arm
     /// (literal id=0 + Some, alias id=N + None, compound id=N + Some).
     pub fn new(
-        request_id: u64,
+        request_id: crate::wire_id::RequestId,
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         payload: &[u8],
@@ -815,7 +815,7 @@ impl ResponseReplyBuilder {
     /// into the builder, where `new` copies them. A reply the queryable staged owns both, and
     /// copying them again was two allocations per reply for bytes that were about to be dropped.
     pub fn from_owned(
-        request_id: u64,
+        request_id: crate::wire_id::RequestId,
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<String>,
         payload: Vec<u8>,
@@ -1192,7 +1192,7 @@ impl ResponseReplyBuilder {
 /// retracted in Round 121j-4-retract.
 #[cfg(feature = "codec-response")]
 pub struct ResponseErrBuilder {
-    request_id: u64,
+    request_id: crate::wire_id::RequestId,
     keyexpr_mapping_id: crate::wire_id::ExprId,
     keyexpr_suffix: Option<String>,
     payload: Vec<u8>,
@@ -1226,7 +1226,7 @@ impl ResponseErrBuilder {
     /// minimal Response(Err) envelope with the keyexpr arm
     /// (literal id=0 + Some, alias id=N + None, compound id=N + Some).
     pub fn new(
-        request_id: u64,
+        request_id: crate::wire_id::RequestId,
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         payload: &[u8],

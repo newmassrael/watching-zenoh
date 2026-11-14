@@ -737,7 +737,7 @@ mod tests {
     }
 
     /// Sender(Local)-mapped aliased wireexpr: id != 0, M=1.
-    fn aliased_sender(id: u64, suffix: Option<&str>) -> WireexprOwned {
+    fn aliased_sender(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwned {
         WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id,
@@ -748,7 +748,7 @@ mod tests {
     }
 
     /// Receiver(Nonlocal)-mapped aliased wireexpr: id != 0, M=0.
-    fn aliased_receiver(id: u64, suffix: Option<&str>) -> WireexprOwned {
+    fn aliased_receiver(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwned {
         WireexprOwned {
             body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
                 id,

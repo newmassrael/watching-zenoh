@@ -175,7 +175,7 @@ pub fn wireexpr_names_a_declaration<S: WireexprStorage>(body: &WireexprOwnedVari
 #[cfg(feature = "alloc")]
 pub fn resolve_wireexpr<S: WireexprStorage>(
     body: &WireexprOwnedVariant<S>,
-    table: &HashMap<crate::wire_id::ExprId, String>,
+    table: &HashMap<u64, String>,
 ) -> Option<String> {
     resolve_wireexpr_in(body, MappingSpaces::peer_only(table))
 }
@@ -328,7 +328,7 @@ pub struct PeerSpace<'a>(PeerSpaceRepr<'a>);
 enum PeerSpaceRepr<'a> {
     /// The growable policy's plain map; a build with no allocator has none.
     #[cfg(feature = "alloc")]
-    Map(&'a HashMap<crate::wire_id::ExprId, String>),
+    Map(&'a HashMap<u64, String>),
     /// The static policy's bounded table.
     Table(&'a FixedIdMap<KeyText<Static>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
 }
@@ -336,7 +336,7 @@ enum PeerSpaceRepr<'a> {
 impl<'a> PeerSpace<'a> {
     /// The growable policy's table, as a peer space.
     #[cfg(feature = "alloc")]
-    pub(crate) fn of_map(map: &'a HashMap<crate::wire_id::ExprId, String>) -> Self {
+    pub(crate) fn of_map(map: &'a HashMap<u64, String>) -> Self {
         Self(PeerSpaceRepr::Map(map))
     }
 
@@ -348,11 +348,16 @@ impl<'a> PeerSpace<'a> {
     }
 
     /// The literal keyexpr the peer declared for `id`.
+    ///
+    /// A peer's table holds ids widened to 64 bits, as the id map every
+    /// session table shares does (`crate::id_map::IdMap`); an `ExprId` is
+    /// looked up widened ([`crate::wire_id::peer_key`]).
     fn literal(&self, id: crate::wire_id::ExprId) -> Option<&'a str> {
+        let key = crate::wire_id::peer_key(id);
         match self.0 {
             #[cfg(feature = "alloc")]
-            PeerSpaceRepr::Map(map) => map.get(&id).map(String::as_str),
-            PeerSpaceRepr::Table(table) => table.find(id).map(|text| text.as_str()),
+            PeerSpaceRepr::Map(map) => map.get(&key).map(String::as_str),
+            PeerSpaceRepr::Table(table) => table.find(key).map(|text| text.as_str()),
         }
     }
 }
@@ -415,7 +420,7 @@ impl<'a> MappingSpaces<'a> {
 
     /// Only the peer's space is known. `M=0` aliases refuse.
     #[cfg(feature = "alloc")]
-    pub fn peer_only(peer: &'a HashMap<crate::wire_id::ExprId, String>) -> Self {
+    pub fn peer_only(peer: &'a HashMap<u64, String>) -> Self {
         Self {
             peer: PeerSpace::of_map(peer),
             own: None,
@@ -424,10 +429,7 @@ impl<'a> MappingSpaces<'a> {
 
     /// Both spaces are known. `M=1` reads the peer's, `M=0` reads ours.
     #[cfg(feature = "alloc")]
-    pub fn with_own(
-        peer: &'a HashMap<crate::wire_id::ExprId, String>,
-        own: &'a dyn OwnMappingSpace,
-    ) -> Self {
+    pub fn with_own(peer: &'a HashMap<u64, String>, own: &'a dyn OwnMappingSpace) -> Self {
         Self {
             peer: PeerSpace::of_map(peer),
             own: Some(own),
@@ -521,8 +523,8 @@ impl<'a> MappingSpaces<'a> {
 /// [`MappingSpaces::peer_only`], so an `M=0` alias still refuses. The conversion
 /// cannot invent a space the caller does not have.
 #[cfg(feature = "alloc")]
-impl<'a> From<&'a HashMap<crate::wire_id::ExprId, String>> for MappingSpaces<'a> {
-    fn from(peer: &'a HashMap<crate::wire_id::ExprId, String>) -> Self {
+impl<'a> From<&'a HashMap<u64, String>> for MappingSpaces<'a> {
+    fn from(peer: &'a HashMap<u64, String>) -> Self {
         Self::peer_only(peer)
     }
 }
@@ -947,10 +949,7 @@ enum Space {
 /// it differently, and the whole point of the question is that the wire does
 /// not answer it.
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-pub fn absorb_keyexpr_into(
-    table: &mut HashMap<crate::wire_id::ExprId, String>,
-    declare: &DeclareOwned,
-) {
+pub fn absorb_keyexpr_into(table: &mut HashMap<u64, String>, declare: &DeclareOwned) {
     match &declare.body {
         DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
             // Bound to a `let` before the insert so the immutable spaces borrow
@@ -958,11 +957,11 @@ pub fn absorb_keyexpr_into(
             let literal =
                 resolve_declared_keyexpr(&d.keyexpr.body, MappingSpaces::peer_only(&*table));
             if let Some(literal) = literal {
-                table.insert(crate::wire_id::declared_expr_id(d.id), literal);
+                table.insert(crate::wire_id::declared_peer_key(d.id), literal);
             }
         }
         DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
-            table.remove(&crate::wire_id::declared_expr_id(u.id));
+            table.remove(&crate::wire_id::declared_peer_key(u.id));
         }
         _ => {}
     }
@@ -977,7 +976,7 @@ mod mapping_bit_tests {
 
     /// The peer's space, with ONE entry. Every test below asks about id `7`,
     /// which this table HAS — so a wrong-space read cannot fail by accident.
-    fn peer_space() -> HashMap<crate::wire_id::ExprId, String> {
+    fn peer_space() -> HashMap<u64, String> {
         let mut t = HashMap::new();
         t.insert(7, "peers/space/temp".to_string());
         t

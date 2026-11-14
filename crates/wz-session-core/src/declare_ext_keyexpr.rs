@@ -94,7 +94,10 @@ pub fn build_ext_keyexpr(literal: &str) -> Result<ExtEntryOwned, CodecError> {
 /// `[is_local, id]` — when the declaration covers the whole key and the suffix
 /// is empty. `has_suffix` follows the suffix, as upstream's `kelen != 0` does.
 #[cfg(feature = "alloc")]
-pub fn build_ext_wireexpr(mapping_id: u64, suffix: &str) -> Result<ExtEntryOwned, CodecError> {
+pub fn build_ext_wireexpr(
+    mapping_id: crate::wire_id::ExprId,
+    suffix: &str,
+) -> Result<ExtEntryOwned, CodecError> {
     let mut body: Vec<u8> = Vec::with_capacity(2 + suffix.len());
     let has_suffix = if suffix.is_empty() {
         0
@@ -102,7 +105,7 @@ pub fn build_ext_wireexpr(mapping_id: u64, suffix: &str) -> Result<ExtEntryOwned
         INNER_HAS_SUFFIX
     };
     body.push(INNER_IS_LOCAL | has_suffix);
-    crate::vle::encode_vle_u64_into(&mut body, mapping_id);
+    crate::vle::encode_vle_u64_into(&mut body, u64::from(mapping_id));
     body.extend_from_slice(suffix.as_bytes());
     let value_len = body.len() as u64;
     // alloc carrier: `owned_bytes` is the unbounded `SceBytes` Vec (R311nq), so
@@ -121,12 +124,15 @@ pub fn build_ext_wireexpr(mapping_id: u64, suffix: &str) -> Result<ExtEntryOwned
 /// and the VLE decode ([`read_vle_u64`](crate::vle::read_vle_u64)) live in ONE
 /// place rather than two hand-rolled parsers that could drift. `None` when no
 /// `ext_keyexpr` entry is present, its body is not a ZBuf, or the id VLE is
-/// truncated.
+/// truncated. The id is narrowed to an `ExprId` as upstream narrows it
+/// ([`crate::wire_id::declared_expr_id`]).
 ///
 /// Generic over the chain a reader can ask ([`ExtEntryView`]): the owned one, or
 /// the chain of a declaration read where its frame lies. One scan, so the two
 /// forms cannot disagree about which entry is the keyexpr.
-fn parse_ext_keyexpr_entry<E: ExtEntryView>(exts: Option<&[E]>) -> Option<(u8, u64, &[u8])> {
+fn parse_ext_keyexpr_entry<E: ExtEntryView>(
+    exts: Option<&[E]>,
+) -> Option<(u8, crate::wire_id::ExprId, &[u8])> {
     for ext in exts? {
         // Told by its identity, the header without the chain flag, as upstream tells
         // it (`ext::WireExprExt::ID`): a ZBuf of the same id that is not mandatory
@@ -140,7 +146,11 @@ fn parse_ext_keyexpr_entry<E: ExtEntryView>(exts: Option<&[E]>) -> Option<(u8, u
         let (&inner_header, rest) = body.split_first()?;
         let (id, consumed) = read_vle_u64(rest)?;
         let suffix_bytes = rest.get(consumed..)?;
-        return Some((inner_header, id, suffix_bytes));
+        return Some((
+            inner_header,
+            crate::wire_id::declared_expr_id(id),
+            suffix_bytes,
+        ));
     }
     None
 }
@@ -445,6 +455,26 @@ mod tests {
         );
     }
 
+    /// Upstream reads the extension's scope as a plain `ExprLen`, which
+    /// narrows: an id of `0x1_0007` names id 7, as it does there.
+    #[test]
+    fn an_ext_id_wider_than_the_scope_names_the_id_upstream_narrows_it_to() {
+        let wide = ExtEntryOwned {
+            header: KEYEXPR_EXT_HEADER,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: 5,
+                // [inner_header 0x03 (local + suffix), VLE 0x1_0007, "x"].
+                value: crate::codec_owned::owned_bytes(&[0x03, 0x87, 0x80, 0x04, b'x']).unwrap(),
+            }),
+        };
+        let mut table = HashMap::new();
+        table.insert(7u64, String::from("demo/"));
+        assert_eq!(
+            resolve_ext_keyexpr(Some(&vec![wide]), &table),
+            Some(String::from("demo/x"))
+        );
+    }
+
     #[test]
     fn resolve_a_truncated_id_vle_is_none() {
         // The inner-id VLE's continuation bit is set but the body ends -> the
@@ -481,8 +511,8 @@ mod tests {
     fn an_own_space_with_a_colliding_id_never_answers_the_ext_keyexpr() {
         let mut peer = HashMap::new();
         peer.insert(7u64, String::from("theirs/"));
-        let mut own = HashMap::new();
-        own.insert(7u64, String::from("ours/"));
+        let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        own.insert(7, String::from("ours/"));
         let spaces = MappingSpaces::with_own(&peer, &own);
         let exts = aliased_ext();
         assert_eq!(
@@ -513,8 +543,8 @@ mod tests {
             Some(String::from("theirs/x"))
         );
         let none = HashMap::new();
-        let mut own = HashMap::new();
-        own.insert(7u64, String::from("ours/"));
+        let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        own.insert(7, String::from("ours/"));
         assert_eq!(
             resolve_ext_keyexpr(Some(&exts), MappingSpaces::with_own(&none, &own)),
             None,

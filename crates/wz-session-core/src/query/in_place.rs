@@ -345,7 +345,7 @@ mod tests {
 
     /// The peer's id space: one alias, and one whose expansion together with a
     /// suffix is past the bounded keyexpr buffer.
-    fn peer() -> HashMap<crate::wire_id::ExprId, String> {
+    fn peer() -> HashMap<u64, String> {
         let mut peer = HashMap::new();
         peer.insert(5, String::from("demo/mapped"));
         peer.insert(
@@ -411,7 +411,7 @@ mod tests {
                 b"value",
                 EncodingHint {
                     packed_id: 0x0B,
-                    schema: Some(String::from("text")),
+                    schema: Some(b"text".to_vec()),
                 },
             );
             #[cfg(feature = "query-source-info")]
@@ -534,7 +534,7 @@ mod tests {
         let decoded = RequestView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
         let (mut reg, log) = recording();
         let (mut replies, mut finals) = (ReplyStage::new(), FinalStage::new());
-        for rid in 0..crate::caps::MAX_PENDING_FINALS as u64 {
+        for rid in 0..crate::caps::MAX_PENDING_FINALS as u32 {
             finals.owe(rid, QosLevel::DEFAULT);
         }
         reg.dispatch_iteration_event(

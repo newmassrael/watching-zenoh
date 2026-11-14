@@ -824,7 +824,7 @@ mod tests {
         let mut board = SwitchboardRegistry::new();
         board.register("home/livingroom/temp", "temp_update");
         let mut inj = RecordingInjector::default();
-        let table: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        let table: HashMap<u64, String> = HashMap::new();
 
         let outcome = frame_event(put_push("home/livingroom/temp", b"22.0"));
         let fired =
@@ -839,7 +839,10 @@ mod tests {
 
     /// R311y740 (N37) — the `M=0` (`Mapping::Receiver`) twin of [`put_push`]:
     /// the mapping id names OUR space, not the peer's.
-    fn put_push_own_alias(mapping_id: u64, payload: &[u8]) -> crate::wire::PushOwned {
+    fn put_push_own_alias(
+        mapping_id: crate::wire_id::ExprId,
+        payload: &[u8],
+    ) -> crate::wire::PushOwned {
         use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
         use wz_codecs::push::PushOwnedVariant;
         let mut push = Push {
@@ -881,7 +884,7 @@ mod tests {
         board.register("theirs/temp", "theirs_update");
         let mut inj = RecordingInjector::default();
 
-        let mut peer: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        let mut peer: HashMap<u64, String> = HashMap::new();
         peer.insert(7, "theirs/temp".to_string());
         let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
         own.insert(7, "ours/temp".to_string());
@@ -913,7 +916,7 @@ mod tests {
         board.register("theirs/temp", "theirs_update");
         let mut inj = RecordingInjector::default();
 
-        let mut peer: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        let mut peer: HashMap<u64, String> = HashMap::new();
         peer.insert(7, "theirs/temp".to_string());
 
         let outcome = frame_event(put_push_own_alias(7, b"22.0"));
@@ -935,7 +938,7 @@ mod tests {
         let mut board = SwitchboardRegistry::new();
         board.register("home/livingroom/temp", "temp_update");
         let mut inj = RecordingInjector::default();
-        let table: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        let table: HashMap<u64, String> = HashMap::new();
 
         let outcome = frame_event(put_push("home/kitchen/humidity", b"55"));
         let fired =

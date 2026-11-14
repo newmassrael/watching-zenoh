@@ -453,7 +453,7 @@ mod tests {
     use sce_forge_runtime::codec::SceCursor;
     use std::sync::{Arc, Mutex};
 
-    const RID: u64 = 9;
+    const RID: crate::wire_id::RequestId = 9;
 
     /// Everything a sink can read through the view, as owned values.
     #[derive(Debug, Clone, PartialEq)]
@@ -481,8 +481,12 @@ mod tests {
             keyexpr: String::from(view.keyexpr()),
             kind: view.kind(),
             payload: view.payload().to_vec(),
-            err_encoding: view.err_encoding().map(|(id, s)| (id, s.map(String::from))),
-            put_encoding: view.put_encoding().map(|(id, s)| (id, s.map(String::from))),
+            err_encoding: view
+                .err_encoding()
+                .map(|(id, s)| (id, s.map(<[u8]>::to_vec))),
+            put_encoding: view
+                .put_encoding()
+                .map(|(id, s)| (id, s.map(<[u8]>::to_vec))),
             attachment: view.attachment().map(<[u8]>::to_vec),
             source_info: view.source_info().cloned(),
             timestamp: view.timestamp().cloned(),
@@ -516,7 +520,7 @@ mod tests {
 
     /// The peer's id space: one alias, and one whose expansion together with a
     /// suffix is past the bounded keyexpr buffer.
-    fn peer() -> HashMap<crate::wire_id::ExprId, String> {
+    fn peer() -> HashMap<u64, String> {
         let mut peer = HashMap::new();
         peer.insert(5, String::from("demo/mapped"));
         peer.insert(6, "x".repeat(crate::caps::MAX_KEYEXPR_BYTES));
@@ -597,7 +601,7 @@ mod tests {
         };
         let schema = EncodingHint {
             packed_id: 0x0B,
-            schema: Some(String::from("text")),
+            schema: Some(b"text".to_vec()),
         };
         let cases = [
             ResponseReplyBuilder::new(RID, 0, Some("demo/a"), b"plain")
@@ -618,7 +622,7 @@ mod tests {
                 .build()
                 .expect("build"),
             ResponseErrBuilder::new(RID, 0, Some("demo/d"), b"oops")
-                .encoding(0x0D, Some("why"))
+                .encoding(0x0D, Some(&b"why"[..]))
                 .build()
                 .expect("build"),
             // Through the peer's alias, with and without a suffix.

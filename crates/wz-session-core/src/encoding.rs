@@ -310,7 +310,7 @@ mod tests {
         let e = encoding_from_mime("application/json;utf-8");
         assert_eq!(e.id(), ID_APPLICATION_JSON);
         assert_eq!(e.packed_id & 0x1, 1, "schema-present bit set");
-        assert_eq!(e.schema.as_deref(), Some("utf-8"));
+        assert_eq!(e.schema_text(), Some("utf-8"));
         assert_eq!(encoding_to_mime(&e), "application/json;utf-8");
     }
 
@@ -320,7 +320,7 @@ mod tests {
     fn from_to_mime_unknown_is_custom() {
         let e = encoding_from_mime("custom/format;v1");
         assert_eq!(e.id(), ID_CUSTOM);
-        assert_eq!(e.schema.as_deref(), Some("custom/format;v1"));
+        assert_eq!(e.schema_text(), Some("custom/format;v1"));
         assert_eq!(encoding_to_mime(&e), "custom/format;v1");
     }
 }

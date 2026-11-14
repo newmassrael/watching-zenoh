@@ -68,7 +68,7 @@ pub enum Resolved {
     Unresolved {
         /// The unresolved numeric id, so a view can render `<unresolved
         /// id=17>` rather than a blank.
-        id: u64,
+        id: crate::wire_id::ExprId,
         /// WHOSE number space the id was looked up in — the half of the
         /// answer that says which side's Declare stream was missed.
         owner: Direction,
@@ -84,9 +84,9 @@ pub enum Resolved {
 #[derive(Debug, Default)]
 pub struct KeyexprTables {
     /// Ids declared BY [`Direction::A`], in A's own number space.
-    a: HashMap<crate::wire_id::ExprId, String>,
+    a: HashMap<u64, String>,
     /// Ids declared BY [`Direction::B`].
-    b: HashMap<crate::wire_id::ExprId, String>,
+    b: HashMap<u64, String>,
 }
 
 impl KeyexprTables {
@@ -96,14 +96,14 @@ impl KeyexprTables {
     }
 
     /// The table owning the ids `direction` declares.
-    fn table(&self, direction: Direction) -> &HashMap<crate::wire_id::ExprId, String> {
+    fn table(&self, direction: Direction) -> &HashMap<u64, String> {
         match direction {
             Direction::A => &self.a,
             Direction::B => &self.b,
         }
     }
 
-    fn table_mut(&mut self, direction: Direction) -> &mut HashMap<crate::wire_id::ExprId, String> {
+    fn table_mut(&mut self, direction: Direction) -> &mut HashMap<u64, String> {
         match direction {
             Direction::A => &mut self.a,
             Direction::B => &mut self.b,
@@ -146,7 +146,7 @@ impl KeyexprTables {
                 _ => Resolved::Empty,
             };
         }
-        match self.table(owner).get(&id) {
+        match self.table(owner).get(&crate::wire_id::peer_key(id)) {
             Some(base) => Resolved::Literal(match suffix {
                 Some(s) if !s.is_empty() => {
                     let mut out = String::with_capacity(base.len() + s.len());
@@ -190,13 +190,13 @@ impl KeyexprTables {
                     // The declarer owns the id, so it lands in the DECLARER's
                     // table regardless of how the bound expression was rooted.
                     self.table_mut(direction)
-                        .insert(crate::wire_id::declared_expr_id(d.id), path.clone());
+                        .insert(crate::wire_id::declared_peer_key(d.id), path.clone());
                 }
                 Some((crate::wire_id::declared_expr_id(d.id), bound))
             }
             DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
                 self.table_mut(direction)
-                    .remove(&crate::wire_id::declared_expr_id(u.id));
+                    .remove(&crate::wire_id::declared_peer_key(u.id));
                 None
             }
             _ => None,
@@ -216,7 +216,7 @@ mod tests {
         suffix.map(|s| crate::codec_owned::owned_string(s).expect("fixture suffix fits"))
     }
 
-    fn local(id: u64, suffix: Option<&str>) -> WireexprOwned {
+    fn local(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwned {
         WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id,
@@ -226,7 +226,7 @@ mod tests {
         }
     }
 
-    fn nonlocal(id: u64, suffix: Option<&str>) -> WireexprOwned {
+    fn nonlocal(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwned {
         WireexprOwned {
             body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
                 id,

@@ -220,12 +220,15 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
 pub enum CachedDeclaration {
     /// `send_declare_keyexpr(mapping_id, suffix)` — pruned by
     /// `send_undeclare_kexpr(mapping_id)`.
-    Keyexpr { mapping_id: u64, suffix: String },
+    Keyexpr {
+        mapping_id: crate::wire_id::ExprId,
+        suffix: String,
+    },
     /// `send_declare_subscriber(..)` — pruned by
     /// `send_undeclare_subscriber(subscriber_id)`.
     Subscriber {
         subscriber_id: u64,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<String>,
     },
     /// `send_declare_queryable(..)` — pruned by
@@ -234,7 +237,7 @@ pub enum CachedDeclaration {
     /// complete queryable does not silently re-declare as incomplete.
     Queryable {
         queryable_id: u64,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<String>,
         complete: bool,
     },
@@ -242,7 +245,7 @@ pub enum CachedDeclaration {
     /// `send_undeclare_token(token_id)`.
     Token {
         token_id: u64,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<String>,
     },
     /// `send_interest_liveliness_subscriber(..)` — pruned by
@@ -251,7 +254,7 @@ pub enum CachedDeclaration {
     LivelinessSubscriberInterest {
         interest_id: u64,
         history: bool,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<String>,
     },
     /// `send_interest_liveliness_get(..)` — one-shot CURRENT snapshot
@@ -260,7 +263,7 @@ pub enum CachedDeclaration {
     /// `send_interest_final(interest_id)` like the subscriber form.
     LivelinessGetInterest {
         interest_id: u64,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<String>,
     },
     /// R311y771 — `send_interest_subscribers` / `send_interest_queryables`:
@@ -295,7 +298,7 @@ pub enum CachedDeclaration {
         /// the cache because the replay must put the SAME byte on the wire:
         /// a replay that dropped it would re-ask as a different client.
         aggregate: bool,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<String>,
     },
 }
@@ -1102,25 +1105,25 @@ mod declaration_cache_tests {
     use alloc::string::ToString;
     use alloc::vec::Vec;
 
-    fn keyexpr(id: u64) -> CachedDeclaration {
+    fn keyexpr(id: crate::wire_id::ExprId) -> CachedDeclaration {
         CachedDeclaration::Keyexpr {
             mapping_id: id,
             suffix: "k".to_string(),
         }
     }
 
-    fn is_keyexpr(id: u64) -> impl Fn(&CachedDeclaration) -> bool {
+    fn is_keyexpr(id: crate::wire_id::ExprId) -> impl Fn(&CachedDeclaration) -> bool {
         move |entry| matches!(entry, CachedDeclaration::Keyexpr { mapping_id, .. } if *mapping_id == id)
     }
 
-    fn id_of(entry: &CachedDeclaration) -> u64 {
+    fn id_of(entry: &CachedDeclaration) -> crate::wire_id::ExprId {
         match entry {
             CachedDeclaration::Keyexpr { mapping_id, .. } => *mapping_id,
             other => unreachable!("only key expressions are cached here: {other:?}"),
         }
     }
 
-    fn filled(count: u64) -> DeclarationCache {
+    fn filled(count: crate::wire_id::ExprId) -> DeclarationCache {
         let mut cache = DeclarationCache::new();
         for id in 1..=count {
             assert_eq!(cache.record(keyexpr(id)), Insertion::EmitNow);
@@ -1268,7 +1271,7 @@ mod declaration_cache_tests {
                 state
             };
             let mut cache = DeclarationCache::new();
-            let mut next_id = 1u64;
+            let mut next_id: crate::wire_id::ExprId = 1;
             for _ in 0..(rng() % 8) {
                 assert_eq!(cache.record(keyexpr(next_id)), Insertion::EmitNow);
                 next_id += 1;

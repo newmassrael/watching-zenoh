@@ -2995,7 +2995,7 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 // ask it at all, so a peer naming our id was answered `None` and dropped.
 impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
-    fn resolve_own_mapping(&self, id: u64) -> Option<String> {
+    fn resolve_own_mapping(&self, id: crate::wire_id::ExprId) -> Option<String> {
         self.resolve_outbound_mapping(id)
     }
 
@@ -3005,7 +3005,7 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
     #[cfg(feature = "alloc")]
     fn append_own_mapping(
         &self,
-        id: u64,
+        id: crate::wire_id::ExprId,
         out: &mut crate::wireexpr_resolve::KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         R::with_mutex_mut(&self.outbound_mappings, |table| {
@@ -3019,7 +3019,7 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
     #[cfg(not(feature = "alloc"))]
     fn append_own_mapping(
         &self,
-        _id: u64,
+        _id: crate::wire_id::ExprId,
         _out: &mut crate::wireexpr_resolve::KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         None
@@ -3622,7 +3622,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
-                outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
+                outbound_mappings: R::new_mutex(HashMap::<crate::wire_id::ExprId, String>::new()),
                 #[cfg(all(feature = "alloc", feature = "codec-response"))]
                 egress_reply_gate: R::new_mutex(None::<ReplyEgressGate>),
                 #[cfg(all(feature = "alloc", feature = "codec-response"))]
@@ -12589,17 +12589,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if mapping_id == 0 {
             return Err(SendDeclareError::ReservedMappingIdZero);
         }
-        // R311y342 — the id space's OTHER end. The lower bound has been
-        // gated since R300; the upper bound never was, so wz could emit an
-        // alias id that neither upstream can hold: zenoh types
-        // `DeclareKeyExpr.id` as `ExprId = u16` and zenoh-pico's
-        // `_z_decl_kexpr_t` holds `uint16_t _id`, while our codec carries a
-        // VLE u64 (deliberate — the shared wireexpr shape). Measured, not
-        // argued: before this gate, `send_declare_keyexpr(65_536, ..)`
-        // returned Ok and put the frame on the wire.
-        if mapping_id > u64::from(u16::MAX) {
-            return Err(SendDeclareError::MappingIdTooWideForWire(mapping_id));
-        }
+        // The upper end of the id space is the type: a mapping id is an
+        // `ExprId`, as zenoh's `DeclareKeyExpr.id` is and zenoh-pico's
+        // `uint16_t _id` is, so no id a caller can name is too wide for the wire.
         check_outbound_keyexpr_pico_safe(suffix)?;
         let declare = build_declare_kexpr(mapping_id, suffix)?;
         // §5.21 routing-namespace — bake the namespace into the wire alias
@@ -13346,18 +13338,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_undeclare_kexpr(&self, mapping_id: crate::wire_id::ExprId) {
         #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
         {
-            // R311y342 — the DECLARE twin's u16 wire bound, applied to the
-            // retraction half. zenoh's `UndeclareKeyExpr { id: ExprId }` and
-            // pico's `_z_undecl_kexpr_t { uint16_t _id }` are as narrow as
-            // their declare counterparts, and this surface emits WITHOUT
-            // consulting the mapping table (its doc's "removing an absent id
-            // is a no-op" idempotence), so the gated twin does not bound it.
-            // Dropped silently rather than reported because this signature has
-            // no error channel by contract — the same reason a transport-down
-            // reject drops the emit here.
-            if mapping_id > u64::from(u16::MAX) {
-                return;
-            }
+            // The id is an `ExprId`, as zenoh's `UndeclareKeyExpr { id }` and
+            // pico's `uint16_t _id` are, so every id this takes fits the wire.
             let declare = build_undeclare_kexpr(mapping_id);
             // A4 — drop the matching replay entry (pico `_z_prune_declaration` undeclare-filter
             // on `_id`) and send the retraction, as one step: a retraction of an entry a paced

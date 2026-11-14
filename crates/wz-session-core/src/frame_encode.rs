@@ -1675,7 +1675,7 @@ mod tests {
             }),
             encoding: Some(EncodingHint {
                 packed_id: u32::MAX,
-                schema: Some("application/x-schema".repeat(3)),
+                schema: Some(b"application/x-schema".repeat(3)),
             }),
             source_info: Some(SourceInfo {
                 zid: [0xCD; 16],

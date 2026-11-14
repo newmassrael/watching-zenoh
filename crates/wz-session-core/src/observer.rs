@@ -1482,8 +1482,8 @@ mod tests {
             let mut observer = ApplicationLayerObserver::new();
 
             // OUR space: id 7 -> `ours/x`.
-            let mut own = HashMap::new();
-            own.insert(7u64, "ours/x".to_string());
+            let mut own: HashMap<crate::wire_id::ExprId, alloc::string::String> = HashMap::new();
+            own.insert(7, "ours/x".to_string());
             observer
                 .subscribers
                 .set_own_mapping_space(std::sync::Arc::new(own));
@@ -1597,7 +1597,7 @@ mod tests {
         // `M=0` (`Mapping::Receiver`) fixtures: the id names OUR space. Local
         // to this module because the cross-talk suite above deliberately uses
         // the id=0 LITERAL form, which consults no space at all.
-        fn push_own_alias(mapping_id: u64) -> crate::wire::PushOwned {
+        fn push_own_alias(mapping_id: crate::wire_id::ExprId) -> crate::wire::PushOwned {
             use wz_codecs::lent::Push;
             Push {
                 keyexpr: Wireexpr {
@@ -1615,7 +1615,7 @@ mod tests {
 
         fn decl_subscriber_own_alias(
             id: u64,
-            mapping_id: u64,
+            mapping_id: crate::wire_id::ExprId,
         ) -> crate::transport_profile::owned::DeclareOwned {
             wz_session_core_test_support::declare_envelope_decl_subscriber(
                 wz_session_core_test_support::decl_subscriber_nonlocal(id, mapping_id, None),
@@ -1624,7 +1624,7 @@ mod tests {
 
         fn decl_queryable_own_alias(
             id: u64,
-            mapping_id: u64,
+            mapping_id: crate::wire_id::ExprId,
         ) -> crate::transport_profile::owned::DeclareOwned {
             wz_session_core_test_support::declare_envelope_decl_queryable(
                 wz_session_core_test_support::decl_queryable_nonlocal(id, mapping_id, None),
@@ -1633,7 +1633,7 @@ mod tests {
 
         fn decl_token_own_alias(
             id: u64,
-            mapping_id: u64,
+            mapping_id: crate::wire_id::ExprId,
         ) -> crate::transport_profile::owned::DeclareOwned {
             wz_session_core_test_support::declare_envelope_decl_token(
                 wz_session_core_test_support::decl_token_nonlocal(id, mapping_id, None),

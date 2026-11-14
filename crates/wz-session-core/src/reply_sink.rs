@@ -10,7 +10,7 @@
 //! routes each inbound `Response(Reply|Err)` (and the terminal
 //! `ResponseFinal`) for a pending z_get through a Dependency-Inversion
 //! seam rather than a hard-coded `Box<dyn FnMut(&InboundReply)>` +
-//! `Box<dyn FnMut(u64)>` pair, so one registry implementation backs both
+//! `Box<dyn FnMut(RequestId)>` pair, so one registry implementation backs both
 //! profiles (ARCHITECTURE.md §2.4 static-first, dynamic-opt-in):
 //!
 //! - **AP / `alloc` on** — [`BoxedReplySink`] wraps the `on_reply` +
@@ -34,7 +34,7 @@
 //! carries no output contract (unlike the queryable [`crate::query_sink`]
 //! seam's `ReplyOut`): `on_reply` only consumes, it emits nothing.
 //!
-//! `on_final` carries the bare `rid` (`u64`, `Copy`) — a scalar tag, no
+//! `on_final` carries the bare `rid` (a `RequestId`, `Copy`) — a scalar tag, no
 //! view needed; it fires once when the matching `ResponseFinal` arrives
 //! and the registry auto-removes the pending entry.
 
@@ -484,7 +484,7 @@ type BoxedReplyFn = Box<dyn FnMut(&dyn ReplyView) + Send + 'static>;
 
 /// Heap final-closure type backing [`BoxedReplySink`].
 #[cfg(feature = "alloc")]
-type BoxedFinalFn = Box<dyn FnMut(u64) + Send + 'static>;
+type BoxedFinalFn = Box<dyn FnMut(crate::wire_id::RequestId) + Send + 'static>;
 
 /// AP / `alloc`-profile adapter: wraps the `on_reply` + `on_final`
 /// capturing closures in heap `Box`es, type-erasing them so a registry
@@ -504,7 +504,7 @@ impl BoxedReplySink {
     /// on_final)` pairing.
     pub fn new(
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(crate::wire_id::RequestId) + Send + 'static,
     ) -> Self {
         Self {
             reply_fn: Box::new(on_reply),
@@ -882,13 +882,13 @@ mod tests {
             keyexpr: "svc/q",
             kind: ReplyKind::Err,
             payload: b"boom",
-            err_encoding: Some((4, Some("text/plain"))),
+            err_encoding: Some((4, Some(&b"text/plain"[..]))),
             attachment: None,
             put_encoding: None,
         };
         assert_eq!(view.kind(), ReplyKind::Err);
         assert_eq!(view.payload(), b"boom");
-        assert_eq!(view.err_encoding(), Some((4, Some("text/plain"))));
+        assert_eq!(view.err_encoding(), Some((4, Some(&b"text/plain"[..]))));
     }
 
     #[cfg(feature = "alloc")]
@@ -899,7 +899,7 @@ mod tests {
         use std::vec::Vec;
 
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let finals: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let finals: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_cb = Arc::clone(&seen);
         let finals_cb = Arc::clone(&finals);
 
@@ -961,7 +961,7 @@ mod consolidating_sink_tests {
     #[derive(Default)]
     struct Recorder {
         delivered: Vec<(String, Vec<u8>)>,
-        finals: Vec<u64>,
+        finals: Vec<crate::wire_id::RequestId>,
     }
 
     impl ReplySink for &mut Recorder {

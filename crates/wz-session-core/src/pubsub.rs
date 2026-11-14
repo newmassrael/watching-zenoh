@@ -2907,10 +2907,10 @@ impl<P: Storage> SubscriberPeer<P> {
     /// operation, which is the same trade-off the outbound mirror
     /// makes intentionally.
     #[cfg(feature = "alloc")]
-    pub fn resolve_inbound_mapping(&self, id: u64) -> Option<String> {
+    pub fn resolve_inbound_mapping(&self, id: crate::wire_id::ExprId) -> Option<String> {
         self.naming
             .aliases
-            .find(id)
+            .find(crate::wire_id::peer_key(id))
             .map(|text| String::from(&text[..]))
     }
 
@@ -3043,10 +3043,15 @@ impl<P: Storage> SubscriberPeer<P> {
                 };
                 // A refusal is counted by the table itself; the declaration that
                 // did not fit is dropped here, with the peer none the wiser.
-                let _ = self.naming.aliases.bind(d.id, text);
+                let _ = self
+                    .naming
+                    .aliases
+                    .bind(crate::wire_id::declared_peer_key(d.id), text);
             }
             DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
-                self.naming.aliases.unbind(u.id);
+                self.naming
+                    .aliases
+                    .unbind(crate::wire_id::declared_peer_key(u.id));
             }
             // DeclSubscriber / UndeclSubscriber are observed by
             // `crate::declare::subscriber::DeclSubscriberRegistry`
@@ -3111,10 +3116,15 @@ impl<P: Storage> SubscriberPeer<P> {
                     return;
                 };
                 // A refusal is counted by the table itself, as for the owned form.
-                let _ = self.naming.aliases.bind(d.id, text);
+                let _ = self
+                    .naming
+                    .aliases
+                    .bind(crate::wire_id::declared_peer_key(d.id), text);
             }
             DeclareVariant::CodecZenohUndeclKexpr(u) => {
-                self.naming.aliases.unbind(u.id);
+                self.naming
+                    .aliases
+                    .unbind(crate::wire_id::declared_peer_key(u.id));
             }
             // The other arms are the dedicated registries', as in the owned form.
             DeclareVariant::CodecZenohDeclSubscriber(_)
@@ -3430,7 +3440,7 @@ impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
 
     /// [`SubscriberPeer::resolve_inbound_mapping`] for this registry's peer.
     #[cfg(feature = "alloc")]
-    pub fn resolve_inbound_mapping(&self, id: u64) -> Option<String> {
+    pub fn resolve_inbound_mapping(&self, id: crate::wire_id::ExprId) -> Option<String> {
         self.peer.resolve_inbound_mapping(id)
     }
 
@@ -4893,7 +4903,7 @@ mod tests {
     /// derive it from. So this is the wire shape, not a choice the fixture makes.
     fn declare_kexpr_scoped(
         mapping_id: u64,
-        scope: u64,
+        scope: crate::wire_id::ExprId,
         suffix: &str,
     ) -> crate::transport_profile::owned::DeclareOwned {
         wz_codecs::lent::Declare {
@@ -4930,7 +4940,10 @@ mod tests {
         .unwrap()
     }
 
-    fn push_with_mapping_id(mapping_id: u64, inline_suffix: Option<&str>) -> PushOwned {
+    fn push_with_mapping_id(
+        mapping_id: crate::wire_id::ExprId,
+        inline_suffix: Option<&str>,
+    ) -> PushOwned {
         Push {
             keyexpr: wz_codecs::lent::Wireexpr {
                 body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
@@ -4949,7 +4962,10 @@ mod tests {
     /// This is what a zenoh peer emits for an id we declared, because
     /// `get_best_key` prefers `ctx.remote_expr_id` and stamps it
     /// `Mapping::Receiver` (`dispatcher/resource.rs:625`).
-    fn push_with_own_mapping_id(mapping_id: u64, inline_suffix: Option<&str>) -> PushOwned {
+    fn push_with_own_mapping_id(
+        mapping_id: crate::wire_id::ExprId,
+        inline_suffix: Option<&str>,
+    ) -> PushOwned {
         Push {
             keyexpr: wz_codecs::lent::Wireexpr {
                 body: WireexprVariant::WireexprNonlocal(wz_codecs::lent::WireexprNonlocal {
@@ -5177,6 +5193,28 @@ mod tests {
             "an M=0 alias names OUR space; substituting the peer half here \
              would have answered `theirs/seven` with full confidence",
         );
+    }
+
+    /// A peer's `DeclareKeyExpr` id wider than an `ExprId` binds the id upstream
+    /// narrows it to, so the scope a later message names finds it, and its
+    /// `UndeclareKeyExpr` of the same wide id unbinds it.
+    #[test]
+    fn a_declared_id_wider_than_an_expr_id_binds_and_unbinds_the_narrowed_id() {
+        let mut registry = SubscriberRegistry::new();
+        let wide = (1u64 << 16) | 7;
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(wide, "theirs/seven"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            registry.resolve_inbound_mapping(7).as_deref(),
+            Some("theirs/seven")
+        );
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(undeclare_kexpr(wide))),
+            Reliability::Reliable,
+        );
+        assert_eq!(registry.resolve_inbound_mapping(7), None);
     }
 
     /// R2385 — a peer declaring a mapping ROOTED IN A PREFIX WE DECLARED now

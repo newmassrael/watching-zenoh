@@ -135,7 +135,6 @@ pub fn decode_query_value_ext_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::ToString;
 
     /// The profile a received message's chain is on; the helpers under test
     /// are generic and a test that does not say which one it means has none.
@@ -207,14 +206,14 @@ mod tests {
         // packed_id = (5 << 1) | 1 = 0x0B : id 5, schema flag set.
         let enc = EncodingHint {
             packed_id: 0x0B,
-            schema: Some("json".to_string()),
+            schema: Some(b"json".to_vec()),
         };
         let entry = encode_query_value_ext::<Wire>(&enc, b"payload-bytes").unwrap();
         let chain = [entry];
         let (got_enc, got_payload) =
             decode_query_value_ext(&chain).expect("schema-encoding value ext decodes");
         assert_eq!(got_enc.packed_id, 0x0B);
-        assert_eq!(got_enc.schema.as_deref(), Some("json"));
+        assert_eq!(got_enc.schema.as_deref(), Some(&b"json"[..]));
         assert_eq!(got_payload, b"payload-bytes");
     }
 

@@ -238,7 +238,7 @@ impl EncodingHint {
 
     /// The schema as text, when it is UTF-8; `None` when there is none or it
     /// is not UTF-8. For a reader that can only show text and says so when it
-    /// cannot (the za row writes `schema_hex` then).
+    /// cannot (a capture row writes `schema_hex` then).
     pub fn schema_text(&self) -> Option<&str> {
         self.schema
             .as_deref()
@@ -1131,7 +1131,7 @@ mod tests {
         assert_eq!(ts.zid, vec![0x11, 0x22, 0x33]);
         let enc = sample.encoding.unwrap();
         assert_eq!(enc.packed_id, 5);
-        assert_eq!(enc.schema.as_deref(), Some("application/json"));
+        assert_eq!(enc.schema_text(), Some("application/json"));
         assert_eq!(sample.qos.unwrap().raw, 0b0001_1010);
         assert_eq!(sample.attachment.unwrap(), b"meta");
         let si = sample.source_info.unwrap();
@@ -1232,11 +1232,11 @@ mod tests {
         let codec: wz_codecs::encoding::EncodingOwned = wz_codecs::encoding::EncodingOwned {
             packed_id: 0x1234,
             schema_len: Some(4),
-            schema: Some(crate::codec_owned::owned_string("text").unwrap()),
+            schema: Some(crate::codec_owned::owned_bytes(b"text").unwrap()),
         };
         let hint = EncodingHint::from_codec(&codec);
         assert_eq!(hint.packed_id, 0x1234);
-        assert_eq!(hint.schema.as_deref(), Some("text"));
+        assert_eq!(hint.schema.as_deref(), Some(&b"text"[..]));
     }
 
     #[test]

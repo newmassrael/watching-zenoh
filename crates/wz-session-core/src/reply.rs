@@ -380,7 +380,7 @@ impl ReplyStamp {
 /// Put / Del).
 #[cfg(feature = "alloc")]
 impl ReplyView for InboundReply {
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
     fn keyexpr(&self) -> &str {
@@ -984,11 +984,11 @@ fn local_stamp(
 /// numeric value is exposed for diagnostic surfaces; callers should
 /// not depend on the exact value across runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ReplyHandle(u64);
+pub struct ReplyHandle(crate::wire_id::RequestId);
 
 impl ReplyHandle {
     /// The rid the registration was bound to.
-    pub fn rid(self) -> u64 {
+    pub fn rid(self) -> crate::wire_id::RequestId {
         self.0
     }
 
@@ -1948,7 +1948,7 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
         deadline_ms: Option<u64>,
         accept: ReplyAcceptance<'_>,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(crate::wire_id::RequestId) + Send + 'static,
     ) -> ReplyHandle {
         // R311y321 — signature UNCHANGED; every caller of THIS method
         // (liveliness_get, the aligner's query plumbing, the tests) registers a
@@ -2053,7 +2053,7 @@ mod tests {
 
     fn response_reply_put(
         rid: crate::wire_id::RequestId,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
         payload: &[u8],
     ) -> ResponseOwned {
@@ -2105,7 +2105,7 @@ mod tests {
         rid: crate::wire_id::RequestId,
         suffix: &str,
         packed_id: u32,
-        schema: Option<&str>,
+        schema: Option<&[u8]>,
         payload: &[u8],
     ) -> ResponseOwned {
         let keyexpr = Wireexpr {
@@ -2150,7 +2150,7 @@ mod tests {
     /// [`response_reply_put`]: the mapping id names OUR space, not the peer's.
     fn response_reply_put_nonlocal(
         rid: crate::wire_id::RequestId,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
         payload: &[u8],
     ) -> ResponseOwned {
@@ -2206,8 +2206,8 @@ mod tests {
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/temp".to_string());
-        let mut own = HashMap::new();
-        own.insert(7u64, "ours/temp".to_string());
+        let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        own.insert(7, "ours/temp".to_string());
 
         let resp = response_reply_put_nonlocal(42, 7, None, b"21.0");
         reg.dispatch_response(&resp, MappingSpaces::with_own(&peer, &own));
@@ -3231,11 +3231,11 @@ mod tests {
             payload: b"v",
             err_encoding: None,
             attachment: Some(b"align"),
-            put_encoding: Some((9, Some("text/plain"))),
+            put_encoding: Some((9, Some(&b"text/plain"[..]))),
         };
         let owned = InboundReply::from_view(&view);
         assert_eq!(owned.attachment(), Some(&b"align"[..]));
-        assert_eq!(owned.put_encoding(), Some((9, Some("text/plain"))));
+        assert_eq!(owned.put_encoding(), Some((9, Some(&b"text/plain"[..]))));
         match owned.body {
             InboundReplyBody::Put {
                 attachment,
@@ -3243,7 +3243,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(attachment.as_deref(), Some(&b"align"[..]));
-                assert_eq!(encoding, Some((9, Some("text/plain".to_string()))));
+                assert_eq!(encoding, Some((9, Some(b"text/plain".to_vec()))));
             }
             other => panic!("expected Put, got {other:?}"),
         }
@@ -3403,7 +3403,7 @@ mod tests {
             |_| {},
         );
 
-        let resp = response_err(5, "error/path", 4, Some("schema_v1"), b"oops");
+        let resp = response_err(5, "error/path", 4, Some(&b"schema_v1"[..]), b"oops");
         reg.dispatch_response(&resp, &HashMap::new());
 
         let captured = captured
@@ -3415,7 +3415,7 @@ mod tests {
         assert_eq!(captured.keyexpr_literal, "error/path");
         match &captured.body {
             InboundReplyBody::Err { encoding, payload } => {
-                assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
+                assert_eq!(*encoding, Some((4, Some(b"schema_v1".to_vec()))));
                 assert_eq!(payload, b"oops");
             }
             other => panic!("expected Err body, got {other:?}"),
@@ -4291,7 +4291,7 @@ mod tests {
         let qr = QueryReply::Err {
             rid: 13,
             keyexpr_literal: "sensors/c".to_string(),
-            encoding: Some((4, Some("schema_v1".to_string()))),
+            encoding: Some((4, Some(b"schema_v1".to_vec()))),
             payload: b"err-payload".to_vec(),
             responder: Some((vec![0x01], 9)),
             qos: crate::sample::QosLevel::from_raw(0b0000_0110),
@@ -4309,7 +4309,7 @@ mod tests {
         match inbound.body {
             InboundReplyBody::Err { encoding, payload } => {
                 // The id 4 and a schema, packed as the wire packs them: (4 << 1) | 1.
-                assert_eq!(encoding, Some((9, Some("schema_v1".to_string()))));
+                assert_eq!(encoding, Some((9, Some(b"schema_v1".to_vec()))));
                 assert_eq!(payload, b"err-payload");
             }
             other => panic!("expected Err, got {other:?}"),
@@ -4424,8 +4424,8 @@ mod tests {
     #[test]
     fn finish_all_ends_every_pending_entry_with_its_final() {
         let mut reg = ReplyRegistry::new();
-        let ended = Arc::new(Mutex::new(Vec::<u64>::new()));
-        for (rid, deadline) in [(21u64, Some(u64::MAX)), (22, None), (23, Some(1))] {
+        let ended = Arc::new(Mutex::new(Vec::<crate::wire_id::RequestId>::new()));
+        for (rid, deadline) in [(21u32, Some(u64::MAX)), (22, None), (23, Some(1))] {
             let ended = ended.clone();
             reg.register(
                 rid,
@@ -4731,7 +4731,7 @@ mod tests {
         // per entry (registration order). Mirrors the duplicate-rid
         // contract on the wire/loopback Final path.
         let mut reg = ReplyRegistry::new();
-        let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let order: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         let order_a = order.clone();
         let order_b = order.clone();
         reg.register(

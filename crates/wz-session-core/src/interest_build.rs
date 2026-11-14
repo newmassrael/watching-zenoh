@@ -210,7 +210,7 @@ pub fn build_interest_propagated(
     kinds: InterestKinds,
     aggregate: bool,
     current_future: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     let mut interest = build_interest_composed(
         interest_id,
@@ -358,7 +358,7 @@ fn build_restricted_interest(
     kinds: InterestKinds,
     current: bool,
     future: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     build_interest_of_kinds(
         interest_id,
@@ -376,7 +376,7 @@ fn build_interest_of_kinds(
     kinds: InterestKinds,
     current: bool,
     future: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     let wireexpr = match keyexpr {
         Some((mapping_id, suffix)) => {
@@ -503,7 +503,7 @@ fn build_interest_composed(
     current: bool,
     future: bool,
     aggregate: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     let mut interest = build_restricted_interest(interest_id, kinds, current, future, keyexpr)?;
     if aggregate {
@@ -523,7 +523,7 @@ fn build_liveliness_token_interest(
     interest_id: u64,
     current: bool,
     future: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     build_restricted_interest(interest_id, InterestKinds::TOKENS, current, future, keyexpr)
 }
@@ -653,7 +653,7 @@ pub fn build_interest_exact(
     kinds: InterestKinds,
     current: bool,
     future: bool,
-    keyexpr: Option<(u64, Option<&str>)>,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     build_interest_of_kinds(interest_id, kinds, current, future, keyexpr)
 }

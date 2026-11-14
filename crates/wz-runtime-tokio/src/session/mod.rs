@@ -7584,12 +7584,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // `declare_queryable` lives on `impl Session<R, T,
                     // Unicast>`, so the seam never returns RequiresUnicast; every
                     // caller hands a suffix for a literal, so neither the
-                    // reserved-zero nor the missing-key arm is reachable; and
-                    // MappingIdTooWideForWire (R311y342) is a
-                    // `send_declare_keyexpr` gate this path never calls.
+                    // reserved-zero nor the missing-key arm is reachable.
                     SendDeclareError::RequiresUnicast
                     | SendDeclareError::ReservedMappingIdZero
-                    | SendDeclareError::MappingIdTooWideForWire(_)
                     | SendDeclareError::MissingKeyexpr => {
                         unreachable!("declare_queryable prepare/seam returned {e:?} unexpectedly")
                     }
@@ -7975,11 +7972,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // Unicast>`, so the seam takes the unicast arm and never
                     // returns RequiresUnicast; every caller hands a suffix for a
                     // literal, so neither the reserved-zero nor the missing-key
-                    // arm is reachable; and MappingIdTooWideForWire (R311y342) is
-                    // a `send_declare_keyexpr` gate this path never calls.
+                    // arm is reachable.
                     SendDeclareError::RequiresUnicast
                     | SendDeclareError::ReservedMappingIdZero
-                    | SendDeclareError::MappingIdTooWideForWire(_)
                     | SendDeclareError::MissingKeyexpr => {
                         unreachable!("declare_subscriber prepare/seam returned {e:?} unexpectedly")
                     }
@@ -8285,14 +8280,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         // above and the prepare reconstruct below.
                         LivelinessAliasError::UnknownMapping(id)
                     }
-                    // R311y342 — MappingIdTooWideForWire joins these: it is a
-                    // `send_declare_keyexpr` gate, and the aliased-token path
-                    // never calls it (it RESOLVES an id the caller already
-                    // declared, so an out-of-range one could not have been
-                    // registered in the first place).
-                    SendDeclareError::ReservedMappingIdZero
-                    | SendDeclareError::MappingIdTooWideForWire(_)
-                    | SendDeclareError::MissingKeyexpr => {
+                    SendDeclareError::ReservedMappingIdZero | SendDeclareError::MissingKeyexpr => {
                         unreachable!(
                             "declare_token_aliased aliased-mode prepare/seam \
                          returned {e:?} unexpectedly"

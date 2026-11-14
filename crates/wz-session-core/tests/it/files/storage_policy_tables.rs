@@ -103,7 +103,7 @@ fn subscriber_unregister_frees_a_slot<P: Storage>() {
 struct NoopReplySink;
 impl wz_session_core::reply_sink::ReplySink for NoopReplySink {
     fn on_reply(&mut self, _reply: &dyn wz_session_core::reply_sink::ReplyView) {}
-    fn on_final(&mut self, _rid: u64) {}
+    fn on_final(&mut self, _rid: wz_session_core::wire_id::RequestId) {}
 }
 
 /// The requester's pending-query table: the entry past `MAX_PENDING_QUERIES` is

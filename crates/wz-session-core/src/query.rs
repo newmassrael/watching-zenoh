@@ -405,7 +405,7 @@ impl crate::query_sink::QueryView for RequestQueryView {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.value.as_ref().map(|(encoding, _)| encoding)
     }
-    fn rid(&self) -> u64 {
+    fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
     #[cfg(feature = "pubsub-ts-stack")]
@@ -1887,7 +1887,7 @@ impl<'a> QueryResponder<'a> {
     /// Inbound Request id this Responder is replying to. Exposed for
     /// diagnostic surfaces; user closures normally don't need it
     /// (the registry pre-fills it into every push).
-    pub fn rid(&self) -> u64 {
+    pub fn rid(&self) -> crate::wire_id::RequestId {
         self.rid
     }
 
@@ -3587,7 +3587,7 @@ mod tests {
 
     fn request_query(
         rid: crate::wire_id::RequestId,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
     ) -> RequestOwned {
         // Construct a minimal Request whose body is a default Query.
@@ -3701,7 +3701,7 @@ mod tests {
     /// [`request_query`]: the mapping id names OUR space, not the peer's.
     fn request_query_nonlocal(
         rid: crate::wire_id::RequestId,
-        mapping_id: u64,
+        mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
     ) -> RequestOwned {
         let suffix_len = suffix.map(|s| s.len() as u64);
@@ -3749,8 +3749,8 @@ mod tests {
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/temp".to_string());
-        let mut own = HashMap::new();
-        own.insert(7u64, "ours/temp".to_string());
+        let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        own.insert(7, "ours/temp".to_string());
 
         let req = request_query_nonlocal(7, 7, None);
         let mut replies = ReplyStage::new();
@@ -5322,7 +5322,7 @@ mod tests {
         // the decode to consume the whole encoding before the payload.
         let encoding = EncodingHint {
             packed_id: 0x0B,
-            schema: Some("json".to_string()),
+            schema: Some(b"json".to_vec()),
         };
         let request = RequestQueryBuilder::new(9, 0, Some("demo/data"))
             .query_value(b"the-query-value", encoding)
@@ -5421,7 +5421,7 @@ mod tests {
 
         let encoding = EncodingHint {
             packed_id: 0x0B,
-            schema: Some("json".to_string()),
+            schema: Some(b"json".to_vec()),
         };
         let wire = RequestQueryBuilder::new(9, 0, Some("demo/data"))
             .query_attachment(b"the-query-attachment")
@@ -5600,8 +5600,11 @@ mod tests {
 
         assert_eq!(replies.len(), 2, "two matched Queries produce two Replies");
         assert_eq!(
-            finals.iter().map(|(rid, _)| *rid).collect::<Vec<u64>>(),
-            vec![10u64, 11u64, 12u64],
+            finals
+                .iter()
+                .map(|(rid, _)| *rid)
+                .collect::<Vec<crate::wire_id::RequestId>>(),
+            vec![10, 11, 12],
             "one Final per DISPATCHED rid, in arrival order -- rid 12 resolved \
              but matched nobody, and a query that reached the table still owes \
              its requester the terminator"
@@ -6604,7 +6607,7 @@ mod tests {
 
         let encoding = crate::sample::EncodingHint {
             packed_id: 0x0B,
-            schema: Some("json".to_string()),
+            schema: Some(b"json".to_vec()),
         };
         let req = request_query_with_value(15, Some("home/temp"), b"fixture-value", &encoding);
         let mut replies = ReplyStage::new();
@@ -6711,7 +6714,7 @@ mod tests {
 
         let encoding = crate::sample::EncodingHint {
             packed_id: 0x0B,
-            schema: Some("json".to_string()),
+            schema: Some(b"json".to_vec()),
         };
         let req = request_query_with_value(15, Some("home/temp"), b"fixture-value", &encoding);
         let mut replies = ReplyStage::new();

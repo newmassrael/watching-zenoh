@@ -252,7 +252,7 @@ pub trait FinalStaging {
     fn owed(&self) -> usize;
 
     /// Take every owed `Final`, in the order they were owed.
-    fn drain_owed(&mut self) -> impl Iterator<Item = (u64, QosLevel)>;
+    fn drain_owed(&mut self) -> impl Iterator<Item = (crate::wire_id::RequestId, QosLevel)>;
 }
 
 // ---------------------------------------------------------------------------
@@ -748,7 +748,7 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
 /// answers `usize::MAX`. The policy defaults to this build's
 /// [`Profile`], so `FinalStage` alone is the build's table.
 pub struct FinalStage<P: Storage = Profile> {
-    rows: BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
+    rows: BoundedVec<(crate::wire_id::RequestId, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
     refused_requests: u32,
 }
 
@@ -787,9 +787,12 @@ impl<P: Storage> FinalStage<P> {
 }
 
 impl<P: Storage> IntoIterator for FinalStage<P> {
-    type Item = (u64, QosLevel);
-    type IntoIter =
-        <BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }, P> as IntoIterator>::IntoIter;
+    type Item = (crate::wire_id::RequestId, QosLevel);
+    type IntoIter = <BoundedVec<
+        (crate::wire_id::RequestId, QosLevel),
+        { caps::MAX_PENDING_FINALS },
+        P,
+    > as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.rows.into_iter()
@@ -806,9 +809,9 @@ impl<P: Storage> Default for FinalStage<P> {
 }
 
 impl<P: Storage> core::ops::Deref for FinalStage<P> {
-    type Target = [(u64, QosLevel)];
+    type Target = [(crate::wire_id::RequestId, QosLevel)];
 
-    fn deref(&self) -> &[(u64, QosLevel)] {
+    fn deref(&self) -> &[(crate::wire_id::RequestId, QosLevel)] {
         &self.rows
     }
 }
@@ -835,7 +838,7 @@ impl<P: Storage> FinalStaging for FinalStage<P> {
         self.rows.len()
     }
 
-    fn drain_owed(&mut self) -> impl Iterator<Item = (u64, QosLevel)> {
+    fn drain_owed(&mut self) -> impl Iterator<Item = (crate::wire_id::RequestId, QosLevel)> {
         OwedDrain {
             rows: &mut self.rows,
             at: 0,
@@ -851,12 +854,13 @@ impl<P: Storage> FinalStaging for FinalStage<P> {
 /// is what lets a frame of queries cost no allocation once the first one has run. A row
 /// is two words and `Copy`, so it is read in place and the backing never moves.
 struct OwedDrain<'a, P: Storage> {
-    rows: &'a mut BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
+    rows:
+        &'a mut BoundedVec<(crate::wire_id::RequestId, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
     at: usize,
 }
 
 impl<P: Storage> Iterator for OwedDrain<'_, P> {
-    type Item = (u64, QosLevel);
+    type Item = (crate::wire_id::RequestId, QosLevel);
 
     fn next(&mut self) -> Option<Self::Item> {
         let row = *self.rows.get(self.at)?;
@@ -887,7 +891,7 @@ mod tests {
     /// from the policy's own contract, never from a feature gate.
     fn fill_to_n_then_refuse_at_n_plus_one<P: Storage>() {
         let mut finals: FinalStage<P> = FinalStage::default();
-        for rid in 0..N as u64 {
+        for rid in 0..N as u32 {
             assert!(finals.has_room(), "entry {rid} is within the capacity");
             finals.owe(rid, QosLevel::DEFAULT);
         }
@@ -917,11 +921,11 @@ mod tests {
     /// table without touching the count of what was refused.
     fn drain_takes_in_order_and_keeps_the_count<P: Storage>() {
         let mut finals: FinalStage<P> = FinalStage::default();
-        for rid in 10..13u64 {
+        for rid in 10..13u32 {
             finals.owe(rid, QosLevel::DEFAULT);
         }
         finals.refuse_request();
-        let mut taken = [0u64; 3];
+        let mut taken: [crate::wire_id::RequestId; 3] = [0; 3];
         for (slot, (rid, _)) in taken.iter_mut().zip(finals.drain_owed()) {
             *slot = rid;
         }
@@ -938,13 +942,13 @@ mod tests {
     /// the drain made it cost one allocation per frame).
     fn drain_keeps_the_backing<P: Storage>() {
         let mut finals: FinalStage<P> = FinalStage::default();
-        for rid in 0..6u64 {
+        for rid in 0..6u32 {
             finals.owe(rid, QosLevel::DEFAULT);
         }
         let first = finals.as_ptr();
         assert_eq!(finals.drain_owed().count(), 6);
         assert!(finals.is_empty());
-        for rid in 0..6u64 {
+        for rid in 0..6u32 {
             finals.owe(rid, QosLevel::DEFAULT);
         }
         assert_eq!(
@@ -1020,7 +1024,7 @@ mod tests {
     /// counted where the capacity is hard, taken where it is not.
     fn rows_fill_to_n_then_refuse_at_n_plus_one<P: Storage>() {
         let mut stage: ReplyStage<P> = ReplyStage::default();
-        for rid in 0..caps::MAX_PENDING_REPLIES as u64 {
+        for rid in 0..caps::MAX_PENDING_REPLIES as u32 {
             assert!(stage.stage_parts(put_reply(rid, "a/b", b"x")).is_ok());
         }
         assert_eq!(stage.staged(), caps::MAX_PENDING_REPLIES);
@@ -1069,7 +1073,7 @@ mod tests {
             "the fixture is fat enough to meet the arena first"
         );
         let mut stage: ReplyStage<P> = ReplyStage::default();
-        for rid in 0..fits as u64 {
+        for rid in 0..fits as u32 {
             assert_eq!(
                 stage.stage_parts(fat_reply(rid, &payload, &attachment)),
                 Ok(())
@@ -1092,7 +1096,7 @@ mod tests {
     fn drain_parts_hands_out_what_was_staged<P: Storage>() {
         let zid = [9u8; 4];
         let mut stage: ReplyStage<P> = ReplyStage::default();
-        for rid in 0..3u64 {
+        for rid in 0..3u32 {
             let payload = [rid as u8 + 1; 3];
             let parts = ReplyParts {
                 rid,

@@ -1122,7 +1122,7 @@ mod tests {
     /// link proved, and the proof changes nothing else the sink reads of the query.
     #[test]
     fn a_query_is_asked_by_nobody_unless_the_links_key_proved_a_zid() {
-        type Seen = Option<(Option<[u8; 16]>, u64, usize)>;
+        type Seen = Option<(Option<[u8; 16]>, crate::wire_id::RequestId, usize)>;
         struct Who([Seen; 2], usize);
         impl QuerySink for Who {
             fn handle(&mut self, query: &dyn QueryView, _out: &mut dyn ReplyOut) {

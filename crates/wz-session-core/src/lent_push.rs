@@ -253,7 +253,7 @@ where
     let mut used = 0usize;
     head[used] = header;
     used += 1;
-    used = put_vle(&mut head, used, mapping_id);
+    used = put_vle(&mut head, used, u64::from(mapping_id));
     if let Some(text) = suffix {
         used = put_vle(&mut head, used, text.len() as u64);
         sink.write_bytes(&head[..used])?;

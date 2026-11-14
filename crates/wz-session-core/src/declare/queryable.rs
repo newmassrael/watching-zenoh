@@ -1382,8 +1382,8 @@ mod tests {
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/q".to_string());
-        let mut own = HashMap::new();
-        own.insert(7u64, "ours/q".to_string());
+        let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        own.insert(7, "ours/q".to_string());
 
         let body =
             DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable_nonlocal(1, 7, None));

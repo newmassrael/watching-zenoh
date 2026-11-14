@@ -1384,8 +1384,8 @@ mod tests {
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/sub".to_string());
-        let mut own = HashMap::new();
-        own.insert(7u64, "ours/sub".to_string());
+        let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        own.insert(7, "ours/sub".to_string());
 
         // M=0 (`WireexprNonlocal`) names OUR space.
         let body =

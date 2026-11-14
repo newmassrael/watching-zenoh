@@ -295,7 +295,7 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// the count of sinks fired (0 if no get matches, else 1).
     pub fn dispatch_reply_borrowed(&mut self, interest_id: u64, keyexpr: &str) -> usize {
         let reply = BorrowedReply {
-            rid: interest_id,
+            rid: crate::wire_id::interest_id_as_read(interest_id),
             keyexpr,
             kind: ReplyKind::Put,
             payload: &[],
@@ -406,7 +406,9 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
             // liveliness get has no consolidation, so there is no cache to flush
             // first — which is why zenoh's liveliness timeout arm has no flush
             // either, while its z_get arm does.
-            entry.sink.on_timeout(id);
+            entry
+                .sink
+                .on_timeout(crate::wire_id::interest_id_as_read(id));
         }
         swept
     }
@@ -445,7 +447,7 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
                 "finalized staging overflow: a staging site is not draining \
                  within its lock window (permanent replay-leak hazard)"
             );
-            entry.sink.on_final(id);
+            entry.sink.on_final(crate::wire_id::interest_id_as_read(id));
         }
         any
     }
@@ -611,7 +613,7 @@ impl LivelinessGetRegistry<BoxedReplySink> {
         interest_id: u64,
         deadline_ms: Option<u64>,
         on_reply: impl FnMut(&dyn crate::reply_sink::ReplyView) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        on_final: impl FnMut(crate::wire_id::RequestId) + Send + 'static,
     ) -> Result<bool, RegisterError> {
         self.register(
             interest_id,
@@ -639,9 +641,12 @@ mod tests {
 
     use crate::reply_sink::ReplyView;
 
-    type Captured = Arc<Mutex<Vec<(u64, String)>>>;
+    type Captured = Arc<Mutex<Vec<(crate::wire_id::RequestId, String)>>>;
 
-    fn make_get(replies: Captured, finals: Arc<Mutex<Vec<u64>>>) -> BoxedReplySink {
+    fn make_get(
+        replies: Captured,
+        finals: Arc<Mutex<Vec<crate::wire_id::RequestId>>>,
+    ) -> BoxedReplySink {
         let replies_cb = replies;
         let finals_cb = finals;
         BoxedReplySink::new(
@@ -651,7 +656,7 @@ mod tests {
                     .unwrap()
                     .push((reply.rid(), reply.keyexpr().to_string()));
             },
-            move |id: u64| {
+            move |id: crate::wire_id::RequestId| {
                 finals_cb.lock().unwrap().push(id);
             },
         )
@@ -668,7 +673,7 @@ mod tests {
     fn register_then_unregister_clears_pending() {
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         assert!(reg
             .register(7, None, make_get(r.clone(), f.clone()))
             .unwrap());
@@ -691,21 +696,21 @@ mod tests {
     fn an_own_space_alias_resolves_in_our_space_on_the_liveliness_get_plane() {
         let mut reg = LivelinessGetRegistry::new();
         let replies: Captured = Arc::new(Mutex::new(Vec::new()));
-        let finals: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let finals: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(9, None, make_get(replies.clone(), finals.clone()))
             .unwrap();
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/token".to_string());
-        let mut own = HashMap::new();
-        own.insert(7u64, "ours/token".to_string());
+        let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
+        own.insert(7, "ours/token".to_string());
 
         let declare = declare_envelope_decl_token_with_interest(decl_token_nonlocal(1, 7, None), 9);
         reg.dispatch_declare(&declare, MappingSpaces::with_own(&peer, &own));
 
         assert_eq!(
             *replies.lock().unwrap(),
-            vec![(9u64, "ours/token".to_string())],
+            vec![(9, "ours/token".to_string())],
             "an M=0 alias names OUR space; reading the peer's would have \
              delivered `theirs/token` to the requester",
         );
@@ -717,7 +722,7 @@ mod tests {
     fn without_an_own_space_the_liveliness_get_plane_refuses_the_same_alias() {
         let mut reg = LivelinessGetRegistry::new();
         let replies: Captured = Arc::new(Mutex::new(Vec::new()));
-        let finals: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let finals: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(9, None, make_get(replies.clone(), finals.clone()))
             .unwrap();
 
@@ -738,7 +743,7 @@ mod tests {
     fn duplicate_register_rejected() {
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         assert!(reg
             .register(7, None, make_get(r.clone(), f.clone()))
             .unwrap());
@@ -754,7 +759,7 @@ mod tests {
     fn decl_token_reply_fires_on_reply_with_interest_id_as_rid() {
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(42, None, make_get(r.clone(), f.clone()))
             .unwrap();
 
@@ -777,7 +782,7 @@ mod tests {
     fn decl_final_fires_on_final_and_removes_pending() {
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(42, None, make_get(r.clone(), f.clone()))
             .unwrap();
 
@@ -799,11 +804,30 @@ mod tests {
         assert_eq!(reg.len(), 0, "DeclFinal removes the pending get");
     }
 
+    /// The sink is handed the interest id at the width upstream reads it,
+    /// while the table still matches on the session's 64-bit id.
+    #[test]
+    fn a_get_correlates_its_sink_by_the_interest_id_as_the_wire_reads_it() {
+        let mut reg = LivelinessGetRegistry::new();
+        let r: Captured = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
+        let wide = (1u64 << 32) | 9;
+        reg.register(wide, None, make_get(r.clone(), f.clone()))
+            .unwrap();
+
+        assert_eq!(reg.dispatch_reply_borrowed(9, "liveliness/a"), 0);
+        assert_eq!(reg.dispatch_reply_borrowed(wide, "liveliness/a"), 1);
+        assert!(reg.dispatch_final(wide));
+
+        assert_eq!(*r.lock().unwrap(), vec![(9, "liveliness/a".to_string())]);
+        assert_eq!(*f.lock().unwrap(), vec![9]);
+    }
+
     #[test]
     fn unsolicited_token_without_interest_id_is_ignored() {
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(42, None, make_get(r.clone(), f.clone()))
             .unwrap();
 
@@ -824,7 +848,7 @@ mod tests {
     fn reply_for_unknown_interest_id_fires_nothing() {
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(42, None, make_get(r.clone(), f.clone()))
             .unwrap();
 
@@ -869,7 +893,7 @@ mod tests {
     fn aliased_keyexpr_resolves_through_peer_table() {
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(42, None, make_get(r.clone(), f.clone()))
             .unwrap();
 
@@ -888,7 +912,7 @@ mod tests {
     fn sweep_times_out_pending_get() {
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(42, Some(1000), make_get(r.clone(), f.clone()))
             .unwrap();
         reg.register(43, None, make_get(r.clone(), f.clone()))
@@ -919,7 +943,7 @@ mod tests {
     fn sweep_synthesizes_the_timeout_error_on_the_liveliness_leg() {
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(42, Some(1000), make_get(r.clone(), f.clone()))
             .unwrap();
 
@@ -938,7 +962,7 @@ mod tests {
         // MCU no-heap path: register + fire without any codec / Declare.
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(7, None, make_get(r.clone(), f.clone()))
             .unwrap();
 
@@ -963,7 +987,7 @@ mod tests {
     fn terminations_stage_finalized_ids_for_prune_drain() {
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(7, None, make_get(r.clone(), f.clone()))
             .unwrap();
         reg.register(8, Some(1000), make_get(r.clone(), f.clone()))
@@ -999,7 +1023,7 @@ mod tests {
     fn an_undrained_final_marker_holds_its_slot_on_the_fixed_backing() {
         let mut reg = LivelinessGetRegistry::new();
         let r: Captured = Arc::new(Mutex::new(Vec::new()));
-        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
         for id in 0..caps::MAX_PENDING_LIVELINESS_GETS as u64 {
             assert_eq!(
                 reg.register(id, None, make_get(r.clone(), f.clone())),
