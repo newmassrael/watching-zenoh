@@ -115,11 +115,15 @@ body embedded with the header's flags bound to its flag-inputs, then
 (`transport_init.scxml`, `transport_open.scxml`, `transport_close.scxml`,
 `transport_keep_alive.scxml`), and the session reads and writes them through
 those documents (`inbound.rs` `parse_init`, `handshake_encode.rs`
-`encode_init_into`). Every other row has a document for its body and none for
-its header byte or its extension chain: the body codecs take the header's flags
-as flag-inputs (`join.scxml:60`), and wz reads the header, the chain and, for
-`Frame` and `Fragment`, the SN by hand. The network messages (§5.4) show the
-whole shape is expressible (`sources/codecs/push.scxml:92`).
+`encode_init_into`). The Frame and the Fragment have a document for their
+header, as upstream codes it (`transport_frame_header.scxml`,
+`transport_fragment_header.scxml`, read by `inbound.rs` `decode_frame_head` and
+written by `frame_encode.rs` `begin_frame`); what follows the header is the
+rest of the unit. Join and the transport OAM have a document for the body and
+none for the header byte or the extension chain: the body codecs take the
+header's flags as flag-inputs (`join.scxml:60`), and wz reads the header and
+the chain by hand. The network messages (§5.4) show the whole shape is
+expressible (`sources/codecs/push.scxml:92`).
 
 Two places of the moved rows stay hand-written, both on the wz side. The
 lend-only Open writes its head and its chain under two session mutexes, one
@@ -137,8 +141,8 @@ extension and of the reserved encoding stay where they are judged (L2, rows
 | 9 | OpenAck | `commons/zenoh-codec/src/transport/open.rs` @ `impl<W> WCodec<&OpenAck, &mut W> for Zenoh080` | A | as 8 | S (as 8) |
 | 10 | Close | `commons/zenoh-codec/src/transport/close.rs` @ `impl<W> WCodec<&Close, &mut W> for Zenoh080` | A | `transport_close.scxml` (body `close.scxml`) | |
 | 11 | KeepAlive | `commons/zenoh-codec/src/transport/keepalive.rs` @ `impl<W> WCodec<&KeepAlive, &mut W> for Zenoh080` | A | `transport_keep_alive.scxml` | |
-| 12 | Frame | `commons/zenoh-codec/src/transport/frame.rs` @ `impl<W> WCodec<&FrameHeader, &mut W> for Zenoh080` | B | `frame.scxml:38-39` (SN, payload as `tail`); decode reads SN and chain by hand, `inbound.rs:902` | W; L5 (the payload is not the batch's tail, row 25) |
-| 13 | Fragment | `commons/zenoh-codec/src/transport/fragment.rs` @ `impl<W> WCodec<&FragmentHeader, &mut W> for Zenoh080` | B | `fragment.scxml:36-37`; header, SN and chain by hand | W; S (reassembly is state across messages) |
+| 12 | Frame | `commons/zenoh-codec/src/transport/frame.rs` @ `impl<W> WCodec<&FrameHeader, &mut W> for Zenoh080` | B | header, SN and chain `transport_frame_header.scxml`; the end of its network messages by hand, `network_message.rs` `RecordsEnd::AtTransportMessage` | L5 (the payload is not the batch's tail, row 25) |
+| 13 | Fragment | `commons/zenoh-codec/src/transport/fragment.rs` @ `impl<W> WCodec<&FragmentHeader, &mut W> for Zenoh080` | A | header, SN and chain `transport_fragment_header.scxml`; the payload is the rest of the unit | S (reassembly is state across messages) |
 | 14 | Join | `commons/zenoh-codec/src/transport/join.rs` @ `impl<W> WCodec<&Join, &mut W> for Zenoh080` | B | body `join.scxml`; header, T unit and chain `join_decode.rs:20`, `inbound.rs:1235` | W; S (T: `commons/zenoh-codec/src/transport/join.rs` @ `if lease.as_millis() % 1_000 == 0 {`) |
 | 15 | Transport OAM | `commons/zenoh-codec/src/transport/oam.rs` @ `impl<W> WCodec<&Oam, &mut W> for Zenoh080` | B | `inbound.rs:1561` by hand; `oam.scxml` has the same layout with the network id as its default | W |
 
@@ -205,7 +209,7 @@ extension and of the reserved encoding stay where they are judged (L2, rows
 | 52 | PrioritySn (reliable, best-effort) | `commons/zenoh-codec/src/transport/join.rs` @ `impl<W> WCodec<&PrioritySn, &mut W> for Zenoh080` | A | `join.scxml` (the base pair) | |
 | 53 | Extension entry: header, then unit, z64 or zbuf by `enc` | `commons/zenoh-protocol/src/common/extension.rs` @ `pub mod iext {` | A | `ext_entry.scxml`, `ext_unit.scxml`, `ext_zint.scxml`, `ext_zbuf.scxml` | (accepts `0b11`, row 101) |
 | 54 | Extension chain of a network or zenoh message (Z continuation) | `commons/zenoh-codec/src/common/extension.rs` @ `pub fn skip_all<R>(reader: &mut R, s: &str) -> Result<(), DidntRead>` | A | `<sce:tlv-chain terminate-on="entry-flag" entry-flag-name="Z">` in every network and zenoh document | |
-| 55 | Extension chain of a transport or scouting message | as 54 | B | in the documents of rows 6-11; the other transport and scouting messages `ext_chain.rs` `decode_ext_chain` | W |
+| 55 | Extension chain of a transport or scouting message | as 54 | B | in the documents of rows 6-13; Join, transport OAM and the scouting messages `ext_chain.rs` `decode_ext_chain` | W |
 
 ### 5.8 Extensions of transport messages
 
@@ -290,7 +294,7 @@ wz also carries an extension upstream does not have, a hop limit
 | Section | Rows | A | B | C |
 |---|---|---|---|---|
 | 5.1 framing and batch | 5 | 2 | 3 | 0 |
-| 5.2 transport messages | 10 | 6 | 4 | 0 |
+| 5.2 transport messages | 10 | 7 | 3 | 0 |
 | 5.3 scouting | 2 | 0 | 2 | 0 |
 | 5.4 network messages | 9 | 7 | 2 | 0 |
 | 5.5 declaration bodies | 9 | 9 | 0 | 0 |
@@ -300,9 +304,9 @@ wz also carries an extension upstream does not have, a hop limit
 | 5.9 network extensions | 10 | 0 | 10 | 0 |
 | 5.10 zenoh body extensions | 6 | 2 | 4 | 0 |
 | 5.11 unknown extensions | 3 | 1 | 1 | 1 |
-| **Total** | **101** | **44** | **55** | **2** |
+| **Total** | **101** | **45** | **54** | **2** |
 
-By cause, over the 57 rows of (B) and (C) (a row may have more than one):
+By cause, over the 56 rows of (B) and (C) (a row may have more than one):
 
 | Cause | Rows | Which |
 |---|---|---|
@@ -312,8 +316,8 @@ By cause, over the 57 rows of (B) and (C) (a row may have more than one):
 | L5 | 2 | 12, 25 |
 | L6 | 4 | 49, 84, 86, 88 (and row 45 among the (A) rows) |
 | L7 | 1 | 73 |
-| W | 13 | 3, 4, 5, 12-17, 26, 49, 51, 55 |
-| S | 3 | 3, 13, 14 (and rows 8, 9 among the (A) rows) |
+| W | 11 | 3, 4, 5, 14-17, 26, 49, 51, 55 |
+| S | 2 | 3, 14 (and rows 8, 9, 13 among the (A) rows) |
 
 L3 is the cause of no (B) row: it shows on the encode side of 21 (A) rows
 (18-24, 27-35, 36-40), §6.2.3.
