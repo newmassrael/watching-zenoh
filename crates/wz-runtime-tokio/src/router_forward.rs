@@ -10482,6 +10482,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         read
     }
 
+    /// [`Self::session_reads_chunk`] for a value the node's own session sent itself: the chunk
+    /// the pass holds is the session's own buffer, handed over as its owner views it
+    /// ([`ShmSendBuffer::receiver_view`](wz_session_core::extshm::ShmSendBuffer::receiver_view)),
+    /// and as its bytes when its owner hands none, as for a copy the implicit optimisation made
+    /// for the links. `None` when the value is not one chunk or the chunk is not held here.
+    #[cfg(feature = "transport-shm")]
+    fn session_holds_own_chunk(
+        &self,
+        descriptors: &[&[u8]],
+    ) -> Option<wz_session_core::link::RxBytes> {
+        use wz_session_core::extshm::ShmRelayHolds;
+        let [slice] = descriptors else {
+            return None;
+        };
+        let held = self
+            .shm_relay
+            .held(&wz_session_core::extshm::decode_shm_descriptor(slice)?)?;
+        Some(
+            held.receiver_view()
+                .unwrap_or_else(|| wz_session_core::link::RxBytes::from(held.bytes().to_vec())),
+        )
+    }
+
     /// Hand a publication to the subscribers this router hosts: `full` carries its key as the
     /// router names it and `relative` as the node's own session does (`None` for a key outside
     /// the namespace of the session, which is not the session's). `from_local` says whether the
@@ -10998,15 +11021,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // the session reads the chunk the pass of this Query holds, as it reads a Put's. A value
         // it cannot read is not shown as no value; the query is not handed to the session, as a
         // session drops a query whose slice does not resolve.
+        // A query of the node's own session names a chunk the session gave itself, and its
+        // queryables are handed the value as the session holds it.
         #[cfg(feature = "transport-shm")]
         let view = match &request.body {
             wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
                 match wz_session_core::request_build::query_value_shm_parts(query) {
                     None => view,
-                    Some((encoding, descriptors)) => match self.session_reads_chunk(&descriptors) {
-                        Some(bytes) => view.with_lent_value(encoding, bytes),
-                        None => return 0,
-                    },
+                    Some((encoding, descriptors)) => {
+                        let read = if inbound == LOCAL_FACE {
+                            self.session_holds_own_chunk(&descriptors)
+                        } else {
+                            self.session_reads_chunk(&descriptors)
+                        };
+                        match read {
+                            Some(bytes) => view.with_lent_value(encoding, bytes),
+                            None => return 0,
+                        }
+                    }
                 }
             }
             #[allow(unreachable_patterns)]

@@ -237,6 +237,14 @@ pub(crate) struct QueryableDeclaration<'a> {
     /// What records on the timestamp stack of a query it receives and of the replies it sends.
     #[cfg(feature = "unstable")]
     pub(crate) timestamps: Arc<TimestampSource>,
+    /// What copies a large reply into shared memory for a peer that could read it, when the
+    /// configuration asks for the optimisation. Held for as long as the queryable is.
+    #[cfg(all(
+        feature = "unstable",
+        feature = "shared-memory",
+        feature = "engine-tokio"
+    ))]
+    pub(crate) shm_promoter: Option<Arc<crate::api::shm::transport::Promoter>>,
 }
 
 /// What a get asks of the engine, in the types of this crate: the key as the wire names it, the
@@ -289,6 +297,14 @@ pub(crate) struct QueryRequest<'a> {
     /// Held until the callback can be called no more: the wait of a querier's undeclaration on its
     /// callbacks ends then.
     pub(crate) querier_notifier: Option<SyncGroupNotifier>,
+    /// What copies a large value into shared memory for a peer that could read it, when the
+    /// configuration asks for the optimisation.
+    #[cfg(all(
+        feature = "unstable",
+        feature = "shared-memory",
+        feature = "engine-tokio"
+    ))]
+    pub(crate) shm_promoter: Option<&'a crate::api::shm::transport::Promoter>,
 }
 
 /// What a liveliness query asks of the engine, in the types of this crate: the key as the wire
@@ -936,54 +952,14 @@ impl Engine {
             Engine::Tokio(state) => {
                 let options = tokio_engine::publish_options(publication);
                 let wire = tokio_engine::wire_key(publication);
-                // A large put that the configuration asks to be optimised, and that a peer could
-                // read from shared memory, is sent to the peers as a copy in the provider; a
-                // subscriber of the session itself is given the bytes it was put with, as
-                // upstream's, which promotes at the link and not before it.
-                #[cfg(all(feature = "unstable", feature = "shared-memory"))]
-                if publication.kind == SampleKind::Put {
-                    let engine = state.shared.as_engine();
-                    if let Some(handle) = publication.shm_promoter.and_then(|promoter| {
-                        promoter.promote(&publication.payload, || engine.has_shm_peer())
-                    }) {
-                        let mut delivered = Ok(0);
-                        if options.allowed_destination.allows_remote() {
-                            let remote = options
-                                .clone()
-                                .with_locality(wz_capi_core::runtime::locality::Locality::Remote);
-                            delivered = engine.publish_shm_on_wire_all(
-                                publication.key,
-                                &wire,
-                                handle,
-                                &remote,
-                            );
-                        }
-                        if delivered.is_ok() && options.allowed_destination.allows_local() {
-                            let local = options.with_locality(
-                                wz_capi_core::runtime::locality::Locality::SessionLocal,
-                            );
-                            delivered = engine.publish_on_wire_all(
-                                publication.key,
-                                &wire,
-                                &publication.payload.to_bytes(),
-                                &local,
-                            );
-                        }
-                        return delivered
-                            .map(|_delivered| ())
-                            .map_err(|refusal| tokio_engine::publish_error(refusal, publication));
-                    }
-                }
                 // A put whose payload is a buffer of shared memory is sent as the buffer: its
                 // descriptor to a peer that negotiated shared memory, its bytes to any other.
                 #[cfg(feature = "shared-memory")]
                 if publication.kind == SampleKind::Put {
-                    if let Some(handle) =
-                        crate::api::shm::transport::send_handle_of(&publication.payload)
-                    {
-                        return state
-                            .shared
-                            .as_engine()
+                    let engine = state.shared.as_engine();
+                    let shared = tokio_engine::put_buffer(publication, || engine.has_shm_peer());
+                    if let Some(handle) = shared {
+                        return engine
                             .publish_shm_on_wire_all(publication.key, &wire, handle, &options)
                             .map(|_delivered| ())
                             .map_err(|refusal| tokio_engine::publish_error(refusal, publication));
@@ -1169,9 +1145,21 @@ impl Engine {
                     eid,
                     #[cfg(feature = "unstable")]
                     timestamps,
+                    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                    shm_promoter,
                     ..
                 } = queryable;
                 RouterEngine::refuse_links(links)?;
+                // The node is held weakly: the queryable lives in it.
+                #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                let promotion = shm_promoter.map(|promoter| {
+                    let forwarder = Arc::downgrade(&router.node.shared_forwarder());
+                    tokio_engine::ReplyPromotion::new(promoter, move || {
+                        forwarder
+                            .upgrade()
+                            .is_some_and(|forwarder| forwarder.has_shm_peer())
+                    })
+                });
                 let sink = tokio_engine::queryable_sink(
                     callback,
                     notifier,
@@ -1179,6 +1167,8 @@ impl Engine {
                     eid,
                     #[cfg(feature = "unstable")]
                     timestamps,
+                    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                    promotion,
                 );
                 let handler = sink(router.node.query_holder());
                 Ok(router.node.forwarder().host_queryable_from(
@@ -1203,8 +1193,18 @@ impl Engine {
                     eid,
                     #[cfg(feature = "unstable")]
                     timestamps,
+                    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                    shm_promoter,
                 } = queryable;
                 let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
+                // The registry is held weakly: the queryable lives in it.
+                #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                let promotion = shm_promoter.map(|promoter| {
+                    let engine = Arc::downgrade(&state.shared.as_engine());
+                    tokio_engine::ReplyPromotion::new(promoter, move || {
+                        engine.upgrade().is_some_and(|engine| engine.has_shm_peer())
+                    })
+                });
                 // The registry's own door, not the port's: the port has no operation that takes
                 // a set of links, and for no restriction the two declare the same.
                 Ok(state.shared.declare_port_queryable_on_links(
@@ -1221,6 +1221,8 @@ impl Engine {
                         eid,
                         #[cfg(feature = "unstable")]
                         timestamps,
+                        #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                        promotion,
                     ),
                 ))
             }
@@ -2166,8 +2168,7 @@ mod tokio_engine {
         key == "qos/publication"
             || (cfg!(feature = "shared-memory") && key == "transport/shared_memory/mode")
             // The implicit optimisation of large messages, which `api::shm::transport::Promoter`
-            // carries out for a put (the lists of `query` and `reply` are not promoted yet, and a
-            // list that names them is read and not acted on for those).
+            // carries out for a put, the value of a query and a reply, as the list names them.
             || (cfg!(all(feature = "shared-memory", feature = "unstable"))
                 && (key == "transport/shared_memory/transport_optimization/message_size_threshold"
                     || key == "transport/shared_memory/transport_optimization/messages"))
@@ -2441,49 +2442,12 @@ mod tokio_engine {
         // to a face that negotiated shared memory, its bytes to any other.
         #[cfg(feature = "shared-memory")]
         if publication.kind == SampleKind::Put {
-            if let Some(handle) = crate::api::shm::transport::send_handle_of(&publication.payload) {
+            if let Some(handle) = put_buffer(publication, || node.has_shm_peer()) {
                 return node
                     .publish_shm(publication.key, handle, &options)
                     .map_err(|error| {
                         zerror!("the node could not publish on {}: {error}", publication.key).into()
                     });
-            }
-            // A large put the configuration asks to be optimised, and that a face could read
-            // from shared memory, is sent to the faces as a copy in the provider; a subscriber
-            // of the session itself is given the bytes it was put with.
-            #[cfg(feature = "unstable")]
-            if let Some(handle) = publication
-                .shm_promoter
-                .and_then(|promoter| promoter.promote(&publication.payload, || node.has_shm_peer()))
-            {
-                use wz_capi_core::runtime::locality::Locality as EngineLocality;
-                let mut published = Ok(());
-                if options.allowed_destination.allows_remote() {
-                    published = node
-                        .publish_shm(
-                            publication.key,
-                            handle,
-                            &options.clone().with_locality(EngineLocality::Remote),
-                        )
-                        .map_err(|error| {
-                            zerror!("the node could not publish on {}: {error}", publication.key)
-                        });
-                }
-                if published.is_ok() && options.allowed_destination.allows_local() {
-                    published = forwarder
-                        .publish_with(
-                            publication.key,
-                            &payload,
-                            &options.with_locality(EngineLocality::SessionLocal),
-                        )
-                        .map_err(|error| {
-                            zerror!(
-                                "the node could not publish on {}: {error:?}",
-                                publication.key
-                            )
-                        });
-                }
-                return published.map_err(Into::into);
             }
         }
         let published = forwarder.publish_with(publication.key, &payload, &options);
@@ -2561,6 +2525,93 @@ mod tokio_engine {
             return shared;
         }
         ZBytes::from(view.payload().to_vec())
+    }
+
+    /// The buffer of shared memory a message whose payload is `payload` is sent from: the payload
+    /// itself when it is one, and otherwise, when the configuration asks for the implicit
+    /// optimisation of the message (`promotion`: the promoter and the kind of the message), a copy
+    /// in the provider of a large payload that some peer could read (`peer_shares_memory`, asked
+    /// only then). `None` is a message sent as its bytes.
+    #[cfg(feature = "shared-memory")]
+    pub(super) fn shm_buffer_of(
+        payload: &ZBytes,
+        #[cfg(feature = "unstable")] promotion: Option<(
+            &crate::api::shm::transport::Promoter,
+            zenoh_config::DataMessage,
+        )>,
+        peer_shares_memory: impl FnOnce() -> bool,
+    ) -> Option<wz_session_core::extshm::ShmSendHandle> {
+        if let Some(handle) = crate::api::shm::transport::send_handle_of(payload) {
+            return Some(handle);
+        }
+        #[cfg(feature = "unstable")]
+        if let Some((promoter, message)) = promotion {
+            return promoter.promote(message, payload, peer_shares_memory);
+        }
+        #[cfg(not(feature = "unstable"))]
+        let _ = peer_shares_memory;
+        None
+    }
+
+    /// [`shm_buffer_of`] for a put of `publication`.
+    #[cfg(feature = "shared-memory")]
+    pub(super) fn put_buffer(
+        publication: &Publication<'_>,
+        peer_shares_memory: impl FnOnce() -> bool,
+    ) -> Option<wz_session_core::extshm::ShmSendHandle> {
+        shm_buffer_of(
+            &publication.payload,
+            #[cfg(feature = "unstable")]
+            publication
+                .shm_promoter
+                .map(|promoter| (promoter, zenoh_config::DataMessage::Put)),
+            peer_shares_memory,
+        )
+    }
+
+    /// The implicit optimisation of the replies of a queryable: the promoter the configuration
+    /// asks for, and whether some peer of the engine could read a reply in shared memory, asked
+    /// as each reply is made. The engine is held weakly, because the queryable lives in it.
+    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    #[derive(Clone)]
+    pub(super) struct ReplyPromotion {
+        promoter: Arc<crate::api::shm::transport::Promoter>,
+        peer_shares_memory: Arc<dyn Fn() -> bool + Send + Sync>,
+    }
+
+    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    impl ReplyPromotion {
+        pub(super) fn new(
+            promoter: Arc<crate::api::shm::transport::Promoter>,
+            peer_shares_memory: impl Fn() -> bool + Send + Sync + 'static,
+        ) -> Self {
+            Self {
+                promoter,
+                peer_shares_memory: Arc::new(peer_shares_memory),
+            }
+        }
+    }
+
+    /// [`shm_buffer_of`] for a reply whose payload is `payload`, promoted as `promotion` says.
+    #[cfg(feature = "shared-memory")]
+    fn reply_buffer(
+        payload: &ZBytes,
+        #[cfg(feature = "unstable")] promotion: Option<&ReplyPromotion>,
+    ) -> Option<wz_session_core::extshm::ShmSendHandle> {
+        #[cfg(feature = "unstable")]
+        if let Some(promotion) = promotion {
+            return shm_buffer_of(
+                payload,
+                Some((&*promotion.promoter, zenoh_config::DataMessage::Reply)),
+                &*promotion.peer_shares_memory,
+            );
+        }
+        shm_buffer_of(
+            payload,
+            #[cfg(feature = "unstable")]
+            None,
+            || false,
+        )
     }
 
     /// The value of a query the engine hands up, as [`payload_of_view`] reads a sample's: the
@@ -2683,6 +2734,9 @@ mod tokio_engine {
         zid: ZenohId,
         eid: Id,
         #[cfg(feature = "unstable")] timestamps: Arc<TimestampSource>,
+        #[cfg(all(feature = "unstable", feature = "shared-memory"))] promotion: Option<
+            ReplyPromotion,
+        >,
     ) -> QueryableSink {
         struct Delivery {
             ordered: Arc<Ordered<Query>>,
@@ -2690,6 +2744,8 @@ mod tokio_engine {
             eid: Id,
             #[cfg(feature = "unstable")]
             timestamps: Arc<TimestampSource>,
+            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            promotion: Option<ReplyPromotion>,
         }
         let delivery = Arc::new(Delivery {
             ordered: Ordered::new(callback, notifier),
@@ -2697,6 +2753,8 @@ mod tokio_engine {
             eid,
             #[cfg(feature = "unstable")]
             timestamps,
+            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            promotion,
         });
         Arc::new(move |holder: Arc<dyn QueryHolder>| {
             let delivery = Arc::clone(&delivery);
@@ -2709,6 +2767,8 @@ mod tokio_engine {
                     delivery.eid,
                     #[cfg(feature = "unstable")]
                     &delivery.timestamps,
+                    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                    delivery.promotion.clone(),
                 ) {
                     Ok(query) => delivery.ordered.deliver(query),
                     Err(error) => tracing::error!("a query could not be delivered: {error}"),
@@ -2717,14 +2777,21 @@ mod tokio_engine {
         })
     }
 
-    /// The query the engine's view of a request is, answered through `held`.
+    /// The query the engine's view of a request is, answered through `held`, its large replies
+    /// copied into shared memory as `promotion` says.
     fn query_of(
         view: &dyn QueryView,
         held: Box<dyn HeldQuery>,
         zid: ZenohId,
         eid: Id,
         #[cfg(feature = "unstable")] timestamps: &Arc<TimestampSource>,
+        #[cfg(all(feature = "unstable", feature = "shared-memory"))] promotion: Option<
+            ReplyPromotion,
+        >,
     ) -> ZResult<Query> {
+        // A reply to a query of the session itself crosses no link, and nothing is copied for it.
+        #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+        let promotion = promotion.filter(|_| !view.is_local());
         let key_expr = KeyExpr::try_from(view.keyexpr().to_owned())?;
         let parameters = Parameters::from(
             view.parameters()
@@ -2776,6 +2843,8 @@ mod tokio_engine {
                     eid,
                     #[cfg(feature = "unstable")]
                     reply_stack.as_ref(),
+                    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                    promotion.as_ref(),
                 );
             });
             outcome
@@ -2797,13 +2866,16 @@ mod tokio_engine {
     }
 
     /// Write what `answer` says into the engine's responder of a query, as the queryable `eid` of
-    /// the session `zid`.
+    /// the session `zid`, a large reply copied into shared memory as `promotion` says.
     fn write_answer(
         out: &mut dyn ReplyOut,
         answer: &Answer,
         zid: ZenohId,
         eid: Id,
         #[cfg(feature = "unstable")] stack: Option<&TsStack>,
+        #[cfg(all(feature = "unstable", feature = "shared-memory"))] promotion: Option<
+            &ReplyPromotion,
+        >,
     ) -> ZResult<()> {
         let zid = zenoh_protocol::core::ZenohIdProto::from(zid);
         out.with_responder(&zid.to_le_bytes()[..zid.size()], eid);
@@ -2834,10 +2906,15 @@ mod tokio_engine {
                 // A reply whose payload is a buffer of shared memory is staged as the buffer, as
                 // a put of one is published: its descriptor goes to a querier whose link
                 // negotiated shared memory, its bytes to any other, and a getter of this session
-                // is handed the buffer.
+                // is handed the buffer. A large one the configuration asks to be optimised is
+                // staged as a copy in the provider.
                 #[cfg(feature = "shared-memory")]
                 let shared = match sample.kind {
-                    SampleKind::Put => crate::api::shm::transport::send_handle_of(&sample.payload),
+                    SampleKind::Put => reply_buffer(
+                        &sample.payload,
+                        #[cfg(feature = "unstable")]
+                        promotion,
+                    ),
                     SampleKind::Delete => None,
                 };
                 let meta = ReplyMeta::new()
@@ -2874,7 +2951,11 @@ mod tokio_engine {
             callback,
             fan,
             consolidation,
-        } = asked_of(request)?;
+        } = asked_of(
+            request,
+            #[cfg(feature = "shared-memory")]
+            || engine.has_shm_peer(),
+        )?;
         let mut leg = leg_minter(callback, fan.clone(), consolidation);
         // A value that is a buffer of shared memory is asked with as the buffer, as a put of one
         // is published.
@@ -2913,7 +2994,11 @@ mod tokio_engine {
             fan,
             consolidation,
             ..
-        } = asked_of(request)?;
+        } = asked_of(
+            request,
+            #[cfg(feature = "shared-memory")]
+            || node.has_shm_peer(),
+        )?;
         // The node records its own routing on the stack of each face it hands the query to, as
         // upstream's dispatcher does, so the stack that leaves is the one the send started.
         #[cfg(feature = "unstable")]
@@ -2981,8 +3066,13 @@ mod tokio_engine {
         }
     }
 
-    /// Read the query `request` says into what an engine is asked.
-    fn asked_of(request: QueryRequest<'_>) -> ZResult<Asked<'_>> {
+    /// Read the query `request` says into what an engine is asked. `peer_shares_memory` says
+    /// whether some peer of the engine could read a value in shared memory, which decides
+    /// whether a large value is copied into the provider for the links.
+    fn asked_of(
+        request: QueryRequest<'_>,
+        #[cfg(feature = "shared-memory")] peer_shares_memory: impl FnOnce() -> bool,
+    ) -> ZResult<Asked<'_>> {
         let QueryRequest {
             key,
             scope,
@@ -3010,6 +3100,12 @@ mod tokio_engine {
             cancellation_token,
             fan,
             querier_notifier,
+            #[cfg(all(
+                feature = "unstable",
+                feature = "shared-memory",
+                feature = "engine-tokio"
+            ))]
+            shm_promoter,
         } = request;
         // What must know when the query is over is told by its callback, when it is dropped: the
         // token the query was made with, and the querier whose undeclaration may wait on it.
@@ -3080,10 +3176,18 @@ mod tokio_engine {
                     *stack = engine_stack_of(&arrived);
                 }));
         }
+        // A value that is a buffer of shared memory goes as the buffer, and a large one the
+        // configuration asks to be optimised goes from a copy in the provider, whose bytes a
+        // queryable of the session itself is handed.
         #[cfg(feature = "shared-memory")]
-        let shm_value = value
-            .as_ref()
-            .and_then(|(payload, _)| crate::api::shm::transport::send_handle_of(payload));
+        let shm_value = value.as_ref().and_then(|(payload, _)| {
+            shm_buffer_of(
+                payload,
+                #[cfg(feature = "unstable")]
+                shm_promoter.map(|promoter| (promoter, zenoh_config::DataMessage::Query)),
+                peer_shares_memory,
+            )
+        });
         Ok(Asked {
             key,
             wire,
@@ -3919,8 +4023,8 @@ pub(crate) struct SessionInner {
     /// first asked for ([`Session::get_shm_provider`]); `None` when it asks for none.
     #[cfg(all(feature = "unstable", feature = "shared-memory"))]
     shm_provider: Option<Arc<crate::api::shm::LazyShmProvider>>,
-    /// What copies a large put into the provider for a peer that could read it, when the
-    /// configuration asks for the optimisation (`transport_optimization`).
+    /// What copies a large put, query value or reply into the provider for a peer that could read
+    /// it, when the configuration asks for the optimisation (`transport_optimization`).
     #[cfg(all(
         feature = "unstable",
         feature = "shared-memory",
@@ -3929,8 +4033,8 @@ pub(crate) struct SessionInner {
     shm_promoter: Option<Arc<crate::api::shm::transport::Promoter>>,
     /// The clients of shared memory segments the application opened the session with
     /// ([`OpenBuilder::with_shm_clients`](crate::session::OpenBuilder::with_shm_clients)). The
-    /// session negotiates no shared memory with its peers yet, so no segment is read through them:
-    /// they are kept for the transport that will (slice Z7).
+    /// engine's reader of received descriptors was made over them as the session opened
+    /// (`api::shm::transport::resolver_factory`); the session keeps them for as long as it lives.
     #[cfg(feature = "shared-memory")]
     #[allow(dead_code)]
     shm_clients: Option<Arc<zenoh_shm::api::client_storage::ShmClientStorage>>,
@@ -4531,6 +4635,12 @@ impl SessionInner {
             eid,
             #[cfg(feature = "unstable")]
             timestamps: Arc::clone(&self.timestamps),
+            #[cfg(all(
+                feature = "unstable",
+                feature = "shared-memory",
+                feature = "engine-tokio"
+            ))]
+            shm_promoter: self.shm_promoter.clone(),
         })?;
         self.queryables().push((eid, engine_id));
         // A close that ran between the check and the record has not seen this queryable.
@@ -4778,6 +4888,12 @@ impl SessionInner {
             cancellation_token,
             fan,
             querier_notifier,
+            #[cfg(all(
+                feature = "unstable",
+                feature = "shared-memory",
+                feature = "engine-tokio"
+            ))]
+            shm_promoter: self.shm_promoter.as_deref(),
         })
     }
 }
@@ -7125,40 +7241,8 @@ mod tests {
         #[test]
         fn a_reply_whose_payload_is_a_buffer_of_shared_memory_reaches_the_getter_as_one() {
             const BODY: &[u8] = b"a reply in shared memory";
-            let on = |id: &str, listen: &str, connect: &str, node: bool| {
-                let opened = || {
-                    open(
-                        Config::from_json5(&format!(
-                            r#"{{ id: "{id}", mode: "peer",
-                                  listen: {{ endpoints: [{listen}] }},
-                                  connect: {{ endpoints: [{connect}] }},
-                                  scouting: {{ multicast: {{ enabled: false }} }},
-                                  transport: {{ shared_memory: {{ enabled: true }} }} }}"#
-                        ))
-                        .expect("a configuration zenoh reads"),
-                    )
-                    .wait()
-                    .expect("opens")
-                };
-                if node {
-                    with_the_node(opened)
-                } else {
-                    opened()
-                }
-            };
-            let endpoint = |port: u16| format!(r#""tcp/127.0.0.1:{port}""#);
-            let (first, second) = (unautoselected_port(), unautoselected_port());
-            let listening = on("a1b3a0", &endpoint(first), "", false);
-            let dialling = on("a1b3a1", "", &endpoint(first), false);
-            let node = on("a1b3a2", &endpoint(second), "", true);
-            let answering = on("a1b3a3", "", &endpoint(second), false);
-            for (who, session) in [("the first dialler", &dialling), ("the second", &answering)] {
-                assert_eq!(connected(session, 1).1.len(), 1, "{who} is linked");
-            }
-            assert!(matches!(&*node.0.engine, Engine::Router(_)), "a node");
-            for session in [&listening, &dialling, &answering] {
-                assert!(matches!(&*session.0.engine, Engine::Tokio(_)), "a registry");
-            }
+            let [listening, dialling, node, answering] =
+                linked_pairs(["a1b3a0", "a1b3a1", "a1b3a2", "a1b3a3"]);
 
             for (who, asker, answerer, key) in [
                 ("a registry", &listening, &dialling, "demo/shm/reply/a"),
@@ -7205,6 +7289,203 @@ mod tests {
                     ),
                     (BODY.to_vec(), true),
                     "{who}'s get was not handed the reply as shared memory"
+                );
+            }
+        }
+
+        /// Two pairs of peers linked over loopback with shared memory enabled, the rest of the
+        /// configuration the default: two registries of faces, the first listening and the second
+        /// dialling it, and a router node listening with a registry dialling it, opened with the
+        /// four `ids` in that order.
+        fn linked_pairs(ids: [&str; 4]) -> [Session; 4] {
+            let on = |id: &str, listen: &str, connect: &str, node: bool| {
+                let opened = || {
+                    open(
+                        Config::from_json5(&format!(
+                            r#"{{ id: "{id}", mode: "peer",
+                                  listen: {{ endpoints: [{listen}] }},
+                                  connect: {{ endpoints: [{connect}] }},
+                                  scouting: {{ multicast: {{ enabled: false }} }},
+                                  transport: {{ shared_memory: {{ enabled: true }} }} }}"#
+                        ))
+                        .expect("a configuration zenoh reads"),
+                    )
+                    .wait()
+                    .expect("opens")
+                };
+                if node {
+                    with_the_node(opened)
+                } else {
+                    opened()
+                }
+            };
+            let endpoint = |port: u16| format!(r#""tcp/127.0.0.1:{port}""#);
+            let (first, second) = (unautoselected_port(), unautoselected_port());
+            let listening = on(ids[0], &endpoint(first), "", false);
+            let dialling = on(ids[1], "", &endpoint(first), false);
+            let node = on(ids[2], &endpoint(second), "", true);
+            let answering = on(ids[3], "", &endpoint(second), false);
+            for (who, session) in [("the first dialler", &dialling), ("the second", &answering)] {
+                assert_eq!(connected(session, 1).1.len(), 1, "{who} is linked");
+            }
+            assert!(matches!(&*node.0.engine, Engine::Router(_)), "a node");
+            for session in [&listening, &dialling, &answering] {
+                assert!(matches!(&*session.0.engine, Engine::Tokio(_)), "a registry");
+            }
+            [listening, dialling, node, answering]
+        }
+
+        /// A payload as a receiver tells it: its bytes, and whether it is shared memory.
+        fn seen(payload: &ZBytes) -> (Vec<u8>, bool) {
+            (payload.to_bytes().into_owned(), payload.as_shm().is_some())
+        }
+
+        /// Ask `asker` for `key` until a reply comes, and that reply's payload as it is seen.
+        fn first_reply(asker: &Session, key: &str, who: &str) -> (Vec<u8>, bool) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let replies = asker.get(key).wait().expect("asks");
+                match replies.recv_timeout(Duration::from_millis(500)) {
+                    Ok(Some(reply)) => {
+                        return seen(reply.result().expect("a sample, not an error").payload())
+                    }
+                    _ if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    _ => panic!("{who} was never answered"),
+                }
+            }
+        }
+
+        /// `act` again every 100 ms until each of `remote` and `own` has been told something, and
+        /// the first thing each was told.
+        fn until_both_are_told(
+            mut act: impl FnMut(),
+            remote: &std::sync::mpsc::Receiver<(Vec<u8>, bool)>,
+            own: &std::sync::mpsc::Receiver<(Vec<u8>, bool)>,
+            who: &str,
+        ) -> ((Vec<u8>, bool), (Vec<u8>, bool)) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let (mut got_remote, mut got_own) = (None, None);
+            loop {
+                if let (Some(told_remote), Some(told_own)) = (&got_remote, &got_own) {
+                    return (told_remote.clone(), told_own.clone());
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{who}: the other session was told {got_remote:?} and the session itself \
+                     {got_own:?}"
+                );
+                act();
+                std::thread::sleep(Duration::from_millis(100));
+                got_remote = got_remote.or_else(|| remote.try_recv().ok());
+                got_own = got_own.or_else(|| own.try_recv().ok());
+            }
+        }
+
+        /// A large put, a large value of a get and a large reply, which the default configuration
+        /// asks to be optimised (all three, from 3072 bytes), reach the other session as shared
+        /// memory, sent by the registry of faces and by a router node: the sender copies each
+        /// into its provider and sends the descriptor over the link that negotiated shared memory.
+        /// A subscriber, a queryable and a getter of the sending session itself are handed the
+        /// bytes, as upstream's, which copies at the link, hands them.
+        #[test]
+        fn a_large_message_the_configuration_optimises_crosses_the_link_in_shared_memory() {
+            let big: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+            let [listening, dialling, node, answering] =
+                linked_pairs(["a1b3a4", "a1b3a5", "a1b3a6", "a1b3a7"]);
+            // The copy is made once the provider is, and the provider is made on the first ask:
+            // each is asked for until it is there, without taking the receiver of its making.
+            for session in [&listening, &dialling, &node, &answering] {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !matches!(session.get_shm_provider(), ShmProviderState::Ready(_)) {
+                    assert!(Instant::now() < deadline, "the provider was never made");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+
+            for (who, sender, other, tag) in [
+                ("the registry", &dialling, &listening, "a"),
+                ("the node", &node, &answering, "b"),
+            ] {
+                use std::sync::{mpsc::channel, Mutex};
+
+                let key = format!("demo/shm/large/{tag}/put");
+                let (to_remote, remote) = channel();
+                let (to_own, own) = channel();
+                let mut subscribers = Vec::new();
+                for (session, to) in [(other, Mutex::new(to_remote)), (sender, Mutex::new(to_own))]
+                {
+                    subscribers.push(
+                        session
+                            .declare_subscriber(key.as_str())
+                            .callback(move |sample| {
+                                let _ = to.lock().unwrap().send(seen(sample.payload()));
+                            })
+                            .wait()
+                            .expect("declares"),
+                    );
+                }
+                let (remote, own) = until_both_are_told(
+                    || sender.put(key.as_str(), big.clone()).wait().expect("puts"),
+                    &remote,
+                    &own,
+                    who,
+                );
+                assert_eq!(remote, (big.clone(), true), "{who}'s large put");
+                assert_eq!(own, (big.clone(), false), "{who}'s own subscriber");
+
+                let key = format!("demo/shm/large/{tag}/value");
+                let (to_remote, remote) = channel();
+                let (to_own, own) = channel();
+                let mut queryables = Vec::new();
+                for (session, to) in [(other, Mutex::new(to_remote)), (sender, Mutex::new(to_own))]
+                {
+                    queryables.push(
+                        session
+                            .declare_queryable(key.as_str())
+                            .callback(move |query| {
+                                let value = query.payload().map_or((Vec::new(), false), seen);
+                                let _ = to.lock().unwrap().send(value);
+                            })
+                            .wait()
+                            .expect("declares"),
+                    );
+                }
+                let (remote, own) = until_both_are_told(
+                    || {
+                        let _replies = sender
+                            .get(key.as_str())
+                            .payload(big.clone())
+                            .wait()
+                            .expect("asks");
+                    },
+                    &remote,
+                    &own,
+                    who,
+                );
+                assert_eq!(remote, (big.clone(), true), "{who}'s large value");
+                assert_eq!(own, (big.clone(), false), "{who}'s own queryable");
+
+                let key = format!("demo/shm/large/{tag}/reply");
+                let (replied, reply_key) = (big.clone(), key.clone());
+                let _queryable = sender
+                    .declare_queryable(key.as_str())
+                    .callback(move |query| {
+                        // A reply that is refused is seen as a get that is never answered.
+                        let _ = query.reply(reply_key.as_str(), replied.clone()).wait();
+                    })
+                    .wait()
+                    .expect("declares");
+                assert_eq!(
+                    first_reply(other, &key, &format!("the getter of {who}'s large reply")),
+                    (big.clone(), true),
+                    "{who}'s large reply"
+                );
+                assert_eq!(
+                    first_reply(sender, &key, &format!("{who}'s own getter")),
+                    (big.clone(), false),
+                    "{who}'s own getter"
                 );
             }
         }

@@ -98,7 +98,7 @@ and it is the one `Session::get_shm_provider` hands out.
 | the engine's POSIX provider and reader | `wz_runtime_tokio::shm_provider`, `shm_backend`, `shm_posix_backend`, `posix_shm`, `shm_clients` | what the C ABI allocates from and reads with |
 | the router's relay pass | `wz_runtime_tokio::shm_relay` | holds the chunks of a message while it is routed and re-expresses them per face |
 | `zenoh-shm` | `crates/wz-zenoh-shm` | upstream's crate, by its name and surface: the Rust API's provider, buffers and reader |
-| the top crate's adapter | `zenoh::api::shm::transport` (`crates/wz-zenoh/src/api/shm.rs`) | a `ZBytes` slice as the engine's send buffer, `ShmReader` as its resolver, and `Promoter`, the implicit optimisation of a put |
+| the top crate's adapter | `zenoh::api::shm::transport` (`crates/wz-zenoh/src/api/shm.rs`) | a `ZBytes` slice as the engine's send buffer, `ShmReader` as its resolver, and `Promoter`, the implicit optimisation of a put, a query value and a reply |
 
 What crosses a link without a copy, by path (registry = the registry of faces, node = a router node):
 
@@ -109,7 +109,7 @@ What crosses a link without a copy, by path (registry = the registry of faces, n
 | value of a get | registry and node | registry and node |
 | reply | registry and node | registry and node |
 | error reply | its bytes (section 4, rule 7) | its inline bytes |
-| implicit optimisation | put | - |
+| implicit optimisation | put, value of a get, reply; registry and node | - |
 
 Upstream's own `shm` test file passes 10 of 10 against the patched graph (`docs/z8-expected.tsv`).
 
@@ -176,9 +176,16 @@ The rules, each of which is a copy and never a loss:
    sends the bytes without the marker: the receiver reads the same value, upstream's or wz's, and no
    count is left owed on the ledger of the link. An Err that arrives with the marker is read in line.
 
-wz promotes per session and not per link: `Promoter` copies a put into the provider when some peer
-of the session could read it (`has_shm_peer`), and the engine then sends the descriptor to each face
-that negotiated shared memory and the bytes to the others, which is upstream's result per link.
+wz promotes per session and not per link: `Promoter` copies a put, the value of a get or a reply
+into the provider when some peer of the session could read it (`has_shm_peer`), and the engine then
+sends the descriptor to each face that negotiated shared memory and the bytes to the others, which is
+upstream's result per link. A reply to a query of the session itself is not copied. The copy is the
+transport's and not the application's (`Holder::Transport` in the adapter): its
+`ShmSendBuffer::receiver_view` answers none, and every place the engine hands a receiver of the
+sending session a buffer (its own subscribers, queryables and getters, on the registry and on a
+node) hands the bytes instead, which is rule 6 by one mechanism. What per session costs is a copy
+that a face without shared memory is then sent the bytes of, where upstream would not have copied
+for that link.
 
 ## 5. Build switches
 
@@ -194,7 +201,7 @@ A build without them offers nothing in the handshake, answers an offer plain, an
 that carries the mandatory marker. A configuration that sets `message_size_threshold` or `messages`
 to other than the default is refused by name in a build that does not act on them (decision D6 of
 the seam note); the top crate with `shared-memory` and `unstable` acts on them
-(`acted_on_by_the_session`), although for a put only (section 7, S4).
+(`acted_on_by_the_session`), for each of the three messages the list can name.
 
 ## 6. One shared-memory system per process
 
@@ -239,7 +246,7 @@ memory are measured again in the step that moves them.
 | S1 | establishment, put (unicast and group), value of a get, a router node's session, the implicit optimisation of a put | landed (seam note, Z7t) |
 | S2 | a reply in shared memory through the Rust API: the registry stages a reply whose payload is a buffer as the buffer (`ReplyMeta::with_shared`), and a getter is handed it as one (`payload_shared`); a router node reads the chunk of a reply to its own get as it routes it (`LocalFaceEvent::ReplyRead`, `ReplyRegistry::dispatch_response_read`), where its face, which negotiates nothing, used to refuse the descriptor | landed |
 | S3 | a reply of a queryable a node hosts as the buffer (`send_hosted_replies`): the chunk is adopted into the relay pass and the response names its descriptor (`QueryReply::into_response_naming`), as `publish_shm_with` does for a put, so that each face is sent the descriptor or the bytes; the node's own get is handed the buffer (`ReplyRead`) | landed |
-| S4 | the implicit optimisation of a query's value and of a reply, by `messages`: the value goes as a descriptor on the legs to faces that negotiated shared memory and as the bytes on the session-local leg; a reply is promoted only for a query that came over a link whose face admits the provider's protocol | owed |
+| S4 | the implicit optimisation of a query's value and of a reply, by `messages` (`Promoter::lists`), with the copy the transport's so that a receiver of the session itself is handed the bytes (section 4); a put takes the same path, in one publication where it took two | landed |
 | S5 | an error reply in shared memory | decided: its bytes, section 4, rule 7 |
 | S6 | one shared-memory system per process (section 6) | owed |
 | S7 | the cross-implementation differential: an upstream session and a wz session in one process over TCP and over a group, each direction, for a put, the value of a get and a reply, with shared memory off on one side as the control (the bytes); in `conformance/differential-shm`, which needs the TCP link of upstream's crate there | owed |

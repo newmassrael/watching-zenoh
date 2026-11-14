@@ -31,9 +31,8 @@
 //!
 //! What the provider is not: the provider of the engine. The engine keeps shared memory of its own
 //! (`docs/shm-transport.md`), and a buffer of this provider crosses it as the buffer it is
-//! (`transport` below). The implicit promotion of a large put into this provider is made by this
-//! crate before the engine (`transport::Promoter`); the value of a query and a reply are not
-//! promoted yet, where upstream promotes both by default.
+//! (`transport` below). The implicit promotion of a large put, query value or reply into this
+//! provider is made by this crate before the engine (`transport::Promoter`).
 
 /// Initialise the shared memory subsystem as the session opens when the configuration asks for it
 /// (`transport/shared_memory/mode` = `init`); in the default `lazy` mode the first use does.
@@ -126,16 +125,35 @@ pub(crate) mod transport {
 
     /// The buffer a put of `payload` is sent from, when it is one slice of shared memory.
     pub(crate) fn send_handle_of(payload: &ZBytes) -> Option<ShmSendHandle> {
+        handle_of(payload, Holder::Application)
+    }
+
+    /// The buffer `payload` is, as `holder` holds it, when it is one slice of shared memory.
+    fn handle_of(payload: &ZBytes, holder: Holder) -> Option<ShmSendHandle> {
         let slice = payload.single_shm_slice()?;
         buffer_of(slice)?;
         Some(ShmSendHandle::new(Arc::new(SendBuffer {
             slice: slice.clone(),
+            holder,
         })))
+    }
+
+    /// Whose a buffer the engine sends is, which decides what a receiver of the sending session
+    /// itself is handed.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Holder {
+        /// The application gave the buffer: a receiver of the session is handed the buffer.
+        Application,
+        /// The implicit optimisation copied a payload into it for the links: a receiver of the
+        /// session is handed the bytes, as upstream's, which copies at the link, hands them.
+        #[cfg(feature = "unstable")]
+        Transport,
     }
 
     /// A buffer some provider of this process owns, as the engine sends it.
     struct SendBuffer {
         slice: ZSlice,
+        holder: Holder,
     }
 
     impl SendBuffer {
@@ -155,7 +173,12 @@ pub(crate) mod transport {
         }
 
         fn receiver_view(&self) -> Option<RxBytes> {
-            view_of(self.slice.clone())
+            match self.holder {
+                Holder::Application => view_of(self.slice.clone()),
+                // `None` is what the engine hands the bytes for.
+                #[cfg(feature = "unstable")]
+                Holder::Transport => None,
+            }
         }
 
         fn reserve_for_receiver(self: Arc<Self>) -> Box<dyn ShmReservation> {
@@ -244,15 +267,21 @@ pub(crate) mod transport {
     /// descriptor and not as bytes (upstream does the same at the link, per peer, in
     /// `io/zenoh-transport/src/common/shm/interop.rs` @ `fn wrap_in_place<const ID: u8>(`).
     ///
-    /// Done for a message the configuration lists (`messages`) and only when some peer could read
-    /// it, so a session none of whose peers shares memory copies nothing. The provider is made on
-    /// the first large message, in the background, and a message that finds it not yet made is
-    /// sent as bytes, as upstream's is.
+    /// Done for a message the configuration lists (`messages`: a put, the value of a query, a
+    /// reply) and only when some peer could read it, so a session none of whose peers shares
+    /// memory copies nothing. The provider is made on the first large message, in the background,
+    /// and a message that finds it not yet made is sent as bytes, as upstream's is.
+    ///
+    /// The copy is the transport's and not the application's: the engine sends its descriptor to
+    /// a face that negotiated shared memory and its bytes to any other, and a receiver of the
+    /// session itself is handed the bytes, as upstream's, which copies at the link, hands them.
     #[cfg(feature = "unstable")]
     pub(crate) struct Promoter {
         provider: Arc<super::LazyShmProvider>,
         threshold: usize,
         put: bool,
+        query: bool,
+        reply: bool,
     }
 
     #[cfg(feature = "unstable")]
@@ -265,19 +294,33 @@ pub(crate) mod transport {
         ) -> Option<Self> {
             let provider = Arc::clone(provider?);
             let optimisation = &config.transport().shared_memory().transport_optimization;
+            let listed =
+                |message: zenoh_config::DataMessage| optimisation.messages().contains(&message);
             Some(Self {
                 provider,
                 threshold: *optimisation.message_size_threshold(),
-                put: optimisation
-                    .messages()
-                    .contains(&zenoh_config::DataMessage::Put),
+                put: listed(zenoh_config::DataMessage::Put),
+                query: listed(zenoh_config::DataMessage::Query),
+                reply: listed(zenoh_config::DataMessage::Reply),
             })
         }
 
-        /// `payload` as a buffer of shared memory, when a put of it is to be promoted and some
-        /// peer could read the promoted buffer; `None` when it is to be sent as it is.
+        /// Whether the configuration lists `message` for the optimisation. A delete carries no
+        /// payload, and upstream's policy has no category for it.
+        fn lists(&self, message: zenoh_config::DataMessage) -> bool {
+            match message {
+                zenoh_config::DataMessage::Put => self.put,
+                zenoh_config::DataMessage::Query => self.query,
+                zenoh_config::DataMessage::Reply => self.reply,
+                zenoh_config::DataMessage::Delete => false,
+            }
+        }
+
+        /// `payload` as a buffer of shared memory, when a `message` of it is to be promoted and
+        /// some peer could read the promoted buffer; `None` when it is to be sent as it is.
         pub(crate) fn promote(
             &self,
+            message: zenoh_config::DataMessage,
             payload: &ZBytes,
             peer_shares_memory: impl FnOnce() -> bool,
         ) -> Option<ShmSendHandle> {
@@ -286,7 +329,7 @@ pub(crate) mod transport {
                 ConstBool, Defragment, GarbageCollect, JustAlloc,
             };
 
-            if !self.put || payload.is_empty() || payload.len() < self.threshold {
+            if !self.lists(message) || payload.is_empty() || payload.len() < self.threshold {
                 return None;
             }
             if payload.single_shm_slice().is_some() || !peer_shares_memory() {
@@ -307,7 +350,7 @@ pub(crate) mod transport {
             }
             .ok()?;
             buffer.as_mut().copy_from_slice(&bytes);
-            send_handle_of(&ZBytes::from_shm_slice(buffer.into()))
+            handle_of(&ZBytes::from_shm_slice(buffer.into()), Holder::Transport)
         }
     }
 
