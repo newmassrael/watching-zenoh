@@ -3563,12 +3563,29 @@ def cmd_selftest() -> int:
                        for name, value in stated_env) for lim in decl["limits"])
            and all((pol["kconfig"], value) in stated_env
                    for pol in decl["policies"] for value in policy_values(pol)))
+    # Three kinds of case state a build another case already states, on purpose: every limit and
+    # policy at its default is the build that states nothing; every name of every ABI is every
+    # name of the ABI (the other ABIs' names count for nothing); and the tokio engine beside a
+    # cooperative feature is the tokio engine, whose build with nothing else is the one that
+    # states nothing (`statement_engine`). They are left out of the count of distinct digests and
+    # held to equal their twin instead, so a change of the engine rule turns one of them red.
+    same_as = {"every limit and policy stated at its default": "nothing stated",
+               "every name of every ABI on": "every name of the ABI on",
+               "the tokio engine beside a cooperative feature": "nothing stated"}
+    by_case = {(v["abi"], v["case"]): v["digest"] for v in vectors}
+    twins = [(abi, case, twin) for (abi, case) in by_case for c, twin in same_as.items()
+             if case == c]
     expect("the statement vectors are the same on every run and every digest is distinct where "
            "the build differs",
            emit_statement_vectors(decl) == emit_statement_vectors(decl)
-           and len({v["digest"] for v in vectors if v["case"] != "every limit and policy stated "
-                    "at its default" and not v["case"].startswith("every name of every ABI")})
-           == len(vectors) - 2 * len(ABIS))
+           and len({v["digest"] for v in vectors if v["case"] not in same_as})
+           == len(vectors) - len(twins))
+    expect("each vector that states a build another states has that build's digest",
+           len(twins) == 2 * len(ABIS) + 1
+           and all(by_case[(abi, case)] == by_case[(abi, twin)] for abi, case, twin in twins))
+    expect("the cooperative engine and the zephyr platform each state a build of their own",
+           len({by_case[("pico", "nothing stated")], by_case[("pico", "the cooperative engine")],
+                by_case[("pico", "the zephyr platform")]}) == 3)
     expect("a statement's digest does not count the catalogue's defaults beside the values",
            statement_digest({**stated, "limits": [{**x, "default": 0} for x in stated["limits"]]})
            == stated["digest"])
