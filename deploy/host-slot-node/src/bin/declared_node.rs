@@ -864,7 +864,7 @@ fn run() -> i32 {
     // The port is bound before the node is built, so the line a lab waits for is said only once a
     // connection to it would be taken.
     #[cfg(feature = "listen")]
-    let listen_at = core::net::SocketAddr::from((LISTEN_ADDR, LISTEN_PORT));
+    let listen_at = core::net::SocketAddr::new(LISTEN_ADDR, LISTEN_PORT);
     #[cfg(all(feature = "listen", not(feature = "listen-tls")))]
     let listening = match PosixTcpListener::bind(listen_at) {
         Ok(listener) => Listening::<_, ACCEPTS>::new(stack.acceptor(listener)),

@@ -40,7 +40,8 @@ pub const GROUPS: usize = 1;
 /// The locator of the group, the address and port it names, the hop limit of what the node
 /// sends and how many members of the group it tracks at once.
 pub const GROUP: &str = "udp/224.0.0.224:7490";
-pub const GROUP_ADDR: [u8; 4] = [224, 0, 0, 224];
+pub const GROUP_ADDR: core::net::IpAddr =
+    core::net::IpAddr::V4(core::net::Ipv4Addr::new(224, 0, 0, 224));
 pub const GROUP_PORT: u16 = 7490;
 pub const GROUP_TTL: u8 = 1;
 pub const MEMBERS: usize = 8;

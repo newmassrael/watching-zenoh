@@ -132,8 +132,9 @@ pub fn fresh_signing_key() -> Result<[u8; SIGNING_KEY_BYTES], &'static str> {
 #[cfg(feature = "multicast")]
 pub mod group {
     use wz_runtime_coop::session_drive::LinkOpenError;
+    use wz_runtime_coop::udp_link::DatagramSocket;
     pub use wz_runtime_posix::group::PosixGroupTransport;
-    use wz_runtime_posix::net::PosixNetError;
+    use wz_runtime_posix::net::{PosixNetError, PosixUdpSocket};
     use wz_session_mcu::slot_group::{GroupBind, GROUP_BATCH_BYTES};
 
     use super::tuning::RX_SLACK;
@@ -150,8 +151,8 @@ pub mod group {
     /// sending with `ttl`.
     #[derive(Debug, Clone, Copy)]
     pub struct PosixGroupBind {
-        /// The group's address.
-        pub group: [u8; 4],
+        /// The group's address, IPv4 or IPv6.
+        pub group: core::net::IpAddr,
         /// The group's port.
         pub port: u16,
         /// The hop limit of what the node sends.
@@ -160,13 +161,17 @@ pub mod group {
 
     impl GroupBind<HostGroupTransport> for PosixGroupBind {
         fn bind(&mut self) -> Result<HostGroupTransport, LinkOpenError> {
-            PosixGroupTransport::join_by_routing_or_first_interface(self.group, self.port, self.ttl)
-                .map_err(|e| match e {
+            let group = core::net::SocketAddr::new(self.group, self.port);
+            PosixGroupTransport::join_by_routing_or_first_interface(group, self.ttl).map_err(|e| {
+                match e {
+                    // The host has no socket of the group's family: no retry gives it one.
+                    e if PosixUdpSocket::refuses_address(&e) => LinkOpenError::Unsupported,
                     // The process has no descriptor left: worth a later try.
                     PosixNetError::Socket(_) => LinkOpenError::Exhausted,
                     // The kernel would not bind the port or join the group.
                     _ => LinkOpenError::Refused,
-                })
+                }
+            })
         }
     }
 }

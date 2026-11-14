@@ -33,7 +33,8 @@ pub const ACCEPTS: usize = 2;
 /// built for.
 pub const LISTEN_TLS: bool = false;
 /// The address and port the listening locator names.
-pub const LISTEN_ADDR: [u8; 4] = [127, 0, 0, 1];
+pub const LISTEN_ADDR: core::net::IpAddr =
+    core::net::IpAddr::V4(core::net::Ipv4Addr::new(127, 0, 0, 1));
 pub const LISTEN_PORT: u16 = 17475;
 /// The sessions the node holds at most: the ones it dials, the peers it holds by their zid and
 /// the ones a peer opened.
