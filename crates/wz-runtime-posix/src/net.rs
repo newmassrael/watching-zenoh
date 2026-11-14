@@ -21,9 +21,21 @@
 //! bounded by `SO_RCVTIMEO` ([`SERVICE_WAIT_MS`]), so a datagram that arrives wakes the loop in
 //! the same system call that waited for it.
 
-use core::ffi::c_int;
+use core::ffi::{c_int, c_uint};
 use core::mem::size_of;
-use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+
+use wz_runtime_coop::group_transport::GroupInterface;
+
+/// The option that joins an IPv6 group: RFC 3493's `IPV6_JOIN_GROUP`, which Linux and Android
+/// spell `IPV6_ADD_MEMBERSHIP` (the same number), and which zenoh-pico's POSIX link sets
+/// (`vendor/zenoh-pico/src/link/transport/udp/udp_multicast_posix.c` @
+/// `IPPROTO_IPV6, IPV6_JOIN_GROUP`).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const IPV6_JOIN: c_int = libc::IPV6_ADD_MEMBERSHIP;
+/// See the Linux form of this constant.
+#[cfg(target_os = "nto")]
+const IPV6_JOIN: c_int = libc::IPV6_JOIN_GROUP;
 
 // The heap profile's readiness seam is compiled where the runtime declares it, whatever this crate's
 // own features are (`wz_runtime_coop::with_heap_link_seams!`), as is every implementation of it here.
@@ -49,9 +61,12 @@ pub enum PosixNetError {
     ReuseAddr(c_int),
     /// `setsockopt(SO_REUSEPORT)` failed with this `errno`.
     ReusePort(c_int),
-    /// `setsockopt(IP_ADD_MEMBERSHIP)` failed with this `errno`: the group could not be joined on
-    /// the interface asked for.
+    /// `setsockopt(IP_ADD_MEMBERSHIP)` or `setsockopt(IPV6_JOIN_GROUP)` failed with this `errno`:
+    /// the group could not be joined on the interface asked for.
     Membership(c_int),
+    /// A multicast interface was named in the other family than the group's or the socket's (an
+    /// IPv4 address for an IPv6 group, an index for an IPv4 one), so no kernel call was made.
+    InterfaceFamily,
     /// `setsockopt` of a multicast egress option (`IP_MULTICAST_IF`, `IP_MULTICAST_TTL`) failed
     /// with this `errno`.
     MulticastOption(c_int),
@@ -262,13 +277,18 @@ pub(crate) fn set_close_on_exec(fd: c_int) -> Result<(), c_int> {
     Ok(())
 }
 
-/// The IPv4 address of the first interface that is up, can multicast and is not a loopback, or
-/// none: the interface to give a multicast join when routing has no answer for the group (a board
-/// with one subnet route and no default route, where joining on "the interface routing picks"
-/// fails with `ENODEV`). The C library's `getifaddrs` is what lists them, on every OS this crate is
-/// built for; it takes a list from the C library's own heap and gives it back before returning,
-/// and the program's own allocator, which it has none of, is not asked.
-pub fn multicast_interface() -> Option<[u8; 4]> {
+/// The first interface that is up, can multicast, is not a loopback and holds an address of
+/// `group`'s family, named as a group of that family names one: by its IPv4 address, or by its
+/// index for an IPv6 group. None when there is no such interface. It is the interface to give a
+/// multicast join when routing has no answer for the group (a board with one subnet route and no
+/// default route, where joining on "the interface routing picks" fails with `ENODEV`), as upstream
+/// zenoh takes the first non-loopback multicast interface of the group's family
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+/// `get_unicast_addresses_of_multicast_interfaces()`). The C library's `getifaddrs` is what lists
+/// them, on every OS this crate is built for; it takes a list from the C library's own heap and
+/// gives it back before returning, and the program's own allocator, which it has none of, is not
+/// asked.
+pub fn multicast_interface(group: &SocketAddr) -> Option<GroupInterface> {
     let mut list: *mut libc::ifaddrs = core::ptr::null_mut();
     // SAFETY: `list` is a live pointer the call fills; it is freed below whenever the call succeeds.
     if unsafe { libc::getifaddrs(&mut list) } != 0 {
@@ -287,12 +307,20 @@ pub fn multicast_interface() -> Option<[u8; 4]> {
         {
             // SAFETY: a non-null `ifa_addr` points at a socket address whose family field is valid.
             let family = unsafe { (*entry.ifa_addr).sa_family } as c_int;
-            if family == libc::AF_INET {
+            if family == libc::AF_INET && group.is_ipv4() {
                 // SAFETY: an `AF_INET` address is a `sockaddr_in`.
                 let sin = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in) };
-                let address = sin.sin_addr.s_addr.to_ne_bytes();
-                if address != [0; 4] {
-                    found = Some(address);
+                let address = Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes());
+                if !address.is_unspecified() {
+                    found = Some(GroupInterface::V4(address));
+                    break;
+                }
+            } else if family == libc::AF_INET6 && group.is_ipv6() && !entry.ifa_name.is_null() {
+                // SAFETY: a non-null `ifa_name` is the interface's NUL-terminated name, live until
+                // `freeifaddrs`.
+                let index = unsafe { libc::if_nametoindex(entry.ifa_name) };
+                if index != 0 {
+                    found = Some(GroupInterface::Index(index));
                     break;
                 }
             }
@@ -499,43 +527,86 @@ impl PosixUdpSocket {
         Self::open(at, true)
     }
 
-    /// Join `group` on the interface that holds `interface` (the unspecified address: the one the
-    /// kernel's routing picks for the group).
-    pub fn join_group(&self, group: [u8; 4], interface: [u8; 4]) -> Result<(), PosixNetError> {
-        // `ip_mreq`, which every kernel here takes and Neutrino has no wider form of: the group and
-        // the address of the interface (the kernel's choice when it is the unspecified one). Linux's
-        // `ip_mreqn` is this plus an interface index this code never set.
-        let request = libc::ip_mreq {
-            imr_multiaddr: libc::in_addr {
-                s_addr: u32::from_ne_bytes(group),
-            },
-            imr_interface: libc::in_addr {
-                s_addr: u32::from_ne_bytes(interface),
-            },
-        };
-        set_option(self.fd, libc::IPPROTO_IP, libc::IP_ADD_MEMBERSHIP, &request)
-            .map_err(PosixNetError::Membership)
+    /// Join `group` on `interface`: an IPv4 group through `IP_ADD_MEMBERSHIP` on the interface
+    /// that holds an address, an IPv6 one through `IPV6_JOIN_GROUP` (MLD) on the interface of an
+    /// index, either on the one the kernel's routing picks for [`GroupInterface::Routing`]. An
+    /// interface named in the other family than the group's is
+    /// [`PosixNetError::InterfaceFamily`], before the kernel is asked.
+    pub fn join_group(
+        &self,
+        group: IpAddr,
+        interface: GroupInterface,
+    ) -> Result<(), PosixNetError> {
+        match (group, interface) {
+            (IpAddr::V4(group), GroupInterface::Routing | GroupInterface::V4(_)) => {
+                let interface = match interface {
+                    GroupInterface::V4(address) => address,
+                    _ => Ipv4Addr::UNSPECIFIED,
+                };
+                // `ip_mreq`, which every kernel here takes and Neutrino has no wider form of: the
+                // group and the address of the interface (the kernel's choice when it is the
+                // unspecified one). Linux's `ip_mreqn` is this plus an interface index this code
+                // never sets.
+                let request = libc::ip_mreq {
+                    imr_multiaddr: libc::in_addr {
+                        s_addr: u32::from_ne_bytes(group.octets()),
+                    },
+                    imr_interface: libc::in_addr {
+                        s_addr: u32::from_ne_bytes(interface.octets()),
+                    },
+                };
+                set_option(self.fd, libc::IPPROTO_IP, libc::IP_ADD_MEMBERSHIP, &request)
+                    .map_err(PosixNetError::Membership)
+            }
+            (IpAddr::V6(group), GroupInterface::Routing | GroupInterface::Index(_)) => {
+                let index = match interface {
+                    GroupInterface::Index(index) => index,
+                    _ => 0,
+                };
+                // SAFETY: an all-zero `ipv6_mreq` is a valid value of it; both fields are set below.
+                let mut request: libc::ipv6_mreq = unsafe { core::mem::zeroed() };
+                request.ipv6mr_multiaddr.s6_addr = group.octets();
+                // `c_uint` on Linux and Neutrino, `c_int` on Android: an index fits either.
+                request.ipv6mr_interface = index as _;
+                set_option(self.fd, libc::IPPROTO_IPV6, IPV6_JOIN, &request)
+                    .map_err(PosixNetError::Membership)
+            }
+            _ => Err(PosixNetError::InterfaceFamily),
+        }
     }
 
-    /// Send multicast datagrams out of the interface that holds `interface`.
-    pub fn set_multicast_interface(&self, interface: [u8; 4]) -> Result<(), PosixNetError> {
-        let address = libc::in_addr {
-            s_addr: u32::from_ne_bytes(interface),
-        };
-        set_option(self.fd, libc::IPPROTO_IP, libc::IP_MULTICAST_IF, &address)
-            .map_err(PosixNetError::MulticastOption)
+    /// Send multicast datagrams out of `interface`: the interface that holds an IPv4 address
+    /// (`IP_MULTICAST_IF`), the interface of an index (`IPV6_MULTICAST_IF`), or, for the routing's
+    /// choice, the one the kernel picks, which needs no option.
+    pub fn set_multicast_interface(&self, interface: GroupInterface) -> Result<(), PosixNetError> {
+        match (self.local, interface) {
+            (_, GroupInterface::Routing) => Ok(()),
+            (SocketAddr::V4(_), GroupInterface::V4(address)) => {
+                let address = libc::in_addr {
+                    s_addr: u32::from_ne_bytes(address.octets()),
+                };
+                set_option(self.fd, libc::IPPROTO_IP, libc::IP_MULTICAST_IF, &address)
+                    .map_err(PosixNetError::MulticastOption)
+            }
+            (SocketAddr::V6(_), GroupInterface::Index(index)) => set_option(
+                self.fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_MULTICAST_IF,
+                &(index as c_uint),
+            )
+            .map_err(PosixNetError::MulticastOption),
+            _ => Err(PosixNetError::InterfaceFamily),
+        }
     }
 
-    /// The hop limit of the multicast datagrams this socket sends (the kernel's default is 1: one
-    /// subnet).
-    pub fn set_multicast_ttl(&self, ttl: u8) -> Result<(), PosixNetError> {
-        set_option(
-            self.fd,
-            libc::IPPROTO_IP,
-            libc::IP_MULTICAST_TTL,
-            &c_int::from(ttl),
-        )
-        .map_err(PosixNetError::MulticastOption)
+    /// The hop limit of the multicast datagrams this socket sends, in the option of its family:
+    /// `IP_MULTICAST_TTL` or `IPV6_MULTICAST_HOPS` (the kernel's default is 1: one subnet).
+    pub fn set_multicast_hops(&self, hops: u8) -> Result<(), PosixNetError> {
+        let (level, name) = match self.local {
+            SocketAddr::V4(_) => (libc::IPPROTO_IP, libc::IP_MULTICAST_TTL),
+            SocketAddr::V6(_) => (libc::IPPROTO_IPV6, libc::IPV6_MULTICAST_HOPS),
+        };
+        set_option(self.fd, level, name, &c_int::from(hops)).map_err(PosixNetError::MulticastOption)
     }
 
     /// The port the kernel bound this socket to.
@@ -663,7 +734,6 @@ impl Drop for PosixUdpSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::net::IpAddr;
 
     /// The IPv4 loopback, on a port the kernel picks.
     const LOOPBACK: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
@@ -771,11 +841,78 @@ mod tests {
 
     #[test]
     fn the_interface_for_a_group_is_never_a_loopback_or_the_unspecified_address() {
-        // A host in a sandbox may have none; a host that has one names a real, routable address.
-        if let Some(address) = multicast_interface() {
-            assert_ne!(address, [0; 4], "the unspecified address is no interface");
-            assert_ne!(address[0], 127, "a loopback is not where a group is joined");
+        // A host in a sandbox may have none; a host that has one names a real, routable address
+        // for an IPv4 group, and an index (never 0, which names no interface) for an IPv6 one.
+        let v4 = SocketAddr::from(([224, 0, 0, 224], 7446));
+        match multicast_interface(&v4) {
+            Some(GroupInterface::V4(address)) => {
+                assert!(
+                    !address.is_unspecified(),
+                    "the unspecified address is no interface"
+                );
+                assert!(
+                    !address.is_loopback(),
+                    "a loopback is not where a group is joined"
+                );
+            }
+            None => {}
+            Some(other) => panic!("an IPv4 group is given {other:?}"),
         }
+        let v6 = SocketAddr::from((Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1), 7446));
+        match multicast_interface(&v6) {
+            Some(GroupInterface::Index(index)) => assert_ne!(index, 0),
+            None => {}
+            Some(other) => panic!("an IPv6 group is given {other:?}"),
+        }
+    }
+
+    /// An interface named in the other family than the group's is refused before the kernel is
+    /// asked, on the join and on the sender's interface alike; the routing's choice of the sender's
+    /// interface asks the kernel nothing.
+    #[test]
+    fn an_interface_of_the_other_family_is_refused_before_the_kernel_is_asked() {
+        let socket = PosixUdpSocket::bind(LOOPBACK).expect("an IPv4 socket");
+        let v6_group = IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1));
+        assert_eq!(
+            socket.join_group(v6_group, GroupInterface::V4(Ipv4Addr::LOCALHOST)),
+            Err(PosixNetError::InterfaceFamily)
+        );
+        assert_eq!(
+            socket.join_group(IpAddr::from([224, 0, 0, 224]), GroupInterface::Index(1)),
+            Err(PosixNetError::InterfaceFamily)
+        );
+        assert_eq!(
+            socket.set_multicast_interface(GroupInterface::Index(1)),
+            Err(PosixNetError::InterfaceFamily)
+        );
+        assert_eq!(
+            socket.set_multicast_interface(GroupInterface::Routing),
+            Ok(())
+        );
+    }
+
+    /// The hop limit is set in the option of the socket's family, and read back from it.
+    #[test]
+    fn the_hop_limit_is_the_option_of_the_sockets_family() {
+        let get = |fd: c_int, level: c_int, name: c_int| -> c_int {
+            let mut value: c_int = -1;
+            let mut len = size_of::<c_int>() as libc::socklen_t;
+            // SAFETY: `value` and `len` are live and writable, and `len` is `value`'s size.
+            let rc = unsafe {
+                libc::getsockopt(fd, level, name, (&mut value as *mut c_int).cast(), &mut len)
+            };
+            assert_eq!(rc, 0);
+            value
+        };
+        let v4 = PosixUdpSocket::bind(LOOPBACK).expect("an IPv4 socket");
+        v4.set_multicast_hops(4).expect("a hop limit");
+        assert_eq!(get(v4.fd(), libc::IPPROTO_IP, libc::IP_MULTICAST_TTL), 4);
+        let v6 = PosixUdpSocket::bind(LOOPBACK_V6).expect("an IPv6 socket");
+        v6.set_multicast_hops(6).expect("a hop limit");
+        assert_eq!(
+            get(v6.fd(), libc::IPPROTO_IPV6, libc::IPV6_MULTICAST_HOPS),
+            6
+        );
     }
 
     #[test]

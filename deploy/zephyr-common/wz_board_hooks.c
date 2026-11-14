@@ -17,8 +17,8 @@
  *     Zephyr's test generator (see wzApplicationGetRandom);
  *   - the wall clock is set at boot from this build's own instant, standing in
  *     for the SNTP sync or RTC a board with network or battery would have;
- *   - the IPv4 address and the zenoh id come from the net stack's interface,
- *     whatever DHCP or Kconfig gave it.
+ *   - the IPv4 or IPv6 address and the zenoh id come from the net stack's
+ *     interface, whatever DHCP, autoconfiguration or Kconfig gave it.
  */
 
 #include <stdint.h>
@@ -421,9 +421,11 @@ int wz_board_set_boot_clock(void)
 	return clock_settime(CLOCK_REALTIME, &boot);
 }
 
-#if defined(CONFIG_NETWORKING) && defined(CONFIG_NET_IPV4)
+#if defined(CONFIG_NETWORKING)
 
 /* ---- the board's network identity, read off Zephyr's interface ---- */
+
+#if defined(CONFIG_NET_IPV4)
 
 /* The first interface that holds a preferred, non-link-local IPv4 address: the
  * one a node's sessions run on. NULL while none does (DHCP not yet granted). */
@@ -454,14 +456,63 @@ int wzApplicationGetIpv4Address(uint8_t *out)
 	return 1;
 }
 
+#endif /* CONFIG_NET_IPV4 */
+
+#if defined(CONFIG_NET_IPV6)
+
+/* The first interface that holds a preferred global IPv6 address, and that address: the
+ * one an IPv6 node's sessions run on. NULL while none does (autoconfiguration not done). */
+static struct net_if *addressed_interface_v6(struct net_in6_addr **address)
+{
+	struct net_if *iface = NULL;
+	struct net_in6_addr *found = net_if_ipv6_get_global_addr(NET_ADDR_PREFERRED, &iface);
+
+	if (found == NULL) {
+		return NULL;
+	}
+	*address = found;
+	return iface;
+}
+
+/* `wz_runtime_zephyr::net::board_ipv6`: write the interface's sixteen bytes and
+ * return 1; return 0 while it has no global address. */
+int wzApplicationGetIpv6Address(uint8_t *out)
+{
+	struct net_in6_addr *address = NULL;
+
+	if (addressed_interface_v6(&address) == NULL) {
+		return 0;
+	}
+	memcpy(out, address->s6_addr, 16);
+	return 1;
+}
+
+#endif /* CONFIG_NET_IPV6 */
+
+/* The interface the node's sessions run on: the one that holds the node's own address, of the
+ * family the image's Kconfig chose for it (CONFIG_WZ_NODE_IPV6, else IPv4). */
+static struct net_if *node_interface(void)
+{
+#if defined(CONFIG_WZ_NODE_IPV6) && defined(CONFIG_NET_IPV6)
+	struct net_in6_addr *address = NULL;
+
+	return addressed_interface_v6(&address);
+#elif defined(CONFIG_NET_IPV4)
+	struct net_in_addr *address = NULL;
+
+	return addressed_interface(&address);
+#else
+	return NULL;
+#endif
+}
+
 /* The node's zenoh id: the link-layer address of the interface its sessions
  * run on, which is unique per NIC and stable across boots. Writes at most `cap`
  * bytes and returns how many (1..=16), or 0 when there is no interface address
  * to derive one from. */
 size_t wzApplicationGetZid(uint8_t *out, size_t cap)
 {
-	struct net_in_addr *address = NULL;
-	struct net_if *iface = addressed_interface(&address);
+	struct net_if *iface = node_interface();
 	struct net_linkaddr *link;
 	size_t len;
 
@@ -506,6 +557,15 @@ int wz_net_recv_timed_out(void)
 	return errno == EAGAIN || errno == EWOULDBLOCK;
 }
 
+/* Whether the `socket` that just returned -1 did so because the stack has no socket of the
+ * family asked for: `net_context_get` answers EPFNOSUPPORT for an IPv6 socket on an image built
+ * without CONFIG_NET_IPV6 ("IPv6 disabled") and the socket layer EAFNOSUPPORT for a family it does
+ * not know. A dial that meets it is refused for good rather than retried. */
+int wz_net_socket_family_refused(void)
+{
+	return errno == EPFNOSUPPORT || errno == EAFNOSUPPORT;
+}
+
 #endif /* CONFIG_NET_SOCKETS */
 
-#endif /* CONFIG_NETWORKING && CONFIG_NET_IPV4 */
+#endif /* CONFIG_NETWORKING */

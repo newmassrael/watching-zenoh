@@ -11,8 +11,9 @@
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::ffi::CStr;
+use core::net::IpAddr;
 
-use wz::runtime_zephyr::net::{await_board_ipv4, board_zid};
+use wz::runtime_zephyr::net::{await_board_ip, board_zid};
 use wz::runtime_zephyr::ZephyrLinks;
 
 use crate::{NodeNet, BATCH_SIZE};
@@ -27,16 +28,17 @@ const RX_SLACK: usize = 64;
 
 pub struct ZephyrNet {
     links: Rc<ZephyrLinks>,
-    address: [u8; 4],
+    address: IpAddr,
     zid: Vec<u8>,
 }
 
 impl ZephyrNet {
-    /// Wait for the board's interface to hold an address and read the identity
-    /// from it. The error is what the console says when it does not.
+    /// Wait for the board's interface to hold an address of the family the image chose
+    /// (`CONFIG_WZ_NODE_IPV4` or `CONFIG_WZ_NODE_IPV6`) and read the identity from it. The error
+    /// is what the console says when it does not.
     pub fn bring_up() -> Result<Self, &'static CStr> {
-        let Some(address) = await_board_ipv4(ADDRESS_WAIT_MS) else {
-            return Err(c"wz: FAIL - the board's interface never got an IPv4 address");
+        let Some(address) = await_board_ip(ADDRESS_WAIT_MS) else {
+            return Err(c"wz: FAIL - the board's interface never got an address of its family");
         };
         let Some(zid) = board_zid() else {
             return Err(c"wz: FAIL - the board gave no identity to derive a zenoh id from");
@@ -63,7 +65,7 @@ impl NodeNet for ZephyrNet {
         self.links.clone()
     }
 
-    fn addresses(&self) -> Vec<[u8; 4]> {
+    fn addresses(&self) -> Vec<IpAddr> {
         alloc::vec![self.address]
     }
 

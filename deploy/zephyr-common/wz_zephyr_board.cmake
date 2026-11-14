@@ -129,6 +129,21 @@ function(wz_zephyr_rust_app)
     endif()
   endforeach()
 
+  # The IP families of the build (deploy/zephyr-common/Kconfig.wz): whether Zephyr's stack has
+  # IPv6, and whether the node's own address is IPv6. `wz-runtime-zephyr`'s build script reads both
+  # as cfgs, so the IPv6 calls and the board's IPv6 address hook are compiled only into an image
+  # whose stack has them.
+  if(CONFIG_NET_IPV6)
+    set(wz_net_ipv6 1)
+  else()
+    set(wz_net_ipv6 0)
+  endif()
+  if(CONFIG_WZ_NODE_IPV6)
+    set(wz_node_ipv6 1)
+  else()
+    set(wz_node_ipv6 0)
+  endif()
+
   # Always-run (ALL + no OUTPUT) so Rust source edits are picked up; cargo's own
   # incremental check keeps the no-change case cheap. BYPRODUCTS registers the
   # archive as this target's product so ninja can depend on it. The environment
@@ -139,6 +154,8 @@ function(wz_zephyr_rust_app)
     COMMAND ${CMAKE_COMMAND} -E env
             WZ_TICKS_PER_SEC=${CONFIG_SYS_CLOCK_TICKS_PER_SEC}
             WZ_CORE_CLOCK_HZ=${CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC}
+            WZ_NET_IPV6=${wz_net_ipv6}
+            WZ_NODE_IPV6=${wz_node_ipv6}
             ${wz_limit_env}
             ${WZ_CARGO_ENV}
             cargo build --release --target ${rust_target}

@@ -81,6 +81,41 @@ pub mod socket {
     pub const IP_ADD_MEMBERSHIP: c_int = 35;
     /// `ZSOCK_IP_DROP_MEMBERSHIP` (`include/zephyr/net/socket.h`): leave one.
     pub const IP_DROP_MEMBERSHIP: c_int = 36;
+    /// `ZSOCK_IP_MULTICAST_TTL`, at level [`IPPROTO_IP`]: the hop limit of the IPv4 multicast
+    /// datagrams a socket sends, an `int` the stack keeps as one byte.
+    pub const IP_MULTICAST_TTL: c_int = 33;
+    /// `NET_IPPROTO_IPV6` (`include/zephyr/net/net_ip.h`), the `level` of the IPv6 socket options
+    /// below. They are taken only on an image built with `CONFIG_NET_IPV6`.
+    pub const IPPROTO_IPV6: c_int = 41;
+    /// `ZSOCK_IPV6_MULTICAST_IF`, at level [`IPPROTO_IPV6`]: the index (an `int`, 1 to 255, or 0
+    /// for the stack's choice) of the interface a socket sends its IPv6 multicast datagrams out of.
+    pub const IPV6_MULTICAST_IF: c_int = 17;
+    /// `ZSOCK_IPV6_MULTICAST_HOPS`, at level [`IPPROTO_IPV6`]: the hop limit of the IPv6 multicast
+    /// datagrams a socket sends, an `int`.
+    pub const IPV6_MULTICAST_HOPS: c_int = 18;
+    /// `ZSOCK_IPV6_ADD_MEMBERSHIP` (`ZSOCK_IPV6_JOIN_GROUP`), at level [`IPPROTO_IPV6`]: join an
+    /// IPv6 multicast group with MLD. Its payload is an [`Ipv6Mreq`].
+    pub const IPV6_ADD_MEMBERSHIP: c_int = 20;
+    /// `ZSOCK_IPV6_DROP_MEMBERSHIP` (`ZSOCK_IPV6_LEAVE_GROUP`): leave one.
+    pub const IPV6_DROP_MEMBERSHIP: c_int = 21;
+
+    /// `struct net_ipv6_mreq` (`include/zephyr/net/net_ip.h`): the group's sixteen bytes and the
+    /// index of the interface, 0 for the socket's own or the default one. 20 bytes, 4-aligned (the
+    /// address is a union with a `uint32_t[4]` member).
+    ///
+    /// ⚠ The handler of both membership options refuses any `optlen` but this struct's size
+    /// (`subsys/net/lib/sockets/sockets_inet.c`, `ipv6_multicast_group`), and an unspecified
+    /// group. The membership, as the IPv4 one, belongs to the interface (`net_ipv6_mld_join`).
+    #[repr(C, align(4))]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Ipv6Mreq {
+        /// The group.
+        pub ipv6mr_multiaddr: [u8; 16],
+        /// The interface index, 0 for the socket's own or the default one.
+        pub ipv6mr_ifindex: c_int,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Ipv6Mreq>() == 20);
 
     /// `struct net_ip_mreqn` (`include/zephyr/net/net_ip.h`): the group, the
     /// local interface's address, and the interface index. 12 bytes.

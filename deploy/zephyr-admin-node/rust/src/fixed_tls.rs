@@ -79,13 +79,12 @@ pub fn identity(subject: &CStr) -> Result<&'static Identity, &'static CStr> {
 /// `tls/` links present `identity`.
 #[cfg(feature = "tls")]
 pub fn stack(
-    address: [u8; 4],
+    address: core::net::IpAddr,
     rx: &'static dyn ByteSource,
     tx: &'static dyn ByteSource,
     identity: &'static Identity,
 ) -> Stack {
-    IpStack::new(core::net::IpAddr::from(address), rx, tx, ZephyrTcpDial)
-        .with_tls(TlsDial::new(ZephyrTcpDial, identity))
+    IpStack::new(address, rx, tx, ZephyrTcpDial).with_tls(TlsDial::new(ZephyrTcpDial, identity))
 }
 
 /// The stack of a node at `address` that also LISTENS for `tls/`: the same stack, whose secure dial
@@ -93,12 +92,12 @@ pub fn stack(
 /// that has none).
 #[cfg(feature = "fixed-admin")]
 pub fn accepting_stack(
-    address: [u8; 4],
+    address: core::net::IpAddr,
     rx: &'static dyn ByteSource,
     tx: &'static dyn ByteSource,
     identity: &'static Identity,
     accept: AcceptBudget,
 ) -> Stack {
-    IpStack::new(core::net::IpAddr::from(address), rx, tx, ZephyrTcpDial)
+    IpStack::new(address, rx, tx, ZephyrTcpDial)
         .with_tls(TlsDial::new(ZephyrTcpDial, identity).with_accept(accept))
 }

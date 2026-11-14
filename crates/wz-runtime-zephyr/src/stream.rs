@@ -29,11 +29,11 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use zephyr_sys::socket::{
     accept, bind, connect, getpeername, getsockname, listen, poll, recv, send, setsockopt,
-    shutdown, socket, PollFd, SockLen, IPPROTO_TCP, POLLIN, SHUT_RDWR, SOCK_STREAM, SOL_SOCKET,
+    shutdown, PollFd, SockLen, IPPROTO_TCP, POLLIN, SHUT_RDWR, SOCK_STREAM, SOL_SOCKET,
     SO_REUSEADDR, TCP_NODELAY,
 };
 
-use crate::net::{family_of, name_of, RawAddr, ZephyrNetError};
+use crate::net::{name_of, open_socket, RawAddr, ZephyrNetError};
 
 /// One connected TCP socket on Zephyr's net stack, of the family of the address it connected to
 /// (an IPv6 one on an image built with `CONFIG_NET_IPV6`).
@@ -91,12 +91,7 @@ fn set_reuseaddr(fd: c_int) -> Result<(), ZephyrNetError> {
 
 /// A TCP socket of `at`'s family: the descriptor, or the stack's refusal.
 fn stream_socket(at: &SocketAddr) -> Result<c_int, ZephyrNetError> {
-    // SAFETY: plain FFI with value arguments.
-    let fd = unsafe { socket(family_of(at), SOCK_STREAM, IPPROTO_TCP) };
-    if fd < 0 {
-        return Err(ZephyrNetError::Socket(fd));
-    }
-    Ok(fd)
+    open_socket(at, SOCK_STREAM, IPPROTO_TCP)
 }
 
 impl ZephyrTcpSocket {
@@ -248,11 +243,12 @@ impl StreamDial for ZephyrTcpDial {
 
     fn dial(&self, to: SocketAddr) -> Result<ZephyrTcpSocket, LinkOpenError> {
         ZephyrTcpSocket::connect(to).map_err(|e| match e {
-            // The stack had no socket to give, which is also what a family the image was built
-            // without reads as (`errno` is out of reach): worth a later try, as a full table is.
+            // The stack had no socket to give: worth a later try, as a full table is.
             ZephyrNetError::Socket(_) => LinkOpenError::Exhausted,
-            // An end the stack cannot name stays unnamable.
-            ZephyrNetError::ScopeTooWide(_) => LinkOpenError::Unsupported,
+            // A family the image was built without, and an end the stack cannot name, stay so.
+            ZephyrNetError::NoFamily | ZephyrNetError::ScopeTooWide(_) => {
+                LinkOpenError::Unsupported
+            }
             _ => LinkOpenError::Refused,
         })
     }

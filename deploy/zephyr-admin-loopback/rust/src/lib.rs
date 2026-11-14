@@ -29,7 +29,7 @@ use core::cell::{Cell, RefCell, UnsafeCell};
 use core::ops::ControlFlow;
 
 use wz::runtime_zephyr::glue::{log, log_parts, stack_usage, yield_us};
-use wz::runtime_zephyr::net::{await_board_ipv4, ZephyrNetError, ZephyrUdpSocket};
+use wz::runtime_zephyr::net::{await_board_ip, ZephyrNetError, ZephyrUdpSocket};
 use wz::runtime_zephyr::stream::{ZephyrTcpDial, ZephyrTcpListener, ZephyrTcpSocket};
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
 use wz_runtime_coop::ip_stack::{IpDriver, IpStack, IpTlsAcceptor};
@@ -834,7 +834,7 @@ pub extern "C" fn wz_app_main() -> i32 {
         log(c"wz: FAIL - the board's entropy source could not fill a signing key");
         return 2;
     }
-    let Some(address) = await_board_ipv4(30_000).or(Some(LOOPBACK)) else {
+    let Some(address) = await_board_ip(30_000).or(Some(core::net::IpAddr::from(LOOPBACK))) else {
         return 1;
     };
     let _ = address;

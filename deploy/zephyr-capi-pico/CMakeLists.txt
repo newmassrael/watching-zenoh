@@ -101,7 +101,7 @@ wz_zephyr_rust_app(
   UNDEFINED
     socket bind getsockname sendto recvfrom poll close
     connect send recv getpeername shutdown setsockopt
-    wz_net_set_rcvtimeo_ms wz_net_recv_timed_out
+    wz_net_set_rcvtimeo_ms wz_net_recv_timed_out wz_net_socket_family_refused
     wz_board_eth_pins_init wz_board_entropy_fill
     wz_zeth_open wz_zeth_transmit wz_zeth_receive wz_zeth_poll_link wz_zeth_link_up
 )

@@ -60,8 +60,12 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
   # two board hooks that read the interface (wz_board_hooks.c).
   set(backend_undefined
     socket bind getsockname sendto recvfrom poll close
-    wz_net_set_rcvtimeo_ms wz_net_recv_timed_out
+    wz_net_set_rcvtimeo_ms wz_net_recv_timed_out wz_net_socket_family_refused
     wzApplicationGetIpv4Address wzApplicationGetZid)
+  # The board's IPv6 address, which the node reads where its stack has IPv6.
+  if(CONFIG_NET_IPV6)
+    list(APPEND backend_undefined wzApplicationGetIpv6Address)
+  endif()
 
   # The session reads each datagram where the link holds it (CONFIG_WZ_RX_IN_PLACE).
   if(CONFIG_WZ_RX_IN_PLACE)
