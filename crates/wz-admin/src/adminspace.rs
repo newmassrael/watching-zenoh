@@ -256,6 +256,17 @@ pub trait SessionAdminRow {
         weight: Option<AdminLinkWeight>,
     ) -> AdminSession;
 
+    /// This session as the row a node that holds it as one of its own transports
+    /// reports: filed under the zid and role the peer's handshake named, with no
+    /// link weight (a node holds one only in a router graph), or `None` while no
+    /// peer has been named, as upstream lists only transports that exist.
+    ///
+    /// The one place that reading is written, for every host that lists its
+    /// sessions this way: a Session-hosted admin space, which holds one, and an API
+    /// session over a registry of faces, which holds one per face.
+    #[cfg(feature = "adminspace-core")]
+    fn admin_session_of_peer(&self) -> Option<AdminSession>;
+
     /// `admin_session` lent instead of built (fixed-memory step S9c): this session as
     /// one `sessions[]` row, handed to `f` as a BORROWED row ([`AdminSessionRef`]),
     /// with nothing allocated. `None` while the session is not established, as
@@ -308,6 +319,20 @@ where
             weight,
             region: Some(self.admin_region()),
         }
+    }
+
+    #[cfg(feature = "adminspace-core")]
+    fn admin_session_of_peer(&self) -> Option<AdminSession> {
+        let peer = self.peer_zid()?;
+        let whatami = self
+            .peer_whatami_wire()
+            .and_then(wz_session_core::WhatAmI::from_wire)
+            .map(|role| String::from(role.to_str()));
+        Some(self.admin_session(
+            wz_session_core::zid_hex::zid_to_zenoh_hex(&peer),
+            whatami,
+            None,
+        ))
     }
 
     fn with_admin_session<X>(&self, f: impl FnOnce(AdminSessionRef<'_>) -> X) -> Option<X> {
@@ -1147,6 +1172,46 @@ pub fn write_admin_leg_key<W: TextOut + ?Sized>(
     out.push_str(tail);
 }
 
+/// The key of one region's graph, `@/<zid>/<whatami>/linkstate/<region>`, with
+/// the region as upstream's `Region` displays it (`north`, `south:<id>:<mode>`):
+/// upstream replies each region under `prefix / region`
+/// (`zenoh/src/net/runtime/adminspace.rs` @
+/// `let reply_key = prefix / &KeyExpr::try_from(format!("{region}")).unwrap();`).
+pub fn write_admin_linkstate_key<W: TextOut + ?Sized>(
+    out: &mut W,
+    zid_hex: &str,
+    whatami: &str,
+    region: &str,
+) {
+    write_admin_leg_key(out, zid_hex, whatami, "linkstate/");
+    out.push_str(region);
+}
+
+/// The text of a graph that holds a node and the nodes it holds a link to, each a
+/// labelled vertex in the order given and no edge between them: what a peer that
+/// does not gossip past its neighbours answers for its `north` region, the pin's
+/// single-hop `Gossip` graph. Each label is a zid in zenoh's hex form.
+///
+/// The one renderer of that graph, for a node's tables and for a Session, which
+/// holds one link.
+#[cfg(feature = "adminspace-router-linkstate")]
+pub fn single_hop_graph_text<'a>(labels: impl IntoIterator<Item = &'a str>) -> String {
+    use core::fmt::Write as _;
+    let mut text = String::from("graph {\n");
+    for (index, label) in labels.into_iter().enumerate() {
+        // Writing into a `String` cannot fail.
+        let _ = writeln!(text, "    {index} [ label = \"{label}\" ]");
+    }
+    text.push_str("}\n");
+    text
+}
+
+/// Whether the admin queryable is declared complete: not, in every mode, as
+/// upstream declares it with the default queryable info
+/// (`zenoh/src/net/runtime/adminspace.rs` @ `ext_info: QueryableInfoType::DEFAULT,`,
+/// whose `complete` is `false`). Every host declares it with this value.
+pub const ADMIN_QUERYABLE_COMPLETE: bool = false;
+
 /// The built-in admin queryable keyexpr `@/<zid>/<whatami>/**` — zenoh declares
 /// its admin queryable on `[root_key, "/**"].concat()` (`adminspace.rs:341`), so
 /// any admin GET under the node prefix routes to it.
@@ -1359,10 +1424,11 @@ impl AdminLegEncoding {
 ///
 /// The `linkstate` / `route` legs live in [`answer_router_admin_query`], a
 /// different function with a different host. They are declared here anyway,
-/// predicated on `whatami == "router"`, because the router hat calls BOTH
-/// answerers for one GET (see the router-hat adminspace integration test) and a
-/// consumer sees one surface, not two. A peer never serves them, which is what the
-/// role predicate encodes.
+/// because a host that holds a graph calls BOTH answerers for one GET (see the
+/// router-hat adminspace integration test) and a consumer sees one surface, not
+/// two. The role predicates are upstream's: `linkstate/<region>` for a peer and
+/// a router, whose hats hold a graph, and `route/successor/**` for a router
+/// alone.
 ///
 /// S9b — the list is produced by [`visit_admin_legs`], which writes each key into
 /// a buffer its caller supplies and hands it over; this is that visitor called over
@@ -1468,14 +1534,22 @@ pub fn visit_admin_legs<K: AdminBuffer>(
     leg(key, visit, Json, Single, |k| {
         write_admin_leg_key(k, zid_hex, whatami, "wz/surface")
     })?;
+    // `linkstate/<region>`: one leg per region of a peer or a router hat, so a
+    // peer lists it as a router does (`fn linkstate_data`, which filters the hats
+    // on `is_peer() || is_router()`). The successor routes are the router hats'
+    // alone (`fn route_successor`).
+    #[cfg(feature = "adminspace-router-linkstate")]
+    if whatami == "router" || whatami == "peer" {
+        leg(
+            key,
+            visit,
+            AdminLegEncoding::Text,
+            AdminLegCardinality::PerItem,
+            |k| write_admin_linkstate_key(k, zid_hex, whatami, "*"),
+        )?;
+    }
     #[cfg(feature = "adminspace-router-linkstate")]
     if whatami == "router" {
-        leg(key, visit, AdminLegEncoding::Text, Single, |k| {
-            write_admin_leg_key(k, zid_hex, whatami, "linkstate/routers")
-        })?;
-        leg(key, visit, AdminLegEncoding::Text, Single, |k| {
-            write_admin_leg_key(k, zid_hex, whatami, "linkstate/peers")
-        })?;
         leg(key, visit, Json, AdminLegCardinality::PerItem, |k| {
             write_admin_leg_key(k, zid_hex, whatami, "route/successor/**")
         })?;
@@ -3039,25 +3113,11 @@ pub fn answer_admin_query(
     .outcome
 }
 
-/// The ROUTER-tier admin `linkstate/routers` key `@/<zid>/<whatami>/linkstate/routers`
-/// (zenoh `zenoh/src/net/runtime/adminspace.rs` @ `fn linkstate_data`).
-/// Router-only in zenoh; the wz router host
-/// (whatami `"router"`) is the sole caller.
+/// The key of one region's graph, [`write_admin_linkstate_key`] as a `String`.
 #[cfg(all(test, feature = "adminspace-router-linkstate"))]
-fn admin_linkstate_routers_key(zid_hex: &str, whatami: &str) -> String {
+fn admin_linkstate_key(zid_hex: &str, whatami: &str, region: &str) -> String {
     let mut s = String::new();
-    write_admin_leg_key(&mut s, zid_hex, whatami, "linkstate/routers");
-    s
-}
-
-/// The admin `linkstate/peers` key `@/<zid>/<whatami>/linkstate/peers` (zenoh
-/// `adminspace.rs:181`). zenoh registers this for any non-Client linkstate node
-/// (a Router AND a plain linkstate peer); the wz router serves it from its
-/// peer-tier `linkstatepeers_net`. Peer-host serving is a NAMED deferral.
-#[cfg(all(test, feature = "adminspace-router-linkstate"))]
-fn admin_linkstate_peers_key(zid_hex: &str, whatami: &str) -> String {
-    let mut s = String::new();
-    write_admin_leg_key(&mut s, zid_hex, whatami, "linkstate/peers");
+    write_admin_linkstate_key(&mut s, zid_hex, whatami, region);
     s
 }
 
@@ -3107,16 +3167,19 @@ fn write_route_successor_entry_suffix<W: TextOut + ?Sized>(
 pub struct AdminRouterCtx<'a> {
     /// This node's zid in zenoh hex form.
     pub zid_hex: &'a str,
-    /// This node's role string — `"router"` for the router host.
+    /// This node's role string: `"router"` or `"peer"`, the two whose hats hold
+    /// a graph.
     pub whatami: &'a str,
-    /// The router-tier graph DOT (zenoh `info(Router)` = `routers_net.dot()`),
-    /// `None` to omit the `linkstate/routers` leg.
-    pub routers_dot: Option<&'a str>,
-    /// The peer-tier graph DOT (zenoh `info(Peer)` = `linkstatepeers_net.dot()`),
-    /// `None` to omit the `linkstate/peers` leg.
-    pub peers_dot: Option<&'a str>,
+    /// `(region, graph)` for each region of the node's peer and router hats, the
+    /// region named as upstream's `Region` displays it (`north`,
+    /// `south:<id>:<mode>`): one `linkstate/<region>` leg each, the graph as
+    /// text (`zenoh/src/net/runtime/adminspace.rs` @
+    /// `fn linkstate_data(prefix: &keyexpr, context: &AdminContext, query: Query) {`).
+    /// Empty for a node that holds no graph, which answers no `linkstate` leg.
+    pub linkstate: &'a [(String, String)],
     /// Every `(source, destination, successor)` triple (all zenoh-hex), the
-    /// enumeration zenoh's `route_successors()` produces from `routers_net`.
+    /// enumeration zenoh's `route_successors()` produces from the router hats;
+    /// empty for a node that is no router.
     pub successors: &'a [(String, String, String)],
     /// The admin GET permission (zenoh `permissions.read`): `false` answers
     /// nothing, the same gate [`answer_admin_query`] applies.
@@ -3127,8 +3190,8 @@ pub struct AdminRouterCtx<'a> {
 /// ROUTER-tier admin answerer, the router-legs sibling of [`answer_admin_query`]:
 /// fires every router leg whose key INTERSECTS the GET keyexpr (zenoh's
 /// per-handler `if key_expr.intersects(key)` dispatch, `adminspace.rs:499-503`):
-/// `linkstate/routers` + `linkstate/peers` (TEXT_PLAIN petgraph DOT, zenoh
-/// `:754,:774`), and one `route/successor/src/<src>/dst/<dst>` reply per triple
+/// one `linkstate/<region>` reply per region the host passed (TEXT_PLAIN graph,
+/// upstream's `fn linkstate_data`), and one `route/successor/src/<src>/dst/<dst>` reply per triple
 /// whose entry key intersects the GET (APPLICATION_JSON, the successor zid as a
 /// JSON string `"<hex>"`, zenoh `:884`). A narrowed `/src/X/dst/Y` GET intersects
 /// only its one entry, so the enumerate+intersect path subsumes zenoh's `route_
@@ -3250,21 +3313,13 @@ pub fn answer_router_admin_query_in<K: AdminBuffer, B: AdminBuffer>(
     {
         let (zid_hex, whatami) = (ctx.zid_hex, ctx.whatami);
 
-        // `linkstate/routers` (`@/<zid>/router/linkstate/routers`, text/plain DOT).
-        if let Some(dot) = ctx.routers_dot {
+        // `linkstate/<region>` (`@/<zid>/<whatami>/linkstate/north`, text/plain),
+        // one leg for each region whose graph the host passed.
+        for (region, graph) in ctx.linkstate {
             run.serve_text(
                 AdminLegEncoding::Text,
-                |k| write_admin_leg_key(k, zid_hex, whatami, "linkstate/routers"),
-                Ok(dot),
-            );
-        }
-
-        // `linkstate/peers` (`@/<zid>/router/linkstate/peers`, text/plain DOT).
-        if let Some(dot) = ctx.peers_dot {
-            run.serve_text(
-                AdminLegEncoding::Text,
-                |k| write_admin_leg_key(k, zid_hex, whatami, "linkstate/peers"),
-                Ok(dot),
+                |k| write_admin_linkstate_key(k, zid_hex, whatami, region),
+                Ok(graph.as_str()),
             );
         }
 
@@ -6271,6 +6326,23 @@ mod tests {
             &fixture_plugins(),
             "{}",
         );
+        // A peer that holds a graph answers its region through the router-tier
+        // answerer, as every host that holds one calls it beside the first.
+        #[cfg(feature = "adminspace-router-linkstate")]
+        {
+            let regions = [(String::from("north"), String::from("graph {\n}\n"))];
+            let _ = answer_router_admin_query(
+                &view,
+                &mut out,
+                &AdminRouterCtx {
+                    zid_hex: "a1b2",
+                    whatami: "peer",
+                    linkstate: &regions,
+                    successors: &[],
+                    read: true,
+                },
+            );
+        }
         assert!(
             !out.replies.is_empty(),
             "the wildcard GET fired no handler at all — the population this test \
@@ -6991,6 +7063,101 @@ mod tests {
         );
     }
 
+    /// One answerer for every role: the node's role is the second chunk of
+    /// every key it answers, the root document is the same object whatever the
+    /// role, and a GET addressed to the same zid under another role meets
+    /// nothing. Upstream roots the whole space at the runtime's role in every
+    /// mode (`zenoh/src/net/runtime/adminspace.rs` @
+    /// `let root_key: OwnedKeyExpr = format!("@/{zid_str}/{whatami_str}")`), and
+    /// its `local_data` names no role at the top level, so a client and a router
+    /// with the same facts answer the same bytes under different keys.
+    #[test]
+    fn every_role_answers_its_own_root_with_one_document() {
+        #[cfg(not(feature = "adminspace-plugins-handlers"))]
+        let plugins_tok = "null";
+        #[cfg(feature = "adminspace-plugins-handlers")]
+        let plugins_tok = "{}";
+        let document = format!(
+            r#"{{"locators":[],"metadata":null,"plugins":{plugins_tok},"sessions":[],"version":"0.1.0","zid":"a1b2"}}"#
+        );
+        let roles = ["client", "peer", "router"];
+        for whatami in roles {
+            let ctx = AdminAnswerCtx {
+                whatami,
+                ..admin_ctx(true)
+            };
+            let root = format!("@/a1b2/{whatami}");
+            let subtree = format!("{root}/**");
+            let view = admin_view(&subtree);
+            let mut out = RecordingReply::default();
+            let _ = answer_admin_query(&view, &mut out, &ctx, &[], &[], &[], "{}");
+            let body = out
+                .replies
+                .iter()
+                .find(|(k, _)| *k == root)
+                .map(|(_, p)| String::from_utf8_lossy(p).into_owned())
+                .unwrap_or_else(|| panic!("{whatami}: no reply at {root}: {:?}", out.replies));
+            assert_eq!(body, document, "{whatami}: the root document");
+            let own_prefix = format!("{root}/");
+            for (key, _) in &out.replies {
+                assert!(
+                    *key == root || key.starts_with(&own_prefix),
+                    "{whatami}: {key} is outside its own root"
+                );
+            }
+            for other in roles.iter().filter(|r| **r != whatami) {
+                let foreign = format!("@/a1b2/{other}/**");
+                let view = admin_view(&foreign);
+                let mut out = RecordingReply::default();
+                let _ = answer_admin_query(&view, &mut out, &ctx, &[], &[], &[], "{}");
+                assert!(
+                    out.replies.is_empty(),
+                    "{whatami}: a GET for the {other} role answered {:?}",
+                    out.replies
+                );
+            }
+        }
+    }
+
+    /// The manifest of a client and of a router list their own keys, and only
+    /// the router lists the router-tier legs: upstream's client hat holds no
+    /// link-state graph and no successor table, so its `linkstate` and
+    /// `route/successor` handlers find no hat to answer from
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `hat.mode().is_router()`).
+    #[test]
+    fn a_client_manifest_lists_its_own_keys_and_no_router_leg() {
+        let client = admin_legs("a1b2", "client");
+        assert!(!client.is_empty(), "a client answers at least its root");
+        for leg in &client {
+            assert!(
+                leg.key == "@/a1b2/client" || leg.key.starts_with("@/a1b2/client/"),
+                "{} is outside the client's root",
+                leg.key
+            );
+            assert!(
+                !leg.key.contains("/linkstate/") && !leg.key.contains("/route/"),
+                "a client lists a router-tier leg: {}",
+                leg.key
+            );
+        }
+        #[cfg(feature = "adminspace-router-linkstate")]
+        for role in ["router", "peer"] {
+            assert!(
+                admin_legs("a1b2", role)
+                    .iter()
+                    .any(|leg| leg.key == format!("@/a1b2/{role}/linkstate/*")),
+                "the control: a {role} lists its link-state leg, one item per region"
+            );
+        }
+        #[cfg(feature = "adminspace-router-linkstate")]
+        assert!(
+            !admin_legs("a1b2", "peer")
+                .iter()
+                .any(|leg| leg.key.contains("/route/")),
+            "a peer holds no router hat, so it lists no successor route"
+        );
+    }
+
     #[cfg(feature = "adminspace-introspection-handlers")]
     fn sub_decl(keyexpr: &str, peers: &[&str]) -> AdminDeclaration {
         AdminDeclaration {
@@ -7394,33 +7561,41 @@ mod tests {
     #[cfg(feature = "adminspace-router-linkstate")]
     fn router_ctx<'a>(
         read: bool,
-        routers_dot: Option<&'a str>,
-        peers_dot: Option<&'a str>,
+        linkstate: &'a [(String, String)],
         successors: &'a [(String, String, String)],
     ) -> AdminRouterCtx<'a> {
         AdminRouterCtx {
             zid_hex: "a1b2",
             whatami: "router",
-            routers_dot,
-            peers_dot,
+            linkstate,
             successors,
             read,
         }
     }
 
+    /// A router's two regions, named as upstream's `Region` displays them: its
+    /// routers in `north`, its peers in the default peer subregion.
+    #[cfg(feature = "adminspace-router-linkstate")]
+    fn router_regions() -> Vec<(String, String)> {
+        vec![
+            (String::from("north"), String::from("graph { R }")),
+            (String::from("south:0:peer"), String::from("graph { P }")),
+        ]
+    }
+
     #[cfg(feature = "adminspace-router-linkstate")]
     #[test]
     fn router_admin_keys_match_zenoh_form() {
-        // zenoh registers `.../linkstate/routers` (adminspace.rs:171),
-        // `.../linkstate/peers` (:181), and each successor under
-        // `.../route/successor/src/<src>/dst/<dst>` (:909-913).
+        // Upstream replies each region's graph under `linkstate/<region>`
+        // (`fn linkstate_data`) and each successor under
+        // `.../route/successor/src/<src>/dst/<dst>` (`fn route_successor`).
         assert_eq!(
-            admin_linkstate_routers_key("a1b2", "router"),
-            "@/a1b2/router/linkstate/routers"
+            admin_linkstate_key("a1b2", "router", "north"),
+            "@/a1b2/router/linkstate/north"
         );
         assert_eq!(
-            admin_linkstate_peers_key("a1b2", "router"),
-            "@/a1b2/router/linkstate/peers"
+            admin_linkstate_key("a1b2", "peer", "south:0:peer"),
+            "@/a1b2/peer/linkstate/south:0:peer"
         );
         assert_eq!(
             admin_route_successor_prefix("a1b2", "router"),
@@ -7434,26 +7609,46 @@ mod tests {
 
     #[cfg(feature = "adminspace-router-linkstate")]
     #[test]
-    fn router_admin_linkstate_get_replies_both_dots_text_plain() {
-        // A `@/a1b2/router/linkstate/**` GET replies BOTH graphs as their DOT
-        // bodies (passthrough — the answerer never re-renders; the host injected
-        // the zenoh-hex labels).
+    fn router_admin_linkstate_get_replies_each_region_text_plain() {
+        // A `@/a1b2/router/linkstate/**` GET replies every region's graph as the
+        // host rendered it (passthrough: the answerer never re-renders).
+        let regions = router_regions();
         let view = admin_view("@/a1b2/router/linkstate/**");
         let mut out = RecordingReply::default();
-        let _ = answer_router_admin_query(
-            &view,
-            &mut out,
-            &router_ctx(true, Some("graph { R }"), Some("graph { P }"), &[]),
+        let _ = answer_router_admin_query(&view, &mut out, &router_ctx(true, &regions, &[]));
+        assert_eq!(out.replies.len(), 2, "one reply per region");
+        assert!(out
+            .replies
+            .iter()
+            .any(|(k, v)| k == "@/a1b2/router/linkstate/north" && v == b"graph { R }"));
+        assert!(out
+            .replies
+            .iter()
+            .any(|(k, v)| k == "@/a1b2/router/linkstate/south:0:peer" && v == b"graph { P }"));
+    }
+
+    /// A peer answers the region of its own hat under its own role, as upstream's
+    /// peer does, and no successor route.
+    #[cfg(feature = "adminspace-router-linkstate")]
+    #[test]
+    fn a_peer_answers_the_linkstate_of_its_region() {
+        let regions = vec![(String::from("north"), String::from("graph { N }"))];
+        let ctx = AdminRouterCtx {
+            zid_hex: "a1b2",
+            whatami: "peer",
+            linkstate: &regions,
+            successors: &[],
+            read: true,
+        };
+        let mut out = RecordingReply::default();
+        let _ = answer_router_admin_query(&admin_view("@/a1b2/peer/**"), &mut out, &ctx);
+        assert_eq!(
+            out.replies,
+            vec![(
+                String::from("@/a1b2/peer/linkstate/north"),
+                b"graph { N }".to_vec()
+            )]
         );
-        assert_eq!(out.replies.len(), 2, "routers + peers DOT");
-        assert!(out
-            .replies
-            .iter()
-            .any(|(k, v)| k == "@/a1b2/router/linkstate/routers" && v == b"graph { R }"));
-        assert!(out
-            .replies
-            .iter()
-            .any(|(k, v)| k == "@/a1b2/router/linkstate/peers" && v == b"graph { P }"));
     }
 
     fn a_capacity_report() -> wz_session_core::capacity::CapacityReport {
@@ -7613,18 +7808,14 @@ mod tests {
 
     #[cfg(feature = "adminspace-router-linkstate")]
     #[test]
-    fn router_admin_linkstate_routers_get_scopes_to_one_leg() {
-        // A narrowed GET on just `linkstate/routers` fires only that leg (the
-        // peers key does not intersect a 5-chunk `.../linkstate/routers` GET).
-        let view = admin_view("@/a1b2/router/linkstate/routers");
+    fn router_admin_linkstate_region_get_scopes_to_one_leg() {
+        // A GET that names one region fires only that region's leg.
+        let regions = router_regions();
+        let view = admin_view("@/a1b2/router/linkstate/north");
         let mut out = RecordingReply::default();
-        let _ = answer_router_admin_query(
-            &view,
-            &mut out,
-            &router_ctx(true, Some("graph { R }"), Some("graph { P }"), &[]),
-        );
+        let _ = answer_router_admin_query(&view, &mut out, &router_ctx(true, &regions, &[]));
         assert_eq!(out.replies.len(), 1);
-        assert_eq!(out.replies[0].0, "@/a1b2/router/linkstate/routers");
+        assert_eq!(out.replies[0].0, "@/a1b2/router/linkstate/north");
     }
 
     #[cfg(feature = "adminspace-router-linkstate")]
@@ -7640,7 +7831,7 @@ mod tests {
         let _ = answer_router_admin_query(
             &admin_view("@/a1b2/router/route/successor/**"),
             &mut out,
-            &router_ctx(true, None, None, &succ),
+            &router_ctx(true, &[], &succ),
         );
         assert_eq!(out.replies.len(), 2, "one reply per successor triple");
         assert!(out.replies.iter().any(|(k, v)| k
@@ -7656,7 +7847,7 @@ mod tests {
         let _ = answer_router_admin_query(
             &admin_view("@/a1b2/router/route/successor/src/201/dst/c3d4"),
             &mut out2,
-            &router_ctx(true, None, None, &succ),
+            &router_ctx(true, &[], &succ),
         );
         assert_eq!(out2.replies.len(), 1);
         assert_eq!(
@@ -7675,27 +7866,28 @@ mod tests {
         // read=false gates ALL router legs (the deny still emits the Final at the
         // dispatch SSOT).
         let succ = vec![("201".to_string(), "c3d4".to_string(), "aaaa".to_string())];
+        let regions = router_regions();
         let mut out = RecordingReply::default();
         let outcome = answer_router_admin_query(
             &admin_view("@/a1b2/router/linkstate/**"),
             &mut out,
-            &router_ctx(false, Some("graph { R }"), Some("graph { P }"), &succ),
+            &router_ctx(false, &regions, &succ),
         );
         assert!(out.replies.is_empty(), "read=false yields no replies");
         assert_eq!(outcome, AdminAnswerOutcome::DeniedRead);
-        // A `None` DOT leg is omitted even on a matching GET (the leg absent, not
-        // an empty body). The outcome distinguishes this from the deny above:
-        // BOTH answer nothing, and only one of them is a permission denial the
-        // host must report.
+        // A node that holds no graph passes no region and answers no leg, even on
+        // a matching GET (the leg absent, not an empty body). The outcome
+        // distinguishes this from the deny above: BOTH answer nothing, and only
+        // one of them is a permission denial the host must report.
         let mut out2 = RecordingReply::default();
         let outcome2 = answer_router_admin_query(
             &admin_view("@/a1b2/router/linkstate/**"),
             &mut out2,
-            &router_ctx(true, None, None, &[]),
+            &router_ctx(true, &[], &[]),
         );
         assert!(
             out2.replies.is_empty(),
-            "None routers_dot/peers_dot omit their legs"
+            "no region passed, no linkstate leg answered"
         );
         assert_eq!(outcome2, AdminAnswerOutcome::Served);
     }

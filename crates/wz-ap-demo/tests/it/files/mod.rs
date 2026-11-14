@@ -7,6 +7,7 @@
 mod check_sessions_binary;
 mod check_topology_binary;
 mod client_connect_phase_binary;
+mod client_node_binary;
 mod config_listen_endpoints_binary;
 mod exclusive_transport_modes_binary;
 mod mesh_offer_multilink_binary;

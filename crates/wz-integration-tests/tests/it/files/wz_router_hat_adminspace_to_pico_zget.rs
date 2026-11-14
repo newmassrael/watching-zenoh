@@ -8,8 +8,9 @@
 //! ## The atom, and why two routers
 //!
 //! `adminspace-router-linkstate`'s `F=` is three legs on the router node
-//! (`@/<zid>/router/**`): `linkstate/routers` + `linkstate/peers` (GraphViz DOT of
-//! the two link-state nets) and `route/successor/**` (the computed
+//! (`@/<zid>/router/**`): `linkstate/north` + `linkstate/south:0:peer` (GraphViz DOT
+//! of the two link-state nets, each under its region's name as upstream displays
+//! it) and `route/successor/**` (the computed
 //! `(src, dst) -> next-hop` table). The successor table is rendered from the
 //! ROUTERS net (zenoh `zenoh/src/net/routing/hat/router/mod.rs` @ `fn net`), so
 //! it is empty on a lone router or
@@ -22,7 +23,7 @@
 //! ## What pico decodes, and why it is not a static echo
 //!
 //! One GET at `@/<R1_zid>/router/**` returns, all decoded by pico's C stack:
-//! - `linkstate/routers` — `graph { ... }` naming BOTH router zids as nodes with a
+//! - `linkstate/north` — `graph { ... }` naming BOTH router zids as nodes with a
 //!   weighted edge between them. The test pins R1's own zid AND R2's zid as node
 //!   labels, so the graph must reflect the live federation, not a template.
 //! - `route/successor/**` — at least one `.../src/<s>/dst/<d>: "<next-hop>"` entry
@@ -179,16 +180,16 @@ fn wz_router_adminspace_decoded_by_pico_z_get() {
     let _ = r2.child_mut().kill();
     let _ = r2.child_mut().wait();
 
-    // ── linkstate/routers: the DOT graph naming both routers ────────
+    // ── linkstate/north: the routers' DOT graph naming both routers ────────
     let routers_line = out
         .lines()
-        .skip_while(|l| !l.contains(&format!("('{root}/linkstate/routers':")))
+        .skip_while(|l| !l.contains(&format!("('{root}/linkstate/north':")))
         .take(6)
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
         !routers_line.is_empty(),
-        "pico decoded no linkstate/routers leg\n--- z_get ---\n{out}"
+        "pico decoded no linkstate/north leg\n--- z_get ---\n{out}"
     );
     assert!(
         routers_line.contains(&r1_zid) && routers_line.contains(&r2_zid),

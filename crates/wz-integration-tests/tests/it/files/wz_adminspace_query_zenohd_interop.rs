@@ -24,7 +24,7 @@
 //! `target/zenohd/zenohd` on a loopback listener: `@/**` returns
 //! `@/<zid>/router` carrying the router's zid, its locators, its live sessions
 //! with each peer's `whatami`, and its version — plus
-//! `@/<zid>/router/linkstate/routers`, which is the router graph.
+//! `@/<zid>/router/linkstate/north`, which is the router graph.
 //!
 //! # What this does NOT prove
 //!

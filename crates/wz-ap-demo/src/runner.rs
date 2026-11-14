@@ -3024,6 +3024,10 @@ pub(crate) async fn run_demo(
     // `--scout-listen` on the `--connect` client: the socket the
     // client's Scout responder joins. `None` is the run without one.
     #[cfg(feature = "scouting-responder")] scout_listen: Option<crate::args::ScoutSocketArgs>,
+    // `--config-queryable` on a single-session run: the admin space this
+    // session hosts. `main` refuses it in a build that compiles no host, so a
+    // `Some` reaches here only where one exists.
+    admin_host: Option<crate::args::SessionAdminSpec>,
 ) -> io::Result<()> {
     let QueryRoleSpec {
         queryable: queryable_spec,
@@ -3453,6 +3457,15 @@ pub(crate) async fn run_demo(
         matching_poll_on,
         matching_listener_on,
     );
+
+    // §5.23 `adminspace-core` — the admin space, declared before the drive loop
+    // serves a frame for the reason the handles above are: a GET routed here
+    // the moment the router learns the queryable must find it registered. Held
+    // to the end of this scope with the handles.
+    #[cfg(feature = "adminspace-core")]
+    let _admin_space = admin_host.and_then(|spec| host_session_adminspace(&session, spec));
+    #[cfg(not(feature = "adminspace-core"))]
+    let _ = admin_host;
 
     // R311ot / R311oy — declare the outbound liveliness TOKEN SYNCHRONOUSLY in
     // this pre-drive registration phase, BEFORE `drive_session_until_terminal`
@@ -4192,6 +4205,13 @@ fn host_session_lifecycle<D, I, M, P, E>(
 
 #[cfg(feature = "routing-peer")]
 pub(crate) struct PeerOpts {
+    /// Whether the node announces itself a client (`--client-node`) rather than a peer
+    /// (`--peer`): a client that listens as well as it dials, as upstream's client binds its
+    /// listen endpoints before it connects to its router
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `async fn start_client(&self) -> ZResult<()> {`).
+    /// The mesh is the peer's, told to treat what it dials north as a router that holds it for a
+    /// client, as the node engine runs a client node.
+    pub as_client: bool,
     pub publish_key: Option<String>,
     pub subscribe_key: Option<String>,
     pub unsubscribe_after_data: bool,
@@ -4533,7 +4553,11 @@ async fn run_peer_until(
     let listeners = bind_all_endpoints(
         listen,
         &accept_cfg,
-        "peer",
+        if opts.as_client {
+            "client-node"
+        } else {
+            "peer"
+        },
         opts.listen_phase,
         opts.listen_retry,
     )
@@ -4574,7 +4598,13 @@ async fn run_peer_until(
     // R311rc (c3d-4) — a DISTINCT zid per peer (the mesh routing graph keys on it,
     // so two peers MUST NOT share one). `node_zid` above is the configured
     // `--zid` or a random one (R2883), as a zenoh node's is.
-    let params = demo_session_init_params(NodeKind::Peer, node_zid, &tuning)?;
+    // The role the node announces, and the session kind that announces it.
+    let (role, kind) = if opts.as_client {
+        (WhatAmI::Client, NodeKind::ClientNode)
+    } else {
+        (WhatAmI::Peer, NodeKind::Peer)
+    };
+    let params = demo_session_init_params(kind, node_zid, &tuning)?;
 
     // R311rb/rf — the peer maintains a linkstate-peer routing graph: each held
     // face feeds the topology graph (the `RouterForwarder`'s north net), which floods its
@@ -4597,15 +4627,25 @@ async fn run_peer_until(
     // Item 751, step 7b — the peer node is the region-hat forwarder at node mode
     // Peer (`docs/peer-region-hats.md`), the forwarder the router host runs, with
     // the peer hat in `North` and a broker hat for the clients south of it.
-    let forwarder = RouterForwarder::peer_with_timestamping(
-        Zid::from_slice(&params.zid),
-        opts.timestamping.map_for(WhatAmI::Peer),
-    )
-    .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
-    // Item 751, step 7d — the south partition, before ANYTHING else is set on the hats: it
-    // rebuilds them, so a mode chosen first would be lost, and the hats a face joins are the
-    // ones it keeps. The face loop reads it back off the forwarder for every session it opens.
-    .with_south_partition(opts.south_partition.clone());
+    // A client node runs the pin's client hat in `North`, as the node engine opens one
+    // (`RouterForwarder::client_with_timestamping`); a peer runs the peer hat.
+    let forwarder = if opts.as_client {
+        RouterForwarder::client_with_timestamping(
+            Zid::from_slice(&params.zid),
+            opts.timestamping.map_for(role),
+        )
+    } else {
+        RouterForwarder::peer_with_timestamping(
+            Zid::from_slice(&params.zid),
+            opts.timestamping.map_for(role),
+        )
+    };
+    let forwarder = forwarder
+        .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
+        // Item 751, step 7d — the south partition, before ANYTHING else is set on the hats: it
+        // rebuilds them, so a mode chosen first would be lost, and the hats a face joins are the
+        // ones it keeps. The face loop reads it back off the forwarder for every session it opens.
+        .with_south_partition(opts.south_partition.clone());
     // `--peer-mode` (zenoh `routing.peer.mode`). Set BEFORE any face registers,
     // because the mode governs how the very first inbound flood is ingested; a
     // node that learned one flood in the wrong mode has already mis-shaped its
@@ -4695,13 +4735,7 @@ async fn run_peer_until(
     // a locator list it did not have yet.
     #[cfg(feature = "scouting-responder")]
     if let Some(scout_socket) = opts.scout_listen.as_ref() {
-        spawn_scouting_responder(
-            scout_socket,
-            WhatAmI::Peer,
-            &params.zid,
-            self_locators.clone(),
-        )
-        .await?;
+        spawn_scouting_responder(scout_socket, role, &params.zid, self_locators.clone()).await?;
     }
 
     // §5.16 interceptor pipeline — assemble ONE InterceptorConfig from the
@@ -5015,18 +5049,18 @@ async fn run_peer_until(
             wz::runtime_tokio::admin_read_permit(&shared.guard().admin_permissions())
         );
         // R2684 (§5.23 `adminspace-router-linkstate`) — this peer's OWN link-state
-        // graph, as the read-only render seam its `linkstate/peers` leg needs.
+        // graph, as the read-only render seam its `linkstate/<region>` leg needs.
         //
         // Minted BEFORE the closure and moved in, for the reason the introspection
         // and sessions buffers above are: the handler is registered INTO the
-        // forwarder, so it cannot borrow the forwarder at query time. The view is
-        // `Rc`-backed, so it renders LIVE per GET rather than from a snapshot.
+        // forwarder, so it cannot borrow the forwarder at query time. The view
+        // renders LIVE per GET rather than from a snapshot.
         //
-        // Upstream serves the peer-tier handler from ANY non-Client hat
-        // (`zenoh/src/net/runtime/adminspace.rs` @ `hat.mode().is_peer()`), which
-        // is what wz did not do: the leg existed only on the router host.
+        // Upstream answers the region of every peer and router hat
+        // (`zenoh/src/net/runtime/adminspace.rs` @
+        // `fn linkstate_data(prefix: &keyexpr, context: &AdminContext, query: Query) {`).
         #[cfg(feature = "adminspace-router-linkstate")]
-        let peers_view = forwarder.peers_net_view();
+        let linkstate_view = forwarder.linkstate_regions_view();
         let node_stats_h = node_stats.clone();
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             let admin_read =
@@ -5084,30 +5118,31 @@ async fn run_peer_until(
                     wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
             }
-            // R2684 — the PEER-tier `linkstate/peers` leg, which upstream serves
-            // from any non-Client hat and wz served only from a router.
+            // R2684 — the peer's `linkstate/<region>` leg, the region of its own
+            // hat, which upstream serves from a peer as from a router.
             //
-            // `routers_dot: None` and an empty `successors` are not placeholders:
-            // they are what this node HAS. A plain linkstate peer keeps one graph,
-            // not the router's two, and `route/successor` is rendered from the
-            // ROUTER-tier net — so omitting both is the honest answer, and
-            // `AdminRouterCtx` documents `None` as "omit that leg" rather than
-            // "answer empty".
+            // The empty `successors` is not a placeholder: it is what this node
+            // HAS. `route/successor` is read off the router hats alone, and a peer
+            // holds none. A client node announces the client role, whose hat holds
+            // no graph, so it answers no `linkstate` leg.
             #[cfg(feature = "adminspace-router-linkstate")]
-            {
-                let peers_dot = peers_view.dot();
+            if whatami_str != "client" {
+                let linkstate = linkstate_view.regions_text();
                 let rctx = AdminRouterCtx {
                     zid_hex: &zid_hex,
                     whatami: whatami_str,
-                    routers_dot: None,
-                    peers_dot: Some(&peers_dot),
+                    linkstate: &linkstate,
                     successors: &[],
                     read: admin_read,
                 };
                 let _ = answer_router_admin_query(view, out, &rctx);
             }
         };
-        forwarder.register_local_queryable(&queryable_key, true, Box::new(handler));
+        forwarder.register_local_queryable(
+            &queryable_key,
+            wz::runtime_tokio::adminspace::ADMIN_QUERYABLE_COMPLETE,
+            Box::new(handler),
+        );
         log::info!("wz-ap-demo peer: adminspace config GET at {config_key}");
 
         // The resource snapshot, under the wz-owned root beside the router host's, with the same
@@ -5372,7 +5407,7 @@ async fn run_peer_until(
         );
         let policy = AutoConnect::new(
             Zid::from_slice(&params.zid),
-            default_autoconnect_matcher(WhatAmI::Peer),
+            default_autoconnect_matcher(role),
             strategy,
         );
         forwarder.enable_autoconnect_into(
@@ -6914,11 +6949,11 @@ async fn run_router_hat_until(
     // BOTH meshes at register time (+ re-advertised to late joiners via the derive
     // fold), so a GET from a DIRECTLY-attached OR a REMOTE (cross-node) querier
     // routes to this router, self-dispatches at the route_request empty-route tail,
-    // and this handler renders LIVE from the two link-state nets per query:
-    // `linkstate/routers` + `route/successor/**` from `routers_net`,
-    // `linkstate/peers` from `linkstatepeers_net` (the wz mirror of zenoh's
-    // routers_linkstate_data / peers_linkstate_data / route_successor,
-    // net/runtime/adminspace.rs:741-919). Root `local_data` (self identity + the
+    // and this handler renders LIVE from the link-state nets per query: one
+    // `linkstate/<region>` leg per region of the router's hats, `north` its routers
+    // and the peers' subregion its peers, and `route/successor/**` from the
+    // routers' net (the wz mirror of upstream's `linkstate_data` and
+    // `route_successor`). Root `local_data` (self identity + the
     // listen locator) rides the shared `answer_admin_query` SSOT.
     //
     // R2685 — this comment used to end "the router's `sessions[]` transport
@@ -6985,7 +7020,7 @@ async fn run_router_hat_until(
         // graph views are: the handler is stored INSIDE the forwarder and so
         // cannot borrow it back.
         let sessions_view = forwarder.sessions_view();
-        let peers_view = forwarder.peers_net_view();
+        let linkstate_view = forwarder.linkstate_regions_view();
         // R2685 — the declaration tables, taken here for the SAME reason the
         // three views above are: the handler is stored inside the forwarder and
         // so cannot borrow it back at query time.
@@ -7145,15 +7180,14 @@ async fn run_router_hat_until(
                     wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
             }
-            // The ROUTER-tier legs, rendered LIVE from the two nets per GET.
-            let routers_dot = routers_view.dot();
-            let peers_dot = peers_view.dot();
+            // The ROUTER-tier legs, rendered LIVE per GET: one `linkstate/<region>`
+            // leg for each region of the router's hats, and the successor routes.
+            let linkstate = linkstate_view.regions_text();
             let successors = routers_view.route_successors_hex();
             let rctx = AdminRouterCtx {
                 zid_hex: &zid_hex,
                 whatami: whatami_str,
-                routers_dot: Some(&routers_dot),
-                peers_dot: Some(&peers_dot),
+                linkstate: &linkstate,
                 successors: &successors,
                 // The SAME resolved permit as the root ctx — read once above.
                 read: admin_read,
@@ -7165,10 +7199,14 @@ async fn run_router_hat_until(
                 );
             }
         };
-        forwarder.register_local_queryable(&queryable_key, true, Box::new(handler));
+        forwarder.register_local_queryable(
+            &queryable_key,
+            wz::runtime_tokio::adminspace::ADMIN_QUERYABLE_COMPLETE,
+            Box::new(handler),
+        );
         log::info!(
             "wz-ap-demo router-hat: adminspace router legs hosted at {queryable_key} \
-             (linkstate/routers, linkstate/peers, route/successor)"
+             (linkstate/<region>, route/successor)"
         );
 
         // The capacity report, under the wz-owned root and not inside upstream's admin space:
@@ -8231,7 +8269,8 @@ fn admin_config_json_of(
 #[cfg(any(
     feature = "routing-peer",
     feature = "adminspace-router-linkstate",
-    feature = "adminspace-config-hotreload"
+    feature = "adminspace-config-hotreload",
+    feature = "adminspace-core"
 ))]
 fn with_metadata_flag(
     cfg: wz::runtime_tokio::config::WzConfig,
@@ -8242,6 +8281,55 @@ fn with_metadata_flag(
             .with_metadata(value)
             .expect("--metadata was refused by args::metadata_flag if upstream cannot read it"),
         None => cfg,
+    }
+}
+
+/// §5.23 `adminspace-core` — host a single-session node's admin space on its
+/// own session: the `@/<zid>/<whatami>/**` queryable and the `config/**`
+/// subscriber upstream's `AdminSpace::start` declares in every mode, both
+/// routed, so another node reaches them through the router this session holds.
+///
+/// The library's pair, not a handler of this binary's: the key, the answerer
+/// and the role in the key (the session's own, `client` for a dialled or
+/// scouted run) are the ones every other wz admin host uses. The config is
+/// seeded from the session's handshake params with the operator's permits and
+/// `metadata`, and is the one the GET reads and a permitted PUT writes.
+///
+/// The locator list is empty: a client binds nothing, and upstream's client
+/// lists none (`zenoh/src/net/runtime/adminspace.rs` @
+/// `.get_locators_noloopback()`). A refusal is logged and leaves the session
+/// running without the admin space, as a refused `--queryable` does.
+#[cfg(feature = "adminspace-core")]
+fn host_session_adminspace(
+    session: &TokioSession,
+    spec: crate::args::SessionAdminSpec,
+) -> Option<wz::runtime_tokio::session::AdminSpace> {
+    use wz::runtime_tokio::adminspace::{admin_queryable_key, AdminSpacePermissions};
+    use wz::runtime_tokio::config::WzConfig;
+    use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
+
+    let params = &session.actions().params;
+    let key = admin_queryable_key(&zid_to_zenoh_hex(&params.zid), params.whatami.to_str());
+    let config = with_metadata_flag(
+        WzConfig::from_init_params(params).with_admin_permissions(AdminSpacePermissions {
+            read: spec.read,
+            write: spec.write,
+        }),
+        spec.metadata.as_ref(),
+    );
+    match session.declare_adminspace_with_config(env!("CARGO_PKG_VERSION"), Vec::new(), config) {
+        Ok(admin) => {
+            log::info!(
+                "wz-ap-demo: adminspace hosted at {key} (read permit = {}, write permit = {})",
+                spec.read,
+                spec.write
+            );
+            Some(admin)
+        }
+        Err(e) => {
+            log::warn!("wz-ap-demo: adminspace declare at {key} rejected: {e}");
+            None
+        }
     }
 }
 
@@ -10142,6 +10230,7 @@ mod peer_quic_cert_tests {
         std::fs::write(&key_path, key_pem.as_bytes()).expect("write key pem");
 
         let opts = PeerOpts {
+            as_client: false,
             publish_key: None,
             subscribe_key: None,
             unsubscribe_after_data: false,
@@ -10280,6 +10369,7 @@ mod peer_failfast_tests {
         // fires at zid derivation, BEFORE any opts field is consumed. The cfg-gated
         // fields are set only under their feature (mirrors main.rs's construction).
         let opts = PeerOpts {
+            as_client: false,
             publish_key: None,
             subscribe_key: None,
             unsubscribe_after_data: false,

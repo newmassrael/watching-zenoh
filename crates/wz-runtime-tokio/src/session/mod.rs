@@ -7068,10 +7068,42 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         <R as SessionRuntime>::LinkSink: Send + Sync,
         T: 'static,
     {
-        let config = Arc::new(std::sync::Mutex::new(
+        self.declare_adminspace_with_config(
+            version,
+            locators,
             crate::config::WzConfig::from_init_params(&self.actions().params)
                 .with_admin_permissions(permissions),
-        ));
+        )
+    }
+
+    /// §5.23 `adminspace-core` — the pair upstream's `AdminSpace::start` declares,
+    /// answering from and writing into `config`, a config the HOST seeded.
+    ///
+    /// [`Self::declare_adminspace_with_permissions`] seeds the config from the
+    /// handshake params and a permit, and nothing else; a node started from an
+    /// operator's settings also carries what the operator set, `metadata` first,
+    /// which upstream serves in `local_data` from the same runtime config its gate
+    /// reads. Taking the config whole keeps one live instance behind the GET, the
+    /// PUT and the host, rather than a second copy of the operator's values beside
+    /// the one the admin space answers from.
+    ///
+    /// The role in every key is the session's own (`params.whatami`), whatever
+    /// `config` says: a client hosts `@/<zid>/client/**` and a router
+    /// `@/<zid>/router/**`, from this one method, as upstream's
+    /// `AdminSpace::start` roots its keys at `runtime.state.whatami` in every mode.
+    #[cfg(feature = "adminspace-core")]
+    pub fn declare_adminspace_with_config(
+        &self,
+        version: impl Into<String>,
+        locators: Vec<String>,
+        config: crate::config::WzConfig,
+    ) -> Result<AdminSpace<R, T>, AdminSpaceError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        T: 'static,
+    {
+        let config = Arc::new(std::sync::Mutex::new(config));
         let get_config = Arc::clone(&config);
         let queryable = self
             .declare_adminspace_viewing(version, locators, move || {
@@ -7278,7 +7310,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminAnswerOutcome,
             SessionAdminRow,
         };
-        use wz_codecs::whatami::WhatAmI;
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
         let zid_hex = zid_to_zenoh_hex(&self.actions().params.zid);
@@ -7321,27 +7352,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // adminspace.rs:664). A routing peer would enumerate its faces instead —
             // the forwarder-hosted §5.23 admin (R311y45) currently passes an EMPTY
             // `sessions[]` (the live forwarder-faces enumeration is a deferral).
-            let mut sessions = Vec::new();
-            if let Some(peer) = actions.peer_zid() {
-                let peer_whatami = actions
-                    .peer_whatami_wire()
-                    .and_then(WhatAmI::from_wire)
-                    .map(|w| String::from(w.to_str()));
-                // R311y473 / R2415 / R2858 / R2860 — the session's REAL links
-                // (one entry per physical link of an aggregating session), its
-                // negotiated `shm` and its `region`, all resolved live per query
-                // off the same captured bundle the peer zid comes from, inside
-                // the one row constructor every admin host shares.
-                sessions.push(actions.admin_session(
-                    zid_to_zenoh_hex(&peer),
-                    peer_whatami,
-                    // R2637 — `None` on the Session-hosted path for the same reason
-                    // the forwarder-hosted peer reports none: a link weight is a
-                    // ROUTER-tier graph value, and a Session holds no such graph.
-                    // Reporting none is the answer, not a gap.
-                    None,
-                ));
-            }
+            // R311y473 / R2415 / R2858 / R2860 — the session's REAL links (one
+            // entry per physical link of an aggregating session), its negotiated
+            // `shm` and its `region`, all resolved live per query off the same
+            // captured bundle the peer zid comes from, by the one row reading every
+            // host that lists its own sessions shares. R2637 — no link weight: a
+            // weight is a ROUTER-tier graph value, and a Session holds no such graph.
+            let sessions: Vec<_> = actions.admin_session_of_peer().into_iter().collect();
             // The match+reply SSOT (root local_data / metrics / config + the read
             // gate) — the SAME answerer the §5.23 routing-peer forwarder host calls
             // (R311y45), so both emit byte-identical admin replies.
@@ -7411,9 +7428,38 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     wz_admin::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
             }
+            // A peer answers the graph of its `north` region, as upstream's peer
+            // hat does (`zenoh/src/net/runtime/adminspace.rs` @
+            // `fn linkstate_data(prefix: &keyexpr, context: &AdminContext, query: Query) {`):
+            // the single-hop graph of this node and the one node this session
+            // links it to. A client's hat holds no graph and answers none.
+            #[cfg(feature = "adminspace-router-linkstate")]
+            if whatami == "peer" {
+                let peer = actions.peer_zid().map(|zid| zid_to_zenoh_hex(&zid));
+                let graph = wz_admin::adminspace::single_hop_graph_text(
+                    core::iter::once(zid_hex.as_str()).chain(peer.as_deref()),
+                );
+                let linkstate = [(String::from("north"), graph)];
+                let _ = wz_admin::adminspace::answer_router_admin_query(
+                    view,
+                    out,
+                    &wz_admin::adminspace::AdminRouterCtx {
+                        zid_hex: &zid_hex,
+                        whatami,
+                        linkstate: &linkstate,
+                        successors: &[],
+                        read,
+                    },
+                );
+            }
         };
 
-        self.declare_queryable(queryable_key, QueryableOptions::default(), handler)
+        self.declare_queryable(
+            queryable_key,
+            QueryableOptions::default()
+                .with_complete(wz_admin::adminspace::ADMIN_QUERYABLE_COMPLETE),
+            handler,
+        )
     }
 
     /// R246 — aliased-keyexpr counterpart of

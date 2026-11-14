@@ -22,6 +22,10 @@ pub(crate) type Id = u32;
 // The session's own part of the admin space, over the transports and links of the unstable API.
 #[cfg(feature = "unstable")]
 pub(crate) mod admin;
+// The runtime's part, `@/<zid>/<whatami>/**`, which upstream's runtime starts whatever the
+// features: a build with an engine to open a session on starts it.
+#[cfg(feature = "engine-tokio")]
+pub(crate) mod runtime_admin;
 
 // R3706: `SampleBuilder::qos` and the timestamp instrumentation trait are used by the builders of a
 // reply and of the timestamp stack, which are slices Z3 and Z6b of docs/zenoh-api-on-the-engine.md.

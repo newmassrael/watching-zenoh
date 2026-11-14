@@ -1155,7 +1155,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # as `partial`: the plain-`tcp/` control and the leg where wz dials zenohd's `tls/` listener are
 # `wz->zenohd`, and the leg where zenohd dials wz's `tls/` acceptor is `zenohd->wz`: 3 tests x 1 atom
 # = 3. Measured by `audit-crossimpl-proof.sh` (`measured 1087, declared 1084`).
-FOREIGN_ADJUDICATOR_LINKS = 1087
+# docs/adminspace-client-mode.md -- 1087 -> 1088, RISING by one: the new
+# `wz_client_adminspace_zenohd_interop.rs`, whose wz-client leg has a stock zenohd router
+# learn a wz client's `@/<zid>/client/**` queryable and route another client's GET to it,
+# tagged `adminspace-core wz->zenohd partial`: 1 test x 1 atom = 1. The zenohd-client
+# control and the all-wz leg declare `none`. Counted from the diff, not yet measured.
+FOREIGN_ADJUDICATOR_LINKS = 1088
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

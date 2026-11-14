@@ -244,6 +244,12 @@ impl Inner {
                 })
                 .collect(),
         );
+        self.transports.set_groups(Arc::new(
+            self.mcast_faces
+                .values()
+                .map(|face| face.membership.clone())
+                .collect(),
+        ));
         #[cfg(target_has_atomic = "64")]
         {
             self.mcast_epochs = Arc::new(
@@ -692,18 +698,24 @@ impl SharedSession {
     /// whatever role a member announced (`vendor/zenoh-pico/src/transport/multicast.c` @
     /// `void _zp_multicast_fetch_zid(`).
     pub fn group_member_zids(&self) -> Vec<Vec<u8>> {
-        // Cloned out of the registry lock: each membership has a lock of its own, which its
-        // face's loop takes to write.
-        let memberships: Vec<McastGroupMembership> = self
-            .lock()
-            .mcast_faces
-            .values()
-            .map(|face| face.membership.clone())
-            .collect();
-        memberships
+        self.group_memberships()
             .iter()
             .flat_map(McastGroupMembership::members)
             .map(|member| member.peer.as_slice().to_vec())
+            .collect()
+    }
+
+    /// The member table of every group the session joined, as handles that read the members
+    /// when they are asked: what an admin space lists after the unicast transports, one row per
+    /// member (upstream's `transport_multicast_peer_to_json`).
+    ///
+    /// Cloned out of the registry lock: each membership has a lock of its own, which its face's
+    /// loop takes to write, so a reader never holds the two at once.
+    pub fn group_memberships(&self) -> Vec<McastGroupMembership> {
+        self.lock()
+            .mcast_faces
+            .values()
+            .map(|face| face.membership.clone())
             .collect()
     }
 

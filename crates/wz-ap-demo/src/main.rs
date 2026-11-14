@@ -335,15 +335,6 @@ fn demo_main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // A build that compiles none of the run-modes below still READS and CHECKS
-    // the value — a malformed flag is refused whatever the build — and then has
-    // nowhere to hand it.
-    #[cfg(not(any(
-        feature = "routing-peer",
-        feature = "router-hat-router",
-        feature = "adminspace-config-hotreload"
-    )))]
-    let _ = metadata;
 
     // R2112 (open-debt items 102 + 210) — `--timestamping <true|false>`, read
     // ONCE beside the tuning above and for the same reason: it is a NODE-scoped
@@ -454,10 +445,11 @@ fn demo_main() -> ExitCode {
     if parse_pair(rest, "--gateway-south").is_some()
         && parse_pair(rest, "--router-hat").is_none()
         && parse_pair(rest, "--peer").is_none()
+        && parse_pair(rest, "--client-node").is_none()
     {
         eprintln!(
-            "wz-ap-demo: --gateway-south requires --router-hat or --peer (only the \
-             region-hat forwarder serves a partitioned south)"
+            "wz-ap-demo: --gateway-south requires --router-hat, --peer or --client-node \
+             (only the region-hat forwarder serves a partitioned south)"
         );
         return ExitCode::from(2);
     }
@@ -496,12 +488,36 @@ fn demo_main() -> ExitCode {
     // where in single-session mode it is one initiator address). Opt-in behind
     // `routing-peer`: a build without it rejects the flag rather than silently
     // no-op'ing, so the catalog claim and the binary stay in lockstep.
-    if let Some(peer_listen) = parse_pair(rest, "--peer") {
+    //
+    // `--client-node <listen>` is the same mesh announcing the client role: a client that binds
+    // its listen endpoints and dials its router, as upstream's client does
+    // (`zenoh/src/net/runtime/orchestrator.rs` @ `async fn start_client(&self) -> ZResult<()> {`).
+    let mesh_arm = match (
+        parse_pair(rest, "--peer"),
+        parse_pair(rest, "--client-node"),
+    ) {
+        (Some(_), Some(_)) => {
+            eprintln!("wz-ap-demo: --peer and --client-node are two roles of one node; name one");
+            return ExitCode::from(2);
+        }
+        (Some(listen), None) => Some((listen, false)),
+        (None, Some(listen)) => Some((listen, true)),
+        (None, None) => None,
+    };
+    if let Some((peer_listen, as_client)) = mesh_arm {
         #[cfg(feature = "routing-peer")]
         {
             let dial_targets: Vec<String> = parse_pair(rest, "--connect")
                 .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
                 .unwrap_or_default();
+            // A client reaches the rest of the system through the router it dials, and
+            // upstream's client with nothing to dial and no scouting does not start
+            // (`zenoh/src/net/runtime/orchestrator.rs` @
+            // `bail!("No peer specified and multicast scouting deactivated!")`).
+            if as_client && dial_targets.is_empty() {
+                eprintln!("wz-ap-demo: --client-node dials its router; name it with --connect");
+                return ExitCode::from(2);
+            }
             // R311ri (c3c e2e) — `--publish <key>` makes this peer ORIGINATE
             // data into the mesh (flooded along its spanning tree); absent, the
             // peer only forwards others' data.
@@ -919,6 +935,7 @@ fn demo_main() -> ExitCode {
                 crate::args::split_endpoint_list(&peer_listen),
                 dial_targets,
                 crate::runner::PeerOpts {
+                    as_client,
                     publish_key,
                     subscribe_key,
                     unsubscribe_after_data,
@@ -971,11 +988,17 @@ fn demo_main() -> ExitCode {
                     // against the column a PEER announces: `connect` is
                     // unbounded and non-fatal (this node has its own listener to
                     // be), `listen` is one attempt and fatal (the address is
-                    // this node's identity to everyone else).
+                    // this node's identity to everyone else). A client node's dial is
+                    // a client's: its router is how it reaches the rest, so it resolves
+                    // against the client column.
                     connect_phase: crate::runner::resolve_phase(
                         connect_timeout,
                         connect_exit,
-                        wz::runtime_tokio::startup_phase::PhasePolicy::CONNECT_MESH_DEFAULT,
+                        if as_client {
+                            wz::runtime_tokio::startup_phase::PhasePolicy::CONNECT_CLIENT_DEFAULT
+                        } else {
+                            wz::runtime_tokio::startup_phase::PhasePolicy::CONNECT_MESH_DEFAULT
+                        },
                     ),
                     start_window,
                     listen_phase: crate::runner::resolve_phase(
@@ -1007,8 +1030,9 @@ fn demo_main() -> ExitCode {
         {
             let _ = peer_listen;
             eprintln!(
-                "wz-ap-demo: --peer requires the `routing-peer` feature \
-                 (build: cargo build -p wz-ap-demo --features routing-peer)"
+                "wz-ap-demo: {} requires the `routing-peer` feature \
+                 (build: cargo build -p wz-ap-demo --features routing-peer)",
+                if as_client { "--client-node" } else { "--peer" }
             );
             return ExitCode::from(2);
         }
@@ -1488,6 +1512,24 @@ fn demo_main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // §5.23 `adminspace-core` — the admin space this single-session node hosts on
+    // its own session (`--config-queryable`), read and refused BEFORE a scout
+    // goes out or a link opens: a run that cannot host it says so by name rather
+    // than coming up without the keys the operator asked it to answer.
+    let single_session_flag = if listen_opt.is_some() {
+        "--listen"
+    } else if scout_requested {
+        "--scout"
+    } else {
+        "--connect"
+    };
+    let admin_host = match crate::args::session_admin_spec(rest, single_session_flag, metadata) {
+        Ok(spec) => spec,
+        Err(message) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+    };
 
     // env_logger reads RUST_LOG (defaults to off). The integration
     // test fixture (R121c) sets RUST_LOG=info to surface subscriber-
@@ -2162,12 +2204,15 @@ fn demo_main() -> ExitCode {
         // first fixture run die here with "at least one of ..." rather than at
         // the assertion it was written for.
         && querier_matching_log_opt.is_none()
+        // An admin space is work of its own: a client that only answers its
+        // `@/<zid>/client/**` keys is the node another client asks.
+        && admin_host.is_none()
     {
         eprintln!(
             "wz-ap-demo: at least one of --key / --publish / --delete / --queryable / --query / \
              --declare-token / --liveliness-subscribe / --liveliness-get / \
              --advanced-subscribe / --advanced-publish / --group-join / \
-             --querier-matching-log / --on-remote-* must be supplied",
+             --querier-matching-log / --config-queryable / --on-remote-* must be supplied",
         );
         eprintln!();
         print_usage();
@@ -2770,6 +2815,7 @@ fn demo_main() -> ExitCode {
             connect_timeout,
             #[cfg(feature = "scouting-responder")]
             scout_listen_requested.then_some(scout_socket),
+            admin_host,
         )
         .await
     });

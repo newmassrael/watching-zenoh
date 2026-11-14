@@ -133,7 +133,7 @@ pub(super) enum Seen {
     /// The counters a node prints and an e2e barrier reads (see
     /// [`NodeSession::counters`]), read after each step.
     Counters(Vec<usize>),
-    /// The graph the admin `linkstate/peers` leg renders.
+    /// The graph the admin `linkstate/<region>` leg of the peers' region renders.
     #[cfg(feature = "adminspace-router-linkstate")]
     Dot(String),
     /// A row the node reports to its admin space: the leg, the keyexpr, and who the
@@ -276,7 +276,7 @@ impl Node {
         Sent::from([(0, vec![Seen::Counters(self.fwd.counters())])])
     }
 
-    /// The graph of the `linkstate/peers` leg as it stands.
+    /// The graph of the peers' `linkstate/<region>` leg as it stands.
     fn dot_view(&self) -> Sent {
         #[cfg(feature = "adminspace-router-linkstate")]
         {
@@ -814,7 +814,7 @@ pub(super) trait NodeSession: FaceForwarder {
     /// client subscriptions held, the client queryables held, and how many nodes the
     /// mesh holds interested in each of the probe keys.
     fn counters(&self) -> Vec<usize>;
-    /// The graph the admin `linkstate/peers` leg renders, as DOT, with the route
+    /// The graph the peers' admin `linkstate/<region>` leg renders, as DOT, with the route
     /// successors that leg's sibling renders.
     #[cfg(feature = "adminspace-router-linkstate")]
     fn peers_dot(&self) -> String;

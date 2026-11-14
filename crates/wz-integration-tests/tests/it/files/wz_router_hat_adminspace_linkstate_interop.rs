@@ -26,7 +26,7 @@
 //!      gate on R1's `learned a queryable` (R1 ingested R2's cross-mesh admin qabl
 //!      advertise — the re-advertise fold under test).
 //!   4. Issuer (client behind R1) GETs `@/<R2_zid>/router/**`.
-//!   5. Assert the issuer received the `linkstate/routers` reply as a petgraph DOT
+//!   5. Assert the issuer received the `linkstate/north` reply as a petgraph DOT
 //!      naming BOTH routers' zenoh-hex zids (a LIVE topology render, not a static
 //!      echo — R2's routers-net has both nodes), and at least one
 //!      `route/successor/src/<x>/dst/<y>` reply (the successor table enumerated).
@@ -234,18 +234,19 @@ fn wz_router_hat_federates_admin_linkstate_across_two_routers() {
         )
     });
 
-    // LIVE-CONTENT (defeats a static echo): the `linkstate/routers` reply is R2's
-    // routers-net petgraph DOT, which MUST name BOTH routers' zenoh-hex zids (R2 =
-    // self, R1 = the federated neighbour). A body naming only one zid would mean the
-    // topology never converged; a `Node {`/struct dump would mean the fidelity fix
+    // LIVE-CONTENT (defeats a static echo): the `linkstate/north` reply is R2's
+    // routers-net petgraph DOT, the graph of its `north` region as upstream names
+    // it, which MUST name BOTH routers' zenoh-hex zids (R2 = self, R1 = the
+    // federated neighbour). A body naming only one zid would mean the topology
+    // never converged; a `Node {`/struct dump would mean the fidelity fix
     // regressed.
-    let linkstate_key = format!("{r2_root}/linkstate/routers");
+    let linkstate_key = format!("{r2_root}/linkstate/north");
     let linkstate_line = iss_captured
         .lines()
         .find(|l| l.contains("REPLY RECEIVED") && l.contains(&format!("keyexpr='{linkstate_key}'")))
         .unwrap_or_else(|| {
             panic!(
-                "no `linkstate/routers` reply for R2 — the router linkstate leg did \
+                "no `linkstate/north` reply for R2 — the router linkstate leg did \
                  not answer across the mesh\n--- issuer ---\n{iss_captured}"
             )
         });
@@ -259,7 +260,7 @@ fn wz_router_hat_federates_admin_linkstate_across_two_routers() {
         .unwrap_or_else(|| panic!("linkstate reply line lacked a payload\n{linkstate_line}"));
     assert!(
         dot_body.contains(&r2_zid) && dot_body.contains(&r1_zid),
-        "the `linkstate/routers` DOT body must name BOTH routers (R2={r2_zid}, \
+        "the `linkstate/north` DOT body must name BOTH routers (R2={r2_zid}, \
          R1={r1_zid}) — a live cross-node topology render.\n--- reply ---\n{linkstate_line}"
     );
     assert!(
@@ -268,25 +269,25 @@ fn wz_router_hat_federates_admin_linkstate_across_two_routers() {
          Debug\n--- reply ---\n{linkstate_line}"
     );
 
-    // The `linkstate/peers` leg is served from R2's SEPARATE `linkstatepeers_net`
-    // (not `routers_net`). R2's peer tier has ONLY self (R1 is a router, classified
-    // into routers_net), so its DOT names R2 and does NOT name R1 — which is exactly
-    // what guards the `peers_net_view()` -> `linkstatepeers_net` wiring: a mis-wire
-    // pointing it at `routers_net` would leak R1's zid into this body.
-    let peers_key = format!("{r2_root}/linkstate/peers");
+    // The peers' region, `south:0:peer` as upstream names it, is served from R2's
+    // SEPARATE `linkstatepeers_net` (not `routers_net`). R2's peer tier has ONLY
+    // self (R1 is a router, classified into routers_net), so its DOT names R2 and
+    // does NOT name R1 — which is exactly what guards the peers' region wiring: a
+    // mis-wire pointing it at `routers_net` would leak R1's zid into this body.
+    let peers_key = format!("{r2_root}/linkstate/south:0:peer");
     let peers_body = iss_captured
         .lines()
         .find(|l| l.contains("REPLY RECEIVED") && l.contains(&format!("keyexpr='{peers_key}'")))
         .and_then(|l| l.split_once("payload=").map(|(_, p)| p.to_string()))
         .unwrap_or_else(|| {
-            panic!("no `linkstate/peers` reply for R2\n--- issuer ---\n{iss_captured}")
+            panic!("no `linkstate/south:0:peer` reply for R2\n--- issuer ---\n{iss_captured}")
         });
     assert!(
         peers_body.contains("graph {")
             && peers_body.contains(&r2_zid)
             && !peers_body.contains(&r1_zid),
-        "the `linkstate/peers` DOT must be R2's peer-tier net (names R2, NOT the \
-         router R1) — the peers_net_view wiring guard.\n--- reply ---\n{peers_body}"
+        "the `linkstate/south:0:peer` DOT must be R2's peer-tier net (names R2, NOT \
+         the router R1) — the peers' region wiring guard.\n--- reply ---\n{peers_body}"
     );
 
     // The `route/successor` table enumerated: at least one entry keyed

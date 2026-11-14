@@ -3529,10 +3529,11 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     timeout_ms: 0,
     exit_on_failure: true,
   }},
-  // §5.23 `adminspace-core` — `metadata`, named for the reason the bind phase's
-  // three are: it must reach NOTHING in this invocation. Its sink is an
-  // adminspace host's `local_data`, and a one-shot client hosts none, so the
-  // expansion withholds it by name. The value is upstream's own example
+  // §5.23 `adminspace-core` — `metadata`, served in the `local_data` of the
+  // admin space this client hosts: the `adminspace` block below enables one,
+  // and a build carrying the single-session host expands the pair to
+  // `--config-queryable` and `--metadata`; a build without it withholds both
+  // by name. The value is upstream's own example
   // (`DEFAULT_CONFIG.json5` @ `metadata: {{`).
   metadata: {{ name: "strawberry", location: "Penny Lane" }},
   // R311y846 — the four `multicast` leaves are named here BECAUSE they must

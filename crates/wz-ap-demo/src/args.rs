@@ -655,6 +655,79 @@ pub(crate) fn metadata_flag(
     Ok(Some(value))
 }
 
+/// §5.23 `adminspace-core` — the admin space a single-session run hosts on its
+/// own session (`--config-queryable`): the read and write permits it starts
+/// with and the `metadata` its `local_data` serves. The role in its keys is not
+/// here: it is the session's, read off the handshake params by the library.
+///
+/// Read only where the build compiles the host (`adminspace-core`); a build
+/// without it parses the flag so it can refuse it by name, and never reaches a
+/// reader of the fields.
+#[cfg_attr(not(feature = "adminspace-core"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionAdminSpec {
+    /// `permissions.read`; `--no-admin-read` clears it.
+    pub(crate) read: bool,
+    /// `permissions.write`; `--config-write-permit` sets it.
+    pub(crate) write: bool,
+    /// `--metadata`, already refused by [`metadata_flag`] if upstream cannot
+    /// read it.
+    pub(crate) metadata: Option<wz::runtime_tokio::json5::Json5Value>,
+}
+
+/// What keeps the single-session run-mode `flag` from hosting an admin space,
+/// or `None` when it hosts one (and for every other run-mode, whose hosts are
+/// their own arms').
+///
+/// The one-shot acceptor hosts none: its listener is bound and held inside the
+/// open helper, so its `local_data` could not list the locator it accepts on,
+/// and a document listing no locator for a node that listens would be wrong
+/// rather than incomplete. A client binds nothing, so its empty list is
+/// upstream's answer too.
+///
+/// One answer for the expansion, which withholds the admin keys from such a
+/// run, and for `main`, which refuses the typed flag: a stock config the
+/// expansion hands over must never be one this binary exits(2) on.
+pub(crate) fn single_session_admin_refusal(flag: &str) -> Option<&'static str> {
+    match flag {
+        "--listen" => Some("an adminspace host (the one-shot acceptor serves none; --peer does)"),
+        "--connect" | "--scout" if !cfg!(feature = "adminspace-core") => Some(
+            "an adminspace host (this build's single-session run-modes serve none; \
+             the adminspace-core feature compiles one)",
+        ),
+        _ => None,
+    }
+}
+
+/// §5.23 `adminspace-core` — the admin space the single-session run `flag`
+/// hosts, read off `args`: `None` without `--config-queryable`.
+///
+/// Without it the permit flags and `--metadata` are inert, as they are on a
+/// `--peer` that hosts none: a stock config whose block names a permit and not
+/// `enabled` expands to the permit alone, and refusing that would stop a node
+/// on a document upstream starts. `--config-writable` is accepted beside it and
+/// adds nothing: the single-session host declares the config-write subscriber
+/// with the queryable, as upstream's admin space always does, and the permit is
+/// what decides whether a write is applied.
+pub(crate) fn session_admin_spec(
+    args: &[String],
+    flag: &str,
+    metadata: Option<wz::runtime_tokio::json5::Json5Value>,
+) -> Result<Option<SessionAdminSpec>, String> {
+    let typed = |name: &str| args.iter().any(|a| a == name);
+    if !typed("--config-queryable") {
+        return Ok(None);
+    }
+    if let Some(missing) = single_session_admin_refusal(flag) {
+        return Err(format!("--config-queryable on {flag} needs {missing}"));
+    }
+    Ok(Some(SessionAdminSpec {
+        read: !typed("--no-admin-read"),
+        write: typed("--config-write-permit"),
+        metadata,
+    }))
+}
+
 /// R2099 (open-debt item 512) — one spelling of "an endpoint LIST on argv":
 /// comma-separated, each member trimmed, empty members dropped.
 ///
@@ -877,14 +950,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // - `{ mode: "router", connect: [..] }` with no listen. zenohd binds port
     //   7447 on every interface (its own mode-dependent default) and is a
     //   ROUTER; wz selected `--connect` and came up as a CLIENT.
-    // - `{ mode: "client", listen: [..] }`. zenohd starts and binds NOTHING,
-    //   naming no locator; wz bound the endpoint. This one runs the other way --
-    //   wz doing something upstream does not -- and it was found by asking the
-    //   oracle rather than by reading wz.
+    // - `{ mode: "client", listen: [..], connect: [..] }`. Upstream's client
+    //   binds its listen endpoints and then dials its router
+    //   (`zenoh/src/net/runtime/orchestrator.rs` @
+    //   `async fn start_client(&self) -> ZResult<()> {`); wz selected
+    //   `--connect` and lost the listener, or `--listen` and lost the dial. It
+    //   selects `--client-node` now, which keeps both.
     //
     // So: `mode` picks the run-mode, [`default_listen_endpoint`] supplies the
-    // address when the document names none, and a client's `listen` is dropped
-    // the way upstream drops it. A document that NAMES the key -- an explicitly
+    // address when the document names none, and a client's `listen` is bound by
+    // the client node as upstream binds it. A document that NAMES the key -- an explicitly
     // empty list included -- suppresses the default, which is also upstream's
     // behaviour (measured: an empty list starts a node that binds nothing).
     //
@@ -990,10 +1065,24 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             // the verdict below says so rather than inventing an address the
             // file refused.
             (WhatAmI::Router | WhatAmI::Peer, _) => None,
-            // A zenoh client never listens, so its `listen` list is not an
-            // address here -- it is a key that reaches nothing, reported as
-            // such below.
-            //
+            // A client that names listen endpoints binds them before it dials its
+            // router (`zenoh/src/net/runtime/orchestrator.rs` @
+            // `async fn start_client(&self) -> ZResult<()> {`, whose first act is
+            // `bind_listeners`): the client node, which binds the whole list and
+            // dials the whole connect list as the peer arm above does.
+            (WhatAmI::Client, eps) if !eps.is_empty() && !connect.is_empty() => {
+                let listen_carried = eps.len();
+                exp.added.push("--client-node".into());
+                exp.added.push(eps.join(","));
+                exp.added.push("--connect".into());
+                exp.added.push(connect.join(","));
+                Some(Selected {
+                    flag: "--client-node",
+                    role: WhatAmI::Client,
+                    listen_carried,
+                    connect_carried: connect.len(),
+                })
+            }
             // R2099 — the WHOLE connect list, which is item 512's same-seam
             // residue: this arm used to emit `connect[0]` and drop the rest,
             // while `connect/endpoints` was reported Expanded. Upstream's client
@@ -1007,11 +1096,8 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                 Some(Selected {
                     flag: "--connect",
                     role: WhatAmI::Client,
-                    // A client binds nothing, so no listen member reaches it --
-                    // the `listen/endpoints` verdict below never consults this
-                    // count on the client path (it is `WithheldFromThisRun`
-                    // before it gets here), and zero is the honest value if it
-                    // ever did.
+                    // This arm is reached with no listen endpoint (the client node
+                    // above takes the ones that name some), so it carries none.
                     listen_carried: 0,
                     connect_carried: connect.len(),
                 })
@@ -1058,13 +1144,22 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             "listen/endpoints",
             match (role_on_cli, cfg.mode, cfg.listen.is_empty()) {
                 (true, _, _) => KeyEffect::OverriddenOnTheCommandLine,
-                // R2091b (open-debt item 511) — a zenoh client never listens, so
-                // the endpoint it names reaches nothing HERE for the same reason
-                // it reaches nothing in a real zenohd. Measured: handed
-                // `{ mode: "client", listen: [..] }` a zenohd starts and names no
-                // locator at all.
-                (false, WhatAmI::Client, false) => {
-                    KeyEffect::WithheldFromThisRun("a zenoh client never listens")
+                // A client that listens binds its endpoints, and the client node
+                // carries them (the general arm below counts them). One that names
+                // nothing to dial runs no node here: upstream's would scout for a
+                // router, and this expansion emits no scouting run.
+                //
+                // R2091b read the opposite off a live zenohd, which named no
+                // locator for `{ mode: "client", listen: [..] }`. A zenohd prints
+                // only the locators that are not loopback
+                // (`zenoh/src/net/runtime/orchestrator.rs` @
+                // `for locator in &locators_noloopback {`), and the endpoint read
+                // was a loopback one, so the reading did not show whether it bound;
+                // the source binds it before it dials.
+                (false, WhatAmI::Client, false) if selected.is_none() => {
+                    KeyEffect::WithheldFromThisRun(
+                        "a client with nothing to dial runs no node here",
+                    )
                 }
                 // An empty list is what binding nothing already means.
                 (false, _, true) => KeyEffect::AlreadyTheBehaviour,
@@ -1089,7 +1184,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         let dialled = matches!(
             selected,
             Some(Selected {
-                flag: "--peer" | "--connect" | "--router-hat",
+                flag: "--peer" | "--client-node" | "--connect" | "--router-hat",
                 ..
             })
         ) && !cfg.connect.is_empty();
@@ -1441,11 +1536,10 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // client starts the responder once its session is open. A `--peer` or
     // `--router-hat` that also dials carries `--connect` and was in the set
     // already, so the only run this adds is the client.
-    let role_answers_scouts = exp
-        .rest
-        .iter()
-        .chain(exp.added.iter())
-        .any(|a| a == "--peer" || a == "--router-hat" || a == "--connect");
+    let role_answers_scouts =
+        exp.rest.iter().chain(exp.added.iter()).any(|a| {
+            a == "--peer" || a == "--client-node" || a == "--router-hat" || a == "--connect"
+        });
     // The switch withholds a direction that ASKS for something. `listen: false`
     // asks for nothing -- it is what the absent flag already means -- and
     // reporting it as withheld would answer a question the operator did not
@@ -1632,7 +1726,9 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // flag with no zenoh config key behind it, so this expansion has no site
     // that emits it and never will. `flag_precondition_gate.py` derives exactly
     // that and reports it as `no site`.
-    let re_dials = |a: &String| a == "--peer" || a == "--router-hat" || a == "--connect";
+    let re_dials = |a: &String| {
+        a == "--peer" || a == "--client-node" || a == "--router-hat" || a == "--connect"
+    };
     let dials = exp.rest.iter().chain(exp.added.iter()).any(re_dials);
     if named("connect/retry") {
         let blocked = no_sink("connect/retry").or_else(|| {
@@ -1681,7 +1777,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // R2948 — a `--connect --reconnect` client too: its supervisor governs the
     // re-dials after an established link is lost, and its FIRST open runs the
     // same startup phase a one-shot client does.
-    let has_phases = |a: &String| a == "--peer" || a == "--router-hat";
+    let has_phases = |a: &String| a == "--peer" || a == "--client-node" || a == "--router-hat";
     let mesh = exp.rest.iter().chain(exp.added.iter()).any(has_phases);
     let not_a_mesh_run = (!mesh).then_some(KeyEffect::WithheldFromThisRun(
         "this run's mode has no startup phase to bound",
@@ -2174,26 +2270,43 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             .unwrap_or_default();
         exp.pair("plugins", "--plugins", section, blocked);
     }
+    // The run-mode the expanded argv runs, typed or selected by the file, and,
+    // when it is a single-session run that cannot host the admin space a
+    // document enables, the verdict its admin keys get instead of a flag it
+    // would exit(2) on.
+    let run_flag = typed_role
+        .map(|(flag, _)| flag)
+        .or(selected.as_ref().map(|s| s.flag));
+    let admin_withheld = run_flag
+        .and_then(single_session_admin_refusal)
+        .map(KeyEffect::WithheldFromThisRun);
     // §5.23 `adminspace-core` — `metadata`, onto `--metadata <value>`: the whole
     // value as JSON5 text, taken VERBATIM like `--plugins`, so nothing is
     // approximated. Every run-mode that hosts an adminspace takes it; the value
     // is served as `local_data`'s `metadata`.
     if named("metadata") {
         // The per-build sink list says whether ANY run-mode of this binary can
-        // serve the value; this says whether THIS run does. Three run-modes host
-        // an adminspace, and `--router-hat` only in a build with its admin host,
-        // so a one-shot client (the drop-in's shape) or a `--router` run is told
-        // the value was withheld rather than reported applied to a node that has
-        // nowhere to serve it.
-        let run_flag = typed_role
-            .map(|(flag, _)| flag)
-            .or(selected.as_ref().map(|s| s.flag));
+        // serve the value; this says whether THIS run does. `--peer` and
+        // `--storage-host` host an adminspace, `--router-hat` in a build with its
+        // admin host, and a single-session client when this run enables one and
+        // the build compiles its host; any other run is told the value was
+        // withheld rather than reported applied to a node with nowhere to serve it.
+        // The client hosts exactly when `--config-queryable` reaches its argv:
+        // typed, or expanded from an enabled block below.
+        let single_session_host = matches!(run_flag, Some("--connect") | Some("--scout"))
+            && admin_withheld.is_none()
+            && (exp.typed("--config-queryable")
+                || (cfg.adminspace.is_some() && named("adminspace/enabled")));
         // A boolean rather than a `match`: with the router's admin host compiled
         // in, the `cfg!` arm is the constant `true`, and clippy then reads the
         // three arms as a `matches!` (R2859 paid that red in the all-features
         // lane).
-        let hosts_an_adminspace = matches!(run_flag, Some("--peer") | Some("--storage-host"))
-            || (run_flag == Some("--router-hat") && cfg!(feature = "adminspace-router-linkstate"));
+        let hosts_an_adminspace = matches!(
+            run_flag,
+            Some("--peer") | Some("--client-node") | Some("--storage-host")
+        ) || (run_flag == Some("--router-hat")
+            && cfg!(feature = "adminspace-router-linkstate"))
+            || single_session_host;
         let blocked = no_sink("metadata").or_else(|| {
             (!hosts_an_adminspace).then_some(KeyEffect::WithheldFromThisRun(
                 "an adminspace host (this run-mode serves none)",
@@ -2216,8 +2329,19 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // the write (`--config-write-permit`), so the single upstream key expands
     // to both — either alone yields a node that does not do what the operator's
     // file says, which is why the key's verdict below is the WEAKER of the two.
-    match &cfg.adminspace {
-        Some(admin) => {
+    match (&cfg.adminspace, admin_withheld) {
+        (Some(_), Some(withheld)) => {
+            for key in [
+                "adminspace/enabled",
+                "adminspace/permissions/read",
+                "adminspace/permissions/write",
+            ] {
+                if named(key) {
+                    exp.record(key, withheld);
+                }
+            }
+        }
+        (Some(admin), None) => {
             if named("adminspace/enabled") {
                 exp.presence("adminspace/enabled", "--config-queryable", true, None);
             }
@@ -2244,7 +2368,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                 exp.record("adminspace/permissions/write", effect);
             }
         }
-        None => {
+        (None, _) => {
             // `enabled: false` is read as no admin space at all, and no admin
             // space is what this binary does with none of the four flags — so
             // the file's sentence IS this node's behaviour.
@@ -3884,15 +4008,17 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         out.push("plugins");
     }
     // §5.23 `adminspace-core` — `metadata`'s sink is an adminspace host's
-    // `local_data`, and this binary has three: `--peer` (`routing-peer`),
+    // `local_data`, and this binary has four: `--peer` (`routing-peer`),
     // `--router-hat` (its admin host is `adminspace-router-linkstate`, not the
-    // bare `router-hat-router`) and `--storage-host`
-    // (`adminspace-config-hotreload`). A build with none of them has nowhere to
-    // serve the value from.
+    // bare `router-hat-router`), `--storage-host`
+    // (`adminspace-config-hotreload`) and the single-session client
+    // (`adminspace-core`). A build with none of them has nowhere to serve the
+    // value from.
     if !cfg!(any(
         feature = "routing-peer",
         feature = "adminspace-router-linkstate",
-        feature = "adminspace-config-hotreload"
+        feature = "adminspace-config-hotreload",
+        feature = "adminspace-core"
     )) {
         out.push("metadata");
     }
@@ -4182,6 +4308,89 @@ mod stock_config_tests {
         );
     }
 
+    /// §5.23 `adminspace-core` — a client document that enables the admin space
+    /// hands the single-session client `--config-queryable`, its permits and its
+    /// `metadata` in a build that hosts one, and the argv it hands over is one
+    /// `main` accepts. In a build that hosts none every admin key is withheld by
+    /// name and no admin flag reaches the argv, so a valid stock config never
+    /// becomes a node that exits(2).
+    #[test]
+    fn a_client_document_enables_its_admin_space_where_the_build_hosts_one() {
+        let doc = r#"{ mode: "client", connect: { endpoints: ["tcp/127.0.0.1:7447"] },
+                       metadata: { name: "client-a" },
+                       adminspace: { enabled: true, permissions: { read: true, write: true } } }"#;
+        let ex = expand(&["--config", "z.json5"], doc).expect("a valid file");
+        let carried = |flag: &str| ex.added.iter().any(|a| a == flag);
+        assert!(carried("--connect"), "the client run: {:?}", ex.added);
+        let admin_flags = [
+            "--config-queryable",
+            "--config-writable",
+            "--config-write-permit",
+            "--metadata",
+        ];
+        if cfg!(feature = "adminspace-core") {
+            for flag in admin_flags {
+                assert!(
+                    carried(flag),
+                    "{flag} must reach the client: {:?}",
+                    ex.added
+                );
+            }
+            for key in [
+                "adminspace/enabled",
+                "adminspace/permissions/write",
+                "metadata",
+            ] {
+                assert!(
+                    ex.effect(key).is_some_and(|e| e.reached_the_node()),
+                    "{key}: {:?}",
+                    ex.effects
+                );
+            }
+            let spec = session_admin_spec(&ex.argv, "--connect", None)
+                .expect("main accepts what the expansion hands over")
+                .expect("and hosts the admin space");
+            assert!(spec.read && spec.write, "{spec:?}");
+        } else {
+            for flag in admin_flags {
+                assert!(!carried(flag), "{flag} reached a client that hosts none");
+            }
+            let withheld = KeyEffect::WithheldFromThisRun(
+                single_session_admin_refusal("--connect").expect("this build hosts none"),
+            );
+            for key in [
+                "adminspace/enabled",
+                "adminspace/permissions/read",
+                "adminspace/permissions/write",
+            ] {
+                assert_eq!(ex.effect(key), Some(withheld), "{key}: {:?}", ex.effects);
+            }
+        }
+    }
+
+    /// The one-shot acceptor hosts no admin space in any build, so a document
+    /// enabling one beside a typed `--listen` has its admin keys withheld in the
+    /// acceptor's own words rather than handed a flag `main` refuses.
+    #[test]
+    fn an_acceptor_run_has_the_admin_keys_withheld() {
+        let doc = r#"{ mode: "peer", adminspace: { enabled: true } }"#;
+        let ex = expand(&["--config", "z.json5", "--listen", "tcp/127.0.0.1:0"], doc)
+            .expect("a valid file");
+        assert!(
+            !ex.added.iter().any(|a| a == "--config-queryable"),
+            "{:?}",
+            ex.added
+        );
+        assert_eq!(
+            ex.effect("adminspace/enabled"),
+            Some(KeyEffect::WithheldFromThisRun(
+                single_session_admin_refusal("--listen").expect("the acceptor hosts none")
+            )),
+            "{:?}",
+            ex.effects
+        );
+    }
+
     #[test]
     fn no_config_flag_leaves_the_command_line_untouched() {
         let out = expand_stock_zenoh_config(&argv(&["--listen", "127.0.0.1:1"]), |_| {
@@ -4255,13 +4464,24 @@ mod stock_config_tests {
             // nothing, so it selects none rather than inventing an address the
             // document refused.
             (r#"{ mode: "peer", listen: { endpoints: [] } }"#, vec![]),
-            // R2091b — a zenoh client NEVER listens, so the endpoint reaches
-            // nothing. Measured on a real zenohd: handed this document it starts
-            // and names no locator at all, while the same file as a peer answers
-            // on that address.
+            // A client that names a listen endpoint and nothing to dial runs no
+            // node here: upstream's would scout for its router first, and this
+            // expansion emits no scouting run.
             (
                 r#"{ mode: "client", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
                 vec![],
+            ),
+            // With a router to dial it is the client node, binding and dialling
+            // as upstream's client does (`fn start_client`).
+            (
+                r#"{ mode: "client", listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     connect: { endpoints: ["tcp/router:7447"] } }"#,
+                vec![
+                    "--client-node",
+                    "tcp/0.0.0.0:7447",
+                    "--connect",
+                    "tcp/router:7447",
+                ],
             ),
             (
                 r#"{ mode: "client", connect: { endpoints: ["tcp/router:7447"] } }"#,
@@ -6962,7 +7182,7 @@ mod stock_config_tests {
     /// |---|---|---|
     /// | `peer` + listen | binds it and is findable | `--listen`, the one-shot acceptor |
     /// | `router` + connect, no listen | binds port 7447 as a ROUTER | `--connect`, a CLIENT |
-    /// | `client` + listen | starts and binds NOTHING | bound the endpoint |
+    /// | `client` + listen | binds it before it dials (`fn start_client`); the live reading named no locator, as zenohd names no loopback one | bound the endpoint and dialled nothing |
     ///
     /// The rows are each other's controls, which is why they are one test. Each
     /// differs from a neighbour in ONE word, so an expansion that answered a
@@ -7004,7 +7224,19 @@ mod stock_config_tests {
                 String::from(r#"{ mode: "peer", listen: { endpoints: [] } }"#),
                 vec![],
             ),
-            // ITEM 511 (c). A zenoh client never listens.
+            // ITEM 511 (c), as the source has it: a client binds its listen
+            // endpoints and dials its router (`fn start_client`), so the pair
+            // selects the client node, which keeps both.
+            (
+                "client + listen + connect",
+                format!(
+                    r#"{{ mode: "client", listen: {{ endpoints: ["{L}"] }},
+                          connect: {{ endpoints: ["{C}"] }} }}"#
+                ),
+                vec!["--client-node", L, "--connect", C],
+            ),
+            // A client that names nothing to dial runs no node here: upstream's
+            // would scout for its router, and this expansion emits no scouting run.
             (
                 "client + listen",
                 format!(r#"{{ mode: "client", listen: {{ endpoints: ["{L}"] }} }}"#),
@@ -7024,6 +7256,24 @@ mod stock_config_tests {
             assert_eq!(out.added, argv(&want), "{what}: {file}");
         }
 
+        // A client that listens and dials keeps both: its mode, its listen list and
+        // its connect list are each applied, by the client node.
+        let client_node = expand(
+            &["--config", "z.json5"],
+            &format!(
+                r#"{{ mode: "client", listen: {{ endpoints: ["{L}"] }},
+                      connect: {{ endpoints: ["{C}"] }} }}"#
+            ),
+        )
+        .unwrap();
+        for key in ["mode", "listen/endpoints", "connect/endpoints"] {
+            assert!(
+                client_node.applied().contains(&key),
+                "{key}: {:?}",
+                client_node.applied()
+            );
+        }
+
         // AND THE REPORT AGREES WITH THE ARGV, on the row where the two used to
         // disagree most: a client's listen endpoint reaches nothing, and saying
         // so is the difference between an operator who knows their file did not
@@ -7039,10 +7289,8 @@ mod stock_config_tests {
             client.applied()
         );
         assert!(
-            client
-                .read_but_not_applied_with_reasons()
-                .iter()
-                .any(|l| l.contains("listen/endpoints (a zenoh client never listens)")),
+            client.read_but_not_applied_with_reasons().iter().any(|l| l
+                .contains("listen/endpoints (a client with nothing to dial runs no node here)")),
             "{:?}",
             client.read_but_not_applied_with_reasons()
         );
@@ -8074,7 +8322,7 @@ mod stock_config_tests {
             r#"{ id: "c2", mode: "client", connect: { endpoints: ["tcp/10.0.0.9:7447"] } }"#;
 
         let err = check(&[("c1.json5", CLIENT_TO_9), ("c2.json5", C2)])
-            .expect_err("a zenoh client never listens");
+            .expect_err("no node of the set listens");
         assert!(err.contains("every node is a client"), "{err}");
 
         let ok = check(&[
@@ -8754,6 +9002,11 @@ pub(crate) enum NodeKind {
     /// for now (a distinct WhatAmI refinement is a later atom).
     #[cfg(feature = "routing-peer")]
     Peer,
+    /// The mesh node of `--client-node <listen>`: a client that listens as well as
+    /// it dials, upstream's client with listen endpoints. It runs the peer's mesh
+    /// and announces the Client `whatami`.
+    #[cfg(feature = "routing-peer")]
+    ClientNode,
     /// P4 §5.21 ACTIVATION — the router-hat node (`--router-hat`, and since
     /// R2886 also `--router`): the ONE demo kind that announces a TRUE wire
     /// [`WhatAmI::Router`], driving the dual-mesh `RouterForwarder`. It needs
@@ -8836,6 +9089,7 @@ pub(crate) const RUN_MODE_ROLES: &[(&str, WhatAmI)] = &[
     // ([`canonical_run_flags`]) before anything reads the argv, so a table
     // entry for it could never match.
     ("--peer", WhatAmI::Peer),
+    ("--client-node", WhatAmI::Client),
     ("--router-hat", WhatAmI::Router),
     ("--storage-host", WhatAmI::Peer),
     // The single-session roles, which `main` reaches last.
@@ -9198,6 +9452,8 @@ pub(crate) fn demo_session_init_params(
         // A hold-only mesh peer announces Peer too (whatami refinement later).
         #[cfg(feature = "routing-peer")]
         NodeKind::Peer => WhatAmI::Peer,
+        #[cfg(feature = "routing-peer")]
+        NodeKind::ClientNode => WhatAmI::Client,
         // P4 §5.21 ACTIVATION — the router-hat node announces the TRUE Router
         // wire value (0b00), so a connecting peer's linkstate graph tags it as a
         // router and this node's RouterForwarder partitions faces by role. This
@@ -10381,6 +10637,98 @@ mod accept_bound_flag_tests {
                 AcceptBounds::default(),
                 "{bad:?}"
             );
+        }
+    }
+}
+
+/// §5.23 `adminspace-core` — what a single-session run makes of
+/// `--config-queryable` and the flags that qualify it.
+#[cfg(test)]
+mod session_admin_tests {
+    use super::{session_admin_spec, single_session_admin_refusal, SessionAdminSpec};
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Without `--config-queryable` nothing is hosted, and the permits are
+    /// inert as they are on a `--peer` that hosts nothing, in every build.
+    #[test]
+    fn without_config_queryable_nothing_is_hosted() {
+        for args in [
+            argv(&["--connect", "tcp/r:7447"]),
+            argv(&[
+                "--connect",
+                "tcp/r:7447",
+                "--no-admin-read",
+                "--config-write-permit",
+            ]),
+        ] {
+            assert_eq!(session_admin_spec(&args, "--connect", None), Ok(None));
+        }
+    }
+
+    /// A client (dialled or scouted) hosts its admin space where the build
+    /// compiles the host, with the permits the flags state, and is refused by
+    /// the feature's name where it does not.
+    #[test]
+    fn a_client_hosts_its_admin_space_where_the_build_compiles_one() {
+        let metadata = wz::runtime_tokio::json5::parse("{ name: 'client-a' }").expect("JSON5");
+        for flag in ["--connect", "--scout"] {
+            let args = argv(&[
+                flag,
+                "--config-queryable",
+                "--no-admin-read",
+                "--config-write-permit",
+            ]);
+            let got = session_admin_spec(&args, flag, Some(metadata.clone()));
+            if cfg!(feature = "adminspace-core") {
+                assert_eq!(
+                    got,
+                    Ok(Some(SessionAdminSpec {
+                        read: false,
+                        write: true,
+                        metadata: Some(metadata.clone()),
+                    })),
+                    "{flag}"
+                );
+            } else {
+                let refused = got.expect_err("no host in this build");
+                assert!(refused.contains("adminspace-core"), "{flag}: {refused}");
+            }
+        }
+    }
+
+    /// The defaults are upstream's `PermissionsConf`: read granted, write not.
+    #[cfg(feature = "adminspace-core")]
+    #[test]
+    fn the_permits_default_to_upstreams() {
+        let args = argv(&["--connect", "tcp/r:7447", "--config-queryable"]);
+        assert_eq!(
+            session_admin_spec(&args, "--connect", None),
+            Ok(Some(SessionAdminSpec {
+                read: true,
+                write: false,
+                metadata: None,
+            }))
+        );
+    }
+
+    /// The one-shot acceptor is refused in every build, and the refusal names
+    /// the run-mode that does host a peer's admin space.
+    #[test]
+    fn the_one_shot_acceptor_hosts_none() {
+        let args = argv(&["--listen", "tcp/127.0.0.1:0", "--config-queryable"]);
+        let refused = session_admin_spec(&args, "--listen", None).expect_err("refused");
+        assert!(refused.contains("--peer"), "{refused}");
+    }
+
+    /// The mesh run-modes host their admin space in their own arms, so this
+    /// refusal has nothing to say about them.
+    #[test]
+    fn the_mesh_run_modes_are_not_refused_here() {
+        for flag in ["--peer", "--router-hat", "--storage-host"] {
+            assert_eq!(single_session_admin_refusal(flag), None, "{flag}");
         }
     }
 }

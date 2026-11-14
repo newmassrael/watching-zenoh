@@ -66,6 +66,7 @@ mod wz_attachment_to_pico_zsub;
 mod wz_batched_frame_to_pico_zsub;
 mod wz_chain_drop_zenohd_interop;
 mod wz_channel_reassembly_zenohd_interop;
+mod wz_client_adminspace_zenohd_interop;
 mod wz_client_and_multicast_peer_sessions_in_one_process_zenohd;
 mod wz_compose_zenohd_interop;
 mod wz_compression_zenohd_interop;

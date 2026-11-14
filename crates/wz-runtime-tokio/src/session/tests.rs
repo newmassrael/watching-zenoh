@@ -4254,6 +4254,274 @@ fn declare_adminspace_answers_root_get_with_local_data_json() {
     assert_eq!(*enc.lock().unwrap(), Some((10, None)));
 }
 
+/// A session that announces the CLIENT role under a zid of its own, so a key
+/// built from the peer fixture's role or zid cannot match by accident.
+#[cfg(all(
+    feature = "adminspace-core",
+    any(feature = "query-get", feature = "declare-queryable")
+))]
+fn build_client_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
+    let mut params = fixture_session_init_params();
+    params.whatami = wz_codecs::whatami::WhatAmI::Client;
+    params.zid = vec![0xC1, 0x1E, 0x47, 0x0A];
+    let (actions, driver) = recording_actions_with_params(params);
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+    let clock = Arc::new(TokioTime::new());
+    (TokioSession::new(actions, observer, clock), driver)
+}
+
+/// A client session hosts its admin space under its OWN role, from the config
+/// the host seeded, as upstream's `AdminSpace::start` roots its keys at the
+/// runtime's `whatami` in every mode (`zenoh/src/net/runtime/adminspace.rs` @
+/// `let whatami_str = runtime.state.whatami.to_str();`).
+///
+/// The metadata is the host's, which only `declare_adminspace_with_config`
+/// carries: `declare_adminspace` would answer `null` there. The GET for the
+/// peer role's root asks the same zid under another role and must meet nothing.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "adminspace-core"
+))]
+#[test]
+fn declare_adminspace_with_config_answers_a_client_under_its_own_role() {
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_client_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let metadata = crate::json5::parse("{ name: 'client-a' }").expect("a JSON5 value");
+    let config = crate::config::WzConfig::from_init_params(&session.actions().params)
+        .with_metadata(&metadata)
+        .expect("upstream reads this value");
+    let _admin = session
+        .declare_adminspace_with_config("0.9.9", Vec::new(), config)
+        .expect("adminspace-core ON in this build");
+
+    let get = |key: &str, into: &Arc<Mutex<Vec<(String, Vec<u8>)>>>| {
+        let r = into.clone();
+        session
+            .query(
+                key,
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                move |reply| {
+                    r.lock()
+                        .unwrap()
+                        .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
+                },
+                |_| {},
+            )
+            .expect("query-get ON in this build");
+    };
+
+    let root = format!("@/{zid_hex}/client");
+    let own = Arc::new(Mutex::new(Vec::new()));
+    get(&root, &own);
+    let got = own.lock().unwrap().clone();
+    assert_eq!(got.len(), 1, "the client root answers once: {got:?}");
+    assert_eq!(got[0].0, root, "under the client role's own root");
+    #[cfg(not(feature = "adminspace-plugins-handlers"))]
+    let plugins_tok = "null";
+    #[cfg(feature = "adminspace-plugins-handlers")]
+    let plugins_tok = "{}";
+    assert_eq!(
+        String::from_utf8(got[0].1.clone()).unwrap(),
+        format!(
+            r#"{{"locators":[],"metadata":{{"name":"client-a"}},"plugins":{plugins_tok},"sessions":[],"version":"0.9.9","zid":"{zid_hex}"}}"#
+        )
+    );
+
+    let other = Arc::new(Mutex::new(Vec::new()));
+    get(&format!("@/{zid_hex}/peer"), &other);
+    let other_role = other.lock().unwrap().clone();
+    assert!(
+        other_role.is_empty(),
+        "the peer role's root is not this client's key: {other_role:?}"
+    );
+}
+
+/// The client's admin queryable is ROUTED: it goes out as a `Declare` naming
+/// `@/<zid>/client/**`, so a router learns it and forwards another node's GET
+/// here. A session-local declaration would answer the local GET above and
+/// leave every remote querier with nothing, which is the gap this pins.
+#[cfg(all(
+    feature = "query-queryable",
+    feature = "declare-queryable",
+    feature = "adminspace-core"
+))]
+#[test]
+fn declare_adminspace_with_config_announces_a_clients_queryable_on_the_wire() {
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, driver) = build_client_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let config = crate::config::WzConfig::from_init_params(&session.actions().params);
+    let _admin = session
+        .declare_adminspace_with_config("0.9.9", Vec::new(), config)
+        .expect("adminspace-core ON in this build");
+
+    let key = format!("@/{zid_hex}/client/**");
+    let announced = (0..driver.frame_count()).any(|i| {
+        driver
+            .frame_bytes(i)
+            .windows(key.len())
+            .any(|w| w == key.as_bytes())
+    });
+    assert!(
+        announced,
+        "no frame on the wire names {key}, so no router can route a GET to it"
+    );
+}
+
+/// The admin queryable is declared NOT complete, as upstream declares it in every
+/// mode (`zenoh/src/net/runtime/adminspace.rs` @ `ext_info: QueryableInfoType::DEFAULT,`):
+/// an `AllComplete` GET of the root meets no queryable, and the `All` twin, the
+/// anti-vacuity control, is answered.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-target",
+    feature = "adminspace-core"
+))]
+#[test]
+fn the_admin_queryable_is_declared_incomplete() {
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    let root = format!("@/{zid_hex}/{whatami}");
+    let _admin = session
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+    let replies = |target: QueryTarget| {
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        session
+            .query(
+                &root,
+                QueryOptions::get()
+                    .with_allowed_destination(Locality::SessionLocal)
+                    .with_target(target),
+                move |_| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                },
+                |_| {},
+            )
+            .expect("query-get ON in this build");
+        count.load(Ordering::SeqCst)
+    };
+    assert_eq!(
+        replies(QueryTarget::AllComplete),
+        0,
+        "no complete queryable"
+    );
+    assert_eq!(replies(QueryTarget::All), 1, "the root is answered");
+}
+
+/// A peer session answers the graph of its `north` region, as upstream's peer hat
+/// does: the single-hop graph of the node and the nodes it links to, here the node
+/// alone since the fixture has no peer named. A client session's hat holds no
+/// graph, so it answers no `linkstate` leg.
+#[cfg(all(feature = "query-get", feature = "adminspace-router-linkstate"))]
+#[test]
+fn a_peer_session_answers_its_north_region_and_a_client_session_none() {
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let ask = |session: &TokioSession, key: &str, into: &Arc<Mutex<Vec<(String, Vec<u8>)>>>| {
+        let r = into.clone();
+        session
+            .query(
+                key,
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                move |reply| {
+                    r.lock()
+                        .unwrap()
+                        .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
+                },
+                |_| {},
+            )
+            .expect("query-get ON in this build");
+    };
+
+    let (peer, _peer_driver) = build_session();
+    assert_eq!(
+        peer.actions().params.whatami,
+        wz_codecs::whatami::WhatAmI::Peer
+    );
+    let zid = zid_to_zenoh_hex(&peer.actions().params.zid);
+    let _peer_admin = peer
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+    let got = Arc::new(Mutex::new(Vec::new()));
+    ask(&peer, &format!("@/{zid}/peer/linkstate/**"), &got);
+    let got = got.lock().unwrap().clone();
+    assert_eq!(got.len(), 1, "the north region alone: {got:?}");
+    assert_eq!(got[0].0, format!("@/{zid}/peer/linkstate/north"));
+    assert_eq!(
+        String::from_utf8(got[0].1.clone()).unwrap(),
+        format!("graph {{\n    0 [ label = \"{zid}\" ]\n}}\n")
+    );
+
+    let (client, _client_driver) = build_client_session();
+    let client_zid = zid_to_zenoh_hex(&client.actions().params.zid);
+    let _client_admin = client
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+    let none = Arc::new(Mutex::new(Vec::new()));
+    ask(
+        &client,
+        &format!("@/{client_zid}/client/linkstate/**"),
+        &none,
+    );
+    assert!(
+        none.lock().unwrap().is_empty(),
+        "a client holds no graph and answers no linkstate leg"
+    );
+}
+
+/// The `sessions[]` row a host that holds this session as one of its transports
+/// lists: none before a handshake has named the peer, as upstream lists only
+/// transports that exist; then one filed under the peer's zid in zenoh's form,
+/// with the role the peer announced once it arrives and no link weight, which
+/// only a router graph holds. The Session host and the `zenoh` preset's
+/// registry of faces both list their sessions through this one reading.
+#[cfg(feature = "adminspace-core")]
+#[test]
+fn admin_session_of_peer_files_the_row_under_the_named_peer() {
+    use wz_admin::adminspace::SessionAdminRow;
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (actions, _driver) = recording_actions();
+    assert!(
+        actions.admin_session_of_peer().is_none(),
+        "no peer has been named, so there is no transport to list"
+    );
+
+    let peer = vec![0xA1, 0x00, 0x31];
+    *actions
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(peer.clone());
+    let row = actions
+        .admin_session_of_peer()
+        .expect("a named peer is a transport");
+    assert_eq!(row.peer_zid_hex, zid_to_zenoh_hex(&peer));
+    assert_eq!(
+        row.whatami, None,
+        "a role that has not arrived stays unnamed"
+    );
+    assert!(row.weight.is_none(), "a session holds no router graph");
+
+    *actions
+        .peer_whatami
+        .lock()
+        .expect("peer_whatami poisoned in test fixture") =
+        Some(wz_codecs::whatami::WhatAmI::Router.to_wire());
+    let row = actions
+        .admin_session_of_peer()
+        .expect("a named peer is a transport");
+    assert_eq!(row.whatami.as_deref(), Some("router"));
+}
+
 #[cfg(all(
     feature = "query-get",
     feature = "query-queryable",
@@ -4752,10 +5020,19 @@ fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
     // DUPLICATE reply, and it additionally catches a key nobody expected —
     // which the literal count could only report as an unexplained number.
     let plugin_prefix = format!("@/{zid_hex}/{whatami}/plugins/");
+    // The fixture is a peer, whose hat holds the graph of its `north` region: a
+    // build that answers the link-state legs answers that one too.
+    let linkstate = format!("@/{zid_hex}/{whatami}/linkstate/north");
+    #[cfg(feature = "adminspace-router-linkstate")]
+    assert!(
+        keys.contains(&linkstate),
+        "a peer's linkstate/north reply present: {keys:?}"
+    );
     let unexpected: Vec<&String> = keys
         .iter()
         .filter(|k| {
-            ![&root, &config, &metrics, &surface].contains(k) && !k.starts_with(&plugin_prefix)
+            ![&root, &config, &metrics, &surface, &linkstate].contains(k)
+                && !k.starts_with(&plugin_prefix)
         })
         .collect();
     assert!(

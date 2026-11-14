@@ -1629,6 +1629,54 @@ fn snapshot_of(session: &TokioSession) -> Option<FaceSnapshot> {
     FaceSnapshot::of_actions(session.actions())
 }
 
+/// The transports a session holds, its faces and the member tables of its groups, published
+/// outside the registry lock for a reader that may already hold another lock.
+///
+/// An admin GET of the session's own key is answered inside the dispatch of the session's
+/// local plane, with the plane's dispatch lock held, and a declaration takes the registry lock
+/// before it reaches the plane. A reader that took the registry lock there would take the two
+/// in the order a declaration takes them reversed. This cell is rewritten under the registry
+/// lock, and whoever holds it takes no other lock, so it orders after both.
+#[derive(Default)]
+pub struct TransportsCell {
+    held: StdMutex<Transports>,
+}
+
+/// What [`TransportsCell::read`] hands out: the faces, and the member table of each group.
+#[derive(Clone, Default)]
+pub struct Transports {
+    /// The session of each unicast face.
+    pub faces: Arc<Vec<TokioSession>>,
+    /// The member table of each group the session joined.
+    #[cfg(feature = "multicast-transport")]
+    pub groups: Arc<Vec<wz_runtime_tokio::multicast_glue::McastGroupMembership>>,
+}
+
+impl TransportsCell {
+    /// The transports as they stand.
+    pub fn read(&self) -> Transports {
+        self.held
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn set_faces(&self, faces: Arc<Vec<TokioSession>>) {
+        self.held
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .faces = faces;
+    }
+
+    #[cfg(feature = "multicast-transport")]
+    fn set_groups(&self, groups: Arc<Vec<wz_runtime_tokio::multicast_glue::McastGroupMembership>>) {
+        self.held
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .groups = groups;
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     faces: BTreeMap<u64, FaceEntry>,
@@ -1724,6 +1772,9 @@ struct Inner {
     /// faces': what the group's members declared moves a filter's answer as a peer's does.
     #[cfg(all(feature = "multicast-transport", target_has_atomic = "64"))]
     mcast_epochs: Arc<Vec<FaceEpochs>>,
+    /// The faces and the groups, published outside this lock ([`TransportsCell`]) and rewritten
+    /// with them under it.
+    transports: Arc<TransportsCell>,
     subs: Vec<SubEntry>,
     /// R311y559 — the session-scope ENTITY id counter: the `eid` of every entity the session
     /// declares, the one the C ABIs' `z_*_id` accessors report.
@@ -1785,6 +1836,7 @@ impl Inner {
                 .map(|face| face.session.clone())
                 .collect(),
         );
+        self.transports.set_faces(self.face_set.clone());
         self.face_slots = Arc::new(self.faces.keys().map(|id| link_slot_of_face(*id)).collect());
         #[cfg(target_has_atomic = "64")]
         {
@@ -4673,6 +4725,13 @@ impl SharedSession {
             .values()
             .map(|face| face.session.clone())
             .collect()
+    }
+
+    /// The cell this session publishes its faces and groups into ([`TransportsCell`]), for a
+    /// reader that must not take the registry lock: one taken once, outside any dispatch, and
+    /// read when it is asked.
+    pub fn transports_cell(&self) -> Arc<TransportsCell> {
+        Arc::clone(&self.lock().transports)
     }
 
     /// `resource-snapshot` — what the receive paths of the unicast faces have counted, those that

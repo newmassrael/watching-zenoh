@@ -7672,6 +7672,12 @@ layer_c1ay_cargo_test_router_hat() {
     wz_test_args wz-ap-demo peer_gateway_south_binary
     _runci_guarded_test "C1AY peer_gateway_south_binary 2" 2 \
         cargo test -p wz-ap-demo --features routing-peer,zenoh-config "${WZ_TEST_ARGS[@]}" --quiet || return 1
+    # `--client-node`, the client that listens and dials (upstream's `start_client` binds its
+    # listen endpoints before it connects): refused without a router to dial and beside `--peer`,
+    # and bound when it has one. 3, read off the file's tests.
+    wz_test_args wz-ap-demo client_node_binary
+    _runci_guarded_test "C1AY client_node_binary 3" 3 \
+        cargo test -p wz-ap-demo --features routing-peer "${WZ_TEST_ARGS[@]}" --quiet || return 1
     # R311y842 — the stock-zenoh config -> argv expansion, for the same reason
     # the parser above states: it returns Result rather than exiting, precisely
     # so the accept/reject SET can be tested, and an exiting expander could not
@@ -22319,6 +22325,16 @@ layer_z_zenohd_interop() {
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
+    # §5.23 adminspace-core — THREE legs: a client's `@/<zid>/client` asked by
+    # another client through a router. The control is a zenohd client behind a
+    # zenohd router; the two subjects are a wz client behind that router and
+    # behind a wz router, judged by the control's predicate. They ride this
+    # lane's demo build: `routing-peer` composes the demo's `adminspace-core`,
+    # and `router-hat-router` is the wz router.
+    wz_test_args wz-integration-tests wz_client_adminspace_zenohd_interop
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+        || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked
     # against wz's cdylib, must report a REAL zenohd's zid under "Routers IDs".
     #
@@ -24444,7 +24460,7 @@ layer_e7b2_router_connect_add_over_the_wire() {
 # connects), so R1 can only route the GET after the re-advertise fold
 # (`re_advertise_self_cross_tier` picking up the `local_queryables` fold in
 # `derived_cross_tier_qabls_into`) federates it on join. The test asserts the LIVE
-# `linkstate/routers` DOT body names BOTH routers' zenoh-hex zids + a
+# `linkstate/north` DOT body names BOTH routers' zenoh-hex zids + a
 # `route/successor/src/<x>/dst/<y>` entry. wz<->wz only — the legs add no new wire
 # format (a standard reply GET, cross-impl-proven by adminspace-core), so no Layer Z
 # cross-impl arm is needed (a byte-parity wz<->zenohd DOT test could only assert
@@ -26727,6 +26743,12 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh peer publisher before a router)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_api_peer_publisher_before_router || return 1
+    # A client that enables its admin space, asked for `@/<zid>/client` by an upstream client through
+    # an upstream router: the two crates answer alike. Two tests, the comparison and the control that
+    # a client which answers nothing is a difference.
+    _runci_guarded_test "Layer E18 (differential, zenoh client admin space)" 2 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_api_client_admin_space || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh timestamp stack stamp)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_ts_stack_stamp || return 1

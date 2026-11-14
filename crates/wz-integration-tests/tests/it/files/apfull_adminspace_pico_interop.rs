@@ -576,19 +576,16 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
         "the plugins leg reports the statically compiled storage_manager as Loaded\n  got: {plugins}"
     );
 
-    // ── adminspace-router-linkstate — the PEER-tier linkstate leg ────
+    // ── adminspace-router-linkstate — the peer's linkstate leg ────
     //
-    // R2684. Upstream registers the peer-tier handler for ANY non-Client hat
-    // (`zenoh/src/net/runtime/adminspace.rs` @ `hat.mode().is_peer()`), so a
-    // plain linkstate peer answers `linkstate/peers`. wz served it only from a
-    // router host,
-    // because the render seam (`LinkstateNetView`) lived behind
-    // `routing-router-hat` while the graph it renders belongs to the peer tier.
+    // R2684. Upstream answers one `linkstate/<region>` leg for each peer and
+    // router hat (`zenoh/src/net/runtime/adminspace.rs` @
+    // `fn linkstate_data(prefix: &keyexpr, context: &AdminContext, query: Query) {`),
+    // so a plain linkstate peer answers the region of its own hat, `north`.
     //
     // THIS NODE IS A PEER, not a router hat: `root` is `@/<zid>/peer`, so the key
-    // asserted below cannot be answered by the router host at all. That is what
-    // makes this the witness for the move rather than a re-test of R311y204.
-    let linkstate_key = format!("{root}/linkstate/peers");
+    // asserted below cannot be answered by the router host at all.
+    let linkstate_key = format!("{root}/linkstate/north");
     let linkstate = out
         .lines()
         .find(|l| l.contains(&format!("('{linkstate_key}':")))
@@ -602,14 +599,20 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
         linkstate.contains("graph {") && linkstate.contains(&zid),
         "the peer-tier linkstate leg is live DOT naming this node's own zid `{zid}`\n  got: {linkstate}"
     );
-    // The ROUTER-tier leg must be ABSENT here. `AdminRouterCtx` documents `None`
-    // as "omit that leg", and a plain peer keeps one graph, not the router's two —
-    // so answering an empty `linkstate/routers` would be a lie shaped like
-    // coverage. This arm is what separates "the peer serves its own tier" from
-    // "the peer serves both and one is empty".
+    // A plain peer holds one hat, so it answers one region and no successor
+    // route, which upstream reads off the router hats alone. A second region or a
+    // successor leg here would be a router's legs answered by a peer.
+    let regions = out
+        .lines()
+        .filter(|l| l.contains(&format!("('{root}/linkstate/")))
+        .count();
+    assert_eq!(
+        regions, 1,
+        "a plain peer answers the region of its one hat\n--- z_get ---\n{out}"
+    );
     assert!(
-        !out.contains(&format!("('{root}/linkstate/routers':")),
-        "a plain peer must omit the ROUTER-tier leg, not answer it empty\n--- z_get ---\n{out}"
+        !out.contains(&format!("('{root}/route/successor/")),
+        "a plain peer answers no successor route\n--- z_get ---\n{out}"
     );
 }
 
@@ -869,11 +872,11 @@ fn apfull_router_hat_linkstate_decoded_by_a_real_pico_z_get() {
     let _ = r2.child_mut().kill();
     let _ = r2.child_mut().wait_bounded();
 
-    // The routers-net DOT, naming BOTH live zids — runtime values, so no static
-    // fixture satisfies it.
+    // The routers' graph, the `north` region, naming BOTH live zids — runtime
+    // values, so no static fixture satisfies it.
     let linkstate = reply_body(
         &out,
-        &format!("{root}/linkstate/routers"),
+        &format!("{root}/linkstate/north"),
         "in the router GET",
     );
     assert!(

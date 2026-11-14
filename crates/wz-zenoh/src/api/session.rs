@@ -467,28 +467,110 @@ impl RouterKeys {
     }
 }
 
-/// The handler a queryable hosted on the router node runs for each query it is asked.
-#[cfg(feature = "unstable")]
-pub(crate) type RouterQueryHandler = Box<
-    dyn FnMut(
+/// The handler the admin space of a session runs for each query it is asked. Shared, because a
+/// registry of faces answers on each face it holds and every face is handed the same one.
+#[cfg(feature = "engine-tokio")]
+pub(crate) type AdminQueryHandler = Arc<
+    dyn Fn(
             &dyn wz_session_core::query_sink::QueryView,
             &mut dyn wz_session_core::query_sink::ReplyOut,
-        ) + Send,
+        ) + Send
+        + Sync,
 >;
+
+/// What the admin space of a session answers from, by the engine it runs on: a node holds the
+/// router's tables, and a registry of faces holds a session for each node it is linked to.
+#[cfg(feature = "engine-tokio")]
+pub(crate) enum AdminViews {
+    /// A node, router, peer or client: the views of its tables.
+    Node(RouterAdminViews),
+    /// A registry of faces: a client, or a peer that fits no node. Its transports are its faces,
+    /// and it holds no router graph.
+    Faces {
+        /// The faces and the groups the registry publishes, read when a query asks, so a face
+        /// that came up a moment ago is listed. The cell and not the registry: a GET of the
+        /// session's own key is answered inside the dispatch of its local plane, where taking
+        /// the registry lock would invert the order a declaration takes the two in. Weak,
+        /// because the registry holds the admin queryable whose handler holds this.
+        transports: std::sync::Weak<wz_capi_core::faces::TransportsCell>,
+        /// Where the session's listeners can be reached: none for a client, which binds nothing.
+        locators: Vec<String>,
+    },
+}
+
+#[cfg(feature = "engine-tokio")]
+impl AdminViews {
+    /// Where the session's listeners can be reached.
+    pub(crate) fn locators(&self) -> &[String] {
+        match self {
+            AdminViews::Node(views) => &views.locators,
+            AdminViews::Faces { locators, .. } => locators,
+        }
+    }
+
+    /// The `sessions[]` rows of the root document: one for each transport the session holds.
+    /// A face is filed under the peer its handshake named, as the Session host files its one
+    /// (`SessionAdminRow::admin_session_of_peer`).
+    pub(crate) fn admin_sessions(&self) -> Vec<wz_runtime_tokio::adminspace::AdminSession> {
+        use wz_runtime_tokio::adminspace::SessionAdminRow;
+
+        match self {
+            AdminViews::Node(views) => views.sessions.admin_sessions(),
+            AdminViews::Faces { transports, .. } => transports
+                .upgrade()
+                .map(|cell| {
+                    cell.read()
+                        .faces
+                        .iter()
+                        .filter_map(|face| face.actions().admin_session_of_peer())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The `sessions[]` rows of the members of every multicast group the session joined, which
+    /// upstream lists after the unicast transports, one per member
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `let transport_multicast_peer_to_json =`). Each
+    /// group's member table writes them (`McastGroupMembership::admin_peers`). A node lists none
+    /// here: the group a router node joins is held by its driver task, not by these views.
+    pub(crate) fn admin_multicast_peers(
+        &self,
+    ) -> Vec<wz_runtime_tokio::adminspace::AdminMulticastPeer> {
+        match self {
+            AdminViews::Node(_) => Vec::new(),
+            AdminViews::Faces { transports, .. } => transports
+                .upgrade()
+                .map(|cell| {
+                    cell.read()
+                        .groups
+                        .iter()
+                        .flat_map(|membership| membership.admin_peers())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The router-tier views, `None` for a registry of faces, which holds no router graph and
+    /// lists no declarations of its own.
+    pub(crate) fn node(&self) -> Option<&RouterAdminViews> {
+        match self {
+            AdminViews::Node(views) => Some(views),
+            AdminViews::Faces { .. } => None,
+        }
+    }
+}
 
 /// What the admin space of a router node answers from: views of the router's tables, which show
 /// them as they are when a query asks, and the locators its listeners got.
-#[cfg(feature = "unstable")]
-#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+#[cfg(feature = "engine-tokio")]
 pub(crate) struct RouterAdminViews {
     /// The sessions the router holds, one for each face.
-    #[cfg(feature = "engine-tokio")]
     pub(crate) sessions: wz_runtime_tokio::router_forward::RouterSessionsView,
     /// What the faces declared, by kind, folded by tier as the pin folds them.
-    #[cfg(feature = "engine-tokio")]
     pub(crate) declarations: wz_runtime_tokio::router_forward::RouterDeclarationsView,
     /// The graph of the north region: the routers.
-    #[cfg(feature = "engine-tokio")]
     pub(crate) routers: wz_runtime_tokio::linkstate_forward::LinkstateNetView,
     /// Where the router's listeners can be reached.
     pub(crate) locators: Vec<String>,
@@ -859,7 +941,6 @@ impl Engine {
     /// The graph of each region the session's admin space answers a `linkstate` query for, as
     /// text, by the region's name: a router node holds the graph of its routers, the north
     /// region, and the one of its peers, the south region they are in.
-    #[cfg(feature = "unstable")]
     fn linkstate_regions(&self) -> Vec<(String, String)> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().linkstate_regions(),
@@ -867,37 +948,68 @@ impl Engine {
         }
     }
 
-    /// The views the admin space of a router node answers from, or `None` for a session that is
-    /// no router node.
-    #[cfg(feature = "unstable")]
-    fn router_admin_views(&self) -> Option<RouterAdminViews> {
+    /// The views the admin space of the session answers from, whatever its mode.
+    fn admin_views(&self) -> AdminViews {
         match self {
             Engine::Router(router) => {
                 let forwarder = router.node.forwarder();
-                Some(RouterAdminViews {
+                AdminViews::Node(RouterAdminViews {
                     sessions: forwarder.sessions_view(),
                     declarations: forwarder.declarations_view(),
                     routers: forwarder.routers_net_view(),
                     locators: router.node.listen_locators().to_vec(),
                 })
             }
-            Engine::Tokio(_) => None,
+            Engine::Tokio(state) => AdminViews::Faces {
+                transports: Arc::downgrade(&state.shared.transports_cell()),
+                locators: state.shared.as_engine().listen_locators(),
+            },
         }
     }
 
-    /// Host `handler` as a queryable of the router node on `key`, answered from the router's
-    /// own thread, or say that the session is no router node.
-    #[cfg(feature = "unstable")]
-    fn host_router_queryable(&self, key: &str, handler: RouterQueryHandler) -> bool {
+    /// Host `handler` as the queryable of the session's admin space on `key`, routed: it is
+    /// declared to every node the session is linked to, as upstream's runtime declares it through
+    /// a face of its routing tables in every mode
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `let primitives = runtime.state.router.new_session(admin.clone());`).
+    /// A node answers from the router's own thread and a registry of faces on the face the query
+    /// came in on; both declare it as upstream does, not complete
+    /// (`ADMIN_QUERYABLE_COMPLETE`, after `zenoh/src/net/runtime/adminspace.rs` @
+    /// `ext_info: QueryableInfoType::DEFAULT,`).
+    fn host_admin_queryable(&self, key: &str, handler: AdminQueryHandler) {
+        use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
+        use wz_runtime_tokio::adminspace::ADMIN_QUERYABLE_COMPLETE;
+        use wz_session_core::query_sink::{QueryView, ReplyOut};
+
         match self {
             Engine::Router(router) => {
-                router
-                    .node
-                    .forwarder()
-                    .register_local_queryable(key, true, handler);
-                true
+                router.node.forwarder().register_local_queryable(
+                    key,
+                    ADMIN_QUERYABLE_COMPLETE,
+                    Box::new(move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                        handler(view, out)
+                    }),
+                );
             }
-            Engine::Tokio(_) => false,
+            Engine::Tokio(state) => {
+                // One callback for each face, every one answering through the same handler: the
+                // answer is made inside the call, so the face's own query is never kept.
+                let sink: QueryableSink =
+                    Arc::new(move |_holder: Arc<dyn QueryHolder>| -> QueryCallback {
+                        let handler = Arc::clone(&handler);
+                        Box::new(move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                            handler(view, out)
+                        })
+                    });
+                let _ = state.shared.declare_port_queryable_on_links(
+                    key.to_owned(),
+                    tokio_engine::wire_key_of(0, None),
+                    ADMIN_QUERYABLE_COMPLETE,
+                    tokio_engine::engine_locality(Locality::Any),
+                    ANY_LINKS,
+                    None,
+                    sink,
+                );
+            }
         }
     }
 
@@ -1620,30 +1732,6 @@ impl Engine {
 
     #[cfg(any(feature = "unstable", feature = "internal"))]
     fn listen_locators(&self) -> Vec<String> {
-        match *self {}
-    }
-
-    #[cfg(feature = "unstable")]
-    fn linkstate_regions(&self) -> Vec<(String, String)> {
-        match *self {}
-    }
-
-    #[cfg(feature = "unstable")]
-    fn router_admin_views(&self) -> Option<RouterAdminViews> {
-        match *self {}
-    }
-
-    #[cfg(feature = "unstable")]
-    fn host_router_queryable(
-        &self,
-        _key: &str,
-        _handler: Box<
-            dyn FnMut(
-                    &dyn wz_session_core::query_sink::QueryView,
-                    &mut dyn wz_session_core::query_sink::ReplyOut,
-                ) + Send,
-        >,
-    ) -> bool {
         match *self {}
     }
 
@@ -4987,6 +5075,11 @@ impl Session {
             shm_clients,
         )?;
         let session = Session::on(core, true);
+        // The runtime's admin space first, as upstream's runtime starts it before the session's
+        // own is declared (`zenoh/src/net/runtime/mod.rs` @
+        // `let start_admin_space = *config.adminspace.enabled();`).
+        #[cfg(feature = "engine-tokio")]
+        crate::api::runtime_admin::start(&session.downgrade());
         #[cfg(feature = "unstable")]
         crate::api::admin::init(session.downgrade());
         Ok(session)
@@ -5200,7 +5293,7 @@ impl WeakSession {
 
     /// The configuration the session was opened with, as the session itself reads and writes it,
     /// which the admin space reads the permissions from and applies the writes to.
-    #[cfg(feature = "unstable")]
+    #[cfg(feature = "engine-tokio")]
     pub(crate) fn config_notifier(
         &self,
     ) -> crate::api::config::Notifier<zenoh_config::ExpandedConfig> {
@@ -5343,23 +5436,21 @@ impl WeakSession {
 
     /// The graph of each region the admin space answers a `linkstate` query for, as text, by the
     /// region's name.
-    #[cfg(feature = "unstable")]
+    #[cfg(feature = "engine-tokio")]
     pub(crate) fn linkstate_regions(&self) -> Vec<(String, String)> {
         self.0.engine.linkstate_regions()
     }
 
-    /// The views the admin space of a router node answers from, or `None` for a session that is
-    /// no router node.
-    #[cfg(feature = "unstable")]
-    pub(crate) fn router_admin_views(&self) -> Option<RouterAdminViews> {
-        self.0.engine.router_admin_views()
+    /// The views the admin space of the session answers from, whatever its mode.
+    #[cfg(feature = "engine-tokio")]
+    pub(crate) fn admin_views(&self) -> AdminViews {
+        self.0.engine.admin_views()
     }
 
-    /// Host `handler` as a queryable of the router node on `key`; `false` for a session that is
-    /// no router node.
-    #[cfg(feature = "unstable")]
-    pub(crate) fn host_router_queryable(&self, key: &str, handler: RouterQueryHandler) -> bool {
-        self.0.engine.host_router_queryable(key, handler)
+    /// Host `handler` as the routed queryable of the session's admin space on `key`.
+    #[cfg(feature = "engine-tokio")]
+    pub(crate) fn host_admin_queryable(&self, key: &str, handler: AdminQueryHandler) {
+        self.0.engine.host_admin_queryable(key, handler)
     }
 
     /// Declare a transport events listener. The id of the engine's watch, released at undeclare or
@@ -5377,7 +5468,7 @@ impl WeakSession {
 
     /// Take the samples for `key_expr` into `callback` as [`Session::declare_subscriber_inner`]
     /// does, for an entity of the session that holds it by this reference.
-    #[cfg(feature = "unstable")]
+    #[cfg(feature = "engine-tokio")]
     pub(crate) fn declare_subscriber_inner(
         &self,
         key_expr: &KeyExpr,
@@ -5415,7 +5506,7 @@ impl WeakSession {
 
     /// Answer the queries for `key_expr` into `callback` as [`Session::declare_queryable_inner`]
     /// does, for an entity of the session that holds it by this reference.
-    #[cfg(feature = "unstable")]
+    #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
     pub(crate) fn declare_queryable_inner(
         &self,
         key_expr: &KeyExpr,
@@ -11720,6 +11811,85 @@ mod tests {
             assert_eq!(told, "hello");
         }
 
+        /// A peer on a multicast group lists each member of the group in the `sessions` of its
+        /// admin space, after its unicast transports, as upstream does
+        /// (`zenoh/src/net/runtime/adminspace.rs` @ `let transport_multicast_peer_to_json =`): the
+        /// member's zid and role, the group, and one link, with none of the fields of a unicast
+        /// row. The peer asks its own key, so the answer is also made inside the dispatch of its
+        /// local plane.
+        #[test]
+        fn a_peer_on_a_group_lists_its_members_in_its_admin_space() {
+            let member = |id: &str, endpoint: &str| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "peer",
+                              listen: {{ endpoints: ["{endpoint}"] }},
+                              scouting: {{ multicast: {{ enabled: false }} }},
+                              adminspace: {{ enabled: true }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("opens")
+            };
+            let first = member("a1b2f1", "udp/224.0.0.1:0");
+            let locator = first
+                .info()
+                .locators()
+                .wait()
+                .into_iter()
+                .find(|locator| locator.protocol().as_str() == "udp")
+                .expect("the group is listed among the locators of the node")
+                .to_string();
+            let second = member("a1b2f2", &locator);
+            let second_zid = serde_json::json!(second.zid().to_string());
+            let root = format!("@/{}/peer", first.zid());
+            let sessions_of_first = || -> Vec<serde_json::Value> {
+                let replies = first.get(root.as_str()).wait().expect("asks");
+                let mut body = None;
+                while let Ok(Some(reply)) = replies.recv_timeout(Duration::from_secs(2)) {
+                    if let Ok(sample) = reply.result() {
+                        body = Some(
+                            sample
+                                .payload()
+                                .try_to_string()
+                                .expect("a text")
+                                .into_owned(),
+                        );
+                    }
+                }
+                let document: serde_json::Value =
+                    serde_json::from_str(&body.expect("the root answers"))
+                        .expect("a JSON document");
+                document["sessions"].as_array().cloned().unwrap_or_default()
+            };
+            // The members learn of each other by their beacons: ask until the second is listed.
+            let deadline = std::time::Instant::now() + WAIT * 2;
+            let mut sessions = sessions_of_first();
+            while !sessions.iter().any(|row| row["peer"] == second_zid)
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(200));
+                sessions = sessions_of_first();
+            }
+            let row = sessions
+                .iter()
+                .find(|row| row["peer"] == second_zid)
+                .unwrap_or_else(|| panic!("the member is not listed: {sessions:?}"));
+            assert_eq!(row["whatami"], serde_json::json!("peer"), "{row}");
+            assert!(
+                row["group"]
+                    .as_str()
+                    .is_some_and(|group| group.starts_with("udp/224.0.0.1:")),
+                "the row names its group: {row}"
+            );
+            assert_eq!(row["links"].as_array().map(Vec::len), Some(1), "{row}");
+            assert!(
+                row.get("region").is_none() && row.get("shm").is_none(),
+                "a member's row is not a unicast row: {row}"
+            );
+        }
+
         #[test]
         fn a_transport_listener_is_told_a_peer_opening_and_closing() {
             let (writer, endpoint) = listening("a1b2d6");
@@ -15387,6 +15557,217 @@ mod tests {
             );
             assert!(keys("@/**").len() > 1, "nothing under @/**");
             drop(second);
+        }
+
+        /// The replies a GET of `selector` from `session` gets within a couple of seconds, as
+        /// `(key, payload)`.
+        fn answers(session: &Session, selector: &str) -> Vec<(String, String)> {
+            let replies = session.get(selector).wait().expect("asks");
+            let mut found = Vec::new();
+            while let Ok(Some(reply)) = replies.recv_timeout(Duration::from_secs(2)) {
+                if let Ok(sample) = reply.result() {
+                    found.push((
+                        sample.key_expr().to_string(),
+                        sample
+                            .payload()
+                            .try_to_string()
+                            .expect("a text payload")
+                            .into_owned(),
+                    ));
+                }
+            }
+            found
+        }
+
+        /// A client that enables its admin space roots it at its own mode and declares it routed:
+        /// another client of the same router asks `@/<zid>/client` and is answered over the first
+        /// client's own link, with that client's zid, its metadata, no locator (a client binds
+        /// nothing) and its router as its one session. Nothing answers under another role, and a
+        /// client that leaves the admin space off answers nothing, as upstream's default
+        /// (`adminspace.enabled: false`) does. A client of this crate is the registry of faces, so
+        /// this is the host of that engine.
+        #[test]
+        fn a_client_answers_its_admin_space_through_its_router() {
+            use std::time::{Duration, Instant};
+
+            let port = unautoselected_port();
+            let router = router("a1b2e9", port);
+            let client = |id: &str, admin: bool| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "client",
+                              connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                              scouting: {{ multicast: {{ enabled: false }} }},
+                              metadata: {{ name: "client-{id}" }},
+                              adminspace: {{ enabled: {admin} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("a client dials its router")
+            };
+            let a = client("c1a2", true);
+            let b = client("c1b2", false);
+            assert!(
+                matches!(*a.0.engine, Engine::Tokio(_)),
+                "a client of this crate is the registry of faces"
+            );
+            let zid_a = a.zid().to_string();
+            let root = format!("@/{zid_a}/client");
+
+            // Nothing on the router's side says when it has learned the queryable: ask until the
+            // answer comes.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut got = answers(&b, &root);
+            while got.is_empty() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(200));
+                got = answers(&b, &root);
+            }
+            assert_eq!(got.len(), 1, "one answer under the client's root: {got:?}");
+            let (key, body) = &got[0];
+            assert_eq!(key, &root);
+            let document: serde_json::Value = serde_json::from_str(body).expect("a JSON document");
+            assert_eq!(document["zid"], serde_json::json!(zid_a), "{body}");
+            assert_eq!(
+                document["metadata"],
+                serde_json::json!({ "name": "client-c1a2" }),
+                "{body}"
+            );
+            assert_eq!(document["locators"], serde_json::json!([]), "{body}");
+            let sessions = document["sessions"].as_array().expect("a list of sessions");
+            assert_eq!(sessions.len(), 1, "the router alone: {body}");
+            assert_eq!(
+                sessions[0]["peer"],
+                serde_json::json!(router.zid().to_string()),
+                "{body}"
+            );
+            assert_eq!(
+                sessions[0]["whatami"],
+                serde_json::json!("router"),
+                "{body}"
+            );
+
+            assert_eq!(
+                answers(&b, &format!("@/{zid_a}/router/**")),
+                Vec::<(String, String)>::new(),
+                "a client answers under its own role alone"
+            );
+            assert_eq!(
+                answers(&a, &format!("@/{}/client/**", b.zid())),
+                Vec::<(String, String)>::new(),
+                "a client that leaves its admin space off answers nothing"
+            );
+            // And the client asks its own key: the answer is made inside the dispatch of its
+            // local plane, and lists the same session.
+            let own = answers(&a, &root);
+            assert_eq!(own.len(), 1, "the client answers its own GET: {own:?}");
+            let own: serde_json::Value = serde_json::from_str(&own[0].1).expect("JSON");
+            assert_eq!(own["sessions"], document["sessions"]);
+        }
+
+        /// A GET of a client's own admin key, asked again and again while another thread
+        /// declares and undeclares queryables on the same session, ends every time. The answer is
+        /// made inside the dispatch of the session's local plane, and a declaration takes the
+        /// registry lock before it reaches that plane, so an answer that took the registry lock
+        /// would take the two in the reverse order: the published transports
+        /// (`TransportsCell`) are what it reads instead.
+        #[test]
+        fn a_clients_own_admin_get_ends_while_entities_are_declared_beside_it() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::time::Duration;
+
+            let port = unautoselected_port();
+            let _router = router("a1b2eb", port);
+            let client = Arc::new(
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "c1a3", mode: "client",
+                              connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                              scouting: {{ multicast: {{ enabled: false }} }},
+                              adminspace: {{ enabled: true }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("a client dials its router"),
+            );
+            let root = format!("@/{}/client", client.zid());
+            let stop = Arc::new(AtomicBool::new(false));
+            let declarer = {
+                let client = Arc::clone(&client);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let queryable = client
+                            .declare_queryable("demo/beside/admin")
+                            .callback(|_| {})
+                            .wait()
+                            .expect("declares");
+                        queryable.undeclare().wait().expect("undeclares");
+                    }
+                })
+            };
+            let (done, finished) = std::sync::mpsc::channel();
+            let asker = {
+                let client = Arc::clone(&client);
+                std::thread::spawn(move || {
+                    for _ in 0..200 {
+                        let replies = client
+                            .get(root.as_str())
+                            .timeout(Duration::from_secs(2))
+                            .wait()
+                            .expect("asks");
+                        while replies.recv().is_ok() {}
+                    }
+                    let _ = done.send(());
+                })
+            };
+            let ended = finished.recv_timeout(Duration::from_secs(60));
+            stop.store(true, Ordering::Relaxed);
+            assert!(
+                ended.is_ok(),
+                "a GET of the client's own admin key did not end beside the declarations"
+            );
+            asker.join().expect("the asker ends");
+            declarer.join().expect("the declarer ends");
+        }
+
+        /// A peer that runs as a node roots its admin space at `peer`, its own mode, and answers
+        /// none of the router-tier legs, as upstream's peer reads no router hat. Until the role
+        /// was read off the mode, every node answered under `router` whatever it was opened as.
+        #[test]
+        fn a_peer_node_answers_its_admin_space_under_its_own_role() {
+            let port = unautoselected_port();
+            let peer = with_the_node(|| {
+                let mut config = Config::from_json5(&format!(
+                    r#"{{ id: "a1b2ea", mode: "peer",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }},
+                          adminspace: {{ enabled: true }} }}"#
+                ))
+                .expect("a configuration zenoh reads");
+                config
+                    .insert_json5("scouting/gossip/enabled", "false")
+                    .expect("a key zenoh reads");
+                open(config).wait().expect("a peer node opens")
+            });
+            assert!(
+                matches!(*peer.0.engine, Engine::Router(_)),
+                "the peer runs as a node"
+            );
+            let zid = peer.zid();
+            let roots = answers(&peer, &format!("@/{zid}/peer"));
+            assert_eq!(roots.len(), 1, "the peer's root: {roots:?}");
+            assert_eq!(
+                answers(&peer, &format!("@/{zid}/router/**")),
+                Vec::<(String, String)>::new(),
+                "nothing under the router role"
+            );
+            assert_eq!(
+                answers(&peer, &format!("@/{zid}/peer/route/successor/**")),
+                Vec::<(String, String)>::new(),
+                "a peer answers no successor route"
+            );
         }
 
         /// A router node that listens on a multicast group joins it at the open, and says the

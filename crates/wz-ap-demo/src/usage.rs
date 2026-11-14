@@ -162,7 +162,8 @@ pub(crate) fn print_usage() {
     eprintln!("                             zenoh peer role on the wire");
     eprintln!("    --connect <a[,b..]>      initiator mode (HOST:PORT or tcp/|ws/HOST:PORT);");
     eprintln!("                             this is the zenoh client role — there is no");
-    eprintln!("                             --client flag, and this is what to reach for.");
+    eprintln!("                             --client flag, and this is what to reach for");
+    eprintln!("                             (a client that also listens is --client-node).");
     eprintln!("                             A comma-separated list is dialled in order and the");
     eprintln!("                             FIRST endpoint that opens wins, as zenoh's client");
     eprintln!("                             does with connect/endpoints");
@@ -267,6 +268,11 @@ pub(crate) fn print_usage() {
         "                             lists are comma-separated. Requires the `routing-peer`"
     );
     eprintln!("                             build feature. Announces the zenoh peer role.");
+    eprintln!("    --client-node <a[,b..]>  a client that listens AND dials: the mesh of --peer,");
+    eprintln!("                             binding every listed address and dialling every");
+    eprintln!("                             --connect router, announcing the zenoh client role,");
+    eprintln!("                             as upstream's client with listen endpoints does.");
+    eprintln!("                             Requires --connect and the `routing-peer` feature.");
     eprintln!("    --peer-mode <linkstate|peer-to-peer>");
     eprintln!("                             zenoh routing.peer.mode — the SUBSYSTEM-wide peer");
     eprintln!("                             routing strategy; every peer AND router of the mesh");
