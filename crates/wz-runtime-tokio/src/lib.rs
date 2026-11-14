@@ -67,12 +67,9 @@ const _: () = assert!(
 // vectors, shares a kernel between links (multilink), and opens them per
 // connection without a table to take them from, so a build graph that unified the
 // selector into this crate would not compile its sessions, or would refuse the
-// ones it could.
-const _: () = assert!(
-    !wz_session_core::tx_buf::SESSION_SLOT,
-    "wz-runtime-tokio builds its sessions on the heap; \
-     `wz-session-core/session-slot` (the MCU per-session slot profile) was unified into an AP build"
-);
+// ones it could. Refused while the macros expand and not by a constant: such a
+// build fails its type check, and a constant's assertion is evaluated after it.
+wz_session_core::heap_session_profile!("wz-runtime-tokio";);
 
 // R311mk — `session_glue` is the unicast handshake driver (it names the
 // `SessionFsmUnicast{Policy,Event}` types + drives `session_actions` /

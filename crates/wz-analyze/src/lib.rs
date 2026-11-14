@@ -8782,11 +8782,13 @@ mod message_name_tests {
         // `0x04` is the KeepAlive MID with every flag clear; the walker names
         // it KeepAlive and so does the session.
         let stream = framed(&[0x04]);
+        // The chain is named by the decoder's own alias: its form is the storage
+        // profile's, which a build this crate shares can change.
         let honest = frame_at(
             0,
             Ok(wz_session_core::inbound::InboundFrame::KeepAlive {
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         match walk_message(sliced(&stream, &honest), &honest) {
@@ -8812,7 +8814,7 @@ mod message_name_tests {
                 // carries, so the stand-in is the ordinary one.
                 session: false,
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         match walk_message(sliced(&stream, &crossed), &crossed) {
@@ -8921,7 +8923,7 @@ mod message_name_tests {
             0,
             Ok(wz_session_core::inbound::InboundFrame::KeepAlive {
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         // The truthful pairing FIRST: a check that refused everything would
@@ -8937,7 +8939,7 @@ mod message_name_tests {
                 reason: 0,
                 session: false,
                 has_ext: false,
-                extensions: Vec::new(),
+                extensions: wz_session_core::inbound::ExtChainOwned::new(),
             }),
         );
         match walk_plaintext(&keepalive, &crossed) {

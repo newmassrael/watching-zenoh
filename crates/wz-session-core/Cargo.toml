@@ -1102,8 +1102,9 @@ tx-lend-only = ["transport-tx-lend"]
 #
 # It must be turned on by an MCU final binary only, never by a library crate's
 # dependency line: workspace feature unification would hand the AP sessions
-# that take a slot where they should take the heap. `wz-runtime-tokio` asserts
-# at build time that it is off (`session_actions::SESSION_SLOT`).
+# that take a slot where they should take the heap. A crate written for the heap
+# profile refuses it by name (`heap_session_profile!`, src/tx_buf.rs):
+# `wz-runtime-tokio` and `wz-capi-coop` do.
 #
 # `transport-multilink` shares ONE kernel between several links by reference
 # count, which a slot, holding exactly one of each, has no form of: with both on
