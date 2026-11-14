@@ -1336,7 +1336,9 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // `wz-ap-demo: No such file or directory (os error 2)` out of a `tcp/`
     // connect whose config happened to carry a CA path — so expanding it for a
     // node with no TLS link turns a valid config into a node that will not
-    // start. zenoh scopes these keys to TLS links; so does this.
+    // start. zenoh scopes these keys to TLS links; so does this. The build is
+    // asked first: a binary without the `tls` feature has no plumbing to hand
+    // the material to on any endpoint (`config_keys_the_demo_drops`).
     let dials_tls = cfg.connect.iter().any(|e| e.starts_with("tls/"));
     let listens_tls = cfg.listen.iter().any(|e| e.starts_with("tls/"));
     const NO_TLS_LINK: &str = "this deployment has no tls endpoint";
@@ -1365,7 +1367,9 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         if named(key) {
             match value {
                 Some(value) => {
-                    let blocked = (!usable).then_some(KeyEffect::WithheldFromThisRun(NO_TLS_LINK));
+                    let no_tls_link =
+                        (!usable).then_some(KeyEffect::WithheldFromThisRun(NO_TLS_LINK));
+                    let blocked = no_sink(key).or(no_tls_link);
                     exp.pair(key, flag, value.clone(), blocked);
                 }
                 // A key the document names with no value asks for nothing, and
@@ -3969,6 +3973,29 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     if !cfg!(feature = "transport-qos") {
         out.push("transport/multicast/qos/enabled");
     }
+    // The certificate material this binary spells (`--tls-ca`, `--tls-cert`, `--tls-key`):
+    // its sink is the `tls` feature's plumbing (`apply_tls_ca`, `apply_tls_accept`), and
+    // without it the three flags parse and change nothing. A reader that holds the material
+    // for the `quic/` link alone still reads the keys here, so the expansion site asks this
+    // list rather than the endpoints; a reader with neither link refuses them by name.
+    if !cfg!(feature = "tls") {
+        out.push("transport/link/tls/root_ca_certificate");
+        out.push("transport/link/tls/listen_certificate");
+        out.push("transport/link/tls/listen_private_key");
+    }
+    // The `tls/` link's socket buffers. Their sink is the link itself, which the runtime
+    // compiles under the same capability the reader reads them under, so the reader's own
+    // answer is the guard: a build may carry the link without this binary's `tls` feature
+    // (a dial whose locator brings its own material needs no flag), and that build sizes
+    // its sockets by `--link-config tls#...` all the same.
+    for key in [
+        "transport/link/tls/so_rcvbuf",
+        "transport/link/tls/so_sndbuf",
+    ] {
+        if !wz::runtime_tokio::zenoh_config::config_key_in_build(key) {
+            out.push(key);
+        }
+    }
     // R2203 (open-debt item 220) — the first row here whose flag does NOT
     // exit(2), and the reason it belongs anyway is what this list is actually
     // about: the doc above says these are "keys whose sink exists but is
@@ -4094,21 +4121,42 @@ mod stock_config_tests {
     /// neither overrides it nor is dropped for the keys the operator left
     /// alone. The expansion is read back through `TransportTuning`, the call
     /// `main` makes, so this judges what the node gets and not only the argv.
+    ///
+    /// A `tls/` link's buffers are read where the build has that link; a build
+    /// without it refuses a file that states one by the key's name, and the
+    /// `tcp/` half is then judged on a file that states only its own keys.
     #[test]
     fn link_socket_buffers_expand_per_key_and_yield_to_a_typed_key() {
         use wz::runtime_tokio::locator::Proto;
-        let file = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
-                        transport: { link: { tcp: { so_rcvbuf: 4096, so_sndbuf: 8192 },
-                                             tls: { so_sndbuf: 16384 } } } }"#;
+        const TLS_KEY: &str = "transport/link/tls/so_sndbuf";
+        let tcp_only = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                            transport: { link: { tcp: { so_rcvbuf: 4096, so_sndbuf: 8192 } } } }"#;
+        let with_tls = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                            transport: { link: { tcp: { so_rcvbuf: 4096, so_sndbuf: 8192 },
+                                                 tls: { so_sndbuf: 16384 } } } }"#;
+
+        let file = if wz::runtime_tokio::zenoh_config::config_key_in_build(TLS_KEY) {
+            let alone = expand(&["--config", "z.json5"], with_tls).expect("a valid file");
+            let tuning = TransportTuning::from_argv(&alone.argv).expect("parseable argv");
+            assert_eq!(
+                tuning.link_defaults.for_proto(Proto::Tls).so_sndbuf,
+                Some(16384)
+            );
+            with_tls
+        } else {
+            let refused = expand(&["--config", "z.json5"], with_tls)
+                .expect_err("a tls link's buffer is an instruction this build cannot carry out");
+            assert!(
+                refused.contains(TLS_KEY) && refused.contains("transport-link-tls"),
+                "the refusal names the key and the capability: {refused}"
+            );
+            tcp_only
+        };
 
         let alone = expand(&["--config", "z.json5"], file).expect("a valid file");
         let tuning = TransportTuning::from_argv(&alone.argv).expect("parseable argv");
         let tcp = tuning.link_defaults.for_proto(Proto::Tcp);
         assert_eq!((tcp.so_rcvbuf, tcp.so_sndbuf), (Some(4096), Some(8192)));
-        assert_eq!(
-            tuning.link_defaults.for_proto(Proto::Tls).so_sndbuf,
-            Some(16384)
-        );
 
         let typed = expand(
             &["--config", "z.json5", "--link-config", "tcp#so_rcvbuf=2048"],
