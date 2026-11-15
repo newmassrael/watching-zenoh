@@ -611,21 +611,21 @@ mod tests {
     #[test]
     fn the_index_finds_the_faces_the_scan_found() {
         let mut store = ClientSubStore::new();
-        store.insert(face(1), 1, "demo/a".into(), ());
-        store.insert(face(2), 1, "demo/b".into(), ());
-        store.insert(face(3), 1, "demo/*".into(), ());
-        store.insert(face(4), 1, "demo/**".into(), ());
-        store.insert(face(5), 1, "other/a".into(), ());
-        store.insert(face(5), 2, "demo/a".into(), ());
-        store.insert(face(6), 1, "demo/a/*".into(), ());
-        store.insert(face(7), 1, "**".into(), ());
-        store.insert(face(8), 1, "demo/c/d/e".into(), ());
+        store.insert(face(1), 1, "demo/a", ());
+        store.insert(face(2), 1, "demo/b", ());
+        store.insert(face(3), 1, "demo/*", ());
+        store.insert(face(4), 1, "demo/**", ());
+        store.insert(face(5), 1, "other/a", ());
+        store.insert(face(5), 2, "demo/a", ());
+        store.insert(face(6), 1, "demo/a/*", ());
+        store.insert(face(7), 1, "**", ());
+        store.insert(face(8), 1, "demo/c/d/e", ());
         for probe in PROBES {
             assert_answers(&store, probe);
         }
         // Withdraw some, displace one, drop a face: the index follows each.
         store.remove_id(face(5), 2);
-        store.insert(face(2), 1, "demo/c/d/e".into(), ());
+        store.insert(face(2), 1, "demo/c/d/e", ());
         store.remove_face(face(3));
         store.remove_id(face(7), 1);
         for probe in PROBES {
@@ -637,8 +637,8 @@ mod tests {
     #[test]
     fn two_ids_of_one_face_on_one_key_keep_the_key_until_the_last_goes() {
         let mut store = ClientSubStore::new();
-        store.insert(face(1), 1, "demo/a".into(), ());
-        store.insert(face(1), 2, "demo/a".into(), ());
+        store.insert(face(1), 1, "demo/a", ());
+        store.insert(face(1), 2, "demo/a", ());
         assert!(
             !store.remove_id_leaving_key(face(1), 1),
             "id 2 still names it"
@@ -656,8 +656,8 @@ mod tests {
     #[test]
     fn an_id_declared_again_on_its_own_key_is_held_once() {
         let mut store = ClientQablStore::new();
-        store.insert(face(1), 1, "demo/q".into(), info(false, 0));
-        let displaced = store.insert(face(1), 1, "demo/q".into(), info(true, 0));
+        store.insert(face(1), 1, "demo/q", info(false, 0));
+        let displaced = store.insert(face(1), 1, "demo/q", info(true, 0));
         assert_eq!(displaced.as_deref(), Some("demo/q"));
         let holders = store.holders("demo/q").expect("still declared");
         assert_eq!(holders.get(&face(1)).map(PersistentMap::len), Some(1));
@@ -682,10 +682,10 @@ mod tests {
     #[test]
     fn a_face_value_is_the_merge_of_its_ids_and_a_key_value_of_its_faces() {
         let mut store = ClientQablStore::new();
-        store.insert(face(1), 1, "demo/q".into(), info(false, 3));
-        store.insert(face(1), 2, "demo/q".into(), info(true, 5));
-        store.insert(face(2), 1, "demo/q".into(), info(false, 1));
-        store.insert(face(2), 2, "demo/r".into(), info(true, 0));
+        store.insert(face(1), 1, "demo/q", info(false, 3));
+        store.insert(face(1), 2, "demo/q", info(true, 5));
+        store.insert(face(2), 1, "demo/q", info(false, 1));
+        store.insert(face(2), 2, "demo/r", info(true, 0));
         assert_eq!(store.face_value(face(1), "demo/q"), Some(info(true, 3)));
         assert_eq!(store.face_value(face(2), "demo/q"), Some(info(false, 1)));
         assert_eq!(store.face_value(face(3), "demo/q"), None);
@@ -697,7 +697,7 @@ mod tests {
         store.remove_id(face(1), 2);
         assert_eq!(store.face_value(face(1), "demo/q"), Some(info(false, 3)));
         // Moving an id to another key takes its value with it.
-        store.insert(face(2), 1, "demo/r".into(), info(false, 4));
+        store.insert(face(2), 1, "demo/r", info(false, 4));
         assert_eq!(store.face_value(face(2), "demo/q"), None);
         assert_eq!(store.face_value(face(2), "demo/r"), Some(info(true, 0)));
         assert_eq!(store.key_value("demo/q"), Some(info(false, 3)));
@@ -707,7 +707,7 @@ mod tests {
     fn a_change_logs_the_key_it_moved_and_a_read_logs_nothing() {
         let mut store = ClientSubStore::new();
         let v0 = store.version();
-        store.insert(face(1), 1, "demo/a".into(), ());
+        store.insert(face(1), 1, "demo/a", ());
         let v1 = store.version();
         let _ = store.faces_intersecting("demo/a");
         let _ = store.names_key("demo/a");
@@ -725,9 +725,9 @@ mod tests {
     #[test]
     fn moving_an_id_logs_both_keys() {
         let mut store = ClientSubStore::new();
-        store.insert(face(1), 1, "demo/a".into(), ());
+        store.insert(face(1), 1, "demo/a", ());
         let before = store.version();
-        store.insert(face(1), 1, "demo/b".into(), ());
+        store.insert(face(1), 1, "demo/b", ());
         let mut moved = Vec::new();
         assert!(store.changed_since(before, |k| moved.push(k.to_owned())));
         moved.sort();
@@ -737,9 +737,9 @@ mod tests {
     #[test]
     fn dropping_a_face_moves_the_version_once_and_logs_each_distinct_key() {
         let mut store = ClientSubStore::new();
-        store.insert(face(1), 1, "demo/a".into(), ());
-        store.insert(face(1), 2, "demo/a".into(), ());
-        store.insert(face(1), 3, "demo/b".into(), ());
+        store.insert(face(1), 1, "demo/a", ());
+        store.insert(face(1), 2, "demo/a", ());
+        store.insert(face(1), 3, "demo/b", ());
         let before = store.version();
         store.remove_face(face(1));
         assert_eq!(store.version(), before + 1);
