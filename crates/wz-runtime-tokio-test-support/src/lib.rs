@@ -1479,9 +1479,13 @@ pub async fn establish_capability_pair_between(
     };
 
     let mut init_engine = new_session_engine(&init_actions);
-    init_engine.initialize();
+    init_engine
+        .initialize()
+        .unwrap_or_else(|never| match never {});
     let mut resp_engine = new_session_engine(&resp_actions);
-    resp_engine.initialize();
+    resp_engine
+        .initialize()
+        .unwrap_or_else(|never| match never {});
 
     let last_send =
         |d: &LifecycleRecordingDriver| d.snapshot().sends.last().expect("a send").0.clone();

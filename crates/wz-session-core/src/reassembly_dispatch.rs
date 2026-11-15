@@ -565,7 +565,7 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLO
             SlotBinding::default(),
         ));
         // W3C SCXML 3.3: enter the initial `Empty` leaf.
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         Self {
             engine,
             key: None,

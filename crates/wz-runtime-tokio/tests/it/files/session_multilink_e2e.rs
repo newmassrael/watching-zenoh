@@ -794,9 +794,13 @@ async fn the_multilink_state_rides_the_cookie_between_init_ack_and_open_syn() {
     init.install_multilink_dispatch(open_multilink_dispatch());
     resp.install_multilink_dispatch(accept_multilink_dispatch());
     let mut init_engine = new_session_engine(&init);
-    init_engine.initialize();
+    init_engine
+        .initialize()
+        .unwrap_or_else(|never| match never {});
     let mut resp_engine = new_session_engine(&resp);
-    resp_engine.initialize();
+    resp_engine
+        .initialize()
+        .unwrap_or_else(|never| match never {});
 
     resp_engine.process_event(E::InboundStart);
     init_engine.process_event(E::OutboundStart);

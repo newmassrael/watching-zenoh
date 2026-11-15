@@ -59,7 +59,7 @@ fn fresh_setup() -> (
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine)
 }
 
@@ -669,7 +669,7 @@ async fn r311kc_rx_init_ack_enlarged_batch_size_rejects_session() {
     params.batch_size = 512;
     let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     drive_to_sent_init_syn(&mut engine);
 
     // seq/req = 0/0 conform; batch_size 1024 > advertised 512.
@@ -1403,7 +1403,7 @@ fn fresh_recording_setup() -> (
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recorder.clone();
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     (recorder, actions, engine)
 }
 

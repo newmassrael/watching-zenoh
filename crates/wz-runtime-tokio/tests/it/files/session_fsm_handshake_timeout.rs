@@ -41,7 +41,7 @@ fn fresh_setup() -> (
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine)
 }
 

@@ -3870,7 +3870,7 @@ mod rx_sn_gate_tests {
         let (actions, _driver) =
             crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
         let mut engine = super::new_session_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(E::OutboundStart);
         engine.process_event(E::LinkOpened);
         for wire in [craft_initack_wire(&[0x11; 8]), craft_openack_wire(5)] {
@@ -5250,7 +5250,7 @@ mod link_congestion_tests {
         let actions =
             super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new());
         let mut engine = super::new_session_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(E::OutboundStart);
         engine.process_event(E::LinkOpened);
         engine.process_event(E::InitAckReceived);
@@ -5282,7 +5282,7 @@ mod link_congestion_tests {
         assert!(actions.set_qos_offer(true), "qos offer applies");
         actions.negotiate_qos_against_peer(true);
         let mut engine = super::new_session_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         for event in [
             E::OutboundStart,
             E::LinkOpened,

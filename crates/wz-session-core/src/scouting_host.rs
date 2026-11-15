@@ -432,7 +432,7 @@ pub fn open_window<R: Runtime>(
     actions: &Arc<ScoutingActions<R>>,
     engine: &mut ScoutEngine<R>,
 ) -> Option<Vec<u8>> {
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     // Idle -> Sending: `scout_emit` fires on the entering transition and stages the datagram.
     engine.process_event(ScoutingEvent::SessionOpenRequested);
     R::with_mutex_mut(&actions.pending_scout, |slot| slot.take())

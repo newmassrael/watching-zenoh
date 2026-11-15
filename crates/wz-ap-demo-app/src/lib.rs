@@ -85,7 +85,7 @@ pub use sensor_monitor::{SensorMonitorPolicy, SensorMonitorState};
 /// The engine starts in [`SensorMonitorState::Idle`].
 pub fn new_engine() -> Engine<SensorMonitorPolicy> {
     let mut engine = Engine::new(SensorMonitorPolicy::new());
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     engine
 }
 

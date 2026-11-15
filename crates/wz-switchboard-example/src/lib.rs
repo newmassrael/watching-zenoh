@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn hot_sample_drives_machine_to_hot() {
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         assert_eq!(engine.get_current_state(), SensorMonitorState::Idle);
 
         // 35.00 C > the 30.00 C native guard threshold. The borrowed `sensor_id`
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn cold_sample_leaves_machine_idle() {
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
 
         // 20.00 C < threshold — the typed guard misses.
         let wire = temp_wire(2000, "livingroom");
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn reset_signal_row_returns_to_idle() {
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         // Drive to hot first.
         dispatch_switchboard(
             "home/livingroom/temp",
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn unmatched_keyexpr_injects_nothing() {
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         let injected =
             dispatch_switchboard("office/temp", &temp_wire(3500, "livingroom"), &mut engine);
         engine.step();
@@ -245,7 +245,7 @@ mod tests {
         // the `&str -> String` field-move delivered the correct value, not just
         // that the payload compiled.
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
 
         // A hot livingroom sample reaches `hot` (sensor_id guard misses).
         dispatch_switchboard(
@@ -280,7 +280,7 @@ mod tests {
         // so this very sample wrongly went to `alarm`; the assertion below is
         // the guard that would have caught that bug.
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         dispatch_switchboard(
             "home/livingroom/temp",
             &temp_wire(3500, "livingroom"),
@@ -314,7 +314,7 @@ mod tests {
         // the exact `ack` bytes acknowledges the alarm; other bytes leave the
         // machine in alarm.
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         // idle -> hot (celsius) -> alarm (kitchen sensor_id).
         dispatch_switchboard(
             "home/livingroom/temp",
@@ -367,7 +367,7 @@ mod tests {
         // dispatch resolves a separate schema<->codec join for humidity_update,
         // distinct from temp_update's.
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         assert_eq!(engine.get_current_state(), SensorMonitorState::Idle);
 
         let injected =
@@ -389,7 +389,7 @@ mod tests {
         // coincidental match). The row still fires (event injected) but the
         // machine stays idle.
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
 
         let injected =
             dispatch_switchboard("home/bathroom/humidity", &humidity_wire(45), &mut engine);
@@ -472,7 +472,7 @@ mod ap_dynamic_tests {
     fn hot_sample_drives_machine_to_hot_via_registry() {
         let board = registry();
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         assert_eq!(engine.get_current_state(), SensorMonitorState::Idle);
 
         let bytes = temp_wire(3500, "livingroom");
@@ -496,7 +496,7 @@ mod ap_dynamic_tests {
     fn cold_sample_leaves_machine_idle_via_registry() {
         let board = registry();
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
 
         let bytes = temp_wire(2000, "livingroom");
         let sample = put_sample("home/livingroom/temp", &bytes);
@@ -516,7 +516,7 @@ mod ap_dynamic_tests {
     fn reset_signal_row_returns_to_idle_via_registry() {
         let board = registry();
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         {
             let hot = temp_wire(3500, "livingroom");
             let sample = put_sample("home/livingroom/temp", &hot);
@@ -541,7 +541,7 @@ mod ap_dynamic_tests {
     fn unmatched_keyexpr_injects_nothing_via_registry() {
         let board = registry();
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
 
         let bytes = temp_wire(3500, "livingroom");
         let sample = put_sample("office/temp", &bytes);
@@ -561,7 +561,7 @@ mod ap_dynamic_tests {
         // escalates `hot -> alarm` identically.
         let board = registry();
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         {
             let hot = temp_wire(3500, "livingroom");
             let sample = put_sample("home/livingroom/temp", &hot);
@@ -613,7 +613,7 @@ mod ap_dynamic_tests {
         // (two value arms) works on the dynamic path, not just the static one.
         let board = registry();
         let mut engine = Engine::new(SensorMonitorPolicy::new());
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         assert_eq!(engine.get_current_state(), SensorMonitorState::Idle);
 
         let bytes = humidity_wire(95);

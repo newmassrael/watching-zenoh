@@ -4596,7 +4596,7 @@ fn wire_session_engine(
 ) {
     let actions = new_session_actions(outbound, params, clock);
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine)
 }
 
@@ -5666,7 +5666,7 @@ pub(crate) async fn initiator_open(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     // Initiator activation -> SentInitSyn (send_init_syn enqueues InitSyn).
     engine.process_event(E::OutboundStart);
     engine.process_event(E::LinkOpened);

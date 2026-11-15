@@ -81,7 +81,7 @@ async fn acceptor_answers(
         actions.set_local_region(Some(RegionName::new(local).expect("a valid fixture name")));
     }
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);
 
     let mut queue = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn_wire))]);

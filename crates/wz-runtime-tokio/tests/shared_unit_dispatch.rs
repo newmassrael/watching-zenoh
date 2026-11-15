@@ -86,7 +86,7 @@ macro_rules! established {
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
         let $actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
         let mut $engine = new_session_engine(&$actions);
-        $engine.initialize();
+        $engine.initialize().unwrap_or_else(|never| match never {});
         $engine.process_event(E::OutboundStart);
         $engine.process_event(E::LinkOpened);
         for wire in [craft_initack_wire(&[0x11; 8]), craft_openack_wire(FIRST_SN)] {

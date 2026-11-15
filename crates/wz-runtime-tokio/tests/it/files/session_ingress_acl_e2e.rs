@@ -136,7 +136,7 @@ async fn arrivals_and_hits(wire: Vec<u8>, config: Option<InterceptorConfig>) -> 
     let actions: Arc<SessionLinkActions> =
         new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     established(&mut engine);
 
     let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(

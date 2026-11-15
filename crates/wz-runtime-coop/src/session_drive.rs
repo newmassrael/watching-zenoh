@@ -859,7 +859,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
             // an engine that never entered `Init`, so `inbound.start` /
             // `outbound.start` does not transition into `AwaitingInitSyn` /
             // `LinkOpening` and the whole handshake stalls.
-            engine.initialize();
+            engine.initialize().unwrap_or_else(|never| match never {});
             // Under `session-slot` the activation waits for the first step (see
             // `pending_role`); every other profile activates here, as it always did.
             #[cfg(not(feature = "session-slot"))]

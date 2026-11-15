@@ -36,7 +36,7 @@ fn r55b_engine_drives_link_opening_onentry_script() {
         TokioTime::new(),
     );
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
 
     // SCXML <scxml initial="Init"> places the engine at Init after
     // initialize(); no script actions run on Init's onentry (there

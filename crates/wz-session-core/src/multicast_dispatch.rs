@@ -697,7 +697,9 @@ impl PeerSlot {
             &mut *at
         };
         // W3C SCXML 3.3: enter the initial `Free` leaf.
-        peer.engine.initialize();
+        peer.engine
+            .initialize()
+            .unwrap_or_else(|never| match never {});
         peer
     }
 
@@ -1018,7 +1020,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             &mut *at
         };
         // W3C SCXML 3.3: enter the initial `Idle` leaf.
-        dispatcher.session.initialize();
+        dispatcher
+            .session
+            .initialize()
+            .unwrap_or_else(|never| match never {});
         dispatcher
     }
 

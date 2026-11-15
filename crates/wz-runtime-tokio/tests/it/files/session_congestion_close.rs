@@ -89,7 +89,7 @@ async fn a_blocking_message_on_a_congested_link_ends_the_running_session_without
     });
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
-    engine.initialize();
+    engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(SessionFsmUnicastEvent::OutboundStart);
     engine.process_event(SessionFsmUnicastEvent::LinkOpened);
     engine.process_event(SessionFsmUnicastEvent::InitAckReceived);

@@ -565,7 +565,7 @@ mod round2 {
         params.zid = vec![0x02; 4]; // distinct zid from the initiator
         let actions = new_session_actions(outbound, params, TokioTime::new());
         let mut engine = new_session_engine(&actions);
-        engine.initialize();
+        engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(E::InboundStart);
 
         let mut iter = 0usize;
