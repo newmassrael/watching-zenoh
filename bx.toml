@@ -293,12 +293,20 @@ local = "never"
 # `window_floor` and `window_max` are 1, so the integrator does not speculate: the hook is heavy
 # and the workstation's cores are shared, and a window above 1 runs several hook runs at once. Raise
 # them when the queue has measured a wait that speculation would remove (`bx --land-queue --stats`).
+#
+# `strategy = "merge"` (owner decision 2026-11-15): the integrator puts a merge commit on the tip
+# instead of replaying the item's commits. Several sessions build integration branches that merge
+# workers' branches; replaying such a branch commit by commit passes each intermediate tree through
+# the pre-commit hook, and those trees mix one branch's manifests with another's locks, so the
+# replay cannot be made without turning a hook off. A merge keeps every commit and its reason, and
+# the hook judges the merged tree, which is the tree that lands. A single-commit item merges the
+# same way; read main by its first parents for the sequence of landings.
 [land]
 remote         = "origin"
 ref            = "main"
 derive         = ["file-round"]
 derived        = "commit"
 derive_message = "docs: File the ledger round of the landed item"
-strategy       = "rebase"
+strategy       = "merge"
 window_floor   = 1
 window_max     = 1
