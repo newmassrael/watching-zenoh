@@ -2520,18 +2520,22 @@ mod tokio_engine {
         defaults: &wz_capi_core::session_defaults::PublicationDefaults,
     ) -> zenoh_config::qos::PublisherQoSConfig {
         use zenoh_config::qos::{CongestionControlConf, PriorityConf};
+        // A function rather than a closure: with `unstable` every policy has a configuration
+        // word and without it one has none, so the mapping is total in one build and partial in
+        // the other, and one body serves both.
+        fn congestion_conf(congestion: EngineCongestion) -> Option<CongestionControlConf> {
+            match congestion {
+                EngineCongestion::Drop => Some(CongestionControlConf::Drop),
+                EngineCongestion::Block => Some(CongestionControlConf::Block),
+                #[cfg(feature = "unstable")]
+                EngineCongestion::BlockFirst => Some(CongestionControlConf::BlockFirst),
+                // Without `unstable` the configuration of this crate cannot state it.
+                #[cfg(not(feature = "unstable"))]
+                EngineCongestion::BlockFirst => None,
+            }
+        }
         zenoh_config::qos::PublisherQoSConfig {
-            congestion_control: defaults.congestion_control.and_then(|congestion| {
-                match congestion {
-                    EngineCongestion::Drop => Some(CongestionControlConf::Drop),
-                    EngineCongestion::Block => Some(CongestionControlConf::Block),
-                    #[cfg(feature = "unstable")]
-                    EngineCongestion::BlockFirst => Some(CongestionControlConf::BlockFirst),
-                    // Without `unstable` the configuration of this crate cannot state it.
-                    #[cfg(not(feature = "unstable"))]
-                    EngineCongestion::BlockFirst => None,
-                }
-            }),
+            congestion_control: defaults.congestion_control.and_then(congestion_conf),
             priority: defaults.priority.and_then(|priority| match priority {
                 // The configuration names no control band.
                 EnginePriority::Control => None,
@@ -7896,17 +7900,20 @@ mod tests {
             }
         }
 
+        /// What a session is told: the bytes it was handed, and whether they came as shared
+        /// memory.
+        type Told = (Vec<u8>, bool);
+
         /// `act` again every 100 ms until each of `remote` and `own` has been told something, and
         /// the first thing each was told.
         fn until_both_are_told(
             mut act: impl FnMut(),
-            remote: &std::sync::mpsc::Receiver<(Vec<u8>, bool)>,
-            own: &std::sync::mpsc::Receiver<(Vec<u8>, bool)>,
+            remote: &std::sync::mpsc::Receiver<Told>,
+            own: &std::sync::mpsc::Receiver<Told>,
             who: &str,
-        ) -> ((Vec<u8>, bool), (Vec<u8>, bool)) {
+        ) -> (Told, Told) {
             let deadline = Instant::now() + Duration::from_secs(10);
-            let (mut got_remote, mut got_own): (Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>) =
-                (None, None);
+            let (mut got_remote, mut got_own): (Option<Told>, Option<Told>) = (None, None);
             loop {
                 if let (Some(told_remote), Some(told_own)) = (&got_remote, &got_own) {
                     return (told_remote.clone(), told_own.clone());
