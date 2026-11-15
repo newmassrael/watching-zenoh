@@ -13597,6 +13597,9 @@ impl FaceForwarder for RouterForwarder {
     }
 
     fn read_gate(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
+        if self.no_face_gated() {
+            return None;
+        }
         self.on_tables().gate_of(id)
     }
 

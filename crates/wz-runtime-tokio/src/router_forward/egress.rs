@@ -85,6 +85,7 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -95,7 +96,74 @@ use wz_session_core::session_actions::Unsent;
 use super::{peer_label, OnTables, RouterFaceState, RouterForwarder, Tables};
 use crate::accept_loop::FaceId;
 use crate::counter::{Counter, Gauge};
-use crate::sync::PlainMutex;
+use crate::persistent_map::{AssignedKeyHasher, HasherFor};
+use crate::sync::{PlainGuard, PlainMutex};
+
+/// The gated faces, each with what it is gated on. Keyed by the node's own face numbers, hashed by
+/// their own bits.
+type GatedMap = HashMap<FaceId, HashSet<GateOn>, AssignedKeyHasher>;
+
+/// The gated faces ([`Credit::gated`]), and how many there are, readable without the lock: the
+/// drive of every face asks after each frame whether its face is gated, and almost always none is.
+struct GatedFaces {
+    faces: PlainMutex<GatedMap>,
+    /// `faces.len()`, stored each time the map is let go ([`GatedGuard`]).
+    count: AtomicUsize,
+}
+
+impl Default for GatedFaces {
+    fn default() -> Self {
+        Self {
+            faces: PlainMutex::new(HashMap::with_hasher(<AssignedKeyHasher as HasherFor<
+                FaceId,
+            >>::for_new_map())),
+            count: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl GatedFaces {
+    /// The map, held until the result is dropped.
+    fn guard(&self) -> GatedGuard<'_> {
+        GatedGuard {
+            faces: self.faces.guard(),
+            count: &self.count,
+        }
+    }
+
+    /// Whether no face is gated, read without the lock. A moment old, as every reading of the
+    /// gates is: a gate asserted by another face's thread since is seen at the next frame, and the
+    /// face's own thread, which asserts the gates of its own messages, sees its own.
+    fn none(&self) -> bool {
+        self.count.load(Ordering::Acquire) == 0
+    }
+}
+
+/// [`GatedFaces`] held: the map, and its count stored again when it is let go.
+struct GatedGuard<'a> {
+    faces: PlainGuard<'a, GatedMap>,
+    count: &'a AtomicUsize,
+}
+
+impl std::ops::Deref for GatedGuard<'_> {
+    type Target = GatedMap;
+
+    fn deref(&self) -> &GatedMap {
+        &self.faces
+    }
+}
+
+impl std::ops::DerefMut for GatedGuard<'_> {
+    fn deref_mut(&mut self) -> &mut GatedMap {
+        &mut self.faces
+    }
+}
+
+impl Drop for GatedGuard<'_> {
+    fn drop(&mut self) {
+        self.count.store(self.faces.len(), Ordering::Release);
+    }
+}
 
 /// How many bytes the router lets a face's messages wait for, and where the faces that fed them
 /// are gated.
@@ -288,7 +356,7 @@ impl Queues {
 pub(super) struct Credit {
     /// For each gated face, what it is gated on: the destinations it fed that are at their
     /// budget, and the pool when the router is at its.
-    gated: PlainMutex<HashMap<FaceId, HashSet<GateOn>>>,
+    gated: GatedFaces,
     /// The faces that hold at least one message, so that a pass over them does not visit the
     /// faces that hold none (a router holds thousands).
     holding: PlainMutex<HashSet<FaceId>>,
@@ -333,7 +401,7 @@ impl Default for Credit {
             Arc::new(move || loop_wake.notify_one())
         };
         Self {
-            gated: PlainMutex::default(),
+            gated: GatedFaces::default(),
             holding: PlainMutex::default(),
             held: Gauge::new(),
             held_bytes: Gauge::new(),
@@ -936,7 +1004,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// gated face did when one task drove them all, would repeat that pass once for each gated face
     /// on every notice, each under the queues' locks.
     pub(super) fn gate_of(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
-        if !self.credit.gated.guard().contains_key(&id) {
+        if self.credit.gated.none() || !self.credit.gated.guard().contains_key(&id) {
             return None;
         }
         self.tables
@@ -1036,8 +1104,45 @@ impl RouterForwarder {
         self.credit.closed.get()
     }
 
+    /// Whether no face is gated, by one load and with neither the gates' lock nor the tables
+    /// taken: what the drive of a face asks after every frame, before it asks whether its own face
+    /// is ([`FaceForwarder::read_gate`](crate::accept_loop::FaceForwarder::read_gate)).
+    pub(super) fn no_face_gated(&self) -> bool {
+        self.credit.gated.none()
+    }
+
     /// The faces that are gated now: not read until a destination they fed has room.
     pub fn egress_gated_faces(&self) -> usize {
         self.credit.gated.guard().len()
+    }
+}
+
+#[cfg(test)]
+mod gated_faces_tests {
+    use super::*;
+
+    /// The count read without the lock is the map's length each time the map is let go, through
+    /// every way the gates are written: an entry, a removal and a retain.
+    #[test]
+    fn the_count_of_gated_faces_follows_the_map_each_time_it_is_let_go() {
+        let gated = GatedFaces::default();
+        assert!(gated.none(), "no face gated");
+        gated
+            .guard()
+            .entry(FaceId(3))
+            .or_default()
+            .insert(GateOn::Pool);
+        assert!(!gated.none(), "one face gated");
+        {
+            let mut held = gated.guard();
+            held.entry(FaceId(4))
+                .or_default()
+                .insert(GateOn::Destination(FaceId(9)));
+            held.remove(&FaceId(3));
+        }
+        assert!(!gated.none(), "one face gated still, another");
+        assert_eq!(gated.guard().len(), 1);
+        gated.guard().retain(|_, _| false);
+        assert!(gated.none(), "the last gate went");
     }
 }
