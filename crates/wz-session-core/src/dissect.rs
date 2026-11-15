@@ -615,10 +615,9 @@ impl<'a> SpanCursor<'a> {
     /// the linkstate `weight` (R311y880).
     ///
     /// The third reader rather than a flag on one of the two above, because
-    /// these fields agree with NEITHER. [`Self::vle_u16`] refuses a wide
-    /// encoding, which is a message stock zenoh reads to the end, and stops
-    /// INSIDE the varint while doing it; [`Self::vle_u64`] renders the wide
-    /// value, which is a number no peer computes. Upstream does the third
+    /// these fields agree with NEITHER. [`Self::vle_u16`] refuses a value past
+    /// 16 bits, in a message stock zenoh reads to the end; [`Self::vle_u64`]
+    /// renders the wide value, which is a number no peer computes. Upstream does the third
     /// thing — reads the zint whole and keeps its low 16 bits
     /// ([`wz_codecs::wire_const::zint_as_u16`]) — so the span covers every wire
     /// byte while the rendered value is what the receiving peer will act on.

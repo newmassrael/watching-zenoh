@@ -103,12 +103,13 @@ fn vle_long(buf: &[u8], at: &mut usize) -> Option<u64> {
     None
 }
 
-/// Read a key's id at `*at`, advancing it, as the generated `WireexprLocal` and
-/// `WireexprNonlocal` read it: a VLE of an `ExprId`, at most three bytes, the third
-/// carrying the two top bits. A wider id is refused there, as upstream refuses it
-/// (`commons/zenoh-codec/src/core/wire_expr.rs` @
-/// `let zodec = Zenoh080Bounded::<ExprId>::new();`), so this answers `None` and the
-/// caller hands the record to the codec, which refuses it.
+/// Read a key's id at `*at`, advancing it: a VLE of an `ExprId` in at most three
+/// bytes, the third carrying the two top bits. Anything else answers `None` and the
+/// caller hands the record to the generated `WireexprLocal` or `WireexprNonlocal`,
+/// which read a ZInt of any length and hold its value to an `ExprId`, as upstream
+/// does (`commons/zenoh-codec/src/core/wire_expr.rs` @
+/// `let zodec = Zenoh080Bounded::<ExprId>::new();`): a wider id is refused there,
+/// and an id padded past three bytes is read there.
 #[inline(always)]
 fn vle_expr_id(buf: &[u8], at: &mut usize) -> Option<crate::wire_id::ExprId> {
     let mut value: crate::wire_id::ExprId = 0;
@@ -575,6 +576,32 @@ mod tests {
         let wider = record([0x80, 0x80, 0x04]);
         assert!(read_plain_put(&wider, 0).is_none());
         assert!(through_the_codec(&wider).is_none());
+    }
+
+    /// An id padded past its value's length is read: in three bytes here and by the
+    /// codec, in four only by the codec, which takes a ZInt of any length as upstream
+    /// does, so a record this reader declines is not lost.
+    #[test]
+    fn a_padded_id_is_read_by_the_codec_where_this_reader_declines_it() {
+        let record = |id: &[u8]| {
+            let mut out = alloc::vec![0x5du8];
+            out.extend_from_slice(id);
+            out.extend_from_slice(&[PLAIN_PUT_HEADER, 1, b'x']);
+            out
+        };
+        // 5 in three bytes.
+        let three = record(&[0x85, 0x80, 0x00]);
+        let (plain, end) = read_plain_put(&three, 0).expect("a three-byte id reads");
+        assert_eq!((plain.id, end), (5, three.len()));
+        assert_eq!(through_the_codec(&three).map(|read| read.0), Some(5));
+
+        // 5 in four bytes, and the widest id in nine.
+        let four = record(&[0x85, 0x80, 0x80, 0x00]);
+        assert!(read_plain_put(&four, 0).is_none());
+        assert_eq!(through_the_codec(&four).map(|read| read.0), Some(5));
+        let nine = record(&[0xff, 0xff, 0x83, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
+        assert!(read_plain_put(&nine, 0).is_none());
+        assert_eq!(through_the_codec(&nine).map(|read| read.0), Some(u16::MAX));
     }
 
     /// The reader against the codec over damaged bytes: one byte of a valid record changed to

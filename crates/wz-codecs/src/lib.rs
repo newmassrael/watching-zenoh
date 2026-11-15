@@ -1072,11 +1072,9 @@ pub mod wire_const {
     /// codec.read(&mut *reader)?` on the plain `Zenoh080`, so the same
     /// `uint_impl!(u16)` derive applies: read the full ZInt, TRUNCATE. wz
     /// declared the field `uint16` in `sources/codecs/linkstate_weight.scxml`
-    /// and SCE derives its read width from the storage type
-    /// (`sce-build/src/forge/generator.rs:11805`), so the emitted reader was
-    /// `read_vle_u16` — which refuses TWICE over: at a value past `u16::MAX`,
-    /// and at any encoding longer than 3 bytes, where it also stops INSIDE the
-    /// varint and leaves the cursor astray.
+    /// and SCE derives its read width from the storage type, so the emitted
+    /// reader was `read_vle_u16`, which reads the whole ZInt and refuses a
+    /// value past `u16::MAX` where upstream keeps its low 16 bits.
     ///
     /// The price was the whole advertisement, not the field.
     /// `walk_linkstate_body` declines on any parse error, so a reader saw the
