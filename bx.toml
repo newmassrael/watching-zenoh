@@ -185,6 +185,12 @@ needed_by = ["--layer 0"]
 #
 # `needed_by` is the action's own name, so no other run is steered by it; `check` is the first
 # eight characters the CLI prints for its revision (`mnemosyne-cli 0.1.0 (ee934276)`).
+#
+# It also names the two hooks that call the CLI (`.githooks/pre-commit` validates the store,
+# `.githooks/pre-push` its pin and schema): the landing queue's integrator gives a git command that
+# runs a hook the tools whose `needed_by` names that hook (bx RFC 0024, 4.4d). Without them the
+# integrator's account had no CLI, and its commit of a filed round was refused by pre-commit
+# (2026-11-15, two items returned).
 [tools.mnemosyne-cli]
 version_file    = "mnemosyne.toml"
 version_pattern = 'pin = "([0-9a-f]{40})"'
@@ -192,7 +198,7 @@ path            = "~/.local/mn/{version}/bin/mnemosyne-cli"
 check           = "{version:8}"
 install         = "CARGO_HOME={scratch}/cargo cargo install --git https://github.com/newmassrael/mnemosyne --rev {version} --bin mnemosyne-cli --locked --root {prefix} mnemosyne-cli"
 prefix_file     = "bin/mnemosyne-cli"
-needed_by       = ["file-round"]
+needed_by       = ["file-round", ".githooks/pre-commit", ".githooks/pre-push"]
 
 [commands]
 # NOT `cargo test --workspace`: this tree refuses a whole-workspace build on
