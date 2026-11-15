@@ -2607,7 +2607,7 @@ mod tokio_engine {
         suffix: Option<String>,
         destination: Locality,
     ) -> Option<InterestForm> {
-        (destination != Locality::SessionLocal).then(|| InterestForm {
+        (destination != Locality::SessionLocal).then_some(InterestForm {
             mapping_id: scope,
             suffix,
             aggregate: false,
