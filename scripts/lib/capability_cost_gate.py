@@ -748,7 +748,13 @@ CASES: tuple[Case, ...] = (
     # the router's probe of its tables' lock: 6,048,928 -> 6,075,734 on pc2 (+26,806). Chosen;
     # the hosted reading at `c42ab17ced` (6,052,832) and that growth, 6,079,638, and 3,500, to
     # the hundred.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_083_200,
+    # 2026-11-15, later -- a fragment chain is sent off the router's threads, where it waited for
+    # room with the tables held; the send queue's wait is parking_lot's condition variable. The
+    # symbol diff on pc2 against `eb14784d20` (6,075,734 -> 6,082,094): `send_chain_off_thread`
+    # and its blocking task about +5,700, the condition variable about +2,500, the std mutex and
+    # condition variable paths that left about -2,800. Chosen; that reading, the 3,904 the hosted
+    # lane read over pc2 at `c42ab17ced`, and 3,500, to the hundred.
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_089_500,
          # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
          # role and the scouting and UDP link under it, and the multicast transport.
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
@@ -836,7 +842,11 @@ CASES: tuple[Case, ...] = (
     # 2026-11-15 -- the loops' heartbeats and their watcher (`pico-peer`'s note of this day):
     # 10,856,404 -> 10,881,977 on pc2 (+25,573). Chosen; the hosted reading at `c42ab17ced`
     # (10,861,512) and that growth, 10,887,085, and 3,500, to the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 10_890_600,
+    # 2026-11-15, later -- the chain sent off the router's threads and the send queue's condition
+    # variable, as `capic-router-node`'s note of this day takes apart: 10,881,977 -> 10,887,773 on
+    # pc2. Chosen; that reading, the 5,108 the hosted lane read over pc2 at `c42ab17ced`, and
+    # 3,500, to the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 10_896_400,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST),
          exports=837,
