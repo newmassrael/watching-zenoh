@@ -27,8 +27,10 @@
 //!
 //! Persistent, as the tables that hold it are: every map in a node is a [`PersistentMap`], so a
 //! copy shares the index and a write copies the nodes on the path to what it changes
-//! (`docs/router-table-snapshots.md`, phase 6). A write reads its path first and writes nothing
-//! when it would change nothing.
+//! (`docs/router-table-snapshots.md`, phase 6). A removal reads its path first and writes nothing
+//! when it would change nothing. An insertion finds or makes its path in the one walk: a member
+//! already there adds nothing, though that walk copies its path out of a version that shares it,
+//! and no caller inserts a member it holds.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -169,8 +171,13 @@ impl<M> KeyexprIndex<M> {
 impl<M: Hash + Eq> KeyexprIndex<M> {
     /// Whether `member` is stored under `keyexpr`.
     pub(crate) fn contains(&self, keyexpr: &str, member: &M) -> bool {
+        self.holds_at(keyexpr.split('/'), member)
+    }
+
+    /// Whether `member` is stored under the keyexpr `chunks` spell.
+    fn holds_at<'c>(&self, chunks: impl IntoIterator<Item = &'c str>, member: &M) -> bool {
         let mut node = &self.root;
-        for chunk in keyexpr.split('/') {
+        for chunk in chunks {
             match node.child(chunk) {
                 Some(child) => node = child,
                 None => return false,
@@ -181,12 +188,9 @@ impl<M: Hash + Eq> KeyexprIndex<M> {
 }
 
 impl<M: Hash + Eq + Clone> KeyexprIndex<M> {
-    /// Store `member` under `keyexpr`, saying whether it was not there. A member already there
-    /// writes nothing.
+    /// Store `member` under `keyexpr`, saying whether it was not there: one walk of the chunks
+    /// finds or makes the path (see the module documentation).
     pub(crate) fn insert(&mut self, keyexpr: &str, member: M) -> bool {
-        if self.contains(keyexpr, &member) {
-            return false;
-        }
         let mut node = &mut self.root;
         for chunk in keyexpr.split('/') {
             // Found by the chunk's text: a chunk some key already holds allocates nothing.
@@ -197,18 +201,19 @@ impl<M: Hash + Eq + Clone> KeyexprIndex<M> {
             );
         }
         let added = node.members.insert(member);
-        debug_assert!(added, "the read did not find the member");
-        self.len += 1;
-        true
+        if added {
+            self.len += 1;
+        }
+        added
     }
 
     /// Take `member` out from under `keyexpr`, saying whether it was there. A member not there
-    /// writes nothing.
+    /// writes nothing. The keyexpr is split once, for the read and the removal.
     pub(crate) fn remove(&mut self, keyexpr: &str, member: &M) -> bool {
-        if !self.contains(keyexpr, member) {
+        let chunks: Vec<&str> = keyexpr.split('/').collect();
+        if !self.holds_at(chunks.iter().copied(), member) {
             return false;
         }
-        let chunks: Vec<&str> = keyexpr.split('/').collect();
         self.root.remove_below(&chunks, member);
         self.len -= 1;
         true
@@ -451,6 +456,23 @@ mod tests {
         }
         let found: BTreeSet<u32> = index.intersecting("a/**").into_iter().copied().collect();
         assert_eq!(found, (0..1_000).collect());
+    }
+
+    /// An insertion of a member already held adds nothing and says so; a removal of one not held,
+    /// under a path held or not, takes nothing.
+    #[test]
+    fn an_insertion_of_a_member_held_adds_nothing_and_a_removal_of_one_not_held_takes_nothing() {
+        let mut index: KeyexprIndex<u32> = KeyexprIndex::new();
+        assert!(index.insert("a/b", 1));
+        assert!(!index.insert("a/b", 1), "the member is held already");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.intersecting("a/b"), [&1]);
+        assert!(!index.remove("a/c", &1), "a path not held");
+        assert!(!index.remove("a/b", &2), "a member not held");
+        assert_eq!(index.len(), 1);
+        assert!(index.contains("a/b", &1));
+        assert!(index.remove("a/b", &1));
+        assert!(index.is_empty() && index.root.is_empty());
     }
 
     /// A write to a copy of a large index leaves the copied index as it was, and removing the

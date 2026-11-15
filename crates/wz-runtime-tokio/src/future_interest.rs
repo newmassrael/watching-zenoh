@@ -93,7 +93,7 @@
 //! 2,048 faces and takes 1 to 3 us with the index (`docs/router-table-snapshots.md`, section
 //! 6.4). The faces a walker yields come in face order.
 
-use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+use wz_session_core::keyexpr_match::keyexpr_intersects_text;
 use wz_session_core::queryable_info::QueryableInfo;
 
 use crate::accept_loop::FaceId;
@@ -238,8 +238,7 @@ impl<V: Copy + PartialEq> FaceFutureInterests<V> {
     fn reply_kes_for(&self, new_ke: &str) -> Vec<(String, bool)> {
         let mut reply_kes: Vec<(String, bool)> = Vec::new();
         for interest in self.interests.values() {
-            let target_chunks: Vec<&str> = interest.target.split('/').collect();
-            if keyexpr_intersects_target(new_ke, &target_chunks) {
+            if keyexpr_intersects_text(new_ke, &interest.target) {
                 let reply_ke = if interest.aggregate {
                     interest.target.as_str()
                 } else {
@@ -670,8 +669,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
             if !reaches(face) {
                 continue;
             }
-            let chunks: Vec<&str> = reply_ke.split('/').collect();
-            if keyexpr_intersects_target(withdrawn_ke, &chunks)
+            if keyexpr_intersects_text(withdrawn_ke, &reply_ke)
                 && !still_backed(&reply_ke, state.aggregates(&reply_ke))
             {
                 to_forget.push((face, reply_ke));
@@ -713,10 +711,10 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
                     .expect("a face the index names holds an entry");
                 state.origin == InterestOrigin::Client
                     && !announced.contains(face)
-                    && state.interests.values().any(|interest| {
-                        let target: Vec<&str> = interest.target.split('/').collect();
-                        keyexpr_intersects_target(withdrawn_ke, &target)
-                    })
+                    && state
+                        .interests
+                        .values()
+                        .any(|interest| keyexpr_intersects_text(withdrawn_ke, &interest.target))
             })
             .collect()
     }
@@ -761,8 +759,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
             let Some((_, state)) = self.push_faces_among([face]).next() else {
                 continue;
             };
-            let chunks: Vec<&str> = reply_ke.split('/').collect();
-            if !keyexpr_intersects_target(withdrawn_ke, &chunks) {
+            if !keyexpr_intersects_text(withdrawn_ke, &reply_ke) {
                 continue;
             }
             let value = value_of(&reply_ke, face, state.aggregates(&reply_ke));
@@ -874,6 +871,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 
     fn face(n: u64) -> FaceId {
         FaceId(n)
